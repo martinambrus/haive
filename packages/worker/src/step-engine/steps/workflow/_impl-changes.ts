@@ -2,8 +2,10 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec } from '../../../repo/git-exec.js';
+import { parsePorcelainZ } from './_commit-diff.js';
 
 /** How many changed files a prompt lists. The cap is for prompt size; what matters
  *  is that a list cut down to it says so — see changedFilesBlock. */
@@ -17,7 +19,7 @@ const MAX_LISTED_FILES = 100;
  *  disclosure, not failure — but only if it is disclosed.
  */
 export interface ImplementationFileSet {
-  /** The files listed in the prompt: `total` of them, capped at MAX_LISTED_FILES. */
+  /** Capped at MAX_LISTED_FILES; a name that spans lines or forges the fence is kept but never written onto a prompt line. */
   files: string[];
   /** How many changed files were found, before the cap. */
   total: number;
@@ -25,10 +27,10 @@ export interface ImplementationFileSet {
    *  kept explicit because this set is persisted to `task_steps.output` and read
    *  back by the gate. */
   truncated: boolean;
-  /** Why the dirty-worktree scan contributed nothing, when it failed outright; null
-   *  when it ran. Optional because the shape is persisted and replayed: a row written
-   *  before this field existed carries neither the flag nor its meaning, and absent
-   *  must not read as "the scan ran cleanly". */
+  /** Why the scan of the change contributed nothing, the dirty worktree or the committed
+   *  half, when one failed outright; null when both ran. Optional because the shape is
+   *  persisted and replayed: a row written before this field existed carries neither the
+   *  flag nor its meaning, and absent must not read as "the scan ran cleanly". */
   scanError?: string | null;
   /** Which lines of each file this change actually wrote. Keyed by the same paths as
    *  `files`; a path with NO entry has none recorded, which is not the same as "the whole
@@ -45,6 +47,9 @@ export interface ImplementationFileSet {
  *  because the set is persisted to `task_steps.output`, where a human reads it back. */
 export type ChangedLineNotes = Record<string, string>;
 
+/** Whether a changed file's name can be written onto a prompt line as itself. */
+export const isListableName = (name: string): boolean => isSingleLine(name) && survivesFence(name);
+
 /** What a step recorded about its own coverage, for a gate to read back out of
  *  `task_steps.output`. Separate from ImplementationFileSet because the gate needs
  *  the counts, never the file list. */
@@ -55,6 +60,8 @@ export interface FileCoverage {
   total: number;
   /** listed < total: the step's verdict does not cover the whole change. */
   truncated: boolean;
+  /** The scan of the change failed, so the list may lack files of it: the verdict does not cover those either. */
+  scanFailed?: true;
 }
 
 /** What a step's `detected` may actually hold.
@@ -84,11 +91,21 @@ function asFileSet(value: MaybeFileSet): ImplementationFileSet | null {
 export function fileCoverage(value: MaybeFileSet): FileCoverage | null {
   const set = asFileSet(value);
   if (!set || typeof set.total !== 'number') return null;
-  return { listed: set.files.length, total: set.total, truncated: set.truncated === true };
+  // A name changedFilesBlock leaves out was not given to the agents.
+  const listed = set.files.filter(isListableName).length;
+  return {
+    listed,
+    total: set.total,
+    truncated: set.truncated === true || listed < set.total,
+    ...(set.scanError ? { scanFailed: true } : {}),
+  };
 }
 
 /** How much of a failed scan's own error text is quoted back. */
 const MAX_SCAN_ERROR_CHARS = 300;
+
+/** What a set records when the committed half could not be read; git's own message is not quoted. */
+const COMMITTED_CHANGE_UNREAD = 'the change committed since the fork point could not be read';
 
 /** What the dirty-worktree scan produced, and whether it ran at all.
  *
@@ -125,20 +142,16 @@ interface DirtyScan {
  *  `MAX_LISTED_FILES`. That cap already reports `truncated` rather than hiding the cut. */
 async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
   try {
-    const { stdout } = await gitExec(['--no-optional-locks', 'status', '--porcelain', '-uall'], {
-      cwd: worktreePath,
-      maxBuffer: GIT_MAX_BUFFER,
-    });
+    // -z keeps a name literal; plain porcelain C-quotes one with a space or a non-ASCII byte.
+    const { stdout } = await gitExec(
+      ['--no-optional-locks', 'status', '--porcelain', '-z', '-uall'],
+      { cwd: worktreePath, maxBuffer: GIT_MAX_BUFFER },
+    );
     const files: string[] = [];
     const untracked: string[] = [];
-    for (const line of stdout.toString().split('\n')) {
-      const name = line.slice(3).trim();
-      if (!name) continue;
-      // A rename record is `R  new -> old` in the non-`-z` format; the destination is the
-      // path that exists on disk, which is the one a reviewer can open.
-      const resolved = name.includes(' -> ') ? name.split(' -> ')[1]! : name;
-      files.push(resolved);
-      if (line.startsWith('??')) untracked.push(resolved);
+    for (const entry of parsePorcelainZ(stdout)) {
+      files.push(entry.path);
+      if (entry.x === '?' && entry.y === '?') untracked.push(entry.path);
     }
     return { files, untracked, error: null };
   } catch (err) {
@@ -286,6 +299,7 @@ async function resolveDiffBase(
   worktreePath: string,
   baseBranch: string | null,
   timeout?: number,
+  forkPointOnly = false,
 ): Promise<string | null> {
   if (baseBranch) {
     try {
@@ -301,6 +315,7 @@ async function resolveDiffBase(
       // base branch renamed, deleted, or unrelated history — fall through to HEAD
     }
   }
+  if (forkPointOnly) return null;
   try {
     await gitExec(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath, timeout });
     return 'HEAD';
@@ -340,13 +355,19 @@ async function readChangeDiff(
 
 /** A binary or mode-only change prints no ---/+++ line, so only this list names its path.
  *  A deleted path has no lines to scope, so it is left out unless `includeDeleted`. A git that
- *  outlives `timeoutMs` is killed and the list is null. */
+ *  outlives `timeoutMs` is killed and the list is null. `forkPointOnly` makes an unresolved fork
+ *  point null too, where HEAD would otherwise stand in. */
 export async function readChangedPaths(
   worktreePath: string,
   baseBranch: string | null,
-  options: { includeDeleted?: boolean; timeoutMs?: number } = {},
+  options: { includeDeleted?: boolean; timeoutMs?: number; forkPointOnly?: boolean } = {},
 ): Promise<string[] | null> {
-  const base = await resolveDiffBase(worktreePath, baseBranch, options.timeoutMs);
+  const base = await resolveDiffBase(
+    worktreePath,
+    baseBranch,
+    options.timeoutMs,
+    options.forkPointOnly,
+  );
   if (!base) return null;
   try {
     const { stdout } = await gitExec(['diff', '--name-status', '-z', '--no-renames', base, '--'], {
@@ -368,8 +389,9 @@ export async function readChangedPaths(
 async function readCommittedDeletions(
   worktreePath: string,
   baseBranch: string | null,
+  options: { forkPointOnly?: boolean } = {},
 ): Promise<string[] | null> {
-  const base = await resolveDiffBase(worktreePath, baseBranch);
+  const base = await resolveDiffBase(worktreePath, baseBranch, undefined, options.forkPointOnly);
   if (!base) return null;
   try {
     const { stdout } = await gitExec(
@@ -405,8 +427,8 @@ async function changedLineNotes(
  * `filesTouched` when present, else the union of the DAG issues'
  * `filesModified`, plus currently-dirty worktree files (single-agent work is
  * still uncommitted at this point) and the files the commits since the fork
- * point deleted. Deduped, capped for prompt size — and the cap is reported
- * rather than applied silently.
+ * point deleted or changed. Deduped, capped for prompt size — and the cap is
+ * reported rather than applied silently.
  */
 export async function collectImplementationFiles(
   ctx: StepContext,
@@ -423,10 +445,14 @@ export async function collectImplementationFiles(
   const measured = await changedLineNotes(worktreePath, baseBranch);
   for (const p of scan.untracked) measured[p] ??= 'new file';
   // A committed deletion may be unreported, and the sandbox masks git: only this list names it.
-  for (const p of (await readCommittedDeletions(worktreePath, baseBranch)) ?? []) {
+  const deletions = await readCommittedDeletions(worktreePath, baseBranch, { forkPointOnly: true });
+  for (const p of deletions ?? []) {
     files.add(p);
     measured[p] ??= 'deleted';
   }
+  // Last, so a capped list keeps the reported and dirty files.
+  const committed = await readChangedPaths(worktreePath, baseBranch, { forkPointOnly: true });
+  for (const p of committed ?? []) files.add(p);
   const all = [...files];
   const listed = all.slice(0, MAX_LISTED_FILES);
   // Only the files the prompt will actually list, so the persisted set carries no notes for
@@ -441,7 +467,10 @@ export async function collectImplementationFiles(
     files: listed,
     total: all.length,
     truncated: listed.length < all.length,
-    scanError: scan.error,
+    scanError:
+      deletions === null || committed === null
+        ? [scan.error, COMMITTED_CHANGE_UNREAD].filter(Boolean).join('; ')
+        : scan.error,
     changedLines,
   };
 }
@@ -497,7 +526,7 @@ export async function collectChangedLineMap(
   if (named === null) return null;
   const diffed = diff === null ? new Map<string, DiffFile>() : parseDiffHunks(diff);
   // A path git quoted never matches a tool's report, so it would read as untouched.
-  if ([...diffed.keys(), ...scan.files].some((p) => p.startsWith('"'))) return null;
+  if ([...diffed.keys()].some((p) => p.startsWith('"'))) return null;
 
   const map: ChangedLineMap = new Map();
   for (const [path, file] of diffed) {
@@ -512,10 +541,17 @@ export async function collectChangedLineMap(
   return map.size > 0 ? map : null;
 }
 
+const SCAN_FAILED_NOTICE = [
+  'COVERAGE: the change could not be read in full, so the list above may be missing files of it.',
+  'Any it lacks were NOT given to you and you cannot see them. Work from what is listed, and',
+  'state plainly in your output that coverage is incomplete — do NOT report a clean result as',
+  'though it covered the whole change.',
+].join('\n');
+
 /**
  * The changed-file block a prompt carries: the caller's own header and its own
- * empty-set fallback, plus — when the list was capped — an explicit statement of
- * what the agent was NOT given.
+ * empty-set fallback, plus — when the list was capped, a name was left out or the scan
+ * of the change failed — an explicit statement of what the agent was NOT given.
  *
  * The notice is worded as an instruction to report the gap, not merely as a note:
  * an agent that silently reviews a partial list produces exactly the clean verdict
@@ -525,8 +561,13 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
   const set = asFileSet(value);
   // A replayed pre-coverage row still lists its files; it simply carries no notice,
   // which is byte-for-byte what it produced before this shipped.
-  const files = set?.files ?? (Array.isArray(value) ? value : []);
-  if (files.length === 0) return fallback;
+  const recorded = set?.files ?? (Array.isArray(value) ? value : []);
+  if (recorded.length === 0) {
+    return set?.scanError ? (fallback ? `${fallback}\n\n` : '') + SCAN_FAILED_NOTICE : fallback;
+  }
+  // A name that spans lines or forges the fence would open a line or be rewritten, so it is counted, never written.
+  const files = recorded.filter(isListableName);
+  const unlistable = recorded.length - files.length;
 
   // The line note is what a list of paths alone cannot say: which part of a 5,000-line file
   // this change is. Without it a reviewer reads the whole file and cannot tell new code from
@@ -535,7 +576,7 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
   const notes = set?.changedLines ?? {};
   const list = [
     `${header}:`,
-    ...files.map((f) => (notes[f] ? `- ${f} — ${notes[f]}` : `- ${f}`)),
+    ...files.map((f) => (Object.hasOwn(notes, f) && notes[f] ? `- ${f} — ${notes[f]}` : `- ${f}`)),
   ].join('\n');
 
   const parts = [list];
@@ -552,11 +593,22 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
     const missing = set.total - files.length;
     parts.push(
       '',
-      `COVERAGE: the list above is ${set.files.length} of ${set.total} changed files. The other`,
+      `COVERAGE: the list above is ${files.length} of ${set.total} changed files. The other`,
       `${missing} were NOT given to you and you cannot see them. Work from what is listed, and`,
       'state plainly in your output that the unlisted files were not covered — do NOT report a',
       'clean result as though it covered the whole change.',
     );
+  }
+  if (unlistable > 0) {
+    parts.push(
+      '',
+      `COVERAGE: ${unlistable} changed files have names that cannot be listed safely. They were`,
+      'NOT given to you and you cannot see them. State plainly in your output that those files',
+      'were not covered — do NOT report a clean result as though it covered the whole change.',
+    );
+  }
+  if (set?.scanError) {
+    parts.push('', SCAN_FAILED_NOTICE);
   }
   return parts.join('\n');
 }
@@ -621,18 +673,19 @@ const DOC_EXTENSIONS = ['.md', '.mdx', '.rst', '.adoc', '.txt'];
 /**
  * Whether this change set is documentation only.
  *
- * Fails CLOSED — false is "not established", never "no docs". Three ways to get it:
+ * Fails CLOSED — false is "not established", never "no docs". Four ways to get it:
  * a bare pre-coverage array or a missing set (no coverage was recorded, so nothing
  * can be concluded), a `truncated` set (the unlisted files are unknown, and calling a
  * partial list docs-only is exactly the silent-cap failure `changedFilesBlock`'s
- * coverage notice exists to prevent), and an empty list (a claim about no files).
+ * coverage notice exists to prevent), a set whose scan of the change failed (the files
+ * it would have named are unknown too), and an empty list (a claim about no files).
  *
  * The cost of a wrong true is a code change reviewed by a documentation protocol, so
  * the bar is "every listed path is a doc AND the list is known to be complete".
  */
 export function isDocsOnlyChange(value: MaybeFileSet): boolean {
   const set = asFileSet(value);
-  if (!set || set.truncated) return false;
+  if (!set || set.truncated || set.scanError) return false;
   if (set.files.length === 0) return false;
   return set.files.every((f) => {
     const lower = f.toLowerCase();

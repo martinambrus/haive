@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
 
 const loadPreviousStepOutput = vi.fn();
 vi.mock('../onboarding/_helpers.js', () => ({
@@ -72,6 +72,14 @@ describe('fileCoverage', () => {
     });
   });
 
+  it('counts only the names a prompt can list, so a name left out reads as not covered', () => {
+    expect(fileCoverage({ files: ['a.ts', 'b\nc.ts'], total: 2, truncated: false })).toEqual({
+      listed: 1,
+      total: 2,
+      truncated: true,
+    });
+  });
+
   it('answers null — not full coverage — for a replayed pre-coverage row', () => {
     // step-runner replays a stored detect_output and only re-runs detect() when it is
     // null, so a task in flight when this shipped reaches apply() with the bare array.
@@ -80,9 +88,47 @@ describe('fileCoverage', () => {
     expect(fileCoverage(['src/a.ts', 'src/b.ts'])).toBeNull();
     expect(fileCoverage(undefined)).toBeNull();
   });
+
+  describe('a scan that failed', () => {
+    const set = { files: ['a.ts', 'b.ts'], total: 2, truncated: false };
+
+    it('is flagged, so a gate can tell a list from a failed scan from a complete one', () => {
+      expect(fileCoverage({ ...set, scanError: 'git failed' })).toEqual({
+        listed: 2,
+        total: 2,
+        truncated: false,
+        scanFailed: true,
+      });
+    });
+
+    it('is flagged alongside the cap when the list was cut too', () => {
+      expect(
+        fileCoverage({ files: names(100), total: 150, truncated: true, scanError: 'git failed' }),
+      ).toEqual({ listed: 100, total: 150, truncated: true, scanFailed: true });
+    });
+
+    it.each([null, undefined])(
+      'leaves the flag off where the scan ran (scanError %s)',
+      (scanError) => {
+        const covered = fileCoverage({ ...set, scanError });
+        expect(covered).toEqual({ listed: 2, total: 2, truncated: false });
+        expect('scanFailed' in covered!).toBe(false);
+      },
+    );
+  });
 });
 
 describe('changedFilesBlock', () => {
+  it('lists a file named like an Object member without a note it never had', () => {
+    const block = changedFilesBlock(
+      { files: ['constructor', 'toString'], total: 2, truncated: false, changedLines: {} },
+      'Changed files',
+      'fallback',
+    );
+    expect(block.split('\n')).toEqual(expect.arrayContaining(['- constructor', '- toString']));
+    expect(block).not.toContain('native code');
+  });
+
   it('returns the caller fallback when there are no files', () => {
     const block = changedFilesBlock(
       { files: [], total: 0, truncated: false },
@@ -90,6 +136,27 @@ describe('changedFilesBlock', () => {
       'Work it out from the workspace.',
     );
     expect(block).toBe('Work it out from the workspace.');
+  });
+
+  describe('an empty list', () => {
+    const empty = { files: [], total: 0, truncated: false };
+    const NOTICE = 'COVERAGE: the change could not be read in full';
+
+    it('carries the notice alone when the scan failed and the fallback is empty', () => {
+      const block = changedFilesBlock({ ...empty, scanError: 'x' }, 'H', '');
+      expect(block.startsWith(NOTICE)).toBe(true);
+      expect(block).toContain('do NOT report a clean result');
+    });
+
+    it('carries the fallback and then the notice when the scan failed', () => {
+      const block = changedFilesBlock({ ...empty, scanError: 'x' }, 'H', 'fallback');
+      expect(block.startsWith(`fallback\n\n${NOTICE}`)).toBe(true);
+    });
+
+    it('returns the fallback exactly when the scan did not fail', () => {
+      expect(changedFilesBlock({ ...empty, scanError: null }, 'H', 'fallback')).toBe('fallback');
+      expect(changedFilesBlock(empty, 'H', '')).toBe('');
+    });
   });
 
   it('lists the files under the caller header with no notice when complete', () => {
@@ -129,6 +196,58 @@ describe('changedFilesBlock', () => {
     expect(block).toContain('state plainly in your output that the unlisted files were not');
     expect(block).toContain('clean result');
   });
+
+  describe('a scan that failed', () => {
+    const set = { files: ['src/a.ts', 'src/b.ts'], total: 2, truncated: false };
+    const COVERAGE = [
+      'COVERAGE: the change could not be read in full, so the list above may be missing files of it.',
+      'Any it lacks were NOT given to you and you cannot see them. Work from what is listed, and',
+      'state plainly in your output that coverage is incomplete — do NOT report a clean result as',
+      'though it covered the whole change.',
+    ].join('\n');
+    const block = (value: Parameters<typeof changedFilesBlock>[0]) =>
+      changedFilesBlock(value, 'Changed files', 'fallback');
+
+    it('adds one COVERAGE paragraph after the list, which orders the agent to say so', () => {
+      expect(block({ ...set, scanError: 'git failed' })).toBe(
+        `Changed files:\n- src/a.ts\n- src/b.ts\n\n${COVERAGE}`,
+      );
+    });
+
+    it('renders a set whose scan ran exactly as a set that never recorded it', () => {
+      expect(block({ ...set, scanError: null })).toBe(block(set));
+      expect(block({ ...set, scanError: undefined })).toBe(block(set));
+      expect(block(set)).toBe('Changed files:\n- src/a.ts\n- src/b.ts');
+    });
+
+    it('puts it after the notices for a cut list and for names left out', () => {
+      const out = block({
+        files: [...names(98), 'x=====y.ts', 'ok.ts'],
+        total: 160,
+        truncated: true,
+        scanError: 'git failed',
+      });
+      const cap = out.indexOf('COVERAGE: the list above is');
+      const unlistable = out.indexOf('names that cannot be listed safely');
+      const scan = out.indexOf('COVERAGE: the change could not be read in full');
+      expect(cap).toBeGreaterThan(-1);
+      expect(unlistable).toBeGreaterThan(cap);
+      expect(scan).toBeGreaterThan(unlistable);
+      expect(out.endsWith(COVERAGE)).toBe(true);
+    });
+
+    it("never writes the scan's own error onto a prompt line", () => {
+      expect(
+        block({ ...set, scanError: 'fatal: /secret/repo/path is not a repository' }),
+      ).not.toContain('secret');
+    });
+
+    it('puts it after the fallback when the set is empty', () => {
+      expect(block({ files: [], total: 0, truncated: false, scanError: 'git failed' })).toBe(
+        `fallback\n\n${COVERAGE}`,
+      );
+    });
+  });
 });
 
 describe('isDocsOnlyChange', () => {
@@ -154,6 +273,27 @@ describe('isDocsOnlyChange', () => {
     // The unlisted files are unknown; calling this docs-only would hand a code change
     // the documentation protocol on the strength of a capped list.
     expect(isDocsOnlyChange(set(['README.md'], true))).toBe(false);
+  });
+
+  it('is false when the scan of the dirty worktree failed, even when every listed file is documentation', () => {
+    // The files the scan would have named are unknown, so the rest being documents proves nothing.
+    expect(
+      isDocsOnlyChange({ ...set(['README.md']), scanError: 'fatal: not a git repository' }),
+    ).toBe(false);
+  });
+
+  it('is false for the list a failed scan produced', async () => {
+    const failed = await collectImplementationFiles(
+      ctxWith(['README.md']),
+      '/nonexistent-worktree',
+    );
+    expect(failed.files).toEqual(['README.md']);
+    expect(failed.scanError).toBeTruthy();
+    expect(isDocsOnlyChange(failed)).toBe(false);
+  });
+
+  it('is true when the scan ran and every listed file is documentation', () => {
+    expect(isDocsOnlyChange({ ...set(['README.md']), scanError: null })).toBe(true);
   });
 
   it('is false for an empty file list', () => {
@@ -256,7 +396,14 @@ describe('collectImplementationFiles — scan provenance', () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'impl-clean-'));
     try {
       await exec2('git', ['init', '-b', 'main'], { cwd: dir });
-      const set = await collectImplementationFiles(ctxWith(['src/a.ts']), dir);
+      const identity = ['-c', 'user.name=T', '-c', 'user.email=t@haive.local', '-c', 'gc.auto=0'];
+      await exec2('git', [...identity, 'commit', '--allow-empty', '-m', 'base'], { cwd: dir });
+      const ctx = ctxWith(['src/a.ts']);
+      // Every step lookup gets this one output, so it also records the fork point the committed half needs.
+      loadPreviousStepOutput.mockResolvedValue({
+        output: { filesTouched: ['src/a.ts'], baseBranch: 'main' },
+      });
+      const set = await collectImplementationFiles(ctx, dir);
       // A clean tree is a RESULT. Reporting it as a failed scan would send a human
       // looking at git instead of at the implementation step.
       expect(set.scanError).toBeNull();
@@ -563,6 +710,101 @@ describe('changedFilesBlock — line notes', () => {
   });
 });
 
+describe('changedFilesBlock — names that span lines', () => {
+  const set = (files: string[], total = files.length) => ({
+    files,
+    total,
+    truncated: total > files.length,
+  });
+  const SPANNING = ['a\nb.php', 'a\rb.php', 'a\u0085b.php', 'a b.php'];
+  const listed = (block: string) => block.split('\n').filter((line) => line.startsWith('- '));
+
+  it('leaves out every name that holds a line break and counts them', () => {
+    const block = changedFilesBlock(set(['ok.php', ...SPANNING]), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 4 changed files have names that cannot be listed safely');
+    expect(block).toContain('clean result');
+  });
+
+  it('keeps a name holding a tab, which cannot start a line', () => {
+    const block = changedFilesBlock(set(['ok.php', 'a\tb.php']), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php', '- a\tb.php']);
+    expect(block).not.toContain('COVERAGE');
+  });
+
+  it('filters a replayed pre-coverage row the same way', () => {
+    const block = changedFilesBlock(['ok.php', ...SPANNING], 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 4 changed files have names that cannot be listed safely');
+  });
+
+  it('states the cap and the names left out as two shortfalls of one list', () => {
+    const block = changedFilesBlock(
+      set([...names(98), 'a\nb.php', 'c\nd.php'], 150),
+      'Changed files',
+      'fallback',
+    );
+
+    expect(block).toContain('COVERAGE: the list above is 98 of 150 changed files');
+    expect(block).toContain('52 were NOT given to you');
+    expect(block).toContain('COVERAGE: 2 changed files have names that cannot be listed safely');
+  });
+
+  it('still says what it left out when no name can be listed, rather than answering the fallback', () => {
+    const block = changedFilesBlock(set(['a\nb.php', 'c\nd.php']), 'Changed files', 'fallback');
+
+    expect(block).not.toContain('fallback');
+    expect(listed(block)).toEqual([]);
+    expect(block).toContain('COVERAGE: 2 changed files have names that cannot be listed safely');
+  });
+});
+
+describe('changedFilesBlock — names that would forge the fence', () => {
+  const set = (files: string[]) => ({ files, total: files.length, truncated: false });
+  const FORGING = ['x=====y.php', 'a====b.php', '=====.php', 'trailing====='];
+  const listed = (block: string) => block.split('\n').filter((line) => line.startsWith('- '));
+
+  it('leaves out every name holding a run of four equals signs and counts them', () => {
+    const block = changedFilesBlock(set(['ok.php', ...FORGING]), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 4 changed files have names that cannot be listed safely');
+    expect(block).toContain('clean result');
+  });
+
+  it('keeps a name with a shorter run, which the fence leaves alone', () => {
+    const block = changedFilesBlock(set(['a=b.php', 'a===b.php']), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- a=b.php', '- a===b.php']);
+    expect(block).not.toContain('COVERAGE');
+  });
+
+  it('counts a name that is both multi-line and forging once', () => {
+    const block = changedFilesBlock(set(['ok.php', 'a\n=====b.php']), 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 1 changed files have names that cannot be listed safely');
+  });
+
+  it('filters a replayed pre-coverage row the same way', () => {
+    const block = changedFilesBlock(['ok.php', ...FORGING], 'Changed files', 'fallback');
+
+    expect(listed(block)).toEqual(['- ok.php']);
+    expect(block).toContain('COVERAGE: 4 changed files have names that cannot be listed safely');
+  });
+
+  it('reads as not covered in the record a gate keeps', () => {
+    expect(fileCoverage(set(['ok.php', 'x=====y.php']))).toEqual({
+      listed: 1,
+      total: 2,
+      truncated: true,
+    });
+  });
+});
+
 describe('collectImplementationFiles — line notes against a real repo', () => {
   const exec = promisify(execFile);
   const GIT_ENV = {
@@ -663,10 +905,13 @@ describe('collectChangedLineMap', () => {
   const git = (dir: string, args: string[]) => exec('git', args, { cwd: dir, env: GIT_ENV });
 
   /** The agents' own account of the change: 07's `filesTouched`, else the DAG issues' files. */
-  function ctxFor(reported: { touched?: string[]; dag?: string[] } = {}): StepContextLike {
+  function ctxFor(
+    reported: { touched?: string[]; dag?: string[] } = {},
+    baseBranch: string | null = 'main',
+  ): StepContextLike {
     loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
       id === '01-worktree-setup'
-        ? { output: { baseBranch: 'main' } }
+        ? { output: { baseBranch } }
         : { output: { filesTouched: reported.touched ?? [] } },
     );
     return {
@@ -699,6 +944,9 @@ describe('collectChangedLineMap', () => {
       await rm(dir, { recursive: true, force: true });
     }
   }
+
+  /** Names `git status` C-quotes unless it runs with `-z`: a non-ASCII byte, a space, a quote. */
+  const QUOTED_NAMES = ['café.php', 'has space.php', 'a"b.php'];
 
   it('keeps every hunk, where the prompt notes stop at 20', async () => {
     const lines = Array.from({ length: 50 }, (_, i) => `l${i}`);
@@ -895,13 +1143,39 @@ describe('collectChangedLineMap', () => {
     });
   });
 
-  it('is null when git quotes a path, which would never match a tool report', async () => {
-    await inRepo({ 'app.php': 'a\n' }, async (dir) => {
-      await writeFile(path.join(dir, 'has space.php'), 'x\n');
+  it('is null when the diff quotes a path, which would never match a tool report', async () => {
+    await inRepo({ 'a"b.php': 'a\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'a"b.php'), 'b\n');
 
       expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
     });
   });
+
+  it.each(['café.php', 'has space.php'])(
+    'reads the edited %s under its literal name, which is how a tool reports it',
+    async (name) => {
+      await inRepo({ [name]: 'a\nb\n' }, async (dir) => {
+        await writeFile(path.join(dir, name), 'a\nB\n');
+
+        const map = await collectChangedLineMap(ctxFor(), dir);
+
+        expect(map?.get(name)).toEqual({ whole: false, ranges: [[2, 2]] });
+      });
+    },
+  );
+
+  it.each([...QUOTED_NAMES, '"lead".php'])(
+    'counts the untracked %s whole, under its literal name',
+    async (name) => {
+      await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+        await writeFile(path.join(dir, name), 'fresh\n');
+
+        const map = await collectChangedLineMap(ctxFor(), dir);
+
+        expect(map?.get(name)).toEqual({ whole: true, ranges: [] });
+      });
+    },
+  );
 
   describe('readChangedPaths', () => {
     const base = { 'kept.php': 'a\nb\n', 'gone.php': 'x\n', 'gone-in-commit.php': 'y\n' };
@@ -1030,15 +1304,15 @@ describe('collectChangedLineMap', () => {
       });
     });
 
-    it('leaves a modification nobody reported out, and lists only the deletion beside it', async () => {
+    it('lists a modification nobody reported after the deletion beside it', async () => {
       await inRepo({ 'gone.php': 'x\n', 'app.php': 'a\nb\nc\n' }, async (dir) => {
         await writeFile(path.join(dir, 'app.php'), 'a\nB\nc\n');
         await commitRemoval(dir);
 
         const out = await collectImplementationFiles(ctxFor(), dir);
 
-        expect(out.files).toEqual(['gone.php']);
-        expect(out.total).toBe(1);
+        expect(out.files).toEqual(['gone.php', 'app.php']);
+        expect(out.total).toBe(2);
       });
     });
 
@@ -1077,6 +1351,420 @@ describe('collectChangedLineMap', () => {
         expect(out.files).toHaveLength(100);
         expect(out.total).toBe(101);
         expect(out.truncated).toBe(true);
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — committed edits', () => {
+    async function commitAll(dir: string): Promise<void> {
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: change it']);
+      const clean = await git(dir, ['status', '--porcelain']);
+      expect(clean.stdout.trim()).toBe('');
+    }
+
+    it('lists an edit nobody reported, with its note, when the work is committed and the tree is clean', async () => {
+      await inRepo({ 'app.php': 'a\nb\nc\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'app.php'), 'a\nB\nc\n');
+        await commitAll(dir);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(['app.php']);
+        expect(out.total).toBe(1);
+        expect(out.truncated).toBe(false);
+        expect(out.changedLines).toEqual({ 'app.php': 'lines 2' });
+      });
+    });
+
+    it('lists a committed binary change and a committed mode change, which the diff prints no header for', async () => {
+      await inRepo(
+        { 'logo.png': Buffer.from([0, 1, 2, 3]), 'run.sh': 'echo hi\n' },
+        async (dir) => {
+          await writeFile(path.join(dir, 'logo.png'), Buffer.from([0, 9, 2, 3]));
+          await chmod(path.join(dir, 'run.sh'), 0o755);
+          await commitAll(dir);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect([...out.files].sort()).toEqual(['logo.png', 'run.sh']);
+          expect(out.total).toBe(2);
+        },
+      );
+    });
+
+    it.each([
+      ['07 reported it', { touched: ['app.php'] }],
+      ['a DAG issue reported it', { dag: ['app.php'] }],
+    ])('lists an edit once when %s and it is dirty again', async (_who, reported) => {
+      await inRepo({ 'app.php': 'a\nb\nc\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'app.php'), 'a\nB\nc\n');
+        await commitAll(dir);
+        await writeFile(path.join(dir, 'app.php'), 'a\nB\nC\n');
+
+        const out = await collectImplementationFiles(ctxFor(reported), dir);
+
+        expect(out.files).toEqual(['app.php']);
+        expect(out.total).toBe(1);
+      });
+    });
+
+    it('lists the reported files first, then the dirty ones, the deletions, and last the committed edits', async () => {
+      await inRepo(
+        { 'gone.php': 'x\n', 'edited.php': 'a\nb\n', 'dirty.php': 'a\nb\n' },
+        async (dir) => {
+          await rm(path.join(dir, 'gone.php'));
+          await writeFile(path.join(dir, 'edited.php'), 'a\nB\n');
+          await commitAll(dir);
+          await writeFile(path.join(dir, 'dirty.php'), 'a\nB\n');
+
+          const out = await collectImplementationFiles(ctxFor({ touched: ['reported.php'] }), dir);
+
+          expect(out.files).toEqual(['reported.php', 'dirty.php', 'gone.php', 'edited.php']);
+          expect(out.total).toBe(4);
+        },
+      );
+    });
+
+    it('counts an unreported dirty file once, whichever spelling git gives its name', async () => {
+      await inRepo({ 'has space.php': 'a\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'has space.php'), 'b\n');
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.total).toBe(1);
+      });
+    });
+
+    it.each([
+      ['café.php', 'lines 1-2'],
+      ['has space.php', 'lines 1-2'],
+      ['a"b.php', undefined],
+    ])(
+      'lists %s once, under its literal name, when it is committed and dirty again',
+      async (name, note) => {
+        await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+          await writeFile(path.join(dir, name), 'a\nb\n');
+          await commitAll(dir);
+          await writeFile(path.join(dir, name), 'a\nB\n');
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([name]);
+          expect(out.total).toBe(1);
+          expect(out.changedLines?.[name]).toBe(note);
+        });
+      },
+    );
+
+    it.each(QUOTED_NAMES)(
+      'notes the untracked %s as a new file, under its literal name',
+      async (name) => {
+        await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+          await writeFile(path.join(dir, name), 'fresh\n');
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([name]);
+          expect(out.changedLines).toEqual({ [name]: 'new file' });
+        });
+      },
+    );
+
+    it.each(['plain.php', 'café.php', 'x -> y.php'])(
+      'lists the destination of a staged rename to %s, and not its source',
+      async (to) => {
+        await inRepo({ 'old name.php': 'one\ntwo\n' }, async (dir) => {
+          await git(dir, ['mv', 'old name.php', to]);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([to]);
+          expect(out.total).toBe(1);
+        });
+      },
+    );
+
+    it.each(['plain.php', 'café.php', 'x -> y.php'])(
+      'lists the destination of an intent-to-add rename to %s, and not its source',
+      async (to) => {
+        await inRepo({ 'old name.php': 'one\ntwo\n' }, async (dir) => {
+          await rename(path.join(dir, 'old name.php'), path.join(dir, to));
+          await git(dir, ['add', '-N', to]);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual([to]);
+          expect(out.total).toBe(1);
+        });
+      },
+    );
+
+    it('keeps the real paths when the cap cuts, and counts each changed file once', async () => {
+      await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+        for (const name of QUOTED_NAMES) await writeFile(path.join(dir, name), 'a\nb\n');
+        await commitAll(dir);
+        for (const name of QUOTED_NAMES) await writeFile(path.join(dir, name), 'a\nB\n');
+
+        const out = await collectImplementationFiles(ctxFor({ touched: names(98) }), dir);
+
+        const real = new Set([...names(98), ...QUOTED_NAMES]);
+        expect(out.files.filter((f) => !real.has(f))).toEqual([]);
+        expect(out.total).toBe(101);
+        expect(out.truncated).toBe(true);
+      });
+    });
+
+    it('keeps the reported and the dirty files when the cap cuts, and counts the committed edit it cut', async () => {
+      await inRepo({ 'edited.php': 'a\nb\n', 'dirty.php': 'a\nb\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'edited.php'), 'a\nB\n');
+        await commitAll(dir);
+        await writeFile(path.join(dir, 'dirty.php'), 'a\nB\n');
+
+        const out = await collectImplementationFiles(ctxFor({ touched: names(99) }), dir);
+
+        expect(out.files).toHaveLength(100);
+        expect(out.files).toContain('dirty.php');
+        expect(out.files).not.toContain('edited.php');
+        expect(out.total).toBe(101);
+        expect(out.truncated).toBe(true);
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — a committed change that cannot be read', () => {
+    const UNREAD = 'the change committed since the fork point could not be read';
+
+    /** `c.js` committed on the task branch and reported by nobody, with a clean tree. */
+    async function inCommittedRepo(run: (dir: string) => Promise<void>): Promise<void> {
+      await inRepo({ 'kept.js': 'a\n', 'gone.js': 'x\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'c.js'), 'new\n');
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: add c.js']);
+        const clean = await git(dir, ['status', '--porcelain']);
+        expect(clean.stdout.trim()).toBe('');
+        await run(dir);
+      });
+    }
+
+    it('lists the committed file and records no failure while the fork point resolves', async () => {
+      await inCommittedRepo(async (dir) => {
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual(['c.js']);
+        expect(out.total).toBe(1);
+        expect(out.scanError).toBeNull();
+      });
+    });
+
+    it('marks the scan failed when the recorded base branch is gone, rather than reading the change against HEAD', async () => {
+      await inCommittedRepo(async (dir) => {
+        await git(dir, ['branch', '-D', 'main']);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual([]);
+        expect(out.total).toBe(0);
+        expect(out.scanError).toBe(UNREAD);
+        expect(fileCoverage(out)?.scanFailed).toBe(true);
+      });
+    });
+
+    it('marks the scan failed when no base branch was recorded', async () => {
+      await inCommittedRepo(async (dir) => {
+        const out = await collectImplementationFiles(ctxFor({}, null), dir);
+
+        expect(out.files).toEqual([]);
+        expect(out.scanError).toBe(UNREAD);
+      });
+    });
+
+    it('marks the scan failed for a committed deletion nobody reported, and says so once', async () => {
+      await inRepo({ 'gone.js': 'x\n', 'kept.js': 'a\n' }, async (dir) => {
+        await rm(path.join(dir, 'gone.js'));
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: remove it']);
+        await git(dir, ['branch', '-D', 'main']);
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+
+        expect(out.files).toEqual([]);
+        expect(out.scanError).toBe(UNREAD);
+      });
+    });
+
+    it("states the dirty scan's own error first when that failed too", async () => {
+      const out = await collectImplementationFiles(
+        ctxFor({ touched: ['a.js'] }),
+        '/nonexistent-worktree',
+      );
+
+      expect(out.files).toEqual(['a.js']);
+      expect(out.scanError?.endsWith(`; ${UNREAD}`)).toBe(true);
+      expect(out.scanError?.startsWith(UNREAD)).toBe(false);
+      expect(out.scanError?.split(UNREAD)).toHaveLength(2);
+    });
+
+    it('tells the reviewers and the gate that the list may lack the committed file the fork point could not name', async () => {
+      await inCommittedRepo(async (dir) => {
+        await git(dir, ['branch', '-D', 'main']);
+
+        const out = await collectImplementationFiles(ctxFor({ dag: ['kept.js'] }), dir);
+
+        expect(out.files).toEqual(['kept.js']);
+        expect(fileCoverage(out)).toEqual({
+          listed: 1,
+          total: 1,
+          truncated: false,
+          scanFailed: true,
+        });
+        expect(changedFilesBlock(out, 'Changed files', 'fallback')).toContain(
+          'COVERAGE: the change could not be read in full',
+        );
+      });
+    });
+
+    it('records no failure for the same change while the fork point resolves', async () => {
+      await inCommittedRepo(async (dir) => {
+        const out = await collectImplementationFiles(ctxFor({ dag: ['kept.js'] }), dir);
+
+        expect(out.files).toEqual(['kept.js', 'c.js']);
+        const covered = fileCoverage(out);
+        expect(covered).toEqual({ listed: 2, total: 2, truncated: false });
+        expect('scanFailed' in covered!).toBe(false);
+        expect(changedFilesBlock(out, 'Changed files', 'fallback')).not.toContain('COVERAGE');
+      });
+    });
+
+    describe('when git loses the fork point for one of the reads only', () => {
+      const originalPath = process.env.PATH;
+      const bins: string[] = [];
+      afterEach(async () => {
+        process.env.PATH = originalPath;
+        for (const bin of bins.splice(0)) await rm(bin, { recursive: true, force: true });
+      });
+
+      /** Puts a `git` first on PATH that fails the `nth` merge-base it is asked for and runs git otherwise. */
+      async function failMergeBase(nth: number): Promise<void> {
+        const { stdout } = await exec('sh', ['-c', 'command -v git']);
+        const bin = await mkdtemp(path.join(tmpdir(), 'impl-fake-git-'));
+        bins.push(bin);
+        const count = path.join(bin, 'merge-bases');
+        const asked = `n=$(($(cat '${count}' 2>/dev/null || echo 0) + 1)); echo $n > '${count}'`;
+        const script = [
+          '#!/bin/sh',
+          `for a in "$@"; do if [ "$a" = merge-base ]; then ${asked}; [ $n -eq ${nth} ] && exit 1; fi; done`,
+          `exec '${stdout.trim()}' "$@"`,
+        ].join('\n');
+        await writeFile(path.join(bin, 'git'), `${script}\n`, { mode: 0o755 });
+        process.env.PATH = `${bin}${path.delimiter}${originalPath}`;
+      }
+
+      // The collector asks for the fork point three times: for the line notes, the deletions, the paths.
+      it('marks the scan failed when only the committed deletions read loses it, and still lists the file', async () => {
+        await inCommittedRepo(async (dir) => {
+          await failMergeBase(2);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual(['c.js']);
+          expect(out.scanError).toBe(UNREAD);
+        });
+      });
+
+      it('marks the scan failed when only the committed paths read loses it', async () => {
+        await inCommittedRepo(async (dir) => {
+          await failMergeBase(3);
+
+          const out = await collectImplementationFiles(ctxFor({ dag: ['kept.js'] }), dir);
+
+          expect(out.files).toEqual(['kept.js']);
+          expect(out.scanError).toBe(UNREAD);
+        });
+      });
+
+      it('leaves the scan unmarked when only the line notes lose it, since fewer notes are never a wrong list', async () => {
+        await inCommittedRepo(async (dir) => {
+          await failMergeBase(1);
+
+          const out = await collectImplementationFiles(ctxFor(), dir);
+
+          expect(out.files).toEqual(['c.js']);
+          expect(out.scanError).toBeNull();
+          expect(out.changedLines?.['c.js']).toBeUndefined();
+        });
+      });
+    });
+
+    it('reads against HEAD when the fork point is gone, unless the caller asks for the fork point only', async () => {
+      await inRepo({ 'kept.js': 'a\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'kept.js'), 'b\n');
+        await git(dir, ['branch', '-D', 'main']);
+
+        expect(await readChangedPaths(dir, 'main')).toEqual(['kept.js']);
+        expect(await readChangedPaths(dir, null)).toEqual(['kept.js']);
+        expect(await readChangedPaths(dir, 'main', { forkPointOnly: true })).toBeNull();
+        expect(await readChangedPaths(dir, null, { forkPointOnly: true })).toBeNull();
+      });
+    });
+
+    it('names the same paths with or without forkPointOnly while the fork point resolves', async () => {
+      await inRepo({ 'kept.js': 'a\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'kept.js'), 'b\n');
+
+        expect(await readChangedPaths(dir, 'main', { forkPointOnly: true })).toEqual(['kept.js']);
+        expect(await readChangedPaths(dir, 'main')).toEqual(['kept.js']);
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — names that span lines', () => {
+    it('records a committed, a dirty and an untracked file whose names hold a newline, and lists none', async () => {
+      await inRepo({ 'dirty\nname.php': 'a\nb\n', 'ordinary.php': 'a\nb\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'committed\nname.php'), 'x\n');
+        await git(dir, ['add', '-A']);
+        await git(dir, ['commit', '-m', 'ISSUE-1: add it']);
+        await writeFile(path.join(dir, 'dirty\nname.php'), 'a\nB\n');
+        await writeFile(path.join(dir, 'ordinary.php'), 'a\nB\n');
+        await writeFile(path.join(dir, 'untracked\nname.php'), 'fresh\n');
+
+        const out = await collectImplementationFiles(ctxFor({ touched: ['reported.php'] }), dir);
+        const block = changedFilesBlock(out, 'Changed files', 'fallback');
+
+        expect(out.total).toBe(5);
+        expect(block.split('\n').filter((line) => line.startsWith('- '))).toEqual([
+          '- reported.php',
+          '- ordinary.php — lines 2',
+        ]);
+        expect(block).not.toContain('name.php');
+        expect(block).toContain(
+          'COVERAGE: 3 changed files have names that cannot be listed safely',
+        );
+        expect(fileCoverage(out)).toEqual({ listed: 2, total: 5, truncated: true });
+      });
+    });
+  });
+
+  describe('collectImplementationFiles — names that would forge the fence', () => {
+    it('records a dirty file whose name holds a run of equals signs, and lists none of them', async () => {
+      await inRepo({ 'ordinary.php': 'a\nb\n' }, async (dir) => {
+        await writeFile(path.join(dir, 'ordinary.php'), 'a\nB\n');
+        await writeFile(path.join(dir, 'a===b.php'), 'fresh\n');
+        await writeFile(path.join(dir, 'x=====y.php'), 'fresh\n');
+
+        const out = await collectImplementationFiles(ctxFor(), dir);
+        const block = changedFilesBlock(out, 'Changed files', 'fallback');
+
+        expect(out.total).toBe(3);
+        expect(block.split('\n').filter((line) => line.startsWith('- '))).toEqual([
+          '- ordinary.php — lines 2',
+          '- a===b.php — new file',
+        ]);
+        expect(block).not.toContain('x=====y.php');
+        expect(block).toContain(
+          'COVERAGE: 1 changed files have names that cannot be listed safely',
+        );
+        expect(fileCoverage(out)).toEqual({ listed: 2, total: 3, truncated: true });
       });
     });
   });

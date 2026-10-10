@@ -35,6 +35,36 @@ describe('08c2 change-set guard', () => {
     ).toThrow(/the worktree scan failed \(git: fatal: not a git repository\)/);
   });
 
+  it('tells the auditor the list may lack files of the change when the scan of it failed', () => {
+    const prompt = (scanError: string | null) =>
+      codeAuditStep.llm!.buildPrompt!({
+        detected: detect({ files: ['src/a.ts'], total: 1, truncated: false, scanError }),
+      } as never);
+
+    expect(prompt('git failed')).toContain('COVERAGE: the change could not be read in full');
+    expect(prompt('git failed')).toContain('do NOT report a clean result');
+    expect(prompt(null)).not.toContain('could not be read in full');
+  });
+
+  it('stores the failed scan on the coverage the gate reads, and leaves the flag off where it ran', async () => {
+    const run = (scanError: string | null) =>
+      codeAuditStep.apply(
+        {} as never,
+        {
+          detected: detect({ files: ['src/a.ts'], total: 1, truncated: false, scanError }),
+          llmOutput: '```json\n{"findings":[]}\n```',
+        } as never,
+      );
+
+    expect((await run('git failed')).coverage).toEqual({
+      listed: 1,
+      total: 1,
+      truncated: false,
+      scanFailed: true,
+    });
+    expect((await run(null)).coverage).toEqual({ listed: 1, total: 1, truncated: false });
+  });
+
   it('builds the prompt with the changed files listed when there is a change set', () => {
     const prompt = codeAuditStep.llm!.buildPrompt!({
       detected: detect({ files: ['src/a.ts'], total: 1, truncated: false, scanError: null }),

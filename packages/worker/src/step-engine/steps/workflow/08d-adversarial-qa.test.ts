@@ -198,6 +198,50 @@ describe('08d change-set guard', () => {
   });
 });
 
+describe('08d: a change set whose scan failed', () => {
+  const detected = (scanError: string | null) => ({
+    level: 'standard',
+    spec: 's',
+    implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false, scanError },
+    appUrl: null,
+  });
+
+  it('tells every adversary the attack surface may lack files of the change', async () => {
+    const agents = await adversarialQaStep.agentMining!.selectAgents({
+      detected: detected('git failed'),
+    } as never);
+    expect(agents.length).toBeGreaterThan(0);
+    for (const a of agents) {
+      expect(a.prompt, a.agentId).toContain('COVERAGE: the change could not be read in full');
+      expect(a.prompt, a.agentId).toContain('do NOT report a clean result');
+    }
+  });
+
+  it('says nothing of it when the scan ran', async () => {
+    const agents = await adversarialQaStep.agentMining!.selectAgents({
+      detected: detected(null),
+    } as never);
+    for (const a of agents) expect(a.prompt, a.agentId).not.toContain('could not be read in full');
+  });
+
+  it('stores the failed scan on the coverage the gate reads, and leaves the flag off where it ran', async () => {
+    const run = (scanError: string | null) =>
+      adversarialQaStep.apply(fakeCtx, {
+        detected: detected(scanError),
+        agentMiningResults: [mining('edge-case-breaker', '```json\n{"verdict":"PASS"}\n```')],
+        isFinalMiningAttempt: true,
+      } as unknown as Parameters<typeof adversarialQaStep.apply>[1]);
+
+    expect((await run('git failed')).coverage).toEqual({
+      listed: 1,
+      total: 1,
+      truncated: false,
+      scanFailed: true,
+    });
+    expect((await run(null)).coverage).toEqual({ listed: 1, total: 1, truncated: false });
+  });
+});
+
 describe('08d mining seats', () => {
   it('seats every adversary by its own id', async () => {
     // The roster is a fixed catalog, so each adversary's id is already the stable seat.

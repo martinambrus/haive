@@ -434,6 +434,33 @@ describe('loadGateHouseRules', () => {
     });
   });
 
+  it('carries the flag 07b stored when a fix left the change unread, beside the counts', async () => {
+    const w = world();
+    w.step07b(validatorOutput({ changedFilesCoverage: { listed: 3, total: 3, scanFailed: true } }));
+    w.invocation(VALIDATOR, stamp({ entries }));
+    expect((await loadGateHouseRules(w.db, TASK))!.changedFilesCoverage).toEqual({
+      listed: 3,
+      total: 3,
+      scanFailed: true,
+    });
+  });
+
+  it.each([
+    ['false', false],
+    ['text', 'true'],
+    ['a number', 1],
+    ['null', null],
+  ])('reads a flag stored as %s as no flag, and keeps the counts', async (_name, stored) => {
+    const w = world();
+    w.step07b(
+      validatorOutput({ changedFilesCoverage: { listed: 3, total: 3, scanFailed: stored } }),
+    );
+    w.invocation(VALIDATOR, stamp({ entries }));
+    const loaded = await loadGateHouseRules(w.db, TASK);
+    expect(loaded!.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+    expect('scanFailed' in loaded!.changedFilesCoverage!).toBe(false);
+  });
+
   it('leaves the coverage out for an output written before 07b recorded it', async () => {
     const w = world();
     w.step07b(validatorOutput());
@@ -1045,6 +1072,33 @@ describe('loadGateHouseRules: whose list of changed files was capped', () => {
     expect(merged!.changedFilesCoverage).toEqual({ listed: 100, total: 150 });
     expect('givenTo' in merged!.changedFilesCoverage!).toBe(false);
   });
+
+  it("keeps 07b's unread-change flag in the fallback, and drops it for the code review's own record", async () => {
+    const seed = (coverage: unknown) => {
+      const w = world();
+      w.step07b(
+        validatorOutput({ changedFilesCoverage: { listed: 3, total: 3, scanFailed: true } }),
+      );
+      w.invocation(VALIDATOR, stamp({ entries: [entryA] }));
+      w.step08c({
+        reviewed: true,
+        peer: { verdict: 'APPROVE', findings: [], positives: [] },
+        coverage,
+        peerInvocationId: PEER,
+      });
+      w.invocation(PEER, stamp({ entries: [entryA] }));
+      return w;
+    };
+    const fallback = await loadGateHouseRules(seed(null).db, TASK, withCodeReview);
+    expect(fallback!.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+    const own = await loadGateHouseRules(
+      seed({ listed: 5, total: 5, truncated: false }).db,
+      TASK,
+      withCodeReview,
+    );
+    expect(own!.changedFilesCoverage).toEqual({ listed: 5, total: 5, givenTo: 'code review' });
+    expect('scanFailed' in own!.changedFilesCoverage!).toBe(false);
+  });
 });
 
 describe('taskChangeFingerprint', () => {
@@ -1220,6 +1274,7 @@ const found = {
 const conflict = { rule: '42ac658a', file: 'src/a.php:7', reason: 'the spec requires it' };
 const left = { title: 'Did not fit', why: 'budget' } as const;
 const capped = { listed: 100, total: 150 };
+const unread = { listed: 3, total: 3, scanFailed: true } as const;
 
 const TABLE = [
   ['a conflict', data({ entries: [rule()], conflicts: [conflict] }), 'warn', 'CONFLICT', true],
@@ -1243,6 +1298,13 @@ const TABLE = [
   [
     'a file list capped below the change',
     data({ entries: [rule()], changedFilesCoverage: capped }),
+    'warn',
+    'PARTIAL',
+    true,
+  ],
+  [
+    'a change a fix left unread',
+    data({ entries: [rule()], changedFilesCoverage: unread }),
     'warn',
     'PARTIAL',
     true,
@@ -1485,6 +1547,93 @@ describe('houseRulesRow', () => {
     expect(row.body).toContain(
       "## Not checked\n- 50 changed files beyond the validator's list of 100",
     );
+  });
+
+  it('ranks a change a fix left unread like a capped file list: below the other states, above ENFORCED', () => {
+    const all = data({
+      entries: [rule()],
+      violations: [found],
+      conflicts: [conflict],
+      reason: 'unavailable',
+      changedFilesCoverage: unread,
+    });
+    expect(houseRulesRow(all)!.statusLabel).toBe('CONFLICT');
+    expect(houseRulesRow({ ...all, conflicts: [] })!.statusLabel).toBe('VIOLATED');
+    expect(houseRulesRow({ ...all, conflicts: [], violations: [] })!.statusLabel).toBe(
+      'NOT CHECKED',
+    );
+    expect(
+      houseRulesRow({ ...all, conflicts: [], violations: [], reason: 'switched_off' })!.statusLabel,
+    ).toBe('OFF');
+    const rest = { ...all, conflicts: [], violations: [], reason: undefined };
+    expect(houseRulesRow(rest)!.statusLabel).toBe('PARTIAL');
+    expect(
+      houseRulesRow({ ...rest, changedFilesCoverage: { listed: 3, total: 3 } })!.statusLabel,
+    ).toBe('ENFORCED');
+  });
+
+  it('says the change could not be fully read, and lists what the read missed as not checked', () => {
+    const row = houseRulesRow(data({ entries: [rule()], changedFilesCoverage: unread }))!;
+    expect(row.detail).toBe('1 rule(s) checked; the change could not be fully read');
+    expect(row.body).toBe(
+      [
+        '## Checked',
+        '- Rule `42ac658a` No inline SVGs — every change',
+        '',
+        '## Not checked',
+        '- files the read missed, if any — the change could not be fully read',
+      ].join('\n'),
+    );
+  });
+
+  it('puts the unread change after the capped list and before the late modification, in the same section', () => {
+    const row = houseRulesRow(
+      data({
+        entries: [rule()],
+        omitted: [left],
+        changedFilesCoverage: { ...capped, scanFailed: true },
+        modifiedAfterCheck: true,
+      }),
+    )!;
+    expect(row.detail).toBe(
+      '1 rule(s) checked; 1 not checked; the validator was given 100 of 150 changed files; the change could not be fully read; the change was modified after the last house-rules check',
+    );
+    expect(row.body).toContain(
+      [
+        '## Not checked',
+        '- Rule Did not fit — left out of the prompt: it did not fit the prompt budget',
+        "- 50 changed files beyond the validator's list of 100",
+        '- files the read missed, if any — the change could not be fully read',
+        '- changes made after the last house-rules check',
+      ].join('\n'),
+    );
+  });
+
+  it('still names the unread change beside a conflict and a violation, which keep the row', () => {
+    const row = houseRulesRow(
+      data({
+        entries: [rule()],
+        conflicts: [conflict],
+        violations: [found],
+        changedFilesCoverage: unread,
+      }),
+    )!;
+    expect(row.statusLabel).toBe('CONFLICT');
+    expect(row.detail).toBe(
+      '1 rule(s) checked; the change could not be fully read; 1 conflict(s); 1 violation(s) open',
+    );
+    expect(row.body).toContain(
+      '## Not checked\n- files the read missed, if any — the change could not be fully read',
+    );
+  });
+
+  it('has nothing to say about an unread change when no rule was given to the validator', () => {
+    const none = data({ changedFilesCoverage: unread });
+    expect(houseRulesRow(none)).toBeNull();
+    expect(houseRulesHoldApprove(none)).toBe(false);
+    const off = houseRulesRow(data({ reason: 'switched_off', changedFilesCoverage: unread }))!;
+    expect(off).toMatchObject({ statusLabel: 'OFF', detail: 'house rules are switched off' });
+    expect(off.body).toBeUndefined();
   });
 
   it('renders exactly as before without the field, and with a list that covers the change', () => {

@@ -15,7 +15,7 @@ import {
   readPlanSnapshot,
 } from './_plan-ops.js';
 import { resolveApprovedSpec, resolveTaskWorktreePath } from './_spec-artifact.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import { collectImplementationFiles, isListableName } from './_impl-changes.js';
 
 /**
  * What this task changed, offered back to the plan as a patch a person approves.
@@ -162,7 +162,15 @@ function buildReconcilePrompt(d: PlanReconcileDetect): string {
       : []),
     '## Files this task changed',
     '',
-    ...d.changedPaths.slice(0, 200).map((p) => `- ${p}`),
+    ...d.changedPaths
+      .filter(isListableName)
+      .slice(0, 200)
+      .map((p) => `- ${p}`),
+    ...(d.changedPaths.some((p) => !isListableName(p))
+      ? [
+          `(${d.changedPaths.filter((p) => !isListableName(p)).length} changed files have names that cannot be listed safely and are left out.)`,
+        ]
+      : []),
     '',
     ...(d.spec ? ['## What the task set out to do', '', d.spec, ''] : []),
     '## What to propose',

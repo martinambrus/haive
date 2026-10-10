@@ -223,23 +223,25 @@ ladder is a guard.
 carry `rule` on an issue and a top-level `rule_conflicts: [{rule, file, reason}]`, both parsed
 tolerantly: a malformed one drops only itself and never makes a pass unparseable. A validator pass
 stores its conflicts, its own `cli_invocations` id (`validatorInvocationId`) and how many changed
-files its list held of how many changed (`changedFilesCoverage`, capped at 100); a fixer pass carries
-all three from the validator it follows. A conflict is never an issue, so no fixer, fix loop or
-churn count acts on it: it waits for a person. Haive backs the block: an issue whose `rule` names an
-entry of the pass's own stamp is raised to `high` when the model said less, and a VALID pass with
-such an issue becomes ISSUES_FOUND so the fixer and the fix loop run. The fixer's issue lines and
-the fix-loop diagnosis name the rule. Gate 2 shows a "House rules" row right after "Implementation
-validation", read only from that invocation's stamp and the output's issues and conflicts, never
-from message copy (`_gate-house-rules.ts`): CONFLICT, VIOLATED, NOT CHECKED (store unreadable or
-prompt too large), OFF, PARTIAL (a rule left out, or rules given while the validator's file list
-was capped: selection matches the whole change, so a rule may match a file it never got) or
-ENFORCED, the first match winning; every state
-but OFF and ENFORCED keeps Approve from being the default. `quick_bugfix` runs no gate 2, so gate 3
-shows the same row first when no gate-2 output exists, under the rule that already governs similar
-sites and insights. An unparseable validator reply records no invocation id and shows no row: the
-validation row already says UNPARSEABLE. A violation in a file the dependency policy calls
-third-party (a Drupal 7 theme outside `custom/`, unless `.haive-data/dependency-ownership.json`
-claims it) is an upstream issue: no fixer runs, and the row still shows it as VIOLATED.
+files its list held of how many changed (`changedFilesCoverage`, capped at 100; a re-validation
+counts the list its fixer re-collected, files the fixer created included, and `scanFailed` when that
+re-collection failed, which the gates read as partial); a fixer pass carries all three from the
+validator it follows. A conflict is never an issue, so no fixer, fix loop or churn count acts on it:
+it waits for a person. Haive backs the block: an issue whose `rule` names an entry of the pass's own
+stamp is raised to `high` when the model said less, and a VALID pass with such an issue becomes
+ISSUES_FOUND so the fixer and the fix loop run. The fixer's issue lines and the fix-loop diagnosis
+name the rule. Gate 2 shows a "House rules" row right after "Implementation validation", read only
+from that invocation's stamp and the output's issues and conflicts, never from message copy
+(`_gate-house-rules.ts`): CONFLICT, VIOLATED, NOT CHECKED (store unreadable or prompt too large),
+OFF, PARTIAL (a rule left out, or rules given while the validator's file list was capped: selection
+matches the whole change, so a rule may match a file it never got) or ENFORCED, the first match
+winning; every state but OFF and ENFORCED keeps Approve from being the default. `quick_bugfix` runs
+no gate 2, so gate 3 shows the same row first when no gate-2 output exists, under the rule that
+already governs similar sites and insights. An unparseable validator reply records no invocation id
+and shows no row: the validation row already says UNPARSEABLE. A violation in a file the dependency
+policy calls third-party (a Drupal 7 theme outside `custom/`, unless
+`.haive-data/dependency-ownership.json` claims it) is an upstream issue: no fixer runs, and the row
+still shows it as VIOLATED.
 
 **08c re-checks what 08b and the 08a fixer wrote.** They run after 07b, and 08c runs after both
 (08e runs after 08c, and quick_bugfix runs no 08c). 08c parses its peer's `rule` and

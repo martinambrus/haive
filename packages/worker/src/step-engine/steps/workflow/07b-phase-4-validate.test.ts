@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
@@ -42,6 +42,7 @@ import {
   churnHotspots,
   phase4ValidateStep,
 } from './07b-phase-4-validate.js';
+import { collectImplementationFiles, isDocsOnlyChange } from './_impl-changes.js';
 import { houseRuleShortIds } from '@haive/shared/global-kb';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
@@ -355,6 +356,32 @@ describe('phase4ValidateStep change-set guard', () => {
         },
       } as never),
     ).toThrow(/07b-phase-4-validate has no changed files to review/);
+  });
+});
+
+describe('phase4ValidateStep first validator pass: a change set whose scan failed', () => {
+  const prompt = (scanError: string | null) =>
+    phase4ValidateStep.llm!.buildPrompt!({
+      detected: {
+        worktreePath: '/wt',
+        sandboxWorktreePath: '/ws',
+        spec: 'spec',
+        implementationFiles: { files: ['src/a.ts'], total: 1, truncated: false, scanError },
+        debtBlock: '',
+        honoredBlock: '',
+        browserTesting: false,
+        docsOnly: false,
+      },
+    } as never);
+
+  it('tells the validator the list may lack files of the change, and not to report a clean result for it', () => {
+    const text = prompt('git failed');
+    expect(text).toContain('COVERAGE: the change could not be read in full');
+    expect(text).toContain('do NOT report a clean result');
+  });
+
+  it('says nothing of it when the scan ran', () => {
+    expect(prompt(null)).not.toContain('could not be read in full');
   });
 });
 
@@ -967,6 +994,7 @@ function ruleWorld(stamps: Record<string, unknown>, setup?: Record<string, unkno
   const fake = createFakeDb({
     cliInvocations: schema.cliInvocations,
     taskSteps: schema.taskSteps,
+    taskDagIssues: schema.taskDagIssues,
   });
   for (const [id, houseRules] of Object.entries(stamps)) {
     fake.insert(schema.cliInvocations, { id, taskId: TASK, houseRules });
@@ -1007,7 +1035,12 @@ const runApply = (
   } = {},
 ) =>
   phase4ValidateStep.apply(ctx, {
-    detected: { dependencyPolicy: ownedPolicy, implementationFiles: opts.implementationFiles },
+    detected: {
+      dependencyPolicy: ownedPolicy,
+      implementationFiles: opts.implementationFiles,
+      // A fixer pass scans this path; it does not exist, so every test fails the scan alike.
+      worktreePath: '/nonexistent-worktree',
+    },
     formValues: {},
     iteration: opts.iteration ?? 0,
     previousIterations: opts.previous ?? [],
@@ -1072,6 +1105,45 @@ const fixerPromptAfter = (previous: unknown[]) =>
     iteration: previous.length,
     previousIterations: previous as never,
   });
+
+describe('07b re-validation after a fix pass whose re-read failed', () => {
+  const NOTICE = 'The change could not be re-read after the fix';
+  const revalidate = (fixerFiles: unknown) =>
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: {
+        sandboxWorktreePath: '/ws',
+        spec: 'spec',
+        taskBrief: 'THE USER REQUEST',
+        dependencyPolicy: ownedPolicy,
+        debtBlock: '',
+        honoredBlock: '',
+        browserTesting: false,
+        docsOnly: false,
+        implementationFiles: fileSet(2, 2),
+      } as never,
+      formValues: {},
+      iteration: 2,
+      previousIterations: [
+        { iteration: 0, applyOutput: mkValidateApply({}) },
+        {
+          iteration: 1,
+          applyOutput: { ...mkValidateApply({}), source: 'fixer', implementationFiles: fixerFiles },
+        },
+      ] as never,
+    });
+
+  it('tells the re-validator its list may miss what the fix created', () => {
+    expect(revalidate({ ...fileSet(2, 2), scanError: 'git failed' })).toContain(NOTICE);
+  });
+
+  it('says nothing of it after a fix pass whose re-read ran', () => {
+    expect(revalidate({ ...fileSet(3, 3), scanError: null })).not.toContain(NOTICE);
+  });
+
+  it('tells it too after a fix pass stored before the change was re-read, which has no list', () => {
+    expect(revalidate(undefined)).toContain(NOTICE);
+  });
+});
 
 describe('parseValidatorOutput: the rule fields', () => {
   it('keeps the rule of an issue and the conflicts at the top level', () => {
@@ -1248,6 +1320,40 @@ describe('phase4ValidateStep.apply: the changed files the validator was given', 
     expect(out.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
   });
 
+  it('flags the coverage of a list that a failed scan produced', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply({ verdict: 'VALID' }), {
+      implementationFiles: { ...fileSet(3, 3), scanError: 'git failed' },
+    });
+    expect(out.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+  });
+
+  it('leaves the flag off where the scan ran', async () => {
+    const out = await runApply(ruleWorld({}).ctx, reply({ verdict: 'VALID' }), {
+      implementationFiles: { ...fileSet(3, 3), scanError: null },
+    });
+    expect(out.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+    expect('scanFailed' in out.changedFilesCoverage!).toBe(false);
+  });
+
+  it('drops the flag once a fixer pass has re-read the change, since that list stands in for detect', async () => {
+    const detect = { ...fileSet(3, 3), scanError: 'git failed' };
+    const text0 = reply();
+    const first = await runApply(ruleWorld({}).ctx, text0, { implementationFiles: detect });
+    const previous = [
+      passRecord(0, text0, first),
+      passRecord(1, FIXER_REPLY, { ...first, source: 'fixer', implementationFiles: fileSet(5, 5) }),
+    ];
+
+    const second = await runApply(ruleWorld({}).ctx, reply({ verdict: 'VALID' }), {
+      iteration: 2,
+      previous,
+      implementationFiles: detect,
+    });
+
+    expect(first.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+    expect(second.changedFilesCoverage).toEqual({ listed: 5, total: 5 });
+  });
+
   it.each([
     ['no list', undefined],
     ['a list written before the totals were recorded', ['src/a.php']],
@@ -1271,13 +1377,13 @@ describe('phase4ValidateStep.apply: the changed files the validator was given', 
       invocationId: FIXER_1,
       implementationFiles: fileSet(7, 7),
     });
-    const r1 = passRecord(1, FIXER_REPLY, o1);
+    // Pass 2 is given the list its fixer pass collected, not detect's.
+    const r1 = passRecord(1, FIXER_REPLY, { ...o1, implementationFiles: fileSet(80, 90) });
     const text2 = reply();
     const o2 = await runApply(w.ctx, text2, {
       iteration: 2,
       previous: [r0, r1],
       invocationId: VALIDATOR_2,
-      implementationFiles: fileSet(80, 90),
     });
     const r2 = passRecord(2, text2, o2);
     const o3 = await runApply(w.ctx, FIXER_REPLY, {
@@ -1866,5 +1972,384 @@ describe('phase4ValidateStep.apply: the report it keeps of the validator reply',
     });
     expect(fixed.report).toBe(older.report);
     expect(fixed.reportChars).toBeUndefined();
+  });
+});
+
+// Detect takes the change once, when the step starts. A fixer pass can add to it, so the validator
+// that follows has to be given the change as the fixer left it, and the gate told how much of that
+// it was.
+describe('phase4ValidateStep: the change each validator pass is given', () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+
+  const put = async (dir: string, file: string, text: string) => {
+    await mkdir(path.dirname(path.join(dir, file)), { recursive: true });
+    await writeFile(path.join(dir, file), text);
+  };
+
+  /** A task branch on which the agent edited `files`, the files 07 reported. */
+  async function checkout(files = ['a.php', 'b.php']): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-validate-pass-'));
+    dirs.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 'test@test.local');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'gc.auto', '0');
+    for (const file of files) await put(dir, file, 'base\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'base');
+    git(dir, 'checkout', '-q', '-b', 'task');
+    for (const file of files) await put(dir, file, 'changed\n');
+    return dir;
+  }
+
+  /** The step's ctx over that branch, and the detect output the step would have stored for it. */
+  async function task(dir: string, files = ['a.php', 'b.php']) {
+    const fake = createFakeDb({
+      cliInvocations: schema.cliInvocations,
+      taskEvents: schema.taskEvents,
+      taskSteps: schema.taskSteps,
+      taskDagIssues: schema.taskDagIssues,
+    });
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: '01-worktree-setup',
+      round: 0,
+      output: { worktreePath: dir, baseBranch: 'main' },
+    });
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: '07-phase-2-implement',
+      round: 0,
+      output: { filesTouched: files },
+    });
+    const ctx = {
+      logger: stubLogger,
+      db: fake.db,
+      taskId: TASK,
+      taskStepId: STEP,
+      round: 0,
+    } as never;
+    const implementationFiles = await collectImplementationFiles(ctx, dir);
+    const detected = {
+      worktreePath: dir,
+      sandboxWorktreePath: '/ws',
+      spec: 'spec',
+      dependencyPolicy: ownedPolicy,
+      implementationFiles,
+      debtBlock: '',
+      honoredBlock: '',
+      browserTesting: false,
+      docsOnly: isDocsOnlyChange(implementationFiles),
+    };
+    return { ctx, detected };
+  }
+
+  const pass = (
+    ctx: never,
+    detected: unknown,
+    iteration: number,
+    previousIterations: unknown[],
+    llmOutput: string,
+  ) =>
+    phase4ValidateStep.apply(ctx, {
+      detected,
+      formValues: {},
+      iteration,
+      previousIterations,
+      llmOutput,
+    } as never);
+  const validatorPrompt = (detected: unknown, previousIterations: unknown[]) =>
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: detected as never,
+      formValues: {},
+      iteration: previousIterations.length,
+      previousIterations: previousIterations as never,
+    });
+
+  /** A validator pass, a fixer pass that creates `created`, and the validator pass after it. */
+  async function validateFixValidate(created = 'images/icon-check.svg', changed?: string[]) {
+    const dir = await checkout(changed);
+    const { ctx, detected } = await task(dir, changed);
+    const first = await pass(ctx, detected, 0, [], reply());
+    await put(dir, created, '<svg/>\n');
+    const fixer = await pass(ctx, detected, 1, [passRecord(0, reply(), first)], FIXER_REPLY);
+    const previous = [passRecord(0, reply(), first), passRecord(1, FIXER_REPLY, fixer)];
+    const prompt = validatorPrompt(detected, previous);
+    const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
+    return {
+      first,
+      fixer,
+      prompt,
+      second,
+      detected,
+      passes: [...previous, passRecord(2, reply({ verdict: 'VALID' }), second)],
+    };
+  }
+
+  it('lists a file the fixer created in the next validator prompt, beside the files detect took', async () => {
+    const { prompt } = await validateFixValidate();
+    expect(prompt).toContain('- images/icon-check.svg — new file');
+    expect(prompt).toContain('- a.php');
+    expect(prompt).toContain('- b.php');
+  });
+
+  it('stores the coverage of the list the last validator pass was given, not the one detect took', async () => {
+    const { first, second } = await validateFixValidate();
+    expect(first.changedFilesCoverage).toEqual({ listed: 2, total: 2 });
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('stores no flag on the coverage of a list the fixer re-read', async () => {
+    const { first, second } = await validateFixValidate();
+    expect('scanFailed' in first.changedFilesCoverage!).toBe(false);
+    expect('scanFailed' in second.changedFilesCoverage!).toBe(false);
+  });
+
+  it('has the fixer pass hand the change on, and keep carrying the validator values', async () => {
+    const { fixer } = await validateFixValidate();
+    expect(fixer.source).toBe('fixer');
+    expect(fixer.implementationFiles?.files).toEqual(['a.php', 'b.php', 'images/icon-check.svg']);
+    expect(fixer.changedFilesCoverage).toEqual({ listed: 2, total: 2 });
+  });
+
+  it('does not tell the validator its line notes predate the fixer, since it measured them after it', async () => {
+    const { prompt } = await validateFixValidate();
+    expect(prompt).not.toContain('recorded BEFORE the fix agent edited');
+  });
+
+  it("gives a validator pass detect's list, with the caveat, and flags its coverage after a fixer output stored without a change", async () => {
+    const dir = await checkout();
+    const { ctx, detected } = await task(dir);
+    const first = await pass(ctx, detected, 0, [], reply());
+    const previous = [
+      passRecord(0, reply(), first),
+      passRecord(1, FIXER_REPLY, mkValidateApply({ source: 'fixer' })),
+    ];
+
+    const prompt = validatorPrompt(detected, previous);
+    const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
+
+    expect(prompt).toContain('- a.php');
+    expect(prompt).toContain('recorded BEFORE the fix agent edited');
+    expect(prompt).toContain('The change could not be re-read after the fix');
+    expect(second.changedFilesCoverage).toEqual({ listed: 2, total: 2, scanFailed: true });
+  });
+
+  it('refuses to build the validator prompt when the fixer left no changed file', () => {
+    const previous = [
+      passRecord(0, '', mkValidateApply()),
+      passRecord(
+        1,
+        FIXER_REPLY,
+        mkValidateApply({
+          source: 'fixer',
+          implementationFiles: { files: [], total: 0, truncated: false, scanError: null },
+        }),
+      ),
+    ];
+    expect(() =>
+      validatorPrompt(
+        {
+          sandboxWorktreePath: '/ws',
+          spec: 'spec',
+          implementationFiles: fileSet(2, 2),
+          debtBlock: '',
+          honoredBlock: '',
+          browserTesting: false,
+          docsOnly: false,
+        },
+        previous,
+      ),
+    ).toThrow(/07b-phase-4-validate has no changed files to review/);
+  });
+
+  // A fixer that adds code to a documentation change makes the later passes a code review.
+  const DOCS = ['README.md', 'docs/guide.md'];
+  // After a validator the next pass is a fixer's, so the same builder renders it.
+  const fixerPrompt = validatorPrompt;
+
+  it('runs the code protocol on the validator pass after a fixer added code to a docs-only change', async () => {
+    const { prompt, second } = await validateFixValidate('scripts/check.ts', DOCS);
+    expect(prompt).toContain('You are the Implementation Validator');
+    expect(prompt).not.toContain('Documentation Validator');
+    expect(prompt).toContain('=== Spec (what the implementation must deliver) ===');
+    expect(prompt).toContain('- scripts/check.ts — new file');
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('keeps the documentation protocol on the validator pass after a fixer that only added documentation', async () => {
+    const { prompt, second } = await validateFixValidate('docs/extra.md', DOCS);
+    expect(prompt).toContain('You are the Documentation Validator');
+    expect(prompt).not.toContain('Implementation Validator');
+    expect(prompt).toContain('=== Brief (what the document was asked to cover) ===');
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+  });
+
+  it('takes the next fixer off the documentation protocol too, once a fixer has added code', async () => {
+    const { detected, passes } = await validateFixValidate('scripts/check.ts', DOCS);
+    const prompt = fixerPrompt(detected, passes);
+    expect(prompt).not.toContain('CITE OR DROP.');
+    expect(prompt).toContain('=== Spec (the original requirements) ===');
+  });
+
+  it('keeps the next fixer on the documentation protocol while the change is documentation only', async () => {
+    const { detected, passes } = await validateFixValidate('docs/extra.md', DOCS);
+    const prompt = fixerPrompt(detected, passes);
+    expect(prompt).toContain('CITE OR DROP.');
+    expect(prompt).toContain('=== Brief (what the document was asked to cover) ===');
+  });
+
+  it('runs the code protocol after a fixer output stored without a change, since its change was not re-read', async () => {
+    const dir = await checkout(DOCS);
+    const { ctx, detected } = await task(dir, DOCS);
+    const first = await pass(ctx, detected, 0, [], reply());
+    const previous = [
+      passRecord(0, reply(), first),
+      passRecord(1, FIXER_REPLY, mkValidateApply({ source: 'fixer' })),
+    ];
+    expect(validatorPrompt(detected, previous)).toContain('You are the Implementation Validator');
+  });
+
+  it("runs the code protocol when the fixer's scan failed, whatever its list holds", () => {
+    const previous = [
+      passRecord(0, reply(), mkValidateApply()),
+      passRecord(
+        1,
+        FIXER_REPLY,
+        mkValidateApply({
+          source: 'fixer',
+          implementationFiles: {
+            files: ['README.md'],
+            total: 1,
+            truncated: false,
+            scanError: 'git failed',
+          },
+        }),
+      ),
+    ];
+    const detected = {
+      sandboxWorktreePath: '/ws',
+      spec: 'spec',
+      implementationFiles: { files: ['README.md'], total: 1, truncated: false, scanError: null },
+      debtBlock: '',
+      honoredBlock: '',
+      browserTesting: false,
+      docsOnly: true,
+    };
+    expect(validatorPrompt(detected, previous)).toContain('You are the Implementation Validator');
+  });
+
+  // detect's scan names an unreported file (c.php); the fixer's failed scan names only 07's files.
+  async function validateBrokenFixValidate(changed?: string[], unreported = 'c.php') {
+    const dir = await checkout(changed);
+    await put(dir, unreported, 'new\n');
+    const { ctx, detected } = await task(dir, changed);
+    const first = await pass(ctx, detected, 0, [], reply());
+    const fixer = await pass(
+      ctx,
+      { ...detected, worktreePath: '/nonexistent-worktree' },
+      1,
+      [passRecord(0, reply(), first)],
+      FIXER_REPLY,
+    );
+    const previous = [passRecord(0, reply(), first), passRecord(1, FIXER_REPLY, fixer)];
+    const prompt = validatorPrompt(detected, previous);
+    const second = await pass(ctx, detected, 2, previous, reply({ verdict: 'VALID' }));
+    const passes = [...previous, passRecord(2, reply({ verdict: 'VALID' }), second)];
+    return { ctx, fixer, prompt, second, detected, passes };
+  }
+
+  it("lists detect's files to the validator after a fixer whose scan failed", async () => {
+    const { fixer, prompt } = await validateBrokenFixValidate();
+    expect(fixer.implementationFiles?.files).toEqual(['a.php', 'b.php']);
+    expect(fixer.implementationFiles?.scanError).toBeTruthy();
+    expect(prompt).toContain('- c.php');
+    expect(prompt).toContain('recorded BEFORE the fix agent edited');
+  });
+
+  it("stores the counts of detect's list as unknown for the validator after a fixer whose scan failed", async () => {
+    const { fixer, second } = await validateBrokenFixValidate();
+    expect(fixer.implementationFiles?.total).toBe(2);
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+  });
+
+  it('has the next fixer pass carry the unknown coverage, as it carries the rest of the validator pass', async () => {
+    const { ctx, detected, passes } = await validateBrokenFixValidate();
+    const next = await pass(ctx, detected, 3, passes, FIXER_REPLY);
+    expect(next.source).toBe('fixer');
+    expect(next.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+  });
+
+  it('stores the coverage without the flag once a later fixer pass has re-read the change', async () => {
+    const { ctx, detected, passes } = await validateBrokenFixValidate();
+    const fixer = await pass(ctx, detected, 3, passes, FIXER_REPLY);
+    expect(fixer.implementationFiles?.scanError).toBeNull();
+    const previous = [...passes, passRecord(3, FIXER_REPLY, fixer)];
+    const third = await pass(ctx, detected, 4, previous, reply({ verdict: 'VALID' }));
+    expect(third.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
+    expect('scanFailed' in third.changedFilesCoverage!).toBe(false);
+  });
+
+  it('runs the code protocol on the validator pass after a fixer whose scan failed on a docs-only change', async () => {
+    const { detected, prompt, second } = await validateBrokenFixValidate(DOCS, 'docs/extra.md');
+    expect(detected.docsOnly).toBe(true);
+    expect(prompt).toContain('You are the Implementation Validator');
+    expect(prompt).not.toContain('Documentation Validator');
+    expect(prompt).toContain('=== Spec (what the implementation must deliver) ===');
+    expect(prompt).toContain('- docs/extra.md');
+    expect(second.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
+  });
+
+  it('takes the next fixer off the documentation protocol too, after a fixer whose scan failed', async () => {
+    const { detected, passes } = await validateBrokenFixValidate(DOCS, 'docs/extra.md');
+    const prompt = fixerPrompt(detected, passes);
+    expect(prompt).not.toContain('CITE OR DROP.');
+    expect(prompt).toContain('=== Spec (the original requirements) ===');
+  });
+
+  it("still refuses to build the validator prompt when the fixer's scan failed and left no changed file", () => {
+    const previous = [
+      passRecord(0, '', mkValidateApply()),
+      passRecord(
+        1,
+        FIXER_REPLY,
+        mkValidateApply({
+          source: 'fixer',
+          implementationFiles: { files: [], total: 0, truncated: false, scanError: 'git failed' },
+        }),
+      ),
+    ];
+    expect(() =>
+      validatorPrompt(
+        {
+          sandboxWorktreePath: '/ws',
+          spec: 'spec',
+          implementationFiles: fileSet(2, 2),
+          debtBlock: '',
+          honoredBlock: '',
+          browserTesting: false,
+          docsOnly: false,
+        },
+        previous,
+      ),
+    ).toThrow(
+      /07b-phase-4-validate has no changed files to review: the worktree scan failed \(git: git failed\)/,
+    );
+  });
+
+  it('runs the code protocol when the scan behind a documentation-only list failed', async () => {
+    const dir = await checkout(DOCS);
+    const { ctx, detected } = await task(dir, DOCS);
+    const failed = await collectImplementationFiles(ctx, '/nonexistent-worktree');
+    expect(failed.files).toEqual(DOCS);
+    const prompt = phase4ValidateStep.llm!.buildPrompt!({
+      detected: { ...detected, implementationFiles: failed, docsOnly: isDocsOnlyChange(failed) },
+    } as never);
+    expect(prompt).toContain('You are the Implementation Validator');
+    expect(prompt).not.toContain('Documentation Validator');
   });
 });
