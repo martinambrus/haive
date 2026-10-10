@@ -25,6 +25,7 @@ import {
   globsFromLines,
   houseRuleBadge,
 } from '@/lib/house-rules';
+import { isCardActivation } from '@/lib/card-keys';
 import {
   Badge,
   Button,
@@ -1959,7 +1960,7 @@ export default function GlobalKbPage() {
                 onKeyDown={
                   clickable
                     ? (ev) => {
-                        if (ev.key === 'Enter' || ev.key === ' ') {
+                        if (isCardActivation(ev)) {
                           ev.preventDefault();
                           setSelected(e);
                         }
