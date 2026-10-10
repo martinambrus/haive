@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
+import { fencedLines, scanFences } from '@haive/shared/markdown-fences';
 import {
   advanceStep,
   finishedRoutingVerdict,
@@ -1011,7 +1012,7 @@ const OMISSION = /\[… [\d,]+ characters? omitted …\]/;
 describe('excerptDiagnosis', () => {
   function parts(out: string): { head: string; tail: string; omitted: number } {
     const [head = '', count = '0', tail = ''] = out.split(
-      /\n\[… ([\d,]+) characters omitted …\]\n/,
+      /\n\n\[… ([\d,]+) characters omitted …\]\n\n/,
     );
     return { head, tail, omitted: Number(count.replace(/,/g, '')) };
   }
@@ -1043,9 +1044,9 @@ describe('excerptDiagnosis', () => {
 
   it('cuts inside a line when none ends nearby, and writes the count with its separator', () => {
     expect(excerptDiagnosis('x'.repeat(10_000), 6000, false)).toBe(
-      `${'x'.repeat(3000)}\n[… 4,000 characters omitted …]\n${'x'.repeat(3000)}`,
+      `${'x'.repeat(3000)}\n\n[… 4,000 characters omitted …]\n\n${'x'.repeat(3000)}`,
     );
-    expect(excerptDiagnosis('abcde', 4, false)).toBe('ab\n[… 1 character omitted …]\nde');
+    expect(excerptDiagnosis('abcde', 4, false)).toBe('ab\n\n[… 1 character omitted …]\n\nde');
   });
 
   it('never gives up more than half a piece to land on a line', () => {
@@ -1060,6 +1061,35 @@ describe('excerptDiagnosis', () => {
     expect(text.slice(-3001).isWellFormed()).toBe(false);
     expect(excerptDiagnosis(text, 6001, false).isWellFormed()).toBe(true);
     expect(excerptDiagnosis(text, 6003, false).isWellFormed()).toBe(true);
+  });
+
+  it('puts the omission line on its own paragraph', () => {
+    const out = excerptDiagnosis('word '.repeat(3000), 400, false);
+    expect(out).toMatch(/[^\n]\n\n\[… [\d,]+ characters omitted …\]\n\n[^\n]/);
+  });
+
+  it.each([
+    ['```', 'ts'],
+    ['~~~~', ''],
+  ])('closes the %s block the head cut and reopens it for the tail', (fence, info) => {
+    const text = `intro\n${fence}${info}\n${numbered('code', 300)}\n${fence}\noutro paragraph`;
+    const out = excerptDiagnosis(text, 800, false);
+    const lines = out.split('\n');
+    const marker = lines.findIndex((l) => OMISSION.test(l));
+    expect(marker).toBeGreaterThan(0);
+    expect(scanFences(lines).length).toBe(2);
+    expect(scanFences(lines).every((f) => f.close !== null)).toBe(true);
+    expect(fencedLines(lines)[marker]).toBe(false);
+    expect(lines[marker - 1]).toBe('');
+    expect(lines[marker + 1]).toBe('');
+    expect(lines.slice(0, marker).some((l) => l.startsWith(fence))).toBe(true);
+    expect(lines[marker + 2]).toBe(fence);
+  });
+
+  it('adds no fence line when the cut falls outside every block', () => {
+    const text = `${'prose '.repeat(600)}\n\`\`\`\ncode\n\`\`\`\n${'prose '.repeat(600)}`;
+    const out = excerptDiagnosis(text, 400, false);
+    expect(scanFences(out.split('\n')).length).toBe(0);
   });
 
   it('repairs the fence each end of the cut carries, without pulling the head into one', () => {

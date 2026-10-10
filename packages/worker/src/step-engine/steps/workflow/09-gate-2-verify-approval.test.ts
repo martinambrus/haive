@@ -1731,8 +1731,8 @@ describe('gate-2 shows a long validator report from both ends', () => {
     const at = lines.findIndex((line) => OMISSION.test(line));
     return {
       count: Number(OMISSION.exec(lines[at] ?? '')?.[1]?.replaceAll(',', '')),
-      head: lines.slice(0, at).join('\n'),
-      tail: lines.slice(at + 1).join('\n'),
+      head: lines.slice(0, at - 1).join('\n'),
+      tail: lines.slice(at + 2).join('\n'),
     };
   };
 

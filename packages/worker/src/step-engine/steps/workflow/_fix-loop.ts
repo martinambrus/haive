@@ -1,6 +1,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
+import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
 import type { StepContext } from '../../step-definition.js';
 import {
   cleanText,
@@ -255,18 +256,39 @@ function tailPiece(text: string, max: number): string {
   return text.slice(start);
 }
 
+/** The run of the markdown fence still open where `text` ends, or null. */
+function openFenceRun(text: string): string | null {
+  const lines = text.split('\n');
+  const open = scanFences(lines).find((fence) => fence.close === null);
+  return open ? (fenceOpener(lines[open.open] ?? '')?.run ?? null) : null;
+}
+
 /** The first and last halves of `budget` around one line stating the count dropped. Each end is
  *  repaired alone: one repair over both would fence a head that sits outside any fence. */
-function cutMiddle(text: string, budget: number, repair: (piece: string) => string): string {
+function cutMiddle(
+  text: string,
+  budget: number,
+  repair: (piece: string) => string,
+  framed = false,
+): string {
   const headLines = headPiece(text, Math.ceil(budget / 2)).split('\n');
-  const tailLines = tailPiece(text, Math.floor(budget / 2)).split('\n');
+  const tailText = tailPiece(text, Math.floor(budget / 2));
+  const tailLines = tailText.split('\n');
   // A BEGIN ending the head, or an END starting the tail, would be repaired into an empty fence.
   if (headLines.at(-1) === UNTRUSTED_OPEN) headLines.pop();
   if (tailLines[0] === UNTRUSTED_CLOSE) tailLines.shift();
   const head = headLines.join('\n');
   const tail = tailLines.join('\n');
   const omitted = omissionLine(text.length - head.length - tail.length);
-  return [repair(head), omitted, repair(tail)].join('\n');
+  // framed: the line is its own paragraph and a markdown fence the cut split is closed and reopened.
+  if (!framed) return [repair(head), omitted, repair(tail)].join('\n');
+  const headRun = openFenceRun(head);
+  const tailRun = openFenceRun(text.slice(0, text.length - tailText.length));
+  return [
+    repair(headRun ? `${head}\n${headRun}` : head),
+    omitted,
+    repair(tailRun ? `${tailRun}\n${tail}` : tail),
+  ].join('\n\n');
 }
 
 /** The first `max` characters of `text`, then `marker` on its own line. A BEGIN banner ending the
@@ -322,7 +344,7 @@ function cutFencedBodies(text: string, budget: number): string {
 export function excerptDiagnosis(raw: string, budget: number, keepPersonWhole: boolean): string {
   const text = cleanText(raw, Infinity);
   if (keepPersonWhole) return balanceFences(cutFencedBodies(text, budget));
-  return text.length > budget ? cutMiddle(text, budget, balanceFences) : balanceFences(text);
+  return text.length > budget ? cutMiddle(text, budget, balanceFences, true) : balanceFences(text);
 }
 
 /** Stable signature of a fix-loop diagnosis, namespaced by its source step. Two diagnoses
