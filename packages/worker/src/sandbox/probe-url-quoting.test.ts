@@ -24,6 +24,6 @@ describe('browser-probe-connect command lines', () => {
   });
 
   it.each(found)('$file hands the URL through shellQuote ($argument)', ({ argument }) => {
-    expect(argument).toMatch(/^\$\{shellQuote\(\w+\)\}/);
+    expect(argument).toMatch(/^\$\{shellQuote\([\w()]+\)\}/);
   });
 });
