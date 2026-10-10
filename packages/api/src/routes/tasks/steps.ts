@@ -23,6 +23,7 @@ import {
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
   type Database,
+  ZERO_MERGE_RETRIES,
 } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import {
@@ -154,6 +155,7 @@ export async function resetRowsForRerun(
         // prior passes forward instead of starting a clean loop.
         iterations: [],
         iterationCount: 0,
+        mergeResolveState: ZERO_MERGE_RETRIES,
         statusMessage: null,
         // Describes attempts this reset is superseding above, and attemptCount (which gates
         // the "re-ran automatically" card) goes back to 0 with them — so the note has to go
@@ -1333,6 +1335,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           idleMs: CLOSED_GAP_INTO_IDLE_MS,
           statusMessage: null,
           aiFixContext,
+          mergeResolveState: ZERO_MERGE_RETRIES,
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
@@ -1879,6 +1882,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           startedAt: null,
           endedAt: null,
           errorMessage: null,
+          mergeResolveState: ZERO_MERGE_RETRIES,
           idleMs: 0,
           waitingStartedAt: null,
           userActiveMs: 0,
