@@ -21,6 +21,7 @@ import {
   REPO_IS_DATA_LINES,
   fencedAgentBlock,
   fencedDebtBlock,
+  safeTitle,
 } from '../_untrusted-repo.js';
 import {
   assertReviewableChange,
@@ -726,7 +727,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         .where(eq(schema.taskDagIssues.taskId, ctx.taskId));
       const lines = issues
         .filter((i) => ((i.debtItems ?? []) as unknown[]).length > 0)
-        .map((i) => `- ${i.issueKey} (${i.title}): ${JSON.stringify(i.debtItems).slice(0, 500)}`);
+        .map(
+          (i) =>
+            `- ${i.issueKey} (${safeTitle(i.title)}): ${JSON.stringify(i.debtItems).slice(0, 500)}`,
+        );
       if (lines.length > 0) {
         debtBlock = [
           'KNOWN TECHNICAL DEBT (do NOT flag these as issues):',

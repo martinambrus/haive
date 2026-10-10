@@ -260,7 +260,11 @@ async function createIssueWorktree(
 
 /** Pre-formatted notes from completed lower-level issues that carried debt, so
  *  downstream coders know about upstream compromises. */
-async function buildUpstreamDebt(db: Database, planId: string, level: number): Promise<string> {
+export async function buildUpstreamDebt(
+  db: Database,
+  planId: string,
+  level: number,
+): Promise<string> {
   if (level === 0) return '';
   const upstream = await db
     .select()
@@ -272,7 +276,9 @@ async function buildUpstreamDebt(db: Database, planId: string, level: number): P
     if (issue.outcome !== 'completed' && issue.outcome !== 'completed_with_debt') continue;
     const debt = (issue.debtItems ?? []) as unknown[];
     if (debt.length === 0) continue;
-    lines.push(`- ${issue.issueKey} (${issue.title}) completed with debt: ${JSON.stringify(debt)}`);
+    lines.push(
+      `- ${issue.issueKey} (${safeTitle(issue.title)}) completed with debt: ${JSON.stringify(debt)}`,
+    );
   }
   if (lines.length === 0) return '';
   return [
@@ -992,7 +998,7 @@ export function reviewerPrompt(
       ? `Files the coder reported changing — this list is the change set (read each in full):\n- ${files.join('\n- ')}`
       : '';
   return [
-    `You are reviewing the implementation of ${issue.issueKey}: ${issue.title}`,
+    `You are reviewing the implementation of ${issue.issueKey}: ${safeTitle(issue.title)}`,
     'Your working directory is the issue worktree containing the implementation.',
     // Joined into ONE element on purpose: this array is `.filter(Boolean)`-ed, which would
     // strip the deliberate blank lines inside the block and collapse three paragraphs into a

@@ -21,7 +21,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { REPO_IS_DATA_LINES, fencedDebtBlock } from '../_untrusted-repo.js';
+import { REPO_IS_DATA_LINES, fencedDebtBlock, safeTitle } from '../_untrusted-repo.js';
 import { appAuthPromptLines, type AppLoginOutcome } from './_app-auth.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
@@ -947,7 +947,10 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         .where(eq(schema.taskDagIssues.taskId, ctx.taskId));
       const lines = issues
         .filter((i) => ((i.debtItems ?? []) as unknown[]).length > 0)
-        .map((i) => `- ${i.issueKey} (${i.title}): ${JSON.stringify(i.debtItems).slice(0, 500)}`);
+        .map(
+          (i) =>
+            `- ${i.issueKey} (${safeTitle(i.title)}): ${JSON.stringify(i.debtItems).slice(0, 500)}`,
+        );
       if (lines.length > 0) {
         debtBlock = [
           'KNOWN TECHNICAL DEBT (documented compromises): only flag these if they are actually',
