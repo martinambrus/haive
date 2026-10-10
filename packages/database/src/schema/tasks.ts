@@ -1137,7 +1137,7 @@ export const cliInvocations = pgTable(
       filesRulesUnmatched?: number;
       similarity?: {
         status: 'pending' | 'ok' | 'failed';
-        errorClass?: 'timeout' | 'refused' | 'auth' | 'other';
+        errorClass?: 'timeout' | 'refused' | 'auth' | 'other' | 'unknown_provenance' | 'abandoned';
         model?: string;
         queryHash?: string;
         ms?: number;

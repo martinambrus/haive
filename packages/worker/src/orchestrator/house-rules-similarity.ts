@@ -20,7 +20,7 @@ import { readTaskText } from './house-rules-dispatch.js';
 
 const log = logger.child({ module: 'house-rules-similarity' });
 
-const SETTLE_MARGIN_MS = 5_000;
+const SETTLE_MARGIN_MS = 15_000;
 
 /** The embedding model's context is 4096 tokens; the title, description and spec opening stay well inside it. */
 export const SIMILARITY_QUERY_MAX_CHARS = 2_500;
@@ -192,13 +192,13 @@ async function score(
   await amendLogged(db, invocationId, record);
 }
 
-/** Waits for a scoring to settle, within the embed budget plus the store's deadline; a record the
- *  scoring leaves pending past that is marked abandoned, so a finished job never leaves one. */
+/** Waits for a scoring to settle, within the embed budget plus a margin for the store's deadline and
+ *  the writes; a record left pending past that is marked abandoned, so a finished job never leaves one. */
 async function settle(db: Database, invocationId: string, scoring: Promise<void>): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   try {
     const { embedTimeoutMs } = await resolveEmbedBudget();
-    const budgetMs = embedTimeoutMs + DISPATCH_KB_BOUNDS.deadlineMs + SETTLE_MARGIN_MS;
+    const budgetMs = embedTimeoutMs + SETTLE_MARGIN_MS;
     const expired = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => resolve(true), budgetMs);
     });
