@@ -26,7 +26,9 @@ adds, and a patch holds `PLAN_PATCH_MAX_OPS` (500) ops, so a run past `SEQUENCE_
 (half of that) keeps its stored order and the finished step names it (`degradedNote`), and the
 prompt states the op budget its reply has. `tooWideToSequence` is the one rule the fan-out and the
 plan page's Order count (`computeSequenceProgress`) share, so the count never promises a pass that
-would skip a group. Each agent sees its node's neighbourhood, never the whole plan:
+would skip a group. A group counts as asked (`askedParents`) only while its agent row is `done`: a
+reply rejected at apply (no patch, or one the applier refused) sets the row `failed`, so the next
+pass asks that group again and the Order count keeps it. Each agent sees its node's neighbourhood, never the whole plan:
 `buildPlanExpansionContext`, the helper 01 and 02 use, with the build-order number `#N` on every line
 and no dependency information, and the context and the child list share one bound,
 `SEQUENCE_CONTEXT_BUDGET` (96,000, as `PLAN_EXPANSION_CONTEXT_MAX_CHARS`). A child list at the cap
