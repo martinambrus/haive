@@ -167,7 +167,7 @@ async function haiveOwnShas(db: Database, repositoryId: string): Promise<Set<str
 }
 
 /**
- * Parse `git log --format=%x00%H%x1f%s --name-only`.
+ * Parse `git log --format=%x00%H%x1f%s --name-only -z`.
  *
  * One git call rather than a `log` plus a `diff`, so each commit keeps its OWN paths and
  * an excluded commit's files can be dropped precisely. A range-wide `git diff` would
@@ -176,16 +176,24 @@ async function haiveOwnShas(db: Database, repositoryId: string): Promise<Set<str
  */
 export function parseCommitLog(stdout: string): { commit: ExternalCommit; paths: string[] }[] {
   const out: { commit: ExternalCommit; paths: string[] }[] = [];
-  for (const record of stdout.split('\0')) {
-    const trimmed = record.replace(/^\n+/, '');
-    if (trimmed.length === 0) continue;
-    const [header, ...rest] = trimmed.split('\n');
-    const sep = header?.indexOf('\x1f') ?? -1;
-    if (!header || sep < 0) continue;
-    out.push({
-      commit: { sha: header.slice(0, sep), subject: header.slice(sep + 1) },
-      paths: rest.map((l) => l.trim()).filter((l) => l.length > 0),
-    });
+  let header = true;
+  let paths: string[] | null = null;
+  for (const field of stdout.split('\0')) {
+    if (field === '') {
+      header = true;
+      continue;
+    }
+    if (header) {
+      header = false;
+      const sep = field.indexOf('\x1f');
+      paths = sep < 0 ? null : [];
+      if (paths) {
+        out.push({ commit: { sha: field.slice(0, sep), subject: field.slice(sep + 1) }, paths });
+      }
+      continue;
+    }
+    // git puts one newline between a commit's header and its first path.
+    paths?.push(paths.length === 0 ? field.replace(/^\n/, '') : field);
   }
   return out;
 }
@@ -260,6 +268,7 @@ export async function resolveExternalDrift(
     'log',
     '--format=%x00%H%x1f%s',
     '--name-only',
+    '-z',
     '--no-merges',
     `${since}..${branchPoint}`,
   ]);

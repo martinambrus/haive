@@ -6,6 +6,7 @@ import {
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
   type Database,
+  ZERO_MERGE_RETRIES,
 } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import { isFatalProviderFailure } from './cli-exec/failure-class.js';
@@ -135,6 +136,7 @@ export async function resetStepAndDownstream(
             degradedNote: null,
             iterations: [],
             iterationCount: 0,
+            mergeResolveState: ZERO_MERGE_RETRIES,
             statusMessage: null,
             // Describes attempts superseded above, and attemptCount (which gates the "re-ran
             // automatically" card) goes back to 0 with them — so the note has to go too, or it

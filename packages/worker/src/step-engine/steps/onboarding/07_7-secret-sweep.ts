@@ -575,14 +575,11 @@ export const secretSweepStep: StepDefinition<SecretSweepDetect, SecretSweepApply
       const candidateFiles = [...new Set(opaquePaths.map((h) => h.file))];
       if (candidateFiles.length > 0) {
         try {
-          const { stdout } = await gitExec(['ls-files', '--', ...candidateFiles], {
+          const { stdout } = await gitExec(['ls-files', '-z', '--', ...candidateFiles], {
             cwd: ctx.repoPath,
             maxBuffer: 4 * 1024 * 1024,
           });
-          trackedFiles = stdout
-            .split('\n')
-            .map((l) => l.trim())
-            .filter(Boolean);
+          trackedFiles = stdout.split('\0').filter(Boolean);
         } catch (err) {
           // No git, or a tree onboarding before its first commit. Left UNDEFINED so the
           // prompt renders no marker: "unknown" must not print as "untracked".

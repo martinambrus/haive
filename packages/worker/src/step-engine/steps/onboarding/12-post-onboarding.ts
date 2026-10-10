@@ -759,14 +759,11 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           maxBuffer: GIT_MAX_BUFFER,
         });
       }
-      const { stdout: stagedOut } = await gitExec(['diff', '--cached', '--name-only'], {
+      const { stdout: stagedOut } = await gitExec(['diff', '--cached', '--name-only', '-z'], {
         cwd: ctx.repoPath,
         maxBuffer: GIT_MAX_BUFFER,
       });
-      const staged = stagedOut
-        .split('\n')
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
+      const staged = stagedOut.split('\0').filter((s) => s.length > 0);
       stagedPaths.push(...staged);
 
       if (staged.length === 0) {

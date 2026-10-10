@@ -142,14 +142,8 @@ async function persistCommitOutcome(
   commitSha: string | null,
 ): Promise<void> {
   try {
-    const names = await gitRun(workspace, ['show', '--name-only', '--format=', 'HEAD']);
-    const thisCommit =
-      names.code === 0
-        ? names.stdout
-            .split('\n')
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0)
-        : [];
+    const names = await gitRun(workspace, ['show', '--name-only', '-z', '--format=', 'HEAD']);
+    const thisCommit = names.code === 0 ? names.stdout.split('\0').filter((s) => s.length > 0) : [];
     const row = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
       columns: { changedPaths: true },

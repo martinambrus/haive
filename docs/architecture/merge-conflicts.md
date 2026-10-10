@@ -41,7 +41,8 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   itself: 26 entries for those 43,305 files). A fixer resolving `.gitignore` otherwise made a file
   under a rule it dropped read as new and be moved, and hid a recorded file under a rule it added,
   which the restore then wrote over (MEASURED on git 2.43). So the tree taken once it ends starts
-  from the recorded one, and only a file new since is judged by the rules it leaves. While secret
+  from the recorded one, and only a file new since is judged by the rules it leaves; a `.gitignore` moved aside and
+  put back is followed by a second snapshot, so a file only the fixer's own rule hid is moved too. While secret
   masking is on (the default), the deny-list's files (`.env`, `.env.*`) that the merge's own index
   does not track are read-only empty mounts in the fixer's sandbox, so it cannot change those, and
   such a file is left out of both snapshots, masking on or off: at a same-branch root the sandbox

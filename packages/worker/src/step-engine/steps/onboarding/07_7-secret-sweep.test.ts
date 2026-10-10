@@ -398,6 +398,45 @@ describe('credential coverage', () => {
   });
 });
 
+describe('detect tracked-file state', () => {
+  it('reads a tracked name git would C-quote as tracked, and an untracked one as not', async () => {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { gitExec } = await import('../../../repo/git-exec.js');
+    const root = await mkdtemp(join(tmpdir(), 'haive-sweep-tracked-'));
+    try {
+      await gitExec(['init'], { cwd: root });
+      const route = "const r = '/lfewjngfsda47wq/export';\n";
+      for (const name of ['a b.js', 'é.js', 'plain.js', 'loose.js']) {
+        await writeFile(join(root, name), route);
+      }
+      await gitExec(['add', '--', 'a b.js', 'é.js', 'plain.js'], { cwd: root });
+      const chain: Record<string, unknown> = {};
+      Object.assign(chain, {
+        from: () => chain,
+        where: () => chain,
+        orderBy: () => chain,
+        limit: async () => [],
+      });
+      const ctx = {
+        repoPath: root,
+        taskId: 't1',
+        db: { select: () => chain },
+        logger: { warn: vi.fn(), info: vi.fn() },
+        throwIfCancelled: () => {},
+      } as unknown as StepContext;
+      const detected = await secretSweepStep.detect!(ctx);
+      expect(new Set(detected.opaquePaths?.map((h) => h.file))).toEqual(
+        new Set(['a b.js', 'é.js', 'plain.js', 'loose.js']),
+      );
+      expect([...(detected.trackedFiles ?? [])].sort()).toEqual(['a b.js', 'plain.js', 'é.js']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('history-only findings carry their commit', () => {
   it('keeps a sha and drops prose, because the field exists to be run through git show', () => {
     const [withSha, withProse] = parseSecretFindings(
