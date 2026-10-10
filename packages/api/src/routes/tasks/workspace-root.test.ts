@@ -12,12 +12,43 @@ const TASK = 'task-1';
 
 // The function takes its db, so two stubs are the whole fixture: what the task row says, and
 // what the repository row says when the task names one.
-function fakeDb(task: Record<string, unknown>, repo: Record<string, unknown> | null): Db {
+// The 01-worktree-setup rows (newest round last) are served to whichever query shape reads them:
+// `db.query.taskSteps` or a `db.select()` builder chain, awaited at any depth.
+function stepChain(rows: unknown[]): unknown {
+  const self: unknown = new Proxy(function () {}, {
+    get(_t, prop) {
+      if (prop === 'then') {
+        return (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+          Promise.resolve(rows).then(resolve, reject);
+      }
+      return () => self;
+    },
+    apply: () => self,
+  });
+  return self;
+}
+
+interface StepRow {
+  status: string;
+  round?: number;
+  output: unknown;
+}
+
+function fakeDb(
+  task: Record<string, unknown>,
+  repo: Record<string, unknown> | null,
+  steps: StepRow[] = [],
+): Db {
+  const rows = steps
+    .map((s) => ({ stepId: '01-worktree-setup', round: 0, ...s }))
+    .sort((a, b) => b.round - a.round);
   return {
     query: {
       tasks: { findFirst: async () => task },
       repositories: { findFirst: async () => repo },
+      taskSteps: { findFirst: async () => rows[0], findMany: async () => rows },
     },
+    select: () => stepChain(rows),
   } as unknown as Db;
 }
 
@@ -55,9 +86,63 @@ describe('resolveWorkspaceRoot', () => {
 
   it('anchors a worktree at its repository', async () => {
     const worktree = path.join(repo, '.haive', 'worktrees', 'wt');
+    await mkdir(worktree, { recursive: true });
     const db = fakeDb(task({ worktreePath: worktree }), { storagePath: repo, localPath: null });
     await expect(resolveWorkspaceRoot(db, TASK, USER)).resolves.toMatchObject({
       root: worktree,
+      anchor: repo,
+    });
+  });
+
+  // C5 (#214): Retry nulled 01's output, the person Skipped 01, worktree_path still names the tree.
+  it('C5 roots a task whose latest 01 round is skipped at the repository', async () => {
+    const worktree = path.join(repo, '.haive', 'worktrees', 'wt');
+    await mkdir(worktree, { recursive: true });
+    const db = fakeDb(
+      task({ worktreePath: worktree, worktreeBranch: 'wt' }),
+      { storagePath: repo, localPath: null },
+      [{ status: 'skipped', output: null }],
+    );
+    await expect(resolveWorkspaceRoot(db, TASK, USER)).resolves.toMatchObject({
+      root: repo,
+      anchor: repo,
+    });
+  });
+
+  // C5 (#221): cleanup or cancel removed the directory; worktree_path still names it.
+  it('C5 answers 409 for a worktree whose directory was removed', async () => {
+    const worktree = path.join(repo, '.haive', 'worktrees', 'wt');
+    const db = fakeDb(
+      task({ worktreePath: worktree, worktreeBranch: 'wt' }),
+      { storagePath: repo, localPath: null },
+      [{ status: 'done', output: { mode: 'worktree', worktreePath: worktree } }],
+    );
+    await expect(resolveWorkspaceRoot(db, TASK, USER)).rejects.toMatchObject({ status: 409 });
+  });
+
+  // G2: Retry state, output nulled, 01 not skipped, directory on disk.
+  it('G2 keeps the worktree for a Retry state', async () => {
+    const worktree = path.join(repo, '.haive', 'worktrees', 'wt');
+    await mkdir(worktree, { recursive: true });
+    const db = fakeDb(
+      task({ worktreePath: worktree, worktreeBranch: 'wt' }),
+      { storagePath: repo, localPath: null },
+      [{ status: 'waiting_form', output: null }],
+    );
+    await expect(resolveWorkspaceRoot(db, TASK, USER)).resolves.toMatchObject({
+      root: worktree,
+      anchor: repo,
+    });
+  });
+
+  // G4: onboarding / plan tasks never recorded a worktree.
+  it('G4 roots a task that never recorded a worktree at the repository', async () => {
+    const db = fakeDb(task({ worktreePath: null, worktreeBranch: null }), {
+      storagePath: repo,
+      localPath: null,
+    });
+    await expect(resolveWorkspaceRoot(db, TASK, USER)).resolves.toMatchObject({
+      root: repo,
       anchor: repo,
     });
   });
