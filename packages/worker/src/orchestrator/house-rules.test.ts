@@ -345,6 +345,56 @@ describe('selectHouseRules: which rules a dispatch is shown', () => {
     ).toHaveLength(1);
   });
 
+  it('shows a path the task names to a dispatch whose change is still empty, and says so in the why', () => {
+    const tpl = files(['**/*.tpl.php'], { title: 'Tpl' });
+    const out = select([tpl], { changedFiles: [], namedFiles: ['templates/node.tpl.php'] });
+    expect(out.entries.map((e) => e.why)).toStrictEqual([
+      { scope: 'files', glob: '**/*.tpl.php', via: 'named' },
+    ]);
+    expect(out.block).toContain('Applies to files matching: **/*.tpl.php');
+    expect('filesRulesUnmatched' in out).toBe(false);
+    expect(select([tpl], { changedFiles: [], namedFiles: [] }).entries).toHaveLength(0);
+  });
+
+  it('leaves the marker off a rule a written file or the estimate matched, whatever the names say', () => {
+    const css = files(['**/*.css'], { title: 'Css' });
+    const written = select([css], { changedFiles: ['web/a.css'], namedFiles: ['web/b.css'] });
+    expect(written.entries.map((e) => e.why)).toStrictEqual([{ scope: 'files', glob: '**/*.css' }]);
+    const planned = select([css], {
+      changedFiles: [],
+      estimatedFiles: ['web/a.css'],
+      namedFiles: ['web/b.css'],
+    });
+    expect(planned.entries.map((e) => e.why)).toStrictEqual([{ scope: 'files', glob: '**/*.css' }]);
+  });
+
+  it('records the first glob a named path matches, in the sorted order, and the marker with it', () => {
+    const many = files(['**/*.tpl.php', '**/*.css', '*.php'], { title: 'Many' });
+    const out = select([many], { namedFiles: ['templates/node.tpl.php', 'web/a.css'] });
+    expect(out.entries[0]!.why).toStrictEqual({ scope: 'files', glob: '**/*.css', via: 'named' });
+  });
+
+  it('matches a named path as a path, never as a pattern', () => {
+    const exact = files(['src/a.php'], { title: 'Exact' });
+    expect(select([exact], { namedFiles: ['src/*.php'] }).entries).toEqual([]);
+    expect(select([exact], { namedFiles: ['src/a.php'] }).entries).toHaveLength(1);
+  });
+
+  it('shows every files rule unscoped, with no marker, when the change cannot be read', () => {
+    const out = select([files(['**/*.twig'])], { changedFiles: null, namedFiles: ['a/b.twig'] });
+    expect(out.entries.map((e) => e.why)).toStrictEqual([{ scope: 'files', glob: null }]);
+  });
+
+  it('is the selection it was without names when no name matches a rule', () => {
+    const rules = [files(['**/*.css']), files(['*.php']), files(['**/*.twig']), rule()];
+    const input = { changedFiles: ['a.php'], estimatedFiles: ['web/b.css'] };
+    const without = select(rules, input);
+    expect(select(rules, { ...input, namedFiles: [] })).toStrictEqual(without);
+    expect(select(rules, { ...input, namedFiles: ['README.md', 'docs/a.txt'] })).toStrictEqual(
+      without,
+    );
+  });
+
   it('passes the rows it was told were refused on to the omitted', () => {
     const refused = [{ id: uuid(900), hash: 'h', title: 'Bad', why: 'refused' as const }];
     const out = select([rule()], { refused });
@@ -383,6 +433,16 @@ describe('selectHouseRules: the files rules that matched nothing', () => {
     });
     expect(out.omitted.map((o) => o.title)).toEqual(['Huge']);
     expect('filesRulesUnmatched' in out).toBe(false);
+  });
+
+  it('does not count a rule a named path matched, and counts the one no name matches', () => {
+    const named = files(['src/*.php'], { title: 'Named' });
+    const out = select([named, files(['**/*.twig'])], {
+      changedFiles: [],
+      namedFiles: ['src/new.php'],
+    });
+    expect(out.entries.map((e) => e.title)).toEqual(['Named']);
+    expect(out.filesRulesUnmatched).toBe(1);
   });
 
   it('counts none when the change could not be read, since every files rule went in unscoped', () => {
@@ -482,6 +542,37 @@ describe('selectHouseRules: the budget', () => {
     expect(out.entries.map((e) => e.title)).toEqual(['Written']);
     expect(out.omitted.map((o) => o.title)).toEqual(['Planned']);
     expect(bytes(out.block!)).toBeLessThanOrEqual(budgetBytes);
+  });
+
+  it('fits the larger rule a written file matched before the smaller one only a named path matches', () => {
+    const written = files(['*.css'], { title: 'Written', size: 5000 });
+    const named = files(['*.php'], { title: 'Named', size: 1000 });
+    const budgetBytes = blockBytes([written], { changedFiles: ['a.css'] }) + 400;
+    const out = select([named, written], {
+      changedFiles: ['a.css'],
+      namedFiles: ['a.php'],
+      budgetBytes,
+    });
+    expect(out.entries.map((e) => e.title)).toEqual(['Written']);
+    expect(out.omitted.map((o) => [o.title, o.why])).toEqual([['Named', 'budget']]);
+    expect(out.omitted.some((o) => 'via' in o)).toBe(false);
+    expect(bytes(out.block!)).toBeLessThanOrEqual(budgetBytes);
+  });
+
+  it('ranks a named match with an estimated one, the smaller first, behind every written match', () => {
+    const written = files(['*.md'], { title: 'Written', size: 6000 });
+    const estimated = files(['*.css'], { title: 'Estimated', size: 3000 });
+    const named = files(['*.php'], { title: 'Named', size: 1000 });
+    const out = select([estimated, named, written], {
+      changedFiles: ['a.md'],
+      estimatedFiles: ['a.css'],
+      namedFiles: ['a.php'],
+    });
+    expect(out.entries.map((e) => [e.title, e.why])).toEqual([
+      ['Written', { scope: 'files', glob: '*.md' }],
+      ['Named', { scope: 'files', glob: '*.php', via: 'named' }],
+      ['Estimated', { scope: 'files', glob: '*.css' }],
+    ]);
   });
 
   it('drops the larger of two files rules first, and breaks a tie by id', () => {

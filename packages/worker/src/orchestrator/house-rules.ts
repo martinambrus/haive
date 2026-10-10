@@ -194,7 +194,7 @@ function isUsable(rule: HouseRuleCandidate): boolean {
 interface Ranked {
   rule: HouseRuleCandidate;
   why: Included['why'];
-  /** 0 always; 1 matched by a written file, or unscoped; 2 matched only by the plan's estimate. */
+  /** 0 always; 1 a written file, or unscoped; 2 only the plan's estimate or a path the task names. */
   tier: number;
   size: number;
 }
@@ -205,6 +205,7 @@ function rank(
   rules: readonly HouseRuleCandidate[],
   changedFiles: readonly string[] | null,
   estimatedFiles: readonly string[],
+  namedFiles: readonly string[],
 ): { ranked: Ranked[]; unmatched: number } {
   const ranked: Ranked[] = [];
   let unmatched = 0;
@@ -221,9 +222,13 @@ function rank(
     const matchers = compileGlobs(rule.spec.globs);
     const written = firstMatchingGlob(matchers, changedFiles);
     const estimated = written === null ? firstMatchingGlob(matchers, estimatedFiles) : null;
-    const glob = written ?? estimated;
+    const named =
+      written === null && estimated === null ? firstMatchingGlob(matchers, namedFiles) : null;
+    const glob = written ?? estimated ?? named;
     if (glob !== null) {
-      ranked.push({ rule, why: { scope: 'files', glob }, tier: written === null ? 2 : 1, size });
+      const why: Included['why'] =
+        named === null ? { scope: 'files', glob } : { scope: 'files', glob, via: 'named' };
+      ranked.push({ rule, why, tier: written === null ? 2 : 1, size });
     } else {
       unmatched += 1;
     }
@@ -277,7 +282,7 @@ export interface HouseRuleSelection {
   entries: Included[];
   omitted: Omitted[];
   block: string | null;
-  /** `files` rules that matched nothing in the change, which a later write may still match. */
+  /** `files` rules that matched no written, estimated or named path, which a later write may still match. */
   filesRulesUnmatched?: number;
 }
 
@@ -301,8 +306,8 @@ export const unavailableSelection = (errorClass: GlobalKbErrorClass): HouseRuleS
  * (`changedFiles` null) puts every `files` rule in unscoped: never narrow on a measurement nobody
  * made. Over budget whole rules are left out, first fit: `always` rules first, oldest approval
  * first (a set within the API's cap always fits), then written-file matches before estimate-only
- * ones and smaller before larger. If every rule is left out the block is the framing and the
- * notice; it is null only when nothing was left out too.
+ * and named-path ones and smaller before larger. If every rule is left out the block is the framing
+ * and the notice; it is null only when nothing was left out too.
  */
 export function selectHouseRules(input: {
   mode: HouseRuleMode;
@@ -311,12 +316,18 @@ export function selectHouseRules(input: {
   refused?: readonly Omitted[];
   changedFiles: readonly string[] | null;
   estimatedFiles?: readonly string[];
+  namedFiles?: readonly string[];
   budgetBytes?: number;
 }): HouseRuleSelection {
   const { mode, changedFiles } = input;
   const framing = framingOf(mode, input.findings === true);
   const budget = input.budgetBytes ?? HOUSE_RULES_BUDGET_BYTES;
-  const { ranked, unmatched } = rank(input.rules, changedFiles, input.estimatedFiles ?? []);
+  const { ranked, unmatched } = rank(
+    input.rules,
+    changedFiles,
+    input.estimatedFiles ?? [],
+    input.namedFiles ?? [],
+  );
 
   // The notice counts against the budget but depends on what is left out, so its room only grows.
   let reserve = 0;

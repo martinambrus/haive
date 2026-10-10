@@ -1128,7 +1128,7 @@ export const cliInvocations = pgTable(
         id: string;
         hash: string;
         title: string;
-        why: { scope: 'always' } | { scope: 'files'; glob: string | null };
+        why: { scope: 'always' } | { scope: 'files'; glob: string | null; via?: 'named' };
       }>;
       omitted: Array<{ id: string; hash: string; title: string; why: 'budget' | 'refused' }>;
       reason?: 'switched_off' | 'unavailable' | 'too_large';

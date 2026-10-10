@@ -285,17 +285,33 @@ this section keeps the decisions.
   slashless globs; an unreadable change; retry_ai; the source guard; the once-only event; 07b's
   parse, carry and backstop; the row table and both gates.
 
-### PR7. Similarity for writers, record-only
-- **Scoring.** For each write-mode dispatch, every enforced `files` rule not already selected gets a
-  score: the best dense similarity between a task query (title, description, the spec's opening) and
-  that rule's vectors in the global `ai_rag_embeddings` (`entry_id`). It uses the same model and store
-  as the global half of `rag_search`.
-- **Record only.** Each `{id, score}` goes into the stamp, and nothing is injected.
-- **Config:** `GLOBAL_KB_HOUSE_RULES_SIMILARITY` is off, record or on, seeded to record.
-- **Measurement checkpoint** (a row in `onboarding_run_checkpoints`): grade at least 10 real recorded
-  dispatches and choose the floor from that. PR8 sets the floor and switches it on.
-- **Tests:** the scorer; off and record leave the prompt unchanged; an embed failure records nothing
-  and never fails a dispatch.
+### PR7. The writer's first dispatch: named paths (PR7a), then similarity, record-only (PR7b)
+A writer's first dispatch has an empty change, so a `files` rule matches nothing (MEASURED on the live
+quick_bugfix ea88adcf: 07 round 0 stamped `filesRulesUnmatched: 1` and wrote the inline `<svg>` the
+rule forbids; 07b and its fixer repaired it). The premise of similarity was measured before building it
+(qwen3-embedding:4b, max cosine over chunks): a task that names the rule's topic separates (the live
+task 0.469 against "no inline svgs", 0.404 against an unrelated rule), a task that only invites a
+violation does not (a spinner task 0.284, below an unrelated rule at 0.314), and floors differ per rule.
+The user decided "both" (2026-10-09):
+- **PR7a, named paths (deterministic).** A write-mode dispatch that is not a DAG coder also matches the
+  paths its task names: title, description and the freshest spec (highest round, then 05a, 05, 04),
+  read as backtick spans, markdown link targets and bare tokens with a `/` or an extension, glob
+  characters refused, each resolved to the one tracked file it ends on a `/` boundary, else kept as
+  written. Tier 2 like an estimate, `why.via: 'named'` on the stamp. A DAG coder keeps its issue's own
+  estimate: task-wide names gave 65 selections over 29 coders, 4 of them relevant. Measured on the
+  install's specs: every named file that was later written was extracted (35/35); suffix resolution
+  raised the rule-level matches from 13 to 16 of 19.
+- **PR7b, similarity (record-only).** For each write-mode dispatch, every enforced `files` rule no path
+  selected gets a score: the best dense similarity between one task-level query (title, description,
+  the spec's opening) and that rule's vectors in the global `ai_rag_embeddings`. A cold embed takes
+  4.6-42.8 s and aborting one cancels the model load, so the score is computed after the CLI starts and
+  amended into the stamp (`similarity: {status, model, queryHash, scores}`), never on the dispatch's
+  path or inside the KB read's 6 s deadline. A failure records `status: 'failed'` with no scores.
+  Config `GLOBAL_KB_HOUSE_RULES_SIMILARITY`: off or record, seeded record.
+- **PR8** picks PER-RULE floors from graded recorded dispatches and adds `on`.
+- **Tests:** the extractor and resolver on real task text, byte identity when nothing is named, no read
+  for review, DAG-coder, switched-off or unreadable-change dispatches (harness H19-H25); the scorer; off
+  and record leave the prompt unchanged; an embed failure never fails a dispatch.
 
 ## Reuse
 - `withAgentRules`, `agentRulesOf` and the handlers' `started_at` stamp path: the pattern for the
