@@ -226,6 +226,64 @@ describe('parseDdevConfig: a document read as YAML', () => {
   });
 });
 
+describe('parseDdevConfig: aliases and merge keys', () => {
+  it('resolves an aliased database type, as DDEV does', () => {
+    const cfg = 'name: &engine postgres\ndatabase: {type: *engine, version: "16"}\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
+  });
+
+  it('resolves an aliased php_version and an aliased database block', () => {
+    const cfg = [
+      'x-php: &php "8.3"',
+      'x-db: &db',
+      '  type: mysql',
+      '  version: "8.0"',
+      'php_version: *php',
+      'database: *db',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: '8.3',
+      dbType: 'mysql',
+      dbVersion: '8.0',
+    });
+  });
+
+  it('reads an alias to an undefined anchor as null', () => {
+    expect(parseDdevConfig('php_version: *nope\n').phpVersion).toBeNull();
+  });
+
+  it('treats a merge key as unreadable, so the line readers answer', () => {
+    const cfg = [
+      'x-db: &db',
+      '  type: postgres',
+      '  version: "16"',
+      'php_version: "8.3"',
+      'database:',
+      '  <<: *db',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toMatchObject({ phpVersion: '8.3', dbType: null });
+  });
+
+  it('returns promptly on a 10-level alias expansion', () => {
+    let cfg = 'a0: &a0 ["x","x","x","x","x","x","x","x","x"]\n';
+    for (let i = 1; i < 10; i++) {
+      cfg += `a${i}: &a${i} [${Array(9)
+        .fill(`*a${i - 1}`)
+        .join(',')}]\n`;
+    }
+    cfg += 'php_version: "8.3"\ndatabase: {type: *a9, version: "16"}\n';
+    const started = Date.now();
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: '8.3',
+      dbType: null,
+      dbVersion: '16',
+    });
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+});
+
 describe('ddevUrlFromConfigText', () => {
   it('derives https://<name>.ddev.site from the booted config (default tld)', () => {
     expect(ddevUrlFromConfigText(MARIADB_CONFIG)).toBe('https://myproject.ddev.site');

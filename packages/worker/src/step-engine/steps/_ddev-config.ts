@@ -4,8 +4,8 @@
 // the line readers below. Shared by onboarding env detection (01-env-detect), the
 // workflow DDEV reconcile step (07c-ddev-reconcile) and env-replicate
 // (01-declare-deps) so all interpret the config identically.
-import { isMap, isScalar, parseDocument } from 'yaml';
-import type { YAMLMap } from 'yaml';
+import { isAlias, isMap, isScalar, parseDocument } from 'yaml';
+import type { Document, YAMLMap } from 'yaml';
 
 /** Match a top-level `key: value` scalar (optionally double-quoted), line by line. */
 function lineField(text: string, key: string): string | null {
@@ -26,21 +26,37 @@ function scalarText(node: unknown, text: string): string | null {
   return value;
 }
 
-function topLevelMap(text: string): YAMLMap | null {
+/** yaml.v3 merges a plain `<<` key; the failsafe schema does not, so such a map is left to the line readers. */
+function hasMergeKey(map: YAMLMap): boolean {
+  return map.items.some(
+    (pair) => isScalar(pair.key) && pair.key.type === 'PLAIN' && pair.key.value === '<<',
+  );
+}
+
+/** The node an alias names, which is how DDEV's YAML reader sees it; any other node as it is. Reads the anchor, never expands it. */
+function resolved(node: unknown, doc: Document): unknown {
+  return isAlias(node) ? node.resolve(doc) : node;
+}
+
+function topLevelMap(text: string): { doc: Document; map: YAMLMap } | null {
   const doc = parseDocument(text, { schema: 'failsafe' });
-  return doc.errors.length === 0 && isMap(doc.contents) ? doc.contents : null;
+  if (doc.errors.length > 0 || !isMap(doc.contents) || hasMergeKey(doc.contents)) return null;
+  const database = resolved(doc.contents.get('database', true), doc);
+  return isMap(database) && hasMergeKey(database) ? null : { doc, map: doc.contents };
 }
 
 /** One parse of `text`; every read from it uses that parse, or the line readers when YAML refuses the document. */
 function ddevReader(text: string) {
-  const map = topLevelMap(text);
+  const parsed = topLevelMap(text);
   return {
     field: (key: string): string | null =>
-      map ? scalarText(map.get(key, true), text) : lineField(text, key),
+      parsed
+        ? scalarText(resolved(parsed.map.get(key, true), parsed.doc), text)
+        : lineField(text, key),
     blockField: (block: string, key: string): string | null => {
-      if (!map) return lineBlockField(text, block, key);
-      const inner = map.get(block, true);
-      return isMap(inner) ? scalarText(inner.get(key, true), text) : null;
+      if (!parsed) return lineBlockField(text, block, key);
+      const inner = resolved(parsed.map.get(block, true), parsed.doc);
+      return isMap(inner) ? scalarText(resolved(inner.get(key, true), parsed.doc), text) : null;
     },
   };
 }
