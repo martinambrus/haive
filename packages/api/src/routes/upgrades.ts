@@ -476,6 +476,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // and current manifest? Used by the UI banner.
   const changedTemplateIds: string[] = [];
   const obsoleteTemplateIds: string[] = [];
+  const retiredTemplateIds: string[] = [];
   // 02 deletes a file only while it holds the bytes its row wrote; stripping an RTK hook is no deletion.
   const removableRow = async (id: string) => {
     if (!root) return false;
@@ -490,6 +491,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     const current = currentByTemplate.get(id);
     if (!current) {
       changedTemplateIds.push(id);
+      retiredTemplateIds.push(id);
       if (await removableRow(id)) obsoleteTemplateIds.push(id);
       continue;
     }
@@ -619,6 +621,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     hasPriorUpgrade,
     inProgressUpgradeTaskId: inProgressUpgradeTask[0]?.id ?? null,
     ...(obsoleteTemplateIds.length > 0 ? { obsoleteTemplateIds } : {}),
+    ...(retiredTemplateIds.length > 0 ? { retiredTemplateIds } : {}),
     ...(customChanges.length > 0 ? { customChanges } : {}),
     ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),

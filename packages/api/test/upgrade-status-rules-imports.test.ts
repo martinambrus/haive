@@ -1579,6 +1579,7 @@ describe('upgrade-status names the changed templates whose plan offers a removal
       'agent.retired',
     ]);
     expect(body.obsoleteTemplateIds).toEqual(['agent.retired']);
+    expect(body.retiredTemplateIds).toEqual(['agent.retired']);
   });
 
   it('does not name a retired template whose file was edited, which 02 will not delete', async () => {
@@ -1588,6 +1589,7 @@ describe('upgrade-status names the changed templates whose plan offers a removal
     const body = await status();
     expect(body.changedTemplateIds as string[]).toContain('agent.retired');
     expect(body.obsoleteTemplateIds).toBeUndefined();
+    expect(body.retiredTemplateIds).toEqual(['agent.retired']);
   });
 
   it('names a retired template whose file still holds the bytes 02 wrote', async () => {
@@ -1600,6 +1602,7 @@ describe('upgrade-status names the changed templates whose plan offers a removal
     }
     const body = await status();
     expect(body.obsoleteTemplateIds).toEqual(['agent.retired']);
+    expect(body.retiredTemplateIds).toEqual(['agent.retired']);
   });
 
   it('names none while every changed template is one to update', async () => {
@@ -1616,5 +1619,6 @@ describe('upgrade-status names the changed templates whose plan offers a removal
       'agent.moved',
     ]);
     expect(body.obsoleteTemplateIds).toBeUndefined();
+    expect(body.retiredTemplateIds).toBeUndefined();
   });
 });

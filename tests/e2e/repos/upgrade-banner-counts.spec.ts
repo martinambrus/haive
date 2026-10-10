@@ -11,6 +11,8 @@ interface Scenario {
   changed: string[];
   /** Absent from the answer, as it is from an older api. */
   obsolete?: string[];
+  /** Absent from the answer, as it is from an older api. */
+  retired?: string[];
   says: string;
   /** What the banner must not say, since only one of the two applies. */
   silentOn?: string;
@@ -36,6 +38,21 @@ const SCENARIOS: Scenario[] = [
     obsolete: ['agent.retired', 'command.retired'],
     says: '2 to remove',
     silentOn: 'to update',
+  },
+  {
+    name: 'a retired template whose file was edited, which 02 keeps or stops tracking',
+    changed: ['agent.code-reviewer', 'agent.retired-edited'],
+    obsolete: [],
+    retired: ['agent.retired-edited'],
+    says: '1 to update, 1 to keep or untrack',
+    silentOn: '2 to update',
+  },
+  {
+    name: 'templates to update, files to remove and files to keep or untrack',
+    changed: ['agent.code-reviewer', 'agent.retired', 'agent.retired-edited'],
+    obsolete: ['agent.retired'],
+    retired: ['agent.retired', 'agent.retired-edited'],
+    says: '1 to update, 1 to remove, 1 to keep or untrack',
   },
   {
     name: 'an api that does not say which are obsolete',
@@ -75,6 +92,7 @@ test('the upgrade banner says what the upgrade will update and what it will remo
     currentTemplateSetHash: 'current',
     changedTemplateIds: scenario.changed,
     ...(scenario.obsolete ? { obsoleteTemplateIds: scenario.obsolete } : {}),
+    ...(scenario.retired ? { retiredTemplateIds: scenario.retired } : {}),
     isOnboarded: true,
     installedHaiveVersion: null,
     currentHaiveVersion: '0.1.0',

@@ -21,6 +21,8 @@ interface UpgradeStatusResponse {
   changedTemplateIds: string[];
   /** The changed templates an upgrade removes rather than updates; older API versions omit it. */
   obsoleteTemplateIds?: string[];
+  /** The changed templates no release renders any more, deletable or not; older API versions omit it. */
+  retiredTemplateIds?: string[];
   isOnboarded: boolean;
   installedHaiveVersion: string | null;
   currentHaiveVersion: string;
@@ -153,15 +155,22 @@ export function UpgradeAvailableBanner({
     const bundleChanges = status.customChanges ?? [];
     const haiveChanged = status.changedTemplateIds.filter((id) => !id.startsWith('custom.'));
     const haiveChangedCount = haiveChanged.length;
-    const toRemove = haiveChanged.filter((id) => status.obsoleteTemplateIds?.includes(id)).length;
-    const toUpdate = haiveChangedCount - toRemove;
+    const retiredIds = status.retiredTemplateIds ?? status.obsoleteTemplateIds;
+    const retired = haiveChanged.filter((id) => retiredIds?.includes(id));
+    const toRemove = retired.filter((id) => status.obsoleteTemplateIds?.includes(id)).length;
+    const toKeep = retired.length - toRemove;
+    const toUpdate = haiveChangedCount - retired.length;
     const missingImports = status.missingRulesImports ?? [];
     const rtkBlocks = status.rtkBlockLeftovers ?? [];
     const rtkHooks = status.rtkSettingsLeftovers ?? [];
     const templateText =
       status.firstUpgradeOnThisInstall && haiveChangedCount === 0
         ? 'not upgraded on this install yet'
-        : [toUpdate > 0 && `${toUpdate} to update`, toRemove > 0 && `${toRemove} to remove`]
+        : [
+            toUpdate > 0 && `${toUpdate} to update`,
+            toRemove > 0 && `${toRemove} to remove`,
+            toKeep > 0 && `${toKeep} to keep or untrack`,
+          ]
             .filter(Boolean)
             .join(', ');
     const showTemplateCount =
