@@ -355,6 +355,39 @@ describe('00b-plan-clarify apply', () => {
     expect(((await thrown(apply([]))) as Error).message).toContain('got a plan before');
   });
 
+  it('redrafts under a fresh agent id when its root was deleted', async () => {
+    const { fake, ctx } = setup();
+    fake.insert(schema.planClarifyRounds, {
+      taskId: TASK,
+      round: 0,
+      action: 'continue',
+      answeredAt: new Date(),
+      integratedAt: new Date(),
+      rootId: null,
+    });
+    const earlier = {
+      agentId: 'clarify-outline',
+      agentTitle: 'Plan outline',
+      status: 'done',
+      output: null,
+      rawOutput: '',
+      errorMessage: null,
+    } as AgentMiningResult;
+    const err = (await thrown(
+      planClarifyStep.apply(ctx, {
+        detected: { build, rootId: null, rounds: [] },
+        formValues: {},
+        agentMiningResults: [earlier],
+        newAgentMiningResults: [],
+        iteration: 0,
+        previousIterations: [],
+      }),
+    )) as MiningWaveError;
+    expect(err.dispatches.map((x) => [x.agentId, x.roleKey])).toEqual([
+      ['clarify-outline-2', 'planner'],
+    ]);
+  });
+
   it('does nothing under the LLM bypass', async () => {
     process.env.HAIVE_TEST_BYPASS_LLM = '1';
     const { apply } = setup();

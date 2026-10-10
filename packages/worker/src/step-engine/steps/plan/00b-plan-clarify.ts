@@ -23,7 +23,8 @@ import {
 } from './01-plan-build.js';
 import { applyAgentPatch, applyAgentPatchOnce, parsePlanPatch } from './_plan-prompt.js';
 import {
-  OUTLINE_AGENT_ID,
+  isOutlineAgent,
+  outlineAgentId,
   askAgentId,
   assertOwnOutline,
   askRoundOf,
@@ -107,6 +108,8 @@ async function dispatchFor(
   d: PlanClarifyDetect,
   move: ClarifyMove,
   rounds: ClarifyRound[],
+  /** Outline agents this step run already has rows for. */
+  earlierDrafts: number,
 ): Promise<AgentMiningDispatch | null> {
   const repositoryId = d.build.repositoryId!;
   const live = await withLiveInputs(ctx, d.build);
@@ -118,7 +121,7 @@ async function dispatchFor(
     case 'outline':
       return {
         ...common,
-        agentId: OUTLINE_AGENT_ID,
+        agentId: outlineAgentId(earlierDrafts),
         agentTitle: 'Plan outline',
         roleKey: 'planner',
         prompt: buildRootPrompt(live, {}, outlineExtraLines(live)),
@@ -377,7 +380,13 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
       const d = detected as PlanClarifyDetect | null;
       if (!d?.build.repositoryId) return [];
       assertOwnOutline(d.rootId, d.rounds);
-      const dispatch = await dispatchFor(ctx, d, nextMove(d.rootId !== null, d.rounds), d.rounds);
+      const dispatch = await dispatchFor(
+        ctx,
+        d,
+        nextMove(d.rootId !== null, d.rounds),
+        d.rounds,
+        0,
+      );
       return dispatch ? [dispatch] : [];
     },
   },
@@ -396,7 +405,7 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
       }
       const askRound = askRoundOf(result.agentId);
       const integrateRound = integrateRoundOf(result.agentId);
-      if (result.agentId === OUTLINE_AGENT_ID) {
+      if (isOutlineAgent(result.agentId)) {
         await foldOutline(ctx, d, result, finalAttempt);
       } else if (askRound !== null) {
         await foldQuestions(ctx, result, askRound, finalAttempt);
@@ -430,7 +439,10 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
     if (args.miningWaveExhausted === true) {
       throw new Error(`Could not start the next agent (${move.kind}); retry this step.`);
     }
-    const dispatch = await dispatchFor(ctx, { ...d, rootId, rounds }, move, rounds);
+    const earlierDrafts = (args.agentMiningResults ?? []).filter((r) =>
+      isOutlineAgent(r.agentId),
+    ).length;
+    const dispatch = await dispatchFor(ctx, { ...d, rootId, rounds }, move, rounds, earlierDrafts);
     throw new MiningWaveError([dispatch!], `clarify: ${move.kind}`);
   },
 };

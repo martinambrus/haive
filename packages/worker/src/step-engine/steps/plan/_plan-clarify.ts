@@ -62,7 +62,12 @@ const MAX_SUGGESTIONS = 4;
 const MAX_SUGGESTION_CHARS = 160;
 const QUESTION_ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
-export const OUTLINE_AGENT_ID = 'clarify-outline';
+/** One id per draft: an outline redrafted after its root was deleted needs a fresh mining row, since
+ *  a step never re-sends an agent id it already has a row for. */
+export const outlineAgentId = (earlierDrafts: number): string =>
+  earlierDrafts === 0 ? 'clarify-outline' : `clarify-outline-${earlierDrafts + 1}`;
+export const isOutlineAgent = (agentId: string): boolean =>
+  /^clarify-outline(-\d+)?$/.test(agentId);
 const ASK_AGENT_RE = /^clarify-ask-r(\d+)$/;
 const INTEGRATE_AGENT_RE = /^clarify-integrate-r(\d+)$/;
 

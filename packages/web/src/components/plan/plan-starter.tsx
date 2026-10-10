@@ -278,7 +278,13 @@ export function PlanStarter({
                 {label}
                 <select
                   value={value}
-                  disabled={busy}
+                  // Saved on the draft with the brief: a retry starts the draft as it was created.
+                  disabled={busy || draftTaskId !== null}
+                  title={
+                    draftTaskId
+                      ? 'Already saved on the draft task. Open the draft to change it.'
+                      : undefined
+                  }
                   onChange={(e) => set(e.target.value)}
                   className="h-7 min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 disabled:opacity-50"
                 >
