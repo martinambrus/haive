@@ -41,7 +41,15 @@ export function hasLeadingHaiveBlock(prompt: string, marker: string): boolean {
     const open = openTag.exec(prompt)?.[0];
     if (open === undefined) return false;
     const close = `\n</${open.slice(1)}`;
-    const end = prompt.indexOf(close, at + open.length);
+    let end = prompt.indexOf(close, at + open.length);
+    // A close counts only at a line end: a prompt stored before names were filtered has one mid-line.
+    while (
+      end !== -1 &&
+      end + close.length < prompt.length &&
+      prompt[end + close.length] !== '\n'
+    ) {
+      end = prompt.indexOf(close, end + 1);
+    }
     if (end === -1) return false;
     if (open === marker) return true;
     at = end + close.length;

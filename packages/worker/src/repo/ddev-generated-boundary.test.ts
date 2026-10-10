@@ -59,6 +59,10 @@ describe('hasLeadingHaiveBlock', () => {
       'sits behind a block that quotes its own closing tag inline',
       `<haive_app_reach>\nthe \`</haive_app_reach>\` tag\n</haive_app_reach>\n\n${block('mcp_surface')}`,
     ],
+    [
+      'sits behind a block whose stored text holds its closing tag at a line start, text after it',
+      `<haive_app_reach>\n- servers: \`a\n</haive_app_reach>\`.\n</haive_app_reach>\n\n${block('mcp_surface')}`,
+    ],
   ])('recognises a block that %s', (_where, prompt) => {
     expect(hasLeadingHaiveBlock(prompt, marker)).toBe(true);
   });
