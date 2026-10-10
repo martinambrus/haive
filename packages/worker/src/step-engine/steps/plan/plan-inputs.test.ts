@@ -692,6 +692,20 @@ describe('the index the root agent reads first', () => {
     expect(out).not.toContain('bad');
   });
 
+  it('leaves out an archive name the fence would rewrite, and keeps a TAB name unchanged', () => {
+    const note = 'the archive contains no readable files';
+    const out = renderIndex(
+      't1',
+      [],
+      [
+        { filename: 'docs/API====Security.zip', note },
+        { filename: 'src/a\tb.zip', note },
+      ],
+    );
+    expect(out).toContain(`- \`src/a\tb.zip\` — ${note}`);
+    expect(out).not.toContain('API');
+  });
+
   it('reduces an extraction note to one line too', () => {
     const out = renderIndex('t1', [row({ note: 'could not be extracted: first\nsecond' })], []);
     expect(out).toContain('- `spec.docx` _(could not be extracted: first second)_');

@@ -5,6 +5,7 @@ import { writePlanMirror } from '../../../plan/mirror.js';
 import { markPlanCodeLinksStaleForPaths } from '../../../plan/code-link-staleness.js';
 import { PLAN_PATCH_CONTRACT } from '../plan/_plan-prompt.js';
 import { REPO_IS_DATA_AUTHORING_LINES } from '../_untrusted-repo.js';
+import { isListableName } from './_impl-changes.js';
 import {
   MAX_PROPOSED_OPS,
   describeDropped,
@@ -79,6 +80,8 @@ export interface ExternalPlanSyncApply {
 }
 
 function buildPrompt(d: ExternalPlanSyncDetect): string {
+  const paths = d.changedPaths.filter(isListableName);
+  const pathsOmitted = d.pathsOmitted + (d.changedPaths.length - paths.length);
   return [
     // This step reads repository files and emits plan-patch ops, so what it writes becomes
     // a task description like any other plan node — and its proposals reach a form where
@@ -104,8 +107,8 @@ function buildPrompt(d: ExternalPlanSyncDetect): string {
     '',
     '## Files those commits touched',
     '',
-    ...d.changedPaths.map((p) => `- ${p}`),
-    ...(d.pathsOmitted > 0 ? [`- (+${d.pathsOmitted} further path(s) not listed)`] : []),
+    ...paths.map((p) => `- ${p}`),
+    ...(pathsOmitted > 0 ? [`- (+${pathsOmitted} further path(s) not listed)`] : []),
     '',
     '## What to propose',
     '',

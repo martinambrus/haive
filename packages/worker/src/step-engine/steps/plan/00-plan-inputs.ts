@@ -12,7 +12,8 @@ import { schema, withTaskAttachmentsLock } from '@haive/database';
 import { ensureArchivesExpanded } from '../../../attachments/expand-archives.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { isSingleLine, safeNote } from '../_untrusted-repo.js';
+import { safeNote } from '../_untrusted-repo.js';
+import { isListableName } from '../workflow/_impl-changes.js';
 import {
   classifyPlanInput,
   extractPlanInput,
@@ -681,7 +682,7 @@ export function renderIndex(
       }`,
     );
   }
-  const shownNotes = archiveNotes.filter((n) => isSingleLine(n.filename));
+  const shownNotes = archiveNotes.filter((n) => isListableName(n.filename));
   if (shownNotes.length > 0) {
     lines.push(
       '',

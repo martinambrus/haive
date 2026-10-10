@@ -1,5 +1,5 @@
-import { collapseToLine, isSingleLine, safeNote } from '../_untrusted-repo.js';
-import type { ChangedFileLines, ChangedLineMap } from './_impl-changes.js';
+import { collapseToLine, safeNote } from '../_untrusted-repo.js';
+import { isListableName, type ChangedFileLines, type ChangedLineMap } from './_impl-changes.js';
 
 const SHELL_SAFE_PATH = /^[A-Za-z0-9._/-]+$/;
 
@@ -94,7 +94,7 @@ export const preExistingFact = (n: number): string =>
 /** A path is a name the agent opens, so one that cannot be a single line is left out, not
  *  rewritten; a message is prose, so it is collapsed and capped. */
 const violationLine = (v: Violation): string | null =>
-  isSingleLine(v.path)
+  isListableName(v.path)
     ? `${v.path}:${v.line}: [${v.type}] ${safeNote(v.message)} (${collapseToLine(v.source)})`
     : null;
 

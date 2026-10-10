@@ -3,7 +3,8 @@ import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { logger, splitAttachmentPath } from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
-import { isSingleLine, safeNote } from './steps/_untrusted-repo.js';
+import { safeNote } from './steps/_untrusted-repo.js';
+import { isListableName } from './steps/workflow/_impl-changes.js';
 
 const log = logger.child({ module: 'attachments-context' });
 
@@ -89,7 +90,7 @@ export async function augmentPromptWithAttachments(
  */
 function describeIncompleteArchives(rows: readonly AttachmentRow[]): string[] {
   const incomplete = rows.filter(
-    (r) => r.expandedAt != null && Boolean(r.expansionNote) && isSingleLine(r.filename),
+    (r) => r.expandedAt != null && Boolean(r.expansionNote) && isListableName(r.filename),
   );
   if (incomplete.length === 0) return [];
   const shown = incomplete.slice(0, INCOMPLETE_ARCHIVE_LIMIT);

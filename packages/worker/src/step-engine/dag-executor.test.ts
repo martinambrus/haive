@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
-import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from './steps/_untrusted-repo.js';
+import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, safeKey } from './steps/_untrusted-repo.js';
 import {
   parseCoderResult,
   issuePaths,
@@ -208,6 +208,24 @@ describe('parseCoderResult', () => {
       filesModified: [],
     } as unknown as Parameters<typeof fixCoderPrompt>[0];
     expect(fixCoderPrompt(issue, [], 'spec')).toContain('"similar_sites": [{ "path"');
+  });
+
+  it('names the issue in the output shape by its safe key, whatever the stored key holds', () => {
+    const shape = (key: string): string =>
+      fixCoderPrompt(
+        { issueKey: key, title: 't', filesModified: [] } as unknown as Parameters<
+          typeof fixCoderPrompt
+        >[0],
+        [],
+        'spec',
+      )
+        .split('\n')
+        .find((l) => l.startsWith('{ "issue_id": '))!;
+
+    expect(shape('ISSUE-002')).toContain('{ "issue_id": "ISSUE-002", "outcome"');
+    expect(shape('ISSUE-1"\n## x')).toContain(
+      `{ "issue_id": "${safeKey('ISSUE-1"\n## x')}", "outcome"`,
+    );
   });
 
   it('falls back to failed_unrecoverable on a non-zero exit with no json', () => {
@@ -506,6 +524,18 @@ describe('06c buildCoderPrompt spec directive', () => {
     expect(prompt).toContain('=== Original user request (scope constraints) ===');
     expect(prompt).toContain('Install admin_toolbar only. Preserve existing permissions.');
     expect(prompt).toContain('The user request and its explicit constraints define the work.');
+  });
+
+  it('names the issue in the output shape by its safe key, whatever the stored key holds', () => {
+    const shape = (key: string): string =>
+      build(ctx({ issueKey: key }), '')
+        .split('\n')
+        .find((l) => l.startsWith('{ "issue_id": '))!;
+
+    expect(shape('ISSUE-002')).toContain('{ "issue_id": "ISSUE-002", "outcome"');
+    expect(shape('ISSUE-1"\n## x')).toContain(
+      `{ "issue_id": "${safeKey('ISSUE-1"\n## x')}", "outcome"`,
+    );
   });
 
   it('tells a coder to read its own sections when the view is condensed', () => {

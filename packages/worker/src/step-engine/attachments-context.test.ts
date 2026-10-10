@@ -215,6 +215,17 @@ describe('augmentPromptWithAttachments', () => {
       expect(lines.filter((l) => l.includes(' — ') && l.includes('name.zip'))).toEqual([]);
     });
 
+    it('leaves out an archive name the fence would rewrite, and keeps a TAB name unchanged', async () => {
+      const out = await augmentPromptWithAttachments(
+        mockDb([archive('docs/API====Security.zip', NOTE), archive('src/a\tb.zip', NOTE)]),
+        'task-1',
+        'ORIGINAL',
+      );
+      const lines = out.split('\n');
+      expect(lines).toContain(`  - src/a\tb.zip — ${NOTE}`);
+      expect(lines.filter((l) => l.includes(' — ') && l.includes('API'))).toEqual([]);
+    });
+
     it('names ten and counts the rest', async () => {
       const rows = Array.from({ length: 12 }, (_, i) => archive(`a${i}.zip`, NOTE));
       const out = await augmentPromptWithAttachments(mockDb(rows), 'task-1', 'ORIGINAL');

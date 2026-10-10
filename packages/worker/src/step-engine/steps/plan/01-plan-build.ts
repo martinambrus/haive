@@ -32,7 +32,8 @@ import { assertPlanPatchWithinBreadth } from './_plan-breadth.js';
 import { recordCodeLinksDropped } from './_plan-events.js';
 import { ensureSemanticExpansionResolution } from './_plan-semantic-stop.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { REPO_IS_DATA_AUTHORING_LINES, isSingleLine, safeTitle } from '../_untrusted-repo.js';
+import { REPO_IS_DATA_AUTHORING_LINES, safeTitle } from '../_untrusted-repo.js';
+import { isListableName } from '../workflow/_impl-changes.js';
 import {
   currentPlanInputs,
   loadLiveAttachments,
@@ -409,7 +410,7 @@ function sourceGuidance(d: PlanBuildDetect): string {
   // `/` and NUL is legal in one. Dropped rather than collapsed: the agent opens these by
   // name, so a mangled name is worse than an absent one, and the prompt sends it to the
   // directory regardless.
-  const kbFiles = d.kbFiles.filter(isSingleLine);
+  const kbFiles = d.kbFiles.filter(isListableName);
   const kb =
     kbFiles.length > 0
       ? `Read the knowledge base at ${KB_DIR}/ first (${kbFiles.length} file(s): ${kbFiles.slice(0, 20).join(', ')}).`

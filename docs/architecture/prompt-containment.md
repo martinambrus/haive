@@ -84,15 +84,15 @@ splits the prior-round block; plan chat fences its own turns and never the user'
 itself is never fenced — a coder must follow it — so hostile text entering one is stopped
 upstream, at the writer, which is what the authoring variant is for.
 
-**A VALUE NAMED ON A PROMPT LINE.** Above the guard or below it, a value interpolated onto a line
-of its own can open an instruction line. What must not be REWRITTEN is FILTERED — a filename or
-a KB id the agent then opens, where `isSingleLine` and `survivesFence` decide and a mangled name
-is worse than an absent one (`changedFilesBlock` and 11f's changed-file list leave such a name out
-and say how many they left out). What is prose is COLLAPSED (`collapseToLine`, `safeTitle`). The
-character class is every Unicode control — C0, DEL and C1 — plus U+2028 and U+2029, with TAB the
-one carve-out. A RANGE, because enumerating cost three review rounds and was wrong every time:
-`\s` misses U+0085, a C0-only class misses the line separators, an ASCII class misses
-U+001C-U+001E.
+**A VALUE NAMED ON A PROMPT LINE.** Above the guard or below it, a value interpolated onto a line of
+its own can open an instruction line. What must not be REWRITTEN is FILTERED — a filename or a KB id
+the agent then opens, where `isSingleLine` and `survivesFence` decide and a mangled name is worse
+than an absent one (`changedFilesBlock`, 11f's changed-file list and the 01e/01f commit path lists
+leave such a name out and say how many they left out; a filter for a name that reaches a fence is
+`isListableName`, both tests). What is prose is COLLAPSED (`collapseToLine`, `safeTitle`). The
+character class is every Unicode control — C0, DEL and C1 — plus U+2028 and U+2029, with TAB the one
+carve-out. A RANGE, because enumerating cost three review rounds and was wrong every time: `\s`
+misses U+0085, a C0-only class misses the line separators, an ASCII class misses U+001C-U+001E.
 
 **FILTER AND FENCE AT PROMPT-BUILD TIME.** `detect_output` is PERSISTED and `step-runner` replays
 it, so anything applied in `detect()` never reaches a step detected before it shipped — the
