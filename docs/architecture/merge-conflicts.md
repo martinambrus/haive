@@ -77,7 +77,13 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   fixer ran cannot be told from the fixer's and is moved with it. The index is refreshed after the
   restore, since git rewrites the files and `merge --abort` refuses their stale stat data. git
   writes what it puts back as the worker, so those paths, and the directories git created for them,
-  are handed back to the merge dir's owner; a directory that already stood keeps its own. `.haive/`,
+  are handed back to the merge dir's owner; a directory that already stood keeps its own. The merge and
+  the abort are handed back the same way (`openMerge`, `abortMerge`): run as root over a tree the
+  sandbox user owns, git writes a conflicted file and a directory it creates as root, which a fixer
+  cannot rewrite or add to (MEASURED). The paths that differ from the commit before the merge, or
+  from `HEAD` before the abort, and the directories above them that root owns, go to the tree's
+  owner, one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
+  `merge --abort` refuses stat data that moved. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
   not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
   removed later takes the link with it. A name is judged by its bytes, since a valid one can hold
@@ -106,9 +112,13 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   the same two commits was another tree. A conversation that resumes another's merge also reports
   what that one's relocations never did. Nothing is recorded under `HOST_REPO_ROOT`: the sandbox
   mounts a local-path repository read-only, so no fixer can write there. A cancel runs no step
-  code, so it moves nothing aside: a task's worktree is removed whole, a fixer's changes with the
-  rest of the task's work, a same-branch root is left as the fixer left it, merge still open, and a
-  plan merge's scratch worktree waits for the next pass or a Save or Pull, as above.
+  code, so once it has stopped the task's sandboxes it does this itself (`settleCancelledMerges`):
+  for each merge the task's rows record with a fixer in flight that still stands, outside a person's
+  checkout, it moves the changes aside and reports them as above, then aborts the merge, an abort
+  that fails being a `merge.abort_failed` event and not a failed cancel. A task's worktree the
+  cleanup removed takes a fixer's changes with the rest of the task's work; one it kept (shared with
+  another live task) is settled like any other tree. A plan merge's scratch worktree waits for the
+  next pass or a Save or Pull, as above.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.

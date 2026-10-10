@@ -60,7 +60,7 @@ export async function unmergedPaths(dir: string): Promise<string[] | null> {
   return res.code === 0 ? nulPaths(res.stdout) : null;
 }
 
-async function revParse(dir: string, spec: string): Promise<string | null> {
+export async function revParse(dir: string, spec: string): Promise<string | null> {
   const res = await gitRun(dir, ['rev-parse', '-q', '--verify', spec]);
   return res.code === 0 ? res.stdout.trim() : null;
 }
@@ -87,16 +87,25 @@ export async function openMerge(
   flags: string[],
   env: Record<string, string>,
 ): Promise<MergeOpen> {
+  const handBack = await handBackPlan(dir);
+  const before = handBack ? await revParse(dir, 'HEAD') : null;
   const res = await gitRun(dir, ['merge', '--no-ff', ...flags, ref], env);
-  if (res.code === 0) return { kind: 'merged' };
-  if (await mergeOpenFor(dir, ref)) return { kind: 'conflict' };
-  return { kind: 'refused', detail: gitDetail(res) };
+  const opened: MergeOpen =
+    res.code === 0
+      ? { kind: 'merged' }
+      : (await mergeOpenFor(dir, ref))
+        ? { kind: 'conflict' }
+        : { kind: 'refused', detail: gitDetail(res) };
+  if (handBack && before && opened.kind !== 'refused') {
+    await handBackWritten(handBack, dir, await differingFrom(dir, before));
+  }
+  return opened;
 }
 
 export type MergeAbort = { ok: true } | { ok: false; blocking: string[]; detail: string };
 
 /** A person's own checkout, mounted from the host: Haive discards nothing there. */
-function isHostCheckout(dir: string): boolean {
+export function isHostCheckout(dir: string): boolean {
   return dir === HOST_REPO_ROOT || dir.startsWith(`${HOST_REPO_ROOT}/`);
 }
 
@@ -110,6 +119,68 @@ function shown(name: string): string {
 function utf8Name(name: string): string | null {
   const bytes = Buffer.from(name, 'latin1');
   return isUtf8(bytes) ? bytes.toString('utf8') : null;
+}
+
+/** Where git, run as root, writes as root over a tree the sandbox user owns, and who owns it. */
+interface HandBack {
+  anchor: string;
+  prefix: string;
+  writer: number;
+  owner: { uid: number; gid: number };
+}
+
+async function handBackPlan(dir: string): Promise<HandBack | null> {
+  const writer = process.getuid?.();
+  if (writer !== 0 || isHostCheckout(dir)) return null;
+  const { anchor, prefix } = workspaceAnchor(dir);
+  const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true }).catch(
+    () => null,
+  );
+  if (!tree || tree.stats.uid === writer) return null;
+  return { anchor, prefix, writer, owner: { uid: tree.stats.uid, gid: tree.stats.gid } };
+}
+
+/** The paths the worktree holds differently from commit `ref`, as git listed them. */
+async function differingFrom(dir: string, ref: string): Promise<string[]> {
+  const res = await gitRun(
+    dir,
+    ['diff', '--name-only', '-z', '--no-renames', ref],
+    undefined,
+    LISTING,
+  );
+  return res.code === 0 ? nulPaths(res.stdout) : [];
+}
+
+/** A file the sandbox user must rewrite or a directory it must add to cannot stay root's: each of
+ *  `names` and the directories above it that root owns go to the tree's owner. What another user
+ *  owns, and every link, stays. A chown moves a file's ctime, which `merge --abort` reads as a
+ *  change, so the index is refreshed after. */
+async function handBackWritten(
+  plan: HandBack,
+  dir: string,
+  names: readonly string[],
+): Promise<void> {
+  const seen = new Set<string>();
+  let changed = false;
+  for (const raw of names) {
+    const name = utf8Name(raw);
+    if (name === null) continue;
+    const parts = name.split('/');
+    for (let i = 1; i <= parts.length; i += 1) {
+      const rel = `${plan.prefix}${parts.slice(0, i).join('/')}`;
+      if (seen.has(rel)) continue;
+      seen.add(rel);
+      const entry = await lstatNoFollow(plan.anchor, rel).catch(() => null);
+      if (entry === null || entry.kind === 'symlink' || entry.stats.uid !== plan.writer) continue;
+      await chownNoFollow(plan.anchor, rel, plan.owner).then(
+        () => {
+          changed = true;
+        },
+        () => undefined,
+      );
+    }
+  }
+  if (changed) await gitRun(dir, ['update-index', '-q', '--refresh']);
 }
 
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
@@ -157,6 +228,14 @@ const PATHSPEC_CHUNK = 100;
  *  the paths are reported instead. */
 export async function abortMerge(dir: string): Promise<MergeAbort> {
   if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
+  const handBack = await handBackPlan(dir);
+  const differing = handBack ? await differingFrom(dir, 'HEAD') : [];
+  const aborted = await abortOpenMerge(dir);
+  if (handBack) await handBackWritten(handBack, dir, differing);
+  return aborted;
+}
+
+async function abortOpenMerge(dir: string): Promise<MergeAbort> {
   const first = await gitRun(dir, ['merge', '--abort']);
   if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
   const blocking = (await stagedThenEdited(dir)) ?? [];

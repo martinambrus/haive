@@ -1352,6 +1352,91 @@ async function setupCleanFeature(): Promise<string> {
 const count = async (dir: string, ref: string): Promise<number> =>
   Number((await git(dir, ['rev-list', '--count', ref])).trim());
 
+/** A repo owned by uid 1000 whose `feature/x` conflicts on `base.txt`, adds `fdir/` (a directory
+ *  only that side has) and `lib/new.txt` (`lib/` is owned by uid 5000), and deletes `gone/`, which
+ *  the merge removes whole. */
+async function setupSandboxOwnedMerge(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-owned-'));
+  await initRepo(dir);
+  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+  await mkdir(path.join(dir, 'gone'));
+  await writeFile(path.join(dir, 'gone', 'g.txt'), 'gone\n', 'utf8');
+  await mkdir(path.join(dir, 'lib'));
+  await writeFile(path.join(dir, 'lib', 'keep.txt'), 'keep\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, 'base.txt'), 'feature\n', 'utf8');
+  await mkdir(path.join(dir, 'fdir', 'sub'), { recursive: true });
+  await writeFile(path.join(dir, 'fdir', 'sub', 'y.txt'), 'y\n', 'utf8');
+  await writeFile(path.join(dir, 'fdir', 'z.txt'), 'z\n', 'utf8');
+  await writeFile(path.join(dir, 'lib', 'new.txt'), 'new\n', 'utf8');
+  await git(dir, ['rm', '-rq', 'gone']);
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'feature']);
+  await git(dir, ['checkout', 'main']);
+  await writeFile(path.join(dir, 'base.txt'), 'main\n', 'utf8');
+  await git(dir, ['commit', '-am', 'main edit']);
+  await exec('chown', ['-R', '1000:1000', dir]);
+  await exec('chown', ['5000:5000', path.join(dir, 'lib')]);
+  return dir;
+}
+
+async function ownersOf(dir: string, rels: string[]): Promise<Record<string, number>> {
+  const uids = await Promise.all(rels.map(async (rel) => (await lstat(path.join(dir, rel))).uid));
+  return Object.fromEntries(rels.map((rel, i) => [rel, uids[i]!]));
+}
+
+// A merge git runs as root writes as root, where the fixer runs as the tree's owner.
+describe.runIf(process.getuid?.() === 0)('a root merge in a tree the sandbox user owns', () => {
+  it('hands what the merge wrote, and the directories it created, to the tree owner', async () => {
+    const dir = await setupSandboxOwnedMerge();
+    try {
+      expect(await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).toEqual({
+        kind: 'conflict',
+      });
+      const rels = ['base.txt', 'fdir', 'fdir/sub', 'fdir/sub/y.txt', 'fdir/z.txt', 'lib/new.txt'];
+      expect(await ownersOf(dir, rels)).toEqual(Object.fromEntries(rels.map((r) => [r, 1000])));
+      expect((await lstat(path.join(dir, 'lib'))).uid).toBe(5000);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('hands back what an abort rewrote and the directory it recreated', async () => {
+    const dir = await setupSandboxOwnedMerge();
+    try {
+      await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV);
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+      const rels = ['base.txt', 'gone', 'gone/g.txt'];
+      expect(await ownersOf(dir, rels)).toEqual(Object.fromEntries(rels.map((r) => [r, 1000])));
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('hands back a cleanly merged tree too', async () => {
+    const dir = await setupSandboxOwnedMerge();
+    try {
+      await git(dir, ['checkout', '-q', 'main']);
+      await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+      await git(dir, ['commit', '-qam', 'revert main edit']);
+      await git(dir, ['checkout', '-q', 'feature/x']);
+      await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+      await git(dir, ['commit', '-qam', 'revert feature edit']);
+      await git(dir, ['checkout', '-q', 'main']);
+      await exec('chown', ['-R', '1000:1000', dir]);
+      expect(await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).toEqual({
+        kind: 'merged',
+      });
+      const rels = ['fdir', 'fdir/sub', 'fdir/sub/y.txt', 'fdir/z.txt'];
+      expect(await ownersOf(dir, rels)).toEqual(Object.fromEntries(rels.map((r) => [r, 1000])));
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
 describe('squashMergeCommit (real git)', () => {
   it('collapses a landed merge into one commit with an identical tree', async () => {
     const dir = await setupCleanFeature();
