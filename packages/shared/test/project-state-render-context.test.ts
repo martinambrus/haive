@@ -504,3 +504,37 @@ describe('S4: renderContextProviderNames', () => {
     expect(namesOf()(portableOnly(), [])).toEqual([]);
   });
 });
+
+describe('S5: isRenderContextSnapshot', () => {
+  const decodes = () => added<(value: unknown) => boolean>('isRenderContextSnapshot');
+  const { rtkChoiceRecorded: _own, ...snapshot } = full();
+
+  it('accepts a context with or without an RTK value, and a portable-only one', () => {
+    expect(decodes()(snapshot)).toBe(true);
+    expect(decodes()(without(snapshot, 'rtkEnabled'))).toBe(true);
+    expect(decodes()(without(without(snapshot, 'rtkEnabled'), 'agentTargets'))).toBe(true);
+  });
+
+  it.each([
+    ['null', null],
+    ['an array', []],
+    ['an empty object', {}],
+    ['a context missing a portable field', without(snapshot, 'framework')],
+    ['a context with a key the column does not hold', { ...snapshot, somethingNew: true }],
+    ['a context whose RTK value is not a boolean', { ...snapshot, rtkEnabled: 'no' }],
+  ])('refuses %s', (_name, value) => {
+    expect(decodes()(value)).toBe(false);
+  });
+});
+
+describe('S6: rtkLeftoversToRemove', () => {
+  const remove = () =>
+    added<(recorded: boolean, rtkEnabled: boolean) => boolean>('rtkLeftoversToRemove');
+
+  it('removes RTK leftovers only for a recorded choice with the switch off', () => {
+    expect(remove()(true, false)).toBe(true);
+    expect(remove()(true, true)).toBe(false);
+    expect(remove()(false, false)).toBe(false);
+    expect(remove()(false, true)).toBe(false);
+  });
+});

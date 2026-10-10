@@ -41,6 +41,7 @@ function database(plan: Plan) {
   const fake = createFakeDb({
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
+    cliProviders: schema.cliProviders,
     projectStateSync: schema.projectStateSync,
     taskSteps: schema.taskSteps,
   });
@@ -208,4 +209,43 @@ describe.each(paths)('the RTK choice of a rollback that %s', (_name, run) => {
 
     expect(column).toEqual({ ...context(undefined), rtkChoiceRecorded: false });
   });
+});
+
+describe('a rollback whose prior rows hold no snapshot that decodes', () => {
+  it.each([
+    ['an empty one', {}],
+    ['none', null],
+  ])(
+    'writes %s as none, never as {}, and renders from the repository context',
+    async (_n, held) => {
+      const repoPath = await root();
+      const fake = database({ rtkFollowsLive: true });
+      const detected = {
+        repositoryId: REPO,
+        rolledBackFromTaskId: UPGRADE_TASK,
+        targets: [
+          {
+            diskPath: REMOVED,
+            templateId: 'agent.gone',
+            templateKind: 'agent',
+            templateSchemaVersion: 1,
+            priorArtifactId: PRIOR_ROW,
+            upgradeArtifactId: null,
+            removed: true,
+            priorTemplateContentHash: hashOf('GONE\n'),
+            priorWrittenHash: hashOf('GONE\n'),
+            priorWrittenContent: 'GONE\n',
+            priorFormValuesSnapshot: held,
+          },
+        ],
+        newArtifactsToUndo: [],
+        warnings: [],
+      };
+      await upgradeRollbackStep.apply(stepContext(fake, repoPath), { detected } as never);
+
+      const rows = fake.rows(schema.onboardingArtifacts);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.formValuesSnapshot).toBeNull();
+    },
+  );
 });

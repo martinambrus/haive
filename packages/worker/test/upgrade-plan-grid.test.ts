@@ -32,13 +32,13 @@ const EXPECTED: Record<string, string> = {
   'rows=none 07=recorded source=blank live=off':
     'framework=history-recorded rtkEnabled=false follows=true rtkEntries=.claude/settings.json:obsolete,.gemini/settings.json:obsolete leftovers=AGENTS.md backfill=true',
   'rows=none 07=unrecorded source=git_https live=on':
-    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=AGENTS.md backfill=true',
+    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=- backfill=true',
   'rows=none 07=unrecorded source=git_https live=off':
-    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=AGENTS.md backfill=true',
+    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=- backfill=true',
   'rows=none 07=unrecorded source=blank live=on':
-    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=AGENTS.md backfill=true',
+    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=- backfill=true',
   'rows=none 07=unrecorded source=blank live=off':
-    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=AGENTS.md backfill=true',
+    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=- backfill=true',
   'rows=none 07=missing-row source=git_https live=on':
     'error: upgrade-plan: cannot resolve render context — no prior onboarding snapshot or step 07 output found',
   'rows=none 07=missing-row source=git_https live=off':
@@ -64,13 +64,13 @@ const EXPECTED: Record<string, string> = {
   'rows=no-snapshot 07=recorded source=blank live=off':
     'framework=history-recorded rtkEnabled=false follows=true rtkEntries=.claude/settings.json:obsolete,.gemini/settings.json:obsolete leftovers=AGENTS.md backfill=false',
   'rows=no-snapshot 07=unrecorded source=git_https live=on':
-    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=AGENTS.md backfill=false',
+    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=- backfill=false',
   'rows=no-snapshot 07=unrecorded source=git_https live=off':
-    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=AGENTS.md backfill=false',
+    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=- backfill=false',
   'rows=no-snapshot 07=unrecorded source=blank live=on':
-    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=AGENTS.md backfill=false',
+    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=- backfill=false',
   'rows=no-snapshot 07=unrecorded source=blank live=off':
-    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=AGENTS.md backfill=false',
+    'framework=history-unrecorded rtkEnabled=false follows=false rtkEntries=- leftovers=- backfill=false',
   'rows=no-snapshot 07=missing-row source=git_https live=on':
     'error: upgrade-plan: cannot resolve render context — no prior onboarding snapshot or step 07 output found',
   'rows=no-snapshot 07=missing-row source=git_https live=off':

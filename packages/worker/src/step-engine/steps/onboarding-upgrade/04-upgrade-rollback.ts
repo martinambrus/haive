@@ -18,6 +18,7 @@ import {
   upsertRegion,
   type InstallManifest,
 } from '@haive/shared';
+import { isRenderContextSnapshot } from '@haive/shared/project-state';
 import { readUpgradeFile, RTK_BLOCK_FILES, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
@@ -27,6 +28,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
+import { resolveRenderContext } from '../../_upgrade-render.js';
 import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { restoreRtkBlocks, RTK_BLOCK_RECORD } from '../onboarding/_rules-files.js';
@@ -421,16 +423,29 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     const manifest = getTemplateManifest();
     let revertedCount = 0;
 
-    // Re-render using whichever snapshot the prior baseline carried.
+    // Re-render using whichever snapshot the prior baseline carried, else the repository's own context.
     const snapshot =
-      detected.targets.find((t) => t.priorFormValuesSnapshot)?.priorFormValuesSnapshot ?? null;
-    if (!snapshot && detected.targets.length > 0) {
-      throw new Error(
-        'upgrade-rollback apply: no form_values_snapshot available on any prior baseline row',
-      );
+      detected.targets
+        .map((t) => t.priorFormValuesSnapshot)
+        .find((s) => isRenderContextSnapshot(s)) ?? null;
+    let renderCtx = snapshot as unknown as TemplateRenderContext | null;
+    if (!renderCtx && detected.targets.length > 0) {
+      renderCtx =
+        (
+          await resolveRenderContext(ctx.db, {
+            repositoryId: detected.repositoryId,
+            userId: ctx.userId,
+            liveRows: await loadLiveArtifacts(ctx.db, detected.repositoryId),
+            logger: ctx.logger,
+          })
+        )?.renderCtx ?? null;
+      if (!renderCtx) {
+        throw new Error(
+          'upgrade-rollback apply: no form_values_snapshot available on any prior baseline row',
+        );
+      }
     }
-    const renderCtx = (snapshot ?? {}) as unknown as TemplateRenderContext;
-    const expanded = snapshot ? expandManifestFor(renderCtx, manifest) : [];
+    const expanded = renderCtx ? expandManifestFor(renderCtx, manifest) : [];
     const byTemplateAndPath = new Map<string, (typeof expanded)[number]>();
     for (const r of expanded) {
       byTemplateAndPath.set(`${r.templateId}:${r.diskPath}`, r);
@@ -620,7 +635,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         writtenContent: restoreContent,
         lastObservedDiskHash: observedHash,
         userModified: !putBack,
-        formValuesSnapshot: (snapshot ?? {}) as Record<string, unknown>,
+        formValuesSnapshot: snapshot,
         sourceStepId: '04-upgrade-rollback',
         source: 'rollback' as const,
         haiveVersion,

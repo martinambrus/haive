@@ -80,6 +80,7 @@ async function setup(agents: string | Buffer = AGENTS) {
       string,
       unknown
     >,
+    rtkFollowsLive: true,
     backfilledRows: 0,
   } as UpgradePlanOutput;
   const apply = () =>

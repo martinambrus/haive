@@ -36,15 +36,19 @@ vi.mock('../src/db.js', () => ({
       repositories: { findFirst: async () => state.repo },
       tasks: { findFirst: async () => (state.onboarded ? { id: 'onboarding-1' } : null) },
     },
-    select: () => ({
+    select: (fields?: Record<string, unknown>) => ({
       from: (table: unknown) => {
         const q = {
           where: () => q,
           innerJoin: () => q,
           orderBy: () => q,
+          groupBy: () => q,
           limit: () => q,
           then: (resolve: (rows: unknown[]) => unknown, reject: (err: unknown) => unknown) =>
-            Promise.resolve(state.rows.get(table) ?? []).then(resolve, reject),
+            Promise.resolve(fields && 'ids' in fields ? [] : (state.rows.get(table) ?? [])).then(
+              resolve,
+              reject,
+            ),
         };
         return q;
       },
@@ -268,6 +272,12 @@ describe('upgrade-status and a repository that switched RTK off', () => {
 
   it('offers an upgrade for an RTK block left in a rules file once RTK is off', async () => {
     await writeFile(path.join(repo, 'AGENTS.md'), `# rules\n${block}`, 'utf8');
+    state.rows.set(
+      schema.onboardingArtifacts,
+      state.rows
+        .get(schema.onboardingArtifacts)!
+        .map((a) => ({ ...(a as object), hasSnapshot: true, rtkRecorded: true })),
+    );
     repoRow(true, ['agent.x']);
     const on = await status();
     expect(on.hasUpgradeAvailable).toBe(false);
