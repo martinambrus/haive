@@ -73,6 +73,16 @@ describe('readTriageOutcome', () => {
     });
   });
 
+  it('takes the final reply over JSON the agent quoted before it', () => {
+    const raw =
+      'I updated:\n```json\n{ "name": "pkg", "version": "1.0.0" }\n```\n' +
+      '```json\n{ "implemented": ["Bumped version"], "notes": "" }\n```\n';
+    expect(readTriageOutcome(raw)).toMatchObject({
+      implemented: true,
+      changes: ['Bumped version'],
+    });
+  });
+
   it('is not implemented when the output is missing or malformed', () => {
     const none = { implemented: false, changes: [], notes: '' };
     expect(readTriageOutcome(null)).toEqual(none);
