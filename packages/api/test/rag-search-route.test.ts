@@ -388,9 +388,10 @@ describe('rag_search, the global store', () => {
     h.connectionString = store.url;
     h.globalEmbed = { vector: Array(DIMS).fill(0.2), delayMs: EMBED_MS };
 
-    const started = Date.now();
+    // Monotonic clock: this host's wall clock runs slow in bursts, so Date.now() undercounts a 6 s wait.
+    const started = performance.now();
     const { status, paths } = await search();
-    const elapsed = Date.now() - started;
+    const elapsed = performance.now() - started;
 
     expect(status).toBe(200);
     expect(paths).toEqual(['src/session.ts']);
@@ -404,9 +405,9 @@ describe('rag_search, the global store', () => {
     h.realStore = true;
     h.connectionString = store.url;
 
-    const started = Date.now();
+    const started = performance.now();
     const { status, paths } = await search();
-    const elapsed = Date.now() - started;
+    const elapsed = performance.now() - started;
 
     expect(status).toBe(200);
     expect(paths).toEqual(['src/session.ts']);
@@ -419,9 +420,9 @@ describe('rag_search, the global store', () => {
     h.realStore = true;
     h.connectionString = store.url;
 
-    const started = Date.now();
+    const started = performance.now();
     const { status, paths } = await search();
-    const elapsed = Date.now() - started;
+    const elapsed = performance.now() - started;
 
     expect(status).toBe(200);
     expect(paths).toEqual(['src/session.ts']);
@@ -498,9 +499,9 @@ describe('rag_search, the local store', () => {
     searchAsksStore();
     h.localEmbed = { vector: Array(DIMS).fill(0.1), delayMs: EMBED_MS };
 
-    const started = Date.now();
+    const started = performance.now();
     const { status } = await search();
-    const elapsed = Date.now() - started;
+    const elapsed = performance.now() - started;
 
     expect(status).toBe(500);
     expect(store.seen.queries).toBeGreaterThan(0);
@@ -514,9 +515,9 @@ describe('rag_search, the local store', () => {
     h.localConnectionString = store.url;
     searchAsksStore();
 
-    const started = Date.now();
+    const started = performance.now();
     const { status } = await search();
-    const elapsed = Date.now() - started;
+    const elapsed = performance.now() - started;
 
     expect(status).toBe(500);
     expect(store.seen.connections).toBeGreaterThan(0);
@@ -529,9 +530,9 @@ describe('rag_search, the local store', () => {
     h.localConnectionString = store.url;
     searchAsksStore();
 
-    const started = Date.now();
+    const started = performance.now();
     const { status } = await search();
-    const elapsed = Date.now() - started;
+    const elapsed = performance.now() - started;
 
     expect(status).toBe(500);
     expect(store.seen.queries).toBeGreaterThan(0);
