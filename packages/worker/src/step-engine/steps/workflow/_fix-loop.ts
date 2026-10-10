@@ -307,19 +307,10 @@ function tailAfterLongFence(text: string, tail: string): string {
 
 /** The first and last halves of `budget` around one line stating the count dropped. Each end is
  *  repaired alone: one repair over both would fence a head that sits outside any fence. */
-function cutMiddle(
-  text: string,
-  budget: number,
-  repair: (piece: string) => string,
-  framed = false,
-): string {
-  let headText = headPiece(text, Math.ceil(budget / 2));
-  let tailText = tailPiece(text, Math.floor(budget / 2));
+function cutMiddle(text: string, budget: number, repair: (piece: string) => string): string {
   // A block with a run too long to re-synthesize is cut around, never through.
-  if (framed) {
-    headText = headBeforeLongFence(headText);
-    tailText = tailAfterLongFence(text, tailText);
-  }
+  const headText = headBeforeLongFence(headPiece(text, Math.ceil(budget / 2)));
+  const tailText = tailAfterLongFence(text, tailPiece(text, Math.floor(budget / 2)));
   const headLines = headText.split('\n');
   const tailLines = tailText.split('\n');
   // A BEGIN ending the head, or an END starting the tail, would be repaired into an empty fence.
@@ -328,8 +319,7 @@ function cutMiddle(
   const head = headLines.join('\n');
   const tail = tailLines.join('\n');
   const omitted = omissionLine(text.length - head.length - tail.length);
-  // framed: the line is its own paragraph and a markdown fence the cut split is closed and reopened.
-  if (!framed) return [repair(head), omitted, repair(tail)].join('\n');
+  // The line is its own paragraph, and a markdown fence the cut split is closed and reopened.
   const headRun = openFenceRun(head);
   const tailRun = openFenceRun(text.slice(0, text.length - tailText.length));
   return [
@@ -380,7 +370,7 @@ function cutFencedBodies(text: string, budget: number): string {
   for (const { start, end, share } of bodies) {
     const body = text.slice(start, end);
     out += text.slice(copied, start);
-    out += body.length > share ? cutMiddle(body, share, (piece) => piece, true) : body;
+    out += body.length > share ? cutMiddle(body, share, (piece) => piece) : body;
     copied = end;
   }
   return out + text.slice(copied);
@@ -394,7 +384,7 @@ function cutFencedBodies(text: string, budget: number): string {
 export function excerptDiagnosis(raw: string, budget: number, keepPersonWhole: boolean): string {
   const text = cleanText(raw, Infinity);
   if (keepPersonWhole) return balanceFences(cutFencedBodies(text, budget));
-  return text.length > budget ? cutMiddle(text, budget, balanceFences, true) : balanceFences(text);
+  return text.length > budget ? cutMiddle(text, budget, balanceFences) : balanceFences(text);
 }
 
 /** Stable signature of a fix-loop diagnosis, namespaced by its source step. Two diagnoses
