@@ -4,6 +4,7 @@ import { userSecretsService } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { runnerExec } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
+import { shellQuote } from '../../../sandbox/shell-quote.js';
 
 /* ------------------------------------------------------------------ */
 /* Deterministic app login for browser testing.                        */
@@ -141,20 +142,20 @@ export async function loginAppBrowser(
   // The config goes in the command string (it is not secret); the credentials go in the
   // environment (they are). Single-quoted with any embedded quote escaped, because a
   // selector legitimately contains quotes — `input[name="user"]` is ordinary.
-  const json = JSON.stringify(cfg).replaceAll("'", `'\\''`);
+  const json = shellQuote(JSON.stringify(cfg));
   const env = { HAIVE_APP_USERNAME: username, HAIVE_APP_PASSWORD: password };
 
   try {
     const output =
       runtime.mode === 'ddev'
         ? (
-            await runnerExec(runtime.handle, `node /opt/browser-login.js '${json}'`, {
+            await runnerExec(runtime.handle, `node /opt/browser-login.js ${json}`, {
               timeoutMs: 90_000,
               env,
             })
           ).output
         : (
-            await appRunnerExec(runtime.handle, `node /opt/browser/browser-login.js '${json}'`, {
+            await appRunnerExec(runtime.handle, `node /opt/browser/browser-login.js ${json}`, {
               timeoutMs: 90_000,
               env,
             })
