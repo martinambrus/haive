@@ -1736,3 +1736,135 @@ describe('phase4ValidateStep: the severity of an issue that names an enforced ru
     },
   );
 });
+
+describe('phase4ValidateStep.apply: the report it keeps of the validator reply', () => {
+  const CAP = 8_000;
+  const OMISSION = /\[… ([\d,]+) characters? omitted …\]/;
+  const FIRST = '## Validation report: FIRST LINE';
+  const LAST = 'LAST LINE: nothing else to report';
+  const prose = (chars: number): string => {
+    const lines = [FIRST];
+    let size = FIRST.length + LAST.length + 2;
+    while (size < chars) {
+      const line = `${lines.length}. requirement ${lines.length} is met by src/app.ts:${lines.length}`;
+      lines.push(line);
+      size += line.length + 1;
+    }
+    return [...lines, LAST].join('\n');
+  };
+  const kept = (output: unknown) => runApply(ruleWorld({}).ctx, output);
+  const keptOf = async (output: unknown) => (await kept(output)).report;
+  const omittedOf = (report: string) => {
+    const lines = report.split('\n');
+    const at = lines.findIndex((line) => OMISSION.test(line));
+    return {
+      count: Number(OMISSION.exec(lines[at] ?? '')?.[1]?.replaceAll(',', '')),
+      head: lines.slice(0, at).join('\n'),
+      tail: lines.slice(at + 1).join('\n'),
+    };
+  };
+
+  it('keeps the first and the last line of a reply over the cap, and says what it left out', async () => {
+    const text = prose(40_000);
+    expect(text.length).toBeGreaterThanOrEqual(40_000);
+    const out = await kept(text);
+    expect(out.verdict).toBe('UNPARSEABLE');
+    const lines = out.report.split('\n');
+    expect(lines[0]).toBe(FIRST);
+    expect(lines.at(-1)).toBe(LAST);
+    expect(out.report).toMatch(OMISSION);
+    expect(out.report.length).toBeLessThanOrEqual(CAP + 100);
+  });
+
+  it('counts in its omission line what it left out of the reply', async () => {
+    const text = prose(40_000);
+    const { count, head, tail } = omittedOf(await keptOf(text));
+    expect(head.length + count + tail.length).toBe(text.length);
+  });
+
+  it('keeps the start of a reply over the cap and the verdict block that ends it, whole', async () => {
+    const verdict = reply({ verdict: 'VALID' });
+    const out = await kept(`${prose(40_000)}\n${verdict}`);
+    expect(out.source).toBe('validator');
+    expect(out.report.startsWith(`${FIRST}\n`)).toBe(true);
+    expect(out.report.endsWith(`${LAST}\n${verdict}`)).toBe(true);
+    expect(out.report).toMatch(OMISSION);
+  });
+
+  it('cuts a reply only once it is over the cap', async () => {
+    const text = prose(CAP + 500);
+    expect(await keptOf(text.slice(0, CAP))).toBe(text.slice(0, CAP));
+    const over = await keptOf(text.slice(0, CAP + 1));
+    expect(over).toMatch(OMISSION);
+    expect(over.length).toBeLessThanOrEqual(CAP + 100);
+  });
+
+  it.each([
+    ['plain text', 5_000],
+    ['text of exactly the cap', CAP],
+  ])('stores %s as it came', async (_name, chars) => {
+    const text = prose(chars + 100).slice(0, chars);
+    expect(text).toHaveLength(chars);
+    expect(await keptOf(text)).toBe(text);
+  });
+
+  it('stores a reply under the cap byte for byte: trailing blanks, blank runs and escape codes stay', async () => {
+    const red = `${String.fromCharCode(27)}[31mfailed${String.fromCharCode(27)}[0m`;
+    const text = `\n  ${FIRST}  \n\n\n\n${red}\t \nrow\t\n${LAST}\n\n`;
+    expect(await keptOf(text)).toBe(text);
+  });
+
+  it('stores an output that is not text as its JSON', async () => {
+    const stub = { verdict: 'VALID', summary: 'bypass stub', issues: [], dimensions: [] };
+    expect(await keptOf(stub)).toBe(JSON.stringify(stub));
+  });
+
+  it.each([
+    ['text under the cap', prose(5_100).slice(0, 5_000)],
+    ['text of exactly the cap', prose(CAP + 100).slice(0, CAP)],
+    ['text one over the cap', prose(CAP + 100).slice(0, CAP + 1)],
+    ['a long text no verdict can be read from', prose(40_000)],
+    ['a long text that ends in a verdict', `${prose(40_000)}\n${reply()}`],
+    ['an output that is not text', { verdict: 'VALID', summary: 's', issues: [], dimensions: [] }],
+  ])('records the length of the whole reply beside the report: %s', async (_name, output) => {
+    const length = typeof output === 'string' ? output.length : JSON.stringify(output).length;
+    expect((await kept(output)).reportChars).toBe(length);
+  });
+
+  it('has a fixer pass carry the report of the validator pass as stored', async () => {
+    const text = `${prose(40_000)}\n${reply()}`;
+    const w = ruleWorld({});
+    const validated = await runApply(w.ctx, text);
+    expect(validated.source).toBe('validator');
+    const fixed = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, text, validated)],
+    });
+    expect(fixed.source).toBe('fixer');
+    expect(fixed.report).toBe(validated.report);
+    expect(fixed.report.endsWith(reply())).toBe(true);
+  });
+
+  it('has a fixer pass carry the length of the reply with the report', async () => {
+    const text = `${prose(40_000)}\n${reply()}`;
+    const w = ruleWorld({});
+    const validated = await runApply(w.ctx, text);
+    const fixed = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, text, validated)],
+    });
+    expect(fixed.reportChars).toBe(text.length);
+  });
+
+  it('has a fixer pass invent no length for a validator pass stored before the length was kept', async () => {
+    const text = `${prose(40_000)}\n${reply()}`;
+    const w = ruleWorld({});
+    const older = { ...(await runApply(w.ctx, text)), reportChars: undefined };
+    const fixed = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, text, older)],
+    });
+    expect(fixed.report).toBe(older.report);
+    expect(fixed.reportChars).toBeUndefined();
+  });
+});

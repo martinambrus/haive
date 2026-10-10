@@ -14,6 +14,7 @@ import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { isOutOfScope } from '../_scope-fence.js';
 import { loadFindingRecurrence, recurrenceKey } from './_review-findings.js';
+import { excerptDiagnosis } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -368,8 +369,28 @@ interface Phase4Output {
   excludedDimensions?: string[];
   fixesApplied?: string[];
   report?: string;
+  reportChars?: number;
   converged?: boolean;
   churnFiles?: string[];
+}
+
+const REPORT_EXCERPT_CHARS = 8000;
+
+// A report opens with its findings and ends with its verdict block, so a cut keeps both ends.
+function reportExcerpt(report: string): string {
+  return report.length > REPORT_EXCERPT_CHARS
+    ? excerptDiagnosis(report, REPORT_EXCERPT_CHARS, false)
+    : report;
+}
+
+const CHECKLIST_EXCERPT_CHARS = 12_000;
+
+function checklistExcerpt(checklist: string): string {
+  const left = checklist.length - CHECKLIST_EXCERPT_CHARS;
+  if (left <= 0) return checklist;
+  const one = left === 1;
+  const note = `[… ${left.toLocaleString('en-US')} more ${one ? 'character' : 'characters'} of the checklist ${one ? 'is' : 'are'} not shown …]`;
+  return `${checklist.slice(0, CHECKLIST_EXCERPT_CHARS)}\n\n${note}`;
 }
 
 interface VerifyGateApply {
@@ -553,7 +574,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         exhaustedBudget: iterations.some((e) => e.exhaustedBudget === true),
         converged: p4.converged !== false,
         churnFiles: p4.churnFiles ?? [],
-        report: (p4.report ?? '').slice(0, 8000),
+        // A report with its reply length was cut once by 07b, at this size; one without it predates that and is cut here.
+        report:
+          typeof p4.reportChars === 'number' ? (p4.report ?? '') : reportExcerpt(p4.report ?? ''),
       };
     }
 
@@ -1026,7 +1049,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           '',
           '> Verify the checklist below by hand. Approve = all passed; Reject = issues found.',
           '',
-          b.checklistMarkdown.slice(0, 12_000),
+          checklistExcerpt(b.checklistMarkdown),
         );
       } else {
         lines.push('', `**Result:** ${b.passed ? 'PASS' : 'FAIL'}`);
