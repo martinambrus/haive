@@ -27,11 +27,15 @@ import { rewriteFileIfNoFollow, updateFileNoFollow, writeFileNoFollow } from '..
 
 const REL = 'src/a.txt';
 const SETTLES_MS = 5_000;
-// The 0xff is not UTF-8 and `updateFileNoFollow` decodes what it reads, so a put-back made from
-// that text instead of the bytes read would not match.
+// The 0xff is not UTF-8, so a put-back made from decoded text instead of the bytes read would not
+// match. `updateFileNoFollow` refuses such a file before writing, so its original is UTF-8.
 const ORIGINAL = Buffer.from(
   '# original\n\xff these bytes must survive a failed write\n',
   'latin1',
+);
+const ORIGINAL_UTF8 = Buffer.from(
+  '# original\n\u00fe these bytes must survive a failed write\n',
+  'utf8',
 );
 // Half of it is longer than ORIGINAL, so a put-back that forgets to truncate leaves a tail behind.
 const NEXT = `# replaced\n${'a line the failed write never finishes\n'.repeat(8)}`;
@@ -45,6 +49,7 @@ interface Primitive {
   control: 'C1' | 'C2' | 'C3';
   name: string;
   ok: string;
+  original: Buffer;
   write: (root: string, rel: string, next: string) => Promise<string>;
 }
 
@@ -53,18 +58,21 @@ const PRIMITIVES: Primitive[] = [
     control: 'C1',
     name: 'rewriteFileIfNoFollow',
     ok: 'rewritten',
+    original: ORIGINAL,
     write: (root, rel, next) => rewriteFileIfNoFollow(root, rel, () => Buffer.from(next, 'utf8')),
   },
   {
     control: 'C2',
     name: 'updateFileNoFollow',
     ok: 'updated',
+    original: ORIGINAL_UTF8,
     write: (root, rel, next) => updateFileNoFollow(root, rel, () => next),
   },
   {
     control: 'C3',
     name: 'writeFileNoFollow overwrite-in-place',
     ok: 'overwritten',
+    original: ORIGINAL,
     write: (root, rel, next) => writeFileNoFollow(root, rel, next, { mode: 'overwrite-in-place' }),
   },
 ];
@@ -169,6 +177,8 @@ describe('a write that fails part-way', () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  const seed = (p: Primitive) => writeFile(file, p.original);
+
   async function expectOnItsInode(bytes: Buffer, which: 'original' | 'new'): Promise<void> {
     const after = await lstat(file);
     expect(after.isFile(), 'the file is at its name').toBe(true);
@@ -188,13 +198,14 @@ describe('a write that fails part-way', () => {
   it.each(PRIMITIVES)(
     '$control $name puts the original bytes back on the same inode',
     async (p) => {
+      await seed(p);
       const enospc = fsError('ENOSPC', 'no space left on device');
       arm({ content: Buffer.from(NEXT, 'utf8'), error: enospc });
 
       const err = await rejection(p.write(root, REL, NEXT));
 
       expect(err, 'the call rejects with the failed write’s own error').toBe(enospc);
-      await expectOnItsInode(ORIGINAL, 'original');
+      await expectOnItsInode(p.original, 'original');
     },
   );
 
@@ -202,9 +213,13 @@ describe('a write that fails part-way', () => {
     'C4 $name reads both failures when putting the bytes back fails too',
     { timeout: SETTLES_MS },
     async (p) => {
+      await seed(p);
       const enospc = fsError('ENOSPC', 'no space left on device');
       const eio = fsError('EIO', 'input/output error');
-      arm({ content: Buffer.from(NEXT, 'utf8'), error: enospc }, { content: ORIGINAL, error: eio });
+      arm(
+        { content: Buffer.from(NEXT, 'utf8'), error: enospc },
+        { content: p.original, error: eio },
+      );
 
       const found = failuresIn(await rejection(p.write(root, REL, NEXT)));
       const readable = `readable from the rejection: ${found.map(label).join(', ')}`;
@@ -215,6 +230,7 @@ describe('a write that fails part-way', () => {
   );
 
   it.each(PRIMITIVES)('C5 $name still writes the new bytes on the same inode', async (p) => {
+    await seed(p);
     arm({
       content: Buffer.from('bytes no write carries', 'utf8'),
       error: fsError('EIO', 'unused'),

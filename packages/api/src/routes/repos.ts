@@ -15,11 +15,13 @@ import {
   errno,
   fileIdentity,
   isPathContainmentError,
+  decodeUtf8Strict,
+  isNotUtf8Error,
+  NotUtf8Error,
   lstatNoFollow,
   ParkedFileError,
   openFileNoFollow,
   readFileNoFollow,
-  readTextNoFollow,
   readdirNoFollow,
   relUnder,
   removeFileIfIdentityNoFollow,
@@ -1582,8 +1584,10 @@ export async function stripHaiveContent(
   root: string,
   rel: string,
 ): Promise<{ changed: boolean; deleted: boolean } | null> {
-  const content = await readTextNoFollow(root, rel, { strict: true });
-  if (content === null) return null;
+  const read = await readFileNoFollow(root, rel, { strict: true });
+  if (read === null) return null;
+  const strict = decodeUtf8Strict(read.data);
+  const content = strict ?? read.data.toString('utf8');
   let next = content;
   for (const [start, end] of HAIVE_REGION_MARKERS) {
     while (true) {
@@ -1597,6 +1601,8 @@ export async function stripHaiveContent(
   next = next.replace(/^@AGENTS\.md\s*$/gm, '');
   const cleaned = next.replace(/\n{3,}/g, '\n\n').trim();
   if (cleaned === content.trim()) return { changed: false, deleted: false };
+  // Written back, a byte that is not UTF-8 would become U+FFFD.
+  if (strict === null) throw new NotUtf8Error(rel);
   if (cleaned.length === 0) {
     await removeNoFollow(root, rel);
     return { changed: true, deleted: true };
@@ -1632,6 +1638,7 @@ export interface OnboardingResetOutcome {
  */
 export function classifyResetFailure(err: unknown): { reason: string; io: boolean } | null {
   if (isPathContainmentError(err)) return { reason: err.reason, io: false };
+  if (isNotUtf8Error(err)) return { reason: 'not valid UTF-8', io: false };
   const code = errno(err);
   if (code === undefined) return null;
   // A file that could not be moved back had been found and moved, so it is no sign the walk
@@ -1982,7 +1989,10 @@ export async function resetOnboardingArtifacts(
       const result = await removeFileIfNoFollow(
         root,
         rel,
-        (data) => hashes.includes(sha256Hex(normalizeContent(data.toString('utf8')))),
+        (data) => {
+          const text = decodeUtf8Strict(data);
+          return text !== null && hashes.includes(sha256Hex(normalizeContent(text)));
+        },
         { maxBytes: MAX_FILE_CONTENT_BYTES, repairPermissions: true },
       );
       // A save that took the name back while the old file was judged is the person's file.
@@ -2012,10 +2022,10 @@ export async function resetOnboardingArtifacts(
     readFileNoFollow(root, rel, { maxBytes: MAX_FILE_CONTENT_BYTES, strict: true });
   /** A whole read's normalised hash. None for a read the cap cut: its opening can normalise to a
    *  render the whole file is not. */
-  const wholeHash = (read: ReadResult | null): string | null =>
-    read === null || read.truncated
-      ? null
-      : sha256Hex(normalizeContent(read.data.toString('utf8')));
+  const wholeHash = (read: ReadResult | null): string | null => {
+    const text = read === null || read.truncated ? null : decodeUtf8Strict(read.data);
+    return text === null ? null : sha256Hex(normalizeContent(text));
+  };
 
   // Settings first, so one the sweep must keep has its verdict before the sweep reaches it, and
   // one it may take is already gone from the listing.

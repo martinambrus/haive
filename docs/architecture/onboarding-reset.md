@@ -213,7 +213,10 @@ is read before the removal, so a save landing between the two was deleted as Hai
 reset removes on its own, the settings pass included, goes through `removeFileIfNoFollow` against
 the row's or the step's hash, as an upgrade's delete does; one that no longer matches is kept and
 reported as edited, and its directory stays around it. A file past the read cap never matches: the
-part read can normalise to a render the whole file is not. A file a save put at the name while the
+part read can normalise to a render the whole file is not. Nor does one that is not valid UTF-8,
+since an invalid byte decodes to U+FFFD and a render can hold that character; for the same reason a
+rules file that is not valid UTF-8 keeps its Haive regions and is reported, rather than written
+back. A file a save put at the name while the
 old one was judged is kept too, though the old one goes. One whose name a save took while it was judged and
 refused cannot go back, so it stays under its private name (`ParkedFileError`, carrying the errno)
 and the reset reports where it is and carries on. That is no failure to read the tree, so it never

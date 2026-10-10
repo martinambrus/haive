@@ -9,7 +9,7 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
-import { PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
+import { NotUtf8Error, PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { checkOnboardingMarkers } from '../src/lib/onboarding-state.js';
 import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
@@ -90,6 +90,19 @@ describe('stripHaiveContent', () => {
     await expect(readFile(path.join(root, 'CLAUDE.md'), 'utf8')).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('refuses a rules file that is not valid UTF-8 and leaves every byte', async () => {
+    const root = await repo('reset-not-utf8-');
+    const bytes = Buffer.concat([
+      Buffer.from('# Caf'),
+      Buffer.from([0xe9]),
+      Buffer.from('\n\n<!-- haive:cli-rules -->\nrules\n<!-- /haive:cli-rules -->\n'),
+    ]);
+    await writeFile(path.join(root, 'AGENTS.md'), bytes);
+
+    await expect(stripHaiveContent(root, 'AGENTS.md')).rejects.toMatchObject({ code: 'ENOTUTF8' });
+    expect((await readFile(path.join(root, 'AGENTS.md'))).equals(bytes)).toBe(true);
   });
 
   it('answers null for a file that is not there', async () => {
@@ -1860,6 +1873,13 @@ describe('sweepSurvivors', () => {
 });
 
 describe('classifyResetFailure', () => {
+  it('reads a file that is not valid UTF-8 as a refusal, not an IO failure', () => {
+    expect(classifyResetFailure(new NotUtf8Error('AGENTS.md'))).toEqual({
+      reason: 'not valid UTF-8',
+      io: false,
+    });
+  });
+
   it('absorbs a refused link as a policy skip, not an IO failure', () => {
     const err = new PathContainmentError('link', '/anchor', 'a/b', 'a');
     expect(classifyResetFailure(err)).toEqual({ reason: 'link', io: false });

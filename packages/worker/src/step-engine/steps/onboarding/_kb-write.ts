@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { isPathContainmentError, updateFileNoFollow } from '@haive/shared/fs-safe';
+import { isNotUtf8Error, isPathContainmentError, updateFileNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEGACY_KB_DIR } from '@haive/shared/knowledge-paths';
 
 /* ------------------------------------------------------------------ */
@@ -134,6 +134,10 @@ export async function applyKbWrites(
       // A refused target joins the `skipped` list rather than aborting the loop: this function
       // already treats one bad path as a per-item outcome, and a link is the same class of problem.
       // Anything else is a real failure and propagates.
+      if (isNotUtf8Error(err)) {
+        skipped.push({ relPath: write.relPath, reason: 'refused: not valid UTF-8' });
+        continue;
+      }
       if (!isPathContainmentError(err)) throw err;
       skipped.push({ relPath: write.relPath, reason: `refused: ${err.reason}` });
       continue;

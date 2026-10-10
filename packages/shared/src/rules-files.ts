@@ -1,6 +1,6 @@
 import type { CliProviderName } from './types/index.js';
 import { CLI_PROVIDER_CATALOG, type CliRulesFileMode } from './cli-providers/catalog.js';
-import { lstatNoFollow, readFileNoFollow, readLinkNoFollow } from './fs-safe.js';
+import { decodeUtf8Strict, lstatNoFollow, readFileNoFollow, readLinkNoFollow } from './fs-safe.js';
 import {
   CLI_RULES_END,
   CLI_RULES_START,
@@ -21,8 +21,8 @@ export const RULES_IMPORT_LINE = '@AGENTS.md';
 /** No upgrade reads past this: a larger file gets no check, comparison or rewrite. */
 export const RULES_FILE_READ_CAP = 1024 * 1024;
 
-/** Why an upgrade did not read a path: past the cap, or not a regular file it could open. */
-export type UnreadReason = 'oversized' | 'unreadable';
+/** Why an upgrade did not read a path: past the cap, not a regular file it could open, or not UTF-8. */
+export type UnreadReason = 'oversized' | 'unreadable' | 'undecodable';
 
 export type UpgradeRead =
   { kind: 'absent' } | { kind: 'unread'; reason: UnreadReason } | { kind: 'text'; text: string };
@@ -38,7 +38,8 @@ export async function readUpgradeFile(repoPath: string, rel: string): Promise<Up
   }
   if (read === null) return { kind: 'absent' };
   if (read.truncated) return { kind: 'unread', reason: 'oversized' };
-  return { kind: 'text', text: read.data.toString('utf8') };
+  const text = decodeUtf8Strict(read.data);
+  return text === null ? { kind: 'unread', reason: 'undecodable' } : { kind: 'text', text };
 }
 
 /** Whether 02 would delete the file at a claim's path: it is absent, or holds the bytes its row
@@ -114,7 +115,8 @@ export async function rulesImportState(repoPath: string, rel: string): Promise<R
     });
     if (read === null) return 'missing';
     if (read.truncated) return 'unreadable';
-    return read.data.toString('utf8').includes(RULES_IMPORT_LINE) ? 'present' : 'missing';
+    if (read.data.includes(RULES_IMPORT_LINE)) return 'present';
+    return decodeUtf8Strict(read.data) === null ? 'unreadable' : 'missing';
   } catch {
     return 'unreadable';
   }
@@ -131,8 +133,8 @@ async function holdsRtkBlock(repoPath: string, rel: string): Promise<boolean> {
       maxBytes: RULES_FILE_READ_CAP,
     });
     if (read === null || read.truncated) return false;
-    const text = read.data.toString('utf8');
-    return extractRegion(text, RTK_REF_MARKER_START, RTK_REF_MARKER_END) !== null;
+    const text = decodeUtf8Strict(read.data);
+    return text !== null && extractRegion(text, RTK_REF_MARKER_START, RTK_REF_MARKER_END) !== null;
   } catch {
     return false;
   }

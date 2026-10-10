@@ -146,7 +146,10 @@ adopted file the person had declined.
 **Every upgrade read stops at one cap, and a path it did not read is never taken for nothing
 there.** `readUpgradeFile` (`@haive/shared/rules-files`) reads no further than
 `RULES_FILE_READ_CAP` (1 MiB) and answers `absent` only for a missing path: past the cap, a link,
-anything but a regular file and a read that fails are `unread`. The plan used to read a link as
+anything but a regular file and a read that fails are `unread`, and so is a file that is not valid
+UTF-8 (`undecodable`): decoded leniently, its bad bytes became U+FFFD and a rewrite wrote that back.
+`updateFileNoFollow` refuses such a file the same way (`NotUtf8Error`), so 07's rules append and the
+knowledge writes report it skipped and leave every byte. The plan used to read a link as
 absent, offer a new file there pre-selected, and the write then threw and failed the whole apply.
 01 now marks such an entry `unread` under `UNREAD_HASH`, which matches no record and reads neither
 as deleted nor as new, and 02 offers no choice on it: the form names it, with why, in one note, and
