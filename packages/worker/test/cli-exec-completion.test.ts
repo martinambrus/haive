@@ -3,7 +3,7 @@ import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 
 const stubs = vi.hoisted(() => ({
-  scoreHouseRules: vi.fn((..._args: unknown[]) => {}),
+  scoreHouseRules: vi.fn((..._args: unknown[]): Promise<void> | undefined => undefined),
   executeByKind: vi.fn(),
   resumeStepIfLinked: vi.fn(async () => {}),
   recordLedgerEntry: vi.fn(async (..._args: unknown[]) => {}),
@@ -221,6 +221,32 @@ describe('a cli run start', () => {
     const started = runWrites(writes).find((w) => 'startedAt' in w.set);
     expect(started?.set.houseRules).toEqual(houseRules);
     expect(stubs.scoreHouseRules).toHaveBeenCalledExactlyOnceWith(db, RUN, base.taskId, houseRules);
+  });
+
+  it('does not complete the job while its scorer is alive, and still completes once it settles', async () => {
+    const { db } = fakeDb({});
+    stubs.executeByKind.mockResolvedValue(ok);
+    let release: () => void = () => {};
+    stubs.scoreHouseRules.mockReturnValueOnce(new Promise<void>((resolve) => (release = resolve)));
+    const settled = vi.fn();
+    const job = handleCliExecJob(db, {
+      ...base,
+      spec: {
+        houseRules: {
+          mode: 'write',
+          entries: [],
+          omitted: [],
+          similarity: { status: 'pending', scores: [] },
+        },
+      },
+    }).then(settled);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(stubs.executeByKind).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    release();
+    await job;
+    expect(settled).toHaveBeenCalledOnce();
   });
 
   it('keeps the rest of the stamp when its similarity record is malformed, and scores nothing', async () => {

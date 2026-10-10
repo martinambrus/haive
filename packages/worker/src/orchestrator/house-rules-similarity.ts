@@ -20,6 +20,8 @@ import { readTaskText } from './house-rules-dispatch.js';
 
 const log = logger.child({ module: 'house-rules-similarity' });
 
+const SETTLE_MARGIN_MS = 5_000;
+
 /** The embedding model's context is 4096 tokens; the title, description and spec opening stay well inside it. */
 export const SIMILARITY_QUERY_MAX_CHARS = 2_500;
 
@@ -162,6 +164,18 @@ async function amend(
       and house_rules->'similarity'->>'status' = 'pending'`);
 }
 
+async function amendLogged(
+  db: Database,
+  invocationId: string,
+  record: HouseRulesSimilarity,
+): Promise<void> {
+  try {
+    await amend(db, invocationId, record);
+  } catch (err) {
+    log.warn({ err, invocationId }, 'the house rules scores could not be recorded');
+  }
+}
+
 async function score(
   db: Database,
   invocationId: string,
@@ -175,22 +189,41 @@ async function score(
     log.warn({ err, invocationId, taskId }, 'house rules could not be scored against the task');
     record = { status: 'failed', errorClass: failureClass(err) };
   }
+  await amendLogged(db, invocationId, record);
+}
+
+/** Waits for a scoring to settle, within the embed budget plus the store's deadline; a record the
+ *  scoring leaves pending past that is marked abandoned, so a finished job never leaves one. */
+async function settle(db: Database, invocationId: string, scoring: Promise<void>): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
   try {
-    await amend(db, invocationId, record);
+    const { embedTimeoutMs } = await resolveEmbedBudget();
+    const budgetMs = embedTimeoutMs + DISPATCH_KB_BOUNDS.deadlineMs + SETTLE_MARGIN_MS;
+    const expired = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), budgetMs);
+    });
+    if (await Promise.race([scoring.then(() => false), expired])) {
+      log.warn({ invocationId }, 'house rules scoring outlived its budget');
+      await amendLogged(db, invocationId, { status: 'failed', errorClass: 'abandoned' });
+    }
   } catch (err) {
-    log.warn({ err, invocationId }, 'the house rules scores could not be recorded');
+    log.warn({ err, invocationId }, 'house rules scoring could not be awaited');
+    await amendLogged(db, invocationId, { status: 'failed', errorClass: 'abandoned' });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-/** Starts the scoring of a run whose start wrote a pending record, and returns at once: the CLI
- *  runs for minutes, so a cold embedder costs the dispatch nothing. Never throws. */
+/** Starts the scoring of a run whose start wrote a pending record. The CLI runs for minutes, so a
+ *  cold embedder costs the dispatch nothing; the caller awaits the returned promise once the run
+ *  is over, so the job never completes with a scorer alive. Never throws or rejects. */
 export function scoreHouseRulesInBackground(
   db: Database,
   invocationId: string,
   taskId: string,
   stamp: HouseRulesStamp | null,
-): void {
+): Promise<void> {
   const pending = stamp?.similarity;
-  if (pending?.status !== 'pending' || !pending.scores?.length) return;
-  void score(db, invocationId, taskId, pending.scores);
+  if (pending?.status !== 'pending' || !pending.scores?.length) return Promise.resolve();
+  return settle(db, invocationId, score(db, invocationId, taskId, pending.scores));
 }

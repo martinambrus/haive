@@ -345,6 +345,40 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
     expect(h.embed).not.toHaveBeenCalled();
   });
 
+  it('returns a promise that settles only once the record is written', async () => {
+    let release: (v: number[][]) => void = () => {};
+    h.embed.mockReturnValue(new Promise<number[][]>((resolve) => (release = resolve)));
+    const settled = vi.fn();
+    const done = scoreHouseRulesInBackground(db, INV, TASK, pendingStamp()).then(settled);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(settled).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    release([[0.6, 0.8]]);
+    await done;
+    expect(updates).toHaveLength(1);
+  });
+
+  it('marks a record abandoned, and settles, when the scoring outlives its budget', async () => {
+    vi.useFakeTimers();
+    try {
+      h.embed.mockReturnValue(new Promise<number[][]>(() => {}));
+      const settled = vi.fn();
+      const done = scoreHouseRulesInBackground(db, INV, TASK, pendingStamp()).then(settled);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(240_000);
+      await done;
+
+      expect(JSON.parse(updates[0]!.params[0] as string)).toStrictEqual({
+        status: 'failed',
+        errorClass: 'abandoned',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('never throws, nor leaves a rejection, when the amendment itself cannot be written', async () => {
     updateFails = true;
     const unhandled = vi.fn();

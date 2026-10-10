@@ -212,6 +212,20 @@ export async function handleCliExecJob(
   payload: CliExecJobPayload,
   deps: CliExecDeps = defaultDeps,
 ): Promise<void> {
+  const house: { scoring?: Promise<void> } = {};
+  try {
+    await runCliExecJob(db, payload, deps, house);
+  } finally {
+    await house.scoring;
+  }
+}
+
+async function runCliExecJob(
+  db: Database,
+  payload: CliExecJobPayload,
+  deps: CliExecDeps,
+  house: { scoring?: Promise<void> },
+): Promise<void> {
   const row = await db.query.cliInvocations.findFirst({
     where: eq(schema.cliInvocations.id, payload.invocationId),
   });
@@ -264,7 +278,7 @@ export async function handleCliExecJob(
     log.info({ invocationId: payload.invocationId }, 'cli invocation superseded before it started');
     return;
   }
-  scoreHouseRulesInBackground(db, row.id, payload.taskId, houseRules);
+  house.scoring = scoreHouseRulesInBackground(db, row.id, payload.taskId, houseRules);
 
   // Work resumed: this invocation is now running, so close any waiting_cli park the step
   // accrued (initial queue wait, or a rate-limit/allowance park between waves) by folding
