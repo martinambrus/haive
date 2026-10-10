@@ -125,9 +125,11 @@ describe('07 detect: agent targets and enabled providers', () => {
     const mixed = await derive(on('amp', 'codex'), LANGUAGES);
     expect(mixed.agentTargets).toEqual([CODEX(false)]);
     expect(mixed.enabledCliProviders).toEqual(listed('amp', 'codex'));
+  });
 
+  it('falls back to the .claude/agents markdown target when no enabled provider has a directory', async () => {
     const alone = await derive(on('amp'), LANGUAGES);
-    expect(alone.agentTargets).toEqual([]);
+    expect(alone.agentTargets).toEqual([CLAUDE(false)]);
     expect(alone.enabledCliProviders).toEqual(listed('amp'));
   });
 
@@ -144,7 +146,7 @@ describe('07 detect: agent targets and enabled providers', () => {
     expect(first.enabledCliProviders).toEqual(listed('claude-code'));
 
     const none = await derive(off('claude-code', 'gemini', 'amp'), LANGUAGES);
-    expect(none.agentTargets).toEqual([]);
+    expect(none.agentTargets).toEqual([CLAUDE(false)]);
     expect(none.enabledCliProviders).toEqual([]);
   });
 
