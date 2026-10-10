@@ -37,9 +37,10 @@ secret-mask policy removes denied file contents from the message context; it con
 omits tracked secret contents too and applies even with masking switched off. Git may not pair
 a moved file (`status.renames=false`, content rewritten below the similarity threshold, or a move
 over a tracked file), so a denied file moved to an allowed name arrives as a deletion plus an
-addition or a modification, and a moved file's old path can be recreated in place: when the change
-deletes, modifies or renames away any denied path, or the change list is capped and may not show
-every change, no file but a deletion shows its content, only its path. A failed policy lookup leaves only the diff summary
+addition or a modification, a moved file's old path can be recreated in place, and a protected file
+staged then moved reads as `AD` plus an untracked copy: when any denied path appears in the change,
+under any status, or the change list is capped and may not show every change, no file but a
+deletion shows its content, only its path. A failed policy lookup leaves only the diff summary
 available, never the unfiltered contents.
 
 The LLM runs before the gate parks and its suggestion becomes the editable form default. The

@@ -196,6 +196,16 @@ describe('10-gate-3-commit message generation', () => {
       expect(filesOf(text).find((f) => f.path === 'renamed.txt')?.note).toBe(WITHHELD);
     });
 
+    it('withholds a copy of a protected file staged and then moved', async () => {
+      const repo = await seedWith({ 'other.txt': 'kept\n' });
+      await writeFile(path.join(repo, 'secret.env'), 'SECRET=abc\n');
+      await git(repo, ['add', 'secret.env']);
+      await rename(path.join(repo, 'secret.env'), path.join(repo, 'public.txt'));
+      const text = await contextOf(repo);
+      expect(text).not.toContain('SECRET=abc');
+      expect(filesOf(text).find((f) => f.path === 'public.txt')?.note).toBe(WITHHELD);
+    });
+
     it('withholds a copy when the protected path is recreated in place', async () => {
       const repo = await seedWith({ 'secret.env': 'SECRET=abc\n' });
       await rename(path.join(repo, 'secret.env'), path.join(repo, 'public.txt'));

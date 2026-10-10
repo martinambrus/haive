@@ -93,14 +93,13 @@ function changedExcerpt(before: string, after: string): { before: string; after:
 }
 
 function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPolicy): string {
-  // A protected file's bytes can leave it under any status git reports, and a capped list can hide the change.
+  // A protected path in the change under any status (git can report a move as AD + ??) may have moved its bytes; a capped list can hide it.
   const protectedChanged =
     artifact.truncated ||
     artifact.files.some(
       (file) =>
-        file.status !== 'added' &&
-        (secretMaskDeniesPath(policy, file.path) ||
-          (file.oldPath !== undefined && secretMaskDeniesPath(policy, file.oldPath))),
+        secretMaskDeniesPath(policy, file.path) ||
+        (file.oldPath !== undefined && secretMaskDeniesPath(policy, file.oldPath)),
     );
   const files = artifact.files.map((file) => {
     const metadata = { path: file.path, oldPath: file.oldPath, status: file.status };
