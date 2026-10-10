@@ -675,7 +675,21 @@ export function assertReviewableChange(stepId: string, value: MaybeFileSet): voi
 /** Documentation file extensions. A change confined to these touches no executable
  *  code, which is what lets a reviewer swap its code dimensions for documentation
  *  ones (07b-phase-4-validate). */
-const DOC_EXTENSIONS = ['.md', '.mdx', '.rst', '.adoc', '.txt'];
+const DOC_EXTENSIONS = ['.md', '.mdx', '.rst', '.adoc'];
+
+/** A `.txt` is prose only by name or location: CMakeLists.txt and requirements.txt are code. */
+const PROSE_TXT_NAME = /^(readme|changelog|license|notice|authors|contributing)\.txt$/;
+
+function isDocumentationPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  if (DOC_EXTENSIONS.some((ext) => lower.endsWith(ext))) return true;
+  if (!lower.endsWith('.txt')) return false;
+  const parts = lower.split('/');
+  return (
+    PROSE_TXT_NAME.test(parts[parts.length - 1]!) ||
+    parts.slice(0, -1).some((d) => d === 'docs' || d === 'doc')
+  );
+}
 
 /**
  * Whether this change set is documentation only.
@@ -694,8 +708,5 @@ export function isDocsOnlyChange(value: MaybeFileSet): boolean {
   const set = asFileSet(value);
   if (!set || set.truncated || set.scanError) return false;
   if (set.files.length === 0) return false;
-  return set.files.every((f) => {
-    const lower = f.toLowerCase();
-    return DOC_EXTENSIONS.some((ext) => lower.endsWith(ext));
-  });
+  return set.files.every(isDocumentationPath);
 }

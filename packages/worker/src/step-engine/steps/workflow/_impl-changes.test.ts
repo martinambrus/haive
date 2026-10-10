@@ -258,7 +258,16 @@ describe('isDocsOnlyChange', () => {
   });
 
   it('is true when every listed file is documentation', () => {
-    expect(isDocsOnlyChange(set(['README.md', 'docs/install.rst', 'NOTES.txt']))).toBe(true);
+    expect(isDocsOnlyChange(set(['README.md', 'docs/install.rst', 'NOTES.md']))).toBe(true);
+  });
+
+  it('counts a .txt as documentation only for a prose name or under a docs directory', () => {
+    expect(isDocsOnlyChange(set(['README.txt', 'changelog.TXT', 'LICENSE.txt']))).toBe(true);
+    expect(isDocsOnlyChange(set(['NOTICE.txt', 'AUTHORS.txt', 'CONTRIBUTING.txt']))).toBe(true);
+    expect(isDocsOnlyChange(set(['docs/x.txt', 'lib/doc/y.txt']))).toBe(true);
+    expect(isDocsOnlyChange(set(['requirements.txt']))).toBe(false);
+    expect(isDocsOnlyChange(set(['CMakeLists.txt']))).toBe(false);
+    expect(isDocsOnlyChange(set(['README.md', 'src/robots.txt']))).toBe(false);
   });
 
   it('is false when any listed file is not documentation', () => {
