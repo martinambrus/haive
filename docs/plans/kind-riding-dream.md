@@ -326,6 +326,44 @@ the tail and declared as the seed's `fixLoop.targetStepId`. It skips round 0, wh
 each fix round reads the diagnosis (`loadFixLoopDiagnosis`) and edits `01-worktree-setup`'s
 integration worktree under `REPO_IS_DATA_ACTING_LINES`, the guard for a pass that edits.
 
+**9 · `scan-report`** — deterministic, **no LLM**, composed last, and the step that holds the
+scan's report. It runs whatever triage chose, an empty selection included, since a scan whose
+triage picked nothing is a report and nothing else.
+
+**Every report carries a `Found, not fixed` section, and nothing turns it off.** A workflow task
+surfaces what it left behind only at review time: an agent MAY add a `## INSIGHTS` block
+(`INSIGHTS_INSTRUCTION`), and gates 2 and 3 show whatever 08e did not pick as one collapsed,
+informational row (`loadUnactedInsights` / `insightsRow`, `_gate-insights.ts`). That fits a task
+whose deliverable is a change. A scan's deliverable is the list of defects, so what it found and
+did not fix is the report's main content, not a side note: the section has no form field, no
+setting and no `visibleWhen`, it renders open, and when it is empty it says so in one line rather
+than disappearing, since a missing section reads exactly like a clean one. It lists, grouped by
+reason and most severe first within each group:
+
+- verified findings triage did not pick, which are written `dismissed_human` the way 08d2 writes
+  what gate 1.5 left out;
+- coherence findings left with no authoritative side, so recorded and never planned;
+- findings triage could offer no remediation for (a landing branch without the scanned commit, a
+  read-only folder import, a detached HEAD), with the reason triage gave;
+- findings whose DAG issue did not merge: refused by the provider (the refusal marker in
+  `concerns`), failed, or cancelled, naming which;
+- findings an earlier scan recorded that are still present and were not picked this time, naming
+  the scan that first recorded them;
+- out-of-scope observations under a diff target (`raw.inScope = false`);
+- `## INSIGHTS` the remediation coders, `scan-fix` and the core tail noted and 08e did not pick,
+  read through `loadUnactedInsights` rather than re-parsed; `scan-remediate`'s coder prompt and
+  `scan-fix` carry `INSIGHTS_INSTRUCTION` as 07 does.
+
+Each entry's reason is derived from structural state — the triage step's output, the issue's
+`task_dag_issues` outcome and marker, `review_findings.disposition` and `raw` — never from a
+message column or an agent's prose, the rule `step-banners.ts` keeps for banners. The section never
+claims a finding was fixed: a merged issue moves its findings out of the section, but `fixed` stays
+unwritten (`review-findings.md`), and only a re-scan that no longer raises a finding is evidence of
+a fix. What the scan never looked at — a REFUSED dimension, a per-file cap's truncation, an
+escaping symlink, a submodule — is a coverage gap, not a found defect, and sits beside the section
+in the coverage record, never inside it. Nothing is capped here: the per-file cap upstream already
+bounds volume, the step shows counts per reason, and the dashboard lists every entry.
+
 ### Scan targets
 
 The form offers four targets, each resolving to the COMMIT the scan reads and, for three of them,
@@ -767,6 +805,9 @@ former, and this module does both kinds of write.
   `steps/workflow/06-run-config.ts`, the runner's `overlayPreAnswerDefaults`, and 00a's `base`
   field in `steps/workflow/00a-sync-base.ts`
 - Conditional form fields: `visibleWhen` in `packages/shared/src/schemas/form.ts`
+- What a workflow task reports as found and not fixed, which `scan-report` reads and widens:
+  `INSIGHTS_INSTRUCTION` in `steps/workflow/08e-insights-triage.ts`, `loadUnactedInsights` in
+  `steps/workflow/_gate-insights.ts`, and the `disposition` writers in `_review-findings.ts`
 - A commit's stored bytes with no attribute or filter applied, the rule the merge snapshots keep:
   `captureFixBaseline` in `step-engine/git-merge.ts`
 
@@ -878,6 +919,14 @@ former, and this module does both kinds of write.
   landing name that starts with `-` is refused at triage before it is stored.
 - A committed `.env` in the snapshot is visible to the security dimension, which reports its
   file, line and kind and never its value.
+- `scan-report` renders `Found, not fixed` for every scan, with no input that hides it: a scan
+  whose triage picked nothing lists every verified finding there, and a scan that left nothing
+  renders the one-line empty statement rather than omitting the section. Fixtures put one entry in
+  each reason group — not picked, no authoritative side, no remediation offered, a refused issue,
+  a failed issue, still present from an earlier scan, out of scope, an unpicked coder insight —
+  and each lands under its own reason; a merged issue's findings are absent and no row is written
+  `fixed`; a REFUSED dimension appears in the coverage record and not in the section; a stale
+  status message on a step changes no entry's reason.
 
 **Core (in the worker suite, shipped with the core changes):**
 - The fan-out barrier fails the step on a rate-limit, auth or server-error row and degrades on a
@@ -902,7 +951,8 @@ former, and this module does both kinds of write.
    `review_findings` with `deep-scan:` reviewer ids and the coverage record names the fifteen
    dimensions that did not run.
 2. Triage two findings in one file; confirm remediation creates one DAG issue, one worktree, and
-   merges.
+   merges, and that the report's `Found, not fixed` section lists every finding left unpicked and
+   neither of the two merged ones.
 3. Re-scan; confirm the already-fixed finding does not reappear and the report says what is new.
 3b. Run coherence alone over this repo's own rules, `AGENTS.md` and KB; confirm every finding cites
    two `file:line` sides, and that the carve-out `2fffb947` added is not raised as a conflict.
