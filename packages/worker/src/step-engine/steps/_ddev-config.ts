@@ -32,7 +32,9 @@ function resolved(node: unknown, doc: Document): unknown {
 }
 
 const isMergeKey = (key: unknown): boolean =>
-  isScalar(key) && key.type === 'PLAIN' && key.value === '<<';
+  isScalar(key) &&
+  key.value === '<<' &&
+  ((key.type === 'PLAIN' && !key.tag) || key.tag === 'tag:yaml.org,2002:merge');
 
 /** `key` in `map` as yaml.v3 reads it: the map's own entry first, then each `<<` source in order. */
 function lookup(map: YAMLMap, key: string, doc: Document, seen = new Set<YAMLMap>()): unknown {

@@ -300,6 +300,11 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
   });
 
+  it('reads a string-tagged << as an ordinary key, not a merge', () => {
+    const cfg = 'x: &db {type: postgres, version: "16"}\ndatabase: { !!str <<: *db }\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: null, dbVersion: null });
+  });
+
   it('reads a merged top-level field', () => {
     expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
   });
