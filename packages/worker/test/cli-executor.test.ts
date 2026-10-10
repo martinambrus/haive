@@ -7,7 +7,10 @@ import {
   type CliSpawner,
 } from '../src/cli-executor/index.js';
 import type { CliCommandSpec, SubAgentInvocation } from '../src/cli-adapters/types.js';
-import { describeFailedSubAgent } from '../src/queues/cli-exec/sub-agent.js';
+import {
+  describeFailedSubAgent,
+  extractClaudeStreamSubStep,
+} from '../src/queues/cli-exec/sub-agent.js';
 import { isOutputTruncationMessage } from '../src/queues/cli-exec/failure-class.js';
 import { execFixture, PARTIAL } from './support/codex-truncation-harness.js';
 
@@ -302,6 +305,80 @@ describe('runSequentialSubAgent on a claude-stream-json sub-step cut at the outp
     const message = describeFailedSubAgent(result);
     expect(isOutputTruncationMessage(message)).toBe(true);
     expect(message).toContain('label');
+  });
+});
+
+describe('runSequentialSubAgent on claude-stream-json sub-steps', () => {
+  // The event shapes a real amp run on the dev install emitted (invocation fb765285), trimmed:
+  // the answer rides the result event, usage rides only the assistant events.
+  const ampStream = (answer: string, output: number) =>
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'T-1' }),
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: answer }],
+          usage: { input_tokens: 0, cache_creation_input_tokens: 200, output_tokens: output },
+        },
+      }),
+      JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: answer }),
+    ].join('\n') + '\n';
+  const buildAmp = (prompt: string): CliCommandSpec => ({
+    command: 'amp',
+    args: ['-x', '--stream-json', prompt],
+    env: {},
+    outputFormat: 'claude-stream-json',
+  });
+
+  it('reads each answer, and sums the tokens, out of the stream', async () => {
+    const spawner = mockSpawner({
+      scan: { stdout: ampStream('```json\n{"found":2}\n```', 30) },
+      label: { stdout: ampStream('```json\n{"labels":["a"]}\n```', 20) },
+      'final report': { stdout: ampStream('All good', 10) },
+    });
+    const result = await runSequentialSubAgent(
+      sequentialInvocation,
+      buildAmp,
+      spawner,
+      {},
+      extractClaudeStreamSubStep,
+    );
+    expect(result.collected).toEqual({ scan: { found: 2 }, labels: { labels: ['a'] } });
+    expect(result.synthesis).toBe('All good');
+    expect(result.tokenUsage).toMatchObject({ outputTokens: 60, cacheCreationTokens: 600 });
+    // amp reports no duration_api_ms, so no model time is invented for it.
+    expect(result.apiDurationMs).toBeNull();
+  });
+
+  it('keeps model time when the stream reports it', async () => {
+    const timed = (answer: string, apiMs: number) =>
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: answer,
+        duration_api_ms: apiMs,
+        usage: { input_tokens: 5, output_tokens: 3 },
+      }) + '\n';
+    const spawner = mockSpawner({
+      scan: { stdout: timed('{"found":1}', 400) },
+      label: { stdout: timed('{"labels":[]}', 300) },
+      'final report': { stdout: timed('done', 200) },
+    });
+    const result = await runSequentialSubAgent(
+      sequentialInvocation,
+      buildAmp,
+      spawner,
+      {},
+      extractClaudeStreamSubStep,
+    );
+    expect(result.tokenUsage).toMatchObject({ outputTokens: 9 });
+    expect(result.apiDurationMs).toBe(900);
+  });
+
+  it('leaves plain-text output to the legacy parse', () => {
+    expect(extractClaudeStreamSubStep('not a stream')).toBeNull();
   });
 });
 

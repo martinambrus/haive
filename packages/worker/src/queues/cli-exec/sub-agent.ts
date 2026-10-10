@@ -184,6 +184,7 @@ export async function executeSubAgentSequential(
       }),
     spawner,
     { timeoutMs: payload.timeoutMs },
+    extractClaudeStreamSubStep,
   );
 
   const failed = result.exitCode !== 0;
@@ -196,6 +197,19 @@ export async function executeSubAgentSequential(
     apiDurationMs: result.apiDurationMs,
     // N processes under one row and no stream: what each sub-step used is not observable here.
     toolUsage: unobservedToolUsage('stream'),
+  };
+}
+
+/** An amp sub-step speaks the claude-compatible stream; read it with the collector every other
+ *  run of that format uses, so its answer, tokens and model time are what a plain run records. */
+export function extractClaudeStreamSubStep(stdout: string) {
+  const collector = createStreamJsonCollector();
+  collector.onChunk(`${stdout}\n`);
+  if (!collector.isStreamJson()) return null;
+  return {
+    text: collector.getResult(),
+    tokenUsage: collector.getTokenUsage(),
+    apiDurationMs: collector.getApiDurationMs(),
   };
 }
 

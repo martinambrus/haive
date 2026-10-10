@@ -47,11 +47,20 @@ function totalApiDurationMs(trace: SubAgentStepTrace[]): number | null {
 
 export type PromptToCliSpec = (prompt: string) => CliCommandSpec;
 
+/** Unwraps a claude-stream-json sub-step (amp). Injected by the caller because that parser lives
+ *  in queues/cli-exec, which this layer does not import. Null when stdout is not such a stream. */
+export type ClaudeStreamExtractor = (stdout: string) => {
+  text: string | null;
+  tokenUsage: CliTokenUsage | null;
+  apiDurationMs: number | null;
+} | null;
+
 export async function runSequentialSubAgent(
   invocation: SubAgentInvocation,
   buildCli: PromptToCliSpec,
   spawner: CliSpawner,
   opts: SpawnOptions = {},
+  extractClaudeStream?: ClaudeStreamExtractor,
 ): Promise<SubAgentRunResult> {
   if (invocation.mode !== 'sequential') {
     throw new Error('runSequentialSubAgent called with non-sequential invocation');
@@ -62,7 +71,7 @@ export async function runSequentialSubAgent(
   let tokenUsage: CliTokenUsage | null = null;
 
   for (const step of invocation.steps) {
-    const traceEntry = await runOneStep(step, buildCli, spawner, opts);
+    const traceEntry = await runOneStep(step, buildCli, spawner, opts, extractClaudeStream);
     trace.push(traceEntry);
     tokenUsage = sumTokenUsage(tokenUsage, traceEntry.tokenUsage ?? null);
     if (traceEntry.exitCode !== 0 || traceEntry.error) {
@@ -86,6 +95,7 @@ export async function runSequentialSubAgent(
     buildCli,
     spawner,
     opts,
+    extractClaudeStream,
   );
   trace.push(synthesisTrace);
   tokenUsage = sumTokenUsage(tokenUsage, synthesisTrace.tokenUsage ?? null);
@@ -105,6 +115,7 @@ async function runOneStep(
   buildCli: PromptToCliSpec,
   spawner: CliSpawner,
   opts: SpawnOptions,
+  extractClaudeStream: ClaudeStreamExtractor | undefined,
 ): Promise<SubAgentStepTrace> {
   const spec = buildCli(step.prompt);
   const result: CliExecutionResult = await spawner(spec, opts);
@@ -131,6 +142,13 @@ async function runOneStep(
     const extracted = extractAntigravityStreamOutput(result.stdout);
     if (extracted.eventCount > 0 && extracted.text !== null) text = extracted.text;
     tokenUsage = extracted.tokenUsage;
+  } else if (spec.outputFormat === 'claude-stream-json' && extractClaudeStream) {
+    const extracted = extractClaudeStream(result.stdout);
+    if (extracted) {
+      if (extracted.text !== null) text = extracted.text;
+      tokenUsage = extracted.tokenUsage;
+      apiDurationMs = extracted.apiDurationMs;
+    }
   } else if (spec.outputFormat === 'gemini-json') {
     const extracted = extractGeminiJsonOutput(result.stdout);
     if (extracted) {
