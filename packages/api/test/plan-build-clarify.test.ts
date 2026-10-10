@@ -133,6 +133,13 @@ describe('starting a plan build with clarifying questions', () => {
     expect(clis.questionerCliProviderId).toBe(CODEX);
   });
 
+  it('refuses a disabled planner pick before creating the task', async () => {
+    setup();
+    const response = await build({ mode: 'from_repo', cliProviderId: OFF });
+    expect(response.status).toBe(409);
+    expect(spawnPlanTask).not.toHaveBeenCalled();
+  });
+
   it('refuses a disabled questioner before creating the task', async () => {
     setup();
     const response = await build({

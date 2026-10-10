@@ -1101,12 +1101,10 @@ async function resolveProvider(
 ): Promise<string | null> {
   const db = getDb();
   if (cliProviderId) {
-    const provider = await db.query.cliProviders.findFirst({
-      where: and(eq(schema.cliProviders.id, cliProviderId), eq(schema.cliProviders.userId, userId)),
-      columns: { id: true },
-    });
-    if (!provider) throw new HttpError(404, 'CLI provider not found');
-    return provider.id;
+    // A disabled provider is refused here rather than dispatched: the dispatcher drops it and
+    // runs whichever provider comes first, which is not the CLI the person picked.
+    await loadUsableProvider(db, userId, cliProviderId);
+    return cliProviderId;
   }
   const lastUsed = await db.query.tasks.findFirst({
     where: and(
