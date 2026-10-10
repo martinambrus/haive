@@ -138,6 +138,7 @@ const artifact = (id: string, at: number, snapshot: 'none' | 'recorded' | 'unrec
   templateContentHash: agent.contentHash,
   bundleItemId: null,
   haiveVersion: null,
+  repositoryId: 'repo-1',
   generatedAt: new Date(at),
   hasSnapshot: snapshot === 'none' ? null : true,
   rtkRecorded: snapshot === 'recorded' ? true : null,
@@ -196,7 +197,21 @@ function seed(cell: Cell, repoDir: string, column: unknown): void {
       ],
     ],
     [schema.onboardingArtifacts, liveRows(cell.rows)],
-    [schema.tasks, cell.history === 'none' ? [] : [{ id: 'onboarding-1', metadata: null }]],
+    [
+      schema.tasks,
+      cell.history === 'none'
+        ? []
+        : [
+            {
+              id: 'onboarding-1',
+              repositoryId: 'repo-1',
+              type: 'onboarding',
+              status: 'completed',
+              completedAt: new Date(1),
+              metadata: null,
+            },
+          ],
+    ],
     [
       schema.taskSteps,
       cell.history === 'recorded'

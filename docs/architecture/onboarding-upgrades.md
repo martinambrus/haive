@@ -236,7 +236,15 @@ repository, whoever writes the status. The api answers its violation 409 in `err
 whichever route revived the task. The worker revives one whose parked form is answered, and a
 refusal there would drop the answer, so the submit route refuses such an answer before storing it; a
 revival the worker still loses to a race reads as the task not pointed and records
-`upgrade.revive_refused`. Its statuses are the api's `LIVE_TASK_STATUSES`, pinned by a test. Both
+`upgrade.revive_refused`. Its statuses are `LIVE_TASK_STATUSES` (`@haive/database`
+`repository-task-lock`), pinned by a test. That module also holds the repository lock every
+creation and revival of an onboarding, upgrade or rollback takes (advisory key, repository row
+`FOR UPDATE`, root claim, the opposing live task): the api's routes and the worker's revival of an
+answered form and the allowance auto-resume run `checkRevive`, and for an upgrade or rollback
+`upgradeAdmission` (`@haive/shared/onboarding-admission`, which the api re-exports), on the locked
+repository row in the transaction that revives. A worker refusal leaves the task failed and records
+`upgrade.revive_refused` with its reason; a refused auto-resume drops the allowance watch rather
+than retrying each tick. Both
 create routes write the task, its event and its move to `queued` in one transaction, since no sweep
 starts or ends a `created` task, and one left by a failure part-way would block every later upgrade
 and rollback. The migration fails the ones an older release left that way before it builds the

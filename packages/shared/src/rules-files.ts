@@ -1,7 +1,16 @@
 import type { CliProviderName } from './types/index.js';
 import { CLI_PROVIDER_CATALOG, type CliRulesFileMode } from './cli-providers/catalog.js';
 import { lstatNoFollow, readFileNoFollow, readLinkNoFollow } from './fs-safe.js';
-import { extractRegion, RTK_REF_MARKER_END, RTK_REF_MARKER_START } from './templates/cli-rules.js';
+import {
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_ID,
+  extractRegion,
+  RTK_REF_MARKER_END,
+  RTK_REF_MARKER_START,
+} from './templates/cli-rules.js';
+import { normalizeContent, sha256Hex } from './templates/manifest.js';
+import { withoutRtkHookEntry } from './templates/rtk-settings.js';
 
 // Shared so the worker's upgrade steps and the api's upgrade status name the same files. Node-only
 // and outside the root barrel, like `fs-safe`, which refuses to load anywhere but Linux.
@@ -30,6 +39,37 @@ export async function readUpgradeFile(repoPath: string, rel: string): Promise<Up
   if (read === null) return { kind: 'absent' };
   if (read.truncated) return { kind: 'unread', reason: 'oversized' };
   return { kind: 'text', text: read.data.toString('utf8') };
+}
+
+/** Whether 02 would delete the file at a claim's path: it is absent, or holds the bytes its row
+ *  records as Haive's. A cli-rules row records the marker-delimited region alone, so that is what
+ *  is compared, and a file with no region reads as absent, as the plan reads it. */
+export function deletableClaim(
+  read: UpgradeRead,
+  claim: { templateId: string; writtenHash: string },
+  opts: { regionExtracted?: boolean } = {},
+): boolean {
+  if (read.kind === 'absent') return true;
+  if (read.kind === 'unread') return false;
+  let text = read.text;
+  if (claim.templateId === CLI_RULES_TEMPLATE_ID && !opts.regionExtracted) {
+    const region = extractRegion(text, CLI_RULES_START, CLI_RULES_END);
+    if (region === null) return true;
+    text = region;
+  }
+  return sha256Hex(normalizeContent(text)) === claim.writtenHash;
+}
+
+/** Whether 02 could still act on a claim: it would delete the file, or it is an RTK settings file
+ *  whose hook can come out. 02 keeps any other. */
+export function removableClaim(
+  read: UpgradeRead,
+  claim: { templateId: string; writtenHash: string },
+): boolean {
+  return (
+    deletableClaim(read, claim) ||
+    (read.kind === 'text' && withoutRtkHookEntry(claim.templateId, read.text) !== null)
+  );
 }
 
 /** The files that must import AGENTS.md for these providers: each import-mode `rulesFile`, once,

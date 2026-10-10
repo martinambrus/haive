@@ -54,15 +54,28 @@ it vouches for. `POST /repos/:id/mark-onboarded` is the manual route, for a run 
 the work and then failed at a late step (13-onboarding-push against a repo with no remote); it
 refuses when a marker is missing or a run is live.
 
-**A clone is admitted to an upgrade by its render context column.** A repository cloned from
-another install's onboarded commit has neither of the two things POST /tasks and upgrade-status
-gate an upgrade on, a completed onboarding task or a live artifact row, only the column the
-project-state sync filled from the checkout's record. `renderContextAdmitsUpgrade`
-(`api/src/lib/onboarding-state.ts`) is a third term, tried only after both fail. It requires that
-the column decodes (a refused one reads as NULL, as 01 reads it), that the repository is `ready`
-with a root, and that the verdict above calls it onboarded, which reads the reset epoch and
-refuses beside a live onboarding. The two older terms read neither. For a clone the column admits
-and no artifact row records, nothing on this install can say what changed. upgrade-status
-therefore offers it the first upgrade (`firstUpgradeOnThisInstall`) until a row records it,
-because the banner is the only place one starts. The offer outlives an upgrade task: one cancelled
-at 02's form has written no row.
+**One rule admits an upgrade, and a rollback.** `upgradeAdmission`
+(`api/src/lib/onboarding-state.ts`) is what POST /tasks, upgrade-status's banner and
+`POST /repositories/:id/rollback-upgrade` all ask. It refuses while an onboarding of the repository
+is live, naming the task, since an upgrade or a rollback beside it would race 07's writes. Then it
+admits on a completed onboarding since the reset epoch (`onboarding_reset_at`), or an
+onboarding-written artifact row since it. An upgrade's own rows do not count: before this rule an
+upgrade could start on a reset repository, so its rows prove nothing. The banner alone still shows
+an upgrade on a repository with no reset and any earlier upgrade task, which POST /tasks then
+refuses. A rollback is gated alike
+because it puts back files a reset removed. Each refusal has its own 409 text
+(`upgradeRefusalMessage`). An onboarding and an upgrade or rollback of one repository are created
+under one lock (`withRepositoryTaskLock`), each refusing the other inside it, so two requests at the
+same moment cannot both start. The lock also takes the repository row and refuses while a reset holds
+the root claim ([Onboarding reset](onboarding-reset.md)), and an upgrade or rollback re-runs
+`upgradeAdmission` inside it, so a reset epoch stamped after the early check still refuses.
+
+**A clone is admitted by its render context column.** A repository cloned from another install's
+onboarded commit has neither a completed onboarding task nor an artifact row, only the column the
+project-state sync filled from the checkout's record. `renderContextAdmitsUpgrade` is a third term,
+tried only after both fail. It requires that the column decodes (a refused one reads as NULL, as 01
+reads it), that the repository is `ready` with a root, and that the verdict above calls it
+onboarded. For a clone the column admits and no artifact row records, nothing on this install can
+say what changed. upgrade-status therefore offers it the first upgrade (`firstUpgradeOnThisInstall`)
+until a row records it, because the banner is the only place one starts. The offer outlives an
+upgrade task: one cancelled at 02's form has written no row.

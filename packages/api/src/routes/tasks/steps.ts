@@ -48,7 +48,7 @@ import { rollupToolUsage } from '../../lib/tool-usage-rollup.js';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
-import { refuseBesideLiveUpgrade } from '../upgrades.js';
+import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
 import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
@@ -235,6 +235,8 @@ async function moveTaskToStep(
   now: Date,
   opts: { fromFailed?: boolean } = {},
 ) {
+  // The task leaves `failed` here for every caller, so the revival checks sit here too.
+  await refuseReviveBesideLive(tx, taskId);
   await resetRowsForRerun(tx, taskId, leftActive, now);
   const [bumped] = await tx
     .update(schema.tasks)
@@ -300,6 +302,7 @@ export async function retryTaskAtStep(
   ];
   const now = new Date();
   const moved = await db.transaction(async (tx) => {
+    await refuseReviveBesideLive(tx, taskId);
     // Runs first and step rows after, the order a pass takes them in.
     const cancelled = await cancelLiveRuns(tx, taskId, 'user', now);
     await resetRowsForRerun(tx, taskId, reset, now);
@@ -675,6 +678,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   if (task.status === 'failed' && task.type === 'onboarding_upgrade' && task.repositoryId) {
     await refuseBesideLiveUpgrade(db, task.repositoryId);
   }
+  if (task.status === 'failed') await db.transaction((tx) => refuseReviveBesideLive(tx, id));
 
   // Target the row awaiting submission: filter to waiting_form + the latest round, so a
   // round > 0 parked form (a fix-loop escalation gate or a manual-mode fix round) is
@@ -768,31 +772,34 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
   const closedIdleMs = step.waitingStartedAt
     ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
     : 0;
-  // Persist the answer to task_events (NOT form_values) and close the idle period.
-  await db.insert(schema.taskEvents).values({
-    taskId: id,
-    taskStepId: step.id,
-    eventType: MERGE_CLARIFICATION_ANSWERED_EVENT,
-    payload: { answer: body.answer },
-  });
-  await db
-    .update(schema.taskSteps)
-    .set({ idleMs: step.idleMs + closedIdleMs, waitingStartedAt: null, updatedAt: now })
-    .where(eq(schema.taskSteps.id, step.id));
+  await db.transaction(async (tx) => {
+    await refuseReviveBesideLive(tx, id);
+    // Persist the answer to task_events (NOT form_values) and close the idle period.
+    await tx.insert(schema.taskEvents).values({
+      taskId: id,
+      taskStepId: step.id,
+      eventType: MERGE_CLARIFICATION_ANSWERED_EVENT,
+      payload: { answer: body.answer },
+    });
+    await tx
+      .update(schema.taskSteps)
+      .set({ idleMs: step.idleMs + closedIdleMs, waitingStartedAt: null, updatedAt: now })
+      .where(eq(schema.taskSteps.id, step.id));
 
-  await appendTaskEvent(db, id, step.id, 'step.clarified', { stepId });
-  // Answering reopens a task that failed while this form waited. The answer rides task_events
-  // rather than the job, so the worker cannot tell this advance from one queued before the failure.
-  await db
-    .update(schema.tasks)
-    .set({
-      status: 'running',
-      errorMessage: null,
-      completedAt: null,
-      ...CLEAR_ALLOWANCE_WATCH,
-      updatedAt: now,
-    })
-    .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')));
+    await appendTaskEvent(tx, id, step.id, 'step.clarified', { stepId });
+    // Answering reopens a task that failed while this form waited. The answer rides task_events
+    // rather than the job, so the worker cannot tell this advance from one queued before the failure.
+    await tx
+      .update(schema.tasks)
+      .set({
+        status: 'running',
+        errorMessage: null,
+        completedAt: null,
+        ...CLEAR_ALLOWANCE_WATCH,
+        updatedAt: now,
+      })
+      .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')));
+  });
 
   const queue = getTaskQueue();
   const payload: TaskJobPayload = { taskId: id, userId, stepId, round: step.round };
@@ -882,6 +889,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
 
     let newEpoch = 0;
     const activatedMeanwhile = await db.transaction(async (tx) => {
+      await refuseReviveBesideLive(tx, id);
       const now = new Date();
       const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
       // Retry resets the clicked step AND its downstream; see resetRowsForRerun for what a
@@ -1079,6 +1087,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       );
       let newEpoch = task.orchestrationEpoch;
       const activatedMeanwhile = await db.transaction(async (tx) => {
+        await refuseReviveBesideLive(tx, id);
         await tx
           .update(schema.taskStepAgentMinings)
           .set({ userRetryRequestedAt: now, updatedAt: now })
@@ -1197,6 +1206,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     );
     const now = new Date();
     const moved = await db.transaction(async (tx) => {
+      await refuseReviveBesideLive(tx, id);
       // Supersede ONLY the failed pass's invocation (latest non-superseded,
       // non-consumed). Prior passes are already consumed; with this superseded,
       // resolveLlmPhase sees no live invocation and re-enqueues pass N afresh.
@@ -1299,6 +1309,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       [step.id],
     );
     const moved = await db.transaction(async (tx) => {
+      await refuseReviveBesideLive(tx, id);
       // Supersede the failed pass's invocation, then preserve detect/form/values
       // and set the fix marker so advanceStep runs the fix agent next.
       await tx
@@ -1382,6 +1393,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
       : 0;
     const moved = await db.transaction(async (tx) => {
+      await refuseReviveBesideLive(tx, id);
       await tx
         .update(schema.taskSteps)
         .set({
@@ -1835,6 +1847,8 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     const now = new Date();
     const contrib = computeFoldContribution(step, now.getTime());
     redrive = await db.transaction(async (tx) => {
+      // The repository lock first, in the order the worker's revivals take it, before any row lock.
+      if (movesTask) await refuseReviveBesideLive(tx, id);
       // A failed step still carries its ended cli_invocation. Without superseding
       // it here, the re-advance below makes resolveLlmPhase re-read that old
       // invocation and re-surface its error (and its provider) instead of

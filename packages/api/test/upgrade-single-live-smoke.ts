@@ -78,6 +78,15 @@ async function main(): Promise<void> {
       createdAt: now,
       updatedAt: now,
     });
+    // An upgrade is admitted only on an onboarded repository, a revival included.
+    await db.insert(schema.tasks).values({
+      userId,
+      repositoryId,
+      type: 'onboarding',
+      title: 'onboarding',
+      status: 'completed',
+      completedAt: new Date(now.getTime() - 60_000),
+    });
 
     const [failed] = await db
       .insert(schema.tasks)

@@ -37,7 +37,7 @@ const { LIVE_TASK_STATUSES } = onboardingState;
  * every state of the verdict (live onboarding, reset epoch, status, markers) is real here.
  */
 const REPO = '00000000-0000-4000-8000-0000000000c1';
-const NO_ONBOARDING = 'No completed onboarding found for this repository; cannot upgrade';
+const NO_ONBOARDING = 'No completed onboarding found for this repository, so it cannot be upgraded';
 
 const app = new Hono<AppEnv>();
 app.use(async (c, next) => {
@@ -112,8 +112,9 @@ interface World {
   tasks?: TaskSeed[];
   /** Onboarding tasks of another repository of the same user. */
   otherTasks?: TaskSeed[];
-  /** A live artifact row, which the existing gate admits on its own. */
-  artifact?: boolean;
+  /** A live artifact row, which the existing gate admits on its own. `at` dates it and `source` names
+   *  what wrote it. */
+  artifact?: boolean | { at: number; source?: 'onboarding' | 'upgrade' };
 }
 
 /** One repository the way POST /tasks finds it, in a database that evaluates its filters. */
@@ -170,8 +171,8 @@ async function world(w: World = {}) {
       templateContentHash: 'h',
       writtenHash: 'w',
       sourceStepId: '12-post-onboarding',
-      source: 'onboarding',
-      generatedAt: new Date(0),
+      source: typeof w.artifact === 'object' ? (w.artifact.source ?? 'onboarding') : 'onboarding',
+      generatedAt: new Date(typeof w.artifact === 'object' ? w.artifact.at : 0),
       supersededAt: null,
     });
   }
@@ -230,7 +231,7 @@ describe('POST /tasks starts an upgrade on a repository only its render context 
       const t = await world({ tasks: [{ status }] });
       const res = await startUpgrade();
       expect(res.status).toBe(409);
-      expect(await refusal(res)).toBe(NO_ONBOARDING);
+      expect(await refusal(res)).toContain(t.seeded[0]!);
       expect(t.upgrades()).toEqual([]);
     },
   );
@@ -253,7 +254,7 @@ describe('POST /tasks starts an upgrade on a repository only its render context 
     const t = await world({ resetAt: 1000, tasks });
     const res = await startUpgrade();
     expect(res.status).toBe(409);
-    expect(await refusal(res)).toBe(NO_ONBOARDING);
+    expect(await refusal(res)).toMatch(/reset/);
     expect(t.upgrades()).toEqual([]);
   });
 
@@ -351,26 +352,8 @@ describe('POST /tasks starts an upgrade on a repository only its render context 
   });
 });
 
-// The existing terms stay as they are: aligning them with the verdict is #165 and #166's own fix.
+// The artifact term needs neither the column nor the markers; what it reads of a reset is below.
 describe('POST /tasks keeps the terms it already had, whatever the column says', () => {
-  it.each([
-    ['NULL', null],
-    ['refused', {}],
-    ['a column it reads', undefined],
-  ])(
-    'P1: admits a completed onboarding from before a reset, with a %s column',
-    async (_n, column) => {
-      const t = await world({
-        column,
-        resetAt: 5000,
-        tasks: [{ status: 'completed', completedAt: 1 }],
-      });
-      const res = await startUpgrade();
-      expect(res.status).toBe(201);
-      expect(t.upgrades()).toHaveLength(1);
-    },
-  );
-
   it.each([
     ['NULL', null],
     ['refused', {}],
@@ -385,18 +368,93 @@ describe('POST /tasks keeps the terms it already had, whatever the column says',
     },
   );
 
-  it('P3: admits a live artifact row beside a live onboarding', async () => {
-    const t = await world({ column: null, artifact: true, tasks: [{ status: 'running' }] });
-    const res = await startUpgrade();
-    expect(res.status).toBe(201);
-    expect(t.upgrades()).toHaveLength(1);
-  });
-
   it('P4: refuses a repository with no column, no onboarding and no row, with the text it always had', async () => {
     const t = await world({ column: null });
     const res = await startUpgrade();
     expect(res.status).toBe(409);
     expect(await refusal(res)).toBe(NO_ONBOARDING);
+    expect(t.upgrades()).toEqual([]);
+  });
+});
+
+// #165, #166: the gate's older terms (a completed onboarding, a live row) read neither the reset epoch
+// nor a live onboarding, so a reset repository took an upgrade, and one could start beside a run.
+describe('POST /tasks starts an upgrade only on a repository the onboarding verdict calls onboarded', () => {
+  const RESET = 5000;
+
+  it.each([
+    ['NULL', null],
+    ['refused', {}],
+    ['readable', undefined],
+  ])('refuses a completion from before the reset, with a %s column', async (_n, column) => {
+    const t = await world({
+      column,
+      resetAt: RESET,
+      tasks: [{ status: 'completed', completedAt: 1000 }],
+    });
+    const res = await startUpgrade();
+    expect(res.status).toBe(409);
+    expect(await refusal(res)).toMatch(/reset/);
+    expect(t.upgrades()).toEqual([]);
+  });
+
+  it('admits a completion from after the reset', async () => {
+    const t = await world({
+      column: null,
+      resetAt: RESET,
+      tasks: [{ status: 'completed', completedAt: 6000 }],
+    });
+    const res = await startUpgrade();
+    expect(res.status).toBe(201);
+    expect(t.upgrades()).toHaveLength(1);
+  });
+
+  it.each([...LIVE_TASK_STATUSES])(
+    'refuses beside an onboarding that is %s, though one completed before',
+    async (status) => {
+      const t = await world({
+        column: null,
+        tasks: [{ status: 'completed', completedAt: 1 }, { status }],
+      });
+      const res = await startUpgrade();
+      expect(res.status).toBe(409);
+      expect(await refusal(res)).toContain(t.seeded[1]!);
+      expect(t.upgrades()).toEqual([]);
+    },
+  );
+
+  it('refuses beside a running onboarding when a live artifact row would admit it', async () => {
+    const t = await world({ column: null, artifact: true, tasks: [{ status: 'running' }] });
+    const res = await startUpgrade();
+    expect(res.status).toBe(409);
+    expect(await refusal(res)).toContain(t.seeded[0]!);
+    expect(t.upgrades()).toEqual([]);
+  });
+
+  it('admits an onboarding row written after the reset, with no completion', async () => {
+    const t = await world({ column: null, resetAt: RESET, artifact: { at: 6000 } });
+    const res = await startUpgrade();
+    expect(res.status).toBe(201);
+    expect(t.upgrades()).toHaveLength(1);
+  });
+
+  it('refuses the rows a partial reset kept, which were written before it', async () => {
+    const t = await world({ column: null, resetAt: RESET, artifact: { at: 1000 } });
+    const res = await startUpgrade();
+    expect(res.status).toBe(409);
+    expect(await refusal(res)).toMatch(/reset/);
+    expect(t.upgrades()).toEqual([]);
+  });
+
+  it('does not take a row an upgrade wrote after the reset for an onboarding', async () => {
+    const t = await world({
+      column: null,
+      resetAt: RESET,
+      artifact: { at: 6000, source: 'upgrade' },
+    });
+    const res = await startUpgrade();
+    expect(res.status).toBe(409);
+    expect(await refusal(res)).toMatch(/reset/);
     expect(t.upgrades()).toEqual([]);
   });
 });

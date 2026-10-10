@@ -1,0 +1,413 @@
+import { and, desc, eq, inArray, isNull, max } from 'drizzle-orm';
+import { LIVE_TASK_STATUSES, schema, type Database, type DbTx } from '@haive/database';
+import { CLI_PROVIDER_LIST } from './cli-providers/index.js';
+import { lstatNoFollow } from './fs-safe.js';
+import { KB_DIR } from './knowledge-paths.js';
+import { readRenderContextColumn } from './project-state/index.js';
+
+/**
+ * The newest `generated_at` among the LIVE `onboarding_artifacts` rows of each repository.
+ *
+ * Only `12-post-onboarding` inserts those rows, so this dates the last time a run reached step 12
+ * of 27 — the evidence `mark-onboarded` needs and a completion date cannot give it, since the run
+ * that route exists for failed at a LATER step and has no `completed_at` at all.
+ *
+ * A LIVE row is NOT on its own evidence of a run since the reset, which is the trap here: a
+ * PARTIAL reset deliberately preserves the rows for paths it could not remove
+ * (`resolveKeptArtifactPaths`), so rows predating the epoch legitimately survive un-superseded.
+ * Reading their mere existence as "a run reached step 12 since the reset" would let a partial
+ * reset — whose markers also survive, by definition — hand back the stamp with no run at all.
+ * The caller compares this date against that repository's own epoch; the timestamp is returned
+ * rather than a boolean so the comparison happens where the epoch already is, instead of as a
+ * per-repository predicate inside one query.
+ *
+ * One query for the whole page.
+ */
+export async function loadNewestLiveArtifactAt(
+  db: Database | DbTx,
+  userId: string,
+  repositoryIds: string[],
+): Promise<Map<string, Date>> {
+  const newest = new Map<string, Date>();
+  if (repositoryIds.length === 0) return newest;
+
+  const rows = await db
+    .select({
+      repositoryId: schema.onboardingArtifacts.repositoryId,
+      generatedAt: schema.onboardingArtifacts.generatedAt,
+    })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.userId, userId),
+        inArray(schema.onboardingArtifacts.repositoryId, repositoryIds),
+        isNull(schema.onboardingArtifacts.supersededAt),
+        // ONBOARDING writes only. `02-upgrade-apply` and the rollback path write through these
+        // same rows with `source` 'upgrade'/'rollback', and an upgrade is reachable on a repo
+        // that was reset: its gate accepts a COMPLETED onboarding task, and that row outlives
+        // the reset. Such a row proves an upgrade ran, never that onboarding reached step 12 —
+        // and taking it as proof would restore the stamp with no onboarding run behind it.
+        eq(schema.onboardingArtifacts.source, 'onboarding'),
+      ),
+    );
+
+  for (const row of rows) {
+    if (!row.repositoryId || row.generatedAt === null) continue;
+    const seen = newest.get(row.repositoryId);
+    if (seen === undefined || row.generatedAt > seen) newest.set(row.repositoryId, row.generatedAt);
+  }
+  return newest;
+}
+
+/** Whether a repository holds artifact rows written AFTER its reset epoch — the one reading of
+ *  `loadNewestLiveArtifactAt` that is safe, shared so the list route, the status route and
+ *  `mark-onboarded` cannot drift apart on it. */
+export function hasArtifactsSinceReset(
+  newestArtifactAt: Date | undefined,
+  onboardingResetAt: Date | null,
+): boolean {
+  if (newestArtifactAt === undefined) return false;
+  // Never reset: there is no epoch to be after, and nothing consults this in that case anyway.
+  if (onboardingResetAt === null) return true;
+  return newestArtifactAt > onboardingResetAt;
+}
+
+/** What the tasks table knows about onboarding for one repository. */
+export interface OnboardingTaskFacts {
+  /** Successful workflow completion, for a repository created blank. This is separate from
+   *  onboarding history: a workflow must never cover for an abandoned onboarding run. */
+  newestCompletedWorkflowAt?: Date | null;
+  /** The newest onboarding task still in flight, or null. */
+  liveTaskId: string | null;
+  /** An onboarding run has finished successfully at some point. */
+  hasCompleted: boolean;
+  /** WHEN the newest such run finished, so the verdict can tell a completion that predates a
+   *  reset from one that followed it. Null when none completed, and also when the completed
+   *  rows carry no `completed_at` — kept separate from `hasCompleted` rather than replacing it,
+   *  because a legacy row with a null timestamp must not read as "never completed". */
+  newestCompletedAt: Date | null;
+  /** An onboarding run was ever STARTED here, whatever became of it. Distinguishes a repo
+   *  that arrived already onboarded (cloned in with `.claude/` and the KB committed) from
+   *  one whose only run was cancelled — the markers look identical for both. */
+  hasAny: boolean;
+}
+
+export const NO_ONBOARDING_TASKS: OnboardingTaskFacts = {
+  liveTaskId: null,
+  hasCompleted: false,
+  newestCompletedAt: null,
+  hasAny: false,
+};
+
+/**
+ * Onboarding history, with optional successful workflow completion evidence for blank repositories.
+ *
+ * Onboarding rows are folded to pick the newest live id and completion date. Workflow history
+ * is aggregated in SQL, returning at most one row per blank repository rather than transferring
+ * and sorting every completed task on each poll. Callers pass the blank IDs they already loaded;
+ * the SQL also verifies source and reset state. Other callers need only onboarding history.
+ */
+export async function loadOnboardingTaskFacts(
+  db: Database | DbTx,
+  userId: string,
+  repositoryIds: string[],
+  blankRepositoryIds: string[] = [],
+): Promise<Map<string, OnboardingTaskFacts>> {
+  const byRepo = new Map<string, OnboardingTaskFacts>();
+  if (repositoryIds.length === 0) return byRepo;
+
+  const [rows, workflowCompletions] = await Promise.all([
+    db
+      .select({
+        id: schema.tasks.id,
+        repositoryId: schema.tasks.repositoryId,
+        status: schema.tasks.status,
+        completedAt: schema.tasks.completedAt,
+      })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.userId, userId),
+          eq(schema.tasks.type, 'onboarding'),
+          inArray(schema.tasks.repositoryId, repositoryIds),
+        ),
+      )
+      .orderBy(desc(schema.tasks.createdAt)),
+    blankRepositoryIds.length === 0
+      ? Promise.resolve([])
+      : db
+          .select({
+            repositoryId: schema.tasks.repositoryId,
+            completedAt: max(schema.tasks.completedAt),
+          })
+          .from(schema.tasks)
+          .innerJoin(schema.repositories, eq(schema.tasks.repositoryId, schema.repositories.id))
+          .where(
+            and(
+              eq(schema.tasks.userId, userId),
+              eq(schema.repositories.userId, userId),
+              eq(schema.tasks.type, 'workflow'),
+              eq(schema.tasks.status, 'completed'),
+              eq(schema.repositories.source, 'blank'),
+              isNull(schema.repositories.onboardingResetAt),
+              inArray(schema.tasks.repositoryId, blankRepositoryIds),
+              inArray(schema.tasks.repositoryId, repositoryIds),
+            ),
+          )
+          .groupBy(schema.tasks.repositoryId),
+  ]);
+
+  for (const row of rows) {
+    if (!row.repositoryId) continue;
+    const entry = byRepo.get(row.repositoryId) ?? { ...NO_ONBOARDING_TASKS };
+    entry.hasAny = true;
+    if (row.status === 'completed') {
+      entry.hasCompleted = true;
+      // Rows arrive newest-first by `created_at`, which is not the same order as `completed_at`,
+      // so take the maximum rather than the first one seen.
+      if (
+        row.completedAt !== null &&
+        (entry.newestCompletedAt === null || row.completedAt > entry.newestCompletedAt)
+      ) {
+        entry.newestCompletedAt = row.completedAt;
+      }
+    }
+    // Rows arrive newest-first, so the first live one seen is the newest.
+    if (!entry.liveTaskId && (LIVE_TASK_STATUSES as readonly string[]).includes(row.status)) {
+      entry.liveTaskId = row.id;
+    }
+    byRepo.set(row.repositoryId, entry);
+  }
+  for (const row of workflowCompletions) {
+    if (!row.repositoryId || row.completedAt === null) continue;
+    const entry = byRepo.get(row.repositoryId) ?? { ...NO_ONBOARDING_TASKS };
+    entry.newestCompletedWorkflowAt = row.completedAt;
+    byRepo.set(row.repositoryId, entry);
+  }
+  return byRepo;
+}
+
+export const ONBOARDING_MARKERS = [
+  KB_DIR,
+  '.claude/agents',
+  '.claude/skills',
+  '.claude/workflow-config.json',
+];
+
+/** 07 and 09_5 write agents and skills only into each enabled CLI's own directory, so these two
+ *  markers stand for that directory of any CLI in the catalog. */
+const MARKER_CANDIDATES: Readonly<Record<string, readonly string[]>> = {
+  '.claude/agents': [
+    ...new Set(
+      CLI_PROVIDER_LIST.flatMap((p) =>
+        p.projectAgentsDir !== null && p.agentFileFormat !== null ? [p.projectAgentsDir] : [],
+      ),
+    ),
+  ],
+  '.claude/skills': [...new Set(CLI_PROVIDER_LIST.map((p) => p.projectSkillsDir))],
+};
+
+/** Which ONBOARDING_MARKERS exist on disk. NOT the onboarded verdict on its own — every
+ *  one of them is written by 07-generate-files, the 8th of 27 onboarding steps, so a
+ *  cancelled run and a live one leave exactly the same files; `resolveOnboardingVerdict`
+ *  combines this with the repo's onboarding task history. Marker checks run in parallel;
+ *  results keep marker order so the detail endpoint's present/missing lists stay stable. */
+export async function checkOnboardingMarkers(
+  root: string,
+): Promise<{ present: string[]; missing: string[] }> {
+  const results = await Promise.all(
+    ONBOARDING_MARKERS.map(async (rel) => {
+      // `pathExists` is `stat`-based: it followed a link and read a dangling one as absent, so a
+      // linked `.claude/agents` counted as installed while the definitions it named lived outside
+      // the tree — and these counts are what the onboarded verdict and `mark-onboarded` rest on.
+      const found = await Promise.all(
+        (MARKER_CANDIDATES[rel] ?? [rel]).map(async (candidate) => {
+          const info = await lstatNoFollow(root, candidate);
+          return info !== null && (info.kind === 'file' || info.kind === 'directory');
+        }),
+      );
+      return [rel, found.includes(true)] as const;
+    }),
+  );
+  return {
+    present: results.filter(([, ok]) => ok).map(([rel]) => rel),
+    missing: results.filter(([, ok]) => !ok).map(([rel]) => rel),
+  };
+}
+
+export interface OnboardingVerdict {
+  onboarded: boolean;
+  /** Set while an onboarding run is in flight. The repo is NOT onboarded then, and this is
+   *  what lets the UI say which of the two reasons applies. */
+  inProgressTaskId: string | null;
+  /** The markers are all on disk but the run that wrote them never finished here — the one
+   *  case POST /repos/:id/mark-onboarded exists for. */
+  canMarkOnboarded: boolean;
+}
+
+export function hasCompletedSinceReset(
+  facts: OnboardingTaskFacts,
+  onboardingResetAt: Date | null,
+): boolean {
+  // A run that finished BEFORE the reset says nothing about the tree the reset left behind. A
+  // completed run carrying no `completed_at` cannot be placed on either side of the epoch, so it
+  // fails closed — the safe direction, and unreachable in practice since `markTaskCompleted`
+  // writes that column in the same UPDATE as the status.
+  return (
+    facts.hasCompleted &&
+    (onboardingResetAt === null ||
+      (facts.newestCompletedAt !== null && facts.newestCompletedAt > onboardingResetAt))
+  );
+}
+
+/**
+ * Is this repository onboarded?
+ *
+ * The four on-disk markers say a run reached 07-generate-files (the 8th of 27 steps), not
+ * that it finished — a cancelled run and a live one leave the same files. The verdict is the
+ * TASK's, with the markers kept as a gate rather than as the evidence:
+ *
+ *   onboarded = markers present
+ *               AND no live onboarding run
+ *               AND (onboarded_at set OR a completed run OR no run was ever started here)
+ *
+ * A repository created blank with no onboarding history or reset can instead use a completed
+ * workflow, with no marker requirement. A setup-only task can generate none of
+ * those artifacts; its completion still admits the next workflow.
+ *
+ * The last clause is what keeps a repository cloned in already onboarded — and every repo
+ * onboarded before this column existed — reading exactly as it did, so nothing needs a
+ * backfill and no boot-time migration can re-stamp a repo whose artifacts were just reset.
+ *
+ * EVERY piece of evidence is read against `onboarding_reset_at`, not just the column. Blocking
+ * the `onboarded_at` write alone was cosmetic: the completed onboarding task row lives forever,
+ * so `hasCompleted` kept answering yes and the repo went on reading `onboarded` across a reset
+ * whatever the stamp did. With no epoch every term below is byte-identical to what it was, which
+ * is what makes this deployable with no backfill.
+ *
+ * Pure, so the table above is unit-testable without a database or a filesystem.
+ */
+export function resolveOnboardingVerdict(input: {
+  /** Only repositories created blank can complete onboarding through their first workflow. */
+  source?: string;
+  /** Markers absent from disk; empty means all four are present. */
+  missing: string[];
+  onboardedAt: Date | null;
+  /** `repositories.onboarding_reset_at`. Null on every repo nobody has reset. */
+  onboardingResetAt?: Date | null;
+  /** Whether this repository holds artifact rows written AFTER its reset epoch — from
+   *  `hasArtifactsSinceReset`, never from the mere existence of a live row, which a PARTIAL reset
+   *  preserves for the paths it could not remove. Only `12-post-onboarding` writes them, so one
+   *  dated after the epoch is proof a run reached step 12 of 27 since the reset. Omitted defaults
+   *  to false, which is exactly the behaviour before this existed. */
+  hasArtifactsSinceReset?: boolean;
+  facts: OnboardingTaskFacts;
+}): OnboardingVerdict {
+  const { missing, onboardedAt, facts } = input;
+  const onboardingResetAt = input.onboardingResetAt ?? null;
+  const hasArtifactsSinceReset = input.hasArtifactsSinceReset ?? false;
+  const markersPresent = missing.length === 0;
+  const inProgressTaskId = facts.liveTaskId;
+
+  const completedSinceReset = hasCompletedSinceReset(facts, onboardingResetAt);
+  // "No run was ever started here" is evidence only until someone resets: a reset IS a run
+  // having been started and then taken back.
+  const neverStarted = !facts.hasAny && onboardingResetAt === null;
+
+  // A setup-only workflow (including quick_bugfix) can finish without writing KB, agents or
+  // skills. Neither an explicit reset nor an actual onboarding run can be answered by this
+  // shortcut. Workflow evidence lives only in task history: onboardedAt remains an onboarding
+  // stamp, so it cannot cover for a later onboarding run that failed after writing its markers.
+  const greenfieldCompleted =
+    input.source === 'blank' && neverStarted && facts.newestCompletedWorkflowAt != null;
+
+  const onboarded =
+    inProgressTaskId === null &&
+    (greenfieldCompleted ||
+      (markersPresent && (onboardedAt !== null || completedSinceReset || neverStarted)));
+
+  // Marking by hand must not undo a reset — but it must still WORK for the case it exists for.
+  //
+  // Requiring a post-reset COMPLETION made this route dead on every reset repository, and in
+  // exactly its documented case: a run that "did the work and then failed at a late step"
+  // (13-onboarding-push against a repo with no remote) never writes `completed_at` at all, while
+  // a run that DID complete is already stamped by `stampRepositoryOnboarded` and needs no button.
+  // So the condition that was meant to guard the hatch closed it.
+  //
+  // A live artifact row is the evidence that separates the two. The reset supersedes every row,
+  // and only `12-post-onboarding` writes them, so a live one means a run reached step 12 of 27
+  // SINCE the reset — which is what "did the work" means here. A repo whose markers are merely
+  // leftovers the reset could not remove has no such row and is still refused.
+  const resetUnanswered =
+    onboardingResetAt !== null && !completedSinceReset && !hasArtifactsSinceReset;
+
+  return {
+    onboarded,
+    inProgressTaskId,
+    canMarkOnboarded: markersPresent && !onboarded && inProgressTaskId === null && !resetUnanswered,
+  };
+}
+
+export interface RepositoryForUpgrade {
+  id: string;
+  source?: string;
+  renderContext: unknown;
+  status: string;
+  storagePath: string | null;
+  localPath: string | null;
+  onboardedAt: Date | null;
+  onboardingResetAt: Date | null;
+}
+
+/** Whether the render context column vouches for an upgrade no row or onboarding does, as on a
+ *  clone: 01 renders from it, and the repos page shows the repository as onboarded. */
+export async function renderContextAdmitsUpgrade(
+  db: Database | DbTx,
+  userId: string,
+  repo: RepositoryForUpgrade,
+): Promise<boolean> {
+  if (readRenderContextColumn(repo.renderContext).kind !== 'column') return false;
+  const root = repo.storagePath ?? repo.localPath;
+  if (repo.status !== 'ready' || !root) return false;
+  const { missing } = await checkOnboardingMarkers(root);
+  const facts =
+    (
+      await loadOnboardingTaskFacts(db, userId, [repo.id], repo.source === 'blank' ? [repo.id] : [])
+    ).get(repo.id) ?? NO_ONBOARDING_TASKS;
+  return resolveOnboardingVerdict({
+    source: repo.source,
+    missing,
+    onboardedAt: repo.onboardedAt,
+    onboardingResetAt: repo.onboardingResetAt,
+    facts,
+  }).onboarded;
+}
+
+export type UpgradeAdmission =
+  | { admitted: true }
+  | { admitted: false; reason: 'live-onboarding'; taskId: string }
+  | { admitted: false; reason: 'reset' | 'none' };
+
+/** The rule the banner and POST /tasks share: no live onboarding, and an onboarding finished, or a
+ *  row it wrote, since the reset epoch, or the render context column of a clone. */
+export async function upgradeAdmission(
+  db: Database | DbTx,
+  userId: string,
+  repo: RepositoryForUpgrade,
+): Promise<UpgradeAdmission> {
+  const resetAt = repo.onboardingResetAt ?? null;
+  const facts =
+    (await loadOnboardingTaskFacts(db, userId, [repo.id])).get(repo.id) ?? NO_ONBOARDING_TASKS;
+  if (facts.liveTaskId) {
+    return { admitted: false, reason: 'live-onboarding', taskId: facts.liveTaskId };
+  }
+  if (hasCompletedSinceReset(facts, resetAt)) return { admitted: true };
+  const newestArtifactAt = (await loadNewestLiveArtifactAt(db, userId, [repo.id])).get(repo.id);
+  if (
+    hasArtifactsSinceReset(newestArtifactAt, resetAt) ||
+    (await renderContextAdmitsUpgrade(db, userId, repo))
+  ) {
+    return { admitted: true };
+  }
+  return { admitted: false, reason: resetAt === null ? 'none' : 'reset' };
+}

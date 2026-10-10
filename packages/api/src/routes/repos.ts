@@ -2783,8 +2783,8 @@ async function runOnboardingArtifactReset(
   );
 
   // Rows that name deleted files must not stay live: they feed the upgrade planner and the
-  // rollback. `applicableTemplateIds` is left alone — the next apply overwrites it, and with no
-  // live rows the banner already reads "not onboarded".
+  // rollback. `applicableTemplateIds` is left alone — the next apply overwrites it, and the epoch
+  // stamped below makes the banner read "not onboarded" until an onboarding finishes again.
   //
   // A row for a path the reset LEFT ALONE stays live, and that is the point. A partial reset —
   // the KB removed, one settings file unreadable — used to supersede everything, which dropped

@@ -1,7 +1,17 @@
 import { Hono } from 'hono';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
 import {
+  checkRevive,
+  isRootClaimLive,
+  liveTaskIdOfType,
+  lockRepositoryRow,
+  rootClaimRefusal,
+  schema,
+  type DbTx,
+  type RootClaimKind,
+} from '@haive/database';
+import {
+  agentSpecSchema,
   buildCliRulesBlockFromProviders,
   bundleAgentTemplateHash,
   CLI_RULES_SCHEMA_VERSION,
@@ -13,7 +23,7 @@ import {
   RTK_SETTINGS_FILES,
   rtkSettingsNeeded,
   sha256Hex,
-  withoutRtkHookEntry,
+  skillEntrySchema,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
@@ -29,13 +39,22 @@ import {
 import {
   importRulesFilesFor,
   readUpgradeFile,
+  deletableClaim,
+  removableClaim,
   rtkBlockFiles,
   rulesImportState,
 } from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { LIVE_TASK_STATUSES, renderContextAdmitsUpgrade } from '../lib/onboarding-state.js';
+import {
+  LIVE_TASK_STATUSES,
+  liveOnboardingMessage,
+  renderContextAdmitsUpgrade,
+  type RepositoryForUpgrade,
+  upgradeAdmission,
+  upgradeRefusalMessage,
+} from '../lib/onboarding-state.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 
 export const upgradeRoutes = new Hono<AppEnv>();
@@ -156,21 +175,6 @@ async function rtkSettingsLeftovers(
   return found;
 }
 
-/** Whether 02 could still act on a claim's file: it is absent, holds its row's bytes, or is an RTK
- *  settings file whose hook can come out. 02 keeps any other, so reporting one offers nothing. */
-async function removableClaim(
-  root: string,
-  claim: { templateId: string; diskPath: string; writtenHash: string },
-): Promise<boolean> {
-  const read = await readUpgradeFile(root, claim.diskPath);
-  if (read.kind === 'absent') return true;
-  if (read.kind === 'unread') return false;
-  return (
-    sha256Hex(normalizeContent(read.text)) === claim.writtenHash ||
-    withoutRtkHookEntry(claim.templateId, read.text) !== null
-  );
-}
-
 /**
  * Report whether an upgrade is available for a repository by comparing the
  * installed artifact fingerprints against the worker-synced manifest cache.
@@ -219,16 +223,24 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       kind: schema.customBundleItems.kind,
       schemaVersion: schema.customBundleItems.schemaVersion,
       contentHash: schema.customBundleItems.contentHash,
+      normalizedSpec: schema.customBundleItems.normalizedSpec,
     })
     .from(schema.customBundleItems)
     .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
     .where(eq(schema.customBundles.repositoryId, repositoryId));
-  const customCurrent = bundleItems.map((b) => ({
-    templateId: `custom.${b.bundleId}.${b.itemId}`,
-    schemaVersion: b.schemaVersion,
-    // The hash the worker records on an agent's artifact rows (expandCustomBundlesFor).
-    contentHash: b.kind === 'agent' ? bundleAgentTemplateHash(b.contentHash) : b.contentHash,
-  }));
+  // 01 skips an item whose spec fails the schema its loader parses it with, so no rendering is current.
+  const customCurrent = bundleItems
+    .filter(
+      (b) =>
+        (b.kind === 'agent' ? agentSpecSchema : skillEntrySchema).safeParse(b.normalizedSpec)
+          .success,
+    )
+    .map((b) => ({
+      templateId: `custom.${b.bundleId}.${b.itemId}`,
+      schemaVersion: b.schemaVersion,
+      // The hash the worker records on an agent's artifact rows (expandCustomBundlesFor).
+      contentHash: b.kind === 'agent' ? bundleAgentTemplateHash(b.contentHash) : b.contentHash,
+    }));
 
   // The AGENTS.md cli-rules region is per-repo content (the repo owner's merged
   // provider rules), so it is not in the global manifest cache. Recompute its
@@ -344,7 +356,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // the user explicitly kept it after a prior upgrade flagged it obsolete.
   // Including it in the drift comparison would make the banner perpetually
   // say "Upgrade available" with the same orphaned items.
-  const liveCustomItemIds = new Set(customCurrent.map((c) => c.templateId));
+  const liveCustomItemIds = new Set(bundleItems.map((b) => `custom.${b.bundleId}.${b.itemId}`));
   const distinctInstalled = new Map<
     string,
     {
@@ -426,7 +438,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     for (const a of liveArtifacts) {
       const id = a.templateId;
       if (applicableSet.has(id) || isPerRepoTemplateId(id) || outsideRemovable.has(id)) continue;
-      if (await removableClaim(root, a)) outsideRemovable.add(id);
+      if (removableClaim(await readUpgradeFile(root, a.diskPath), a)) outsideRemovable.add(id);
     }
   }
   const filteredInstalled = new Map(
@@ -467,10 +479,24 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // Per-template comparison: which template IDs differ between installed
   // and current manifest? Used by the UI banner.
   const changedTemplateIds: string[] = [];
+  const obsoleteTemplateIds: string[] = [];
+  const retiredTemplateIds: string[] = [];
+  // 02 deletes a file only while it holds the bytes its row wrote; stripping an RTK hook is no deletion.
+  const removableRow = async (id: string) => {
+    if (!root) return false;
+    for (const a of liveArtifacts) {
+      if (a.templateId === id && deletableClaim(await readUpgradeFile(root, a.diskPath), a)) {
+        return true;
+      }
+    }
+    return false;
+  };
   for (const [id, installed] of filteredInstalled.entries()) {
     const current = currentByTemplate.get(id);
     if (!current) {
       changedTemplateIds.push(id);
+      retiredTemplateIds.push(id);
+      if (await removableRow(id)) obsoleteTemplateIds.push(id);
       continue;
     }
     if (
@@ -486,9 +512,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }
   }
 
-  const isOnboarded = distinctInstalled.size > 0;
+  const admission = await upgradeAdmission(db, userId, repo);
+  let admitted = admission.admitted;
   let firstUpgradeOnThisInstall = false;
-  if (!isOnboarded) {
+  if (admitted && distinctInstalled.size === 0) {
     const priorOnboarding = await db.query.tasks.findFirst({
       where: and(
         eq(schema.tasks.repositoryId, repositoryId),
@@ -502,36 +529,36 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     // one until a row records it, whatever became of an upgrade that recorded nothing.
     firstUpgradeOnThisInstall =
       !priorOnboarding && (await renderContextAdmitsUpgrade(db, userId, repo));
+  }
+  if (!admission.admitted && admission.reason === 'none') {
     // POST /tasks starts an upgrade only on an onboarded repository, so one any upgrade ran on is one.
-    const [anyUpgrade] =
-      priorOnboarding || firstUpgradeOnThisInstall
-        ? []
-        : await db
-            .select({ id: schema.tasks.id })
-            .from(schema.tasks)
-            .where(
-              and(
-                eq(schema.tasks.repositoryId, repositoryId),
-                eq(schema.tasks.userId, userId),
-                eq(schema.tasks.type, 'onboarding_upgrade'),
-              ),
-            )
-            .limit(1);
-    if (!priorOnboarding && !firstUpgradeOnThisInstall && !anyUpgrade) {
-      const res: UpgradeStatusResponse = {
-        repositoryId,
-        hasUpgradeAvailable: false,
-        installedTemplateSetHash: null,
-        currentTemplateSetHash: currentSetHash,
-        changedTemplateIds: [],
-        isOnboarded: false,
-        installedHaiveVersion: null,
-        currentHaiveVersion,
-        hasInProgressUpgradeSession: false,
-        hasPriorUpgrade: false,
-      };
-      return c.json(res);
-    }
+    const [anyUpgrade] = await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.userId, userId),
+          eq(schema.tasks.type, 'onboarding_upgrade'),
+        ),
+      )
+      .limit(1);
+    admitted = anyUpgrade !== undefined;
+  }
+  if (!admitted) {
+    const res: UpgradeStatusResponse = {
+      repositoryId,
+      hasUpgradeAvailable: false,
+      installedTemplateSetHash: null,
+      currentTemplateSetHash: currentSetHash,
+      changedTemplateIds: [],
+      isOnboarded: false,
+      installedHaiveVersion: null,
+      currentHaiveVersion,
+      hasInProgressUpgradeSession: false,
+      hasPriorUpgrade: false,
+    };
+    return c.json(res);
   }
 
   // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.
@@ -597,6 +624,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     hasInProgressUpgradeSession: hasInProgressUpgradeTask,
     hasPriorUpgrade,
     inProgressUpgradeTaskId: inProgressUpgradeTask[0]?.id ?? null,
+    ...(obsoleteTemplateIds.length > 0 ? { obsoleteTemplateIds } : {}),
+    ...(retiredTemplateIds.length > 0 ? { retiredTemplateIds } : {}),
     ...(customChanges.length > 0 ? { customChanges } : {}),
     ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
@@ -635,38 +664,89 @@ export async function refuseBesideLiveUpgrade(
   db: ReturnType<typeof getDb> | DbTx,
   repositoryId: string,
 ): Promise<void> {
-  const [live] = await db
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, repositoryId),
-        eq(schema.tasks.type, 'onboarding_upgrade'),
-        inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
-      ),
-    )
-    .limit(1);
-  if (live) {
-    throw new HttpError(
-      409,
-      `An upgrade or rollback is already in progress for this repository (task ${live.id})`,
-    );
-  }
+  const liveId = await liveTaskIdOfType(db, repositoryId, 'onboarding_upgrade');
+  if (liveId) throw new HttpError(409, liveUpgradeMessage(liveId));
 }
 
-/** Insert an upgrade or a rollback task only while no other one of the repository is live, since two
- *  running side by side apply and revert the same files. Serialised per repository, so two clicks
- *  cannot both pass the check. */
-export async function insertUpgradeTask<T>(
+function liveUpgradeMessage(taskId: string): string {
+  return `An upgrade or rollback is already in progress for this repository (task ${taskId})`;
+}
+
+/** Run `work` in a transaction holding the repository's onboarding and upgrade lock, so the checks
+ *  it makes and the insert it ends with cannot interleave with another creator's. The repository
+ *  row is locked too, and a live root claim refuses: a reset that claims the root afterwards waits
+ *  for this commit and finds the task among the writers it refuses for. */
+export async function withRepositoryTaskLock<T>(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
+  work: (tx: DbTx, repo: RepositoryForUpgrade) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => work(tx, await lockRepositoryTasks(tx, repositoryId)));
+}
+
+async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
+  const repo = await lockRepositoryRow(tx, repositoryId);
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  if (isRootClaimLive(repo.rootClaimedAt)) {
+    throw new HttpError(409, rootClaimRefusal(repo.rootClaimKind as RootClaimKind | null));
+  }
+  return repo;
+}
+
+/** Call first in the transaction that moves an onboarding or upgrade task out of a non-live
+ *  status. Creation checks under the repository lock, and a failed task is not live, so the
+ *  revival takes the same lock and makes the creation's checks (`checkRevive`, which the worker's
+ *  revival runs too): an onboarding beside a live upgrade or rollback, an upgrade or rollback
+ *  beside a live onboarding, a live root claim. An upgrade or rollback is also admitted again, as
+ *  at creation, so one a reset has since cut off cannot continue. */
+export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<void> {
+  const check = await checkRevive(tx, taskId);
+  if (!check) return;
+  const rollback = (check.task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
+  const action = rollback ? 'rolled back' : 'upgraded';
+  const refusal = check.refusal;
+  if (refusal) {
+    switch (refusal.reason) {
+      case 'no-repository':
+        throw new HttpError(404, 'Repository not found');
+      case 'root-claim':
+        throw new HttpError(409, rootClaimRefusal(refusal.claimKind));
+      case 'live-upgrade':
+        throw new HttpError(409, liveUpgradeMessage(refusal.taskId));
+      case 'live-onboarding':
+        throw new HttpError(
+          409,
+          check.task.type === 'onboarding'
+            ? liveOnboardingMessage(refusal.taskId)
+            : upgradeRefusalMessage(
+                { admitted: false, reason: 'live-onboarding', taskId: refusal.taskId },
+                action,
+              ),
+        );
+    }
+  }
+  if (check.task.type !== 'onboarding_upgrade') return;
+  const admission = await upgradeAdmission(tx, check.task.userId, check.repo);
+  if (!admission.admitted) throw new HttpError(409, upgradeRefusalMessage(admission, action));
+}
+
+/** Insert an upgrade or a rollback task only while no other one of the repository is live and no
+ *  onboarding runs, since two running side by side apply and revert the same files. Serialised per
+ *  repository with onboarding's creation, so two clicks cannot both pass the check. The admission
+ *  is read again here, on the locked row, so a reset stamped since the early check refuses. */
+export async function insertUpgradeTask<T>(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  repositoryId: string,
+  action: 'upgraded' | 'rolled back',
   insert: (tx: DbTx) => Promise<T>,
 ): Promise<T> {
-  return db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
-    );
+  return withRepositoryTaskLock(db, repositoryId, async (tx, repo) => {
     await refuseBesideLiveUpgrade(tx, repositoryId);
+    const admission = await upgradeAdmission(tx, userId, repo);
+    if (!admission.admitted) {
+      throw new HttpError(409, upgradeRefusalMessage(admission, action));
+    }
     return insert(tx);
   });
 }
@@ -708,34 +788,55 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
 
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
-    columns: { id: true, name: true },
+    columns: {
+      id: true,
+      name: true,
+      renderContext: true,
+      source: true,
+      status: true,
+      storagePath: true,
+      localPath: true,
+      onboardedAt: true,
+      onboardingResetAt: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
+  // A rollback restores files a reset removed, or races a live onboarding, so it is admitted alike.
+  const admission = await upgradeAdmission(db, userId, repo);
+  if (!admission.admitted) {
+    throw new HttpError(409, upgradeRefusalMessage(admission, 'rolled back'));
+  }
 
-  const { task, queued } = await insertUpgradeTask(db, repositoryId, async (tx) => {
-    const priorUpgrade = await latestUpgradeToRollBack(tx, repositoryId);
-    if (!priorUpgrade) {
-      throw new HttpError(
-        409,
-        'No completed upgrade to roll back: none has completed, or the last one was rolled back',
-      );
-    }
-    const [row] = await tx
-      .insert(schema.tasks)
-      .values({
-        userId,
-        type: 'onboarding_upgrade',
-        title: `Rollback upgrade: ${repo.name}`,
-        description: 'Revert the most recent onboarding upgrade for this repository.',
-        repositoryId,
-        metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade },
-        status: 'created',
-      })
-      .returning();
-    if (!row) throw new HttpError(500, 'Failed to create rollback task');
-    // Queued with the insert: a `created` rollback left behind would block the next one.
-    return { task: row, queued: await markQueuedForStart(tx, row.id) };
-  });
+  const { task, queued } = await insertUpgradeTask(
+    db,
+    userId,
+    repositoryId,
+    'rolled back',
+    async (tx) => {
+      const priorUpgrade = await latestUpgradeToRollBack(tx, repositoryId);
+      if (!priorUpgrade) {
+        throw new HttpError(
+          409,
+          'No completed upgrade to roll back: none has completed, or the last one was rolled back',
+        );
+      }
+      const [row] = await tx
+        .insert(schema.tasks)
+        .values({
+          userId,
+          type: 'onboarding_upgrade',
+          title: `Rollback upgrade: ${repo.name}`,
+          description: 'Revert the most recent onboarding upgrade for this repository.',
+          repositoryId,
+          metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade },
+          status: 'created',
+        })
+        .returning();
+      if (!row) throw new HttpError(500, 'Failed to create rollback task');
+      // Queued with the insert: a `created` rollback left behind would block the next one.
+      return { task: row, queued: await markQueuedForStart(tx, row.id) };
+    },
+  );
 
   if (queued) await enqueueStart(task.id, userId);
 

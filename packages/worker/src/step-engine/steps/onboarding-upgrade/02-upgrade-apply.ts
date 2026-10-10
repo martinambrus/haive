@@ -6,7 +6,12 @@ import {
   toSafeRel,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { readUpgradeFile, RULES_FILE_READ_CAP, type UnreadReason } from '@haive/shared/rules-files';
+import {
+  readUpgradeFile,
+  deletableClaim,
+  RULES_FILE_READ_CAP,
+  type UnreadReason,
+} from '@haive/shared/rules-files';
 import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -193,8 +198,10 @@ export function keptRowUpdate(
   };
 }
 
-const keptRefusal = (diskPath: string) =>
-  `kept ${diskPath}: it does not hold what Haive wrote there, so delete it by hand if it should go`;
+const NOT_WHAT_HAIVE_WROTE =
+  'it does not hold what Haive wrote there, so delete it by hand if it should go';
+
+const keptRefusal = (diskPath: string) => `kept ${diskPath}: ${NOT_WHAT_HAIVE_WROTE}`;
 
 const unjudgedRefusal = (diskPath: string) =>
   `kept ${diskPath}: it could not be compared with what Haive wrote there (a link, not a regular ` +
@@ -452,12 +459,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       groupEntriesForForm(detected.entries);
     const fields: FormSchema['fields'] = [];
 
-    const toOptions = (entries: UpgradePlanEntry[]) =>
+    const toOptions = (
+      entries: UpgradePlanEntry[],
+      describe?: (e: UpgradePlanEntry) => string | null,
+    ) =>
       entries.map((e) => {
         const opt: {
           value: string;
           label: string;
           group: string;
+          description?: string;
           details?: {
             kind: 'diff';
             baseline: string | null;
@@ -469,6 +480,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           label: e.diskPath,
           group: templateKindLabel(e.templateKind),
         };
+        const description = describe?.(e);
+        if (description) opt.description = description;
         if (e.newContent !== null) {
           // Diff baseline = what's actually on disk now (currentContent), so
           // the user sees the change relative to their current state — not the
@@ -543,7 +556,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       const stripped = rtkHookStripPreview(e);
       return stripped === null ? [] : [{ entry: e, stripped }];
     });
-    const removable = obsolete.filter((e) => !strippable.some((s) => s.entry === e));
+    // 02 deletes a file only while it holds the bytes its row records, so deletion is offered for
+    // those and for a path already gone, as the banner counts them. 01 stores a rules region already
+    // cut out of AGENTS.md.
+    const removes = (e: UpgradePlanEntry) =>
+      deletableClaim(
+        e.currentContent === null ? { kind: 'absent' } : { kind: 'text', text: e.currentContent },
+        { templateId: e.templateId, writtenHash: e.baselineWrittenHash ?? '' },
+        { regionExtracted: true },
+      );
+    const removable = obsolete.filter((e) => !strippable.some((s) => s.entry === e) && removes(e));
     if (removable.length > 0) {
       fields.push({
         type: 'multi-select',
@@ -566,7 +588,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           `${keepable.length} artifact(s) Haive no longer manages. Select to leave the file where ` +
           'it is and stop tracking it, so later upgrades do not offer it again. A file also ' +
           'selected for deletion is deleted.',
-        options: toOptions(keepable),
+        options: toOptions(keepable, (e) =>
+          removes(e) ? null : `Not offered for deletion: ${NOT_WHAT_HAIVE_WROTE}.`,
+        ),
         defaults: [],
       });
     }

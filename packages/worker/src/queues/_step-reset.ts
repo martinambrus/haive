@@ -1,5 +1,7 @@
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import {
+  isUniqueViolationOf,
+  ONE_LIVE_UPGRADE_INDEX,
   schema,
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
@@ -7,6 +9,7 @@ import {
 } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import { isFatalProviderFailure } from './cli-exec/failure-class.js';
+import { refuseRevive, type ReviveRefused } from './_revive-check.js';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
 // detect. Used by the `revise` route (handleResult): a review step asks to re-run an
@@ -16,6 +19,11 @@ import { isFatalProviderFailure } from './cli-exec/failure-class.js';
 
 class EpochMovedOn extends Error {}
 class ResumeClaimLost extends Error {}
+class ReviveBlocked extends Error {
+  constructor(readonly refusal: ReviveRefused) {
+    super(refusal.reason);
+  }
+}
 
 /** Reset `targetStepId` and every non-pending downstream row (same round) to `pending`,
  *  superseding their open cli_invocations and dropping their agent minings. Deliberately
@@ -216,6 +224,8 @@ export async function autoResumeFailedStep(
   let flipped = false;
   try {
     await db.transaction(async (tx) => {
+      const refusal = await refuseRevive(tx, taskId);
+      if (refusal) throw new ReviveBlocked(refusal);
       const now = new Date();
       // Clear this step's own blocking invocation so resolveLlmPhase sees no live invocation and
       // re-dispatches a fresh wave at upcomingIteration = completed passes. The TRAILING
@@ -344,7 +354,41 @@ export async function autoResumeFailedStep(
     });
     flipped = true;
   } catch (err) {
-    if (!(err instanceof ResumeClaimLost)) throw err;
+    if (err instanceof ResumeClaimLost) return false;
+    const refusal =
+      err instanceof ReviveBlocked
+        ? err.refusal
+        : isUniqueViolationOf(err, ONE_LIVE_UPGRADE_INDEX)
+          ? { reason: 'live-upgrade-index' }
+          : null;
+    if (!refusal) throw err;
+    await refuseAutoResume(db, taskId, stepId, refusal);
   }
   return flipped;
+}
+
+/** A refused auto-resume leaves the task failed, records why, and drops the allowance watch so the
+ *  poller does not try it again every tick; the attempt counter was never bumped. */
+async function refuseAutoResume(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  { reason, otherTaskId }: ReviveRefused,
+): Promise<void> {
+  await db.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId: null,
+    eventType: 'upgrade.revive_refused',
+    payload: { stepId, reason, ...(otherTaskId ? { otherTaskId } : {}) },
+  });
+  await db
+    .update(schema.tasks)
+    .set({
+      awaitingAllowanceProviderId: null,
+      awaitingProviderReason: null,
+      awaitingProviderSince: null,
+      allowanceResetAt: null,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
 }

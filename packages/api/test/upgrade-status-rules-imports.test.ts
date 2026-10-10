@@ -6,7 +6,10 @@ import { schema } from '@haive/database';
 import {
   buildClaudeSettingsJson,
   buildCliRulesBlockFromProviders,
+  bundleAgentTemplateHash,
+  CLI_RULES_END,
   CLI_RULES_SCHEMA_VERSION,
+  CLI_RULES_START,
   CLI_RULES_TEMPLATE_ID,
   normalizeContent,
   RTK_REF_MARKER_END,
@@ -76,7 +79,8 @@ function inSync(providers: { name: string; rulesContent: string; enabled: boolea
     templateContentHash: hash,
     bundleItemId: null,
     haiveVersion: null,
-    generatedAt: null,
+    repositoryId: 'repo-1',
+    generatedAt: new Date(1),
   });
   state.rows = new Map<unknown, unknown[]>([
     [schema.templateManifestCache, [{ ...agent, setHash: 's' }]],
@@ -901,7 +905,8 @@ describe('D10: upgrade-status and the set a project-state sync wrote', () => {
         : 'w',
       bundleItemId: null,
       haiveVersion: null,
-      generatedAt: null,
+      repositoryId: 'repo-1',
+      generatedAt: new Date(1),
     });
     state.rows = new Map<unknown, unknown[]>([
       [
@@ -1121,6 +1126,42 @@ describe('upgrade-status and a claim outside the applicable set', () => {
     expect(await reads()).toEqual([[], false]);
   });
 
+  describe('and the files 02 deletes', () => {
+    const REGION = `${CLI_RULES_START}\nthe rules\n${CLI_RULES_END}`;
+    const obsolete = async () => (await status()).obsoleteTemplateIds;
+    const rulesRow = (file: string) => {
+      inSync([{ ...claude, enabled: false }]);
+      return claim({
+        templateId: CLI_RULES_TEMPLATE_ID,
+        diskPath: 'AGENTS.md',
+        hash: 'h-cr',
+        body: REGION,
+        file,
+      });
+    };
+
+    it('G2: counts a retired rules region that AGENTS.md still holds unedited among other text', async () => {
+      await rulesRow(`# mine\n\n${REGION}\n\nmore of mine\n`);
+      expect(await obsolete()).toEqual([CLI_RULES_TEMPLATE_ID]);
+    });
+
+    it('G2: not one whose region was edited', async () => {
+      await rulesRow(`# mine\n\n${REGION.replace('the rules', 'my rules')}\n`);
+      expect(await obsolete()).toBeUndefined();
+    });
+
+    it('G3: counts an RTK settings file holding what Haive wrote, not one only its hook can leave', async () => {
+      await settings();
+      expect(await obsolete(), 'unedited').toEqual([RTK]);
+      state.rows.set(
+        schema.onboardingArtifacts,
+        state.rows.get(schema.onboardingArtifacts)!.slice(0, 2),
+      );
+      await settings({ file: editedSettings });
+      expect(await obsolete(), 'edited around the hook').toBeUndefined();
+    });
+  });
+
   it('N8b: keeps reporting a template the manifest dropped while the set still holds it', async () => {
     repoRow({ applicableTemplateIds: ['agent.x', 'agent.retired'] });
     await claim({
@@ -1140,7 +1181,14 @@ describe('upgrade-status and a claim outside the applicable set', () => {
       body: 'skill body\n',
     };
     state.rows.set(schema.customBundleItems, [
-      { itemId: 'i1', bundleId: 'b1', kind: 'skill', schemaVersion: 1, contentHash: 'h-c' },
+      {
+        itemId: 'i1',
+        bundleId: 'b1',
+        kind: 'skill',
+        schemaVersion: 1,
+        contentHash: 'h-c',
+        normalizedSpec: { id: 'x', title: 'X', description: 'A skill that renders' },
+      },
     ]);
     await claim({ ...custom, bundleItemId: 'i1' });
     expect(await reads(), 'a live item').toEqual([[], false]);
@@ -1230,5 +1278,347 @@ describe('upgrade-status and an upgrade that only untracked a row', () => {
     const body = await status();
     expect(body.isOnboarded).toBe(true);
     expect(body.hasPriorUpgrade).toBe(false);
+  });
+});
+
+// #165, #166, the banner's half: a reset and a live onboarding withdraw the offer whatever rows remain.
+// The hand mock ignores every WHERE, so the one set of task rows below answers each task query.
+describe('upgrade-status honours a reset and a live onboarding', () => {
+  const RESET = 5000;
+  let repo: string;
+
+  const onboarding = (over: Record<string, unknown> = {}) => ({
+    id: 'onboarding-1',
+    repositoryId: 'repo-1',
+    type: 'onboarding',
+    status: 'completed',
+    completedAt: new Date(1000),
+    metadata: null,
+    ...over,
+  });
+
+  /** The repository, its tasks and its live rows (all written at `rowsAt`, none when null). */
+  const world = (over: {
+    resetAt?: number;
+    tasks?: Record<string, unknown>[];
+    rowsAt?: number | null;
+  }) => {
+    inSync([claude]);
+    const rowsAt = over.rowsAt === undefined ? 1000 : over.rowsAt;
+    state.rows.set(
+      schema.onboardingArtifacts,
+      rowsAt === null
+        ? []
+        : (state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+            ...r,
+            repositoryId: 'repo-1',
+            generatedAt: new Date(rowsAt),
+          })),
+    );
+    state.rows.set(schema.tasks, over.tasks ?? []);
+    state.onboarded = (over.tasks ?? []).some((t) => t.status === 'completed');
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: ['agent.x'],
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+      source: 'git_https',
+      status: 'ready',
+      onboardedAt: null,
+      onboardingResetAt: over.resetAt === undefined ? null : new Date(over.resetAt),
+    };
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-reset-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  const notOnboarded = async () => {
+    const body = await status();
+    expect(body.isOnboarded).toBe(false);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  };
+
+  it('is onboarded where nothing was reset and a row is live', async () => {
+    world({});
+    expect((await status()).isOnboarded).toBe(true);
+  });
+
+  it('is not onboarded after a reset when the rows it kept are all that remain', async () => {
+    world({ resetAt: RESET, tasks: [onboarding()], rowsAt: 1000 });
+    await notOnboarded();
+  });
+
+  it('is not onboarded after a reset when only a completion from before it remains', async () => {
+    world({ resetAt: RESET, tasks: [onboarding()], rowsAt: null });
+    await notOnboarded();
+  });
+
+  it('is onboarded once an onboarding completed after the reset', async () => {
+    world({ resetAt: RESET, tasks: [onboarding({ completedAt: new Date(6000) })], rowsAt: null });
+    expect((await status()).isOnboarded).toBe(true);
+  });
+
+  it('is onboarded once rows were written after the reset', async () => {
+    world({ resetAt: RESET, rowsAt: 6000 });
+    expect((await status()).isOnboarded).toBe(true);
+  });
+
+  it.each(['running', 'waiting_user'])(
+    'is not onboarded while an onboarding is %s, whatever rows remain',
+    async (taskStatus) => {
+      world({ tasks: [onboarding(), onboarding({ id: 'onboarding-2', status: taskStatus })] });
+      await notOnboarded();
+    },
+  );
+
+  it('is not onboarded after a reset because an upgrade once ran', async () => {
+    world({
+      resetAt: RESET,
+      tasks: [onboarding({ id: 'upgrade-1', type: 'onboarding_upgrade', status: 'failed' })],
+      rowsAt: null,
+    });
+    await notOnboarded();
+  });
+});
+
+// #235: 01 skips a bundle item whose spec fails its loader's schema, so a live row for it is offered
+// as obsolete, while the banner counted every item as current.
+describe('upgrade-status and a bundle item 01 cannot render', () => {
+  const GOOD_SKILL = { id: 'good', title: 'Good', description: 'A skill that renders' };
+  const GOOD_AGENT = {
+    id: 'agent-ok',
+    title: 'Agent',
+    description: 'An agent that renders',
+    color: 'blue',
+    field: 'qa',
+    tools: [],
+    coreMission: 'Review',
+    responsibilities: [],
+    whenInvoked: [],
+    executionSteps: [],
+    outputFormat: '',
+    qualityCriteria: [],
+    antiPatterns: [],
+  };
+  let repo: string;
+
+  const item = (itemId: string, kind: 'agent' | 'skill', spec: Record<string, unknown>) => ({
+    itemId,
+    bundleId: 'b1',
+    kind,
+    schemaVersion: 1,
+    contentHash: 'h-c',
+    normalizedSpec: spec,
+  });
+  /** A live row for the item, current as far as its hash goes. */
+  const row = (itemId: string, kind: 'agent' | 'skill') => ({
+    id: `row-${itemId}`,
+    diskPath: `.claude/${kind}s/${itemId}.md`,
+    templateId: `custom.b1.${itemId}`,
+    templateSchemaVersion: 1,
+    templateContentHash: kind === 'agent' ? bundleAgentTemplateHash('h-c') : 'h-c',
+    writtenHash: 'w',
+    bundleItemId: itemId,
+    haiveVersion: null,
+    repositoryId: 'repo-1',
+    generatedAt: new Date(1000),
+  });
+  const world = (items: ReturnType<typeof item>[], live: [string, 'agent' | 'skill'][]) => {
+    inSync([claude]);
+    state.rows.set(schema.onboardingArtifacts, [
+      ...(state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        repositoryId: 'repo-1',
+        generatedAt: new Date(1000),
+      })),
+      ...live.map(([itemId, kind]) => row(itemId, kind)),
+    ]);
+    state.rows.set(schema.customBundleItems, items);
+    state.rows.set(schema.customBundles, [{ name: 'House bundle' }]);
+    state.onboarded = false;
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: ['agent.x'],
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+    };
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-bundle-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('reads installed items that render as current', async () => {
+    world(
+      [item('good', 'skill', GOOD_SKILL), item('agent-ok', 'agent', GOOD_AGENT)],
+      [
+        ['good', 'skill'],
+        ['agent-ok', 'agent'],
+      ],
+    );
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([]);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+
+  it.each([
+    ['skill', 'skill', { id: 'bad-one' }],
+    ['agent', 'agent', { ...GOOD_AGENT, id: 'bad-one', coreMission: '' }],
+  ] as const)(
+    'reports an installed %s whose spec fails the schema as changed',
+    async (_k, kind, spec) => {
+      world(
+        [item('good', 'skill', GOOD_SKILL), item('bad-one', kind, spec)],
+        [
+          ['good', 'skill'],
+          ['bad-one', kind],
+        ],
+      );
+      const body = await status();
+      expect(body.changedTemplateIds).toEqual(['custom.b1.bad-one']);
+      expect(body.hasUpgradeAvailable).toBe(true);
+      expect(body.customChanges).toEqual([
+        { bundleId: 'b1', bundleName: 'House bundle', changedItemCount: 1 },
+      ]);
+    },
+  );
+
+  it('reports nothing for an item that fails the schema and was never installed', async () => {
+    world(
+      [item('good', 'skill', GOOD_SKILL), item('bad-one', 'skill', { id: 'bad-one' })],
+      [['good', 'skill']],
+    );
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([]);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('still reads a valid item with no live row as a new one to install', async () => {
+    world([item('good', 'skill', GOOD_SKILL)], []);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual(['custom.b1.good']);
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+});
+
+/** #237: of the templates reported as changed, the ones whose plan offers a removal are named, so the
+ *  banner can say what the upgrade will do. */
+describe('upgrade-status names the changed templates whose plan offers a removal', () => {
+  let repo: string;
+
+  const row = (templateId: string, hash: string) => ({
+    id: `row-${templateId}`,
+    diskPath: `.claude/agents/${templateId}.md`,
+    templateId,
+    templateSchemaVersion: 1,
+    templateContentHash: hash,
+    writtenHash: 'w',
+    bundleItemId: null,
+    haiveVersion: null,
+    repositoryId: 'repo-1',
+    generatedAt: new Date(1000),
+  });
+  const world = (applicable: string[]) => {
+    inSync([claude]);
+    state.rows.set(schema.onboardingArtifacts, [
+      ...(state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        repositoryId: 'repo-1',
+        generatedAt: new Date(1000),
+      })),
+      row('agent.moved', 'h-old'),
+      row('agent.retired', 'h-retired'),
+    ]);
+    state.rows
+      .get(schema.templateManifestCache)!
+      .push(
+        { templateId: 'agent.moved', schemaVersion: 1, contentHash: 'h-new', setHash: 's' },
+        { templateId: 'agent.fresh', schemaVersion: 1, contentHash: 'h-fresh', setHash: 's' },
+      );
+    state.onboarded = false;
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: applicable,
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+    };
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-obsolete-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('names an installed template no release renders any more, and no other changed one', async () => {
+    world(['agent.x', 'agent.moved', 'agent.fresh', 'agent.retired']);
+    const body = await status();
+    expect([...(body.changedTemplateIds as string[])].sort()).toEqual([
+      'agent.fresh',
+      'agent.moved',
+      'agent.retired',
+    ]);
+    expect(body.obsoleteTemplateIds).toEqual(['agent.retired']);
+    expect(body.retiredTemplateIds).toEqual(['agent.retired']);
+  });
+
+  it('does not name a retired template whose file was edited, which 02 will not delete', async () => {
+    world(['agent.x', 'agent.moved', 'agent.fresh', 'agent.retired']);
+    await mkdir(path.join(repo, '.claude/agents'), { recursive: true });
+    await writeFile(path.join(repo, '.claude/agents/agent.retired.md'), 'edited by hand\n', 'utf8');
+    const body = await status();
+    expect(body.changedTemplateIds as string[]).toContain('agent.retired');
+    expect(body.obsoleteTemplateIds).toBeUndefined();
+    expect(body.retiredTemplateIds).toEqual(['agent.retired']);
+  });
+
+  it('names a retired template whose file still holds the bytes 02 wrote', async () => {
+    world(['agent.x', 'agent.moved', 'agent.fresh', 'agent.retired']);
+    await mkdir(path.join(repo, '.claude/agents'), { recursive: true });
+    await writeFile(path.join(repo, '.claude/agents/agent.retired.md'), 'w\n', 'utf8');
+    const rows = state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[];
+    for (const r of rows) {
+      if (r.templateId === 'agent.retired') r.writtenHash = sha256Hex(normalizeContent('w\n'));
+    }
+    const body = await status();
+    expect(body.obsoleteTemplateIds).toEqual(['agent.retired']);
+    expect(body.retiredTemplateIds).toEqual(['agent.retired']);
+  });
+
+  it('names none while every changed template is one to update', async () => {
+    world(['agent.x', 'agent.moved', 'agent.fresh']);
+    state.rows.set(
+      schema.onboardingArtifacts,
+      (state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).filter(
+        (r) => r.templateId !== 'agent.retired',
+      ),
+    );
+    const body = await status();
+    expect([...(body.changedTemplateIds as string[])].sort()).toEqual([
+      'agent.fresh',
+      'agent.moved',
+    ]);
+    expect(body.obsoleteTemplateIds).toBeUndefined();
+    expect(body.retiredTemplateIds).toBeUndefined();
   });
 });

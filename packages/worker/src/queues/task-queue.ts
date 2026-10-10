@@ -132,6 +132,7 @@ import {
   updateOwnedStep,
   type TaskFence,
 } from '../step-engine/step-ownership.js';
+import { refuseRevive } from './_revive-check.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
@@ -442,8 +443,48 @@ async function resolveCurrentStepIndex(
   return rows[0]?.runSeq ?? fallbackIndex;
 }
 
+/** Run a task write that can lift a failed task (no fence, or one that may revive) after the
+ *  creation's checks, in one transaction; false when one refused, recorded, or nothing landed. */
+async function writeReviving(
+  db: Database | DbHandle,
+  taskId: string,
+  stepId: string,
+  fence: TaskFence | undefined,
+  write: (handle: Database | DbHandle) => Promise<boolean>,
+): Promise<boolean> {
+  if (fence && !fence.reviveFailed) return write(db);
+  const refuse = async (reason: string, extra: Record<string, unknown> = {}) => {
+    logger.info(
+      { taskId, stepId, reason },
+      'revive refused: the exclusion on the repository holds',
+    );
+    await appendEvent(db, taskId, null, 'upgrade.revive_refused', {
+      stepId,
+      reason,
+      ...extra,
+    }).catch(() => undefined);
+    return false;
+  };
+  try {
+    const refused = await db.transaction(async (tx) => {
+      const refusal = await refuseRevive(tx, taskId);
+      if (refusal) return refusal;
+      return (await write(tx)) ? null : 'overtaken';
+    });
+    if (refused === null) return true;
+    if (refused === 'overtaken') return false;
+    return await refuse(
+      refused.reason,
+      refused.otherTaskId ? { otherTaskId: refused.otherTaskId } : {},
+    );
+  } catch (err) {
+    if (!isUniqueViolationOf(err, ONE_LIVE_UPGRADE_INDEX)) throw err;
+    return refuse('live-upgrade-index');
+  }
+}
+
 /** Park the task on a step. With a fence, only while it holds, as for markTaskRunningWithStep. */
-async function markTaskWaiting(
+export async function markTaskWaiting(
   db: Database,
   taskId: string,
   stepId: string,
@@ -453,23 +494,27 @@ async function markTaskWaiting(
   fence?: TaskFence,
 ): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  const [parked] = await db
-    .update(schema.tasks)
-    .set({
-      status,
-      currentStepId: stepId,
-      currentStepIndex,
-      currentRound: round,
-      updatedAt: new Date(),
-    })
-    .where(taskWriteTarget(taskId, fence))
-    .returning({ id: schema.tasks.id });
-  return parked !== undefined;
+  return writeReviving(db, taskId, stepId, fence, async (handle) => {
+    const [parked] = await handle
+      .update(schema.tasks)
+      .set({
+        status,
+        currentStepId: stepId,
+        currentStepIndex,
+        currentRound: round,
+        updatedAt: new Date(),
+      })
+      .where(taskWriteTarget(taskId, fence))
+      .returning({ id: schema.tasks.id });
+    return parked !== undefined;
+  });
 }
 
 /** Point the running task at a step. With a fence, only while it holds: false when a Retry moved
- *  the task on or a Stop failed it, and nothing was written. */
-async function markTaskRunningWithStep(
+ *  the task on or a Stop failed it, and nothing was written. A write that can lift a failed
+ *  onboarding or upgrade makes the creation's checks under the creation's lock, in the
+ *  transaction that writes, and leaves the task failed when one refuses. */
+export async function markTaskRunningWithStep(
   db: Database | DbHandle,
   taskId: string,
   stepId: string,
@@ -478,8 +523,8 @@ async function markTaskRunningWithStep(
   fence?: TaskFence,
 ): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  try {
-    const [pointed] = await db
+  return writeReviving(db, taskId, stepId, fence, async (handle) => {
+    const [pointed] = await handle
       .update(schema.tasks)
       .set({
         status: 'running',
@@ -503,17 +548,7 @@ async function markTaskRunningWithStep(
       .where(taskWriteTarget(taskId, fence))
       .returning({ id: schema.tasks.id });
     return pointed !== undefined;
-  } catch (err) {
-    if (!fence?.reviveFailed || !isUniqueViolationOf(err, ONE_LIVE_UPGRADE_INDEX)) throw err;
-    logger.info(
-      { taskId, stepId },
-      'revive refused: another upgrade or rollback of the repository is live',
-    );
-    await appendEvent(db, taskId, null, 'upgrade.revive_refused', { stepId }).catch(
-      () => undefined,
-    );
-    return false;
-  }
+  });
 }
 
 class ParkOvertaken extends Error {}

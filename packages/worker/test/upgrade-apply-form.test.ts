@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { FormSchema } from '@haive/shared';
+import { normalizeContent, sha256Hex, type FormSchema } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { buildClaudeSettingsJson } from '../src/step-engine/steps/onboarding/_rtk-templates.js';
@@ -8,6 +8,8 @@ import type {
   UpgradePlanEntry,
   UpgradePlanOutput,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+
+const hashOf = (text: string) => sha256Hex(normalizeContent(text));
 
 function entry(
   bucket: UpgradePlanBucket,
@@ -134,6 +136,8 @@ describe('upgradeApplyStep.form() — diff details on options', () => {
         entry('obsolete', '.claude/plugins/disabled-lsp.json', {
           currentContent: 'STALE',
           newContent: null,
+          currentHash: hashOf('STALE'),
+          baselineWrittenHash: hashOf('STALE'),
         }),
       ]),
     );
@@ -151,8 +155,8 @@ describe('upgradeApplyStep.form() — diff details on options', () => {
         templateKind: 'rtk-config',
         currentContent,
         newContent: null,
-        currentHash: currentContent === unedited ? 'render' : 'edited',
-        baselineWrittenHash: 'render',
+        currentHash: hashOf(currentContent),
+        baselineWrittenHash: hashOf(unedited),
       });
     const schema = callForm(
       plan([
@@ -188,6 +192,109 @@ describe('upgradeApplyStep.form() — diff details on options', () => {
         if (opt.details) expect(opt.details.editable).toBe(false);
       }
     }
+  });
+});
+
+// 02 deletes an obsolete file only while it holds the bytes its row records, so the form offers
+// deletion for those and for a file already gone, and nothing it would keep.
+describe('upgradeApplyStep.form() — obsolete files', () => {
+  const WROTE = 'as Haive wrote it\n';
+  /** An obsolete entry the way 01 describes one: the file's bytes (null: gone) against its row's. */
+  const obsolete = (diskPath: string, held: string | null, over: Partial<UpgradePlanEntry> = {}) =>
+    entry('obsolete', diskPath, {
+      liveArtifactId: `row:${diskPath}`,
+      currentContent: held,
+      newContent: null,
+      currentHash: held === null ? null : hashOf(held),
+      baselineWrittenHash: hashOf(WROTE),
+      ...over,
+    });
+  const multi = (schema: FormSchema | null, id: string) => {
+    const field = schema?.fields.find((f) => 'id' in f && f.id === id);
+    if (field && field.type !== 'multi-select') throw new Error(`${id} is not a multi-select`);
+    return field ?? null;
+  };
+  const values = (schema: FormSchema | null, id: string) =>
+    multi(schema, id)?.options.map((o) => o.value) ?? null;
+
+  it('offers deletion for a file that holds what Haive wrote, and for one that is gone', () => {
+    const schema = callFormOrNull(
+      plan([
+        obsolete('.claude/agents/same.md', WROTE),
+        obsolete('.claude/agents/gone.md', null),
+        obsolete('.claude/agents/edited.md', 'a person changed this\n'),
+      ]),
+    );
+    expect(values(schema, 'selectedObsoleteRemovals')).toEqual([
+      'e:.claude/agents/same.md',
+      'e:.claude/agents/gone.md',
+    ]);
+  });
+
+  it('offers an edited file only in the keep choice, and says why', () => {
+    const schema = callFormOrNull(
+      plan([
+        obsolete('.claude/agents/same.md', WROTE),
+        obsolete('.claude/agents/edited.md', 'a person changed this\n'),
+      ]),
+    );
+    const keep = multi(schema, 'selectedObsoleteUntracks');
+    expect(keep?.options.map((o) => o.value)).toEqual([
+      'e:.claude/agents/same.md',
+      'e:.claude/agents/edited.md',
+    ]);
+    expect(keep?.options[0]?.description).toBeUndefined();
+    expect(keep?.options[1]?.description).toMatch(/does not hold what Haive wrote/);
+    expect(values(schema, 'selectedObsoleteRemovals')).toEqual(['e:.claude/agents/same.md']);
+  });
+
+  it('has no deletion field when every obsolete file was edited', () => {
+    const schema = callFormOrNull(
+      plan([obsolete('.claude/agents/edited.md', 'a person changed this\n')]),
+    );
+    expect(multi(schema, 'selectedObsoleteRemovals')).toBeNull();
+    expect(values(schema, 'selectedObsoleteUntracks')).toEqual(['e:.claude/agents/edited.md']);
+  });
+
+  it('offers an edited bundle item nowhere: 02 untracks it unasked', () => {
+    const schema = callFormOrNull(
+      plan([
+        obsolete('.claude/agents/same.md', WROTE),
+        obsolete('.claude/agents/mine.md', 'a person changed this\n', {
+          templateId: 'custom.bundle-1.item-1',
+          templateKind: 'custom-agent',
+        }),
+      ]),
+    );
+    expect(values(schema, 'selectedObsoleteRemovals')).toEqual(['e:.claude/agents/same.md']);
+    expect(values(schema, 'selectedObsoleteUntracks')).toEqual(['e:.claude/agents/same.md']);
+  });
+
+  it('judges the rules region, not the file around it', () => {
+    const region = '<!-- region -->\nrules\n';
+    const schema = callFormOrNull(
+      plan([
+        obsolete('AGENTS.md', region, {
+          templateId: 'cli-rules',
+          templateKind: 'cli-rules-block',
+          baselineWrittenHash: hashOf(region),
+        }),
+      ]),
+    );
+    expect(values(schema, 'selectedObsoleteRemovals')).toEqual(['e:AGENTS.md']);
+  });
+
+  it('does not offer an edited rules region for deletion', () => {
+    const schema = callFormOrNull(
+      plan([
+        obsolete('AGENTS.md', '<!-- region -->\nrules, edited\n', {
+          templateId: 'cli-rules',
+          templateKind: 'cli-rules-block',
+          baselineWrittenHash: hashOf('<!-- region -->\nrules\n'),
+        }),
+      ]),
+    );
+    expect(multi(schema, 'selectedObsoleteRemovals')).toBeNull();
   });
 });
 

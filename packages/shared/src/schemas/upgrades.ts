@@ -18,6 +18,12 @@ export const upgradeStatusResponseSchema = z.object({
   installedTemplateSetHash: z.string().nullable(),
   currentTemplateSetHash: z.string(),
   changedTemplateIds: z.array(z.string()),
+  /** The `changedTemplateIds` an upgrade removes rather than updates: installed, and no release renders
+   *  them any more. Absent from older servers, and when there are none. */
+  obsoleteTemplateIds: z.array(z.string()).optional(),
+  /** The `changedTemplateIds` no release renders any more, deletable or not; 02 offers to keep or untrack
+   *  the ones it cannot delete. Absent from older servers, and when there are none. */
+  retiredTemplateIds: z.array(z.string()).optional(),
   isOnboarded: z.boolean(),
   /** Most recent Haive release version recorded on a live artifact row. Null
    *  when the repo was onboarded before version tracking (pre-migration 0011)

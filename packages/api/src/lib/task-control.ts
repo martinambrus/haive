@@ -27,57 +27,65 @@ export async function stopActiveCliInvocations(
   taskId: string,
   opts: { failTask: boolean; actor?: StopActor },
 ): Promise<{ killed: number; cancelled: number; stopped: number }> {
+  // Supersede every still-live invocation first (committed before the kill) so
+  // the dying cli-exec job's resume is a no-op and can't clobber the caller's
+  // terminal state. One transaction, so no reader sees a run cancelled beside a step still
+  // running, and a failure leaves every run as it was and kills nothing.
+  const { cancelled, stopped } = await db.transaction((tx) => supersedeLiveRuns(tx, taskId, opts));
+  // Force-remove the cli sandboxes AFTER the supersede writes commit, so the
+  // dying job's resume sees the superseded row and skips its advance. Narrowed
+  // to `haive-cli-*` (sandbox-kill.ts) so the DDEV/app runtime survives.
+  const killed = await killTaskSandboxes(taskId);
+  return { killed, cancelled, stopped };
+}
+
+/** The database half of `stopActiveCliInvocations`, inside the caller's transaction and killing
+ *  nothing: a caller that may still roll back runs this, and kills only after it commits. */
+export async function supersedeLiveRuns(
+  tx: DbHandle,
+  taskId: string,
+  opts: { failTask: boolean; actor?: StopActor },
+): Promise<{ cancelled: number; stopped: number }> {
   const now = new Date();
   // Who stopped it. The owner reads these strings on their own task page, so an admin stopping
   // someone else's work during a maintenance drain must not be reported to them as "by user" —
   // that is the one reading of it that is actively wrong. Defaults to the original text, so the
   // owner-initiated path is unchanged.
   const by = opts.actor === 'admin' ? 'an administrator' : 'user';
-  // Supersede every still-live invocation first (committed before the kill) so
-  // the dying cli-exec job's resume is a no-op and can't clobber the caller's
-  // terminal state. One transaction, so no reader sees a run cancelled beside a step still
-  // running, and a failure leaves every run as it was and kills nothing.
-  const { cancelled, stopped } = await db.transaction(async (tx) => {
-    const first = await cancelLiveRuns(tx, taskId, by, now);
-    const failed = await failStuckSteps(tx, taskId, by, now);
-    // A pass records a run only under its row's lock, so the step writes above waited for any run
-    // being recorded, and this ends it.
-    const late = await cancelLiveRuns(tx, taskId, by, now);
-    const runs = first.length + late.length;
-    if (opts.failTask && (runs > 0 || failed.length > 0)) {
-      // Drop the task to `failed` (restartable) from any non-terminal state — incl.
-      // `waiting_user`, which a half-finished step transition can leave behind.
-      //
-      // completedAt is the exit stamp every other terminal task write makes (markTaskCompleted
-      // / markTaskFailed / handleCancelTask / cancelTaskRow), and Stop was the one path that
-      // skipped it. Without it the task reads as terminal while carrying no exit time, which two
-      // consumers then get wrong: computeTaskTiming ends the span at `completedAt ?? now`, so a
-      // Stopped task's wall clock ticks forever, and the runtime reaper's failed-grace falls back
-      // to the CONTAINER start — the anchor its own comment warns re-arms a full grace on every
-      // stray reboot and lets a dead task squat a runtime slot. A retry or an allowance resume
-      // clears it again (task-queue.ts), so restartability is unaffected.
-      await tx
-        .update(schema.tasks)
-        .set({
-          status: 'failed',
-          errorMessage: `Stopped by ${by}`,
-          completedAt: now,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(schema.tasks.id, taskId),
-            inArray(schema.tasks.status, ['running', 'queued', 'waiting_user']),
-          ),
-        );
-    }
-    return { cancelled: runs, stopped: failed.length };
-  });
-  // Force-remove the cli sandboxes AFTER the supersede writes commit, so the
-  // dying job's resume sees the superseded row and skips its advance. Narrowed
-  // to `haive-cli-*` (sandbox-kill.ts) so the DDEV/app runtime survives.
-  const killed = await killTaskSandboxes(taskId);
-  return { killed, cancelled, stopped };
+  const first = await cancelLiveRuns(tx, taskId, by, now);
+  const failed = await failStuckSteps(tx, taskId, by, now);
+  // A pass records a run only under its row's lock, so the step writes above waited for any run
+  // being recorded, and this ends it.
+  const late = await cancelLiveRuns(tx, taskId, by, now);
+  const runs = first.length + late.length;
+  if (opts.failTask && (runs > 0 || failed.length > 0)) {
+    // Drop the task to `failed` (restartable) from any non-terminal state — incl.
+    // `waiting_user`, which a half-finished step transition can leave behind.
+    //
+    // completedAt is the exit stamp every other terminal task write makes (markTaskCompleted
+    // / markTaskFailed / handleCancelTask / cancelTaskRow), and Stop was the one path that
+    // skipped it. Without it the task reads as terminal while carrying no exit time, which two
+    // consumers then get wrong: computeTaskTiming ends the span at `completedAt ?? now`, so a
+    // Stopped task's wall clock ticks forever, and the runtime reaper's failed-grace falls back
+    // to the CONTAINER start — the anchor its own comment warns re-arms a full grace on every
+    // stray reboot and lets a dead task squat a runtime slot. A retry or an allowance resume
+    // clears it again (task-queue.ts), so restartability is unaffected.
+    await tx
+      .update(schema.tasks)
+      .set({
+        status: 'failed',
+        errorMessage: `Stopped by ${by}`,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.tasks.id, taskId),
+          inArray(schema.tasks.status, ['running', 'queued', 'waiting_user']),
+        ),
+      );
+  }
+  return { cancelled: runs, stopped: failed.length };
 }
 
 /** End and supersede every live run of the task. Inside the caller's transaction, since a second
@@ -143,24 +151,27 @@ export async function settleActiveSteps(
   db: ReturnType<typeof getDb>,
   taskId: string,
 ): Promise<void> {
+  await db.transaction((tx) => settleActiveStepsIn(tx, taskId));
+}
+
+/** `settleActiveSteps` inside the caller's transaction. */
+export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise<void> {
   const now = new Date();
-  await db.transaction(async (tx) => {
-    await tx
-      .select({ id: schema.taskSteps.id })
-      .from(schema.taskSteps)
-      .where(
-        and(
-          eq(schema.taskSteps.taskId, taskId),
-          inArray(schema.taskSteps.status, ['running', 'waiting_cli', 'waiting_form']),
-        ),
-      )
-      .for('update');
-    await failStuckSteps(tx, taskId, 'user', now);
-    await tx
-      .update(schema.taskSteps)
-      .set({ status: 'pending', waitingStartedAt: null, updatedAt: now })
-      .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')));
-  });
+  await tx
+    .select({ id: schema.taskSteps.id })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        inArray(schema.taskSteps.status, ['running', 'waiting_cli', 'waiting_form']),
+      ),
+    )
+    .for('update');
+  await failStuckSteps(tx, taskId, 'user', now);
+  await tx
+    .update(schema.taskSteps)
+    .set({ status: 'pending', waitingStartedAt: null, updatedAt: now })
+    .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')));
 }
 
 /** Fail whatever step is stuck in running/waiting_cli. This covers BOTH a CLI step (whose

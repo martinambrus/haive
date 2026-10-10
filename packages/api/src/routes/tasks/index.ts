@@ -56,9 +56,10 @@ import {
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
 import {
-  loadOnboardingTaskFacts,
-  NO_ONBOARDING_TASKS,
-  renderContextAdmitsUpgrade,
+  liveOnboardingMessage,
+  liveOnboardingTaskId,
+  upgradeAdmission,
+  upgradeRefusalMessage,
 } from '../../lib/onboarding-state.js';
 import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
 import { currentStepLabel } from './_step-label.js';
@@ -70,7 +71,9 @@ import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../li
 import {
   clearTaskPause,
   settleActiveSteps,
+  settleActiveStepsIn,
   stopActiveCliInvocations,
+  supersedeLiveRuns,
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
@@ -94,7 +97,12 @@ import {
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
 import { retryTaskAtStep, stepRoutes } from './steps.js';
-import { insertUpgradeTask } from '../upgrades.js';
+import {
+  insertUpgradeTask,
+  refuseBesideLiveUpgrade,
+  refuseReviveBesideLive,
+  withRepositoryTaskLock,
+} from '../upgrades.js';
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 
@@ -432,64 +440,30 @@ taskRoutes.post('/', async (c) => {
     if (!repo) throw new HttpError(404, 'Repository not found');
   }
 
-  // Two onboarding runs on one repository write the same `.claude/` files, the same KB and
-  // the same scope list, so the second is a corruption path rather than a queue. Refused
-  // here only — a workflow or run_app task on a repo mid-onboarding stays the caller's call.
-  if (body.type === 'onboarding' && body.repositoryId) {
-    const facts =
-      (await loadOnboardingTaskFacts(db, userId, [body.repositoryId])).get(body.repositoryId) ??
-      NO_ONBOARDING_TASKS;
-    if (facts.liveTaskId) {
-      throw new HttpError(
-        409,
-        `Onboarding is already running for this repository (task ${facts.liveTaskId})`,
-      );
-    }
-  }
-
   if (body.type === 'onboarding_upgrade') {
     if (!body.repositoryId) {
       throw new HttpError(400, 'onboarding_upgrade tasks require a repositoryId');
     }
-    const priorOnboarding = await db.query.tasks.findFirst({
+    const repo = await db.query.repositories.findFirst({
       where: and(
-        eq(schema.tasks.repositoryId, body.repositoryId),
-        eq(schema.tasks.userId, userId),
-        eq(schema.tasks.type, 'onboarding'),
-        eq(schema.tasks.status, 'completed'),
+        eq(schema.repositories.id, body.repositoryId),
+        eq(schema.repositories.userId, userId),
       ),
-      columns: { id: true },
+      columns: {
+        id: true,
+        renderContext: true,
+        source: true,
+        status: true,
+        storagePath: true,
+        localPath: true,
+        onboardedAt: true,
+        onboardingResetAt: true,
+      },
     });
-    const priorArtifact = await db.query.onboardingArtifacts.findFirst({
-      where: and(
-        eq(schema.onboardingArtifacts.repositoryId, body.repositoryId),
-        isNull(schema.onboardingArtifacts.supersededAt),
-      ),
-      columns: { id: true },
-    });
-    if (!priorOnboarding && !priorArtifact) {
-      const repo = await db.query.repositories.findFirst({
-        where: and(
-          eq(schema.repositories.id, body.repositoryId),
-          eq(schema.repositories.userId, userId),
-        ),
-        columns: {
-          id: true,
-          renderContext: true,
-          source: true,
-          status: true,
-          storagePath: true,
-          localPath: true,
-          onboardedAt: true,
-          onboardingResetAt: true,
-        },
-      });
-      if (!repo || !(await renderContextAdmitsUpgrade(db, userId, repo))) {
-        throw new HttpError(
-          409,
-          'No completed onboarding found for this repository; cannot upgrade',
-        );
-      }
+    if (!repo) throw new HttpError(404, 'Repository not found');
+    const admission = await upgradeAdmission(db, userId, repo);
+    if (!admission.admitted) {
+      throw new HttpError(409, upgradeRefusalMessage(admission, 'upgraded'));
     }
   }
 
@@ -729,7 +703,27 @@ taskRoutes.post('/', async (c) => {
   let task: typeof schema.tasks.$inferSelect;
   let queued: typeof schema.tasks.$inferSelect | undefined;
   if (body.type === 'onboarding_upgrade') {
-    ({ task, queued } = await insertUpgradeTask(db, body.repositoryId!, async (tx) => {
+    ({ task, queued } = await insertUpgradeTask(
+      db,
+      userId,
+      body.repositoryId!,
+      'upgraded',
+      async (tx) => {
+        const row = firstRow(await insertTask(tx));
+        return { task: row, queued: await settle(tx, row) };
+      },
+    ));
+  } else if (body.type === 'onboarding' && body.repositoryId) {
+    // Two onboarding runs on one repository write the same `.claude/` files, the same KB and
+    // the same scope list, and an upgrade beside one rewrites them, so the check shares the
+    // upgrade's lock. A workflow or run_app task on a repo mid-onboarding stays the caller's call.
+    const repositoryId = body.repositoryId;
+    ({ task, queued } = await withRepositoryTaskLock(db, repositoryId, async (tx) => {
+      const liveId = await liveOnboardingTaskId(tx, userId, repositoryId);
+      if (liveId) {
+        throw new HttpError(409, liveOnboardingMessage(liveId));
+      }
+      await refuseBesideLiveUpgrade(tx, repositoryId);
       const row = firstRow(await insertTask(tx));
       return { task: row, queued: await settle(tx, row) };
     }));
@@ -1169,48 +1163,72 @@ taskRoutes.post('/:id/action', async (c) => {
       // drifting backwards, and Retry the only enabled button. Same helper Stop/cancel use;
       // it supersedes live invocations, ends the parked step, and kills the haive-cli-*
       // sandboxes while leaving the DDEV/app runtime up.
-      await stopActiveCliInvocations(db, id, { failTask: false });
-      // stopActiveCliInvocations deliberately covers running/waiting_cli only. A step parked
-      // at a FORM should be re-offered by the restart, not failed, so reset it to pending.
-      await settleActiveSteps(db, id);
-      // Wipe the transient wait notes ("Waiting for a free runtime slot…", "Queued — machine at
-      // capacity…") off every pending row. A retry replays from step 0 and the fix loop restarts
-      // at round 1, so rows materialized by a previous, longer run (rounds 2+) are orphaned at
-      // `pending` and never run again — yet they keep the message they were parked with. The step
-      // list sorts by round, so that frozen line lands at the BOTTOM of the task page and reads as
-      // the task's current state while the real work runs mid-page. Rows that DO run re-derive
-      // their own message (the park poll rewrites it; step-runner clears it on pending->running).
-      await db
-        .update(schema.taskSteps)
-        .set({ statusMessage: null, updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.taskSteps.taskId, id),
-            // pending = queued or parked; skipped = never ran. Neither can be "waiting" for
-            // anything, so any message on them is stale. done/failed rows keep theirs — there
-            // it is a run artifact ("Waiting for AI analysis…" on a killed step) worth reading.
-            inArray(schema.taskSteps.status, ['pending', 'skipped']),
-            isNotNull(schema.taskSteps.statusMessage),
-          ),
-        );
+      // An onboarding or upgrade requeues in one locked transaction, so a refusal changes nothing.
+      const lockedRevival = task.type === 'onboarding' || task.type === 'onboarding_upgrade';
+      if (!lockedRevival) await db.transaction((tx) => refuseReviveBesideLive(tx, id));
+      const clearMessages = async (h: typeof db | DbTx) => {
+        // Wipe the transient wait notes ("Waiting for a free runtime slot…", "Queued — machine at
+        // capacity…") off every pending row. A retry replays from step 0 and the fix loop restarts
+        // at round 1, so rows materialized by a previous, longer run (rounds 2+) are orphaned at
+        // `pending` and never run again — yet they keep the message they were parked with. The step
+        // list sorts by round, so that frozen line lands at the BOTTOM of the task page and reads as
+        // the task's current state while the real work runs mid-page. Rows that DO run re-derive
+        // their own message (the park poll rewrites it; step-runner clears it on pending->running).
+        await h
+          .update(schema.taskSteps)
+          .set({ statusMessage: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.taskSteps.taskId, id),
+              // pending = queued or parked; skipped = never ran. Neither can be "waiting" for
+              // anything, so any message on them is stale. done/failed rows keep theirs — there
+              // it is a run artifact ("Waiting for AI analysis…" on a killed step) worth reading.
+              inArray(schema.taskSteps.status, ['pending', 'skipped']),
+              isNotNull(schema.taskSteps.statusMessage),
+            ),
+          );
+      };
+      const requeue = (tx: typeof db | DbTx) =>
+        tx
+          .update(schema.tasks)
+          .set({
+            status: 'queued',
+            errorMessage: null,
+            // full task restart → fresh auto-resume budget
+            allowanceAutoResumeCount: 0,
+            ...CLEAR_ALLOWANCE_WATCH,
+            // Retrying a paused task means "run it". Leaving the hold set would restart the task
+            // straight into the pause park, with Retry apparently doing nothing.
+            pausedAt: null,
+            orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')))
+          .returning({ id: schema.tasks.id });
       // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
       // dropped by the worker's epoch guard instead of running against the restarted task.
-      const [requeued] = await db
-        .update(schema.tasks)
-        .set({
-          status: 'queued',
-          errorMessage: null,
-          // full task restart → fresh auto-resume budget
-          allowanceAutoResumeCount: 0,
-          ...CLEAR_ALLOWANCE_WATCH,
-          // Retrying a paused task means "run it". Leaving the hold set would restart the task
-          // straight into the pause park, with Retry apparently doing nothing.
-          pausedAt: null,
-          orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
-          updatedAt: new Date(),
-        })
-        .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')))
-        .returning({ id: schema.tasks.id });
+      let requeued: { id: string } | undefined;
+      if (lockedRevival) {
+        requeued = await db.transaction(async (tx) => {
+          await refuseReviveBesideLive(tx, id);
+          await supersedeLiveRuns(tx, id, { failTask: false });
+          await settleActiveStepsIn(tx, id);
+          await clearMessages(tx);
+          const [moved] = await requeue(tx);
+          if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
+          return moved;
+        });
+      } else {
+        await stopActiveCliInvocations(db, id, { failTask: false });
+        // stopActiveCliInvocations deliberately covers running/waiting_cli only. A step parked
+        // at a FORM should be re-offered by the restart, not failed, so reset it to pending.
+        await settleActiveSteps(db, id);
+        await clearMessages(db);
+        [requeued] = await db.transaction(async (tx) => {
+          await refuseReviveBesideLive(tx, id);
+          return requeue(tx);
+        });
+      }
       // A Cancel that landed since the read stands.
       if (!requeued) throw new HttpError(409, 'The task is no longer failed; reload it');
       // Answering a parked form revives the task, so its pass can open a row between the settle
