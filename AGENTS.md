@@ -277,8 +277,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 ### Plans and attachments
 
 - [Plan canvas](docs/architecture/plan-canvas.md): plan nodes and their one writer, plan build,
-  plan chat, sequencing, "Start next", impact, the mirror. `applyPlanPatch`, `computePlanReady`,
-  `buildPlanExpansionContext`.
+  clarifying questions, plan chat, sequencing, "Start next", impact, the mirror. `applyPlanPatch`,
+  `computePlanReady`, `buildPlanExpansionContext`, `00b-plan-clarify`.
 - [Task attachments](docs/architecture/task-attachments.md): relative-path names, archive
   expansion, the attachments lock, prompt caps. `expand-archives.ts`, `withTaskAttachmentsLock`.
 - [Database persistence](docs/architecture/database-persistence.md): pinned project dumps,

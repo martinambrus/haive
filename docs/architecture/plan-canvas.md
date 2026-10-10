@@ -18,6 +18,24 @@ markdown document) is RETIRED from `planBuildRequestSchema` and deliberately ali
 worker's `BuildMode`, so stored tasks stay retryable. An unrecognised stored value falls to
 `from_repo` — a default rather than a throw, because that is what a revert would also produce.
 
+**Clarifying questions come before the expansion** (`00b-plan-clarify`, index -0.5, opt-in per
+task through `tasks.metadata.planClarify`, which the build route sets by default for a brief and
+only on request for a knowledge-base build). The planner drafts root + level 1 from what the inputs
+state, every assumption and conflict an open `decision`/`research` node directly under the root; a
+questioner asks about it; the planner folds each round's answers in as a patch and marks every
+answer `settled` or `open`, and open ones are asked again. The owner ends it, and 01 expands the
+outline (its depth form says so through `outlineFromThisTask`). Planner and questioner are mining
+SEATS (`STEP_MINING_SEATS`), not loop roles, so each runs on its own CLI; the route seeds the
+questioner as a task step choice. Three decisions to keep. It cycles like 02, by waves and
+`ReopenStepFormError`, NOT plan chat's self-revise: that reset deletes every round's agent rows and
+supersedes their invocations, dropping the spend from statistics. Rounds live in
+`plan_clarify_rounds`, and every move (`nextMove`) is decided from that table and the plan root, so
+a Retry, a reopen and a redelivered submit all land on the same step; answers are written only
+while `answered_at` is null, and a field id carries its round, so a stale submit for an earlier
+round reopens the form instead. Its folds drop any node placed below the root
+(`outsideOutline`): 01's frontier expands component LEAVES only, so a decision put under a
+component would take that component out of the build with nothing reporting it.
+
 **plan_chat** is one conversation on one card: a self-targeting `reviseLoop` re-parks the form every turn and the user ends it by submitting nothing. The transcript lives in `plan_node_messages` precisely because that revise resets the step row each cycle. The agent is handed the WHOLE plan (via `renderPlanMarkdown`, the same render committed as `.haive-data/plan.md` — one function so what the agent reads and what is committed cannot drift), so a request made while looking at one node can correctly patch another. **advisory** researches a non-code blocker and then STOPS: `02-advisory-decision` parks on a form and only the USER closes it — an agent concluding an unsigned contract is fine would turn a real blocker into a green tick.
 
 **A sibling run too wide for one agent's reply is named, never sent.** The build-order step
