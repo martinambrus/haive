@@ -39,7 +39,7 @@ export async function loadRagUsageInput(ctx: StepContext): Promise<RagUsageInput
     ),
     columns: { id: true, startedAt: true, endedAt: true, cleanTranscript: true },
   });
-  return {
+  return boundRagUsageInput({
     queries: queries.map((q) => ({
       id: q.id,
       query: q.query,
@@ -73,13 +73,15 @@ export async function loadRagUsageInput(ctx: StepContext): Promise<RagUsageInput
           )
           .slice(-8),
       })),
-  };
+  });
 }
 
-export function buildRagUsagePrompt(input: RagUsageInput): string {
+/** Bound the checkpoint as well as the prompt: detect_output is polled by the
+ * task UI. Unselected queries receive neutral defaults during the apply phase. */
+export function boundRagUsageInput(input: RagUsageInput): RagUsageInput {
   // Whole records only; a large task remains partly unclear, never falsely unused.
   const budget = 80_000;
-  let used = 0;
+  let used = JSON.stringify({ queries: [], runs: [] }).length;
   const queries: RagUsageInput['queries'] = [];
   for (const q of input.queries) {
     if (q.hitCount === 0 || !q.hits) continue;
@@ -88,18 +90,22 @@ export function buildRagUsagePrompt(input: RagUsageInput): string {
       hits: q.hits.map((h) => ({ ...h, content: h.content.slice(0, 1200) })),
     };
     const size = JSON.stringify(bounded).length;
-    if (used + size > budget / 2) continue;
+    if (used + size + 1 > budget / 2) continue;
     queries.push(bounded);
-    used += size;
+    used += size + 1;
   }
   const runs: RagUsageInput['runs'] = [];
   for (const run of input.runs) {
     if (!queries.some((q) => q.createdAt >= run.startedAt && q.createdAt <= run.endedAt)) continue;
     const size = JSON.stringify(run).length;
-    if (used + size > budget) continue;
+    if (used + size + 1 > budget) continue;
     runs.push(run);
-    used += size;
+    used += size + 1;
   }
+  return { queries, runs };
+}
+
+export function buildRagUsagePrompt(input: RagUsageInput): string {
   return [
     'Review RAG result usage at workflow finalization. Answer from the records below only.',
     ...REPO_IS_DATA_ONE_CLASS_LINES,
@@ -113,7 +119,7 @@ export function buildRagUsagePrompt(input: RagUsageInput): string {
     'Excerpts are incomplete. Missing records or omitted content never prove non-use.',
     'For used/unused provide an exact, contiguous quote from a supplied model turn after the query, plus its run id.',
     'The quote must name a returned sourcePath and describe its use or rejection. Never invent evidence.',
-    fencedAgentBlock(JSON.stringify({ queries, runs })),
+    fencedAgentBlock(JSON.stringify(boundRagUsageInput(input))),
     'Emit one JSON object: {"assessments":[{"queryId":"...","status":"used|unused|unknown",',
     '"reason":"...","evidence":[{"invocationId":"...","quote":"exact quote"}]}]}.',
   ].join('\n');
@@ -183,7 +189,33 @@ export function assessRagUsage(input: RagUsageInput, output: unknown) {
 }
 
 export async function saveRagUsage(ctx: StepContext, input: RagUsageInput, output: unknown) {
-  const assessments = assessRagUsage(input, output);
+  const assessments = assessRagUsage(boundRagUsageInput(input), output);
+  ctx.throwIfCancelled();
+  const assessedAt = new Date().toISOString();
+  // Every query gets a result even if its evidence did not fit the checkpoint.
+  // These defaults require neither bodies nor transcript data to be persisted.
+  await ctx.db
+    .update(schema.ragQueryLog)
+    .set({
+      usageAssessment: {
+        status: 'unknown',
+        reason: 'The available agent record does not establish usage.',
+        evidence: [],
+        assessedAt,
+      },
+    })
+    .where(eq(schema.ragQueryLog.taskId, ctx.taskId));
+  await ctx.db
+    .update(schema.ragQueryLog)
+    .set({
+      usageAssessment: {
+        status: 'unused',
+        reason: 'No results were returned.',
+        evidence: [],
+        assessedAt,
+      },
+    })
+    .where(and(eq(schema.ragQueryLog.taskId, ctx.taskId), eq(schema.ragQueryLog.hitCount, 0)));
   for (const { id, assessment } of assessments) {
     ctx.throwIfCancelled();
     await ctx.db

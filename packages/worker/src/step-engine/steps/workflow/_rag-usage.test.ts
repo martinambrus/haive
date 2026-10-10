@@ -3,6 +3,7 @@ import { createCleanTranscriptBuffer } from '../../../queues/cli-exec/clean-tran
 import {
   assessRagUsage,
   buildRagUsagePrompt,
+  boundRagUsageInput,
   loadRagUsageInput,
   type RagUsageInput,
 } from './_rag-usage.js';
@@ -46,6 +47,54 @@ const status = (data: RagUsageInput, output: unknown) =>
   assessRagUsage(data, output)[0]!.assessment.status;
 
 describe('RAG usage evidence', () => {
+  it('bounds the evidence returned to detect and dispatch before it can be checkpointed', async () => {
+    const q = input.queries[0]!;
+    const run = input.runs[0]!;
+    const ctx = {
+      taskId: 'task',
+      taskStepId: 'final',
+      db: {
+        query: {
+          ragQueryLog: {
+            findMany: async () =>
+              Array.from({ length: 200 }, (_, i) => ({
+                ...q,
+                id: `q${i}`,
+                createdAt: new Date(q.createdAt),
+                resultHits: [
+                  { sourcePath: 'src/session.ts', content: 'expanded article '.repeat(50_000) },
+                ],
+              })),
+          },
+          cliInvocations: {
+            findMany: async () => [
+              {
+                id: run.id,
+                startedAt: new Date(run.startedAt),
+                endedAt: new Date(run.endedAt),
+                cleanTranscript: {
+                  segments: [
+                    {
+                      kind: 'model',
+                      at: Date.parse(run.endedAt),
+                      text: 'Agent prose '.repeat(50_000),
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    } as unknown as StepContext;
+    const loaded = await loadRagUsageInput(ctx);
+    expect(JSON.stringify(loaded).length).toBeLessThanOrEqual(80_000);
+    expect(loaded.queries.length).toBeLessThan(200);
+    expect(
+      loaded.queries.every((query) => query.hits!.every((hit) => hit.content.length <= 1200)),
+    ).toBe(true);
+    expect(boundRagUsageInput(loaded)).toEqual(loaded);
+  });
   it('assesses later prose in a merged Clean segment using the timestamp of its own fragment', async () => {
     const q = input.queries[0]!;
     const run = input.runs[0]!;

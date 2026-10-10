@@ -51,7 +51,10 @@ time, conservatively leaving later appended prose unclear.
 with a run’s completion time would manufacture evidence of later use.
 
 Every recorded query receives an assessment, including unknown when the model
-fails or evidence is missing. The evidence payload is bounded to 80,000 characters,
+fails or evidence is missing. Apply sets neutral defaults and zero-hit verdicts
+for the task in bulk, then saves the validated assessments for selected queries. The evidence payload is bounded to 80,000 characters before it is returned from
+loading, so neither detect nor dispatch checkpoints full article/transcript bodies
+in the task-step output that the UI polls. The prompt reuses the same bound,
 with result snippets capped at 1,200 characters and run prose limited to the last
 eight timestamped model turns (4,000 characters each). Whole query/run records
 that do not fit are omitted; omitted evidence leaves usage unknown, never unused.
