@@ -261,3 +261,32 @@ describe('a claimed file that is not valid UTF-8', () => {
     expect((await readFile(path.join(root, rel))).equals(swapped)).toBe(true);
   });
 });
+
+describe('a claimed directory holding a file that is not valid UTF-8', () => {
+  it('keeps the file, though it decodes leniently to the bytes its step recorded', async () => {
+    const written = '# agent \uFFFD\n';
+    const swapped = Buffer.from(
+      Buffer.from(written).toString('latin1').replace('\xef\xbf\xbd', '\xff'),
+      'latin1',
+    );
+    const rel = '.claude/agents/gen.md';
+    const root = await repoWith({});
+    await mkdir(path.join(root, '.claude/agents'), { recursive: true });
+    await writeFile(path.join(root, rel), swapped);
+    const outcome = await resetOnboardingArtifacts(root, {
+      writtenHashes: new Map(),
+      haiveDirs: new Set(['.claude/agents']),
+      haiveEntries: new Map([[rel, sha256Hex(normalizeContent(written))]]),
+    });
+    const kept = await readFile(path.join(root, rel)).catch(() => null);
+    const moved = outcome.quarantined.find((q) => q.from === '.claude/agents' || q.from === rel);
+    const at =
+      kept ??
+      (moved
+        ? await readFile(path.join(root, moved.to, moved.from === rel ? '' : 'gen.md')).catch(
+            () => null,
+          )
+        : null);
+    expect(at?.equals(swapped)).toBe(true);
+  });
+});
