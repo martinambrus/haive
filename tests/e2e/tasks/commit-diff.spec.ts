@@ -69,11 +69,14 @@ test('text highlights and the change map work in inline, split and fullscreen vi
     const marker = map.getByRole('button', { name: 'Jump to added line 301 (new file)' });
     await expect(marker).toBeVisible();
     await marker.click();
-    // The long setting can extend beyond the half-width split pane.
-    await pane.evaluate((el) => {
-      el.scrollLeft = el.scrollWidth;
-    });
-    await expect(changed).toBeInViewport();
+    // The long setting can extend beyond the half-width split pane. Retried because the
+    // jump's queued scroll event on the other pane can mirror scrollLeft back to 0.
+    await expect(async () => {
+      await pane.evaluate((el) => {
+        el.scrollLeft = el.scrollWidth;
+      });
+      await expect(changed).toBeInViewport({ timeout: 1000 });
+    }).toPass();
     expect(await pane.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
     await expect(viewer.locator('[data-diff-highlight="remove"]', { hasText: '//' })).toHaveCount(
       1,
