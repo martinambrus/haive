@@ -14,7 +14,6 @@ import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { safeNote } from '../_untrusted-repo.js';
 import { isListableName } from '../workflow/_impl-changes.js';
-
 import {
   classifyPlanInput,
   extractPlanInput,
