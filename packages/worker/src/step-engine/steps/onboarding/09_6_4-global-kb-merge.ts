@@ -187,6 +187,8 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     const mergedDrafts = new Set<string>();
     const leftDraft = new Set<string>();
     const editedDraft = new Set<string>();
+    const finishedDraft = new Set<string>();
+    let writeFailed = false;
     let merged = 0;
     try {
       const settings = await resolveGlobalKbSettings();
@@ -231,10 +233,12 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
                 .set({ description: inherited, updatedAt: new Date() })
                 .where(and(stillDraft, isNull(globalKbEntries.description)));
             }
+            finishedDraft.add(p.draftId);
           }
         });
       }
     } catch (err) {
+      writeFailed = true;
       ctx.logger.warn({ err }, 'global KB merge: applying merged bodies failed');
     }
     // Unmerged drafts stay linked for manual review/merge at 09_6_5.
@@ -264,7 +268,9 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
             ? 'no longer a draft when the merge finished'
             : editedDraft.has(p.draftId)
               ? 'edited while the merge ran; the edit was kept'
-              : (r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged')),
+              : writeFailed && !finishedDraft.has(p.draftId)
+                ? 'the merged article was not written: the knowledge base write failed'
+                : (r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged')),
         };
       }),
     );

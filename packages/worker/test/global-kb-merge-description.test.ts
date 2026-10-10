@@ -311,4 +311,64 @@ describe('the merge step and descriptions', () => {
       expect(out.degradedNote).not.toContain('Twin draft');
     });
   });
+
+  describe('a knowledge base write that throws', () => {
+    const SECOND = '00000000-0000-4000-8000-0000000000f3';
+    const result = (id: string) => ({
+      agentId: `merge:${id}`,
+      status: 'done',
+      rawOutput: `<<<MERGED\n${MERGED}\nMERGED>>>`,
+    });
+
+    async function applyThrowingOn(failingWrite: number | null) {
+      state = setup(null, null);
+      state.fake.insert(globalKbEntries, {
+        namespace: 'default',
+        category: 'best_practice',
+        facets: {},
+        source: 'promoted',
+        id: SECOND,
+        title: 'Second draft',
+        body: 'second body',
+        status: 'draft',
+        sourceTaskId: TASK,
+        supersedesEntryId: EXISTING,
+        description: null,
+      });
+      let writes = 0;
+      state.fake.hooks.beforeUpdate = () => {
+        writes += 1;
+        if (writes === failingWrite) throw new Error('connection reset');
+      };
+      const detected = await globalKbMergeStep.detect!(state.ctx);
+      return globalKbMergeStep.apply!(state.ctx, {
+        detected,
+        agentMiningResults: [result(DRAFT), result(SECOND)],
+      } as never);
+    }
+
+    it('labels the pair it threw on and the pair it never reached as a failed write', async () => {
+      const out = await applyThrowingOn(1);
+
+      expect(out).toMatchObject({ merged: 0, skipped: 2 });
+      expect(out.degradedNote).toContain('the merged article was not written');
+      expect(out.degradedNote).not.toContain('no usable merged article');
+    });
+
+    it('keeps the label of a pair finished before the throw', async () => {
+      const out = await applyThrowingOn(2);
+
+      expect(out).toMatchObject({ merged: 1, skipped: 1 });
+      expect(out.degradedNote).toContain('Second draft');
+      expect(out.degradedNote).toContain('the merged article was not written');
+      expect(out.degradedNote).not.toContain('Draft (');
+    });
+
+    it('labels nothing as a failed write when no write throws', async () => {
+      const out = await applyThrowingOn(null);
+
+      expect(out).toMatchObject({ merged: 2, skipped: 0 });
+      expect(out.degradedNote).toBeUndefined();
+    });
+  });
 });
