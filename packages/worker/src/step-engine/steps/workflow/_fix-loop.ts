@@ -387,6 +387,17 @@ export function excerptDiagnosis(raw: string, budget: number, keepPersonWhole: b
   return text.length > budget ? cutMiddle(text, budget, balanceFences) : balanceFences(text);
 }
 
+const CHECK_OUTPUT_CHARS = 4000;
+// excerptDiagnosis can run a little over its budget; the room keeps its result under the cap, so a second pass leaves it alone.
+const CHECK_OUTPUT_ROOM = 150;
+
+/** A check's output cut to `CHECK_OUTPUT_CHARS`: a run's verdict is at the end of its output, so a cut keeps both ends. */
+export function checkOutputExcerpt(output: string): string {
+  return output.length > CHECK_OUTPUT_CHARS
+    ? excerptDiagnosis(output, CHECK_OUTPUT_CHARS - CHECK_OUTPUT_ROOM, false)
+    : output;
+}
+
 /** Stable signature of a fix-loop diagnosis, namespaced by its source step. Two diagnoses
  *  from the SAME step that say the same thing (modulo ids, paths, and numbers) hash equal;
  *  diagnoses from different steps never collide (sourceStepId is part of the key). Lets

@@ -14,7 +14,7 @@ import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { isOutOfScope } from '../_scope-fence.js';
 import { loadFindingRecurrence, recurrenceKey } from './_review-findings.js';
-import { excerptDiagnosis } from './_fix-loop.js';
+import { checkOutputExcerpt, excerptDiagnosis } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -415,14 +415,27 @@ function reportExcerpt(report: string): string {
     : report;
 }
 
+// The first `max` characters without a split surrogate pair, and a note counting what is left out.
+function headWithNote(
+  text: string,
+  max: number,
+  what: string,
+): { head: string; note: string } | null {
+  if (text.length <= max) return null;
+  const end = (text.charCodeAt(max - 1) & 0xfc00) === 0xd800 ? max - 1 : max;
+  const left = text.length - end;
+  const one = left === 1;
+  return {
+    head: text.slice(0, end),
+    note: `[… ${left.toLocaleString('en-US')} more ${one ? 'character' : 'characters'} of the ${what} ${one ? 'is' : 'are'} not shown …]`,
+  };
+}
+
 const CHECKLIST_EXCERPT_CHARS = 12_000;
 
 function checklistExcerpt(checklist: string): string {
-  const left = checklist.length - CHECKLIST_EXCERPT_CHARS;
-  if (left <= 0) return checklist;
-  const one = left === 1;
-  const note = `[… ${left.toLocaleString('en-US')} more ${one ? 'character' : 'characters'} of the checklist ${one ? 'is' : 'are'} not shown …]`;
-  return `${checklist.slice(0, CHECKLIST_EXCERPT_CHARS)}\n\n${note}`;
+  const cut = headWithNote(checklist, CHECKLIST_EXCERPT_CHARS, 'checklist');
+  return cut ? `${cut.head}\n\n${cut.note}` : checklist;
 }
 
 interface VerifyGateApply {
@@ -467,7 +480,7 @@ function liteCheck(c?: StoredCheck): LiteCheck | null {
   return {
     ran: c.ran !== false,
     passed: c.passed === true,
-    output: (c.output ?? '').slice(0, 4000),
+    output: checkOutputExcerpt(c.output ?? ''),
     ...(typeof blocking === 'number' && typeof preExisting === 'number'
       ? { scope: { blocking, preExisting } }
       : {}),
@@ -488,6 +501,11 @@ function parseProbeErrors(raw: string | undefined): {
   return { consoleErrors: toList(obj?.consoleErrors), networkErrors: toList(obj?.networkErrors) };
 }
 
+function smokeExcerpt(excerpt: string): string {
+  const cut = headWithNote(excerpt, 1200, 'response excerpt');
+  return cut ? `${cut.head}\n${cut.note}` : excerpt;
+}
+
 /** Concrete runtime errors handed to a rejected-at-gate-2 fixer: the live browser's
  *  captured console/network errors plus the mandatory HTTP smoke's body excerpt. The
  *  human's prose says WHAT is wrong; this says exactly what the runtime reported, so the
@@ -505,7 +523,7 @@ function buildRuntimeErrorsBlock(detected: VerifyGateDetect): string {
   if (rs?.ran && runtimeSmokeVerdict(rs) !== 'pass' && rs.errorExcerpt) {
     lines.push(
       `Runtime HTTP smoke${rs.httpStatus !== null ? ` (HTTP ${rs.httpStatus})` : ''} at ${rs.url ?? 'the app'} — response excerpt:`,
-      rs.errorExcerpt.slice(0, 1200),
+      smokeExcerpt(rs.errorExcerpt),
     );
   }
   return lines.join('\n');
@@ -980,7 +998,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           statusLabel: 'NOT RUN',
           detail: c.note,
           ...(c.output.trim() && c.output.trim() !== c.note?.trim()
-            ? { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }
+            ? { body: fenced(checkOutputExcerpt(c.output)), defaultOpen: false }
             : {}),
         });
         continue;
@@ -997,7 +1015,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         ...(detail ? { detail } : {}),
         ...(c.passed || !c.output.trim()
           ? {}
-          : { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }),
+          : { body: fenced(checkOutputExcerpt(c.output)), defaultOpen: false }),
       });
     }
     // Omitting a check nobody selected is right — a skipped check is not a failure — but with ALL

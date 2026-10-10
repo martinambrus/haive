@@ -646,6 +646,46 @@ describe('phase5VerifyStep.apply', () => {
       expect(out.degradedNote).not.toContain('not selected');
     });
 
+    describe('classifies the environment on the whole output, not on the stored excerpt', () => {
+      const MARKER = "browserType.launch: Executable doesn't exist at /root/.cache/chrome";
+      const failingRun = (markerFromEnd: number) => {
+        const body = 'noise line\n'.repeat(900);
+        const text = `FIRST\n${body}${MARKER}\n${'tail line\n'.repeat(markerFromEnd / 10)}Tests: 3 failed`;
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+          args.includes('curl')
+            ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+            : { exitCode: 1, output: text },
+        );
+        return text;
+      };
+      const run = () =>
+        runApply(
+          { test: PHPUNIT, testFramework: 'playwright' },
+          { runTest: true, runLint: false, runTypecheck: false },
+        );
+
+      it('catches a marker the excerpt cut out of the middle', async () => {
+        const text = failingRun(3000);
+        const out = await run();
+
+        expect(text.length).toBeGreaterThan(10_000);
+        expect(out.test.output).not.toContain(MARKER);
+        expect(out.test.output.length).toBeLessThanOrEqual(4000);
+        expect(out.test.ran).toBe(false);
+        expect(out.degradedNote).toContain('NOT known to be green');
+        expect(JSON.stringify(out)).not.toContain('"raw"');
+      });
+
+      it('still catches a marker inside the stored tail', async () => {
+        failingRun(200);
+        const out = await run();
+
+        expect(out.test.output).toContain(MARKER);
+        expect(out.test.ran).toBe(false);
+        expect(JSON.stringify(out)).not.toContain('"raw"');
+      });
+    });
+
     // The user ticked these slots; "not selected" would say the opposite of what happened.
     it('names every slot whose runner was unavailable in the card note, and calls none of them unselected', async () => {
       ensureAppServing.mockResolvedValue({ mode: 'none', url: null });
@@ -823,25 +863,69 @@ describe('phase5VerifyStep.apply', () => {
     });
   });
 
-  it('keeps the tail of a long host check output, as the DDEV path does', async () => {
-    ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
-    const noisy = {
+  describe('stores both ends of a long check output', () => {
+    const hostCheck = (script: string) => ({
       kind: 'host' as const,
       label: 'noisy',
-      argv: [
-        process.execPath,
-        '-e',
-        "process.stdout.write('x'.repeat(6000) + 'END'); process.exitCode = 1",
-      ],
-    };
+      argv: [process.execPath, '-e', script],
+    });
+    const LONG = `FIRST\n${'noise line\n'.repeat(950)}Tests: 3 failed`;
 
-    const out = await runApply(
-      { ddevMode: false, workspacePath: tmpdir(), test: noisy },
-      { runTest: true },
-    );
+    it('keeps the start and the verdict of a long host run, within the cap', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      const out = await runApply(
+        {
+          ddevMode: false,
+          workspacePath: tmpdir(),
+          test: hostCheck(`process.stdout.write(${JSON.stringify(LONG)}); process.exitCode = 1`),
+        },
+        { runTest: true },
+      );
 
-    expect(out.test.output).toHaveLength(4000);
-    expect(out.test.output.endsWith('END')).toBe(true);
+      expect(LONG.length).toBeGreaterThan(10_000);
+      expect(out.test.output.startsWith('FIRST\n')).toBe(true);
+      expect(out.test.output.endsWith('Tests: 3 failed')).toBe(true);
+      expect(out.test.output).toMatch(/\[… [\d,]+ characters? omitted …\]/);
+      expect(out.test.output.length).toBeLessThanOrEqual(4000);
+    });
+
+    it('keeps both ends of a long DDEV run too', async () => {
+      ddevExec.mockResolvedValue({ exitCode: 1, output: LONG });
+      const out = await runApply({ test: PHPUNIT }, { runTest: true });
+
+      expect(out.test.output.startsWith('FIRST\n')).toBe(true);
+      expect(out.test.output.endsWith('Tests: 3 failed')).toBe(true);
+      expect(out.test.output.length).toBeLessThanOrEqual(4000);
+    });
+
+    it('keeps both ends of a failing host run that exits non-zero with stderr', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      const out = await runApply(
+        {
+          ddevMode: false,
+          workspacePath: tmpdir(),
+          test: hostCheck(`process.stderr.write(${JSON.stringify(LONG)}); process.exitCode = 2`),
+        },
+        { runTest: true },
+      );
+
+      expect(out.test.output.startsWith('FIRST\n')).toBe(true);
+      expect(out.test.output.endsWith('Tests: 3 failed')).toBe(true);
+    });
+
+    it('stores a 3,999 character output byte for byte', async () => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      const out = await runApply(
+        {
+          ddevMode: false,
+          workspacePath: tmpdir(),
+          test: hostCheck("process.stdout.write('x'.repeat(3998) + '!'); process.exitCode = 1"),
+        },
+        { runTest: true },
+      );
+
+      expect(out.test.output).toBe(`${'x'.repeat(3998)}!`);
+    });
   });
 
   describe('lint limited to the lines the change wrote', () => {

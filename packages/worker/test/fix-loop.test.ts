@@ -18,6 +18,7 @@ import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-
 import { phase4ValidateStep } from '../src/step-engine/steps/workflow/07b-phase-4-validate.js';
 import {
   cleanDiagnosis,
+  checkOutputExcerpt,
   excerptDiagnosis,
   buildFixLoopEscalationSchema,
   buildOscillationEscalationSchema,
@@ -2251,5 +2252,23 @@ describe('a person-source request recorded without machineFenced reads as machin
     const marked = await loadPriorFixContext(ctxWith([ev(src, 1, HOSTILE)], 2));
     expect(outsideFences(marked)).toContain(HOSTILE);
     expect(marked).not.toContain(UNTRUSTED_OPEN);
+  });
+});
+
+describe('checkOutputExcerpt', () => {
+  it('returns an output at or under 4000 characters as it is', () => {
+    const at = `${'x'.repeat(3999)}\n`;
+    expect(checkOutputExcerpt(at)).toBe(at);
+    expect(checkOutputExcerpt('')).toBe('');
+  });
+
+  it('keeps both ends of a longer output within the cap, and a second pass leaves it alone', () => {
+    const text = `FIRST\n${'noise line\n'.repeat(900)}Tests: 3 failed`;
+    const out = checkOutputExcerpt(text);
+    expect(out.startsWith('FIRST\n')).toBe(true);
+    expect(out.endsWith('Tests: 3 failed')).toBe(true);
+    expect(out).toMatch(OMISSION);
+    expect(out.length).toBeLessThanOrEqual(4000);
+    expect(checkOutputExcerpt(out)).toBe(out);
   });
 });
