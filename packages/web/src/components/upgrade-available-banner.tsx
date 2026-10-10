@@ -19,6 +19,8 @@ interface UpgradeStatusResponse {
   installedTemplateSetHash: string | null;
   currentTemplateSetHash: string;
   changedTemplateIds: string[];
+  /** The changed templates an upgrade removes rather than updates; older API versions omit it. */
+  obsoleteTemplateIds?: string[];
   isOnboarded: boolean;
   installedHaiveVersion: string | null;
   currentHaiveVersion: string;
@@ -149,12 +151,19 @@ export function UpgradeAvailableBanner({
   if (status.hasUpgradeAvailable) {
     const primaryLabel = status.hasInProgressUpgradeSession ? 'Continue upgrade' : 'Review & apply';
     const bundleChanges = status.customChanges ?? [];
-    const haiveChangedCount = status.changedTemplateIds.filter(
-      (id) => !id.startsWith('custom.'),
-    ).length;
+    const haiveChanged = status.changedTemplateIds.filter((id) => !id.startsWith('custom.'));
+    const haiveChangedCount = haiveChanged.length;
+    const toRemove = haiveChanged.filter((id) => status.obsoleteTemplateIds?.includes(id)).length;
+    const toUpdate = haiveChangedCount - toRemove;
     const missingImports = status.missingRulesImports ?? [];
     const rtkBlocks = status.rtkBlockLeftovers ?? [];
     const rtkHooks = status.rtkSettingsLeftovers ?? [];
+    const templateText =
+      status.firstUpgradeOnThisInstall && haiveChangedCount === 0
+        ? 'not upgraded on this install yet'
+        : [toUpdate > 0 && `${toUpdate} to update`, toRemove > 0 && `${toRemove} to remove`]
+            .filter(Boolean)
+            .join(', ');
     const showTemplateCount =
       haiveChangedCount > 0 ||
       bundleChanges.length > 0 ||
@@ -168,12 +177,11 @@ export function UpgradeAvailableBanner({
           <span className="text-neutral-300">
             {showTemplateCount && (
               <>
-                {status.firstUpgradeOnThisInstall && haiveChangedCount === 0
-                  ? 'not upgraded on this install yet'
-                  : `${haiveChangedCount} template(s) changed`}
+                {templateText}
                 {bundleChanges.length > 0 && (
                   <>
-                    ; {bundleChanges.reduce((acc, c) => acc + c.changedItemCount, 0)} bundle item(s)
+                    {templateText && '; '}
+                    {bundleChanges.reduce((acc, c) => acc + c.changedItemCount, 0)} bundle item(s)
                     across {bundleChanges.length} bundle(s)
                   </>
                 )}

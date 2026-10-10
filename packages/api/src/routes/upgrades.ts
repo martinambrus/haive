@@ -466,10 +466,12 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // Per-template comparison: which template IDs differ between installed
   // and current manifest? Used by the UI banner.
   const changedTemplateIds: string[] = [];
+  const obsoleteTemplateIds: string[] = [];
   for (const [id, installed] of filteredInstalled.entries()) {
     const current = currentByTemplate.get(id);
     if (!current) {
       changedTemplateIds.push(id);
+      obsoleteTemplateIds.push(id);
       continue;
     }
     if (
@@ -597,6 +599,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     hasInProgressUpgradeSession: hasInProgressUpgradeTask,
     hasPriorUpgrade,
     inProgressUpgradeTaskId: inProgressUpgradeTask[0]?.id ?? null,
+    ...(obsoleteTemplateIds.length > 0 ? { obsoleteTemplateIds } : {}),
     ...(customChanges.length > 0 ? { customChanges } : {}),
     ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),

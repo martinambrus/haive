@@ -1477,3 +1477,85 @@ describe('upgrade-status and a bundle item 01 cannot render', () => {
     expect(body.hasUpgradeAvailable).toBe(true);
   });
 });
+
+/** #237: of the templates reported as changed, the ones whose plan offers a removal are named, so the
+ *  banner can say what the upgrade will do. */
+describe('upgrade-status names the changed templates whose plan offers a removal', () => {
+  let repo: string;
+
+  const row = (templateId: string, hash: string) => ({
+    id: `row-${templateId}`,
+    diskPath: `.claude/agents/${templateId}.md`,
+    templateId,
+    templateSchemaVersion: 1,
+    templateContentHash: hash,
+    writtenHash: 'w',
+    bundleItemId: null,
+    haiveVersion: null,
+    repositoryId: 'repo-1',
+    generatedAt: new Date(1000),
+  });
+  const world = (applicable: string[]) => {
+    inSync([claude]);
+    state.rows.set(schema.onboardingArtifacts, [
+      ...(state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        repositoryId: 'repo-1',
+        generatedAt: new Date(1000),
+      })),
+      row('agent.moved', 'h-old'),
+      row('agent.retired', 'h-retired'),
+    ]);
+    state.rows
+      .get(schema.templateManifestCache)!
+      .push(
+        { templateId: 'agent.moved', schemaVersion: 1, contentHash: 'h-new', setHash: 's' },
+        { templateId: 'agent.fresh', schemaVersion: 1, contentHash: 'h-fresh', setHash: 's' },
+      );
+    state.onboarded = false;
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: applicable,
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+    };
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-obsolete-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('names an installed template no release renders any more, and no other changed one', async () => {
+    world(['agent.x', 'agent.moved', 'agent.fresh', 'agent.retired']);
+    const body = await status();
+    expect([...(body.changedTemplateIds as string[])].sort()).toEqual([
+      'agent.fresh',
+      'agent.moved',
+      'agent.retired',
+    ]);
+    expect(body.obsoleteTemplateIds).toEqual(['agent.retired']);
+  });
+
+  it('names none while every changed template is one to update', async () => {
+    world(['agent.x', 'agent.moved', 'agent.fresh']);
+    state.rows.set(
+      schema.onboardingArtifacts,
+      (state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).filter(
+        (r) => r.templateId !== 'agent.retired',
+      ),
+    );
+    const body = await status();
+    expect([...(body.changedTemplateIds as string[])].sort()).toEqual([
+      'agent.fresh',
+      'agent.moved',
+    ]);
+    expect(body.obsoleteTemplateIds).toBeUndefined();
+  });
+});
