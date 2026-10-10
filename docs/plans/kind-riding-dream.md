@@ -407,9 +407,15 @@ reason and most severe first within each group:
 - findings an earlier scan recorded that are still present and were not picked this time, naming
   the scan that first recorded them;
 - out-of-scope observations under a diff target (`raw.inScope = false`);
-- `## INSIGHTS` the remediation coders, `scan-fix` and the core tail noted and 08e did not pick,
-  read through `loadUnactedInsights` with no limit (see Core changes) rather than re-parsed;
-  `scan-remediate`'s coder prompt and
+- findings the core tail's own reviewers (07b, 08c, 08c2, 08d) raised in this task and nobody
+  resolved, read from their `review_findings` rows by disposition: `accepted_risk` (accepted at
+  the fix loop's escalation gate), `dismissed_human` (left out at gate 1.5), and `open` rows of the
+  last round each reviewer ran, which no fix round followed. `dismissed_refuted` is left out, since
+  a refuter disproved it, and so are an earlier round's `open` rows, which a later round re-reviewed;
+- `## INSIGHTS` the remediation coders, `scan-fix` and the core tail noted, read through
+  `loadUnactedInsights` with no limit (see Core changes) rather than re-parsed: those 08e did not
+  pick, and those it did as implementation attempted and unconfirmed, since 08e's `implemented` is
+  true whenever anything was picked, whatever its agent did. `scan-remediate`'s coder prompt and
   `scan-fix` carry `INSIGHTS_INSTRUCTION` as 07 does.
 
 Each entry's reason is derived from structural state — the triage step's output, the issue's
@@ -821,9 +827,11 @@ ahead of the module:
   (`issueBranchHasChanges`), which is left unmerged with a no-change marker in `concerns`, a dependent of the failed issue ends `failed_unrecoverable` with a blocked-by marker in
   `concerns` — no new `dag_issue_outcome` value, as with the refusal marker — and an environment
   halt, a merge halt and every other site `scan-remediate` lists as a fault still fail it.
-- **`loadUnactedInsights` takes a limit.** It slices to `INSIGHTS_AT_GATE` (30) itself, which suits
-  a gate row and not a report that lists everything. The gates pass that constant, `scan-report`
-  passes none, and the omitted count keeps its meaning for both.
+- **`loadUnactedInsights` takes a limit and can return what 08e picked.** It slices to
+  `INSIGHTS_AT_GATE` (30) itself, which suits a gate row and not a report that lists everything,
+  and it drops every insight 08e picked, which a gate can afford and a report cannot. The gates
+  pass that constant and keep today's subtraction; `scan-report` passes no limit and takes the
+  picked insights back, marked as picked. The omitted count keeps its meaning for both.
 - **`00a-sync-base` fences its refspecs.** Its fetches put `base` straight after `origin`
   (`fetch origin <base>:refs/heads/<base>`, `fetch --deepen=50 origin <base>`) with no
   `--end-of-options`, and `base` comes from a free-text field, so a value shaped like an option is
@@ -1006,7 +1014,9 @@ former, and this module does both kinds of write.
   each reason group — not picked, no authoritative side, no remediation offered, a refused issue,
   a failed issue, still present from an earlier scan, out of scope, an unpicked coder insight —
   and each lands under its own reason; a merged issue's findings are listed as remediation
-  attempted and unconfirmed, and no row is written `fixed`; more than 30 unpicked insights are all
+  attempted and unconfirmed, and no row is written `fixed`; an insight 08e picked is listed as implementation attempted;
+  a tail reviewer's `accepted_risk` row and its last round's `open` row are listed and its
+  `dismissed_refuted` row is not; more than 30 unpicked insights are all
   listed; a REFUSED dimension appears in the coverage record and not in the section; a stale
   status message on a step changes no entry's reason.
 - A triage that picks nothing, and a remediation whose every issue fails, each reach `scan-report`
@@ -1044,8 +1054,9 @@ former, and this module does both kinds of write.
   accepted issue whose branch is empty is left unmerged with the no-change marker while the step
   completes, a replanner abort records its issues and the step completes, and an environment
   halt or a merge halt still fails the step; without the policy, every existing DAG test is unchanged.
-- `loadUnactedInsights` with no limit returns every unpicked insight; with `INSIGHTS_AT_GATE` the
-  gates still show 30 and count the rest.
+- `loadUnactedInsights` with no limit returns every unpicked insight, and the picked ones marked
+  when asked; with `INSIGHTS_AT_GATE` the gates still show 30, count the rest and list no picked
+  insight.
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
