@@ -94,7 +94,12 @@ import {
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
 import { retryTaskAtStep, stepRoutes } from './steps.js';
-import { insertUpgradeTask, refuseBesideLiveUpgrade, withRepositoryTaskLock } from '../upgrades.js';
+import {
+  insertUpgradeTask,
+  refuseBesideLiveUpgrade,
+  refuseReviveBesideLive,
+  withRepositoryTaskLock,
+} from '../upgrades.js';
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 
@@ -710,7 +715,7 @@ taskRoutes.post('/', async (c) => {
     // the same scope list, and an upgrade beside one rewrites them, so the check shares the
     // upgrade's lock. A workflow or run_app task on a repo mid-onboarding stays the caller's call.
     const repositoryId = body.repositoryId;
-    task = await withRepositoryTaskLock(db, repositoryId, async (tx) => {
+    ({ task, queued } = await withRepositoryTaskLock(db, repositoryId, async (tx) => {
       const liveId = await liveOnboardingTaskId(tx, userId, repositoryId);
       if (liveId) {
         throw new HttpError(
@@ -719,9 +724,9 @@ taskRoutes.post('/', async (c) => {
         );
       }
       await refuseBesideLiveUpgrade(tx, repositoryId);
-      return firstRow(await insertTask(tx));
-    });
-    queued = await settle(db, task);
+      const row = firstRow(await insertTask(tx));
+      return { task: row, queued: await settle(tx, row) };
+    }));
   } else {
     task = await db.transaction(async (tx) => {
       const row = firstRow(await insertTask(tx));
@@ -1158,6 +1163,7 @@ taskRoutes.post('/:id/action', async (c) => {
       // drifting backwards, and Retry the only enabled button. Same helper Stop/cancel use;
       // it supersedes live invocations, ends the parked step, and kills the haive-cli-*
       // sandboxes while leaving the DDEV/app runtime up.
+      await db.transaction((tx) => refuseReviveBesideLive(tx, id));
       await stopActiveCliInvocations(db, id, { failTask: false });
       // stopActiveCliInvocations deliberately covers running/waiting_cli only. A step parked
       // at a FORM should be re-offered by the restart, not failed, so reset it to pending.
@@ -1184,22 +1190,25 @@ taskRoutes.post('/:id/action', async (c) => {
         );
       // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
       // dropped by the worker's epoch guard instead of running against the restarted task.
-      const [requeued] = await db
-        .update(schema.tasks)
-        .set({
-          status: 'queued',
-          errorMessage: null,
-          // full task restart → fresh auto-resume budget
-          allowanceAutoResumeCount: 0,
-          ...CLEAR_ALLOWANCE_WATCH,
-          // Retrying a paused task means "run it". Leaving the hold set would restart the task
-          // straight into the pause park, with Retry apparently doing nothing.
-          pausedAt: null,
-          orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
-          updatedAt: new Date(),
-        })
-        .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')))
-        .returning({ id: schema.tasks.id });
+      const [requeued] = await db.transaction(async (tx) => {
+        await refuseReviveBesideLive(tx, id);
+        return tx
+          .update(schema.tasks)
+          .set({
+            status: 'queued',
+            errorMessage: null,
+            // full task restart → fresh auto-resume budget
+            allowanceAutoResumeCount: 0,
+            ...CLEAR_ALLOWANCE_WATCH,
+            // Retrying a paused task means "run it". Leaving the hold set would restart the task
+            // straight into the pause park, with Retry apparently doing nothing.
+            pausedAt: null,
+            orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')))
+          .returning({ id: schema.tasks.id });
+      });
       // A Cancel that landed since the read stands.
       if (!requeued) throw new HttpError(409, 'The task is no longer failed; reload it');
       // Answering a parked form revives the task, so its pass can open a row between the settle

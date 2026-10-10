@@ -46,6 +46,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
   LIVE_TASK_STATUSES,
+  liveOnboardingTaskId,
   renderContextAdmitsUpgrade,
   type RepositoryForUpgrade,
   upgradeAdmission,
@@ -688,32 +689,74 @@ export async function withRepositoryTaskLock<T>(
   repositoryId: string,
   work: (tx: DbTx, repo: RepositoryForUpgrade) => Promise<T>,
 ): Promise<T> {
-  return db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
+  return db.transaction(async (tx) => work(tx, await lockRepositoryTasks(tx, repositoryId)));
+}
+
+async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
+  );
+  const [repo] = await tx
+    .select({
+      id: schema.repositories.id,
+      source: schema.repositories.source,
+      renderContext: schema.repositories.renderContext,
+      status: schema.repositories.status,
+      storagePath: schema.repositories.storagePath,
+      localPath: schema.repositories.localPath,
+      onboardedAt: schema.repositories.onboardedAt,
+      onboardingResetAt: schema.repositories.onboardingResetAt,
+      rootClaimedAt: schema.repositories.rootClaimedAt,
+      rootClaimKind: schema.repositories.rootClaimKind,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .for('update');
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  if (isRootClaimLive(repo.rootClaimedAt)) {
+    throw new HttpError(409, rootClaimRefusal(repo.rootClaimKind as RootClaimKind | null));
+  }
+  return repo;
+}
+
+/** Call first in the transaction that moves an onboarding or upgrade task out of a non-live
+ *  status. Creation checks under the repository lock, and a failed task is not live, so the
+ *  revival takes the same lock and makes the creation's checks: an onboarding beside a live
+ *  upgrade or rollback, an upgrade or rollback beside a live onboarding, a live root claim. */
+export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<void> {
+  const [task] = await tx
+    .select({
+      type: schema.tasks.type,
+      userId: schema.tasks.userId,
+      repositoryId: schema.tasks.repositoryId,
+      metadata: schema.tasks.metadata,
+    })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId));
+  if (!task?.repositoryId || (task.type !== 'onboarding' && task.type !== 'onboarding_upgrade')) {
+    return;
+  }
+  await lockRepositoryTasks(tx, task.repositoryId);
+  const [current] = await tx
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId));
+  if (!current || (LIVE_TASK_STATUSES as readonly string[]).includes(current.status)) return;
+  if (task.type === 'onboarding') {
+    await refuseBesideLiveUpgrade(tx, task.repositoryId);
+    return;
+  }
+  const liveId = await liveOnboardingTaskId(tx, task.userId, task.repositoryId);
+  if (liveId) {
+    const rollback = (task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
+    throw new HttpError(
+      409,
+      upgradeRefusalMessage(
+        { admitted: false, reason: 'live-onboarding', taskId: liveId },
+        rollback ? 'rolled back' : 'upgraded',
+      ),
     );
-    const [repo] = await tx
-      .select({
-        id: schema.repositories.id,
-        source: schema.repositories.source,
-        renderContext: schema.repositories.renderContext,
-        status: schema.repositories.status,
-        storagePath: schema.repositories.storagePath,
-        localPath: schema.repositories.localPath,
-        onboardedAt: schema.repositories.onboardedAt,
-        onboardingResetAt: schema.repositories.onboardingResetAt,
-        rootClaimedAt: schema.repositories.rootClaimedAt,
-        rootClaimKind: schema.repositories.rootClaimKind,
-      })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
-    if (!repo) throw new HttpError(404, 'Repository not found');
-    if (isRootClaimLive(repo.rootClaimedAt)) {
-      throw new HttpError(409, rootClaimRefusal(repo.rootClaimKind as RootClaimKind | null));
-    }
-    return work(tx, repo);
-  });
+  }
 }
 
 /** Insert an upgrade or a rollback task only while no other one of the repository is live and no
