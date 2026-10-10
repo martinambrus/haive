@@ -4,7 +4,7 @@
 // the line readers below. Shared by onboarding env detection (01-env-detect), the
 // workflow DDEV reconcile step (07c-ddev-reconcile) and env-replicate
 // (01-declare-deps) so all interpret the config identically.
-import { isAlias, isMap, isScalar, parseDocument } from 'yaml';
+import { isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml';
 import type { Document, YAMLMap } from 'yaml';
 
 /** Match a top-level `key: value` scalar (optionally double-quoted), line by line. */
@@ -26,23 +26,37 @@ function scalarText(node: unknown, text: string): string | null {
   return value;
 }
 
-/** yaml.v3 merges a plain `<<` key; the failsafe schema does not, so such a map is left to the line readers. */
-function hasMergeKey(map: YAMLMap): boolean {
-  return map.items.some(
-    (pair) => isScalar(pair.key) && pair.key.type === 'PLAIN' && pair.key.value === '<<',
-  );
-}
-
 /** The node an alias names, which is how DDEV's YAML reader sees it; any other node as it is. Reads the anchor, never expands it. */
 function resolved(node: unknown, doc: Document): unknown {
   return isAlias(node) ? node.resolve(doc) : node;
 }
 
+const isMergeKey = (key: unknown): boolean =>
+  isScalar(key) && key.type === 'PLAIN' && key.value === '<<';
+
+/** `key` in `map` as yaml.v3 reads it: the map's own entry first, then each `<<` source in order. */
+function lookup(map: YAMLMap, key: string, doc: Document, depth = 0): unknown {
+  const own = map.items.find(
+    (pair) => !isMergeKey(pair.key) && isScalar(pair.key) && pair.key.value === key,
+  );
+  if (own) return resolved(own.value, doc);
+  if (depth > 8) return undefined;
+  for (const pair of map.items) {
+    if (!isMergeKey(pair.key)) continue;
+    const source = resolved(pair.value, doc);
+    const sources = isSeq(source) ? source.items.map((item) => resolved(item, doc)) : [source];
+    for (const from of sources) {
+      if (!isMap(from)) continue;
+      const found = lookup(from, key, doc, depth + 1);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
 function topLevelMap(text: string): { doc: Document; map: YAMLMap } | null {
   const doc = parseDocument(text, { schema: 'failsafe' });
-  if (doc.errors.length > 0 || !isMap(doc.contents) || hasMergeKey(doc.contents)) return null;
-  const database = resolved(doc.contents.get('database', true), doc);
-  return isMap(database) && hasMergeKey(database) ? null : { doc, map: doc.contents };
+  return doc.errors.length === 0 && isMap(doc.contents) ? { doc, map: doc.contents } : null;
 }
 
 /** One parse of `text`; every read from it uses that parse, or the line readers when YAML refuses the document. */
@@ -50,13 +64,11 @@ function ddevReader(text: string) {
   const parsed = topLevelMap(text);
   return {
     field: (key: string): string | null =>
-      parsed
-        ? scalarText(resolved(parsed.map.get(key, true), parsed.doc), text)
-        : lineField(text, key),
+      parsed ? scalarText(lookup(parsed.map, key, parsed.doc), text) : lineField(text, key),
     blockField: (block: string, key: string): string | null => {
       if (!parsed) return lineBlockField(text, block, key);
-      const inner = resolved(parsed.map.get(block, true), parsed.doc);
-      return isMap(inner) ? scalarText(resolved(inner.get(key, true), parsed.doc), text) : null;
+      const inner = lookup(parsed.map, block, parsed.doc);
+      return isMap(inner) ? scalarText(lookup(inner, key, parsed.doc), text) : null;
     },
   };
 }

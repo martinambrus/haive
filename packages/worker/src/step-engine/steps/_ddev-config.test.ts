@@ -253,7 +253,7 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig('php_version: *nope\n').phpVersion).toBeNull();
   });
 
-  it('treats a merge key as unreadable, so the line readers answer', () => {
+  it('reads a merged database block, as DDEV does', () => {
     const cfg = [
       'x-db: &db',
       '  type: postgres',
@@ -263,7 +263,27 @@ describe('parseDdevConfig: aliases and merge keys', () => {
       '  <<: *db',
       '',
     ].join('\n');
-    expect(parseDdevConfig(cfg)).toMatchObject({ phpVersion: '8.3', dbType: null });
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: '8.3',
+      dbType: 'postgres',
+      dbVersion: '16',
+    });
+  });
+
+  it('lets the map own key win over its merged one, and merges a list of sources in order', () => {
+    const cfg = [
+      'x-a: &a {type: mysql, version: "5.7"}',
+      'x-b: &b {type: postgres, version: "16"}',
+      'database:',
+      '  <<: [*a, *b]',
+      '  version: "8.0"',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'mysql', dbVersion: '8.0' });
+  });
+
+  it('reads a merged top-level field', () => {
+    expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
   });
 
   it('returns promptly on a 10-level alias expansion', () => {
