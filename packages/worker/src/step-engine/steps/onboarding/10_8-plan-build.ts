@@ -25,11 +25,12 @@ export const onboardingPlanBuildStep = createPlanBuildStep({
   index: 14.5,
   title: 'Project plan',
   description:
-    'Derives a durable plan of what the project is meant to be from the knowledge base just written, so later tasks can be created from it and the spec writer knows what components exist.',
-  // No form: onboarding is already a long sequence of them, and one more asking
-  // for two numbers with good defaults is friction rather than control. The plan
-  // is editable on the canvas afterwards.
+    'Optional. Derives a durable plan of what the project is meant to be from the knowledge base just written, so later tasks can be created from it and the spec writer knows what components exist.',
+  // No depth/breadth form: onboarding is already a long sequence of them, and two
+  // numbers with good defaults are friction rather than control. The plan is
+  // editable on the canvas afterwards.
   askForBudget: false,
+  askToRun: true,
   // Never rebuild over an existing plan. A repo re-onboarded (or resumed) must
   // not get a second decomposition merged into the one someone has been editing.
   extraShouldRun: async (ctx) => {

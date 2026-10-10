@@ -173,6 +173,7 @@ async function main(): Promise<void> {
       '10-rag-populate': {
         truncateExisting: true,
       },
+      '10_8-plan-build': { buildPlan: 'skip' },
       '11-final-review': {
         acknowledged: true,
         reviewerNotes: 'Smoke run; stubs expected due to missing CLI.',
