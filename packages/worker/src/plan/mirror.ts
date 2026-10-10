@@ -182,6 +182,17 @@ async function writePlanMirrorLocked(
   return written;
 }
 
+/** Only `refused` is worth telling a person: every rescan meets no snapshot or an existing plan. */
+export type PlanMirrorImport =
+  | { imported: true }
+  | { imported: false; code: 'no_mirror' | 'has_plan' | 'refused'; reason: string };
+
+const refused = (reason: string): PlanMirrorImport => ({
+  imported: false,
+  code: 'refused',
+  reason,
+});
+
 /**
  * Restore a plan from a fresh clone's committed mirror.
  *
@@ -199,28 +210,26 @@ export async function importPlanMirror(
   db: Database,
   repositoryId: string,
   storagePath: string,
-): Promise<{ imported: boolean; reason?: string }> {
+): Promise<PlanMirrorImport> {
   let rawPayload: unknown;
   try {
     // null is absence OR a refusal — a link, a non-regular file — and both mean there is no mirror
     // to import, which is exactly what the `catch` concluded for an unreadable path.
     const raw = await readTextNoFollow(storagePath, HAIVE_DATA_FILES.plan);
-    if (raw === null) return { imported: false, reason: 'no plan mirror' };
+    if (raw === null) return { imported: false, code: 'no_mirror', reason: 'no plan mirror' };
     rawPayload = JSON.parse(raw) as unknown;
   } catch {
-    return { imported: false, reason: 'no plan mirror' };
+    return { imported: false, code: 'no_mirror', reason: 'no plan mirror' };
   }
 
   const parsed = planMirrorPayloadSchema.safeParse(rawPayload);
   if (!parsed.success) {
     const version = (rawPayload as { schemaVersion?: unknown } | null)?.schemaVersion;
-    return {
-      imported: false,
-      reason:
-        version !== 1 && version !== PLAN_MIRROR_SCHEMA_VERSION
-          ? `schemaVersion ${String(version)} not supported`
-          : `invalid plan mirror: ${parsed.error.issues[0]?.message ?? 'validation failed'}`,
-    };
+    return refused(
+      version !== 1 && version !== PLAN_MIRROR_SCHEMA_VERSION
+        ? `schemaVersion ${String(version)} not supported`
+        : `invalid plan mirror: ${parsed.error.issues[0]?.message ?? 'validation failed'}`,
+    );
   }
   const mirror = parsed.data;
   const mirrorNodes =
@@ -228,46 +237,43 @@ export async function importPlanMirror(
       ? mirror.nodes.map((node) => ({ ...node, createdBy: node.createdBy }))
       : mirror.nodes.map((node) => ({ ...node, createdBy: 'import' as const }));
   if (!Array.isArray(mirror.nodes) || mirror.nodes.length === 0) {
-    return { imported: false, reason: 'mirror has no nodes' };
+    return refused('mirror has no nodes');
   }
 
   const roots = mirrorNodes.filter((n) => n.parentId === null);
   if (roots.length !== 1) {
-    return {
-      imported: false,
-      reason: `plan mirror must contain exactly one root (found ${roots.length})`,
-    };
+    return refused(`plan mirror must contain exactly one root (found ${roots.length})`);
   }
   const ids = mirrorNodes.map((n) => n.id);
   const uniqueIds = new Set(ids);
   if (uniqueIds.size !== ids.length) {
-    return { imported: false, reason: 'plan mirror contains duplicate node refs' };
+    return refused('plan mirror contains duplicate node refs');
   }
   for (const edge of mirror.edges) {
     if (!uniqueIds.has(edge.fromNodeId) || !uniqueIds.has(edge.toNodeId)) {
-      return { imported: false, reason: 'plan mirror contains a dangling plan link' };
+      return refused('plan mirror contains a dangling plan link');
     }
     if (edge.fromNodeId === edge.toNodeId) {
-      return { imported: false, reason: 'plan mirror contains a self-referencing plan link' };
+      return refused('plan mirror contains a self-referencing plan link');
     }
   }
   const codeLinks = mirror.schemaVersion === 2 ? mirror.codeLinks : [];
   for (const link of codeLinks) {
     if (!uniqueIds.has(link.nodeId)) {
-      return { imported: false, reason: 'plan mirror contains a dangling code link' };
+      return refused('plan mirror contains a dangling code link');
     }
   }
   const edgeKeys = mirror.edges.map((edge) =>
     [edge.fromNodeId, edge.toNodeId, edge.kind].join('\0'),
   );
   if (new Set(edgeKeys).size !== edgeKeys.length) {
-    return { imported: false, reason: 'plan mirror contains duplicate plan links' };
+    return refused('plan mirror contains duplicate plan links');
   }
   const codeLinkKeys = codeLinks.map((link) =>
     [link.nodeId, link.repoPath, link.symbol ?? ''].join('\0'),
   );
   if (new Set(codeLinkKeys).size !== codeLinkKeys.length) {
-    return { imported: false, reason: 'plan mirror contains duplicate code links' };
+    return refused('plan mirror contains duplicate code links');
   }
 
   const [existing] = await db
@@ -275,7 +281,9 @@ export async function importPlanMirror(
     .from(schema.planNodes)
     .where(eq(schema.planNodes.repositoryId, repositoryId))
     .limit(1);
-  if (existing) return { imported: false, reason: 'repository already has a plan' };
+  if (existing) {
+    return { imported: false, code: 'has_plan', reason: 'repository already has a plan' };
+  }
 
   // The ids are restored verbatim, and a node id is globally unique — so adding
   // the SAME repository twice would collide on the primary key. That is not a
@@ -288,7 +296,7 @@ export async function importPlanMirror(
     .where(inArray(schema.planNodes.id, ids))
     .limit(1);
   if (clashes.length > 0) {
-    return { imported: false, reason: 'these plan nodes already exist under another repository' };
+    return refused('these plan nodes already exist under another repository');
   }
 
   // Order parents before children so `path` can be built from the parent's, and
@@ -320,7 +328,7 @@ export async function importPlanMirror(
   };
   for (const n of mirrorNodes) {
     if (!place(n.id)) {
-      return { imported: false, reason: `plan mirror parentage does not resolve for node ${n.id}` };
+      return refused(`plan mirror parentage does not resolve for node ${n.id}`);
     }
   }
 
