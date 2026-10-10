@@ -36,7 +36,10 @@ round reopens the form instead. The route refuses a repository that already has 
 when the task is created, and a deferred build waits while its files upload; so the outline fold
 also writes a round 0 naming the root it drafted (`root_id`, nulled if that root is deleted), and
 the step refuses any other root (`assertOwnOutline`): one written before it started, or one someone
-recreated while a round was parked. A deleted root with no replacement is simply redrafted, under a numbered agent id
+recreated while a round was parked. The api also refuses to delete the root, or to create one, while a clarifying build is open
+(`refuseRootChangeDuringClarify`): through the questions AND through 01's depth form, since a root
+rebuilt there by 01 alone would carry none of the answers; cancel the build to change it. Behind
+that, a deleted root with no replacement is simply redrafted, under a numbered agent id
 (`clarify-outline-N`), since a step never re-sends an id it already has a row for. A
 node's `sourceTaskId` cannot serve, since every later patch, a canvas edit included, rewrites it. Its folds drop any node placed below the root
 (`outsideOutline`): 01's frontier expands component LEAVES only, so a decision put under a

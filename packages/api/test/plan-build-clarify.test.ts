@@ -151,3 +151,54 @@ describe('starting a plan build with clarifying questions', () => {
     expect(clis.plannerCliProviderId).not.toBeNull();
   });
 });
+
+describe('the plan root while a clarifying build is open', () => {
+  const ROOT_ID = '00000000-0000-4000-8000-0000000000f1';
+  function withOpenBuild(clarify: boolean) {
+    const fake = setup();
+    fake.insert(schema.planNodes, {
+      id: ROOT_ID,
+      repositoryId: REPO,
+      parentId: null,
+      path: `/${ROOT_ID}/`,
+      title: 'Root',
+      ordinal: 0,
+      kind: 'component',
+      status: 'todo',
+      version: 1,
+    });
+    fake.insert(schema.tasks, {
+      userId: USER,
+      repositoryId: REPO,
+      type: 'plan_build',
+      title: 'Build plan',
+      status: 'waiting_user',
+      metadata: clarify ? { planBuildMode: 'greenfield', planClarify: true } : {},
+    });
+    return fake;
+  }
+
+  it('refuses to delete the root', async () => {
+    const fake = withOpenBuild(true);
+    const res = await app.request(`/${REPO}/plan/nodes/${ROOT_ID}`, { method: 'DELETE' });
+    expect(res.status).toBe(409);
+    expect(fake.rows(schema.planNodes)).toHaveLength(1);
+  });
+
+  it('refuses to create a root once the old one is gone', async () => {
+    const fake = withOpenBuild(true);
+    fake.patch(schema.planNodes, ROOT_ID, { repositoryId: '00000000-0000-4000-8000-0000000000c9' });
+    const res = await app.request(`/${REPO}/plan/nodes`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Another root' }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it('leaves the root alone for a build that asks no questions', async () => {
+    withOpenBuild(false);
+    const res = await app.request(`/${REPO}/plan/nodes/${ROOT_ID}`, { method: 'DELETE' });
+    expect(res.status).not.toBe(409);
+  });
+});

@@ -56,13 +56,35 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { enqueuePlanTask, spawnPlanTask } from '../lib/spawn-plan-task.js';
 import { loadUsableProvider, writeStepCliChoice } from '../lib/step-cli-choice.js';
-
-const PLAN_CLARIFY_STEP_ID = '00b-plan-clarify';
 import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advisories.js';
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
 import { getTaskQueue } from '../queues.js';
 
 const exec = promisify(execFile);
+
+const PLAN_CLARIFY_STEP_ID = '00b-plan-clarify';
+
+/** A build asking clarifying questions, or about to expand the outline they shaped, owns the
+ *  plan's root until it ends: deleting or replacing it would leave the questions about, or the
+ *  expansion working on, a plan the owner's answers never reached. */
+async function refuseRootChangeDuringClarify(repositoryId: string): Promise<void> {
+  const open = await getDb()
+    .select({ metadata: schema.tasks.metadata })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'plan_build'),
+        notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+      ),
+    );
+  if (open.some((t) => (t.metadata as { planClarify?: unknown } | null)?.planClarify === true)) {
+    throw new HttpError(
+      409,
+      'A plan build is asking clarifying questions about this outline. Finish or cancel it before deleting or replacing the plan root.',
+    );
+  }
+}
 
 export const planRoutes = new Hono<AppEnv>();
 
@@ -801,6 +823,7 @@ planRoutes.post('/:id/plan/nodes', async (c) => {
     const root = await findPlanRoot(db, repositoryId);
     parentRef = root?.id ?? null;
   }
+  if (parentRef === null) await refuseRootChangeDuringClarify(repositoryId);
 
   try {
     const res = await applyPlanPatch(
@@ -983,6 +1006,9 @@ planRoutes.delete('/:id/plan/nodes/:nodeId', async (c) => {
   const nodeId = c.req.param('nodeId');
   const db = getDb();
   await requireNode(repositoryId, nodeId);
+  if ((await findPlanRoot(db, repositoryId))?.id === nodeId) {
+    await refuseRootChangeDuringClarify(repositoryId);
+  }
   try {
     const res = await applyPlanPatch(
       db,
