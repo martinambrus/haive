@@ -350,7 +350,7 @@ describe('foldSequenceResults', () => {
         set: (values: Record<string, unknown>) => ({
           where: () => {
             // The fold's claim on the reply, taken with its patch; every other write is a stamp.
-            if ('consumedAt' in values) {
+            if ('consumedAt' in values && !('status' in values)) {
               return { returning: async () => (opts.claimedElsewhere ? [] : [{ id: 'row' }]) };
             }
             stamps.push(values);
@@ -479,6 +479,7 @@ describe('foldSequenceResults', () => {
       {
         status: 'failed',
         errorMessage: "plan patch not applied: upsert dropped: unknown node reference '42'",
+        consumedAt: expect.any(Date),
         updatedAt: expect.any(Date),
       },
     ]);
@@ -497,6 +498,50 @@ describe('foldSequenceResults', () => {
     const { db, stamps } = fakeDb();
     expect(await foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).toBe(2);
     expect(stamps).toEqual([]);
+  });
+});
+
+describe('a rejected fold racing a pass that applied the same reply', () => {
+  it('leaves the row the other pass applied as done', async () => {
+    const row: { status: string; consumedAt: Date | null } = { status: 'done', consumedAt: null };
+    const db = {
+      update: () => ({
+        set: (values: Record<string, unknown>) => ({
+          where: () => {
+            const claims = 'consumedAt' in values;
+            const lands = claims ? row.consumedAt === null : row.status === 'done';
+            if (lands) Object.assign(row, values);
+            return Object.assign(Promise.resolve(), {
+              returning: async () => (lands ? [{ id: 'row' }] : []),
+            });
+          },
+        }),
+      }),
+      transaction: async (fn: (tx: unknown) => unknown) => {
+        const before = { ...row };
+        try {
+          return await fn(db);
+        } catch (err) {
+          Object.assign(row, before);
+          // The pass beside this one claims and applies the reply in this window.
+          row.consumedAt = new Date();
+          throw err;
+        }
+      },
+    } as unknown as Database;
+    vi.mocked(applyAgentPatch).mockRejectedValueOnce(new Error('version conflict'));
+    await foldSequenceResults(
+      { taskId: 't', taskStepId: 's', db, logger: { warn: () => {} } } as unknown as StepContext,
+      'r',
+      [
+        {
+          agentId: sequenceAgentId(PARENT, 1),
+          status: 'done',
+          output: { ops: [{ op: 'upsert', nodeRef: A, ordinal: 0 }] },
+        } as AgentMiningResult,
+      ],
+    );
+    expect(row.status).toBe('done');
   });
 });
 
