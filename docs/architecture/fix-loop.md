@@ -120,7 +120,11 @@ the fences — their words and Haive's framing — stays whole and only the fenc
 cut, head and tail; any other source is cut head and tail as a whole; one marker states what was
 omitted and the fences stay balanced. Budgets: 6,000 for the defect block and the honored
 constraints, 1,500 per side of the oscillation gate and for the cap gate, 800 for 07's form, and 400 per prior-round
-entry, where a person's entry is cut too because that block is background. A person's text stays
+entry, where a person's entry is cut too because that block is background. 07b's validator report
+is cut once, at 8,000, the size gate 2 shows, and records the reply's full length (`reportChars`), so
+the gate shows it as stored and its marker counts what the reply lost; a row written before then is
+cut again at the gate, which can count only what that second cut removed. Gate 2's manual checklist
+keeps its first 12,000 characters and says how many more it does not show. A person's text stays
 bounded only because each producer fences the machine part it joins to it: gate 2 does, and so
 does 08d2 for the QA findings a person selects (a 500-finding "Fix all" measured 222,419 chars in
 07's prompt before, 8,806 after). The fingerprints hash the whole cleaned text (`contentFingerprint`, `task-ledger.ts`):
