@@ -1543,6 +1543,27 @@ describe('upgrade-status names the changed templates whose plan offers a removal
     expect(body.obsoleteTemplateIds).toEqual(['agent.retired']);
   });
 
+  it('does not name a retired template whose file was edited, which 02 will not delete', async () => {
+    world(['agent.x', 'agent.moved', 'agent.fresh', 'agent.retired']);
+    await mkdir(path.join(repo, '.claude/agents'), { recursive: true });
+    await writeFile(path.join(repo, '.claude/agents/agent.retired.md'), 'edited by hand\n', 'utf8');
+    const body = await status();
+    expect(body.changedTemplateIds as string[]).toContain('agent.retired');
+    expect(body.obsoleteTemplateIds).toBeUndefined();
+  });
+
+  it('names a retired template whose file still holds the bytes 02 wrote', async () => {
+    world(['agent.x', 'agent.moved', 'agent.fresh', 'agent.retired']);
+    await mkdir(path.join(repo, '.claude/agents'), { recursive: true });
+    await writeFile(path.join(repo, '.claude/agents/agent.retired.md'), 'w\n', 'utf8');
+    const rows = state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[];
+    for (const r of rows) {
+      if (r.templateId === 'agent.retired') r.writtenHash = sha256Hex(normalizeContent('w\n'));
+    }
+    const body = await status();
+    expect(body.obsoleteTemplateIds).toEqual(['agent.retired']);
+  });
+
   it('names none while every changed template is one to update', async () => {
     world(['agent.x', 'agent.moved', 'agent.fresh']);
     state.rows.set(

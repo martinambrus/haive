@@ -468,11 +468,21 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // and current manifest? Used by the UI banner.
   const changedTemplateIds: string[] = [];
   const obsoleteTemplateIds: string[] = [];
+  // 02 offers a removal only for a row whose file still holds the bytes it wrote.
+  const removableRow = async (id: string) => {
+    if (!root) return false;
+    for (const a of liveArtifacts) {
+      if (a.templateId === id && removableClaim(await readUpgradeFile(root, a.diskPath), a)) {
+        return true;
+      }
+    }
+    return false;
+  };
   for (const [id, installed] of filteredInstalled.entries()) {
     const current = currentByTemplate.get(id);
     if (!current) {
       changedTemplateIds.push(id);
-      obsoleteTemplateIds.push(id);
+      if (await removableRow(id)) obsoleteTemplateIds.push(id);
       continue;
     }
     if (
