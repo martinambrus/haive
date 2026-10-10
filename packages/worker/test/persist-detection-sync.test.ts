@@ -4,13 +4,17 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { importPlanMirror } from '../src/plan/mirror.js';
+import { importPlanMirror, recordPlanMirrorError } from '../src/plan/mirror.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import { persistDetection } from '../src/repo/clone.js';
 
 vi.mock('../src/project-state/sync.js', () => ({ syncProjectStateFromCheckout: vi.fn() }));
 vi.mock('../src/plan/mirror.js', () => ({
-  importPlanMirror: vi.fn(async () => ({ imported: false, reason: 'no plan mirror' })),
+  importPlanMirror: vi.fn(async () => ({
+    imported: false,
+    code: 'no_mirror',
+    reason: 'no plan mirror',
+  })),
   recordPlanMirrorError: vi.fn(),
 }));
 
@@ -68,4 +72,38 @@ describe('persistDetection and the project state sync', () => {
       expect(planned).toBeGreaterThan(synced!);
     },
   );
+});
+
+describe('persistDetection and a plan snapshot it leaves alone', () => {
+  it.each([
+    ['no_mirror', 'invalid plan mirror: looks like a refusal', false],
+    ['has_plan', 'invalid plan mirror: looks like a refusal', false],
+    ['refused', 'repository already has a plan', true],
+  ] as const)('%s, worded "%s": recorded as an error = %s', async (code, reason, recorded) => {
+    const root = await mkdtemp(join(tmpdir(), 'persist-detection-'));
+    dirs.push(root);
+    const fake = createFakeDb({ repositories: schema.repositories });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      status: 'cloning',
+    });
+    vi.mocked(syncProjectStateFromCheckout).mockResolvedValue({ outcome: 'unchanged' } as never);
+    vi.mocked(importPlanMirror).mockResolvedValueOnce({ imported: false, code, reason });
+    const db = fake.db as unknown as Database;
+
+    await persistDetection(db, REPO, root);
+
+    if (recorded) {
+      expect(recordPlanMirrorError).toHaveBeenCalledExactlyOnceWith(
+        db,
+        REPO,
+        `Plan snapshot not imported: ${reason}`,
+      );
+    } else {
+      expect(recordPlanMirrorError).not.toHaveBeenCalled();
+    }
+  });
 });

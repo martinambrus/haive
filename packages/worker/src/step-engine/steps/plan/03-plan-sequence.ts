@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/shared';
 import {
@@ -517,14 +517,24 @@ async function buildWave(
   }));
 }
 
+// A rejected reply makes its agent `failed`, so another pass does not count its group as asked.
+// It claims the reply as a fold does, so a pass that applied it and this rejection never both land.
 async function stampMiningError(ctx: StepContext, agentId: string, message: string): Promise<void> {
+  const now = new Date();
   await ctx.db
     .update(schema.taskStepAgentMinings)
-    .set({ errorMessage: message.slice(0, 2000) })
+    .set({
+      status: 'failed',
+      errorMessage: message.slice(0, 2000),
+      consumedAt: now,
+      updatedAt: now,
+    })
     .where(
       and(
         eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
         eq(schema.taskStepAgentMinings.agentId, agentId),
+        eq(schema.taskStepAgentMinings.status, 'done'),
+        isNull(schema.taskStepAgentMinings.consumedAt),
       ),
     )
     .catch(() => undefined);
