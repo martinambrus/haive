@@ -63,9 +63,9 @@ coverage the way the review rows read theirs, and holds Approve when 07b was giv
 when the change could not be re-read after a fix (`changedFilesCoverage.scanFailed`): then nobody
 knows whether the fix added files, and the House rules row is PARTIAL for the same reason (it says
 only that the change could not be fully read, since its data does not say when).
-08a's re-tester is told instead, beside detect's list: its verdict is behavioural, so re-testing
-the failures exercises the fix whatever a list names, and 08c re-collects the change at its own
-detect, so gate 2's Browser testing row takes no mark.
+The 07b re-validator and 08a's re-tester are each told so in their prompt, beside detect's list.
+08a's verdict is behavioural, so re-testing the failures exercises the fix whatever a list names,
+and 08c re-collects the change at its own detect, so gate 2's Browser testing row takes no mark.
 
 Each path carries the LINES this change wrote (`lines 12-18, 45`, `new file`, `deleted`,
 `no line changes (mode or rename only)`). Measured against the MERGE-BASE with the task's base
