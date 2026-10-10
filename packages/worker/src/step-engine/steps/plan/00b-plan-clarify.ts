@@ -68,7 +68,8 @@ import {
 
 interface PlanClarifyDetect {
   build: PlanBuildDetect;
-  hasRoot: boolean;
+  /** The plan's current root, null when there is none. */
+  rootId: string | null;
   rounds: ClarifyRound[];
 }
 
@@ -93,6 +94,7 @@ async function loadRounds(ctx: StepContext): Promise<ClarifyRound[]> {
     answered: r.answeredAt !== null,
     outcome: (r.outcome as ClarifyOutcome | null) ?? null,
     integrated: r.integratedAt !== null,
+    rootId: r.rootId,
   }));
 }
 
@@ -192,19 +194,30 @@ async function foldOutline(
           { ...patch, ops: withMinedStatus(kept, d.build.mode) },
           { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
         );
-        // Round 0 records that THIS task drafted the outline (see `assertOwnOutline`). Written
-        // only while absent: a re-rolled outline folds again over the same row.
-        const [marked] = await tx
-          .select({ id: schema.planClarifyRounds.id })
-          .from(schema.planClarifyRounds)
+        // Round 0 names the root THIS task drafted (see `assertOwnOutline`). A redrafted outline,
+        // after a re-roll or after its root was deleted, folds again over the same row.
+        const [root] = await tx
+          .select({ id: schema.planNodes.id })
+          .from(schema.planNodes)
+          .where(
+            and(
+              eq(schema.planNodes.repositoryId, d.build.repositoryId!),
+              isNull(schema.planNodes.parentId),
+            ),
+          )
+          .limit(1);
+        const rootId = root?.id ?? null;
+        const marked = await tx
+          .update(schema.planClarifyRounds)
+          .set({ rootId })
           .where(
             and(
               eq(schema.planClarifyRounds.taskId, ctx.taskId),
               eq(schema.planClarifyRounds.round, 0),
             ),
           )
-          .limit(1);
-        if (!marked) {
+          .returning({ id: schema.planClarifyRounds.id });
+        if (marked.length === 0) {
           const now = new Date();
           await tx.insert(schema.planClarifyRounds).values({
             taskId: ctx.taskId,
@@ -212,6 +225,7 @@ async function foldOutline(
             action: 'continue',
             answeredAt: now,
             integratedAt: now,
+            rootId,
           });
         }
         return applied;
@@ -345,7 +359,8 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
 
   async detect(ctx): Promise<PlanClarifyDetect> {
     const build = await planBuildStep.detect!(ctx);
-    return { build, hasRoot: build.hasRoot, rounds: await loadRounds(ctx) };
+    const root = build.repositoryId ? await findPlanRoot(ctx.db, build.repositoryId) : null;
+    return { build, rootId: root?.id ?? null, rounds: await loadRounds(ctx) };
   },
 
   form(_ctx, detected) {
@@ -361,8 +376,8 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const d = detected as PlanClarifyDetect | null;
       if (!d?.build.repositoryId) return [];
-      assertOwnOutline(d.hasRoot, d.rounds);
-      const dispatch = await dispatchFor(ctx, d, nextMove(d.hasRoot, d.rounds), d.rounds);
+      assertOwnOutline(d.rootId, d.rounds);
+      const dispatch = await dispatchFor(ctx, d, nextMove(d.rootId !== null, d.rounds), d.rounds);
       return dispatch ? [dispatch] : [];
     },
   },
@@ -400,9 +415,9 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
       rounds = await loadRounds(ctx);
     }
 
-    const hasRoot = (await findPlanRoot(ctx.db, repositoryId)) !== null;
-    assertOwnOutline(hasRoot, rounds);
-    const move = nextMove(hasRoot, rounds);
+    const rootId = (await findPlanRoot(ctx.db, repositoryId))?.id ?? null;
+    assertOwnOutline(rootId, rounds);
+    const move = nextMove(rootId !== null, rounds);
     if (move.kind === 'form') throw new ReopenStepFormError(`round ${move.round} awaits answers`);
     if (move.kind === 'done') {
       try {
@@ -415,7 +430,7 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
     if (args.miningWaveExhausted === true) {
       throw new Error(`Could not start the next agent (${move.kind}); retry this step.`);
     }
-    const dispatch = await dispatchFor(ctx, { ...d, hasRoot, rounds }, move, rounds);
+    const dispatch = await dispatchFor(ctx, { ...d, rootId, rounds }, move, rounds);
     throw new MiningWaveError([dispatch!], `clarify: ${move.kind}`);
   },
 };

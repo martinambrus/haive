@@ -46,6 +46,8 @@ export interface ClarifyRound {
   answered: boolean;
   outcome: ClarifyOutcome | null;
   integrated: boolean;
+  /** Round 0 only: the root of the outline this task drafted, null once that root is deleted. */
+  rootId: string | null;
 }
 
 export type ClarifyMove =
@@ -89,11 +91,12 @@ export function hasContent(r: Pick<ClarifyRound, 'answers' | 'steer'>): boolean 
  * Refuses a plan this task did not draft. The build route checks that a repository has no plan
  * when the task is created, but a deferred build can wait while its files upload, and a root
  * written meanwhile by another build or by hand would otherwise be questioned and patched as if
- * it were this task's outline. Round 0, written with the outline, is the proof of ownership:
- * a node's `sourceTaskId` is not, since every later patch rewrites it.
+ * it were this task's outline; so would a root someone deleted and recreated while a round was
+ * parked. Round 0, written with the outline, names the root it drafted, and only that root is
+ * this task's. A node's `sourceTaskId` cannot say so, since every later patch rewrites it.
  */
-export function assertOwnOutline(hasRoot: boolean, rounds: readonly ClarifyRound[]): void {
-  if (hasRoot && !rounds.some((r) => r.round === 0)) {
+export function assertOwnOutline(rootId: string | null, rounds: readonly ClarifyRound[]): void {
+  if (rootId !== null && rounds.find((r) => r.round === 0)?.rootId !== rootId) {
     throw new Error(
       'This repository got a plan before this build started, and clarifying questions only shape a new outline. Skip this step to build into the existing plan, or change it through the plan chat.',
     );

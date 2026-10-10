@@ -370,6 +370,7 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
       answered: true,
       outcome: null,
       integrated: false,
+      rootId: null,
     };
     return [
       {
@@ -1178,7 +1179,7 @@ const CHANGE_SET = {
 const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
   // A fresh build: no root and no rounds, so 00b dispatches its planner's outline. Any root it did
   // not draft (no round 0) is refused before anything is dispatched (`assertOwnOutline`).
-  '00b-plan-clarify': { hasRoot: false, rounds: [] },
+  '00b-plan-clarify': { rootId: null, rounds: [] },
   // `level` as well as the change set: `lensesForLevel` compares strictly against 'standard' and
   // 'enterprise', both of which a proxy fails, so 08c dispatched its refuter panel and NONE of its
   // review lenses. `enterprise` is the cumulative top of that roster (`REVIEW_LENSES.slice(0, 3)`), so

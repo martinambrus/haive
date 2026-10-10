@@ -417,6 +417,8 @@ export const planClarifyRounds = pgTable(
     outcome: jsonb('outcome').$type<unknown>(),
     integratedAt: timestamp('integrated_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
+    /** Round 0 only: the root of the outline this task drafted. Nulled when that root is deleted. */
+    rootId: uuid('root_id').references(() => planNodes.id, { onDelete: 'set null' }),
   },
   (table) => [uniqueIndex('plan_clarify_rounds_task_round_idx').on(table.taskId, table.round)],
 );

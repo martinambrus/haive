@@ -1,7 +1,8 @@
 -- A plan build can now ask clarifying questions before it expands the outline. Each round's
 -- questions, the person's answers and the planner's verdict on them live here, because every
 -- round reopens the step's form (which clears its answers) and a Retry must resume the
--- conversation rather than start it again.
+-- conversation rather than start it again. Round 0 marks the outline this task drafted, and its
+-- root_id is that outline's root: a root it does not name is a plan this build must not question.
 --
 -- Additive and idempotent. Rollback: revert `schema/plan.ts` and
 --   DROP TABLE IF EXISTS "plan_clarify_rounds";
@@ -19,12 +20,20 @@ CREATE TABLE IF NOT EXISTS "plan_clarify_rounds" (
   "answered_at" timestamp,
   "outcome" jsonb,
   "integrated_at" timestamp,
-  "created_at" timestamp DEFAULT now() NOT NULL
+  "created_at" timestamp DEFAULT now() NOT NULL,
+  "root_id" uuid
 );
 
 DO $$ BEGIN
   ALTER TABLE "plan_clarify_rounds" ADD CONSTRAINT "plan_clarify_rounds_task_id_tasks_id_fk"
     FOREIGN KEY ("task_id") REFERENCES "public"."tasks"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE "plan_clarify_rounds" ADD CONSTRAINT "plan_clarify_rounds_root_id_plan_nodes_id_fk"
+    FOREIGN KEY ("root_id") REFERENCES "public"."plan_nodes"("id") ON DELETE SET NULL ON UPDATE NO ACTION;
 EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;

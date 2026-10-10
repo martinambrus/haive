@@ -20,6 +20,8 @@ import {
 const ROOT = '11111111-1111-4111-8111-111111111111';
 const TASK = '22222222-2222-4222-8222-222222222222';
 const STEP = '33333333-3333-4333-8333-333333333333';
+const REPO = '44444444-4444-4444-8444-444444444444';
+const OTHER_ROOT = '55555555-5555-4555-8555-555555555555';
 const plan = vi.hoisted(() => ({
   root: null as { id: string } | null,
   patches: [] as unknown[],
@@ -34,10 +36,23 @@ vi.mock('@haive/shared/plan', async (importOriginal) => ({
 }));
 vi.mock('./_plan-prompt.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_plan-prompt.js')>()),
-  applyAgentPatch: vi.fn(async (_tx: unknown, patch: { ops: unknown[] }) => {
+  applyAgentPatch: vi.fn(async (tx: unknown, patch: { ops: unknown[] }) => {
     if (plan.refuse) throw plan.refuse;
     plan.patches.push(patch);
-    if (plan.makesRoot) plan.root = { id: ROOT };
+    if (plan.makesRoot && !plan.root) {
+      const { schema } = await import('@haive/database');
+      await (tx as { insert: (t: unknown) => { values: (v: unknown) => Promise<unknown> } })
+        .insert(schema.planNodes)
+        .values({
+          id: ROOT,
+          repositoryId: '44444444-4444-4444-8444-444444444444',
+          parentId: null,
+          path: `/${ROOT}/`,
+          title: 'Root',
+          ordinal: 0,
+        });
+      plan.root = { id: ROOT };
+    }
     return { created: [], updated: [], dropped: [], strippedCodeLinks: [], refs: {} };
   }),
 }));
@@ -51,7 +66,7 @@ const { planClarifyStep } = await import('./00b-plan-clarify.js');
 
 const build = {
   mode: 'greenfield',
-  repositoryId: 'repo-1',
+  repositoryId: REPO,
   existingNodeCount: 0,
   hasRoot: false,
   kbFiles: [],
@@ -68,6 +83,7 @@ function setup({ ownOutline = true } = {}) {
     taskSteps: schema.taskSteps,
     taskStepAgentMinings: schema.taskStepAgentMinings,
     planClarifyRounds: schema.planClarifyRounds,
+    planNodes: schema.planNodes,
   });
   // A root that exists before a test starts is this task's own outline unless the test says not.
   if (plan.root && ownOutline) {
@@ -77,6 +93,7 @@ function setup({ ownOutline = true } = {}) {
       action: 'continue',
       answeredAt: new Date(),
       integratedAt: new Date(),
+      rootId: ROOT,
     });
   }
   const ctx = {
@@ -108,7 +125,7 @@ function setup({ ownOutline = true } = {}) {
     final = true,
   ) =>
     planClarifyStep.apply(ctx, {
-      detected: { build, hasRoot: plan.root !== null, rounds: [] },
+      detected: { build, rootId: plan.root?.id ?? null, rounds: [] },
       formValues,
       agentMiningResults: results,
       newAgentMiningResults: results,
@@ -180,7 +197,9 @@ describe('00b-plan-clarify apply', () => {
     ]);
     const ops = (plan.patches[0] as { ops: { nodeRef: string }[] }).ops.map((o) => o.nodeRef);
     expect(ops).toEqual(['tmp-root', 'tmp-pay']);
-    expect(rounds()).toEqual([expect.objectContaining({ round: 0, action: 'continue' })]);
+    expect(rounds()).toEqual([
+      expect.objectContaining({ round: 0, action: 'continue', rootId: ROOT }),
+    ]);
   });
 
   it('records the questions and parks on the form, which shows them', async () => {
@@ -193,7 +212,7 @@ describe('00b-plan-clarify apply', () => {
     expect(round1()).toMatchObject({ round: 1, nothingOpen: false, answeredAt: null });
     const form = planClarifyStep.form!({} as never, {
       build,
-      hasRoot: true,
+      rootId: ROOT,
       rounds: [
         {
           round: 1,
@@ -205,6 +224,7 @@ describe('00b-plan-clarify apply', () => {
           answered: false,
           outcome: null,
           integrated: false,
+          rootId: null,
         },
       ],
     });
@@ -314,11 +334,25 @@ describe('00b-plan-clarify apply', () => {
     expect(err.message).toContain('got a plan before this build started');
     const select = planClarifyStep.agentMining!.selectAgents({
       ctx: {} as StepContext,
-      detected: { build, hasRoot: true, rounds: [] },
+      detected: { build, rootId: ROOT, rounds: [] },
       formValues: {},
       llmOutput: undefined,
     });
     expect(((await thrown(select)) as Error).message).toContain('got a plan before');
+  });
+
+  it('refuses a root someone replaced while a round was parked', async () => {
+    plan.root = { id: OTHER_ROOT };
+    const { fake, apply } = setup({ ownOutline: false });
+    fake.insert(schema.planClarifyRounds, {
+      taskId: TASK,
+      round: 0,
+      action: 'continue',
+      answeredAt: new Date(),
+      integratedAt: new Date(),
+      rootId: ROOT,
+    });
+    expect(((await thrown(apply([]))) as Error).message).toContain('got a plan before');
   });
 
   it('does nothing under the LLM bypass', async () => {
@@ -339,6 +373,7 @@ describe('clarify helpers', () => {
     answered: false,
     outcome: null,
     integrated: false,
+    rootId: null,
     ...over,
   });
 
