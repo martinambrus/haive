@@ -34,7 +34,10 @@ time. The selected provider's operator rules remain injected, including commit c
 the step's explicit JSON contract takes precedence where necessary. Evidence fencing covers
 older persisted detect payloads that only have the diff summary. Repository
 secret-mask policy removes denied file contents from the message context; it conservatively
-omits tracked secret contents too and applies even with masking switched off. A failed policy
+omits tracked secret contents too and applies even with masking switched off. Git may not pair
+a moved file (`status.renames=false`, or content rewritten below the similarity threshold), so a
+denied file moved to an allowed name arrives as a deletion plus an addition: when the change
+deletes any denied file, no added file's content is shown, only its path. A failed policy
 lookup leaves only the diff summary available, never the unfiltered contents.
 
 The LLM runs before the gate parks and its suggestion becomes the editable form default. The
