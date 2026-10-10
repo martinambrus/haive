@@ -48,7 +48,7 @@ async function repo(): Promise<string> {
 /** The exact argv `resolveExternalDrift` runs, so the parser is exercised against real
  *  git output rather than a fixture someone hand-wrote to match the parser. */
 async function logRange(dir: string, range: string): Promise<string> {
-  return git(dir, ['log', '--format=%x00%H%x1f%s', '--name-only', '--no-merges', range]);
+  return git(dir, ['log', '--format=%x00%H%x1f%s', '--name-only', '-z', '--no-merges', range]);
 }
 
 describe('parseCommitLog', () => {
@@ -91,6 +91,30 @@ describe('parseCommitLog', () => {
     expect(parsed).toHaveLength(1);
     expect(parsed[0]?.commit.sha).toBe(sha);
     expect(parsed[0]?.commit.subject).toBe('fix(auth): token expiry uses <= not <');
+  });
+
+  it('keeps a name git would C-quote, and a commit with no files between two that have some', async () => {
+    const dir = await repo();
+    const from = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+    await commit(dir, 'a b.txt', 'a\n', 'add spaced');
+    await git(dir, ['commit', '--allow-empty', '-m', 'chore: empty']);
+    await writeFile(path.join(dir, 'é.txt'), 'e\n', 'utf8');
+    await writeFile(path.join(dir, 'q"uote.txt'), 'q\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'add accented']);
+    const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+
+    const parsed = parseCommitLog(await logRange(dir, `${from}..${head}`));
+    expect(parsed.map((p) => p.commit.subject)).toEqual([
+      'add accented',
+      'chore: empty',
+      'add spaced',
+    ]);
+    expect(parsed.map((p) => [...p.paths].sort())).toEqual([
+      ['q"uote.txt', 'é.txt'].sort(),
+      [],
+      ['a b.txt'],
+    ]);
   });
 
   it('returns nothing for an empty range', async () => {

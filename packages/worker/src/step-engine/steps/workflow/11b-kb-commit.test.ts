@@ -98,6 +98,42 @@ describe('11b form', () => {
   });
 });
 
+describe('11b detect', () => {
+  it('reports a name git would C-quote exactly as it is, and a rename by its new name', async () => {
+    const dir = await initRepo();
+    try {
+      const kb = '.haive-data/knowledge_base/investigations';
+      await mkdir(path.join(dir, kb), { recursive: true });
+      await writeFile(path.join(dir, kb, 'a b.md'), '# a\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'seed']);
+      await git(dir, ['mv', `${kb}/a b.md`, `${kb}/c d.md`]);
+      await writeFile(path.join(dir, kb, 'é.md'), '# e\n', 'utf8');
+      const chain: Record<string, unknown> = {};
+      Object.assign(chain, {
+        from: () => chain,
+        where: () => chain,
+        orderBy: () => chain,
+        limit: async () => [],
+      });
+      const ctx = {
+        ...stubCtx,
+        workspacePath: dir,
+        taskId: 't1',
+        db: { select: () => chain },
+        logger: { info: () => {}, warn: () => {} },
+      } as unknown as StepContext;
+
+      const detected = await kbCommitStep.detect!(ctx);
+      expect([...detected.dirtyFiles].sort()).toEqual([`${kb}/c d.md`, `${kb}/é.md`]);
+      expect(detected.statusSummary).toContain(`R  ${kb}/a b.md -> ${kb}/c d.md`);
+      expect(detected.statusSummary).toContain(`?? ${kb}/é.md`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('11b apply', () => {
   it('stages and commits the knowledge-base files in the worktree', async () => {
     const dir = await initRepo();

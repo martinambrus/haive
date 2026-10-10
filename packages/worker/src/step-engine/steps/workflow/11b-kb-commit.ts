@@ -1,6 +1,7 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { parsePorcelainZ } from './_commit-diff.js';
 import { KB_COMMIT_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
 import { KB_PATHSPECS, commitKnowledgeTrees, gitRun } from './_kb-commit.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
@@ -98,17 +99,18 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
       '--no-optional-locks',
       'status',
       '--porcelain',
+      '-z',
       '--',
       ...KB_PATHSPECS,
     ]);
     if (status.code !== 0) {
       throw new Error(`git status failed in ${workspacePath}: ${status.stderr || status.stdout}`);
     }
-    const lines = status.stdout
-      .split('\n')
-      .map((l) => l.replace(/\r$/, ''))
-      .filter((l) => l.trim().length > 0);
-    const dirtyFiles = lines.map((l) => l.slice(3).trim()).filter(Boolean);
+    const entries = parsePorcelainZ(status.stdout);
+    const lines = entries.map((e) =>
+      e.oldPath === undefined ? `${e.x}${e.y} ${e.path}` : `${e.x}${e.y} ${e.oldPath} -> ${e.path}`,
+    );
+    const dirtyFiles = entries.map((e) => e.path);
     // Over BOTH knowledge trees: unlike the learning gate, by this step the
     // learnings are ordinary written files. Best-effort — losing the diff costs
     // the gate its review surface, not its commit.

@@ -710,3 +710,40 @@ describe('10-gate-3-commit house rules', () => {
     }
   });
 });
+
+describe('10-gate-3-commit persisted changed paths', () => {
+  it('stores a name git would C-quote exactly as it is', async () => {
+    const repo = await seedRepo();
+    await writeFile(path.join(repo, 'a b.txt'), '1\n');
+    await writeFile(path.join(repo, 'é.txt'), '1\n');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-q', '-m', 'seed names']);
+    await git(repo, ['mv', 'a b.txt', 'c d.txt']);
+    await writeFile(path.join(repo, 'é.txt'), '2\n');
+    const base = mkCtx(repo);
+    const stored: { changedPaths?: string[] }[] = [];
+    const ctx = {
+      ...base,
+      db: {
+        ...(base.db as object),
+        update: () => ({
+          set: (v: { changedPaths?: string[] }) => {
+            stored.push(v);
+            return { where: async () => undefined };
+          },
+        }),
+      },
+    } as unknown as StepContext;
+    const detected = await gate3CommitStep.detect!(ctx);
+    const out = await gate3CommitStep.apply(ctx, {
+      detected,
+      formValues: { commit: true, commitMessage: 'rename and edit' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(out.committed).toBe(true);
+    const paths = stored[0]?.changedPaths ?? [];
+    expect(paths).toEqual(expect.arrayContaining(['c d.txt', 'é.txt']));
+    expect(paths.filter((p) => p.startsWith('"'))).toEqual([]);
+  });
+});
