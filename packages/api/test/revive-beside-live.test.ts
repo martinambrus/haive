@@ -19,10 +19,11 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 
 import { Hono } from 'hono';
-import { schema } from '@haive/database';
+import { liveTaskIdOfType, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import { withRepositoryTaskLock } from '../src/routes/upgrades.js';
 import type { AppEnv } from '../src/context.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000c1';
@@ -287,6 +288,114 @@ describe('creating an onboarding', () => {
       const res = await json('/', { type: 'onboarding', title: 'Onboarding', repositoryId: REPO });
       expect(res.status).toBe(500);
       expect(t.fake.rows(schema.tasks).map((r) => r.id)).toEqual([TASK]);
+    },
+  );
+});
+
+describe('a task Retry from START that is refused', () => {
+  const parked: Revival = {
+    name: 'a task Retry from START',
+    step: { status: 'waiting_form', waitingStartedAt: new Date(), formSchema: { title: 'f' } },
+    task: { currentStepId: null },
+    request: () => json(`/${TASK}/action`, { action: 'retry' }),
+  };
+
+  function withRun(type: string) {
+    const t = setup(type, parked);
+    const step = t.fake.rows(schema.taskSteps)[0]!;
+    t.fake.insert(schema.cliInvocations, {
+      taskId: TASK,
+      taskStepId: step.id,
+      mode: 'cli',
+      prompt: 'implement',
+    });
+    const run = () => t.fake.rows(schema.cliInvocations)[0]!;
+    const parkedStep = () => t.fake.rows(schema.taskSteps)[0]!;
+    return { ...t, run, parkedStep };
+  }
+
+  const untouched = (t: ReturnType<typeof withRun>) => {
+    expect(t.run()).toMatchObject({ supersededAt: null, endedAt: null });
+    expect(t.parkedStep()).toMatchObject({ status: 'waiting_form' });
+    expect(t.task()).toMatchObject({ status: 'failed', orchestrationEpoch: 3 });
+    expect(h.kill).not.toHaveBeenCalled();
+    expect(h.add).not.toHaveBeenCalled();
+  };
+
+  it.each(['onboarding', 'onboarding_upgrade'])(
+    'touches nothing of a failed %s when an opposing task holds the lock first',
+    async (type) => {
+      const t = withRun(type);
+      const other = type === 'onboarding' ? 'onboarding_upgrade' : 'onboarding';
+      let fired = false;
+      t.fake.hooks.beforeLock = () => {
+        if (fired) return;
+        fired = true;
+        t.fake.insert(schema.tasks, {
+          userId: USER,
+          repositoryId: REPO,
+          type: other,
+          title: other,
+          status: 'running',
+        });
+      };
+      const res = await parked.request();
+      expect(res.status).toBe(409);
+      untouched(t);
+    },
+  );
+
+  it('refuses an opposing creator that arrives mid-cleanup instead of failing after it', async () => {
+    const t = withRun('onboarding');
+    let creation: Promise<unknown> | undefined;
+    t.fake.hooks.beforeUpdate = async (table) => {
+      if (table !== schema.cliInvocations || creation) return;
+      creation = withRepositoryTaskLock(t.fake.db as never, REPO, async (tx) => {
+        if (await liveTaskIdOfType(tx, REPO, 'onboarding')) throw new Error('refused');
+        await tx.insert(schema.tasks).values({
+          userId: USER,
+          repositoryId: REPO,
+          type: 'onboarding_upgrade',
+          title: 'upgrade',
+          status: 'running',
+        });
+      }).catch((err: unknown) => err);
+      await Promise.race([creation, new Promise((r) => setTimeout(r, 20))]);
+    };
+    const res = await parked.request();
+    const outcome = await creation;
+    expect(res.status).toBe(200);
+    expect(outcome).toBeInstanceOf(Error);
+    expect(t.task()).toMatchObject({ status: 'queued', orchestrationEpoch: 4 });
+    expect(t.fake.rows(schema.tasks).filter((r) => r.type === 'onboarding_upgrade')).toEqual([]);
+  });
+
+  it('touches nothing when a Cancel lands before the task is requeued', async () => {
+    const t = withRun('onboarding');
+    t.fake.hooks.beforeUpdate = (table) => {
+      if (table !== schema.tasks) return;
+      t.fake.hooks.beforeUpdate = null;
+      t.fake.patch(schema.tasks, TASK, { status: 'cancelled' });
+    };
+    const res = await parked.request();
+    expect(res.status).toBe(409);
+    expect(t.run()).toMatchObject({ supersededAt: null, endedAt: null });
+    expect(t.parkedStep()).toMatchObject({ status: 'waiting_form' });
+    expect(h.kill).not.toHaveBeenCalled();
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it.each(['onboarding', 'onboarding_upgrade', 'workflow'])(
+    'still requeues a failed %s, supersedes its run, re-offers the form and kills',
+    async (type) => {
+      const t = withRun(type);
+      const res = await parked.request();
+      expect(res.status).toBe(200);
+      expect(t.run()).toMatchObject({ exitCode: 137, supersededAt: expect.any(Date) });
+      expect(t.parkedStep()).toMatchObject({ status: 'pending', waitingStartedAt: null });
+      expect(t.task()).toMatchObject({ status: 'queued', orchestrationEpoch: 4 });
+      expect(h.kill).toHaveBeenCalled();
+      expect(h.add).toHaveBeenCalledTimes(1);
     },
   );
 });
