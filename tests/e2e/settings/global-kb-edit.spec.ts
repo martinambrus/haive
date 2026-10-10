@@ -185,7 +185,10 @@ test.describe('global KB authoring and editing', () => {
     await expect(editor.locator('li')).toHaveCount(2);
     await expect(dialog.getByRole('button', { name: 'Activate', exact: true })).toBeDisabled();
     await expect(dialog.getByRole('button', { name: 'Delete', exact: true })).toBeDisabled();
-    await editor.press('Control+End');
+    // StarterKit's TrailingNode appends an empty paragraph after the list on the first
+    // transaction, so Control+End can land outside it; aim at the last item instead.
+    await editor.locator('li').last().click();
+    await editor.press('End');
     await editor.press('Enter');
     await editor.pressSequentially('A corrected rule');
     await dialog.getByRole('button', { name: 'Save body' }).click();
