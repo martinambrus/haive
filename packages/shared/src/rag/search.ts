@@ -5,8 +5,11 @@ import {
   RAG_TABLE,
   TASK_SOURCE_TYPE,
 } from './connection.js';
+import { logger } from '../logger/index.js';
 import { vectorLiteral } from './embed.js';
 import { extractIdentifiers, identifierTsQuery } from './identifiers.js';
+
+const log = logger.child({ module: 'rag-search' });
 
 /** Keeps the effort estimator's per-task embeddings out of every candidate CTE — see
  *  TASK_SOURCE_TYPE. A literal from our own constant, not a bind parameter, because the
@@ -262,6 +265,7 @@ interface RawRow {
   chunk_index: number | string;
   source_type: string;
   content: string;
+  id: string | number;
   dense_sim: number | string | null;
   ts_norm: number | string | null;
   hybrid: number | string | null;
@@ -376,7 +380,9 @@ async function identifierIdfs(
       if (!stat || stat.df <= 0 || stat.total <= 0) return 0;
       return Math.log(stat.total / stat.df);
     });
-  } catch {
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    log.warn({ code: typeof code === 'string' ? code : undefined }, 'identifier statistics failed');
     // A store predating the identifier lexemes answers this fine (every df is 0),
     // so a throw here is a real fault — degrade to no identifier ranker rather
     // than failing a search that would otherwise work.
@@ -515,7 +521,7 @@ export async function ragHybridSearch(
         ${useIdent ? 'UNION\n        SELECT id FROM ident' : ''}
       )
       SELECT
-        e.source_path, e.section_id, e.chunk_index, e.source_type, e.content,
+        e.source_path, e.section_id, e.chunk_index, e.source_type, e.content, e.id,
         COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q))) AS dense_sim,
         (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1)) AS ts_norm,
         (
@@ -578,7 +584,7 @@ export async function ragHybridSearch(
       `
       WITH q AS (SELECT plainto_tsquery('english', $1) AS qq)
       SELECT
-        source_path, section_id, chunk_index, source_type, content,
+        source_path, section_id, chunk_index, source_type, content, id,
         0 AS dense_sim,
         (ts_rank_cd(content_tsv, (SELECT qq FROM q))
           / (ts_rank_cd(content_tsv, (SELECT qq FROM q)) + 1)) AS ts_norm,
@@ -622,7 +628,9 @@ export async function ragHybridSearch(
     filter,
     repositoryId,
   });
-  return applyKnowledgeReserve([...hits, ...candidates.map(toHit)], cfg);
+  const ranked = new Set(rows.map((r) => String(r.id)));
+  const extra = candidates.filter((r) => !ranked.has(String(r.id)));
+  return applyKnowledgeReserve([...hits, ...extra.map(toHit)], cfg);
 }
 
 function toHit(r: RawRow): RagSearchHit {
@@ -684,7 +692,7 @@ async function fetchKnowledgeCandidates(
   return (await conn.pg.unsafe(
     `
       WITH q AS (SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh)
-      SELECT source_path, section_id, chunk_index, source_type, content,
+      SELECT source_path, section_id, chunk_index, source_type, content, id,
              1 - (vector <=> (SELECT qv FROM q)) AS dense_sim,
              0 AS ts_norm, 0 AS hybrid, 0 AS rrf
       FROM ${RAG_TABLE}

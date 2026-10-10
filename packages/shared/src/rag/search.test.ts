@@ -1,4 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const h = vi.hoisted(() => ({ warn: vi.fn() }));
+
+vi.mock('../logger/index.js', () => ({
+  logger: { child: () => ({ warn: h.warn }), info: () => {}, warn: () => {}, error: () => {} },
+}));
+
 import type { RagConnection } from './connection.js';
 import {
   DEFAULT_RAG_SEARCH_CONFIG,
@@ -285,7 +292,83 @@ function fakeStore(opts: { transaction: boolean; statisticsFail: boolean }): {
   };
 }
 
+describe('ragHybridSearch knowledge candidates', () => {
+  const row = (type: string, path: string, rrf: number, id: string, content = '') => ({
+    source_path: path,
+    section_id: 's',
+    chunk_index: 0,
+    source_type: type,
+    content,
+    dense_sim: 0.7,
+    ts_norm: 0,
+    hybrid: 0,
+    rrf,
+    id,
+  });
+  const search = (fused: unknown[], candidates: unknown[], hasRepositoryColumn = true) => {
+    const pg = {
+      unsafe: async (statement: string) => {
+        if (!hasRepositoryColumn && statement.includes('repository_id')) {
+          throw Object.assign(new Error('column "repository_id" does not exist'), {
+            code: '42703',
+          });
+        }
+        if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
+        if (statement.includes('dense_c')) return fused;
+        if (statement.includes('ANY($2::text[])')) return candidates;
+        return [];
+      },
+    };
+    const conn = { mode: 'external', pg, embeddingDimensions: 4, close: async () => {} } as never;
+    return ragHybridSearch(conn, [0.1, 0.2, 0.3, 0.4], 'where is the session cookie set');
+  };
+
+  it('returns a knowledge chunk once when the candidate query reaches it too', async () => {
+    const hits = await search(
+      [row('code', 'src/a.ts', 0.03, '1'), row('kb', 'docs/ARCHITECTURE.md', 0.0158, '2')],
+      [row('kb', 'docs/ARCHITECTURE.md', 0, '2')],
+    );
+
+    expect(hits.map((x) => x.sourcePath)).toEqual(['src/a.ts', 'docs/ARCHITECTURE.md']);
+    expect(hits[1]!.rrf).toBe(0.0158);
+  });
+
+  it('keeps two repositories fused rows that share a path, section and index', async () => {
+    const hits = await search(
+      [
+        row('code', 'src/a.ts', 0.03, '1'),
+        row('kb', 'README.md', 0.0158, '2', 'one'),
+        row('kb', 'README.md', 0.0157, '3', 'two'),
+      ],
+      [],
+    );
+
+    expect(hits.map((x) => x.content)).toEqual(['', 'one', 'two']);
+  });
+
+  it('keeps a candidate that is another row at the same path', async () => {
+    const hits = await search(
+      [row('code', 'src/a.ts', 0.03, '1'), row('kb', 'README.md', 0.0158, '2', 'one')],
+      [row('kb', 'README.md', 0, '3', 'two')],
+    );
+
+    expect(hits.map((x) => x.content)).toEqual(['', 'one', 'two']);
+  });
+
+  it('searches a store with no repository_id column, which is the global KB', async () => {
+    const hits = await search(
+      [row('code', 'src/a.ts', 0.03, '1'), row('kb', 'docs/ARCHITECTURE.md', 0.0158, '2')],
+      [row('kb', 'docs/ARCHITECTURE.md', 0, '2')],
+      false,
+    );
+
+    expect(hits.map((x) => x.sourcePath)).toEqual(['src/a.ts', 'docs/ARCHITECTURE.md']);
+  });
+});
+
 describe('ragHybridSearch identifier statistics', () => {
+  beforeEach(() => h.warn.mockClear());
+
   const QUERY = 'getUserById validation';
   const VEC = [0.1, 0.2, 0.3, 0.4];
   const mainStatement = (calls: Array<{ statement: string }>) =>
@@ -315,4 +398,24 @@ describe('ragHybridSearch identifier statistics', () => {
       expect(mainStatement(calls)).not.toContain('ident AS (');
     },
   );
+
+  it('logs one warning carrying the SQLSTATE and nothing of the query', async () => {
+    const { conn } = fakeStore({ transaction: false, statisticsFail: true });
+
+    await ragHybridSearch(conn, VEC, QUERY);
+
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(h.warn.mock.calls[0]);
+    expect(h.warn.mock.calls[0]![0]).toMatchObject({ code: '22012' });
+    expect(logged).not.toContain('getuserbyid');
+    expect(logged).not.toContain('content_tsv');
+  });
+
+  it('logs nothing when the statistics read succeeds', async () => {
+    const { conn } = fakeStore({ transaction: false, statisticsFail: false });
+
+    await ragHybridSearch(conn, VEC, QUERY);
+
+    expect(h.warn).not.toHaveBeenCalled();
+  });
 });

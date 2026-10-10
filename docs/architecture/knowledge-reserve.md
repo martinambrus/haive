@@ -47,3 +47,9 @@ neither global caller is perturbed and neither pays for the extra query.
 belt-and-braces: a promoted hit carries exactly the low `rrf` that got it cut, so a plain rrf
 slice drops it FIRST and the reserve would die at the merge. `knowledgeReserve: 0` restores
 the previous ranking exactly.
+
+The reserve's candidates come from a query of their own (rrf 0), and it can return a chunk the fusion
+already ranked: on a page shorter than topK both copies used to fit (MEASURED: `docs/ARCHITECTURE.md`
+twice in all three sampled queries). A candidate whose row `id` the fusion already returned is dropped
+before the reserve runs; rows are told apart by `id`, the one key both the per-repository store and the
+global store have, so two repositories' chunks at the same path in a shared store both stay.
