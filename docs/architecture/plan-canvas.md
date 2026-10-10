@@ -44,7 +44,10 @@ rebuilt there by 01 alone would carry none of the answers; cancel the build to c
 chat is refused then too: its agent patches the whole plan and would race the answers being folded in. Behind
 that, a deleted root with no replacement is simply redrafted, under a numbered agent id
 (`clarify-outline-N`), since a step never re-sends an id it already has a row for. A
-node's `sourceTaskId` cannot serve, since every later patch, a canvas edit included, rewrites it. Its folds drop any node placed below the root
+node's `sourceTaskId` cannot serve, since every later patch, a canvas edit included, rewrites it. Answer folds also drop an op that deletes the root or adds another, which would leave round 0 naming
+none. 01 and 02 treat the WHOLE outline as this build's when round 0 names the current root
+(`ownsClarifiedOutline`), since a canvas edit during the questions clears a node's `sourceTaskId` and
+would otherwise take a `done` from_repo branch off the frontier. Its folds drop any node placed below the root
 (`outsideOutline`): 01's frontier expands component LEAVES only, so a decision put under a
 component would take that component out of the build with nothing reporting it.
 

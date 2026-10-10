@@ -42,6 +42,7 @@ import {
 } from './00-plan-inputs.js';
 import { classifyPlanInput } from './_plan-inputs.js';
 import { gitExec } from '../../../repo/git-exec.js';
+import { ownsClarifiedOutline } from './_plan-clarify-owner.js';
 
 /**
  * Build a repository's plan, one LEVEL per mining wave.
@@ -191,10 +192,13 @@ export function computeFrontier(
    *  already exists, and without this exemption the wave machine would find an
    *  empty frontier after level 1 and stop. */
   sourceTaskId?: string,
+  /** The whole plan is this build's own outline (`ownsClarifiedOutline`), so every node counts as
+   *  mined by it: a canvas edit rewrites `sourceTaskId` and must not take a branch off the frontier. */
+  ownsWholePlan = false,
 ): PlanNodeSkeleton[] {
   const withChildren = new Set(nodes.map((n) => n.parentId).filter(Boolean) as string[]);
   const minedByThisBuild = (n: PlanNodeSkeleton): boolean =>
-    sourceTaskId !== undefined && n.sourceTaskId === sourceTaskId;
+    ownsWholePlan || (sourceTaskId !== undefined && n.sourceTaskId === sourceTaskId);
   return nodes.filter(
     (n) =>
       !withChildren.has(n.id) &&
@@ -930,9 +934,12 @@ export function createPlanBuildStep(
       }
       if (root) asked.add(root.id);
 
-      const frontierAll = computeFrontier(nodes, depthBudget(args.formValues), ctx.taskId).filter(
-        (n) => !asked.has(n.id),
-      );
+      const frontierAll = computeFrontier(
+        nodes,
+        depthBudget(args.formValues),
+        ctx.taskId,
+        await ownsClarifiedOutline(ctx, nodes),
+      ).filter((n) => !asked.has(n.id));
       // Failure aggregation for the output: every failed row across ALL waves,
       // recomputed from the cumulative set each pass.
       const allFailures = cumulative

@@ -3,6 +3,8 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { PlanPatchError } from '@haive/shared/plan';
 import { UNTRUSTED_OPEN } from '../_untrusted-repo.js';
+import type { PlanNodeSkeleton } from '@haive/shared/plan';
+import { computeFrontier } from './01-plan-build.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import { MiningRetryError, MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import type { PlanBuildDetect } from './01-plan-build.js';
@@ -569,6 +571,26 @@ describe('clarify helpers', () => {
     expect(verdicts.map((v) => v.status)).toEqual(['settled', 'open']);
   });
 
+  it('keeps an edited outline component on the frontier when the build owns the outline', () => {
+    const node = (id: string, parentId: string | null, depth: number) =>
+      ({
+        id,
+        parentId,
+        path: '/x/'.repeat(depth),
+        ordinal: 0,
+        title: id,
+        kind: 'component',
+        status: 'done',
+        taskable: false,
+        version: 1,
+        createdBy: 'llm',
+        sourceTaskId: null,
+      }) as unknown as PlanNodeSkeleton;
+    const nodes = [node('root', null, 1), node('edited', 'root', 2)];
+    expect(computeFrontier(nodes, 3, TASK).map((n) => n.id)).toEqual([]);
+    expect(computeFrontier(nodes, 3, TASK, true).map((n) => n.id)).toEqual(['edited']);
+  });
+
   it('keeps an open question todo whatever the outline left out', () => {
     expect(
       openQuestionsTodo([
@@ -595,6 +617,15 @@ describe('clarify helpers', () => {
     );
     expect(kept).toHaveLength(3);
     expect(dropped).toEqual(['deep: only the root may hold new parts here']);
+    const swap = outsideOutline(
+      [
+        { op: 'delete', nodeRef: `node:${ROOT}`, expectedVersion: 1 },
+        { op: 'upsert', nodeRef: 'tmp-new', parentRef: null, title: 'New root' },
+      ],
+      ROOT,
+    );
+    expect(swap.kept).toEqual([]);
+    expect(swap.dropped).toHaveLength(2);
   });
 
   it('offers no form once the round is answered, and leans to building when nothing is open', () => {

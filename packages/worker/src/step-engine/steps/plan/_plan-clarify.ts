@@ -247,6 +247,16 @@ export function outsideOutline(
   const dropped: string[] = [];
   for (const op of ops) {
     const o = op as Record<string, unknown>;
+    // Folding answers into an owned outline never swaps its root: a deleted or second root would
+    // leave round 0 naming none, and every later pass would refuse the plan as foreign.
+    if (
+      rootRef !== null &&
+      ((o?.op === 'delete' && stripNodeRefPrefix(String(o.nodeRef)) === rootRef) ||
+        (o?.op === 'upsert' && o.parentRef === null))
+    ) {
+      dropped.push(`${String(o.title ?? o.nodeRef)}: the outline keeps its root`);
+      continue;
+    }
     const parent =
       o?.op === 'upsert' && typeof o.parentRef === 'string'
         ? stripNodeRefPrefix(o.parentRef)

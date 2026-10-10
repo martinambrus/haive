@@ -390,6 +390,7 @@ const attachedCtx = (
     taskAttachments: schema.taskAttachments,
     taskSteps: schema.taskSteps,
     planNodes: schema.planNodes,
+    planClarifyRounds: schema.planClarifyRounds,
   });
   fake.insert(schema.tasks, {
     id: TASK,
