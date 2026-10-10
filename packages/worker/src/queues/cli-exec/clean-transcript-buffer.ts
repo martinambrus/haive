@@ -17,6 +17,7 @@
 import type { CleanTranscript, CleanTranscriptSegment } from '@haive/shared';
 
 export const CLEAN_TRANSCRIPT_MAX_CHARS = 1024 * 1024;
+export const CLEAN_TRANSCRIPT_MAX_CHUNKS = 8192;
 
 export interface CleanTranscriptBuffer {
   /** One assistant text block. Extends a trailing `model` segment rather than opening a new
@@ -46,6 +47,7 @@ export function createCleanTranscriptBuffer(
 
   const segments: CleanTranscriptSegment[] = [];
   let chars = 0;
+  let chunkCount = 0;
   let elidedSegments = 0;
   let elidedChars = 0;
 
@@ -62,8 +64,17 @@ export function createCleanTranscriptBuffer(
       const [dropped] = segments.splice(victim, 1);
       if (!dropped) break;
       chars -= dropped.text.length;
+      chunkCount -= dropped.proseChunks?.length ?? 0;
       elidedChars += dropped.text.length;
       elidedSegments += 1;
+    }
+    // Timing is metadata, not duplicate prose. Keep a bounded tail of fragment
+    // offsets even when one long display segment cannot be dropped.
+    while (chunkCount > CLEAN_TRANSCRIPT_MAX_CHUNKS) {
+      const segment = segments.find((s) => (s.proseChunks?.length ?? 0) > 0);
+      if (!segment) break;
+      segment.proseChunks!.shift();
+      chunkCount -= 1;
     }
   };
 
@@ -71,16 +82,25 @@ export function createCleanTranscriptBuffer(
     pushModel(text: string): void {
       if (!text) return;
       const last = segments[segments.length - 1];
+      const at = Date.now();
       if (last?.kind === 'model') {
         // Same separator rule the live Clean tab applies to consecutive `text` frames, so
         // two turns render as two markdown blocks rather than one run-on paragraph.
         const sep = last.text.endsWith('\n\n') ? '' : last.text.endsWith('\n') ? '\n' : '\n\n';
+        const start = last.text.length + sep.length;
         last.text += sep + text;
+        last.proseChunks!.push({ at, start, end: last.text.length });
         chars += sep.length + text.length;
       } else {
-        segments.push({ kind: 'model', text, at: Date.now() });
+        segments.push({
+          kind: 'model',
+          text,
+          at,
+          proseChunks: [{ at, start: 0, end: text.length }],
+        });
         chars += text.length;
       }
+      chunkCount += 1;
       enforceBudget();
     },
 

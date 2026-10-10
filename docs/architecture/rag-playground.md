@@ -40,6 +40,13 @@ overlapping the query's timestamp. It rejects fabricated quotes, unrelated runs,
 duplicate assessments and historical queries without saved hits. The playground
 shows the reason and evidence. Raw stream logs are excluded because they contain
 tool results: quoting retrieval itself would be circular evidence. Untimestamped
+Each new Clean transcript records `proseChunks` offsets and timestamps while
+keeping its merged display text. The collector bounds timing metadata to 8,192
+fragments across the invocation and removes only their offsets when that budget
+is exceeded. Review quotes use the fragment timestamp, not the merged segment's
+original timestamp. Legacy segments without fragment timing retain their original
+time, conservatively leaving later appended prose unclear.
+
 `rawOutput` is also excluded: it can concatenate pre-query turns, so labeling it
 with a run’s completion time would manufacture evidence of later use.
 

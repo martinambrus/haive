@@ -1410,6 +1410,7 @@ export interface StoredCleanTranscript {
     kind: 'model' | 'user';
     text: string;
     at: number;
+    proseChunks?: Array<{ at: number; start: number; end: number }>;
     steerId?: string;
     consumed?: boolean;
   }>;

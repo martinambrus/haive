@@ -203,6 +203,9 @@ export interface CleanTranscriptSegment {
   kind: 'model' | 'user';
   text: string;
   at: number;
+  /** Timestamped model fragments within the merged display text. Missing on
+   * legacy segments; [] means fragment timing was elided. Offsets exclude separators. */
+  proseChunks?: Array<{ at: number; start: number; end: number }>;
   /** Client steer id, so a user turn can be correlated with its later `steer_consumed`
    *  frame. Absent on a legacy id-less steer. */
   steerId?: string;

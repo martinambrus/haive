@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createCleanTranscriptBuffer } from '../../../queues/cli-exec/clean-transcript-buffer.js';
 import {
   assessRagUsage,
   buildRagUsagePrompt,
@@ -45,6 +46,51 @@ const status = (data: RagUsageInput, output: unknown) =>
   assessRagUsage(data, output)[0]!.assessment.status;
 
 describe('RAG usage evidence', () => {
+  it('assesses later prose in a merged Clean segment using the timestamp of its own fragment', async () => {
+    const q = input.queries[0]!;
+    const run = input.runs[0]!;
+    const quote = run.turns[0]!.text;
+    const now = vi
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(Date.parse('2026-10-10T10:00:30.000Z'))
+      .mockReturnValueOnce(Date.parse('2026-10-10T10:01:30.000Z'));
+    let transcript;
+    try {
+      const buf = createCleanTranscriptBuffer();
+      buf.pushModel('I am looking for the cookie implementation.');
+      buf.pushModel(quote);
+      transcript = buf.toTranscript();
+    } finally {
+      now.mockRestore();
+    }
+    const ctx = {
+      taskId: 'task',
+      taskStepId: 'final',
+      db: {
+        query: {
+          ragQueryLog: {
+            findMany: async () => [{ ...q, createdAt: new Date(q.createdAt), resultHits: q.hits }],
+          },
+          cliInvocations: {
+            findMany: async () => [
+              {
+                id: run.id,
+                startedAt: new Date(run.startedAt),
+                endedAt: new Date(run.endedAt),
+                cleanTranscript: transcript,
+              },
+            ],
+          },
+        },
+      },
+    } as unknown as StepContext;
+    const loaded = await loadRagUsageInput(ctx);
+    expect(loaded.runs[0]!.turns).toHaveLength(2);
+    expect(status(loaded, report())).toBe('used');
+    expect(status(loaded, report('used', 'I am looking for the cookie implementation.'))).toBe(
+      'unknown',
+    );
+  });
   it('does not turn an untimed raw-output copy of a pre-query remark into later evidence', async () => {
     const q = input.queries[0]!;
     const run = input.runs[0]!;

@@ -59,12 +59,18 @@ export async function loadRagUsageInput(ctx: StepContext): Promise<RagUsageInput
         id: r.id,
         startedAt: r.startedAt!.toISOString(),
         endedAt: r.endedAt!.toISOString(),
-        // Only timestamped model turns establish chronology. rawOutput may
-        // concatenate earlier turns, so stamping it at completion would turn
-        // a pre-query remark into false evidence of later use.
+        // The Clean tab merges model turns for display. Use fragment timestamps
+        // when available, never its original timestamp for later appended prose.
         turns: (r.cleanTranscript?.segments ?? [])
           .filter((s) => s.kind === 'model')
-          .map((s) => ({ at: new Date(s.at).toISOString(), text: s.text.slice(-4000) }))
+          .flatMap((s) =>
+            s.proseChunks === undefined
+              ? [{ at: new Date(s.at).toISOString(), text: s.text.slice(-4000) }]
+              : s.proseChunks.map((chunk) => ({
+                  at: new Date(chunk.at).toISOString(),
+                  text: s.text.slice(chunk.start, chunk.end).slice(-4000),
+                })),
+          )
           .slice(-8),
       })),
   };
