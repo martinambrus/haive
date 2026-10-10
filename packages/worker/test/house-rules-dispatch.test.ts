@@ -162,11 +162,16 @@ describe('readChangedFiles', () => {
     expect(files).toContain('protected/a');
   });
 
-  it('holds only the dirty files when the fork point is unknown, which is all the work of a single agent', async () => {
+  it('holds only the dirty files when no base is recorded, which is all the work of a single agent', async () => {
     const dir = await repo();
     await put(dir, 'src/keep.php', 'edited\n');
     expect(await readChangedFiles(dir, null)).toEqual(['src/keep.php']);
-    expect(await readChangedFiles(dir, 'a-branch-that-is-gone')).toEqual(['src/keep.php']);
+  });
+
+  it('is unreadable when the recorded base no longer resolves, so committed work is never lost silently', async () => {
+    const dir = await repo();
+    await put(dir, 'src/keep.php', 'edited\n');
+    expect(await readChangedFiles(dir, 'a-branch-that-is-gone')).toBeNull();
   });
 
   it('is empty, not unreadable, for a tree that changed nothing', async () => {

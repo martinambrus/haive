@@ -43,9 +43,11 @@ export async function readChangedFiles(
     { timeout: gitTimeoutMs },
   );
   if (status.code !== 0) return null;
+  // A named base that no longer resolves would leave a DAG task's commits out, so it reads as unread.
   const committed = await readChangedPaths(tree, baseBranch, {
     includeDeleted: true,
     timeoutMs: gitTimeoutMs,
+    forkPointOnly: baseBranch !== null,
   });
   if (committed === null) return null;
   const dirty = parsePorcelainZ(status.stdout).flatMap((entry) =>
