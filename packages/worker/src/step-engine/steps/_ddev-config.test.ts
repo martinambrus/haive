@@ -300,6 +300,11 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
   });
 
+  it('reads a non-specific-tagged << as a merge, as yaml.v3 does', () => {
+    const cfg = 'x: &db {type: postgres, version: "16"}\ndatabase: { ! <<: *db }\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
+  });
+
   it('reads a string-tagged << as an ordinary key, not a merge', () => {
     const cfg = 'x: &db {type: postgres, version: "16"}\ndatabase: { !!str <<: *db }\n';
     expect(parseDdevConfig(cfg)).toMatchObject({ dbType: null, dbVersion: null });
