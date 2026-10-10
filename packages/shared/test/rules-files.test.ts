@@ -5,9 +5,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   importRulesFilesFor,
   readUpgradeFile,
+  removableClaim,
   RULES_FILE_READ_CAP,
   rulesImportState,
 } from '../src/rules-files.js';
+import { normalizeContent, sha256Hex } from '../src/templates/manifest.js';
+import { buildClaudeSettingsJson } from '../src/templates/rtk-settings.js';
 
 describe('importRulesFilesFor', () => {
   it('names each import-mode rules file once, in provider order', () => {
@@ -101,5 +104,36 @@ describe('readUpgradeFile', () => {
     expect(await readUpgradeFile(repo, 'link.md')).toEqual(unread);
     expect(await readUpgradeFile(repo, 'dir.md')).toEqual(unread);
     expect(await readUpgradeFile(repo, 'sub/elsewhere.md')).toEqual(unread);
+  });
+});
+
+describe('removableClaim', () => {
+  // Not normalize-stable: CRLF line ends, trailing spaces and extra blank lines.
+  const WROTE = 'recorded body  \r\nwith CRLF line ends\r\n\r\n\r\n';
+  const claim = { templateId: 'agent.old', writtenHash: sha256Hex(normalizeContent(WROTE)) };
+  const text = (body: string) => ({ kind: 'text', text: body }) as const;
+
+  it('holds for a path with nothing at it', () => {
+    expect(removableClaim({ kind: 'absent' }, claim)).toBe(true);
+  });
+
+  it('holds for a file with the bytes its row records, however they are spelled', () => {
+    expect(normalizeContent(WROTE)).not.toBe(WROTE);
+    expect(removableClaim(text(WROTE), claim)).toBe(true);
+    expect(removableClaim(text(normalizeContent(WROTE)), claim)).toBe(true);
+  });
+
+  it('does not hold for a file that was changed, or one that could not be read whole', () => {
+    expect(removableClaim(text('a person changed this\n'), claim)).toBe(false);
+    expect(removableClaim({ kind: 'unread', reason: 'oversized' }, claim)).toBe(false);
+    expect(removableClaim({ kind: 'unread', reason: 'unreadable' }, claim)).toBe(false);
+  });
+
+  it('holds for an RTK settings file edited around the hook, which can have the hook taken out', () => {
+    const rtk = { templateId: 'rtk.claude-settings', writtenHash: 'what-its-row-records' };
+    const edited = buildClaudeSettingsJson().replace('{\n', '{\n  "model": "ours",\n');
+    expect(removableClaim(text(edited), rtk)).toBe(true);
+    expect(removableClaim(text('{\n  "model": "ours"\n}\n'), rtk)).toBe(false);
+    expect(removableClaim(text(edited), { ...rtk, templateId: 'agent.old' })).toBe(false);
   });
 });

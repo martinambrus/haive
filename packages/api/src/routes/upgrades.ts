@@ -13,7 +13,6 @@ import {
   RTK_SETTINGS_FILES,
   rtkSettingsNeeded,
   sha256Hex,
-  withoutRtkHookEntry,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
@@ -29,6 +28,7 @@ import {
 import {
   importRulesFilesFor,
   readUpgradeFile,
+  removableClaim,
   rtkBlockFiles,
   rulesImportState,
 } from '@haive/shared/rules-files';
@@ -158,21 +158,6 @@ async function rtkSettingsLeftovers(
     }
   }
   return found;
-}
-
-/** Whether 02 could still act on a claim's file: it is absent, holds its row's bytes, or is an RTK
- *  settings file whose hook can come out. 02 keeps any other, so reporting one offers nothing. */
-async function removableClaim(
-  root: string,
-  claim: { templateId: string; diskPath: string; writtenHash: string },
-): Promise<boolean> {
-  const read = await readUpgradeFile(root, claim.diskPath);
-  if (read.kind === 'absent') return true;
-  if (read.kind === 'unread') return false;
-  return (
-    sha256Hex(normalizeContent(read.text)) === claim.writtenHash ||
-    withoutRtkHookEntry(claim.templateId, read.text) !== null
-  );
 }
 
 /**
@@ -430,7 +415,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     for (const a of liveArtifacts) {
       const id = a.templateId;
       if (applicableSet.has(id) || isPerRepoTemplateId(id) || outsideRemovable.has(id)) continue;
-      if (await removableClaim(root, a)) outsideRemovable.add(id);
+      if (removableClaim(await readUpgradeFile(root, a.diskPath), a)) outsideRemovable.add(id);
     }
   }
   const filteredInstalled = new Map(

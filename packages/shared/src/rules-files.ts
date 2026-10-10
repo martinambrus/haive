@@ -2,6 +2,8 @@ import type { CliProviderName } from './types/index.js';
 import { CLI_PROVIDER_CATALOG, type CliRulesFileMode } from './cli-providers/catalog.js';
 import { lstatNoFollow, readFileNoFollow, readLinkNoFollow } from './fs-safe.js';
 import { extractRegion, RTK_REF_MARKER_END, RTK_REF_MARKER_START } from './templates/cli-rules.js';
+import { normalizeContent, sha256Hex } from './templates/manifest.js';
+import { withoutRtkHookEntry } from './templates/rtk-settings.js';
 
 // Shared so the worker's upgrade steps and the api's upgrade status name the same files. Node-only
 // and outside the root barrel, like `fs-safe`, which refuses to load anywhere but Linux.
@@ -30,6 +32,20 @@ export async function readUpgradeFile(repoPath: string, rel: string): Promise<Up
   if (read === null) return { kind: 'absent' };
   if (read.truncated) return { kind: 'unread', reason: 'oversized' };
   return { kind: 'text', text: read.data.toString('utf8') };
+}
+
+/** Whether 02 could still act on a claim whose path reads as `read`: it is absent, holds the bytes
+ *  its row records as Haive's, or is an RTK settings file whose hook can come out. 02 keeps any other. */
+export function removableClaim(
+  read: UpgradeRead,
+  claim: { templateId: string; writtenHash: string },
+): boolean {
+  if (read.kind === 'absent') return true;
+  if (read.kind === 'unread') return false;
+  return (
+    sha256Hex(normalizeContent(read.text)) === claim.writtenHash ||
+    withoutRtkHookEntry(claim.templateId, read.text) !== null
+  );
 }
 
 /** The files that must import AGENTS.md for these providers: each import-mode `rulesFile`, once,
