@@ -64,6 +64,27 @@ describe('buildBlankRenderContext', () => {
     expect(ctx.enabledCliProviders.map((p) => p.name)).toEqual(['claude-code']);
   });
 
+  it('records each enabled provider rules file and mode', async () => {
+    const ctx = await buildBlankRenderContext(
+      mockDb([
+        { name: 'claude-code', enabled: true },
+        { name: 'codex', enabled: true },
+        { name: 'gemini', enabled: false },
+      ]),
+      ARGS,
+    );
+    expect(ctx.enabledCliProviders).toEqual([
+      { name: 'claude-code', rulesFile: 'CLAUDE.md', rulesFileMode: 'import' },
+      { name: 'codex', rulesFile: 'AGENTS.md', rulesFileMode: 'native' },
+    ]);
+  });
+
+  it('records no agent targets for an amp-only repository, seeding no agent', async () => {
+    const ctx = await buildBlankRenderContext(mockDb([{ name: 'amp', enabled: true }]), ARGS);
+    expect(ctx.agentTargets).toEqual([]);
+    expect(ctx.enabledCliProviders.map((p) => p.name)).toEqual(['amp']);
+  });
+
   it('never claims LSP support, having no languages to support', async () => {
     const ctx = await buildBlankRenderContext(
       mockDb([{ name: 'claude-code', enabled: true }]),
