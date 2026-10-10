@@ -128,12 +128,18 @@ in the web container's `bash -c` (MEASURED: `tests/$(id)Test.php` ran `id` there
 quoting). So for a DDEV run 08b drops a reported test path holding any character outside
 `[A-Za-z0-9._/@+-]`; on every run it drops absolute paths, `..`, control characters and a segment
 starting with `-` (an option to the runner), and notes how many written tests did not run. 07c
-accepts a target only as `mysql|mariadb:<digits and dots>`, read the way YAML reads the value.
-07c compares and guards on those YAML values on BOTH sides, so a quote- or comment-only restatement
-of the same version plans no migration and `'postgres'` keeps its PostgreSQL guard; a `.ddev/` tree
-whose hash is unchanged is no drift at all, whatever an older parser stored for the baseline. The
-block parser reads a quoted value followed by a comment and CRLF files; a quoted value holding ` #`
-is handed on whole and refused rather than read as the text before it.
+accepts a target only as `mysql|mariadb:<digits and dots>`, read the way YAML reads the value. 07c
+compares and guards on those YAML values on BOTH sides, so a quote- or comment-only restatement of
+the same version plans no migration and `'postgres'` keeps its PostgreSQL guard; a `.ddev/` tree
+whose hash is unchanged is no drift at all, whatever an older parser stored for the baseline. Every
+reader of `.ddev/config.yaml` (07c, 01c, 01c1, 11g, onboarding's env detection and env-replicate)
+goes through `_ddev-config.ts`, which parses with `yaml` on the failsafe schema, so a value is its
+source text (`8.10` stays `8.10`) and quotes, comments, a comment after `database:`, the flow form,
+CRLF, aliases and `<<` merge keys read as YAML (and DDEV's yaml.v3) reads them, an alias by looking
+its anchor up, never by expanding it. Only the first document of a stream is read, as yaml.v3's
+`Unmarshal` does; a first document `yaml` refuses falls back to the old line readers over that
+document's text alone. A
+quoted value holding ` #` is handed on whole and refused rather than read as the text before it.
 
 The DDEV project's Mailpit is surfaced at every step that already shows the running app (08a, Gate 2, `99-run-app-ready`), and the URL is always what `ddev describe -j` REPORTS (`parseDdevMailpitUrls`), never one we compose. That is what makes a single string right in both viewing modes: the headed browser runs INSIDE the runner and dials the same `*.ddev.site` name the host does, so the VNC half needs nothing published — MEASURED, `curl http://<project>.ddev.site:8025` from inside a runner answers 200. The host half publishes slots 3/4 at runner create (the DB-port argument: `01c` boots before the browser choice is known) and pins `ddev config global --mailpit-{http,https}-port` to the same numbers, in the exec that already sets `--router-*-port`; global config is per-runner, so no repo file is touched and nothing lands in review scope. NOTHING gets a `localhost` twin: the runner's whole traefik config carries one rule, `HostRegexp(^<project>\.ddev\.site$)`, with no catch-all, so `Host: localhost` is answered 404 on every entrypoint while `Host: <project>.ddev.site:9999` answers 200 — the router strips the port and matches the NAME (all MEASURED), and nothing here registers `additional_hostnames`. The app had carried such an entry since `83897d67` without it ever routing; it was removed rather than fixed, since the two `*.ddev.site` URLs already cover the case. `kind: 'localhost'` stays correct for `appRunnerAccessUrls`, whose port is published straight off the container with no router in front. Routing itself survives a port mismatch (the router strips the port before matching, MEASURED at 200 on a deliberately wrong one); the pin exists so the printed URL is right, and `decideMailpitHostUrls` drops a host link whose reported port disagrees with the published one, since a project's own `.ddev/config.yaml` OVERRIDES the global pin. The in-app "Open Mailpit" button is its own `runtime-ensure` job name, NOT a field on ENSURE — every ENSURE enqueue shares `jobId: ensure-<taskId>` and BullMQ coalesces on it, dropping a second payload silently — and it carries no URL, which the worker resolves itself so the route cannot aim that browser anywhere else. It navigates to the http URL: the runner's Chromium keeps a trust store separate from the system one curl uses, and an interstitial would land the user on a warning page instead of their mailbox.
 
