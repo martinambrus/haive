@@ -10,8 +10,9 @@ dynamic discovery.
 
 The goal is a module system: a self-contained package (potentially closed-source, cloned from a
 private git repo) that plugs in and adds a nav menu item, its own pages (e.g. a Statistics dashboard
-plus subpages), global settings, and admin settings — without editing core registration files per
-module.
+plus subpages), global settings, admin settings, and connections to external systems (GitHub,
+GitLab, Gitea, Google Drive, Gmail, Dropbox, Slack and the like — see "Integrations" below) — without
+editing core registration files per module.
 
 User decisions that scope this plan:
 - Attach model = REBUILD ON INSTALL. A module is a build-time workspace package; it is cloned in and
@@ -61,6 +62,9 @@ for it (`entitlementId`, no-op gate).
     `requireAuth`. Module routers drop into a mount loop unchanged. IMPROVEMENT over the core
     convention: the module loader mounts module routers behind `requireAuth` (and `requireAdmin` for
     admin-declared bases) BY DEFAULT, so a module cannot accidentally ship an open endpoint.
+- Integrations are the same static-list problem in miniature: five git forges in a hardcoded map
+  (`packages/worker/src/forge/registry.ts`), OAuth for GitHub only, one card on
+  `settings/integrations`. The "Integrations" section gives them the provider contract below.
 
 ## Module package contract
 
@@ -74,6 +78,8 @@ an `exports` map with these subpaths (all optional except `./manifest`):
 - `./steps` — `StepDefinition[]` (server; imported by the worker loader).
 - `./jobs` — optional BullMQ worker/queue registration (server; worker loader).
 - `./ensure-schema` — idempotent own-database bootstrap (server; worker loader), mirroring global-kb.
+- `./integrations` — the executable REST operations of the integration providers the manifest
+  declares (server; imported by the api loader, which runs them inside the integration broker).
 - `./web` — escape-hatch compiled-React pages/components (web-safe only; consumed ONLY by the web
   build via codegen; never used by the generic path).
 
@@ -90,7 +96,8 @@ regenerated in each package build (prebuild hook).
 `id`, `name`, `version`, `schemaVersion`, and optional capability declarations: `nav?` (items:
 `{ href, label, icon?, adminOnly?, order? }`), `pages?` (id -> `DashboardSpec`), `apiBasePath?`,
 `apiRequiresAdmin?`, `globalSettings?` (a `FormSchema` + key namespace + defaults), `adminSettings?`
-(a `FormSchema`), `hasSteps?`, `ownsDatabase?`, `entitlementId?` (Task 2 seam, ignored in Task 1).
+(a `FormSchema`), `hasSteps?`, `ownsDatabase?`, `integrations?` (`IntegrationProviderSpec[]`, see
+"Integrations"), `entitlementId?` (Task 2 seam, ignored in Task 1).
 
 `DashboardSpec` (new Zod discriminated-union in `packages/shared/src/schemas/`, sibling of `form.ts`):
 `{ title, description?, widgets: Widget[] }`. `Widget` = discriminated union on `type`:
@@ -113,6 +120,204 @@ the exact joint a step-contributing module sits on.
   `module.<moduleId>.<stepId>` so a module can never shadow a core step id.
 - Boot ordering: the module loader must run before `syncComposableCatalog`, which itself already runs
   after `registerAllSteps`.
+
+## Integrations — connecting Haive to external systems
+
+An integration is a connection from Haive to an outside system: a git forge (GitHub, GitLab, Gitea,
+Bitbucket), file storage (Google Drive, Dropbox, Box), mail (Gmail), chat (Slack), docs and issue
+trackers (Notion, Linear, Jira/Confluence), and whatever comes next. It is the same problem as the
+rest of this plan, a static list with no seam, so it gets the same answer: a provider is a
+capability declared in a manifest, core ships its own providers through that same contract, and a
+module adds a provider without editing a core registration file.
+
+### What exists today (grounded 2026-10-10)
+
+Haive already integrates with git forges, in a hardcoded way:
+
+- `repo_credentials` (`packages/database/src/schema/repos.ts:312`) holds per-user, envelope-encrypted
+  credentials: `host`, a `provider` column naming one of five forges (`forgeProviderSchema`:
+  github, gitea, gitlab, bitbucket_cloud, bitbucket_server) and an `apiBaseUrl` override for
+  self-hosted installs. One row serves as both the git-over-HTTPS credential and the forge API token.
+- `packages/worker/src/forge/registry.ts` is a static map of five `ForgeProvider`s exposing
+  `openPullRequest` and `getPullRequestState`, which `12-worktree-cleanup` (`:728`) and
+  `pr-poll-queue` (`:155`) call. The typed errors in `forge/types.ts` (`ForgeAuthError`,
+  `ForgeRateLimitError`, ...) are already the shape every provider's REST adapter should use.
+- OAuth exists for GitHub alone, as a device flow (`api/src/routes/github-oauth.ts`) whose client id
+  comes from `GITHUB_OAUTH_CLIENT_ID` or a per-user secret. `settings/integrations` holds that one
+  card. GitLab, Gitea and Bitbucket take a pasted token.
+- The sandbox already has the pattern that keeps credentials out of it: `haive-rag` and
+  `ddev-control` (`sandbox/mcp-config.ts:247`, `buildDefaultMcpServers`) are dependency-free stdio
+  MCP servers that call the api with a task-scoped token (`signRagToken`,
+  `packages/shared/src/rag/token.ts:22`), and the api does the privileged work.
+- Repository-supplied MCP servers (`mcp_settings.json`) reach the CLI only under the consent rules in
+  `docs/architecture/mcp-consent.md`. Those are the repository's servers; nothing lets a user connect
+  their own accounts.
+
+### Decisions (1-4 PROPOSED, to lock before Slice 6 starts; 5 DECIDED 2026-10-10)
+
+1. **One provider contract, core and modules alike.** The five forges stay in core, because clone
+   and pull requests are core features, and are re-registered through the provider contract rather
+   than the static map. Every other provider ships as a module (`@haive/module-integration-<id>`, or
+   one module per vendor family such as Google). Core holds the broker, the tables and the UI; no
+   core edit per provider.
+2. **Two access surfaces per provider, MCP preferred, REST as fallback.** A provider declares an
+   `mcp` surface (the vendor's remote MCP server, or a pinned stdio server) and/or an `api` surface
+   (typed REST operations Haive implements). Where the vendor has no usable MCP server, or it is in
+   a preview Haive cannot join, the REST operations are what Haive integrates "until they ship one",
+   and the broker presents them to agents as MCP tools, so an agent sees one uniform surface either
+   way and a provider can move from REST to MCP without a task type noticing.
+3. **Provider credentials never enter the sandbox.** Agents reach integrations only through a
+   Haive-owned broker (below). Rationale: secret masking (`docs/architecture/sandbox-masking.md`)
+   exists so an agent cannot read a secret; a bearer token for someone's mailbox in an env var or
+   config file would undo that, would need every vendor domain on a restricted task's egress
+   allow-list (`sandbox/egress-gateway.ts`), and would leave refresh, revocation and auditing to
+   code Haive does not run.
+4. **Connections are per user by default, shared by an admin when wanted.** A user connection acts
+   as that user. A shared connection (a Slack bot posting task notifications, a service account on a
+   self-hosted GitLab) is created by an admin and granted explicitly. Nothing reaches an agent
+   without a grant, the same principle as the MCP consent rules. A grant says WHICH account a
+   repository or task may use; it carries no access level (decision 5).
+5. **DECIDED (user, 2026-10-10): write access is ONE on/off switch per user per integration.**
+   Every operation and MCP tool a provider exposes is classed `read` or `write` in its manifest.
+   Read follows the grant; write additionally needs the user's switch for that integration, a
+   setting on their Integrations page that holds for all their tasks and steps. Write is NOT
+   enabled per task or per step: asking again for every task, let alone every step, is the friction
+   this decision rejects. The switch defaults to off. Reads and writes are logged apart on every
+   call and counted per integration in the task's usage panel ("Call log and task statistics").
+
+### Provider landscape (researched 2026-10-10, secondary sources — re-verify at implementation)
+
+| Provider | Vendor MCP server | Auth | Haive surface |
+|---|---|---|---|
+| GitHub | Remote `https://api.githubcopilot.com/mcp/`, public preview, not on GitHub Enterprise Server; OAuth access gated by Copilot preview policy | OAuth (device flow exists) or PAT | Core forge REST (exists) + remote MCP where allowed |
+| GitLab | Official MCP server, beta, Premium/Ultimate only, OAuth with dynamic client registration | OAuth or PAT | Core forge REST (exists); MCP only on paid tiers, so REST stays the guaranteed path |
+| Gitea | `gitea.com/gitea/gitea-mcp`, stdio/Docker, PAT; no hosted endpoint | PAT | Core forge REST (exists); stdio MCP optional |
+| Bitbucket | None verified | App password / PAT | Core forge REST (exists) |
+| Google Drive, Gmail | Official per-product remote servers (`drivemcp.googleapis.com`, `gmailmcp.googleapis.com`), Developer Preview / gradual rollout from 2026-05; needs the install's own GCP project with the MCP APIs enabled | OAuth 2.0, install-registered client | Module; REST (Drive v3, Gmail API) until the MCP servers are generally available |
+| Dropbox | Remote `https://mcp.dropbox.com/mcp`, beta; write support reported inconsistently | OAuth (interactive only, no machine-to-machine) | Module; REST (API v2) for writes |
+| Slack | Remote `mcp.slack.com`, only for clients a workspace admin approves | OAuth | Module; Web API until Haive is an approved client |
+| Notion | Remote `https://mcp.notion.com/mcp`; the self-hosted server is unmaintained | OAuth | Module; MCP |
+| Linear | Remote `https://mcp.linear.app/mcp` | OAuth 2.1 with dynamic registration, or API key | Module; MCP |
+| Atlassian (Jira, Confluence) | Remote server; sources disagree on the `/v1` vs `/v2` path | OAuth | Module; MCP |
+
+Two findings shape the design rather than the table. A vendor MCP server may admit only clients it
+has approved (Slack; GitHub's OAuth preview policy), so Haive acting as the MCP client can be refused
+where Claude Code or Cursor is not: the REST fallback is not a stopgap for missing servers alone.
+And Google's servers bill and authorize against the install's own Google Cloud project, so the
+provider's admin form must ask for that project's OAuth client, not a Haive-wide one.
+
+### Provider contract (`IntegrationProviderSpec`, in `@haive/shared`)
+
+The `ModuleManifest` gains `integrations?: IntegrationProviderSpec[]`, plain web-safe data like the
+rest of the manifest:
+
+- `id` (core ids bare, e.g. `github`; module ids namespaced `module.<moduleId>.<id>` like composable
+  steps, so a module cannot shadow a core provider), `displayName`, `category`
+  (`forge` | `storage` | `mail` | `chat` | `docs` | `issues` | `other`), `selfHosted` (asks for a
+  base URL, as `apiBaseUrl` does for forges today).
+- `auth: AuthMethodSpec[]`, in preference order: `oauth2` (`authorizeUrl`, `tokenUrl`, `revokeUrl?`,
+  scopes per access level, PKCE always, `clientRegistration`: `preregistered` | `cimd` | `dcr`),
+  `device` (the GitHub flow, generalised), `token` (a pasted PAT or API key, with a `FormSchema` and
+  help text naming the scopes to grant).
+- `mcp?`: `{ kind: 'remote', url }` or `{ kind: 'stdio', image | package, version }`, always pinned.
+- `operations?`: the REST surface's catalogue — `{ opId, description, inputSchema, access:
+  'read' | 'write' }` as data. The executable bodies live in the module's new `./integrations`
+  subpath (server-only, loaded by the api loader), never in the manifest.
+- `entitlementId?` per provider, so Task 2 can sell a provider separately from its module.
+
+The forge interface keeps its name and its two methods; the core forge providers implement the
+integration contract around them, so `12-worktree-cleanup` and `pr-poll-queue` change only in how
+they resolve a provider.
+
+### Connections, grants, and the data model
+
+All in the core Drizzle barrel with a numbered migration — integrations are core infrastructure, and
+a module that contributes a provider owns no tables for it.
+
+- `integration_provider_configs`: one row per enabled provider on this install — `providerId`,
+  `enabled`, the install's OAuth client id and envelope-encrypted client secret (via
+  `SecretsService`), and `apiBase` for self-hosted ones. The existing `GITHUB_OAUTH_CLIENT_ID`
+  env var keeps precedence over the row, exactly as `resolveGithubClientId` gives it today.
+- `integration_connections`: `id`, `providerId`, `scope` (`user` | `shared`), `ownerUserId`,
+  `accountLabel` and `externalAccountId` (who the vendor says this is), `authMethod`,
+  `grantedScopes`, envelope-encrypted `accessToken` / `refreshToken` with `expiresAt`, `status`
+  (`connected` | `needs_reauth` | `revoked` | `provider_unavailable`), `lastError`, timestamps. For
+  a forge, the row references its `repo_credentials` row (`repoCredentialId`) instead of holding the
+  token itself.
+- `integration_grants`: `connectionId`, a target (`task_type` slug, `repository`, or `task`), and an
+  optional tool allow-list. A grant is what lets an agent or step use a connection; holding a
+  connection grants nothing. It has no access level: write is decision 5's switch, not the grant's.
+- `integration_user_settings`: `userId`, `providerId`, `writeEnabled` (default false) — decision
+  5's switch, one row per user per integration, covering every account the user connected for that
+  provider. A shared connection also carries its own admin-set `writeEnabled`; a write through it
+  needs both switches on, the admin's for the account and the task owner's for the integration.
+- `integration_calls`: one row per broker call — `connectionId`, `providerId`, `taskId`,
+  `taskStepId`, `cliInvocationId`, the tool or operation, `access` (`read` | `write`), the surface
+  that served it (`mcp` | `rest`), `outcome` (`ok` | `refused` | `error`), timestamp. Never the
+  arguments or the result: those are someone's mail and documents.
+
+`repo_credentials` is NOT folded into connections in this plan. That would be a destructive
+migration of the table every clone and push reads; the forge rows link to it instead. Folding it in
+is a later, separate plan with its own additive and destructive phases.
+
+### OAuth broker (api)
+
+- `POST /integrations/:providerId/connect` starts a flow and returns the authorize URL (a POST,
+  because a GET must not start work — `AGENTS.md`, request origin rule). State and the PKCE verifier
+  live in Redis, single-use, bound to the session user, with a short TTL.
+- `GET /integrations/oauth/callback` is the redirect target at `HAIVE_PUBLIC_API_URL` (else the app
+  host on the api port, as `isForeignOrigin` resolves it). It is a top-level GET from the vendor, so
+  it carries no Origin worth checking: the single-use `state` bound to the session is what
+  authenticates it, and a replayed or foreign state is refused without touching a token.
+- Client registration order, per provider: the install's pre-registered client from
+  `integration_provider_configs` → a Client ID Metadata Document Haive serves at
+  `/integrations/oauth/client-metadata.json`, which needs a public HTTPS origin and therefore does
+  not exist on a localhost install → dynamic client registration → device flow → pasted token. The
+  MCP authorization spec of 2025-11-25 made CIMD the preferred route and DCR a fallback; the
+  provider's `clientRegistration` field records which ones the vendor actually accepts.
+- Refresh happens in the api, on demand, under a per-connection Redis lock: vendors that rotate
+  refresh tokens invalidate the old one on use, so two concurrent refreshes would log the user out.
+  A refusal flips `status` to `needs_reauth`; UI keys on that column, never on `lastError` text
+  (the message-column rule in `AGENTS.md`).
+- Disconnect revokes at the vendor when the provider declares `revokeUrl`, then deletes the tokens.
+
+### Agent surface: the `haive-integrations` MCP broker
+
+- A dependency-free stdio server, `haive-integrations`, bind-mounted like `haive-rag` and added by
+  `buildDefaultMcpServers` only for invocations whose task holds at least one grant. It carries a
+  task-scoped token and nothing else.
+- It calls `POST /integrations/mcp/:connectionId` on the api. The api verifies the token, checks the
+  grant and the tool's access class, then either forwards the MCP request to the vendor's remote
+  server with the real bearer attached (streamable HTTP), or runs the provider's REST operation and
+  answers in MCP form. Tool names are prefixed by connection so two accounts of one provider do not
+  collide.
+- A restricted task's egress allow-list gains nothing: the sandbox talks to the api only, and the
+  api talks to the vendor.
+- Results are untrusted text (a Slack message or a shared document can carry instructions): the
+  broker returns them as data under the rules in `docs/architecture/prompt-containment.md`.
+- The tool list is built per invocation: write tools are listed only while decision 5's switch is
+  on. The broker checks the switch again on every write call, so turning it off mid-task refuses
+  the next write rather than waiting for the next invocation. Turning it on for a provider whose
+  connection lacks write scopes starts incremental authorization for those scopes; turning it off
+  leaves the scopes granted and relies on the broker's refusal.
+
+### Call log and task statistics
+
+- Every broker call writes an `integration_calls` row, reads and writes apart, refused calls
+  included. The broker is the only path to an integration, so the log is complete for EVERY CLI,
+  unlike `cli_invocations.tool_usage`, whose `loaded` inventory is null for codex, amp and gemini
+  (`docs/architecture/statistics.md`, "Agents, skills and MCP tools").
+- The task's usage panel at the bottom of the task page (`TaskToolUsagePanel`,
+  `packages/web/src/app/(app)/tasks/[id]/page.tsx:3100`, which already lists the agents, skills and
+  MCP tools a task used) gains an Integrations group: per integration, and per account where a task
+  used two, the number of reads and the number of writes, with refused and failed calls counted
+  apart. It comes from `GET /tasks/:id/tool-usage`, which reads `integration_calls` beside the
+  existing rollup (`api/src/lib/tool-usage-rollup.ts`), so the browser still does no arithmetic.
+- `haive-integrations` joins `HAIVE_MCP_SERVER_NAMES` (`@haive/shared/stats`) so the panel does not
+  report it as a repository's own MCP server; the worker test that pins that list to
+  `mcp-config.ts` covers it.
+- `/stats` gets the same counts per integration over its window (`docs/architecture/statistics.md`
+  owns the denominators); the task panel comes first.
 
 ## Distribution and entitlement
 
@@ -315,7 +520,9 @@ with no deactivate is rejected. The `modules` intent row carries two orthogonal 
   its code and data stay in place. This is the WordPress "deactivate" — reversible instantly, no
   data loss, no rebuild. (Deactivation can be live precisely because it only STOPS using code that
   is already loaded; install/uninstall change what code EXISTS, which the standalone-build model
-  requires a rebuild for.)
+  requires a rebuild for.) Its integration providers go the same way: their connections flip to
+  `provider_unavailable` with tokens and grants kept, the broker refuses their tools, and
+  reactivating restores them.
 
 So the four reachable states: installed+active (normal), installed+deactivated (parked, data kept),
 uninstalled+data-kept (gone but revivable), uninstalled+purged (gone, `./teardown` ran). The
@@ -338,7 +545,10 @@ Applied to THIS plan (not to hot-reload, but to the removal lifecycle), it names
 Fix, in the plan's own grain (data + boot-upsert, no runtime effect system):
 
 - A module MAY declare `./teardown` — an idempotent inverse of `./ensure-schema` (drop its own
-  database/schema, delete its namespaced config keys). Explicitly NOT auto-run on rebuild (a
+  database/schema, delete its namespaced config keys). A module contributing integration providers
+  gets a core-run teardown half it does not write: revoke each of their connections at the vendor
+  where the provider declares `revokeUrl`, then delete the connection, grant and provider-config
+  rows. A token that could not be revoked is listed in the purge report, never dropped silently. Explicitly NOT auto-run on rebuild (a
   rebuild without the module is not a request to destroy its data); run only by an explicit
   `pnpm module remove <id>` operator action, the symmetric sibling of `pnpm module add`, which the
   admin UI surfaces as a distinct, confirm-gated "remove and purge data" step separate from
@@ -406,7 +616,8 @@ detect an unresolvable step (its module is `missing`) and mark the task DEAD ins
 Uninstalling OR deactivating a module that live tasks depend on would break those tasks mid-flight
 (their steps/routes vanish). The Modules page must never do this silently: before any uninstall or
 deactivate, it computes and SHOWS the running/queued tasks that depend on the module, and forces the
-operator to choose one of two paths.
+operator to choose one of two paths. "Depend" includes tasks holding grants on the module's
+integration providers, not only tasks running its steps.
 
 - **Urgent (a security flaw — remove now):** STOP the dependent tasks immediately (kill their CLIs
   via the existing STOP), then apply the deactivate/uninstall. This is the "I do not care about
@@ -496,6 +707,55 @@ without the choice.
   uses the generic path.
 - Verify: a stub escape-hatch page renders through the codegen import map.
 
+### Slice 6 — Integration core: providers, connections, OAuth broker
+- `@haive/shared`: `IntegrationProviderSpec`, `AuthMethodSpec`, the operation catalogue shape.
+- Core migration: `integration_provider_configs`, `integration_connections`, `integration_grants`,
+  `integration_user_settings`, `integration_calls` (additive only; `repo_credentials` untouched).
+- Provider registry in api and worker: core providers plus every loaded module's `integrations`,
+  reported in `GET /admin/modules/loaded` beside routes and steps.
+- The five forges re-registered as core providers wrapping the existing `ForgeProvider`s; their
+  connections reference `repo_credentials`. `resolveForgeProvider` keeps its signature.
+- OAuth broker routes (connect, callback, refresh, disconnect) with PKCE, single-use state and the
+  per-connection refresh lock. The GitHub device flow moves behind the generic `device` method; its
+  routes stay as aliases for one release.
+- Web: `settings/integrations` becomes the user's connection list (connect, reconnect, disconnect,
+  status from the `status` column, and the per-integration write switch of decision 5); an admin
+  Integrations tab holds per-provider enablement and the
+  install's OAuth clients, replacing the GitHub client-id card (the env var keeps precedence).
+- Does not depend on Slices 0-5: core providers need no module. It can ship before them, and
+  module-contributed providers light up once the loader exists.
+- Verify: connect GitHub by browser OAuth with PKCE; a replayed or foreign `state` is refused; two
+  concurrent refreshes of one connection produce one vendor call; existing repositories still clone
+  and open PRs with no credential change.
+- Rollback: drop the five tables (nothing else reads them) and restore the static forge map; the
+  GitHub aliases mean the old device-flow UI still works throughout.
+
+### Slice 7 — Agent surface: grants and the `haive-integrations` broker
+- `haive-integrations` stdio server shipped as a `SandboxExtraFile` and added by
+  `buildDefaultMcpServers` when the task holds a grant; `POST /integrations/mcp/:connectionId`
+  verifies the task token and grant, forwards to the vendor's remote MCP or runs the REST
+  operation, and records each call in `integration_calls`.
+- The Integrations group in `TaskToolUsagePanel` (reads and writes per integration).
+- Grants UI on the repository settings page and in the task-type composer
+  (`rippling-wibbling-puffin.md`, "Steps may require integrations").
+- A connection in `needs_reauth` or `provider_unavailable` parks a step that needs it with a
+  reconnect banner, built in `lib/step-banners.ts` like the other parks.
+- Verify: an agent lists exactly the granted tools; write tools are absent while the user's write
+  switch for that integration is off; turning it off mid-task refuses the next write call; no
+  provider token appears in the sandbox (container env, mounted files, MCP config); revoking a grant
+  removes the tools at the next invocation; the task panel's read and write counts equal the
+  task's `integration_calls` rows.
+- Rollback: stop adding the server in `buildDefaultMcpServers`; grants and connections stay.
+
+### Slice 8 — Reference integration module
+- `modules/integration-google/` with Drive and Gmail providers: REST operations as the default
+  surface and the official remote MCP servers as an opt-in per install while Google keeps them in
+  preview. It exercises both surfaces, an install-registered OAuth client, and incremental scopes
+  (read at connect, write scopes when the user turns write on). Needs Slices 1 and 6.
+- Verify: connect a Google account, grant Drive read to one repository, run a task whose agent
+  lists and reads a Drive file through the broker, then deactivate the module and see the
+  connection go `provider_unavailable` and the task's next step park with the reconnect banner.
+
 ## Cross-cutting rules
 
 - Module DBs are separate databases with idempotent `ensure-schema` (deployable, re-runnable) — never
@@ -519,6 +779,11 @@ admin install UI should say so plainly rather than implying a sandbox.
 What does apply, and is worth listing beside that statement: module routers are auth-gated by default
 at mount, module databases are separate with idempotent `ensure-schema`, and module config keys are
 namespaced. Those are hygiene, not isolation.
+
+A module's integration operations run in the api with the decrypted tokens of every connection
+granted to the call, so an integration module is trusted with the accounts users connect to it. That
+belongs in the same plain statement. What does hold: the sandbox never sees a provider token, and
+the broker checks the grant and decision 5's write switch before a module's operation runs.
 
 ### Runtime hot-swap is deliberately NOT adopted
 
@@ -614,3 +879,25 @@ Lifecycle:
 18. Uninstall/deactivate with a RUNNING dependent task: the preflight lists it and blocks until the
    operator picks urgent (tasks stopped, then action) or graceful (tasks paused, drained, then
    action); neither path silently kills or silently waits.
+
+Integrations:
+
+19. With zero modules, the five forges are listed as core providers, and every existing repository
+   clones, pushes, opens a PR and polls its state exactly as before (`12-worktree-cleanup`,
+   `pr-poll-queue`).
+20. OAuth: connect a provider by browser flow with PKCE; replaying the callback, or presenting a
+   `state` minted for another user, is refused and stores no token; a refusal on refresh flips the
+   connection to `needs_reauth` and the UI shows reconnect from that column.
+21. Two concurrent refreshes of one connection make one vendor token call (the lock), and the
+   connection stays usable afterwards.
+22. In a sandbox holding a grant, no provider token is readable: container env, mounted files and
+   the CLI's MCP config hold only the task-scoped broker token.
+23. The agent's tool list equals the grant: write tools absent while the user's write switch for that
+   integration is off, other users' connections absent, a revoked grant gone at the next invocation.
+   A write through a shared connection needs both the admin's and the task owner's switch.
+24. A task that read twice and wrote once in Drive shows Drive: 2 reads, 1 write in its usage panel,
+   on a codex run as on a claude one, and a refused write is counted as refused, not as a write.
+25. A provider whose vendor MCP refuses Haive as a client falls back to its REST operations when
+   declared, and says which surface served the call in the call record.
+26. Purge of an integration module revokes its connections at the vendor and lists any it could
+   not revoke.

@@ -140,6 +140,12 @@ unreachable for the input the plan was about.
   fan-out as an optional improvement, never a prerequisite.
 - `serialized-chasing-thacker` and `rippling-wibbling-puffin` carry paired rules covering the same
   joint: a module's steps must reach the composable step catalog.
+- They split integrations the same way: `serialized-chasing-thacker` owns providers (core forges and
+  module-contributed ones such as Google Drive, Gmail, Dropbox, Slack), connections, grants, the
+  OAuth broker and the `haive-integrations` MCP broker (Slices 6-8; decisions 1-4 PROPOSED, decision 5 — write is one switch per user per
+  integration, reads and writes counted apart in the task's usage panel — DECIDED 2026-10-10);
+  `rippling-wibbling-puffin` owns how a task type requires them and how task-create picks the
+  account ("Steps may require integrations"). Slice 6 needs no module and can ship first.
 - `glistening-percolating-snowflake` rides `.haive-data/`, which shipped as slice 2 of
   `amber-fencing-hopper`.
 - `steadfast-committing-gray` and `frictionless-bootstrapping-otter` share one slice exactly:
