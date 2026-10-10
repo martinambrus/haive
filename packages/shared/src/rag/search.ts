@@ -176,7 +176,7 @@ export function applyKnowledgeReserve(
 ): RagSearchHit[] {
   const { topK, knowledgeReserve, knowledgeReserveRatio } = opts;
   if (topK <= 0) return [];
-  const byRrf = [...hits].sort((a, b) => b.rrf - a.rrf);
+  const byRrf = dedupeByKey(hits).sort((a, b) => b.rrf - a.rrf);
   if (knowledgeReserve <= 0) return byRrf.slice(0, topK);
 
   // A small page must not be handed over to the reserve: topK reaches this route
@@ -218,6 +218,16 @@ export function applyKnowledgeReserve(
 
 function hitKey(hit: RagSearchHit): string {
   return [hit.sourcePath, hit.sectionId, hit.chunkIndex].join('\u0000');
+}
+
+/** The fused rows and the reserve's candidates can name the same chunk; the ranked copy wins. */
+function dedupeByKey(hits: RagSearchHit[]): RagSearchHit[] {
+  const best = new Map<string, RagSearchHit>();
+  for (const h of hits) {
+    const prev = best.get(hitKey(h));
+    if (!prev || h.rrf > prev.rrf) best.set(hitKey(h), h);
+  }
+  return [...best.values()];
 }
 
 /** Optional metadata filter for the GLOBAL KB store: restricts candidates to a
