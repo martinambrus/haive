@@ -28,6 +28,7 @@ import {
   resolveRuntimeWeightMb,
 } from './runtime-caps.js';
 import {
+  RuntimeSlotAbortedError,
   acquireRuntimeSlot,
   markBrowserDesktopDown,
   markBrowserDesktopUp,
@@ -251,18 +252,49 @@ export async function ensureAppRunnerStarted(
   repoSubpath: string,
   imageTag: string,
   appPort?: number,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<AppRunnerHandle> {
+  const { signal } = opts;
+  if (signal?.aborted) throw new RuntimeSlotAbortedError(taskId);
   // Coalesce concurrent boots of the same task (08a apply + VNC runtime-ensure)
   // into one — two startAppRunner calls would collide on the container name.
   const inFlight = inFlightAppRunnerBoots.get(taskId);
-  if (inFlight) return inFlight;
-  const boot = ensureAppRunnerStartedInner(taskId, repoSubpath, imageTag, appPort);
-  inFlightAppRunnerBoots.set(taskId, boot);
-  try {
-    return await boot;
-  } finally {
-    inFlightAppRunnerBoots.delete(taskId);
+  if (inFlight) {
+    try {
+      return await rejectOnAbort(inFlight, signal, taskId);
+    } catch (err) {
+      // The boot's owner was stopped, not this caller: boot again rather than inherit its Stop.
+      if (err instanceof RuntimeSlotAbortedError && !signal?.aborted) {
+        return ensureAppRunnerStarted(taskId, repoSubpath, imageTag, appPort, opts);
+      }
+      throw err;
+    }
   }
+  const boot: Promise<AppRunnerHandle> = ensureAppRunnerStartedInner(
+    taskId,
+    repoSubpath,
+    imageTag,
+    appPort,
+    signal,
+  ).finally(() => {
+    if (inFlightAppRunnerBoots.get(taskId) === boot) inFlightAppRunnerBoots.delete(taskId);
+  });
+  inFlightAppRunnerBoots.set(taskId, boot);
+  return boot;
+}
+
+/** Settles with `p`, or rejects as soon as `signal` aborts, leaving `p` itself running. */
+function rejectOnAbort<T>(
+  p: Promise<T>,
+  signal: AbortSignal | undefined,
+  taskId: string,
+): Promise<T> {
+  if (!signal) return p;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new RuntimeSlotAbortedError(taskId));
+    signal.addEventListener('abort', onAbort, { once: true });
+    void p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 async function ensureAppRunnerStartedInner(
@@ -270,6 +302,7 @@ async function ensureAppRunnerStartedInner(
   repoSubpath: string,
   imageTag: string,
   appPort?: number,
+  signal?: AbortSignal,
 ): Promise<AppRunnerHandle> {
   const name = appRunnerName(taskId);
   if (await isRunning(name)) {
@@ -292,7 +325,7 @@ async function ensureAppRunnerStartedInner(
   const debugMode = await isTaskDebugMode(taskId);
   // Cold boot only (the reuse path above already returned): hold an admission slot so
   // at most maxConcurrentRuntimes runtime runners boot at once. Released once up/failed.
-  const releaseSlot = await acquireRuntimeSlot(taskId, 'app');
+  const releaseSlot = await acquireRuntimeSlot(taskId, 'app', undefined, signal);
   try {
     return await startAppRunner({ taskId, repoSubpath, imageTag, appPort, debugMode });
   } finally {

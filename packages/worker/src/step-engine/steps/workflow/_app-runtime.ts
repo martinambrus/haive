@@ -220,6 +220,7 @@ async function ensureAppServingInner(ctx: AppRuntimeCtx): Promise<ServingRuntime
       spec.repoSubpath,
       spec.envImageTag,
       spec.port ?? undefined,
+      { signal: ctx.signal },
     );
     // A cold container recreate (worker reload, daemon restart, host reboot)
     // brings the container back as `sleep infinity` but NOT the dev server — so
