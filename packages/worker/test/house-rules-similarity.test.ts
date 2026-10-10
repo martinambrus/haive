@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   hasVector: true,
   jsonRows: [] as Array<{ id: string; hash: string | null; embedding: unknown }>,
   storeError: null as Error | null,
+  strict: true,
   storeCalls: [] as Array<{ sql: string; params: unknown[] }>,
   storeOptions: [] as unknown[],
   settings: {
@@ -26,10 +27,14 @@ const h = vi.hoisted(() => ({
 vi.mock('../src/orchestrator/house-rules-dispatch.js', () => ({
   readTaskText: async () => h.text,
 }));
-vi.mock('@haive/shared/rag', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  ollamaEmbed: h.embed,
-}));
+vi.mock('@haive/shared/rag', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/rag')>();
+  return {
+    ...actual,
+    ollamaEmbed: h.embed,
+    resolveEmbedBudget: async () => ({ ...(await actual.resolveEmbedBudget()), strict: h.strict }),
+  };
+});
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   resolveGlobalKbSettings: async () => h.settings,
@@ -99,6 +104,7 @@ beforeEach(() => {
   h.rows = [];
   h.hasVector = true;
   h.jsonRows = [];
+  h.strict = true;
   h.storeError = null;
   h.storeCalls = [];
   h.storeOptions = [];
@@ -310,6 +316,24 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
       const record = await recordWritten();
 
       expect(record).toStrictEqual({ status: 'failed', errorClass });
+    },
+  );
+
+  it.each([
+    ['pgvector', true],
+    ['jsonb', false],
+  ])(
+    'scores no rule while strict embedding is off, since hash vectors are stored as embedded, on a %s store',
+    async (_label, hasVector) => {
+      h.strict = false;
+      h.hasVector = hasVector;
+      h.rows = [{ id: A, hash: 'hr1:Alpha', score: 0.9 }];
+      h.jsonRows = [{ id: A, hash: 'hr1:Alpha', embedding: [0.6, 0.8] }];
+      scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+      const record = await recordWritten();
+
+      expect(record).toStrictEqual({ status: 'failed', errorClass: 'unknown_provenance' });
+      expect(h.embed).not.toHaveBeenCalled();
     },
   );
 

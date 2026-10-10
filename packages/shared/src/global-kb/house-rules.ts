@@ -252,7 +252,9 @@ export const houseRuleBytes = (entry: RenderedEntry, opts: HouseRuleRenderOption
 
 const houseRulesSimilaritySchema = z.object({
   status: z.enum(['pending', 'ok', 'failed']),
-  errorClass: z.enum(['timeout', 'refused', 'auth', 'other']).optional(),
+  errorClass: z
+    .enum(['timeout', 'refused', 'auth', 'other', 'unknown_provenance', 'abandoned'])
+    .optional(),
   model: z.string().optional(),
   queryHash: z.string().optional(),
   ms: z.number().nonnegative().optional(),
