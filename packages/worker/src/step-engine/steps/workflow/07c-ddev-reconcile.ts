@@ -110,6 +110,10 @@ export function classifyDrift(
   target: DdevConfigFields,
   targetHash: string,
 ): { kind: DriftKind; migrateTarget: string | null; unsupportedReason: string | null } {
+  // An unchanged .ddev/ tree has no drift, whatever an older parser stored for the baseline.
+  if (targetHash === baseline.configHash) {
+    return { kind: 'none', migrateTarget: null, unsupportedReason: null };
+  }
   const targetBlock = yamlDatabase(target.dbType, target.dbVersion);
   const baseBlock = yamlDatabase(baseline.dbType, baseline.dbVersion);
   const targetDb = targetBlock ? `${targetBlock.type}:${targetBlock.version}` : null;
@@ -139,10 +143,7 @@ export function classifyDrift(
     return { kind: 'db-migrate', migrateTarget: targetDb, unsupportedReason: null };
   }
 
-  if (targetHash !== baseline.configHash) {
-    return { kind: 'restart', migrateTarget: null, unsupportedReason: null };
-  }
-  return { kind: 'none', migrateTarget: null, unsupportedReason: null };
+  return { kind: 'restart', migrateTarget: null, unsupportedReason: null };
 }
 
 /**

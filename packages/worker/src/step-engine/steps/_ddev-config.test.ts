@@ -102,8 +102,8 @@ describe('matchYamlBlockField: a scalar as YAML reads it', () => {
     ['"10.11"  ', '10.11'],
     ['10.11  ', '10.11'],
     ['10.11#lts', '10.11#lts'],
-    ['"10.11 # lts"', '10.11 # lts'],
-    ["'10.11 # lts'", '10.11 # lts'],
+    ['"10.11 # lts"', '"10.11 # lts"'],
+    ["'10.11 # lts'", "'10.11 # lts'"],
   ])('reads version: %s as %s', (written, expected) => {
     expect(read(written)).toBe(expected);
   });
@@ -157,6 +157,18 @@ describe('matchYamlBlockField: a scalar as YAML reads it', () => {
       webserver: null,
       docroot: 'web',
     });
+  });
+});
+
+describe('parseDdevConfig: line endings and quoted comment marks', () => {
+  it('reads a database block written with CRLF line endings', () => {
+    const cfg = ['name: p', 'database:', '  type: mariadb', '  version: "10.11"', ''].join('\r\n');
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'mariadb', dbVersion: '10.11' });
+  });
+
+  it('hands on whole a quoted value holding " #", so 07c refuses it', () => {
+    const cfg = ['database:', '  type: mariadb', "  version: '10.11 # lts'", ''].join('\n');
+    expect(parseDdevConfig(cfg).dbVersion).toBe("'10.11 # lts'");
   });
 });
 

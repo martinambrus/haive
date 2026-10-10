@@ -29,13 +29,16 @@ export function ddevUrlFromConfigText(text: string): string | null {
 function yamlScalarValue(rest: string): string | null {
   const line = rest.trimEnd();
   const quoted = /^(?:"([^"]*)"|'([^']*)')(?:[ \t]+#.*)?$/.exec(line);
-  const value = quoted ? (quoted[1] ?? quoted[2] ?? '') : line.replace(/(?:^|[ \t])#.*$/, '');
+  const inner = quoted ? (quoted[1] ?? quoted[2] ?? '') : null;
+  // A quoted " #" is not a comment; handed on whole, the line is refused rather than read as the text before it.
+  if (inner !== null && /[ \t]#/.test(inner)) return line;
+  const value = inner ?? line.replace(/(?:^|[ \t])#.*$/, '');
   return value.trim() || null;
 }
 
 /** Match a `key: value` scalar one level inside a `block:` mapping, as YAML reads the value. */
 export function matchYamlBlockField(text: string, block: string, key: string): string | null {
-  const blockRe = new RegExp(`^${block}:\\s*\\n((?:[ \\t]+.+\\n?)+)`, 'm');
+  const blockRe = new RegExp(`^${block}:\\s*\\n((?:[ \\t]+.+\\r?\\n?)+)`, 'm');
   const blockMatch = text.match(blockRe);
   if (!blockMatch || !blockMatch[1]) return null;
   const inner = blockMatch[1];

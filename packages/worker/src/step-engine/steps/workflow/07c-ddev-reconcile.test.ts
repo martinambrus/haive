@@ -124,6 +124,18 @@ describe('classifyDrift', () => {
     expect(classifyDrift(baseline(), target(), HASH_A).kind).toBe('none');
   });
 
+  it('an unchanged .ddev/ tree is no drift, whatever an older parser stored for the baseline', () => {
+    const stored = baseline({ dbType: 'mariadb', dbVersion: null });
+    expect(
+      classifyDrift(stored, target({ dbType: 'mariadb', dbVersion: '10.11' }), HASH_A).kind,
+    ).toBe('none');
+  });
+
+  it('refuses a version whose quoted text holds " #" rather than migrating to the text before it', () => {
+    const r = classifyDrift(baseline(), target({ dbVersion: "'10.11 # lts'" }), HASH_B);
+    expect(r.kind).toBe('unsupported');
+  });
+
   // 01c now writes `nodejs_version` into a config it generates. It writes the file BEFORE
   // reading its baseline, so the new line is inside the baseline hash and must not surface
   // here as a phantom restart of an environment nobody touched.
