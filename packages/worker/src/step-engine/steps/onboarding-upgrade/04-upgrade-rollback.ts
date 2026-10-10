@@ -1,4 +1,5 @@
 import {
+  decodeUtf8Strict,
   errno,
   isPathContainmentError,
   ParkedFileError,
@@ -599,7 +600,9 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           warnings.push(
             back === 'unread'
               ? `did not put back ${target.diskPath}: it could not be compared with what the upgrade removed (a link, not a regular file, or larger than ${RULES_FILE_READ_CAP} bytes)`
-              : `did not put back ${target.diskPath}: it changed after the upgrade removed it`,
+              : back === 'undecodable'
+                ? `did not put back ${target.diskPath}: it is not valid UTF-8, so writing it back would change more than the upgrade removed`
+                : `did not put back ${target.diskPath}: it changed after the upgrade removed it`,
           );
           continue;
         }
@@ -849,6 +852,7 @@ type RestoreResult =
   | { outcome: 'edited'; hash: string }
   | { outcome: 'absent' }
   | { outcome: 'unjudged' }
+  | { outcome: 'undecodable' }
   | { outcome: 'parked'; parkedAt: string; rewrote: boolean };
 
 /** Put back what an upgrade replaced only while the file, or its rules region, still holds what the
@@ -872,7 +876,11 @@ async function restoreIfUpgrades(
       repoPath,
       rel,
       (data) => {
-        const current = data.toString('utf8');
+        const current = decodeUtf8Strict(data);
+        if (current === null) {
+          judged = { outcome: 'undecodable' };
+          return null;
+        }
         const text = region ? extractRegion(current, CLI_RULES_START, CLI_RULES_END) : current;
         if (text === null) {
           judged = { outcome: 'absent' };
@@ -924,6 +932,8 @@ function restoreRefusal(
       return `kept ${what} as it is: it was saved while the rollback judged it, and ${result.rewrote ? 'what the rollback put back' : 'what stood there before'} is at ${result.parkedAt}`;
     case 'unjudged':
       return `did not put back ${what}: it could not be compared with what the upgrade wrote there`;
+    case 'undecodable':
+      return `did not put back ${what}: it is not valid UTF-8, so writing it back would change more than the upgrade did`;
   }
 }
 
@@ -936,7 +946,7 @@ async function restoreRemoved(
   rel: string,
   templateKind: string,
   content: string,
-): Promise<'restored' | 'changed' | 'unread'> {
+): Promise<'restored' | 'changed' | 'unread' | 'undecodable'> {
   const unreadable = (err: unknown) =>
     isPathContainmentError(err) &&
     ['link', 'not-directory', 'not-regular-file'].includes(err.reason);
@@ -951,11 +961,12 @@ async function restoreRemoved(
       if (unreadable(err)) return 'unread';
       if (errno(err) !== 'EEXIST') throw err;
       const read = await readUpgradeFile(repoPath, rel);
-      if (read.kind === 'unread') return 'unread';
+      if (read.kind === 'unread') return read.reason === 'undecodable' ? 'undecodable' : 'unread';
       return read.kind === 'text' && read.text === content ? 'restored' : 'changed';
     }
   }
   let judged = false;
+  let undecodable = false;
   let alreadyBack = false;
   let result;
   try {
@@ -964,7 +975,11 @@ async function restoreRemoved(
       rel,
       (data) => {
         judged = true;
-        const current = data.toString('utf8');
+        const current = decodeUtf8Strict(data);
+        if (current === null) {
+          undecodable = true;
+          return null;
+        }
         const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
         if (region !== null) {
           alreadyBack = region === content;
@@ -979,6 +994,7 @@ async function restoreRemoved(
     throw err;
   }
   if (result === 'rewritten' || alreadyBack) return 'restored';
+  if (undecodable) return 'undecodable';
   return result === 'kept' && !judged ? 'unread' : 'changed';
 }
 

@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { constants, type Dirent, type Stats } from 'node:fs';
 import {
@@ -89,6 +90,25 @@ export class ParkedFileError extends Error {
     super(`${rel} could not be put back (${code ?? 'error'}); it is at ${parkedAt}`, options);
     this.name = 'ParkedFileError';
   }
+}
+
+/** A file whose bytes are not UTF-8, which a text edit would write back with U+FFFD in their place. */
+export class NotUtf8Error extends Error {
+  readonly code = 'ENOTUTF8' as const;
+
+  constructor(readonly rel: string) {
+    super(`${rel} is not valid UTF-8, so writing it back would change more than the edit`);
+    this.name = 'NotUtf8Error';
+  }
+}
+
+export function isNotUtf8Error(err: unknown): err is NotUtf8Error {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'ENOTUTF8';
+}
+
+/** The text of `data`, or null when it is not UTF-8: a lenient decode turns the bad bytes into U+FFFD. */
+export function decodeUtf8Strict(data: Buffer): string | null {
+  return isUtf8(data) ? data.toString('utf8') : null;
 }
 
 /** `rel` as the primitives take it: relative, no `..`, no NUL; `.` and empty segments dropped, so
@@ -1662,6 +1682,8 @@ export interface UpdateFileOptions {
  *
  * `unchanged` is returned — and nothing written — when `update` returns `null` or the identical
  * string, so a re-run that has nothing to add does not touch the file's mtime.
+ *
+ * A write over a file that is not valid UTF-8 throws `NotUtf8Error` and writes nothing.
  */
 export async function updateFileNoFollow(
   anchor: string,
@@ -1706,6 +1728,7 @@ export async function updateFileNoFollow(
     const current = original.toString('utf8');
     const next = await update(current);
     if (next === null || next === current) return 'unchanged';
+    if (!isUtf8(original)) throw new NotUtf8Error(rel);
     await replaceHeldBytes(fh, Buffer.from(next, 'utf8'), original);
     return 'updated';
   } finally {

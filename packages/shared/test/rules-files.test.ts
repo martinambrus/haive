@@ -8,7 +8,9 @@ import {
   removableClaim,
   RULES_FILE_READ_CAP,
   rulesImportState,
+  rtkBlockFiles,
 } from '../src/rules-files.js';
+import { RTK_REF_MARKER_END, RTK_REF_MARKER_START } from '../src/templates/cli-rules.js';
 import { normalizeContent, sha256Hex } from '../src/templates/manifest.js';
 import { buildClaudeSettingsJson } from '../src/templates/rtk-settings.js';
 
@@ -66,6 +68,39 @@ describe('rulesImportState', () => {
     expect(await rulesImportState(repo, 'CLAUDE.md')).toBe('unreadable');
     expect(await rulesImportState(repo, 'GEMINI.md')).toBe('unreadable');
   });
+
+  it('reads a file that is not UTF-8 as present while it holds the line, else as unreadable', async () => {
+    const bad = Buffer.from([0xe9, 0x0a]);
+    await writeFile(
+      path.join(repo, 'CLAUDE.md'),
+      Buffer.concat([bad, Buffer.from('@AGENTS.md\n')]),
+    );
+    await writeFile(path.join(repo, 'GEMINI.md'), bad);
+    expect(await rulesImportState(repo, 'CLAUDE.md')).toBe('present');
+    expect(await rulesImportState(repo, 'GEMINI.md')).toBe('unreadable');
+  });
+});
+
+describe('rtkBlockFiles', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'rtk-block-files-'));
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('names a file holding the block, and none that is not UTF-8, which no strip can edit', async () => {
+    const block = `${RTK_REF_MARKER_START}\nrtk\n${RTK_REF_MARKER_END}\n`;
+    await writeFile(path.join(repo, 'AGENTS.md'), block, 'utf8');
+    await writeFile(
+      path.join(repo, 'CLAUDE.md'),
+      Buffer.concat([Buffer.from([0xe9, 0x0a]), Buffer.from(block)]),
+    );
+    expect(await rtkBlockFiles(repo)).toEqual(['AGENTS.md']);
+  });
 });
 
 describe('readUpgradeFile', () => {
@@ -104,6 +139,16 @@ describe('readUpgradeFile', () => {
     expect(await readUpgradeFile(repo, 'link.md')).toEqual(unread);
     expect(await readUpgradeFile(repo, 'dir.md')).toEqual(unread);
     expect(await readUpgradeFile(repo, 'sub/elsewhere.md')).toEqual(unread);
+  });
+
+  it('reads a file that is not UTF-8 as unread, and one holding U+FFFD itself as text', async () => {
+    await writeFile(path.join(repo, 'latin1.md'), Buffer.from([0x43, 0x61, 0x66, 0xe9]));
+    await writeFile(path.join(repo, 'bom.md'), '﻿x�', 'utf8');
+    expect(await readUpgradeFile(repo, 'latin1.md')).toEqual({
+      kind: 'unread',
+      reason: 'undecodable',
+    });
+    expect(await readUpgradeFile(repo, 'bom.md')).toEqual({ kind: 'text', text: '﻿x�' });
   });
 });
 

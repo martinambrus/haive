@@ -1,4 +1,5 @@
 import {
+  decodeUtf8Strict,
   errno,
   isPathContainmentError,
   removeFileIfNoFollow,
@@ -211,8 +212,9 @@ const unjudgedRefusal = (diskPath: string) =>
 
 /** Why the upgrade leaves a path it did not read as it is. */
 export function unreadWording(reason: UnreadReason): string {
-  return reason === 'oversized'
-    ? `it is larger than ${RULES_FILE_READ_CAP} bytes`
+  if (reason === 'oversized') return `it is larger than ${RULES_FILE_READ_CAP} bytes`;
+  return reason === 'undecodable'
+    ? 'it is not valid UTF-8, so writing it back would change more than the upgrade means to'
     : 'it is not a regular file the upgrade could read';
 }
 
@@ -231,13 +233,18 @@ export async function removeIfHaives(
   writtenHash: string | null | undefined,
 ): Promise<Removal> {
   let judged = false;
+  let undecodable = false;
   const haives = (text: string) => {
     judged = true;
     return sha256Hex(normalizeContent(text)) === writtenHash;
   };
   const kept = (): Removal => ({
     outcome: 'kept',
-    refusal: judged ? keptRefusal(entry.diskPath) : unjudgedRefusal(entry.diskPath),
+    refusal: undecodable
+      ? `kept ${entry.diskPath}: ${unreadWording('undecodable')}`
+      : judged
+        ? keptRefusal(entry.diskPath)
+        : unjudgedRefusal(entry.diskPath),
   });
   const cap = { maxBytes: RULES_FILE_READ_CAP };
   try {
@@ -280,7 +287,11 @@ export async function removeIfHaives(
       repoPath,
       rel,
       (data) => {
-        const current = data.toString('utf8');
+        const current = decodeUtf8Strict(data);
+        if (current === null) {
+          undecodable = true;
+          return null;
+        }
         const region = extractRegion(current, CLI_RULES_START, CLI_RULES_END);
         noRegion = region === null;
         if (region === null || !haives(region)) return null;

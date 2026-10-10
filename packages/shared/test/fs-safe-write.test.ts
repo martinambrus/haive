@@ -811,6 +811,22 @@ describe('fs-safe write primitives', () => {
       await expect(stat(path.join(root, 'src', 'absent.txt'))).rejects.toThrow();
     });
 
+    it('refuses to write over a file that is not UTF-8, and leaves every byte', async () => {
+      const bytes = Buffer.from([0x43, 0x61, 0x66, 0xe9]);
+      await writeFile(path.join(root, 'src', 'latin1.txt'), bytes);
+      await expect(
+        updateFileNoFollow(root, 'src/latin1.txt', (cur) => `${cur}!`),
+      ).rejects.toMatchObject({ code: 'ENOTUTF8', rel: 'src/latin1.txt' });
+      expect((await readFile(path.join(root, 'src', 'latin1.txt'))).equals(bytes)).toBe(true);
+    });
+
+    it('still answers unchanged for a file that is not UTF-8 when it has nothing to write', async () => {
+      const bytes = Buffer.from([0x43, 0x61, 0x66, 0xe9]);
+      await writeFile(path.join(root, 'src', 'latin1.txt'), bytes);
+      expect(await updateFileNoFollow(root, 'src/latin1.txt', () => null)).toBe('unchanged');
+      expect((await readFile(path.join(root, 'src', 'latin1.txt'))).equals(bytes)).toBe(true);
+    });
+
     it('refuses a link at the leaf and leaves its target alone', async () => {
       await symlink(path.join(outside, 'secret.txt'), path.join(root, 'link.txt'));
       await expect(

@@ -2,6 +2,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import {
+  isNotUtf8Error,
   isPathContainmentError,
   lstatNoFollow,
   readdirNoFollow,
@@ -746,6 +747,14 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       recordWrite(rel, contents);
     };
 
+    /** A rules file that is not UTF-8 is left byte for byte: reported skipped, never rewritten. */
+    const refuseNotUtf8 = (rel: string) => (err: unknown) => {
+      if (!isNotUtf8Error(err)) throw err;
+      ctx.logger.warn({ rel }, 'left a file that is not valid UTF-8 as it is');
+      skippedFiles.push(rel);
+      return 'refused' as const;
+    };
+
     /** Append text to file if not already present, or create if missing.
      *  With paired markers ("<!-- haive:X -->" ... "<!-- /haive:X -->") and the
      *  step's `overwrite` flag, the content between the markers is replaced in
@@ -782,7 +791,8 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
           );
         },
         { create: true, createParents: true },
-      );
+      ).catch(refuseNotUtf8(rel));
+      if (result === 'refused') return;
       // `wroteFiles.push`, never `recordWrite`, and that is deliberate. These are the root rules
       // files, which hold the user's own text around a Haive marker block: hashing `block` under
       // the FILE's path would record a digest that can never match the file, the same trap
@@ -911,7 +921,8 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       await appendOrCreate('AGENTS.md', rulesPlan.agentsRulesBlock, CLI_RULES_START, CLI_RULES_END);
     }
     for (const rf of rulesPlan.importFiles) {
-      const stub = await ensureRulesImportStub(ctx.repoPath, rf);
+      const stub = await ensureRulesImportStub(ctx.repoPath, rf).catch(refuseNotUtf8(rf));
+      if (stub === 'refused') continue;
       if (stub === 'created') wroteFiles.push(rf);
       else if (stub === 'appended') appendedFiles.push(rf);
       else skippedFiles.push(rf);
