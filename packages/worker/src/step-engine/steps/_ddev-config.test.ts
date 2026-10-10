@@ -305,6 +305,13 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig(cfg)).toMatchObject({ dbType: null, dbVersion: null });
   });
 
+  it('reads through a merge chain thousands of maps long', () => {
+    let cfg = 'm0: &m0 {type: postgres}\n';
+    for (let i = 1; i < 12000; i++) cfg += `m${i}: &m${i} {<<: *m${i - 1}}\n`;
+    cfg += 'database:\n  <<: *m11999\n';
+    expect(parseDdevConfig(cfg).dbType).toBe('postgres');
+  });
+
   it('reads a merged top-level field', () => {
     expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
   });
