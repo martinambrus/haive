@@ -3,6 +3,7 @@ import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
   dagIssueResultSchema,
+  logger,
   reviewerOutputSchema,
   advisorOutputSchema,
   replannerOutputSchema,
@@ -22,6 +23,13 @@ import {
   safeKey,
 } from './steps/_untrusted-repo.js';
 import { ROOT_CAUSE_LINES, repeatedFlagLines } from './steps/workflow/_fix-loop.js';
+import { isOutOfScope, SCOPE_FENCE_INSIGHTS } from './steps/_scope-fence.js';
+import { INSIGHTS_INSTRUCTION } from './steps/workflow/08e-insights-triage.js';
+import {
+  changedFilesBlock,
+  collectChangeSet,
+  type ImplementationFileSet,
+} from './steps/workflow/_impl-changes.js';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
@@ -952,9 +960,37 @@ function specLines(issue: DagIssueRow, spec: string): string[] {
   ];
 }
 
-export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
+/** What the issue's worktree holds against the integration branch it forked from, as the other
+ *  reviewers' lists are measured; null when that base cannot be named, which leaves the coder's list. */
+async function issueChangeSet(
+  ra: ReviewArgs,
+  issue: DagIssueRow,
+): Promise<ImplementationFileSet | null> {
+  if (!issue.worktreePath) return null;
+  try {
+    const integration = await loadIntegrationWorktree(ra.db, ra.taskId);
+    return await collectChangeSet(
+      issue.worktreePath,
+      integration.branch,
+      new Set((issue.filesModified ?? []) as string[]),
+    );
+  } catch (err) {
+    logger.warn({ err, issueKey: issue.issueKey }, 'could not measure the issue change set');
+    return null;
+  }
+}
+
+export function reviewerPrompt(
+  issue: DagIssueRow,
+  spec: string,
+  changes: ImplementationFileSet | null = null,
+): string {
   const criteria = (issue.acceptanceCriteria ?? []) as string[];
   const files = (issue.filesModified ?? []) as string[];
+  const reported =
+    files.length > 0
+      ? `Files the coder reported changing — this list is the change set (read each in full):\n- ${files.join('\n- ')}`
+      : '';
   return [
     `You are reviewing the implementation of ${issue.issueKey}: ${issue.title}`,
     'Your working directory is the issue worktree containing the implementation.',
@@ -966,9 +1002,16 @@ export function reviewerPrompt(issue: DagIssueRow, spec: string): string {
     // The coder's own files_modified IS the change set here: git is unavailable in the
     // sandbox, so without this list a reviewer has no way to find what changed except by
     // reaching for git — and then treating the zero-byte `.git` boundary as corruption.
-    files.length > 0
-      ? `Files the coder reported changing — this list is the change set (read each in full):\n- ${files.join('\n- ')}`
-      : '',
+    changes
+      ? changedFilesBlock(
+          changes,
+          'Files this issue changed — this list is the change set (read each in full)',
+          reported,
+        )
+      : reported,
+    SCOPE_FENCE_INSIGHTS.join('\n'),
+    'In this verdict the list is `issues`: put a problem in code this issue did not write under `## INSIGHTS`. One you list anyway needs `"in_scope": "no"`, and is not sent to the fix agent.',
+    INSIGHTS_INSTRUCTION,
     'Review it as a senior engineer would before merge; verify each acceptance criterion against the code.',
     criteria.length > 0 ? `Acceptance criteria:\n- ${criteria.join('\n- ')}` : '',
     ...specLines(issue, spec),
@@ -1052,7 +1095,10 @@ export function parseReviewerOutput(
     candidate = body ? safeJsonParse(body) : null;
   }
   const parsed = reviewerOutputSchema.safeParse(candidate);
-  return parsed.success ? parsed.data : null;
+  if (!parsed.success) return null;
+  const raw = (candidate as { issues?: unknown[] }).issues ?? [];
+  const issues = parsed.data.issues.filter((_, i) => !isOutOfScope((raw[i] ?? {}) as object));
+  return { ...parsed.data, issues };
 }
 
 /** A fix_required verdict whose own structured signals say the work is done:
@@ -1344,7 +1390,7 @@ export async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec),
+          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
           undefined,
           true,
@@ -1371,7 +1417,7 @@ export async function ingestReviewRun(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec),
+          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
         );
         if (!ok)
@@ -1466,7 +1512,7 @@ export async function ingestReviewRun(
     issue,
     'reviewer',
     issue.innerIteration,
-    reviewerPrompt(issue, spec),
+    reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
     ['tool_use'],
   );
   if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
@@ -1495,9 +1541,14 @@ export async function resolveReviewPhase(
       .limit(1);
     const latest = runs[0];
     if (!latest) {
-      const ok = await spawnReviewAgent(ra, issue, 'reviewer', 0, reviewerPrompt(issue, spec), [
-        'tool_use',
-      ]);
+      const ok = await spawnReviewAgent(
+        ra,
+        issue,
+        'reviewer',
+        0,
+        reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
+        ['tool_use'],
+      );
       if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
       continue;
     }
@@ -1519,7 +1570,7 @@ export async function resolveReviewPhase(
           issue,
           'reviewer',
           issue.innerIteration,
-          reviewerPrompt(issue, spec),
+          reviewerPrompt(issue, spec, await issueChangeSet(ra, issue)),
           ['tool_use'],
         );
         if (!ok)

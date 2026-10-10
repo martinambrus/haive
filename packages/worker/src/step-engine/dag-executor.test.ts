@@ -3157,3 +3157,124 @@ describe('the fix coder prompt asks for the root cause and says when a file was 
     expect(await secondReview([], ['a.ts'])).not.toContain(REPEAT);
   });
 });
+
+describe('the DAG issue reviewer is scoped to the lines its issue wrote', () => {
+  const exec = promisify(execFile);
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  const git = async (dir: string, args: string[]) => {
+    await exec('git', args, { cwd: dir, env: GIT_ENV });
+  };
+  const legacy = Array.from({ length: 20 }, (_, n) => `export const legacy${n + 1} = ${n + 1};`);
+
+  /** `main` holds a 20-line file; `main--ISSUE-1` rewrites its lines 10-11 and leaves them uncommitted. */
+  async function issueRepo(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'dag-reviewer-scope-'));
+    await git(dir, ['init', '-b', 'main']);
+    await git(dir, ['config', 'gc.auto', '0']);
+    await writeFile(path.join(dir, 'lib.ts'), `${legacy.join('\n')}\n`, 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'initial']);
+    await git(dir, ['checkout', '-b', 'main--ISSUE-1']);
+    const edited = [...legacy];
+    edited[9] = 'export const written10 = 10;';
+    edited[10] = 'export const written11 = 11;';
+    await writeFile(path.join(dir, 'lib.ts'), `${edited.join('\n')}\n`, 'utf8');
+    return dir;
+  }
+
+  async function ingest(worktree: string, run: { role: string }, output: InvLike) {
+    const { db, inserts } = makeSpawnDb();
+    const stepOutput = { output: { worktreePath: worktree, branchName: 'main' } };
+    (db as unknown as { select: unknown }).select = () => ({
+      from: () => ({
+        where: () => ({
+          for: async () => [{ id: 'step1' }],
+          orderBy: () => Object.assign(Promise.resolve([]), { limit: async () => [stepOutput] }),
+        }),
+      }),
+    });
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const ra = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    } as never;
+    const row = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Rewrite two lines',
+      innerIteration: 1,
+      stuckCount: 0,
+      reviewInfraRetries: 0,
+      branchName: 'main--ISSUE-1',
+      worktreePath: worktree,
+      sandboxWorktreePath: worktree,
+      filesModified: ['lib.ts'],
+      similarSites: [],
+      specSections: [],
+      errorMessage: null,
+      reviewerVerdict: null,
+    } as never;
+    await ingestReviewRun(ra, row, { id: 'run-1', ...run } as never, output);
+    return inserts.find((i) => i.table === schema.cliInvocations)?.values.prompt as string;
+  }
+
+  it('names the lines the issue wrote and carries the report-only scope fence', async () => {
+    const dir = await issueRepo();
+    try {
+      const prompt = await ingest(
+        dir,
+        { role: 'coder' },
+        inv({ parsedOutput: { issue_id: 'ISSUE-1', outcome: 'completed' } }),
+      );
+      expect(prompt).toContain('- lib.ts — lines 10-11');
+      expect(prompt).toContain('SCOPE FENCE. IN SCOPE = the lines this change wrote');
+      expect(prompt).toContain('## INSIGHTS');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not send a finding the reviewer marked outside those lines to the fix coder', async () => {
+    const dir = await issueRepo();
+    try {
+      const prompt = await ingest(
+        dir,
+        { role: 'reviewer' },
+        inv({
+          parsedOutput: {
+            verdict: 'fix_required',
+            criteria_results: [{ criterion: 'c', passed: false }],
+            issues: [
+              { severity: 'high', file: 'lib.ts', description: 'written line is wrong' },
+              {
+                severity: 'high',
+                file: 'lib.ts',
+                description: 'legacy line 3 should be rewritten',
+                in_scope: 'no (pre-existing)',
+              },
+            ],
+          },
+        }),
+      );
+      expect(prompt).toContain('written line is wrong');
+      expect(prompt).not.toContain('legacy line 3 should be rewritten');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
