@@ -2415,6 +2415,22 @@ describe('ingestReviewRun: a review that failed only on out-of-scope findings', 
     ]);
   });
 
+  it('keeps findings with no description apart by their suggestion across rounds', async () => {
+    const bare = { severity: 'low', file: 'lib.ts', description: '', in_scope: 'no' };
+    const split = { ...bare, suggestion: 'Split A' };
+    const other = { ...bare, suggestion: 'Split B' };
+    const prior = {
+      verdict: 'fix_required',
+      criteria_results: pass,
+      issues: [],
+      withheld: [split],
+    };
+    const latest = { verdict: 'block', criteria_results: pass, issues: [written, other, split] };
+    const r = await run(latest, null, prior);
+    const kept = r.resolved?.reviewerVerdict?.withheld as { suggestion?: string }[] | undefined;
+    expect(kept?.map((i) => i.suggestion)).toEqual(['Split A', 'Split B']);
+  });
+
   it('keeps an earlier round withheld finding when the last verdict withheld nothing', async () => {
     const r = await run({ verdict: 'approve', criteria_results: pass, issues: [] }, null, {
       verdict: 'fix_required',

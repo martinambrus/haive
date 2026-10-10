@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { schema } from '@haive/database';
 import {
+  findingIdentity,
   insightsTriageStep,
   loadInsightOutputs,
   parseInsights,
@@ -216,6 +217,21 @@ describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
       expect(neither).toHaveLength(1);
       expect(neither[0]!.title).toBe('out-of-scope finding at lib.ts');
     }
+  });
+
+  it('names two findings with no description on one file by their fallback title', async () => {
+    const bare = { severity: 'low', file: 'lib.ts', in_scope: 'no' };
+    for (const description of ['', '\u0007']) {
+      const a = { ...bare, description, suggestion: 'Split  A' };
+      const b = { ...bare, description, suggestion: 'Split B' };
+      expect(findingIdentity(a)).not.toBe(findingIdentity(b));
+      expect(findingIdentity(a)).toBe(findingIdentity({ ...a, suggestion: 'split a' }));
+      const ins = await titles([], [{ ...verdict, withheld: [a, b] }]);
+      expect(ins.map((i) => i.title)).toEqual(['Split A', 'Split B']);
+    }
+    expect(findingIdentity({ file: 'lib.ts:9', description: 'Legacy  X' })).toBe(
+      'lib.ts::legacy x',
+    );
   });
 
   it('never takes a finding with no description as covered by an insight that has none', async () => {

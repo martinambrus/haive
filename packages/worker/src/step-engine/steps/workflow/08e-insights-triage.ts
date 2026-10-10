@@ -107,9 +107,17 @@ export function parseInsights(outputs: { stepId: string; raw: string }[], limit 
 
 const normalizeFinding = (text: string): string => collapseToLine(text).toLowerCase();
 
-/** The identity of a finding: its file (without a trailing line number) and description, normalized. */
-export const findingIdentity = (f: { file?: string | null; description: string }): string =>
-  `${normalizeFinding((f.file ?? '').replace(/:\d+(-\d+)?$/, ''))}::${normalizeFinding(f.description)}`;
+type WithheldFinding = { file?: string | null; description: string; suggestion?: string | null };
+
+/** What names a finding: its description, else its suggestion, else its file. */
+const findingText = (f: WithheldFinding): string =>
+  collapseToLine(f.description) ||
+  collapseToLine(f.suggestion ?? '') ||
+  collapseToLine(f.file ? `out-of-scope finding at ${f.file}` : 'out-of-scope finding');
+
+/** The identity of a finding: its file (without a trailing line number) and its normalized name. */
+export const findingIdentity = (f: WithheldFinding): string =>
+  `${normalizeFinding((f.file ?? '').replace(/:\d+(-\d+)?$/, ''))}::${normalizeFinding(findingText(f))}`;
 
 /** The raw output of every step invocation of the task that carries an `## INSIGHTS` block, in the
  *  order they ran, then one block per finding a DAG reviewer withheld as outside its issue's lines
@@ -152,10 +160,7 @@ export async function loadInsightOutputs(
         );
       if (!covered) {
         const field = (text: string) => collapseToLine(text).replaceAll('|', '/');
-        const title =
-          field(f.description) ||
-          field(f.suggestion ?? '') ||
-          field(f.file ? `out-of-scope finding at ${f.file}` : 'out-of-scope finding');
+        const title = field(findingText(f));
         lines.push(
           `- INSIGHT: ${title} | ${field(f.file ?? '')} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
         );
