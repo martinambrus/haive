@@ -212,3 +212,54 @@ describe('houseRuleStampTitle', () => {
     }
   });
 });
+
+describe('the similarity record of a stamp', () => {
+  const pending: NonNullable<HouseRulesStamp['similarity']> = {
+    status: 'pending',
+    scores: [{ id: ID_B, hash: HASH, title: 'Templates stay thin', score: null }],
+  };
+
+  it('keeps a record in each of its three states, as the column stores it', () => {
+    const ok: NonNullable<HouseRulesStamp['similarity']> = {
+      status: 'ok',
+      model: 'qwen3-embedding:4b',
+      queryHash: 'a'.repeat(64),
+      ms: 412,
+      scores: [{ id: ID_B, hash: HASH, title: 'Templates stay thin', score: 0.4321 }],
+    };
+    const failed: NonNullable<HouseRulesStamp['similarity']> = {
+      status: 'failed',
+      errorClass: 'timeout',
+    };
+    for (const similarity of [pending, ok, failed]) {
+      const column: StoredStamp = { ...FULL, similarity };
+      expect(parseHouseRulesStamp(JSON.parse(JSON.stringify(column)))).toStrictEqual({
+        ...FULL,
+        similarity,
+      });
+    }
+  });
+
+  it('leaves a stamp without one exactly as it was, and an old stamp parses with no key added', () => {
+    expect(parseHouseRulesStamp(FULL)).toStrictEqual(FULL);
+    expect('similarity' in parseHouseRulesStamp(FULL)!).toBe(false);
+  });
+
+  it('drops a malformed record alone and keeps the rest of the stamp', () => {
+    for (const bad of [
+      { status: 'done' },
+      { scores: [] },
+      'pending',
+      { status: 'ok', ms: -1 },
+      null,
+    ]) {
+      const parsed = parseHouseRulesStamp({ ...FULL, similarity: bad });
+      expect(parsed).toEqual(FULL);
+    }
+  });
+
+  it('drops a key a later release adds to the record, not the record', () => {
+    const parsed = parseHouseRulesStamp({ ...FULL, similarity: { ...pending, floor: 0.4 } });
+    expect(parsed?.similarity).toStrictEqual(pending);
+  });
+});

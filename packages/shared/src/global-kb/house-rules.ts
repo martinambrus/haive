@@ -250,6 +250,24 @@ export function validateHouseRuleGlobs(globs: readonly string[]): string | null 
 export const houseRuleBytes = (entry: RenderedEntry, opts: HouseRuleRenderOptions): number =>
   Buffer.byteLength(renderHouseRuleEntry(entry, opts), 'utf8');
 
+const houseRulesSimilaritySchema = z.object({
+  status: z.enum(['pending', 'ok', 'failed']),
+  errorClass: z.enum(['timeout', 'refused', 'auth', 'other']).optional(),
+  model: z.string().optional(),
+  queryHash: z.string().optional(),
+  ms: z.number().nonnegative().optional(),
+  scores: z
+    .array(
+      z.object({
+        id: z.string(),
+        hash: z.string(),
+        title: z.string(),
+        score: z.number().nullable(),
+      }),
+    )
+    .optional(),
+});
+
 const houseRulesStampSchema = z.object({
   mode: z.enum(HOUSE_RULE_MODES),
   entries: z.array(
@@ -280,10 +298,15 @@ const houseRulesStampSchema = z.object({
   reason: z.enum(['switched_off', 'unavailable', 'too_large']).optional(),
   errorClass: z.enum(['timeout', 'refused', 'auth', 'other']).optional(),
   filesRulesUnmatched: z.number().int().nonnegative().optional(),
+  // A malformed record is dropped alone, so the rest of the stamp still parses.
+  similarity: houseRulesSimilaritySchema.optional().catch(undefined),
 });
 
 /** What a CLI run was given of the house rules, stored in `cli_invocations.house_rules`. */
 export type HouseRulesStamp = z.infer<typeof houseRulesStampSchema>;
+
+/** How close the task is to each unmatched `files` rule of a write dispatch; recorded, never shown. */
+export type HouseRulesSimilarity = NonNullable<HouseRulesStamp['similarity']>;
 
 /** A stored value as a stamp, or null for NULL and for anything that is not one. */
 export function parseHouseRulesStamp(value: unknown): HouseRulesStamp | null {

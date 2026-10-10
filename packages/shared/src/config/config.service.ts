@@ -356,6 +356,8 @@ export const CONFIG_KEYS = {
   GLOBAL_KB_DIGEST_ENABLED: 'config:globalKb:digestEnabled',
   // Switch for enforced house rules. Off leaves every approval in place and enforces none.
   GLOBAL_KB_HOUSE_RULES_ENABLED: 'config:globalKb:houseRulesEnabled',
+  // How a writer's unmatched `files` house rules are scored against the task: one of HOUSE_RULES_SIMILARITY_MODES.
+  GLOBAL_KB_HOUSE_RULES_SIMILARITY: 'config:globalKb:houseRulesSimilarity',
 
   // RAG embedding budgets. Two timeouts, not one, because the same ollamaEmbed
   // call serves bulk ingestion and the interactive rag_search query embed: a
@@ -619,6 +621,18 @@ export function parseAllowanceWatchMode(raw: string | null | undefined): Allowan
     : 'notify';
 }
 
+/** Allowed levels for CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_SIMILARITY: `record` scores the rules into
+ *  the invocation's stamp and shows the agent nothing. */
+export const HOUSE_RULES_SIMILARITY_MODES = ['off', 'record'] as const;
+export type HouseRulesSimilarityMode = (typeof HOUSE_RULES_SIMILARITY_MODES)[number];
+
+/** Anything but `off`, an absent key and a value a later release adds included, reads as `record`. */
+export function parseHouseRulesSimilarityMode(
+  raw: string | null | undefined,
+): HouseRulesSimilarityMode {
+  return raw === 'off' ? 'off' : 'record';
+}
+
 /** Who may create an account on this instance.
  *
  *  `closed` is the intended default for a self-hosted product, but the FIRST registration is exempt
@@ -695,6 +709,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
   [CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED]: 'true',
   [CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_ENABLED]: 'true',
+  [CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_SIMILARITY]: 'record',
   // 4 min for an ingest batch: past the measured 69s CPU worst case with room for
   // a slower host, and low enough that hitting it still means something is wrong.
   // 20s for a query embed is 45x the measured 0.44s CPU cost of one.

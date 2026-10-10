@@ -2,7 +2,12 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CONFIG_KEYS, ConfigService, configService } from '../src/config/config.service.js';
+import {
+  CONFIG_KEYS,
+  ConfigService,
+  configService,
+  parseHouseRulesSimilarityMode,
+} from '../src/config/config.service.js';
 import { secretsService } from '../src/config/secrets.service.js';
 import {
   resolveGlobalKbEnabled,
@@ -113,5 +118,36 @@ describe('the global KB switch', () => {
     }
 
     expect(readers).toEqual(['shared/src/global-kb/connection.ts']);
+  });
+});
+
+describe('the house-rules similarity setting', () => {
+  it('is seeded as record under its own key', async () => {
+    expect(CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_SIMILARITY).toBe(
+      'config:globalKb:houseRulesSimilarity',
+    );
+    const seeded = new Map<string, string>();
+    const svc = new ConfigService() as unknown as { redis: unknown; seedDefaults(): Promise<void> };
+    svc.redis = {
+      pipeline: () => ({
+        setnx: (key: string, value: string) => void seeded.set(key, value),
+        exec: async () => [],
+      }),
+    };
+    await svc.seedDefaults();
+
+    expect(seeded.get(CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_SIMILARITY)).toBe('record');
+  });
+
+  it.each([
+    ['off', 'off'],
+    ['record', 'record'],
+    ['on', 'record'],
+    ['', 'record'],
+    ['nonsense', 'record'],
+    [null, 'record'],
+    [undefined, 'record'],
+  ])('reads %j as %s', (raw, expected) => {
+    expect(parseHouseRulesSimilarityMode(raw)).toBe(expected);
   });
 });
