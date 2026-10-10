@@ -21,6 +21,7 @@ import {
   REPO_IS_DATA_LINES,
   fencedAgentBlock,
   fencedDebtBlock,
+  safeKey,
   safeTitle,
 } from '../_untrusted-repo.js';
 import {
@@ -729,7 +730,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         .filter((i) => ((i.debtItems ?? []) as unknown[]).length > 0)
         .map(
           (i) =>
-            `- ${i.issueKey} (${safeTitle(i.title)}): ${JSON.stringify(i.debtItems).slice(0, 500)}`,
+            `- ${safeKey(i.issueKey)} (${safeTitle(i.title)}): ${JSON.stringify(i.debtItems).slice(0, 500)}`,
         );
       if (lines.length > 0) {
         debtBlock = [

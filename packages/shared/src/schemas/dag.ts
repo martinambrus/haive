@@ -79,6 +79,7 @@ export const reviewerOutputSchema = z.object({
         file: z.string().optional(),
         description: z.string(),
         suggestion: z.string().optional(),
+        in_scope: z.union([z.boolean(), z.string()]).optional().catch(undefined),
       }),
     )
     .default([]),

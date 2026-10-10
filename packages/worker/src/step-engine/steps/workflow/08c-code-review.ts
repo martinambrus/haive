@@ -35,6 +35,7 @@ import {
   REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES,
   REPO_IS_DATA_LINES,
   fencedDebtBlock,
+  safeKey,
   safeTitle,
 } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
@@ -1173,7 +1174,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         .filter((i) => ((i.debtItems ?? []) as unknown[]).length > 0)
         .map(
           (i) =>
-            `- ${i.issueKey} (${safeTitle(i.title)}): ${JSON.stringify(i.debtItems).slice(0, 500)}`,
+            `- ${safeKey(i.issueKey)} (${safeTitle(i.title)}): ${JSON.stringify(i.debtItems).slice(0, 500)}`,
         );
       if (lines.length > 0) {
         // Rendered raw here and fenced by `fencedDebtBlock` where the prompt is assembled —

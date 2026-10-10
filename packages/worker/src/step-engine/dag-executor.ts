@@ -277,7 +277,7 @@ export async function buildUpstreamDebt(
     const debt = (issue.debtItems ?? []) as unknown[];
     if (debt.length === 0) continue;
     lines.push(
-      `- ${issue.issueKey} (${safeTitle(issue.title)}) completed with debt: ${JSON.stringify(debt)}`,
+      `- ${safeKey(issue.issueKey)} (${safeTitle(issue.title)}) completed with debt: ${JSON.stringify(debt)}`,
     );
   }
   if (lines.length === 0) return '';
@@ -998,16 +998,14 @@ export function reviewerPrompt(
       ? `Files the coder reported changing — this list is the change set (read each in full):\n- ${files.join('\n- ')}`
       : '';
   return [
-    `You are reviewing the implementation of ${issue.issueKey}: ${safeTitle(issue.title)}`,
+    `You are reviewing the implementation of ${safeKey(issue.issueKey)}: ${safeTitle(issue.title)}`,
     'Your working directory is the issue worktree containing the implementation.',
     // Joined into ONE element on purpose: this array is `.filter(Boolean)`-ed, which would
     // strip the deliberate blank lines inside the block and collapse three paragraphs into a
     // wall of text. A single joined string keeps its own newlines and is non-empty, so the
     // filter passes it through whole — the same reason INVARIANT_CITATION survives below.
     REPO_IS_DATA_LINES.join('\n'),
-    // The coder's own files_modified IS the change set here: git is unavailable in the
-    // sandbox, so without this list a reviewer has no way to find what changed except by
-    // reaching for git — and then treating the zero-byte `.git` boundary as corruption.
+    // The files and lines this issue changed, measured against its fork point; the coder's list when that fails.
     changes
       ? changedFilesBlock(
           changes,
@@ -1102,8 +1100,7 @@ export function parseReviewerOutput(
   }
   const parsed = reviewerOutputSchema.safeParse(candidate);
   if (!parsed.success) return null;
-  const raw = (candidate as { issues?: unknown[] }).issues ?? [];
-  const issues = parsed.data.issues.filter((_, i) => !isOutOfScope((raw[i] ?? {}) as object));
+  const issues = parsed.data.issues.filter((i) => !isOutOfScope(i));
   return { ...parsed.data, issues };
 }
 
