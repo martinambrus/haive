@@ -265,7 +265,7 @@ interface RawRow {
   chunk_index: number | string;
   source_type: string;
   content: string;
-  repository_id?: string | null;
+  id: string | number;
   dense_sim: number | string | null;
   ts_norm: number | string | null;
   hybrid: number | string | null;
@@ -521,7 +521,7 @@ export async function ragHybridSearch(
         ${useIdent ? 'UNION\n        SELECT id FROM ident' : ''}
       )
       SELECT
-        e.source_path, e.section_id, e.chunk_index, e.source_type, e.content, e.repository_id,
+        e.source_path, e.section_id, e.chunk_index, e.source_type, e.content, e.id,
         COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q))) AS dense_sim,
         (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1)) AS ts_norm,
         (
@@ -584,7 +584,7 @@ export async function ragHybridSearch(
       `
       WITH q AS (SELECT plainto_tsquery('english', $1) AS qq)
       SELECT
-        source_path, section_id, chunk_index, source_type, content, repository_id,
+        source_path, section_id, chunk_index, source_type, content, id,
         0 AS dense_sim,
         (ts_rank_cd(content_tsv, (SELECT qq FROM q))
           / (ts_rank_cd(content_tsv, (SELECT qq FROM q)) + 1)) AS ts_norm,
@@ -628,14 +628,9 @@ export async function ragHybridSearch(
     filter,
     repositoryId,
   });
-  const ranked = new Set(rows.map(chunkIdentity));
-  const extra = candidates.filter((r) => !ranked.has(chunkIdentity(r)));
+  const ranked = new Set(rows.map((r) => String(r.id)));
+  const extra = candidates.filter((r) => !ranked.has(String(r.id)));
   return applyKnowledgeReserve([...hits, ...extra.map(toHit)], cfg);
-}
-
-/** A chunk's storage identity; the same path in two repositories is two chunks. */
-function chunkIdentity(r: RawRow): string {
-  return [r.repository_id ?? '', r.source_path, r.section_id, Number(r.chunk_index)].join('\u0000');
 }
 
 function toHit(r: RawRow): RagSearchHit {
@@ -697,7 +692,7 @@ async function fetchKnowledgeCandidates(
   return (await conn.pg.unsafe(
     `
       WITH q AS (SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh)
-      SELECT source_path, section_id, chunk_index, source_type, content, repository_id,
+      SELECT source_path, section_id, chunk_index, source_type, content, id,
              1 - (vector <=> (SELECT qv FROM q)) AS dense_sim,
              0 AS ts_norm, 0 AS hybrid, 0 AS rrf
       FROM ${RAG_TABLE}

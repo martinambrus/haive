@@ -293,7 +293,7 @@ function fakeStore(opts: { transaction: boolean; statisticsFail: boolean }): {
 }
 
 describe('ragHybridSearch knowledge candidates', () => {
-  const row = (type: string, path: string, rrf: number, repo: string, content = '') => ({
+  const row = (type: string, path: string, rrf: number, id: string, content = '') => ({
     source_path: path,
     section_id: 's',
     chunk_index: 0,
@@ -303,11 +303,16 @@ describe('ragHybridSearch knowledge candidates', () => {
     ts_norm: 0,
     hybrid: 0,
     rrf,
-    repository_id: repo,
+    id,
   });
-  const search = (fused: unknown[], candidates: unknown[]) => {
+  const search = (fused: unknown[], candidates: unknown[], hasRepositoryColumn = true) => {
     const pg = {
       unsafe: async (statement: string) => {
+        if (!hasRepositoryColumn && statement.includes('repository_id')) {
+          throw Object.assign(new Error('column "repository_id" does not exist'), {
+            code: '42703',
+          });
+        }
         if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
         if (statement.includes('dense_c')) return fused;
         if (statement.includes('ANY($2::text[])')) return candidates;
@@ -320,8 +325,8 @@ describe('ragHybridSearch knowledge candidates', () => {
 
   it('returns a knowledge chunk once when the candidate query reaches it too', async () => {
     const hits = await search(
-      [row('code', 'src/a.ts', 0.03, 'r1'), row('kb', 'docs/ARCHITECTURE.md', 0.0158, 'r1')],
-      [row('kb', 'docs/ARCHITECTURE.md', 0, 'r1')],
+      [row('code', 'src/a.ts', 0.03, '1'), row('kb', 'docs/ARCHITECTURE.md', 0.0158, '2')],
+      [row('kb', 'docs/ARCHITECTURE.md', 0, '2')],
     );
 
     expect(hits.map((x) => x.sourcePath)).toEqual(['src/a.ts', 'docs/ARCHITECTURE.md']);
@@ -331,9 +336,9 @@ describe('ragHybridSearch knowledge candidates', () => {
   it('keeps two repositories fused rows that share a path, section and index', async () => {
     const hits = await search(
       [
-        row('code', 'src/a.ts', 0.03, 'r1'),
-        row('kb', 'README.md', 0.0158, 'r1', 'one'),
-        row('kb', 'README.md', 0.0157, 'r2', 'two'),
+        row('code', 'src/a.ts', 0.03, '1'),
+        row('kb', 'README.md', 0.0158, '2', 'one'),
+        row('kb', 'README.md', 0.0157, '3', 'two'),
       ],
       [],
     );
@@ -341,13 +346,23 @@ describe('ragHybridSearch knowledge candidates', () => {
     expect(hits.map((x) => x.content)).toEqual(['', 'one', 'two']);
   });
 
-  it('keeps a candidate that is another repository chunk at the same path', async () => {
+  it('keeps a candidate that is another row at the same path', async () => {
     const hits = await search(
-      [row('code', 'src/a.ts', 0.03, 'r1'), row('kb', 'README.md', 0.0158, 'r1', 'one')],
-      [row('kb', 'README.md', 0, 'r2', 'two')],
+      [row('code', 'src/a.ts', 0.03, '1'), row('kb', 'README.md', 0.0158, '2', 'one')],
+      [row('kb', 'README.md', 0, '3', 'two')],
     );
 
     expect(hits.map((x) => x.content)).toEqual(['', 'one', 'two']);
+  });
+
+  it('searches a store with no repository_id column, which is the global KB', async () => {
+    const hits = await search(
+      [row('code', 'src/a.ts', 0.03, '1'), row('kb', 'docs/ARCHITECTURE.md', 0.0158, '2')],
+      [row('kb', 'docs/ARCHITECTURE.md', 0, '2')],
+      false,
+    );
+
+    expect(hits.map((x) => x.sourcePath)).toEqual(['src/a.ts', 'docs/ARCHITECTURE.md']);
   });
 });
 
