@@ -133,13 +133,23 @@ describe('settleCancelledMerges', () => {
     expect(await mergeOpen(dir)).toBe(true);
   });
 
-  it("leaves a merge in the task's own worktree to the worktree's removal", async () => {
+  it("settles a merge in the task's own worktree when the cancel kept that worktree", async () => {
     const dir = await openConflict();
     const state = await stateFor(dir, true);
     const h = makeDb([{ id: 'row1', state }], dir);
     await settleCancelledMerges(h.db, 'task-1');
-    expect(await mergeOpen(dir)).toBe(true);
+    expect(await mergeOpen(dir)).toBe(false);
+    expect(h.patches).toEqual([{ mergeResolveState: { ...state, fixBaseline: null } }]);
+  });
+
+  it('does nothing for a merge whose worktree the cancel removed', async () => {
+    const dir = await openConflict();
+    const state = await stateFor(dir, true);
+    await rm(dir, { recursive: true, force: true });
+    const h = makeDb([{ id: 'row1', state }], dir);
+    await settleCancelledMerges(h.db, 'task-1');
     expect(h.events).toEqual([]);
+    expect(h.patches).toEqual([]);
   });
 
   it('leaves alone a merge that is no longer the one the fixer was sent into', async () => {

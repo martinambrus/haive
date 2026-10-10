@@ -3286,28 +3286,22 @@ export async function backfillMissingRunSeq(db: Database): Promise<void> {
 
 /** A cancel runs no step code, so a merge fixer it stopped leaves its merge open and its changes
  *  outside the conflicted files in the tree. Once the sandboxes are gone, each merge the task's
- *  rows record is relocated and aborted, unless it ran in the task's own worktree (removed whole)
- *  or in a person's checkout. Never throws: the cancel must finish. */
+ *  rows record is relocated and aborted wherever it still stands (a worktree the cleanup removed
+ *  no longer does), unless it is in a person's checkout. Never throws: the cancel must finish. */
 export async function settleCancelledMerges(db: Database, taskId: string): Promise<void> {
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { worktreePath: true },
-  });
   const rows = await db
     .select({ id: schema.taskSteps.id, state: schema.taskSteps.mergeResolveState })
     .from(schema.taskSteps)
     .where(and(eq(schema.taskSteps.taskId, taskId), isNotNull(schema.taskSteps.mergeResolveState)));
-  const own = task?.worktreePath ?? null;
   for (const row of rows) {
     const state = row.state as MergeResolveState | null;
     const baseline = state?.fixBaseline;
     if (!state || !baseline || !('tree' in baseline)) continue;
     const dir = state.mergeDir;
-    if (isHostCheckout(dir) || (own !== null && (dir === own || dir.startsWith(`${own}/`)))) {
-      continue;
-    }
+    if (isHostCheckout(dir)) continue;
     try {
-      if ((await revParse(dir, 'MERGE_HEAD')) !== baseline.mergeHead) continue;
+      const head = await revParse(dir, 'MERGE_HEAD').catch(() => null);
+      if (head !== baseline.mergeHead) continue;
       await relocateAndRecordLeftovers(db, {
         taskId,
         stepRowId: row.id,
