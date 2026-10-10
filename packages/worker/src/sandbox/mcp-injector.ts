@@ -2,6 +2,7 @@ import type Docker from 'dockerode';
 import { logger } from '@haive/shared';
 import type { CliProviderName } from '@haive/shared';
 import { buildMcpConfigForCli, type McpConfigFile, type McpServerSpec } from './mcp-config.js';
+import { shellQuote } from './shell-quote.js';
 
 const log = logger.child({ module: 'mcp-injector' });
 
@@ -99,8 +100,4 @@ function dirname(p: string): string {
   const idx = trimmed.lastIndexOf('/');
   if (idx <= 0) return '/';
   return trimmed.slice(0, idx);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

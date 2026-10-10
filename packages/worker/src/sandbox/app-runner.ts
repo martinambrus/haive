@@ -33,6 +33,7 @@ import {
   markBrowserDesktopDown,
   markBrowserDesktopUp,
 } from './runtime-admission.js';
+import { shellQuote } from './shell-quote.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
 // env-replicate image. It runs a single-process non-DDEV app AND hosts the
@@ -389,12 +390,6 @@ export async function appRunnerExec(
   }
 }
 
-/** POSIX-safe single-quote: wraps a string for use as one shell word, so a
- *  user/LLM command with env prefixes or spaces survives interpolation intact. */
-function shSingleQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}
-
 /** Poll the app's port from inside the app-runner until it answers (curl 2xx/3xx),
  *  or the timeout elapses. Used both to launch-and-wait and to cheaply probe
  *  whether an already-running container still serves the app. */
@@ -430,7 +425,7 @@ export async function launchAppInRunner(
 ): Promise<{ healthy: boolean; logTail: string }> {
   await appRunnerExec(
     handle,
-    `cd ${handle.projectDir} && nohup bash -lc ${shSingleQuote(bootCommand)} > /tmp/haive-app.log 2>&1 & disown`,
+    `cd ${handle.projectDir} && nohup bash -lc ${shellQuote(bootCommand)} > /tmp/haive-app.log 2>&1 & disown`,
     { timeoutMs: 30_000 },
   );
   const healthy = await waitForPortInRunner(handle, port, opts.timeoutMs ?? 60_000);

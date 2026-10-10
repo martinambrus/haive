@@ -18,6 +18,7 @@ import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME } from './sandbox-runner.js';
 import { CLI_CREDENTIAL_FILES } from '../usage-window/credential-files.js';
 import { readVolumeFile } from '../usage-window/token-source.js';
+import { shellQuote } from './shell-quote.js';
 
 export interface ProviderAuthCtx {
   userId: string;
@@ -865,11 +866,6 @@ chown 1000:1000 /vol/settings.json /vol/${MCP_MANAGED_MARKER}
 /** Names Haive wrote into the CLI's own MCP config last time, one per line. Lives in the
  *  per-task auth volume, so it dies with the task. */
 const MCP_MANAGED_MARKER = '.haive-mcp-managed';
-
-/** Shell-quote a value for the `sh -c` scripts the helper containers run. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
 
 /**
  * Write Haive's MCP servers into the task auth volume using the CLI's OWN `mcp add`.
