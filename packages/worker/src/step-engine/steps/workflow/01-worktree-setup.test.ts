@@ -37,7 +37,10 @@ async function setupRepo(): Promise<string> {
  *  loadPreviousStepOutput('00a-sync-base') with "no such row". */
 function mkCtx(
   root: string,
-  opts: { title?: string; claimant?: { id: string; title: string; status: string } } = {},
+  opts: {
+    title?: string;
+    claimant?: { id: string; title: string; status: string; worktreeBranch?: string };
+  } = {},
 ): StepContext {
   let taskCalls = 0;
   return {
@@ -167,6 +170,38 @@ describe('01 worktree setup apply', () => {
       await expect(
         git(root, ['rev-parse', '--verify', 'refs/heads/feature/add-ddev']),
       ).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('names the claimant branch when two spellings share one worktree directory', async () => {
+    const root = await setupRepo();
+    try {
+      const ctx = mkCtx(root, {
+        claimant: {
+          id: 'task2',
+          title: 'Other task',
+          status: 'waiting_user',
+          worktreeBranch: 'feature/add-ddev',
+        },
+      });
+      const args = {
+        detected: {
+          hasGit: true,
+          currentBranch: 'main',
+          isClean: true,
+          proposedBranch: 'feature-add-ddev',
+          proposalBumpedFrom: null,
+          syncedBase: 'main',
+        },
+        formValues: { branchName: 'feature-add-ddev' },
+        iteration: 0,
+        previousIterations: [],
+      } as unknown as StepApplyArgs<never>;
+      await expect(worktreeSetupStep.apply(ctx, args)).rejects.toThrow(
+        /"feature-add-ddev" shares its worktree directory with branch "feature\/add-ddev", held by task "Other task" \(task2, waiting_user\)/,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

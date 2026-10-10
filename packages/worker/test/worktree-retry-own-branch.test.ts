@@ -12,6 +12,16 @@ import { worktreeSetupStep } from '../src/step-engine/steps/workflow/01-worktree
 import type { StepApplyArgs, StepContext } from '../src/step-engine/step-definition.js';
 
 const repair = vi.hoisted(() => ({ failWith: null as Error | null }));
+const carry = vi.hoisted(() => ({ failWith: null as Error | null }));
+
+vi.mock('../src/repo/carry-untracked.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/repo/carry-untracked.js')>();
+  return {
+    ...actual,
+    carryUntrackedForTask: (...args: Parameters<typeof actual.carryUntrackedForTask>) =>
+      carry.failWith ? Promise.reject(carry.failWith) : actual.carryUntrackedForTask(...args),
+  };
+});
 
 vi.mock('../src/repo/worktree-permissions.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/repo/worktree-permissions.js')>();
@@ -56,6 +66,7 @@ const roots: string[] = [];
 
 afterEach(async () => {
   repair.failWith = null;
+  carry.failWith = null;
   vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
@@ -262,14 +273,14 @@ describe('01 worktree setup after the task applied once (a Retry)', () => {
 
 describe('01 worktree setup records the task worktree before the steps that can throw', () => {
   it('C5a: an apply that throws in the carry step has recorded the branch for the next detect', async () => {
-    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new Error('config unreadable'));
+    carry.failWith = new Error('carry refused');
     const root = await setupRepo();
     const row = freshTask();
     const ctx = mkCtx(root, row);
     const detected = await worktreeSetupStep.detect!(ctx);
 
     await expect(worktreeSetupStep.apply(ctx, submitDefault(ctx, detected))).rejects.toThrow(
-      'config unreadable',
+      'carry refused',
     );
     expect(await worktreePaths(root)).toContain(
       path.join(root, WORKTREE_SUBDIR, 'feature-add-ddev'),

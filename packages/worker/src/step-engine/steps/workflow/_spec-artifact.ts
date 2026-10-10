@@ -1,5 +1,6 @@
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import { decidedWorktreePath, loadTaskWorktreeDecision } from '../../../repo/task-worktree.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, SPEC_VIEW_MODES, type SpecViewMode } from '@haive/shared';
@@ -67,9 +68,14 @@ export async function resolveApprovedSpec(ctx: StepContext): Promise<string> {
 export async function resolveTaskWorktreePath(ctx: StepContext): Promise<string | null> {
   const task = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
-    columns: { worktreePath: true },
+    columns: { worktreeBranch: true, worktreePath: true },
   });
-  return task?.worktreePath && task.worktreePath.length > 0 ? task.worktreePath : null;
+  const decision = await loadTaskWorktreeDecision(ctx.db, {
+    taskId: ctx.taskId,
+    columnBranch: task?.worktreeBranch,
+    columnPath: task?.worktreePath,
+  });
+  return decidedWorktreePath(decision, ctx.repoPath);
 }
 
 /** Write the spec to `<worktreePath>/.haive/spec.md`. Idempotent (plain overwrite, so a

@@ -135,13 +135,13 @@ export async function carryUntrackedForTask(
   worktreePath: string,
 ): Promise<CarryUntrackedResult> {
   const empty: CarryUntrackedResult = { copied: [], skippedExisting: 0, failed: 0 };
-  const enabled = await configService.getBoolean(
-    CONFIG_KEYS.WORKTREE_CARRY_UNTRACKED_ENABLED,
-    true,
-  );
-  if (!enabled) return empty;
 
   try {
+    const enabled = await configService.getBoolean(
+      CONFIG_KEYS.WORKTREE_CARRY_UNTRACKED_ENABLED,
+      true,
+    );
+    if (!enabled) return empty;
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
       columns: { repositoryId: true },

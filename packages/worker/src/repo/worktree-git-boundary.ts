@@ -2,6 +2,7 @@ import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { hasLeadingHaiveBlock } from './ddev-generated-boundary.js';
+import { loadRepositoryRoot, resolveTaskWorktree } from './task-worktree.js';
 import { worktreeDirName, WORKTREE_SUBDIR } from './worktree-paths.js';
 
 export const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
@@ -65,6 +66,29 @@ export function invocationUsesWorktreeGitBoundary(target: InvocationRepoTarget):
   return Boolean(target.worktreeBranch);
 }
 
+/** The feature-worktree branch an invocation works in, or null for the repository root. Null
+ *  without asking when `worktreeRel` overrides the feature worktree: the override paths name their
+ *  own tree. Throws `WorktreeRemovedError` for a recorded worktree whose directory is gone. */
+export async function resolveInvocationWorktreeBranch(
+  db: Database,
+  taskId: string,
+  task: {
+    userId: string;
+    repositoryId: string;
+    worktreeBranch: string | null;
+    worktreePath: string | null;
+  },
+  worktreeRel?: string,
+): Promise<string | null> {
+  if (worktreeRel !== undefined) return task.worktreeBranch;
+  const resolved = await resolveTaskWorktree(
+    db,
+    { taskId, columnBranch: task.worktreeBranch, columnPath: task.worktreePath },
+    await loadRepositoryRoot(db, task.repositoryId),
+  );
+  return resolved.kind === 'worktree' ? resolved.branch : null;
+}
+
 /** Resolve the boundary before an adapter serializes its prompt into CLI args.
  * `worktreeRel` must be the same override later placed on CliExecJobPayload. */
 export async function resolveInvocationUsesWorktreeGitBoundary(
@@ -74,7 +98,7 @@ export async function resolveInvocationUsesWorktreeGitBoundary(
 ): Promise<boolean> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { repositoryId: true, worktreeBranch: true },
+    columns: { userId: true, repositoryId: true, worktreeBranch: true, worktreePath: true },
   });
   if (!task?.repositoryId) return false;
 
@@ -87,7 +111,12 @@ export async function resolveInvocationUsesWorktreeGitBoundary(
   return invocationUsesWorktreeGitBoundary({
     storagePath: repo.storagePath,
     localPath: repo.localPath,
-    worktreeBranch: task.worktreeBranch,
+    worktreeBranch: await resolveInvocationWorktreeBranch(
+      db,
+      taskId,
+      { ...task, repositoryId: task.repositoryId },
+      worktreeRel,
+    ),
     worktreeRel,
   });
 }
@@ -145,7 +174,7 @@ export async function resolveInvocationWorkerTree(
 ): Promise<string | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true, worktreeBranch: true },
+    columns: { userId: true, repositoryId: true, worktreeBranch: true, worktreePath: true },
   });
   if (!task?.repositoryId) return null;
 
@@ -160,7 +189,12 @@ export async function resolveInvocationWorkerTree(
     storagePath,
     userId: task.userId,
     repositoryId: task.repositoryId,
-    worktreeBranch: task.worktreeBranch,
+    worktreeBranch: await resolveInvocationWorktreeBranch(
+      db,
+      taskId,
+      { ...task, repositoryId: task.repositoryId },
+      worktreeRel,
+    ),
     worktreeRel,
   });
   return resolveInvocationWorkerRoot({

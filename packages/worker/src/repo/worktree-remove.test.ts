@@ -176,6 +176,7 @@ function mkDb(
   stepOutput: unknown = null,
   /** Row findWorktreePathClaimant should see: another live task on the same worktree. */
   sharer: { id: string; title: string; status: string } | null = null,
+  stepStatus = 'done',
 ): Database {
   // removeTaskWorktree reads `tasks` twice: its own row first, then (via
   // findWorktreePathClaimant) any other live task pointing at the same path.
@@ -193,7 +194,9 @@ function mkDb(
     select: () => ({
       from: () => ({
         where: () => ({
-          orderBy: () => ({ limit: () => Promise.resolve([{ output: stepOutput }]) }),
+          orderBy: () => ({
+            limit: () => Promise.resolve([{ output: stepOutput, status: stepStatus }]),
+          }),
         }),
       }),
     }),
@@ -221,6 +224,21 @@ describe('removeTaskWorktree', () => {
       expect(await exists(wt)).toBe(false);
       // 'feat' has no commits of its own, so the safe delete succeeds.
       expect(res.branchDeleted).toBe(true);
+      expect(await branchExists(root, 'feat')).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // G1: a Skipped 01 leaves its output null and the columns set; the recorded tree is still on disk
+  // and still the reaper's to remove.
+  it('G1 removes the recorded worktree after 01 was skipped', async () => {
+    const { root, wt } = await setupRepoWithWorktree();
+    try {
+      const db = mkDb({ worktreePath: wt, worktreeBranch: 'feat' }, root, null, null, 'skipped');
+      const res = await removeTaskWorktree(db, 'task1');
+      expect(res.removed).toBe(true);
+      expect(await exists(wt)).toBe(false);
       expect(await branchExists(root, 'feat')).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });

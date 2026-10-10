@@ -6,6 +6,9 @@ import {
   CLI_DISPATCH_STEP_IDS,
   CLI_DISPATCH_STEPS,
   COST_METERED_PROVIDERS,
+  decideTaskWorktree,
+  WORKTREE_SUBDIR,
+  worktreeDirName,
   resolveCostBasis,
   MODEL_HEALTH_STEP_IDS,
   SKIPPABLE_STEP_IDS,
@@ -18,7 +21,7 @@ import {
   type CliRoleDescriptor,
   type CliTokenUsage,
 } from '@haive/shared';
-import { relUnder } from '@haive/shared/fs-safe';
+import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
@@ -1235,7 +1238,30 @@ export async function resolveWorkspaceRoot(
   if (task.worktreePath && !repoRoot) {
     throw new HttpError(409, 'Task workspace no longer belongs to a repository');
   }
-  let root = task.worktreePath ?? repoRoot;
+  const latestSetup = repoRoot
+    ? await db.query.taskSteps.findFirst({
+        where: and(
+          eq(schema.taskSteps.taskId, taskId),
+          eq(schema.taskSteps.stepId, '01-worktree-setup'),
+        ),
+        orderBy: [desc(schema.taskSteps.round)],
+        columns: { status: true, output: true },
+      })
+    : undefined;
+  const decision = decideTaskWorktree({
+    columnBranch: task.worktreeBranch,
+    columnPath: task.worktreePath,
+    latestStatus: latestSetup?.status,
+    output: latestSetup?.output,
+  });
+  const worktreePath =
+    decision.kind !== 'worktree'
+      ? null
+      : (decision.path ??
+        (decision.branch && repoRoot
+          ? resolve(repoRoot, WORKTREE_SUBDIR, worktreeDirName(decision.branch))
+          : null));
+  let root = worktreePath ?? repoRoot;
   if (!root) {
     // A task with neither a worktree nor a repository may still have a workspace: a repo-less
     // `kb_author` run gets an empty scratch directory, and its Editor tab is deliberately enabled
@@ -1263,6 +1289,15 @@ export async function resolveWorkspaceRoot(
     relUnder(anchor, resolve(root));
   } catch {
     throw new HttpError(409, 'Task workspace is not inside its repository');
+  }
+  if (decision.kind === 'worktree' && worktreePath) {
+    const entry = await lstatNoFollow(anchor, relUnder(anchor, resolve(worktreePath)));
+    if (entry === null) {
+      throw new HttpError(
+        409,
+        `The worktree for branch "${decision.branch ?? worktreePath}" was removed`,
+      );
+    }
   }
   return { task, root: resolve(root), anchor };
 }

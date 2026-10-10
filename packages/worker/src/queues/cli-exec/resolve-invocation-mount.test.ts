@@ -1,9 +1,19 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import { ensureTaskScratchWorkspace } from '../../repo/scratch-workspace.js';
 import { invocationRepoSubpath } from '../../repo/worktree-git-boundary.js';
+import {
+  makePointerFixture,
+  pointerDb,
+  POINTER_BRANCH,
+  type PointerFixture,
+} from '../../../test/support/worktree-pointer-db.js';
 import { resolveInvocationRepoMount } from './resolvers.js';
+
+vi.hoisted(() => {
+  process.env.REPO_STORAGE_ROOT = `${process.env.TMPDIR ?? '/tmp'}/wt-pointer-mount-${process.pid}-${Math.random().toString(36).slice(2)}`;
+});
 
 // Only the filesystem half is stubbed: the subpath and the repo-less predicate stay real, and
 // the resolver MUST create the directory, because docker refuses a volume-subpath that does not
@@ -27,6 +37,7 @@ function mkDb(
     query: {
       tasks: { findFirst: async () => task ?? undefined },
       repositories: { findFirst: async () => repo ?? undefined },
+      taskSteps: { findFirst: async () => undefined },
     },
   } as unknown as Database;
 }
@@ -35,6 +46,15 @@ const VOLUME_TASK = { userId: 'u1', repositoryId: 'r1', worktreeBranch: 'feature
 const VOLUME_REPO = { source: 'clone', storagePath: null, localPath: null };
 
 describe('resolveInvocationRepoMount', () => {
+  let liveFx: PointerFixture;
+  beforeEach(async () => {
+    liveFx = await makePointerFixture();
+    await liveFx.mkWorktree();
+  });
+  afterEach(async () => {
+    await liveFx.cleanup();
+  });
+
   it('mounts the feature worktree alone at the workdir root by default', async () => {
     const db = mkDb(VOLUME_TASK, VOLUME_REPO);
     const { repoMount, hasWorktree } = await resolveInvocationRepoMount(db, 't1');
@@ -195,5 +215,120 @@ describe('resolveInvocationRepoMount', () => {
     // refuses a volume-subpath that does not, and the human Terminal resolves this before
     // `resolveTaskContext` ever runs for a task still sitting in `created`.
     expect(ensureTaskScratchWorkspace).toHaveBeenCalledWith('u1', 't1');
+  });
+});
+
+// tasks.worktree_branch / worktree_path are audit history and are never cleared, so a reader that
+// needs the CURRENT worktree has to ask whether 01-worktree-setup still stands behind them.
+describe('resolveInvocationRepoMount against a recorded worktree pointer', () => {
+  let fx: PointerFixture;
+  beforeEach(async () => {
+    fx = await makePointerFixture();
+  });
+  afterEach(async () => {
+    await fx.cleanup();
+  });
+
+  const repo = () => ({ source: 'clone', storagePath: fx.repoRoot, localPath: null });
+  const recorded = () => ({
+    worktreeBranch: POINTER_BRANCH,
+    worktreePath: fx.worktreePath,
+  });
+  const doneOutput = () => ({
+    mode: 'worktree',
+    worktreePath: fx.worktreePath,
+    branchName: POINTER_BRANCH,
+    sandboxWorktreePath: '/haive/workdir/.haive/worktrees/feature-x',
+  });
+
+  // C1 (#214): Retry nulled 01's output, the person Skipped 01, the column still names the tree.
+  it('C1 mounts the repository root when the latest 01 round is skipped', async () => {
+    await fx.mkWorktree();
+    const db = pointerDb({
+      task: recorded(),
+      repo: repo(),
+      steps: [{ status: 'skipped', output: null }],
+    });
+    const { repoMount, hasWorktree } = await resolveInvocationRepoMount(db, 't1');
+    expect(repoMount?.subpath).toBe('u1/r1');
+    expect(hasWorktree).toBe(false);
+  });
+
+  it('G5 follows the LATEST round: an earlier skipped round does not hide a later done one', async () => {
+    await fx.mkWorktree();
+    const db = pointerDb({
+      task: recorded(),
+      repo: repo(),
+      steps: [
+        { status: 'skipped', output: null, round: 0 },
+        { status: 'done', output: doneOutput(), round: 1 },
+      ],
+    });
+    const { repoMount, hasWorktree } = await resolveInvocationRepoMount(db, 't1');
+    expect(repoMount?.subpath).toBe('u1/r1/.haive/worktrees/feature-x');
+    expect(hasWorktree).toBe(true);
+  });
+
+  // C4 (#221): cleanup or cancel removed the directory; the column still names it.
+  it('C4 refuses a worktree whose directory was removed', async () => {
+    const db = pointerDb({
+      task: recorded(),
+      repo: repo(),
+      steps: [{ status: 'done', output: doneOutput() }],
+    });
+    await expect(resolveInvocationRepoMount(db, 't1')).rejects.toThrow(/worktree.*removed/is);
+  });
+
+  // G2: a Retry nulled 01's output and parked it; the tree is on disk and is still the task's.
+  it('G2 keeps the worktree for a Retry state (output null, 01 not skipped, directory present)', async () => {
+    await fx.mkWorktree();
+    const db = pointerDb({
+      task: recorded(),
+      repo: repo(),
+      steps: [{ status: 'waiting_form', output: null }],
+    });
+    const { repoMount, hasWorktree } = await resolveInvocationRepoMount(db, 't1');
+    expect(repoMount?.subpath).toBe('u1/r1/.haive/worktrees/feature-x');
+    expect(hasWorktree).toBe(true);
+  });
+
+  // G3: a DAG issue worktree is named by the override; the feature directory is not consulted.
+  it('G3 mounts a DAG issue worktree although the feature worktree directory is gone', async () => {
+    await fx.mkWorktree('feature-x--issue-3');
+    const db = pointerDb({
+      task: recorded(),
+      repo: repo(),
+      steps: [{ status: 'done', output: doneOutput() }],
+    });
+    const { repoMount, hasWorktree } = await resolveInvocationRepoMount(
+      db,
+      't1',
+      '.haive/worktrees/feature-x--issue-3',
+    );
+    expect(repoMount?.subpath).toBe('u1/r1/.haive/worktrees/feature-x--issue-3');
+    expect(hasWorktree).toBe(true);
+  });
+
+  it('G3 mounts the repository root for the merge-fix override although the worktree is gone', async () => {
+    const db = pointerDb({
+      task: recorded(),
+      repo: repo(),
+      steps: [{ status: 'done', output: doneOutput() }],
+    });
+    const { repoMount, hasWorktree } = await resolveInvocationRepoMount(db, 't1', '');
+    expect(repoMount?.subpath).toBe('u1/r1');
+    expect(hasWorktree).toBe(false);
+  });
+
+  // G4: onboarding / plan tasks never recorded a worktree.
+  it('G4 mounts the repository root when no worktree was ever recorded', async () => {
+    const db = pointerDb({
+      task: { worktreeBranch: null, worktreePath: null },
+      repo: repo(),
+      steps: [],
+    });
+    const { repoMount, hasWorktree } = await resolveInvocationRepoMount(db, 't1');
+    expect(repoMount?.subpath).toBe('u1/r1');
+    expect(hasWorktree).toBe(false);
   });
 });

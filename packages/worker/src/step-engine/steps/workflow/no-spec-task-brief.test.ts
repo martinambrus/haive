@@ -71,6 +71,7 @@ const db = {
   query: {
     tasks: { findFirst: async () => ({ adversarialQaLevel: 'poc' }) },
     taskDagPlans: { findFirst: async () => undefined },
+    taskSteps: { findFirst: async () => undefined },
   },
   select: () => ({
     from: () => ({ innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }) }),

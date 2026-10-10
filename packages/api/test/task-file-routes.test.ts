@@ -17,6 +17,7 @@ vi.mock('../src/db.js', () => ({
     query: {
       tasks: { findFirst: async () => state.task },
       repositories: { findFirst: async () => state.repo },
+      taskSteps: { findFirst: async () => undefined },
     },
   }),
 }));
