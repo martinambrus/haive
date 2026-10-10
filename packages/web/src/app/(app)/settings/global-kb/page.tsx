@@ -1625,7 +1625,7 @@ export default function GlobalKbPage() {
               </div>
             )}
             <div className="flex flex-wrap gap-3">
-              <div className="flex flex-col gap-1.5">
+              <div className="flex min-w-0 max-w-full flex-col gap-1.5">
                 <Label htmlFor="cfg-ollama-mode">Ollama server</Label>
                 <select
                   id="cfg-ollama-mode"
@@ -1643,7 +1643,7 @@ export default function GlobalKbPage() {
                           : p.ollamaUrl,
                     }));
                   }}
-                  className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                  className="h-10 w-full min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
                 >
                   <option value="internal">Use Haive internal Ollama service</option>
                   <option value="external">Use an external Ollama server</option>
