@@ -44,6 +44,7 @@ import { usePageTitle } from '@/lib/use-page-title';
 import { formatDuration } from '@/lib/format-duration';
 import { formatCost } from '@/lib/format-cost';
 import { formatTokens } from '@/lib/format-tokens';
+import { formatSampledTps } from '@/lib/format-throughput';
 import {
   formatAgentHours,
   formatConcurrency,
@@ -70,6 +71,13 @@ const SpendChart = dynamic(() => import('@/components/stats/charts').then((m) =>
 });
 const ActivityChart = dynamic(
   () => import('@/components/stats/charts').then((m) => m.ActivityChart),
+  {
+    ssr: false,
+    loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
+  },
+);
+const ThroughputChart = dynamic(
+  () => import('@/components/stats/charts').then((m) => m.ThroughputChart),
   {
     ssr: false,
     loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
@@ -1223,6 +1231,67 @@ function StatsPageInner() {
                               }`}
                             >
                               {m.differs || ''}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Throughput</CardTitle>
+                  <CardDescription>
+                    Output tokens per second, two ways. Per model second divides by the time the CLI
+                    reports spent waiting on the model, prompt processing included; the
+                    claude-family CLIs and gemini report it, so codex and amp show a dash there. Per
+                    wall-clock second divides by the whole run, tool calls and sandbox included.
+                    Fewer than five runs show their count instead of a rate.
+                  </CardDescription>
+                </CardHeader>
+                <ThroughputChart days={timeline?.days ?? []} />
+                {steps.throughput.length > 0 && (
+                  <div className="mt-4 overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs uppercase tracking-wider text-neutral-500">
+                          <th className="pb-2 font-medium">Provider</th>
+                          <th className="pb-2 pl-3 font-medium">Model</th>
+                          <th className="pb-2 pl-3 text-right font-medium">Model tok/s</th>
+                          <th className="pb-2 pl-3 text-right font-medium">Median run</th>
+                          <th className="pb-2 pl-3 text-right font-medium">Wall tok/s</th>
+                          <th className="pb-2 pl-3 text-right font-medium">Timed / runs</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {steps.throughput.map((t) => (
+                          <tr
+                            key={JSON.stringify([t.provider, t.served])}
+                            className="border-t border-neutral-800"
+                          >
+                            <td className="py-2 text-neutral-300">
+                              {t.provider ?? <span className="text-neutral-500">deleted</span>}
+                            </td>
+                            <td className="py-2 pl-3 font-mono text-xs">
+                              {t.served === null ? (
+                                <span className="text-neutral-500">not recorded</span>
+                              ) : (
+                                <span className="text-neutral-200">{t.served}</span>
+                              )}
+                            </td>
+                            <td className="whitespace-nowrap py-2 pl-3 text-right font-mono text-neutral-200">
+                              {formatSampledTps(t.api)}
+                            </td>
+                            <td className="whitespace-nowrap py-2 pl-3 text-right font-mono text-neutral-400">
+                              {formatSampledTps({ ...t.api, tps: t.api.medianTps })}
+                            </td>
+                            <td className="whitespace-nowrap py-2 pl-3 text-right font-mono text-neutral-200">
+                              {formatSampledTps(t.wall)}
+                            </td>
+                            <td className="whitespace-nowrap py-2 pl-3 text-right font-mono text-neutral-500">
+                              {formatCount(t.api.n)} / {formatCount(t.invocations)}
                             </td>
                           </tr>
                         ))}

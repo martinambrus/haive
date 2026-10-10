@@ -29,6 +29,7 @@ import {
 import { useAutoCloseSuccessfulTerminals } from '@/lib/terminal-autoclose';
 import { formatDuration, formatTimeoutBudget } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
+import { formatTps, ratePerSecond } from '@/lib/format-throughput';
 import { invocationBanner } from '@/lib/step-banners';
 import { useGlobalPause } from '@/lib/use-global-pause';
 
@@ -524,6 +525,34 @@ function InvocationPanel({
               >
                 in {formatTokens(tu.inputTokens)} / out {formatTokens(tu.outputTokens)}
                 {cache > 0 ? ` / cache ${formatTokens(cache)}` : ''} tok
+              </span>
+            );
+          })()}
+        {invocation.tokenUsage &&
+          !invocation.isActive &&
+          (() => {
+            const out = invocation.tokenUsage.outputTokens;
+            const api = ratePerSecond(out, invocation.apiDurationMs);
+            const wall =
+              invocation.startedAt && invocation.endedAt
+                ? ratePerSecond(
+                    out,
+                    Date.parse(invocation.endedAt) - Date.parse(invocation.startedAt),
+                  )
+                : null;
+            if (api === null && wall === null) return null;
+            return (
+              <span
+                className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 text-violet-300"
+                title={
+                  'Output tokens per second of model time (prompt processing included)' +
+                  ' and of wall-clock time (tool calls and sandbox included). Model time is' +
+                  ' reported only by the claude-family CLIs and gemini.'
+                }
+              >
+                {api !== null ? `${formatTps(api)} model` : null}
+                {api !== null && wall !== null ? ' / ' : null}
+                {wall !== null ? `${formatTps(wall)} wall` : null}
               </span>
             );
           })()}

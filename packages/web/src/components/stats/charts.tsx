@@ -7,14 +7,17 @@ import {
   BarChart,
   CartesianGrid,
   Legend,
+  Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
-import { CHART_CHROME, CHART_COLORS } from './palette';
+import { CHART_CHROME, CHART_COLORS, THROUGHPUT_COLORS } from './palette';
 import { formatBucketLabel } from '@/lib/stats/format-stats';
 import { formatCost, type CostDisplay } from '@/lib/format-cost';
+import { formatTps } from '@/lib/format-throughput';
 import type { StatsTimelineDay } from '@/lib/api-client';
 
 /**
@@ -178,6 +181,55 @@ export function PlanVelocityChart({
         />
         <Bar dataKey="completed" name="Nodes completed" fill={CHART_COLORS.user} />
       </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+/** Output tokens per second per day. A day under the sample floor is a gap, never a zero. */
+export function ThroughputChart({ days }: { days: StatsTimelineDay[] }) {
+  const data = days.map((d) => ({
+    bucket: d.bucket,
+    api: d.throughput.api.sufficient ? d.throughput.api.tps : null,
+    wall: d.throughput.wall.sufficient ? d.throughput.wall.tps : null,
+  }));
+  if (data.every((d) => d.api === null && d.wall === null)) {
+    return <EmptyChart message="No day in this window has five runs with recorded usage." />;
+  }
+  return (
+    <ResponsiveContainer width="100%" height={220}>
+      <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+        <CartesianGrid stroke={CHART_CHROME.grid} vertical={false} />
+        <XAxis dataKey="bucket" tickFormatter={formatBucketLabel} minTickGap={24} {...axisProps} />
+        <YAxis width={40} tickFormatter={(v: number) => v.toFixed(0)} {...axisProps} />
+        <Tooltip
+          contentStyle={tooltipStyle}
+          labelFormatter={(label) => formatBucketLabel(String(label ?? ''))}
+          formatter={(value, name) => [
+            formatTps(value == null ? null : Number(value)),
+            String(name ?? ''),
+          ]}
+          cursor={{ stroke: CHART_CHROME.axis }}
+        />
+        <Legend wrapperStyle={{ fontSize: 11, color: CHART_CHROME.axis }} />
+        <Line
+          type="monotone"
+          dataKey="api"
+          name="Per model second"
+          stroke={THROUGHPUT_COLORS.api}
+          strokeWidth={2}
+          dot={{ r: 3 }}
+          connectNulls={false}
+        />
+        <Line
+          type="monotone"
+          dataKey="wall"
+          name="Per wall-clock second"
+          stroke={THROUGHPUT_COLORS.wall}
+          strokeWidth={2}
+          dot={{ r: 3 }}
+          connectNulls={false}
+        />
+      </LineChart>
     </ResponsiveContainer>
   );
 }

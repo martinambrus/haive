@@ -96,3 +96,12 @@ export const TOKEN_COLORS = {
   /** output — violet-500. 1.7% of the total, which is why this is a bar and not a pie. */
   output: '#8b5cf6',
 } as const;
+
+/** Output tokens per second. Model speed keeps the output-token violet, since it is a rate of
+ *  that bucket; validated as a pair against #0a0a0a (worst CVD ΔE 18.9, normal 27.0). */
+export const THROUGHPUT_COLORS = {
+  /** per second of model time — violet-500 */
+  api: '#8b5cf6',
+  /** per second of wall clock — teal-600 */
+  wall: '#0d9488',
+} as const;

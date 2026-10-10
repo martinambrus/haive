@@ -1143,6 +1143,9 @@ export const cliInvocations = pgTable(
       maxOutputTokens: number | null;
       maxOutputTokensExhausted: boolean;
     }>(),
+    /** Model time the CLI reported (claude family `duration_api_ms`, gemini `totalLatencyMs`); NULL when it reports
+     *  none. Migration 0181. */
+    apiDurationMs: integer('api_duration_ms'),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

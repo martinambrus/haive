@@ -40,6 +40,9 @@ interface StreamJsonCollector {
    *  never summed with assistant usages), else the sum of assistant-event
    *  usages (amp emits no result usage). Null when nothing reported. */
   getTokenUsage: () => CliTokenUsage | null;
+  /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
+   *  run's turns, like its usage). Null when no result event carried one. */
+  getApiDurationMs: () => number | null;
   /** Which model this stream ASKED for vs which one ANSWERED. Two distinct
    *  channels — see StreamModelReport / model-identity.ts. Null when the stream
    *  named no model anywhere (amp's init reports `agent_mode` instead). */
@@ -105,6 +108,7 @@ export function createStreamJsonCollector(
   let resultErrorText: string | null = null;
   let resultTerminalReason: string | null = null;
   let resultUsage: CliTokenUsage | null = null;
+  let resultApiDurationMs: number | null = null;
   // Live fallback (mid-stream snapshots, before the authoritative `result` event
   // arrives): sum fresh input/output across assistant turns. Cache is asymmetric:
   // each Anthropic turn re-reports the FULL cached prefix it read, so cache_read
@@ -239,6 +243,9 @@ export function createStreamJsonCollector(
       // still burned tokens) — capture before the success early-return.
       const usage = normalizeClaudeUsage(event.usage);
       if (usage) resultUsage = usage;
+      if (typeof event.duration_api_ms === 'number' && Number.isFinite(event.duration_api_ms)) {
+        resultApiDurationMs = event.duration_api_ms;
+      }
       if (typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd)) {
         costUsd = event.total_cost_usd;
       }
@@ -472,6 +479,13 @@ export function createStreamJsonCollector(
       }
       if (requestedModel === null && servedModel === null && billedModels.size === 0) return null;
       return { requested: requestedModel, served: servedModel, billed: [...billedModels] };
+    },
+    getApiDurationMs(): number | null {
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      return resultApiDurationMs;
     },
     getTokenUsage(): CliTokenUsage | null {
       if (buffer.trim()) {

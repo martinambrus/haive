@@ -77,6 +77,9 @@ export interface ExtractedGeminiOutput {
    *  the sole identity channel for this CLI. Usually one entry; two when the run
    *  fell back (e.g. pro plus flash). Empty when stats are absent. */
   models: string[];
+  /** Σ `stats.models.*.api.totalLatencyMs`: the summed duration of every API response (gemini-cli
+   *  `uiTelemetry`), i.e. model time. Null when no model reported one. */
+  apiDurationMs: number | null;
 }
 
 /** Parse `gemini --output-format json` stdout: one JSON document
@@ -98,6 +101,7 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
   if (typeof doc.response !== 'string') return null;
 
   let tokenUsage: CliTokenUsage | null = null;
+  let apiDurationMs: number | null = null;
   const modelNames: string[] = [];
   const stats = doc.stats as Record<string, unknown> | undefined;
   const models =
@@ -107,6 +111,10 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
       if (name.trim()) modelNames.push(name.trim());
     }
     for (const entry of Object.values(models)) {
+      const api = (entry as Record<string, unknown> | null)?.api as
+        Record<string, unknown> | undefined;
+      const latency = num(api?.totalLatencyMs);
+      if (latency !== null) apiDurationMs = (apiDurationMs ?? 0) + latency;
       const tokens = (entry as Record<string, unknown> | null)?.tokens as
         Record<string, unknown> | undefined;
       if (!tokens || typeof tokens !== 'object') continue;
@@ -124,5 +132,5 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
       tokenUsage = sumTokenUsage(tokenUsage, modelUsage);
     }
   }
-  return { responseText: doc.response, tokenUsage, models: modelNames };
+  return { responseText: doc.response, tokenUsage, models: modelNames, apiDurationMs };
 }
