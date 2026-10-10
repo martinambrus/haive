@@ -11,6 +11,7 @@ import {
 } from '../_untrusted-repo.js';
 import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { parseAgentJson } from './_agent-json.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
 // `## INSIGHTS` block to their output noting OPTIONAL improvements out of scope
@@ -50,7 +51,30 @@ interface TriageApply {
   selected: Insight[];
   skipped: number;
   implemented: boolean;
+  changes: string[];
   notes: string;
+}
+
+/** What the fix agent reported. `implemented` holds only when it listed a change, since a
+ *  selection alone says nothing about what the agent did. */
+export function readTriageOutcome(llmOutput: unknown): {
+  implemented: boolean;
+  changes: string[];
+  notes: string;
+} {
+  const out = parseAgentJson(llmOutput, (c) =>
+    c && typeof c === 'object' && Array.isArray((c as { implemented?: unknown }).implemented)
+      ? (c as { implemented: unknown[]; notes?: unknown })
+      : null,
+  );
+  const changes = (out?.implemented ?? []).filter(
+    (c): c is string => typeof c === 'string' && c.trim() !== '',
+  );
+  return {
+    implemented: changes.length > 0,
+    changes,
+    notes: typeof out?.notes === 'string' ? out.notes : '',
+  };
 }
 
 /** Parse `## INSIGHTS` blocks from a list of raw agent outputs. Each insight
@@ -225,17 +249,16 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     const sel = ((args.formValues as { selectedInsights?: string[] }).selectedInsights ??
       []) as string[];
     const selected = d.insights.filter((i) => sel.includes(i.id));
-    const implemented = selected.length > 0;
+    const outcome = readTriageOutcome(selected.length > 0 ? args.llmOutput : null);
     ctx.logger.info(
-      { found: d.insights.length, selected: selected.length, implemented },
+      { found: d.insights.length, selected: selected.length, implemented: outcome.implemented },
       'insight triage complete',
     );
     return {
       insightsFound: d.insights.length,
       selected,
       skipped: d.insights.length - selected.length,
-      implemented,
-      notes: '',
+      ...outcome,
     };
   },
 };
