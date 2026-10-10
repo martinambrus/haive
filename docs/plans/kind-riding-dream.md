@@ -194,6 +194,13 @@ it is gone, each voter citing the current `file:line`; an unreadable voter never
 it. One outside the target, in a dimension not run or REFUSED, or in a file the per-file cap
 truncated is not re-checked and stays listed, carried into this scan's report as unconfirmed.
 
+Every re-check outcome is written down, on a row of THIS scan as every later write is: a re-checked
+finding gets one carrying, in `raw`, the scan that first recorded it and the verdict, `cleared` or
+`still present`, and one not re-checked gets one marked `carried`. The earlier rows stay as they
+are. Loading what is unresolved then reads each finding's latest row, so a finding scan B cleared
+is not handed to scan C again, and comes back only if scan C raises it anew — as a new finding,
+since the defect was gone in between.
+
 **A consolidator does not make this step redundant**, and the prompt should say so where a reader
 might assume otherwise. Consolidation reconciles drafts of one answer; refutation checks a claim
 against the code and demands a cited `file:line`. `purring-marinating-peacock`'s own caveat is
@@ -971,7 +978,8 @@ former, and this module does both kinds of write.
   `dead-code` raises a pre-existing symbol whose last caller the target removed; `comment-debt`
   raises nothing outside the changed lines and the blocks around them.
 - A finding an earlier report left unconfirmed is cleared only by a 2-of-3 re-check citing the
-  current `file:line`; one in a REFUSED dimension, a cap-truncated file or outside the target stays
+  current `file:line`, and the clearance is a row of the clearing scan: the scan after it neither
+  re-checks nor lists that finding, while the earlier rows are unchanged; one in a REFUSED dimension, a cap-truncated file or outside the target stays
   listed as unconfirmed, and its absence from the new findings alone clears nothing.
 - A tail reviewer finding present in its step output whose `review_findings` write failed is listed
   with its disposition unknown.
