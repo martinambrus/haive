@@ -126,6 +126,9 @@ export interface PlanBuildDetect {
   /** PDFs that DID yield text. A SOFT preference only — the sidecar is a real
    *  fallback, so a blind model can still read one and must not be refused. */
   hasPdfInputs?: boolean;
+  /** Stamped by detect so the opt-in form keys on it: a row detected before the form existed
+   *  reuses its saved detect output, lacks this, and keeps building instead of asking mid-build. */
+  askToRun?: boolean;
 }
 
 export interface PlanBuildApply {
@@ -136,7 +139,7 @@ export interface PlanBuildApply {
    *  `stopped` reason means the plan is shallower than the depth budget asked
    *  for — the form tells the user this can happen. */
   frontierRemaining: number;
-  stopped: 'complete' | 'wave_budget' | 'node_budget' | 'dispatch_failed';
+  stopped: 'complete' | 'wave_budget' | 'node_budget' | 'dispatch_failed' | 'declined';
   mirrorFiles: string[];
   failures: string[];
 }
@@ -144,6 +147,11 @@ export interface PlanBuildApply {
 export function depthBudget(values: FormValues): number {
   const n = Number(values.depthBudget);
   return Number.isFinite(n) && n >= 1 && n <= 6 ? Math.floor(n) : DEFAULT_DEPTH;
+}
+
+/** Only an explicit `skip` declines: a step parked before the opt-in form existed has no value. */
+export function planBuildDeclined(values: FormValues): boolean {
+  return values.buildPlan === 'skip';
 }
 
 export function breadthCap(values: FormValues): number {
@@ -548,6 +556,9 @@ export interface PlanBuilderOptions {
    *  more asking for two numbers with sensible defaults is friction rather than
    *  control. The plan is editable afterwards either way. */
   askForBudget: boolean;
+  /** Ask whether to build at all, defaulting to no. The onboarding wrapper does: a build costs a
+   *  lot of tokens and the plan view can start one at any time. */
+  askToRun?: boolean;
   /** Extra gate on top of the global kill-switch. The onboarding wrapper uses it
    *  to skip a repo that already has a plan. */
   extraShouldRun?: (ctx: StepContext) => Promise<boolean>;
@@ -637,10 +648,35 @@ export function createPlanBuildStep(
         inputIndexPath: inputs?.indexPath ?? null,
         visualOnlyInputs: visualOnlyInputsOf(inputs),
         hasPdfInputs: inputs?.hasPdfInputs === true,
+        ...(opts.askToRun ? { askToRun: true } : {}),
       };
     },
 
     form(_ctx, detected): FormSchema | null {
+      if (detected.askToRun) {
+        return {
+          title: 'Build the project plan now?',
+          description: [
+            '**This step is optional and uses a lot of tokens.** It sends one agent per part of the project, level by level, often dozens of agent runs on a large repository.',
+            '',
+            'You can skip it and build the plan any time later: open the repository, go to its **Plan** view and choose **Build from the knowledge base**.',
+          ].join('\n'),
+          fields: [
+            {
+              type: 'radio',
+              id: 'buildPlan',
+              label: 'Project plan',
+              options: [
+                { value: 'skip', label: 'Skip for now, I will build it from the Plan view later' },
+                { value: 'build', label: 'Build the plan now (uses many tokens)' },
+              ],
+              default: 'skip',
+              required: true,
+            },
+          ],
+          submitLabel: 'Continue',
+        };
+      }
       if (!opts.askForBudget) return null;
       return {
         title: 'Plan depth',
@@ -694,6 +730,7 @@ export function createPlanBuildStep(
         // immediately with an empty fold.
         if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
         if (!detected || !(detected as PlanBuildDetect).repositoryId) return [];
+        if (planBuildDeclined(formValues)) return [];
         const d = detected as PlanBuildDetect;
         const repositoryId = d.repositoryId!;
 
@@ -736,6 +773,7 @@ export function createPlanBuildStep(
         failures: [],
       };
       if (!d.repositoryId) return empty;
+      if (planBuildDeclined(args.formValues)) return { ...empty, stopped: 'declined' };
       const repositoryId = d.repositoryId;
 
       const cumulative = args.agentMiningResults ?? [];
