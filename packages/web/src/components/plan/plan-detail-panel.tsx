@@ -24,6 +24,7 @@ import { Badge, Button, FormError } from '@/components/ui';
 import { FormRenderer } from '@/components/form-renderer';
 import { humanPlanAction, planResolutionForm } from '@haive/shared/plan-resolution';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import { bodyToSave } from '@/lib/body-edit';
 import { CodePreviewDialog } from '@/components/code-preview-dialog';
 import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -128,6 +129,7 @@ export function PlanDetailPanel({
   const [statusDraft, setStatusDraft] = useState<PlanNodeStatus>('todo');
   const [kindDraft, setKindDraft] = useState<PlanNodeDetail['node']['kind']>('component');
   const [bodyDraft, setBodyDraft] = useState('');
+  const [bodyBaseline, setBodyBaseline] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
   const [linkTarget, setLinkTarget] = useState('');
   // Which group's add-a-link row is open, as `<kind>:<dir>`. One at a time.
@@ -635,6 +637,7 @@ export function PlanDetailPanel({
                 key={nodeId}
                 value={bodyDraft}
                 onChange={setBodyDraft}
+                onBaseline={setBodyBaseline}
                 placeholder="Describe this node…"
                 breaks={!looksLikeMarkdown(node.body ?? '')}
               />
@@ -642,15 +645,20 @@ export function PlanDetailPanel({
                 <Button
                   size="sm"
                   disabled={saving}
-                  onClick={() =>
+                  onClick={() => {
+                    const body = bodyToSave(node.body ?? '', bodyDraft, bodyBaseline);
+                    if (body === undefined) {
+                      setEditingBody(false);
+                      return;
+                    }
                     void write(async () => {
                       await updatePlanNode(repositoryId, nodeId, {
                         expectedVersion: node.version,
-                        body: bodyDraft,
+                        body,
                       });
                       setEditingBody(false);
-                    })
-                  }
+                    });
+                  }}
                 >
                   Save
                 </Button>
@@ -675,7 +683,10 @@ export function PlanDetailPanel({
               )}
               <button
                 type="button"
-                onClick={() => setEditingBody(true)}
+                onClick={() => {
+                  setBodyBaseline(null);
+                  setEditingBody(true);
+                }}
                 className="self-start text-xs text-indigo-300 underline"
               >
                 Edit description

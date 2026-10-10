@@ -25,6 +25,7 @@ import {
   globsFromLines,
   houseRuleBadge,
 } from '@/lib/house-rules';
+import { bodyToSave } from '@/lib/body-edit';
 import { isCardActivation } from '@/lib/card-keys';
 import {
   Badge,
@@ -343,6 +344,7 @@ export default function GlobalKbPage() {
   const [descBusy, setDescBusy] = useState(false);
   const [descError, setDescError] = useState<string | null>(null);
   const [bodyEdit, setBodyEdit] = useState<string | null>(null);
+  const [bodyBaseline, setBodyBaseline] = useState<string | null>(null);
   const [bodyBusy, setBodyBusy] = useState(false);
   const [bodyError, setBodyError] = useState<string | null>(null);
   const [enforcePanel, setEnforcePanel] = useState<EnforcePanel | null>(null);
@@ -1033,11 +1035,16 @@ export default function GlobalKbPage() {
       setBodyError('The article body cannot be empty.');
       return;
     }
+    const body = bodyToSave(e.body, bodyEdit, bodyBaseline);
+    if (body === undefined) {
+      setBodyEdit(null);
+      return;
+    }
     setBodyBusy(true);
     setBodyError(null);
     try {
       const res = await api.patch<{ entry: GlobalKbEntry }>(`/global-kb/entries/${e.id}`, {
-        body: bodyEdit,
+        body,
       });
       const saved = res.entry;
       setSelected((cur) => (cur?.id === e.id ? saved : cur));
@@ -2313,6 +2320,7 @@ export default function GlobalKbPage() {
                     disabled={busy || scopeBusy || descBusy || enforceOpen}
                     onClick={() => {
                       setBodyError(null);
+                      setBodyBaseline(null);
                       setBodyEdit(selected.body);
                     }}
                   >
@@ -2334,6 +2342,7 @@ export default function GlobalKbPage() {
                     key={selected.id}
                     value={bodyEdit}
                     onChange={setBodyEdit}
+                    onBaseline={setBodyBaseline}
                     disabled={bodyBusy || scopeBusy || descBusy || busy}
                     breaks={!looksLikeMarkdown(selected.body)}
                     placeholder="Write the article…"
