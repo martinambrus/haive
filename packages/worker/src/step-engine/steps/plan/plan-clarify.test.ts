@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { PlanPatchError } from '@haive/shared/plan';
+import { UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import { MiningRetryError, MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import type { PlanBuildDetect } from './01-plan-build.js';
@@ -29,6 +30,7 @@ const plan = vi.hoisted(() => ({
   refuse: null as Error | null,
   makesRoot: true,
   created: [] as string[],
+  live: null as { rows: unknown[] } | null,
 }));
 
 vi.mock('@haive/shared/plan', async (importOriginal) => ({
@@ -68,6 +70,10 @@ vi.mock('./_plan-prompt.js', async (importOriginal) => ({
 vi.mock('./01-plan-build.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./01-plan-build.js')>()),
   withLiveInputs: vi.fn(async (_ctx: unknown, d: unknown) => d),
+}));
+vi.mock('./00-plan-inputs.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./00-plan-inputs.js')>()),
+  loadLiveAttachments: vi.fn(async () => plan.live),
 }));
 vi.mock('../../../plan/mirror.js', () => ({ writePlanMirror: vi.fn(async () => []) }));
 
@@ -177,6 +183,7 @@ beforeEach(() => {
   plan.refuse = null;
   plan.makesRoot = true;
   plan.created = [];
+  plan.live = null;
   delete process.env.HAIVE_TEST_BYPASS_LLM;
 });
 
@@ -256,16 +263,20 @@ describe('00b-plan-clarify apply', () => {
     expect(toPlanner.dispatches.map((x) => [x.agentId, x.roleKey])).toEqual([
       ['clarify-integrate-r1', 'planner'],
     ]);
-    expect(toPlanner.dispatches[0]!.prompt).toContain('The owner answered: Stripe');
+    expect(toPlanner.dispatches[0]!.prompt).toContain(
+      'The owner picked this answer the questioner had suggested:',
+    );
     expect(toPlanner.dispatches[0]!.prompt).toContain('The owner also said: Mobile first.');
     expect(round1()).toMatchObject({
-      answers: [{ questionId: 'payments', answer: 'Stripe' }],
+      answers: [{ questionId: 'payments', answer: 'Stripe', suggested: true }],
       action: 'continue',
     });
 
     // A redelivered submit carrying other values must not overwrite the recorded answers.
     await thrown(apply([], { ...values, [answerFieldId(1, 'payments')]: 'PayPal' }));
-    expect(round1()!.answers).toEqual([{ questionId: 'payments', answer: 'Stripe' }]);
+    expect(round1()!.answers).toEqual([
+      { questionId: 'payments', answer: 'Stripe', suggested: true },
+    ]);
 
     const integrated = mined(
       'clarify-integrate-r1',
@@ -419,6 +430,24 @@ describe('00b-plan-clarify apply', () => {
     expect(rounds()).toEqual([expect.objectContaining({ round: 0, rootId: null })]);
   });
 
+  it('fences a picked suggestion as agent text and leaves a typed answer unfenced', async () => {
+    plan.root = { id: ROOT };
+    const { mined, apply } = setup();
+    await thrown(apply([mined('clarify-ask-r1', questions)]));
+    const sent = (await thrown(
+      apply([], {
+        [answerFieldId(1, 'payments')]: 'Stripe',
+        [answerFieldId(1, 'users')]: 'Club members only',
+        [actionFieldId(1)]: 'continue',
+      }),
+    )) as MiningWaveError;
+    const prompt = sent.dispatches[0]!.prompt;
+    expect(prompt).toContain(
+      `The owner picked this answer the questioner had suggested:\n${UNTRUSTED_OPEN}\nStripe`,
+    );
+    expect(prompt).toContain('The owner answered: Club members only');
+  });
+
   it('carries the answered rounds into a redrafted outline', () => {
     const lines = outlineExtraLines({ mode: 'greenfield' }, [
       {
@@ -454,6 +483,17 @@ describe('00b-plan-clarify apply', () => {
       },
     ]).join('\n');
     expect(pending).not.toContain('Not yet folded in.');
+  });
+
+  it('refuses to draft an outline once a files-only brief has lost every file', async () => {
+    plan.live = { rows: [] };
+    const select = planClarifyStep.agentMining!.selectAgents({
+      ctx: {} as StepContext,
+      detected: { build: { ...build, brief: '' }, rootId: null, rounds: [] },
+      formValues: {},
+      llmOutput: undefined,
+    });
+    expect(((await thrown(select)) as Error).message).toContain('nothing to build from');
   });
 
   it('does nothing under the LLM bypass', async () => {

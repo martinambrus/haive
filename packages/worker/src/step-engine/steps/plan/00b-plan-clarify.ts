@@ -13,6 +13,7 @@ import { shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import {
   PLAN_AGENT_TIMEOUT_MS,
+  assertSomethingToBuildFrom,
   buildRootPrompt,
   partialApplyNote,
   planAgentCapabilities,
@@ -22,6 +23,7 @@ import {
   type PlanBuildDetect,
 } from './01-plan-build.js';
 import { applyAgentPatch, applyAgentPatchOnce, parsePlanPatch } from './_plan-prompt.js';
+import { loadLiveAttachments } from './00-plan-inputs.js';
 import {
   isOutlineAgent,
   outlineAgentId,
@@ -112,7 +114,13 @@ async function dispatchFor(
   earlierDrafts: number,
 ): Promise<AgentMiningDispatch | null> {
   const repositoryId = d.build.repositoryId!;
-  const live = await withLiveInputs(ctx, d.build);
+  // The outline is drafted from the inputs alone, so it refuses, as 01's root dispatch does, when
+  // a greenfield build has neither a brief nor a file left: before preparing them and after.
+  const outline = move.kind === 'outline';
+  const attachments = outline ? await loadLiveAttachments(ctx) : undefined;
+  if (outline) assertSomethingToBuildFrom(d.build, attachments ?? null);
+  const live = await withLiveInputs(ctx, d.build, attachments);
+  if (outline) assertSomethingToBuildFrom(d.build, await loadLiveAttachments(ctx));
   const common = {
     capabilities: planAgentCapabilities(live),
     preferVision: live.hasPdfInputs === true,

@@ -22,6 +22,9 @@ export interface ClarifyQuestion {
 export interface ClarifyAnswer {
   questionId: string;
   answer: string;
+  /** The owner clicked one of the questioner's suggestions: their choice, but agent-written text,
+   *  so it is fenced like the question. Absent for an answer they typed. */
+  suggested?: boolean;
 }
 
 export interface ClarifyVerdict {
@@ -131,7 +134,12 @@ export function readRoundAnswers(
   for (const q of round.questions) {
     const raw = values[answerFieldId(round.round, q.id)];
     if (typeof raw === 'string' && raw.trim()) {
-      answers.push({ questionId: q.id, answer: raw.trim() });
+      const answer = raw.trim();
+      answers.push({
+        questionId: q.id,
+        answer,
+        ...(q.suggestions.includes(answer) ? { suggested: true } : {}),
+      });
     }
   }
   const steer = values[steerFieldId(round.round)];
@@ -321,6 +329,14 @@ function briefLines(d: PlanBuildDetect): string[] {
   ];
 }
 
+/** An answer as a prompt states it. Typed text is the owner speaking and stays unfenced; a
+ *  clicked suggestion is the questioner's text, which a repository it read could have steered. */
+function answerLines(a: ClarifyAnswer): string[] {
+  return a.suggested
+    ? ['The owner picked this answer the questioner had suggested:', fencedAgentBlock(a.answer)]
+    : [`The owner answered: ${a.answer}`];
+}
+
 /** Earlier rounds as the next agent sees them. The questions and the planner's notes were
  *  written by agents and are fenced; the owner's answers and steering are the operator speaking
  *  and are not. */
@@ -330,10 +346,10 @@ function historyLines(rounds: readonly ClarifyRound[]): string[] {
     if (!r.answered || r.round === 0) continue;
     out.push(`### Round ${r.round}`);
     for (const q of r.questions) {
-      const answer = r.answers?.find((a) => a.questionId === q.id)?.answer;
+      const answer = r.answers?.find((a) => a.questionId === q.id);
       const verdict = r.outcome?.verdicts.find((v) => v.questionId === q.id);
       out.push(`Question \`${q.id}\`:`, fencedAgentBlock(q.question));
-      out.push(answer ? `The owner answered: ${answer}` : 'The owner did not answer it.');
+      out.push(...(answer ? answerLines(answer) : ['The owner did not answer it.']));
       if (verdict) {
         out.push(`Planner's verdict: ${verdict.status}`);
         if (verdict.note) out.push(fencedAgentBlock(verdict.note));
@@ -409,7 +425,7 @@ export function buildIntegratePrompt(
   const qa = answered.flatMap((q) => [
     `### \`${q.id}\``,
     fencedAgentBlock(q.question),
-    `The owner answered: ${round.answers!.find((a) => a.questionId === q.id)!.answer}`,
+    ...answerLines(round.answers!.find((a) => a.questionId === q.id)!),
     '',
   ]);
   return [

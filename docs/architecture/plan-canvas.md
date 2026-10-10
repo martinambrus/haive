@@ -25,7 +25,9 @@ state, every assumption and conflict an open `decision`/`research` node directly
 questioner asks about it; the planner folds each round's answers in as a patch and marks every
 answer `settled` or `open`, and open ones are asked again. The owner ends it, and 01 expands the
 outline (its depth form says so through `outlineFromThisTask`). Planner and questioner are mining
-SEATS (`STEP_MINING_SEATS`), not loop roles, so each runs on its own CLI; the route seeds the
+SEATS (`STEP_MINING_SEATS`), not loop roles, so each runs on its own CLI. An answer the owner TYPED
+reaches the planner as operator text; a suggestion they clicked was written by the questioner and
+stays fenced (`ClarifyAnswer.suggested`), since a repository it read could have steered it; the route seeds the
 questioner as a task step choice. Three decisions to keep. It cycles like 02, by waves and
 `ReopenStepFormError`, NOT plan chat's self-revise: that reset deletes every round's agent rows and
 supersedes their invocations, dropping the spend from statistics. Rounds live in
