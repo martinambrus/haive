@@ -105,3 +105,20 @@ session through the worker's repository resource cleanup job. Repository editors
 read-only git-data boundary as task editors (`repoGitDataBoundary`), since code-server extensions
 and workspace tasks execute repository code; the repository Terminal remains the surface for git
 commits and pushes.
+
+## The task's current worktree
+
+`tasks.worktree_branch` and `worktree_path` are written once, by 01-worktree-setup, and kept as an
+audit record (the cancel and Finish reapers, the branch claims and the backfill script read them as
+history). They are not where a task works now: a run_app Retry followed by a Skip of 01 leaves them
+pointing at the abandoned worktree, and 12-worktree-cleanup or a cancel removes the directory without
+touching them. Every reader that needs the current workspace asks one decision instead:
+`decideTaskWorktree` (`@haive/shared`) reads the columns, falls back to 01's output for a task written
+before the columns, and answers the repository root when the latest round of 01 is skipped. The worker
+wraps it in `resolveTaskWorktree` (`repo/task-worktree.ts`), which checks the directory under the
+repository's own root (`storagePath ?? localPath`) and refuses a removed worktree
+(`WorktreeRemovedError`) rather than falling back to the root, since that would put a read-write agent
+on the main checkout. The invocation mount, the Terminal, the prompt boundary and the api's file routes
+(409) refuse; the runtime readers (`_task-meta`, `_spec-artifact`, `_external-drift`) use the decision
+alone, because a runner teardown after 12 must not throw. An explicit `worktreeRel` (DAG issue, merge
+fix) names its own tree and skips all of this.
