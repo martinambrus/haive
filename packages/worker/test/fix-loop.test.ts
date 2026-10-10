@@ -1122,6 +1122,14 @@ describe('excerptDiagnosis', () => {
     expect(lines.filter((l) => /^`+$/.test(l)).every((l) => l.length === 400)).toBe(true);
   });
 
+  it('adds no synthetic fence longer than the cap when the opener is a huge run', () => {
+    const run = '`'.repeat(10_000);
+    const text = `intro\n${run}\n${numbered('code', 800)}`;
+    const out = excerptDiagnosis(text, 6000, false);
+    expect(out.length).toBeLessThanOrEqual(6000 + 120);
+    expect(out).toMatch(OMISSION);
+  });
+
   it('adds no fence line when the cut falls outside every block', () => {
     const text = `${'prose '.repeat(600)}\n\`\`\`\ncode\n\`\`\`\n${'prose '.repeat(600)}`;
     const out = excerptDiagnosis(text, 400, false);

@@ -269,12 +269,18 @@ function tailPiece(text: string, max: number): string {
   return text.slice(start);
 }
 
-/** The opener's indentation and run of the markdown fence still open where `text` ends, or null. */
+/** A longer opener is not re-synthesized: its closer would cost as much as the budget it is cut to. */
+const MAX_SYNTHETIC_FENCE = 16;
+
+/** The opener's indentation and run of the markdown fence still open where `text` ends, or null
+ *  when there is none or its run is longer than `MAX_SYNTHETIC_FENCE`. */
 function openFenceRun(text: string): string | null {
   const lines = text.split('\n');
   const open = scanFences(lines).find((fence) => fence.close === null);
   const opener = open ? fenceOpener(lines[open.open] ?? '') : null;
-  return opener ? `${' '.repeat(opener.indent)}${opener.run}` : null;
+  return opener && opener.run.length <= MAX_SYNTHETIC_FENCE
+    ? `${' '.repeat(opener.indent)}${opener.run}`
+    : null;
 }
 
 /** The first and last halves of `budget` around one line stating the count dropped. Each end is
