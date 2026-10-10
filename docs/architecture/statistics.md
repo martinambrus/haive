@@ -195,9 +195,12 @@ existed on the dev install to test a parser against, so only runs after 0181 car
 **Each side's numerator and denominator cover the same runs.** A run with no recorded usage enters
 neither side; a run without model time enters only the wall side. Σtokens / Σtime is the headline
 and the per-run median rides beside it on the model side, because one long run dominates the
-aggregate: MEASURED, gemma4:31b-cloud reads 53 aggregate against a 15 median. Rates below
-`MIN_SAMPLES_FOR_TREND` render as `n=…`, and the trend chart leaves such a day as a gap rather
-than a point. Colours are `THROUGHPUT_COLORS`: model speed keeps the output-token violet, validated
+aggregate: MEASURED, gemma4:31b-cloud reads 53 aggregate against a 15 median. On `/stats`, rates
+below `MIN_SAMPLES_FOR_TREND` render as `n=…` and the trend chart leaves such a day as a gap
+rather than a point, because there a rate stands for a model's or a day's speed in general. The
+task page does NOT apply the floor, on purpose: a step badge is the exact rate of that step's own
+runs and a terminal header that of one run, so `n=1` there would hide a true figure, not flag a
+weak one. The badge's tooltip states how many runs each side covers. Colours are `THROUGHPUT_COLORS`: model speed keeps the output-token violet, validated
 as a pair with teal-600 against `#0a0a0a`.
 
 ## Agents, skills and MCP tools
