@@ -26,6 +26,7 @@ import {
   relocateFixerChanges,
   squashMergeCommit,
   unmergedPaths,
+  type FixerLeftovers,
   type MergeAbort,
 } from './git-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
@@ -204,6 +205,31 @@ async function setStepStatus(
   },
 ): Promise<TaskStepRow> {
   return updateOwnedStep(db, stepRowId, patch);
+}
+
+/** Move what a merge fixer changed outside the conflicted files aside and record the event.
+ *  `spent` runs between the two, once the relocation has settled. */
+export async function relocateAndRecordLeftovers(
+  db: Database,
+  at: {
+    taskId: string;
+    stepRowId: string;
+    runId: string;
+    dir: string;
+    branch: string;
+    baseline: MergeResolveState['fixBaseline'];
+  },
+  spent?: (leftovers: FixerLeftovers | null) => Promise<void>,
+): Promise<FixerLeftovers | null> {
+  const leftovers = await relocateFixerChanges(
+    at.dir,
+    at.baseline,
+    { taskId: at.taskId, runId: at.runId },
+    () => taskSecretMaskPolicy(db, at.taskId),
+  );
+  await spent?.(leftovers);
+  if (leftovers) await recordFixerLeftovers(db, at.taskId, at.stepRowId, at.branch, leftovers);
+  return leftovers;
 }
 
 async function saveMergeState(
@@ -795,20 +821,27 @@ export async function resolveMergePhase(
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
       }
       if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
-      const leftovers = await relocateFixerChanges(
-        state.mergeDir,
-        state.fixBaseline,
-        { taskId: params.taskId, runId: inv.id },
-        () => taskSecretMaskPolicy(db, params.taskId),
+      const sent = state;
+      const leftovers = await relocateAndRecordLeftovers(
+        db,
+        {
+          taskId: params.taskId,
+          stepRowId: current.id,
+          runId: inv.id,
+          dir: sent.mergeDir,
+          branch: sent.featureBranch,
+          baseline: sent.fixBaseline,
+        },
+        // Spent once used: a later pass comparing it with a tree the merge has since left would put
+        // the merge's files back. Kept while the index still holds what the fixer staged, for the retry.
+        async (found) => {
+          if (sent.fixBaseline && !found?.indexHeld) {
+            state = { ...sent, fixBaseline: null };
+            await saveMergeState(db, current.id, state);
+          }
+        },
       );
-      // Spent once used: a later pass comparing it with a tree the merge has since left would put
-      // the merge's files back. Kept while the index still holds what the fixer staged, for the retry.
-      if (state.fixBaseline && !leftovers?.indexHeld) {
-        state = { ...state, fixBaseline: null };
-        await saveMergeState(db, current.id, state);
-      }
       if (leftovers) {
-        await recordFixerLeftovers(db, params.taskId, current.id, state.featureBranch, leftovers);
         current = await addStepWarning(
           db,
           current,

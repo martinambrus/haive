@@ -20,6 +20,7 @@ import {
   ONE_LIVE_UPGRADE_INDEX,
   schema,
   type Database,
+  type MergeResolveState,
 } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -132,6 +133,8 @@ import {
   updateOwnedStep,
   type TaskFence,
 } from '../step-engine/step-ownership.js';
+import { abortMerge, isHostCheckout, revParse } from '../step-engine/git-merge.js';
+import { relocateAndRecordLeftovers } from '../step-engine/merge-resolver.js';
 import { refuseRevive } from './_revive-check.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
@@ -3281,6 +3284,57 @@ export async function backfillMissingRunSeq(db: Database): Promise<void> {
   }
 }
 
+/** A cancel runs no step code, so a merge fixer it stopped leaves its merge open and its changes
+ *  outside the conflicted files in the tree. Once the sandboxes are gone, each merge the task's
+ *  rows record is relocated and aborted, unless it ran in the task's own worktree (removed whole)
+ *  or in a person's checkout. Never throws: the cancel must finish. */
+export async function settleCancelledMerges(db: Database, taskId: string): Promise<void> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { worktreePath: true },
+  });
+  const rows = await db
+    .select({ id: schema.taskSteps.id, state: schema.taskSteps.mergeResolveState })
+    .from(schema.taskSteps)
+    .where(and(eq(schema.taskSteps.taskId, taskId), isNotNull(schema.taskSteps.mergeResolveState)));
+  const own = task?.worktreePath ?? null;
+  for (const row of rows) {
+    const state = row.state as MergeResolveState | null;
+    const baseline = state?.fixBaseline;
+    if (!state || !baseline || !('tree' in baseline)) continue;
+    const dir = state.mergeDir;
+    if (isHostCheckout(dir) || (own !== null && (dir === own || dir.startsWith(`${own}/`)))) {
+      continue;
+    }
+    try {
+      if ((await revParse(dir, 'MERGE_HEAD')) !== baseline.mergeHead) continue;
+      await relocateAndRecordLeftovers(db, {
+        taskId,
+        stepRowId: row.id,
+        runId: state.fixInvocationId ?? row.id,
+        dir,
+        branch: state.featureBranch,
+        baseline,
+      });
+      await db
+        .update(schema.taskSteps)
+        .set({ mergeResolveState: { ...state, fixBaseline: null } })
+        .where(eq(schema.taskSteps.id, row.id));
+      const aborted = await abortMerge(dir);
+      if (!aborted.ok) {
+        await appendEvent(db, taskId, row.id, 'merge.abort_failed', {
+          featureBranch: state.featureBranch,
+          baseBranch: state.baseBranch,
+          blocking: aborted.blocking.slice(0, 20),
+          detail: aborted.detail,
+        });
+      }
+    } catch (err) {
+      logger.warn({ err, taskId, stepRowId: row.id }, 'cancelled merge could not be settled');
+    }
+  }
+}
+
 async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<void> {
   const now = new Date();
   await db
@@ -3324,6 +3378,9 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  await settleCancelledMerges(db, payload.taskId).catch((err) =>
+    logger.warn({ err, taskId: payload.taskId }, 'settle-cancelled-merges failed'),
+  );
   try {
     await cleanupTaskScratchWorkspace(db, payload.taskId);
   } catch (err) {
