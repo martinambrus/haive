@@ -528,7 +528,7 @@ export async function collectChangedLineMap(
   if (scan.error !== null) return null;
   const baseBranch = await taskBaseBranch(ctx);
   const diff = await readChangeDiff(worktreePath, baseBranch);
-  const named = await readChangedPaths(worktreePath, baseBranch);
+  const named = await readChangedPaths(worktreePath, baseBranch, { forkPointOnly: true });
   // Without the list a binary or mode-only change is absent, and absent reads as untouched.
   if (named === null) return null;
   const diffed = diff === null ? new Map<string, DiffFile>() : parseDiffHunks(diff);

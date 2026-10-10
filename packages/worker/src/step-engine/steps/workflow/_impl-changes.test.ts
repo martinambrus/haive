@@ -1114,6 +1114,23 @@ describe('collectChangedLineMap', () => {
     });
   });
 
+  it('is null when the base branch is gone, so a committed unreported file is not dropped from the scope', async () => {
+    await inRepo({ 'kept.php': 'a\n' }, async (dir) => {
+      await writeFile(path.join(dir, 'c.php'), 'x\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'ISSUE-1: add c']);
+      await writeFile(path.join(dir, 'kept.php'), 'b\n');
+      expect([...(await collectChangedLineMap(ctxFor(), dir))!.keys()].sort()).toEqual([
+        'c.php',
+        'kept.php',
+      ]);
+
+      await git(dir, ['branch', '-D', 'main']);
+
+      expect(await collectChangedLineMap(ctxFor({ touched: ['kept.php'] }), dir)).toBeNull();
+    });
+  });
+
   it('is null when nothing names a changed file', async () => {
     await inRepo({ 'app.php': 'a\n' }, async (dir) => {
       expect(await collectChangedLineMap(ctxFor(), dir)).toBeNull();
@@ -1141,14 +1158,14 @@ describe('collectChangedLineMap', () => {
     }
   });
 
-  it('reads the diff when the base falls back to HEAD and a root file is named HEAD', async () => {
+  it('reads the notes diff when the base falls back to HEAD and a root file is named HEAD', async () => {
     await inRepo({ 'app.php': 'a\nb\n', HEAD: 'x\n' }, async (dir) => {
       await git(dir, ['branch', '-D', 'main']);
       await writeFile(path.join(dir, 'app.php'), 'a\nB\n');
 
-      const map = await collectChangedLineMap(ctxFor(), dir);
+      const out = await collectImplementationFiles(ctxFor(), dir);
 
-      expect(map?.get('app.php')).toEqual({ whole: false, ranges: [[2, 2]] });
+      expect(out.changedLines?.['app.php']).toBe('lines 2');
     });
   });
 
