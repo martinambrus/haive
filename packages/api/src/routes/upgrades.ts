@@ -1,6 +1,12 @@
 import { Hono } from 'hono';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import {
+  isRootClaimLive,
+  rootClaimRefusal,
+  schema,
+  type DbTx,
+  type RootClaimKind,
+} from '@haive/database';
 import {
   agentSpecSchema,
   buildCliRulesBlockFromProviders,
@@ -40,8 +46,8 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
   LIVE_TASK_STATUSES,
-  liveOnboardingTaskId,
   renderContextAdmitsUpgrade,
+  type RepositoryForUpgrade,
   upgradeAdmission,
   upgradeRefusalMessage,
 } from '../lib/onboarding-state.js';
@@ -671,23 +677,46 @@ export async function refuseBesideLiveUpgrade(
 }
 
 /** Run `work` in a transaction holding the repository's onboarding and upgrade lock, so the checks
- *  it makes and the insert it ends with cannot interleave with another creator's. */
+ *  it makes and the insert it ends with cannot interleave with another creator's. The repository
+ *  row is locked too, and a live root claim refuses: a reset that claims the root afterwards waits
+ *  for this commit and finds the task among the writers it refuses for. */
 export async function withRepositoryTaskLock<T>(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
-  work: (tx: DbTx) => Promise<T>,
+  work: (tx: DbTx, repo: RepositoryForUpgrade) => Promise<T>,
 ): Promise<T> {
   return db.transaction(async (tx) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
     );
-    return work(tx);
+    const [repo] = await tx
+      .select({
+        id: schema.repositories.id,
+        source: schema.repositories.source,
+        renderContext: schema.repositories.renderContext,
+        status: schema.repositories.status,
+        storagePath: schema.repositories.storagePath,
+        localPath: schema.repositories.localPath,
+        onboardedAt: schema.repositories.onboardedAt,
+        onboardingResetAt: schema.repositories.onboardingResetAt,
+        rootClaimedAt: schema.repositories.rootClaimedAt,
+        rootClaimKind: schema.repositories.rootClaimKind,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .for('update');
+    if (!repo) throw new HttpError(404, 'Repository not found');
+    if (isRootClaimLive(repo.rootClaimedAt)) {
+      throw new HttpError(409, rootClaimRefusal(repo.rootClaimKind as RootClaimKind | null));
+    }
+    return work(tx, repo);
   });
 }
 
 /** Insert an upgrade or a rollback task only while no other one of the repository is live and no
  *  onboarding runs, since two running side by side apply and revert the same files. Serialised per
- *  repository with onboarding's creation, so two clicks cannot both pass the check. */
+ *  repository with onboarding's creation, so two clicks cannot both pass the check. The admission
+ *  is read again here, on the locked row, so a reset stamped since the early check refuses. */
 export async function insertUpgradeTask<T>(
   db: ReturnType<typeof getDb>,
   userId: string,
@@ -695,14 +724,11 @@ export async function insertUpgradeTask<T>(
   action: 'upgraded' | 'rolled back',
   insert: (tx: DbTx) => Promise<T>,
 ): Promise<T> {
-  return withRepositoryTaskLock(db, repositoryId, async (tx) => {
+  return withRepositoryTaskLock(db, repositoryId, async (tx, repo) => {
     await refuseBesideLiveUpgrade(tx, repositoryId);
-    const taskId = await liveOnboardingTaskId(tx, userId, repositoryId);
-    if (taskId) {
-      throw new HttpError(
-        409,
-        upgradeRefusalMessage({ admitted: false, reason: 'live-onboarding', taskId }, action),
-      );
+    const admission = await upgradeAdmission(tx, userId, repo);
+    if (!admission.admitted) {
+      throw new HttpError(409, upgradeRefusalMessage(admission, action));
     }
     return insert(tx);
   });

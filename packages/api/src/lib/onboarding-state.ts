@@ -42,7 +42,7 @@ export const LIVE_TASK_STATUSES = [
  * One query for the whole page.
  */
 export async function loadNewestLiveArtifactAt(
-  db: Database,
+  db: Database | DbTx,
   userId: string,
   repositoryIds: string[],
 ): Promise<Map<string, Date>> {
@@ -380,7 +380,7 @@ export interface RepositoryForUpgrade {
 /** Whether the render context column vouches for an upgrade no row or onboarding does, as on a
  *  clone: 01 renders from it, and the repos page shows the repository as onboarded. */
 export async function renderContextAdmitsUpgrade(
-  db: Database,
+  db: Database | DbTx,
   userId: string,
   repo: RepositoryForUpgrade,
 ): Promise<boolean> {
@@ -419,7 +419,7 @@ export type UpgradeAdmission =
 /** The rule the banner and POST /tasks share: no live onboarding, and an onboarding finished, or a
  *  row it wrote, since the reset epoch, or the render context column of a clone. */
 export async function upgradeAdmission(
-  db: Database,
+  db: Database | DbTx,
   userId: string,
   repo: RepositoryForUpgrade,
 ): Promise<UpgradeAdmission> {
