@@ -34,13 +34,15 @@ test.describe('global KB entries', () => {
     let userId = '';
     try {
       userId = (await registerUser(sql, page.request, { prefix: 'kb-retry' })).userId;
-      // The rows are faked on top of the real response, so its headers stay the api's own.
+      // Fulfilled without the real call, which in CI outlasted the 5 s expect below.
       await page.route(
         (url) => url.pathname === '/global-kb/entries',
         async (route) => {
-          const response = await route.fetch();
           await route.fulfill({
-            response,
+            headers: {
+              'access-control-allow-origin': 'http://localhost:3000',
+              'access-control-allow-credentials': 'true',
+            },
             json: {
               entries: [
                 failedEntry('00000000-0000-4000-8000-0000000000e1', 'Can run again', 'failed'),
@@ -76,7 +78,7 @@ test.describe('global KB entries', () => {
       await expect(card('Task was cancelled')).not.toContainText('retry');
     } finally {
       // The page polls the list. Drain route callbacks before deleting its user
-      // or closing the fixture, otherwise route.fetch can outlive the test.
+      // or closing the fixture, otherwise a callback can outlive the test.
       await page.unrouteAll({ behavior: 'wait' });
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
