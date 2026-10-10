@@ -743,7 +743,6 @@ export default function GlobalKbPage() {
   // missing/purged predecessor (404) just falls back to the plain body view.
   useEffect(() => {
     setSupersededEntry(null);
-    setDraftView(selected?.status === 'draft' ? 'diff' : 'full');
     const supersedesId = selected?.supersedesEntryId;
     if (!supersedesId) return;
     let cancelled = false;
@@ -768,6 +767,12 @@ export default function GlobalKbPage() {
       cancelled = true;
     };
   }, [selected]);
+
+  useEffect(() => {
+    setDraftView(selected?.status === 'draft' ? 'diff' : 'full');
+    // Keyed on the id: a save replaces `selected` with the same entry and must keep the toggle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
 
   /** From the dialog the failure shows in the dialog, since the banner under the page is behind
    *  its overlay. */
