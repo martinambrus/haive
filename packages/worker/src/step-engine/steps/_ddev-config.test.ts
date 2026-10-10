@@ -282,6 +282,19 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'mysql', dbVersion: '8.0' });
   });
 
+  it('returns promptly on a chain of merges that repeat one alias', () => {
+    let cfg = 'm0: &m0 {x: "1"}\n';
+    for (let i = 1; i < 40; i++) {
+      cfg += `m${i}: &m${i}\n  <<: [${Array(8)
+        .fill(`*m${i - 1}`)
+        .join(', ')}]\n`;
+    }
+    cfg += 'database:\n  <<: *m39\n';
+    const started = performance.now();
+    expect(parseDdevConfig(cfg).dbType).toBeNull();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it('reads a merged top-level field', () => {
     expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
   });

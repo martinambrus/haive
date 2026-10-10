@@ -35,19 +35,21 @@ const isMergeKey = (key: unknown): boolean =>
   isScalar(key) && key.type === 'PLAIN' && key.value === '<<';
 
 /** `key` in `map` as yaml.v3 reads it: the map's own entry first, then each `<<` source in order. */
-function lookup(map: YAMLMap, key: string, doc: Document, depth = 0): unknown {
+function lookup(map: YAMLMap, key: string, doc: Document, seen = new Set<YAMLMap>()): unknown {
+  // Each map is searched once, so a chain of merges repeating one alias stays linear.
+  if (seen.has(map)) return undefined;
+  seen.add(map);
   const own = map.items.find(
     (pair) => !isMergeKey(pair.key) && isScalar(pair.key) && pair.key.value === key,
   );
   if (own) return resolved(own.value, doc);
-  if (depth > 8) return undefined;
   for (const pair of map.items) {
     if (!isMergeKey(pair.key)) continue;
     const source = resolved(pair.value, doc);
     const sources = isSeq(source) ? source.items.map((item) => resolved(item, doc)) : [source];
     for (const from of sources) {
       if (!isMap(from)) continue;
-      const found = lookup(from, key, doc, depth + 1);
+      const found = lookup(from, key, doc, seen);
       if (found !== undefined) return found;
     }
   }
