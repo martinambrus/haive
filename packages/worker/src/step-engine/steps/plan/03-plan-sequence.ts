@@ -517,14 +517,16 @@ async function buildWave(
   }));
 }
 
+// A rejected reply makes its agent `failed`, so another pass does not count its group as asked.
 async function stampMiningError(ctx: StepContext, agentId: string, message: string): Promise<void> {
   await ctx.db
     .update(schema.taskStepAgentMinings)
-    .set({ errorMessage: message.slice(0, 2000) })
+    .set({ status: 'failed', errorMessage: message.slice(0, 2000), updatedAt: new Date() })
     .where(
       and(
         eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
         eq(schema.taskStepAgentMinings.agentId, agentId),
+        eq(schema.taskStepAgentMinings.status, 'done'),
       ),
     )
     .catch(() => undefined);

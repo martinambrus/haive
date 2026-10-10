@@ -1,14 +1,18 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import type { Database } from '@haive/database';
-import type { PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import type { AskedRow, PlanEdgeRecord, PlanNodeSkeleton } from '@haive/shared/plan';
 import {
   SEQUENCE_AGENTS_PER_PASS,
   SEQUENCE_MAX_RUN_CHILDREN,
+  askedParents,
   computePlanSequence,
+  computeSequenceProgress,
   loadPlanEdges,
   loadPlanSkeletons,
   parsePlanNodeRefs,
   planNodePath,
+  sequenceAgentId,
 } from '@haive/shared/plan';
 import { PLAN_PATCH_MAX_OPS } from '@haive/shared';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
@@ -472,7 +476,11 @@ describe('foldSequenceResults', () => {
     ]);
     expect(vi.mocked(applyAgentPatch)).not.toHaveBeenCalled();
     expect(stamps).toEqual([
-      { errorMessage: "plan patch not applied: upsert dropped: unknown node reference '42'" },
+      {
+        status: 'failed',
+        errorMessage: "plan patch not applied: upsert dropped: unknown node reference '42'",
+        updatedAt: expect.any(Date),
+      },
     ]);
   });
 
@@ -489,6 +497,107 @@ describe('foldSequenceResults', () => {
     const { db, stamps } = fakeDb();
     expect(await foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).toBe(2);
     expect(stamps).toEqual([]);
+  });
+});
+
+describe('a reply the fold rejects', () => {
+  const THIS_PASS = '55555555-5555-4555-8555-555555555555';
+  const NEXT_PASS = '66666666-6666-4666-8666-666666666666';
+  const NO_STEP_OF_MINE = '';
+  const agentId = sequenceAgentId(PARENT, 1);
+  const ORDER = [
+    { op: 'upsert', nodeRef: A, ordinal: 0 },
+    { op: 'upsert', nodeRef: B, ordinal: 1 },
+  ];
+  const outcome = (dropped: string[] = []) => ({
+    created: [],
+    updated: [A, B],
+    deleted: [],
+    linked: 0,
+    unlinked: 0,
+    codeLinked: 0,
+    refs: {},
+    dropped,
+    strippedCodeLinks: [],
+  });
+
+  function pass(row: Record<string, unknown> = {}) {
+    const fake = createFakeDb({ minings: schema.taskStepAgentMinings });
+    fake.insert(schema.taskStepAgentMinings, {
+      taskStepId: THIS_PASS,
+      agentId,
+      status: 'done',
+      attempts: 1,
+      ...row,
+    });
+    const ctx = {
+      taskId: 't',
+      taskStepId: THIS_PASS,
+      db: fake.db as unknown as Database,
+      logger: { warn: () => {} },
+    } as unknown as StepContext;
+    const asked = (stepId: string) =>
+      askedParents(fake.rows(schema.taskStepAgentMinings) as AskedRow[], stepId);
+    return { fake, ctx, asked };
+  }
+
+  const answer = (output: unknown) => ({ agentId, status: 'done', output }) as AgentMiningResult;
+
+  beforeEach(() => {
+    vi.mocked(applyAgentPatch).mockReset();
+  });
+
+  it.each([
+    ['carries no patch', () => answer('I could not order these.')],
+    [
+      'names no node it can order',
+      () => answer({ ops: [{ op: 'upsert', nodeRef: 42, ordinal: 0 }] }),
+    ],
+    [
+      'is refused by the applier',
+      () => {
+        vi.mocked(applyAgentPatch).mockRejectedValueOnce(new Error('plan patch failed validation'));
+        return answer({ ops: ORDER });
+      },
+    ],
+  ])('a reply that %s is asked again by the next pass and still counted', async (_why, make) => {
+    const { ctx, asked } = pass();
+    await foldSequenceResults(ctx, 'r', [make()]);
+
+    const next = asked(NEXT_PASS);
+    expect(next.has(PARENT)).toBe(false);
+    expect(computeTargets(NODES, [], next).targets.map((t) => t.parentId)).toEqual([PARENT]);
+    const count = computeSequenceProgress(NODES, [], asked(NO_STEP_OF_MINE));
+    expect(count.groupsRemaining).toBe(1);
+  });
+
+  it('does not send a rejected group a second time within its own pass', async () => {
+    const { ctx, asked } = pass();
+    await foldSequenceResults(ctx, 'r', [answer('I could not order these.')]);
+
+    expect(asked(THIS_PASS).has(PARENT)).toBe(true);
+  });
+
+  it.each([
+    ['whole', []],
+    ['with ops set aside', ["upsert dropped: unknown node reference 'x'"]],
+  ])('a reply that landed %s stays asked by every pass', async (_how, dropped) => {
+    vi.mocked(applyAgentPatch).mockResolvedValueOnce(outcome(dropped));
+    const { ctx, asked } = pass();
+    await foldSequenceResults(ctx, 'r', [answer({ ops: ORDER })]);
+
+    expect(asked(NEXT_PASS).has(PARENT)).toBe(true);
+    expect(asked(NO_STEP_OF_MINE).has(PARENT)).toBe(true);
+  });
+
+  it('does not write over a row that has moved on from the reply it folded', async () => {
+    const { ctx, fake } = pass({ status: 'running' });
+    await foldSequenceResults(ctx, 'r', [answer('I could not order these.')]);
+
+    expect(fake.rows(schema.taskStepAgentMinings)[0]).toMatchObject({
+      status: 'running',
+      errorMessage: null,
+    });
   });
 });
 
