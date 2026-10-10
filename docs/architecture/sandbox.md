@@ -122,3 +122,11 @@ on the main checkout. The invocation mount, the Terminal, the prompt boundary an
 (409) refuse; the runtime readers (`_task-meta`, `_spec-artifact`, `_external-drift`) use the decision
 alone, because a runner teardown after 12 must not throw. An explicit `worktreeRel` (DAG issue, merge
 fix) names its own tree and skips all of this.
+
+## Values in runner shell commands
+
+`runnerExec` and `appRunnerExec` run their command through a shell, so every value spliced into one
+goes through `shellQuote` (`sandbox/shell-quote.ts`), the one helper. That includes an app URL:
+`ddevUrlFromConfigText` builds it from the raw `.ddev/config.yaml` before DDEV has read the file, and
+ddev v1.25.2 writes a `project_tld` of `e'; id; '` into its config, refusing it only at a later
+`ddev describe`. `probe-url-quoting.test.ts` pins the 12 `browser-probe-connect` command lines.
