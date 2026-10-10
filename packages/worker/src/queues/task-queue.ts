@@ -16,7 +16,6 @@ import {
 } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import {
-  checkRevive,
   isUniqueViolationOf,
   ONE_LIVE_UPGRADE_INDEX,
   schema,
@@ -133,6 +132,7 @@ import {
   updateOwnedStep,
   type TaskFence,
 } from '../step-engine/step-ownership.js';
+import { refuseRevive } from './_revive-check.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
@@ -522,13 +522,16 @@ export async function markTaskRunningWithStep(
   try {
     if (!fence?.reviveFailed) return await point(db);
     const refused = await db.transaction(async (tx) => {
-      const check = await checkRevive(tx, taskId);
-      if (check?.refusal) return check.refusal;
+      const refusal = await refuseRevive(tx, taskId);
+      if (refusal) return refusal;
       return (await point(tx)) ? null : 'overtaken';
     });
     if (refused === null) return true;
     if (refused === 'overtaken') return false;
-    return await refuse(refused.reason, 'taskId' in refused ? { otherTaskId: refused.taskId } : {});
+    return await refuse(
+      refused.reason,
+      refused.otherTaskId ? { otherTaskId: refused.otherTaskId } : {},
+    );
   } catch (err) {
     if (!fence?.reviveFailed || !isUniqueViolationOf(err, ONE_LIVE_UPGRADE_INDEX)) throw err;
     return refuse('live-upgrade-index');

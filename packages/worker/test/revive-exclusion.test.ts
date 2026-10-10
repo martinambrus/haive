@@ -25,6 +25,7 @@ function setup(
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
+    onboardingArtifacts: schema.onboardingArtifacts,
   });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -45,6 +46,17 @@ function setup(
     currentStepId: STEP,
     completedAt: fake.now(),
   });
+  if (type === 'onboarding_upgrade') {
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-000000000003',
+      userId: USER,
+      repositoryId: REPO,
+      type: 'onboarding',
+      title: 'onboarded',
+      status: 'completed',
+      completedAt: fake.now(),
+    });
+  }
   if (other) {
     fake.insert(schema.tasks, {
       id: OTHER,
