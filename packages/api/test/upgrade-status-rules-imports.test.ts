@@ -459,7 +459,8 @@ describe('upgrade-status and an upgrade that only removed files', () => {
 
 describe('upgrade-status and the RTK settings files no row records', () => {
   let repo: string;
-  const settings = (text: string) => writeFile(path.join(repo, '.claude/settings.json'), text);
+  const settings = (text: string | Buffer) =>
+    writeFile(path.join(repo, '.claude/settings.json'), text);
 
   beforeEach(async () => {
     repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-rtk-settings-'));
@@ -510,6 +511,15 @@ describe('upgrade-status and the RTK settings files no row records', () => {
 
   it('not for one past the read cap, which the plan does not read either', async () => {
     await settings(`${buildClaudeSettingsJson()}${'\n'.repeat(RULES_FILE_READ_CAP)}`);
+    const body = await status();
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('not for one that is not UTF-8, which 02 keeps whole', async () => {
+    const edited = JSON.parse(buildClaudeSettingsJson()) as Record<string, unknown>;
+    edited.theme = 'café';
+    await settings(Buffer.from(`${JSON.stringify(edited, null, 2)}\n`, 'latin1'));
     const body = await status();
     expect(body.rtkSettingsLeftovers).toBeUndefined();
     expect(body.hasUpgradeAvailable).toBe(false);
