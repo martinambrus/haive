@@ -317,6 +317,14 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig(cfg).dbType).toBe('postgres');
   });
 
+  it('resolves a redefined anchor to its nearest earlier definition', () => {
+    let cfg = '';
+    for (let i = 0; i < 3000; i++) cfg += `a${i}: &a {type: mysql}\n`;
+    cfg += 'b: &a {type: postgres, version: "16"}\n';
+    cfg += `database: {<<: [${Array(3000).fill('*a').join(', ')}]}\n`;
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '16' });
+  });
+
   it('reads a merged top-level field', () => {
     expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
   });

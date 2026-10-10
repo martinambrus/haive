@@ -28,24 +28,21 @@ function scalarText(node: unknown, text: string): string | null {
 
 type Resolve = (node: unknown) => unknown;
 
-/** Resolves an alias to the nearest anchor of its name before it, as YAML does, from one index of the
- *  document's anchors; `Alias.resolve` rescans the document on every call. Never expands an alias. */
+/** Resolves an alias to the nearest anchor of its name before it, as YAML does. One walk of the
+ *  document in order records every alias's target; `Alias.resolve` rescans on every call. */
 function anchorResolver(doc: Document): Resolve {
-  const anchors = new Map<string, { start: number; node: Node }[]>();
+  const latest = new Map<string, Node>();
+  const targets = new Map<unknown, Node>();
   visit(doc, (_key, node) => {
+    if (isAlias(node)) {
+      const target = latest.get(node.source);
+      if (target) targets.set(node, target);
+      return;
+    }
     const named = node as Node & { anchor?: string };
-    if (!named.anchor || !named.range) return;
-    const list = anchors.get(named.anchor) ?? [];
-    list.push({ start: named.range[0], node: named });
-    anchors.set(named.anchor, list);
+    if (named.anchor) latest.set(named.anchor, named);
   });
-  return (node) => {
-    if (!isAlias(node)) return node;
-    const at = node.range?.[0] ?? Infinity;
-    let found: Node | undefined;
-    for (const entry of anchors.get(node.source) ?? []) if (entry.start < at) found = entry.node;
-    return found;
-  };
+  return (node) => (isAlias(node) ? targets.get(node) : node);
 }
 
 // yaml.v3's merge predicate: an untagged plain `<<`, or one tagged `!` or `!!merge`.
