@@ -58,7 +58,7 @@ import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
 import {
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
-  renderContextAdmitsUpgrade,
+  upgradeAdmission,
 } from '../../lib/onboarding-state.js';
 import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
 import { currentStepLabel } from './_step-label.js';
@@ -451,45 +451,37 @@ taskRoutes.post('/', async (c) => {
     if (!body.repositoryId) {
       throw new HttpError(400, 'onboarding_upgrade tasks require a repositoryId');
     }
-    const priorOnboarding = await db.query.tasks.findFirst({
+    const repo = await db.query.repositories.findFirst({
       where: and(
-        eq(schema.tasks.repositoryId, body.repositoryId),
-        eq(schema.tasks.userId, userId),
-        eq(schema.tasks.type, 'onboarding'),
-        eq(schema.tasks.status, 'completed'),
+        eq(schema.repositories.id, body.repositoryId),
+        eq(schema.repositories.userId, userId),
       ),
-      columns: { id: true },
+      columns: {
+        id: true,
+        renderContext: true,
+        source: true,
+        status: true,
+        storagePath: true,
+        localPath: true,
+        onboardedAt: true,
+        onboardingResetAt: true,
+      },
     });
-    const priorArtifact = await db.query.onboardingArtifacts.findFirst({
-      where: and(
-        eq(schema.onboardingArtifacts.repositoryId, body.repositoryId),
-        isNull(schema.onboardingArtifacts.supersededAt),
-      ),
-      columns: { id: true },
-    });
-    if (!priorOnboarding && !priorArtifact) {
-      const repo = await db.query.repositories.findFirst({
-        where: and(
-          eq(schema.repositories.id, body.repositoryId),
-          eq(schema.repositories.userId, userId),
-        ),
-        columns: {
-          id: true,
-          renderContext: true,
-          source: true,
-          status: true,
-          storagePath: true,
-          localPath: true,
-          onboardedAt: true,
-          onboardingResetAt: true,
-        },
-      });
-      if (!repo || !(await renderContextAdmitsUpgrade(db, userId, repo))) {
+    if (!repo) throw new HttpError(404, 'Repository not found');
+    const admission = await upgradeAdmission(db, userId, repo);
+    if (!admission.admitted) {
+      if (admission.reason === 'live-onboarding') {
         throw new HttpError(
           409,
-          'No completed onboarding found for this repository; cannot upgrade',
+          `Onboarding is still running for this repository (task ${admission.taskId}), so it cannot be upgraded yet`,
         );
       }
+      throw new HttpError(
+        409,
+        admission.reason === 'reset'
+          ? 'This repository was reset and no onboarding has finished since, so it cannot be upgraded'
+          : 'No completed onboarding found for this repository; cannot upgrade',
+      );
     }
   }
 

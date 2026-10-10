@@ -76,7 +76,8 @@ function inSync(providers: { name: string; rulesContent: string; enabled: boolea
     templateContentHash: hash,
     bundleItemId: null,
     haiveVersion: null,
-    generatedAt: null,
+    repositoryId: 'repo-1',
+    generatedAt: new Date(1),
   });
   state.rows = new Map<unknown, unknown[]>([
     [schema.templateManifestCache, [{ ...agent, setHash: 's' }]],
@@ -901,7 +902,8 @@ describe('D10: upgrade-status and the set a project-state sync wrote', () => {
         : 'w',
       bundleItemId: null,
       haiveVersion: null,
-      generatedAt: null,
+      repositoryId: 'repo-1',
+      generatedAt: new Date(1),
     });
     state.rows = new Map<unknown, unknown[]>([
       [
@@ -1230,5 +1232,113 @@ describe('upgrade-status and an upgrade that only untracked a row', () => {
     const body = await status();
     expect(body.isOnboarded).toBe(true);
     expect(body.hasPriorUpgrade).toBe(false);
+  });
+});
+
+// #165, #166, the banner's half: a reset and a live onboarding withdraw the offer whatever rows remain.
+// The hand mock ignores every WHERE, so the one set of task rows below answers each task query.
+describe('upgrade-status honours a reset and a live onboarding', () => {
+  const RESET = 5000;
+  let repo: string;
+
+  const onboarding = (over: Record<string, unknown> = {}) => ({
+    id: 'onboarding-1',
+    repositoryId: 'repo-1',
+    type: 'onboarding',
+    status: 'completed',
+    completedAt: new Date(1000),
+    metadata: null,
+    ...over,
+  });
+
+  /** The repository, its tasks and its live rows (all written at `rowsAt`, none when null). */
+  const world = (over: {
+    resetAt?: number;
+    tasks?: Record<string, unknown>[];
+    rowsAt?: number | null;
+  }) => {
+    inSync([claude]);
+    const rowsAt = over.rowsAt === undefined ? 1000 : over.rowsAt;
+    state.rows.set(
+      schema.onboardingArtifacts,
+      rowsAt === null
+        ? []
+        : (state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+            ...r,
+            repositoryId: 'repo-1',
+            generatedAt: new Date(rowsAt),
+          })),
+    );
+    state.rows.set(schema.tasks, over.tasks ?? []);
+    state.onboarded = (over.tasks ?? []).some((t) => t.status === 'completed');
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: ['agent.x'],
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+      source: 'git_https',
+      status: 'ready',
+      onboardedAt: null,
+      onboardingResetAt: over.resetAt === undefined ? null : new Date(over.resetAt),
+    };
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-reset-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  const notOnboarded = async () => {
+    const body = await status();
+    expect(body.isOnboarded).toBe(false);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  };
+
+  it('is onboarded where nothing was reset and a row is live', async () => {
+    world({});
+    expect((await status()).isOnboarded).toBe(true);
+  });
+
+  it('is not onboarded after a reset when the rows it kept are all that remain', async () => {
+    world({ resetAt: RESET, tasks: [onboarding()], rowsAt: 1000 });
+    await notOnboarded();
+  });
+
+  it('is not onboarded after a reset when only a completion from before it remains', async () => {
+    world({ resetAt: RESET, tasks: [onboarding()], rowsAt: null });
+    await notOnboarded();
+  });
+
+  it('is onboarded once an onboarding completed after the reset', async () => {
+    world({ resetAt: RESET, tasks: [onboarding({ completedAt: new Date(6000) })], rowsAt: null });
+    expect((await status()).isOnboarded).toBe(true);
+  });
+
+  it('is onboarded once rows were written after the reset', async () => {
+    world({ resetAt: RESET, rowsAt: 6000 });
+    expect((await status()).isOnboarded).toBe(true);
+  });
+
+  it.each(['running', 'waiting_user'])(
+    'is not onboarded while an onboarding is %s, whatever rows remain',
+    async (taskStatus) => {
+      world({ tasks: [onboarding(), onboarding({ id: 'onboarding-2', status: taskStatus })] });
+      await notOnboarded();
+    },
+  );
+
+  it('is not onboarded after a reset because an upgrade once ran', async () => {
+    world({
+      resetAt: RESET,
+      tasks: [onboarding({ id: 'upgrade-1', type: 'onboarding_upgrade', status: 'failed' })],
+      rowsAt: null,
+    });
+    await notOnboarded();
   });
 });

@@ -263,6 +263,21 @@ export interface OnboardingVerdict {
   canMarkOnboarded: boolean;
 }
 
+export function hasCompletedSinceReset(
+  facts: OnboardingTaskFacts,
+  onboardingResetAt: Date | null,
+): boolean {
+  // A run that finished BEFORE the reset says nothing about the tree the reset left behind. A
+  // completed run carrying no `completed_at` cannot be placed on either side of the epoch, so it
+  // fails closed — the safe direction, and unreachable in practice since `markTaskCompleted`
+  // writes that column in the same UPDATE as the status.
+  return (
+    facts.hasCompleted &&
+    (onboardingResetAt === null ||
+      (facts.newestCompletedAt !== null && facts.newestCompletedAt > onboardingResetAt))
+  );
+}
+
 /**
  * Is this repository onboarded?
  *
@@ -312,14 +327,7 @@ export function resolveOnboardingVerdict(input: {
   const markersPresent = missing.length === 0;
   const inProgressTaskId = facts.liveTaskId;
 
-  // A run that finished BEFORE the reset says nothing about the tree the reset left behind. A
-  // completed run carrying no `completed_at` cannot be placed on either side of the epoch, so it
-  // fails closed — the safe direction, and unreachable in practice since `markTaskCompleted`
-  // writes that column in the same UPDATE as the status.
-  const completedSinceReset =
-    facts.hasCompleted &&
-    (onboardingResetAt === null ||
-      (facts.newestCompletedAt !== null && facts.newestCompletedAt > onboardingResetAt));
+  const completedSinceReset = hasCompletedSinceReset(facts, onboardingResetAt);
   // "No run was ever started here" is evidence only until someone resets: a reset IS a run
   // having been started and then taken back.
   const neverStarted = !facts.hasAny && onboardingResetAt === null;
@@ -358,21 +366,23 @@ export function resolveOnboardingVerdict(input: {
   };
 }
 
+export interface RepositoryForUpgrade {
+  id: string;
+  source?: string;
+  renderContext: unknown;
+  status: string;
+  storagePath: string | null;
+  localPath: string | null;
+  onboardedAt: Date | null;
+  onboardingResetAt: Date | null;
+}
+
 /** Whether the render context column vouches for an upgrade no row or onboarding does, as on a
  *  clone: 01 renders from it, and the repos page shows the repository as onboarded. */
 export async function renderContextAdmitsUpgrade(
   db: Database,
   userId: string,
-  repo: {
-    id: string;
-    source?: string;
-    renderContext: unknown;
-    status: string;
-    storagePath: string | null;
-    localPath: string | null;
-    onboardedAt: Date | null;
-    onboardingResetAt: Date | null;
-  },
+  repo: RepositoryForUpgrade,
 ): Promise<boolean> {
   if (readRenderContextColumn(repo.renderContext).kind !== 'column') return false;
   const root = repo.storagePath ?? repo.localPath;
@@ -389,4 +399,33 @@ export async function renderContextAdmitsUpgrade(
     onboardingResetAt: repo.onboardingResetAt,
     facts,
   }).onboarded;
+}
+
+export type UpgradeAdmission =
+  | { admitted: true }
+  | { admitted: false; reason: 'live-onboarding'; taskId: string }
+  | { admitted: false; reason: 'reset' | 'none' };
+
+/** The rule the banner and POST /tasks share: no live onboarding, and an onboarding finished, or a
+ *  row it wrote, since the reset epoch, or the render context column of a clone. */
+export async function upgradeAdmission(
+  db: Database,
+  userId: string,
+  repo: RepositoryForUpgrade,
+): Promise<UpgradeAdmission> {
+  const resetAt = repo.onboardingResetAt ?? null;
+  const facts =
+    (await loadOnboardingTaskFacts(db, userId, [repo.id])).get(repo.id) ?? NO_ONBOARDING_TASKS;
+  if (facts.liveTaskId) {
+    return { admitted: false, reason: 'live-onboarding', taskId: facts.liveTaskId };
+  }
+  if (hasCompletedSinceReset(facts, resetAt)) return { admitted: true };
+  const newestArtifactAt = (await loadNewestLiveArtifactAt(db, userId, [repo.id])).get(repo.id);
+  if (
+    hasArtifactsSinceReset(newestArtifactAt, resetAt) ||
+    (await renderContextAdmitsUpgrade(db, userId, repo))
+  ) {
+    return { admitted: true };
+  }
+  return { admitted: false, reason: resetAt === null ? 'none' : 'reset' };
 }

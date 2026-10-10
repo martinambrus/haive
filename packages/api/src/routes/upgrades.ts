@@ -35,7 +35,11 @@ import {
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { LIVE_TASK_STATUSES, renderContextAdmitsUpgrade } from '../lib/onboarding-state.js';
+import {
+  LIVE_TASK_STATUSES,
+  renderContextAdmitsUpgrade,
+  upgradeAdmission,
+} from '../lib/onboarding-state.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 
 export const upgradeRoutes = new Hono<AppEnv>();
@@ -486,9 +490,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }
   }
 
-  const isOnboarded = distinctInstalled.size > 0;
+  const admission = await upgradeAdmission(db, userId, repo);
+  let admitted = admission.admitted;
   let firstUpgradeOnThisInstall = false;
-  if (!isOnboarded) {
+  if (admitted && distinctInstalled.size === 0) {
     const priorOnboarding = await db.query.tasks.findFirst({
       where: and(
         eq(schema.tasks.repositoryId, repositoryId),
@@ -502,36 +507,36 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     // one until a row records it, whatever became of an upgrade that recorded nothing.
     firstUpgradeOnThisInstall =
       !priorOnboarding && (await renderContextAdmitsUpgrade(db, userId, repo));
+  }
+  if (!admission.admitted && admission.reason === 'none') {
     // POST /tasks starts an upgrade only on an onboarded repository, so one any upgrade ran on is one.
-    const [anyUpgrade] =
-      priorOnboarding || firstUpgradeOnThisInstall
-        ? []
-        : await db
-            .select({ id: schema.tasks.id })
-            .from(schema.tasks)
-            .where(
-              and(
-                eq(schema.tasks.repositoryId, repositoryId),
-                eq(schema.tasks.userId, userId),
-                eq(schema.tasks.type, 'onboarding_upgrade'),
-              ),
-            )
-            .limit(1);
-    if (!priorOnboarding && !firstUpgradeOnThisInstall && !anyUpgrade) {
-      const res: UpgradeStatusResponse = {
-        repositoryId,
-        hasUpgradeAvailable: false,
-        installedTemplateSetHash: null,
-        currentTemplateSetHash: currentSetHash,
-        changedTemplateIds: [],
-        isOnboarded: false,
-        installedHaiveVersion: null,
-        currentHaiveVersion,
-        hasInProgressUpgradeSession: false,
-        hasPriorUpgrade: false,
-      };
-      return c.json(res);
-    }
+    const [anyUpgrade] = await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.userId, userId),
+          eq(schema.tasks.type, 'onboarding_upgrade'),
+        ),
+      )
+      .limit(1);
+    admitted = anyUpgrade !== undefined;
+  }
+  if (!admitted) {
+    const res: UpgradeStatusResponse = {
+      repositoryId,
+      hasUpgradeAvailable: false,
+      installedTemplateSetHash: null,
+      currentTemplateSetHash: currentSetHash,
+      changedTemplateIds: [],
+      isOnboarded: false,
+      installedHaiveVersion: null,
+      currentHaiveVersion,
+      hasInProgressUpgradeSession: false,
+      hasPriorUpgrade: false,
+    };
+    return c.json(res);
   }
 
   // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.
