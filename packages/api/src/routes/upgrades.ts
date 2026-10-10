@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
+  agentSpecSchema,
   buildCliRulesBlockFromProviders,
   bundleAgentTemplateHash,
   CLI_RULES_SCHEMA_VERSION,
@@ -13,6 +14,7 @@ import {
   RTK_SETTINGS_FILES,
   rtkSettingsNeeded,
   sha256Hex,
+  skillEntrySchema,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
@@ -208,16 +210,24 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       kind: schema.customBundleItems.kind,
       schemaVersion: schema.customBundleItems.schemaVersion,
       contentHash: schema.customBundleItems.contentHash,
+      normalizedSpec: schema.customBundleItems.normalizedSpec,
     })
     .from(schema.customBundleItems)
     .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
     .where(eq(schema.customBundles.repositoryId, repositoryId));
-  const customCurrent = bundleItems.map((b) => ({
-    templateId: `custom.${b.bundleId}.${b.itemId}`,
-    schemaVersion: b.schemaVersion,
-    // The hash the worker records on an agent's artifact rows (expandCustomBundlesFor).
-    contentHash: b.kind === 'agent' ? bundleAgentTemplateHash(b.contentHash) : b.contentHash,
-  }));
+  // 01 skips an item whose spec fails the schema its loader parses it with, so no rendering is current.
+  const customCurrent = bundleItems
+    .filter(
+      (b) =>
+        (b.kind === 'agent' ? agentSpecSchema : skillEntrySchema).safeParse(b.normalizedSpec)
+          .success,
+    )
+    .map((b) => ({
+      templateId: `custom.${b.bundleId}.${b.itemId}`,
+      schemaVersion: b.schemaVersion,
+      // The hash the worker records on an agent's artifact rows (expandCustomBundlesFor).
+      contentHash: b.kind === 'agent' ? bundleAgentTemplateHash(b.contentHash) : b.contentHash,
+    }));
 
   // The AGENTS.md cli-rules region is per-repo content (the repo owner's merged
   // provider rules), so it is not in the global manifest cache. Recompute its
@@ -333,7 +343,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // the user explicitly kept it after a prior upgrade flagged it obsolete.
   // Including it in the drift comparison would make the banner perpetually
   // say "Upgrade available" with the same orphaned items.
-  const liveCustomItemIds = new Set(customCurrent.map((c) => c.templateId));
+  const liveCustomItemIds = new Set(bundleItems.map((b) => `custom.${b.bundleId}.${b.itemId}`));
   const distinctInstalled = new Map<
     string,
     {

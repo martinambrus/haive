@@ -6,6 +6,7 @@ import { schema } from '@haive/database';
 import {
   buildClaudeSettingsJson,
   buildCliRulesBlockFromProviders,
+  bundleAgentTemplateHash,
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_TEMPLATE_ID,
   normalizeContent,
@@ -1142,7 +1143,14 @@ describe('upgrade-status and a claim outside the applicable set', () => {
       body: 'skill body\n',
     };
     state.rows.set(schema.customBundleItems, [
-      { itemId: 'i1', bundleId: 'b1', kind: 'skill', schemaVersion: 1, contentHash: 'h-c' },
+      {
+        itemId: 'i1',
+        bundleId: 'b1',
+        kind: 'skill',
+        schemaVersion: 1,
+        contentHash: 'h-c',
+        normalizedSpec: { id: 'x', title: 'X', description: 'A skill that renders' },
+      },
     ]);
     await claim({ ...custom, bundleItemId: 'i1' });
     expect(await reads(), 'a live item').toEqual([[], false]);
@@ -1340,5 +1348,132 @@ describe('upgrade-status honours a reset and a live onboarding', () => {
       rowsAt: null,
     });
     await notOnboarded();
+  });
+});
+
+// #235: 01 skips a bundle item whose spec fails its loader's schema, so a live row for it is offered
+// as obsolete, while the banner counted every item as current.
+describe('upgrade-status and a bundle item 01 cannot render', () => {
+  const GOOD_SKILL = { id: 'good', title: 'Good', description: 'A skill that renders' };
+  const GOOD_AGENT = {
+    id: 'agent-ok',
+    title: 'Agent',
+    description: 'An agent that renders',
+    color: 'blue',
+    field: 'qa',
+    tools: [],
+    coreMission: 'Review',
+    responsibilities: [],
+    whenInvoked: [],
+    executionSteps: [],
+    outputFormat: '',
+    qualityCriteria: [],
+    antiPatterns: [],
+  };
+  let repo: string;
+
+  const item = (itemId: string, kind: 'agent' | 'skill', spec: Record<string, unknown>) => ({
+    itemId,
+    bundleId: 'b1',
+    kind,
+    schemaVersion: 1,
+    contentHash: 'h-c',
+    normalizedSpec: spec,
+  });
+  /** A live row for the item, current as far as its hash goes. */
+  const row = (itemId: string, kind: 'agent' | 'skill') => ({
+    id: `row-${itemId}`,
+    diskPath: `.claude/${kind}s/${itemId}.md`,
+    templateId: `custom.b1.${itemId}`,
+    templateSchemaVersion: 1,
+    templateContentHash: kind === 'agent' ? bundleAgentTemplateHash('h-c') : 'h-c',
+    writtenHash: 'w',
+    bundleItemId: itemId,
+    haiveVersion: null,
+    repositoryId: 'repo-1',
+    generatedAt: new Date(1000),
+  });
+  const world = (items: ReturnType<typeof item>[], live: [string, 'agent' | 'skill'][]) => {
+    inSync([claude]);
+    state.rows.set(schema.onboardingArtifacts, [
+      ...(state.rows.get(schema.onboardingArtifacts) as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        repositoryId: 'repo-1',
+        generatedAt: new Date(1000),
+      })),
+      ...live.map(([itemId, kind]) => row(itemId, kind)),
+    ]);
+    state.rows.set(schema.customBundleItems, items);
+    state.rows.set(schema.customBundles, [{ name: 'House bundle' }]);
+    state.onboarded = false;
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: ['agent.x'],
+      storagePath: repo,
+      localPath: null,
+      rtkEnabled: false,
+    };
+  };
+
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-bundle-'));
+    await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it('reads installed items that render as current', async () => {
+    world(
+      [item('good', 'skill', GOOD_SKILL), item('agent-ok', 'agent', GOOD_AGENT)],
+      [
+        ['good', 'skill'],
+        ['agent-ok', 'agent'],
+      ],
+    );
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([]);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+
+  it.each([
+    ['skill', 'skill', { id: 'bad-one' }],
+    ['agent', 'agent', { ...GOOD_AGENT, id: 'bad-one', coreMission: '' }],
+  ] as const)(
+    'reports an installed %s whose spec fails the schema as changed',
+    async (_k, kind, spec) => {
+      world(
+        [item('good', 'skill', GOOD_SKILL), item('bad-one', kind, spec)],
+        [
+          ['good', 'skill'],
+          ['bad-one', kind],
+        ],
+      );
+      const body = await status();
+      expect(body.changedTemplateIds).toEqual(['custom.b1.bad-one']);
+      expect(body.hasUpgradeAvailable).toBe(true);
+      expect(body.customChanges).toEqual([
+        { bundleId: 'b1', bundleName: 'House bundle', changedItemCount: 1 },
+      ]);
+    },
+  );
+
+  it('reports nothing for an item that fails the schema and was never installed', async () => {
+    world(
+      [item('good', 'skill', GOOD_SKILL), item('bad-one', 'skill', { id: 'bad-one' })],
+      [['good', 'skill']],
+    );
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual([]);
+    expect(body.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('still reads a valid item with no live row as a new one to install', async () => {
+    world([item('good', 'skill', GOOD_SKILL)], []);
+    const body = await status();
+    expect(body.changedTemplateIds).toEqual(['custom.b1.good']);
+    expect(body.hasUpgradeAvailable).toBe(true);
   });
 });
