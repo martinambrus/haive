@@ -263,6 +263,7 @@ const houseRulesSimilaritySchema = z.object({
         hash: z.string(),
         title: z.string(),
         score: z.number().nullable(),
+        stale: z.boolean().optional(),
       }),
     )
     .optional(),

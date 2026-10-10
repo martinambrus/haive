@@ -9,9 +9,9 @@ import { resolveEmbedBudget } from '@haive/shared/rag';
 const h = vi.hoisted(() => ({
   text: 'Add a cart icon\nShow it in the header.',
   embed: vi.fn(async (..._args: unknown[]): Promise<number[][]> => [[0.6, 0.8]]),
-  rows: [] as Array<{ id: string; score: number | string }>,
+  rows: [] as Array<{ id: string; hash: string | null; score: number | string }>,
   hasVector: true,
-  jsonRows: [] as Array<{ id: string; embedding: unknown }>,
+  jsonRows: [] as Array<{ id: string; hash: string | null; embedding: unknown }>,
   storeError: null as Error | null,
   storeCalls: [] as Array<{ sql: string; params: unknown[] }>,
   storeOptions: [] as unknown[],
@@ -110,8 +110,8 @@ afterEach(() => vi.restoreAllMocks());
 describe('scoring the unmatched files rules of a write dispatch', () => {
   it('amends the pending record with the best cosine per rule, null for a rule with no vector', async () => {
     h.rows = [
-      { id: A, score: '0.8123456' },
-      { id: C, score: 0.25 },
+      { id: A, hash: 'hr1:Alpha', score: '0.8123456' },
+      { id: C, hash: 'hr1:Gamma', score: 0.25 },
     ];
     scoreHouseRulesInBackground(
       db,
@@ -164,10 +164,10 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
   it('scores a store without pgvector from its jsonb vectors, the best cosine per rule', async () => {
     h.hasVector = false;
     h.jsonRows = [
-      { id: A, embedding: [1, 0] },
-      { id: A, embedding: '[0,1]' },
-      { id: C, embedding: [0.6, 0.8] },
-      { id: C, embedding: [1, 0] },
+      { id: A, hash: 'hr1:Alpha', embedding: [1, 0] },
+      { id: A, hash: 'hr1:Alpha', embedding: '[0,1]' },
+      { id: C, hash: 'hr1:Gamma', embedding: [0.6, 0.8] },
+      { id: C, hash: 'hr1:Gamma', embedding: [1, 0] },
     ];
     scoreHouseRulesInBackground(
       db,
@@ -189,6 +189,41 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
     expect(scores[2]!.score).toBeCloseTo(1, 9);
   });
 
+  it.each([
+    ['pgvector', true],
+    ['jsonb', false],
+  ])(
+    'leaves a rule re-enforced since the stamp unscored and marked stale, on a %s store',
+    async (_label, hasVector) => {
+      h.hasVector = hasVector;
+      h.rows = [
+        { id: A, hash: 'hr1:Alpha', score: 0.7 },
+        { id: C, hash: 'hr1:Gamma-edited', score: 0.9 },
+      ];
+      h.jsonRows = [
+        { id: A, hash: 'hr1:Alpha', embedding: [0.6, 0.8] },
+        { id: C, hash: 'hr1:Gamma-edited', embedding: [0.6, 0.8] },
+      ];
+      scoreHouseRulesInBackground(
+        db,
+        INV,
+        TASK,
+        pendingStamp([
+          [A, 'Alpha'],
+          [B, 'Beta'],
+          [C, 'Gamma'],
+        ]),
+      );
+      const record = await recordWritten();
+
+      expect(record.scores).toEqual([
+        { ...candidate(A, 'Alpha'), score: hasVector ? 0.7 : expect.closeTo(1, 9) },
+        candidate(B, 'Beta'),
+        { ...candidate(C, 'Gamma'), score: null, stale: true },
+      ]);
+    },
+  );
+
   it('scores through a cold embedder load that outlasts the old 30 s budget', async () => {
     const coldLoadMs = 42_800;
     const { embedTimeoutMs } = await resolveEmbedBudget();
@@ -197,7 +232,7 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
       if (coldLoadMs > budget) throw Object.assign(new Error('aborted'), { name: 'TimeoutError' });
       return [[0.6, 0.8]];
     });
-    h.rows = [{ id: A, score: 0.5 }];
+    h.rows = [{ id: A, hash: 'hr1:Alpha', score: 0.5 }];
     scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
     const record = await recordWritten();
 

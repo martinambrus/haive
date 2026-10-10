@@ -42,20 +42,23 @@ function vectorOf(value: unknown): number[] | null {
 
 /** The best cosine per entry, computed over the fetched vectors of a store without pgvector. */
 function bestCosines(
-  rows: Array<{ id: string; embedding: unknown }>,
+  rows: Array<{ id: string; hash: string | null; embedding: unknown }>,
   query: number[],
-): Array<{ id: string; score: number }> {
-  const best = new Map<string, number>();
+): Array<{ id: string; hash: string | null; score: number }> {
+  const best = new Map<string, { id: string; hash: string | null; score: number }>();
   for (const row of rows) {
     const vector = vectorOf(row.embedding);
     if (vector === null) continue;
     const score = cosineSimilarity(query, vector);
-    if (score > (best.get(row.id) ?? -Infinity)) best.set(row.id, score);
+    if (score > (best.get(row.id)?.score ?? -Infinity)) {
+      best.set(row.id, { id: row.id, hash: row.hash, score });
+    }
   }
-  return [...best].map(([id, score]) => ({ id, score }));
+  return [...best.values()];
 }
 
-/** The highest cosine between the query and any row of each candidate; a rule with no vector keeps null. */
+/** The highest cosine between the query and any row of each candidate; a rule with no vector keeps
+ *  null, and one whose enforced hash is no longer the stamped one is marked stale rather than scored. */
 async function measure(
   db: Database,
   taskId: string,
@@ -82,23 +85,31 @@ async function measure(
           where table_name = 'ai_rag_embeddings' and column_name = 'vector'`)) as unknown as unknown[];
         if (columns.length > 0) {
           const read = await tx.execute(sql`
-            select r.entry_id::text as id, max(1 - (r.vector <=> ${vectorLiteral(vector)}::vector)) as score
+            select r.entry_id::text as id, e.enforced_hash as hash,
+              max(1 - (r.vector <=> ${vectorLiteral(vector)}::vector)) as score
             from ai_rag_embeddings r
             join global_kb_entries e on e.id = r.entry_id
             where r.namespace = ${settings.namespace}
               and r.entry_id = any(${ids}::uuid[])
               and e.embed_status = 'embedded'
-            group by r.entry_id`);
-          return read as unknown as Array<{ id: string; score: number | string }>;
+            group by r.entry_id, e.enforced_hash`);
+          return read as unknown as Array<{
+            id: string;
+            hash: string | null;
+            score: number | string;
+          }>;
         }
         const read = await tx.execute(sql`
-          select r.entry_id::text as id, r.embedding_json as embedding
+          select r.entry_id::text as id, e.enforced_hash as hash, r.embedding_json as embedding
           from ai_rag_embeddings r
           join global_kb_entries e on e.id = r.entry_id
           where r.namespace = ${settings.namespace}
             and r.entry_id = any(${ids}::uuid[])
             and e.embed_status = 'embedded'`);
-        return bestCosines(read as unknown as Array<{ id: string; embedding: unknown }>, vector);
+        return bestCosines(
+          read as unknown as Array<{ id: string; hash: string | null; embedding: unknown }>,
+          vector,
+        );
       }),
     {
       connectTimeoutSeconds: DISPATCH_KB_BOUNDS.connectTimeoutSeconds,
@@ -106,13 +117,18 @@ async function measure(
       settings,
     },
   );
-  const byId = new Map(rows.map((row) => [row.id, Number(row.score)]));
+  const byId = new Map(rows.map((row) => [row.id, row]));
   return {
     status: 'ok',
     model: embedModel,
     queryHash: createHash('sha256').update(query).digest('hex'),
     ms: Date.now() - startedAt,
-    scores: candidates.map((c) => ({ ...c, score: byId.get(c.id) ?? null })),
+    scores: candidates.map((c) => {
+      const row = byId.get(c.id);
+      if (!row) return { ...c, score: null };
+      if (row.hash !== c.hash) return { ...c, score: null, stale: true };
+      return { ...c, score: Number(row.score) };
+    }),
   };
 }
 

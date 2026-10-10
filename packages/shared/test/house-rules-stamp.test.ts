@@ -231,7 +231,11 @@ describe('the similarity record of a stamp', () => {
       status: 'failed',
       errorClass: 'timeout',
     };
-    for (const similarity of [pending, ok, failed]) {
+    const stale: NonNullable<HouseRulesStamp['similarity']> = {
+      ...ok,
+      scores: [{ id: ID_B, hash: HASH, title: 'Templates stay thin', score: null, stale: true }],
+    };
+    for (const similarity of [pending, ok, failed, stale]) {
       const column: StoredStamp = { ...FULL, similarity };
       expect(parseHouseRulesStamp(JSON.parse(JSON.stringify(column)))).toStrictEqual({
         ...FULL,
