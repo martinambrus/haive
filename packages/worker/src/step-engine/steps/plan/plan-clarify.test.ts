@@ -10,6 +10,7 @@ import {
   answerFieldId,
   buildClarifyForm,
   nextMove,
+  outlineExtraLines,
   outsideOutline,
   parseQuestions,
   parseVerdicts,
@@ -386,6 +387,29 @@ describe('00b-plan-clarify apply', () => {
     expect(err.dispatches.map((x) => [x.agentId, x.roleKey])).toEqual([
       ['clarify-outline-2', 'planner'],
     ]);
+    expect(err.dispatches[0]!.prompt).not.toContain('What the owner already decided');
+  });
+
+  it('carries the answered rounds into a redrafted outline', () => {
+    const lines = outlineExtraLines({ mode: 'greenfield' }, [
+      {
+        round: 1,
+        questions: [
+          { id: 'pay', topic: '', question: 'Who takes payment?', why: '', suggestions: [] },
+        ],
+        nothingOpen: false,
+        answers: [{ questionId: 'pay', answer: 'Stripe only' }],
+        steer: 'Mobile first.',
+        action: 'continue',
+        answered: true,
+        outcome: null,
+        integrated: true,
+        rootId: null,
+      },
+    ]).join('\n');
+    expect(lines).toContain('What the owner already decided');
+    expect(lines).toContain('The owner answered: Stripe only');
+    expect(lines).toContain('The owner also said: Mobile first.');
   });
 
   it('does nothing under the LLM bypass', async () => {

@@ -124,7 +124,7 @@ async function dispatchFor(
         agentId: outlineAgentId(earlierDrafts),
         agentTitle: 'Plan outline',
         roleKey: 'planner',
-        prompt: buildRootPrompt(live, {}, outlineExtraLines(live)),
+        prompt: buildRootPrompt(live, {}, outlineExtraLines(live, rounds)),
       };
     case 'ask':
       return {

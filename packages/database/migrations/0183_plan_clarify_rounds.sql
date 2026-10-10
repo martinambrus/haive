@@ -31,6 +31,9 @@ EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;
 
+-- A table pushed before root_id existed is skipped by the CREATE above and still needs it.
+ALTER TABLE "plan_clarify_rounds" ADD COLUMN IF NOT EXISTS "root_id" uuid;
+
 DO $$ BEGIN
   ALTER TABLE "plan_clarify_rounds" ADD CONSTRAINT "plan_clarify_rounds_root_id_plan_nodes_id_fk"
     FOREIGN KEY ("root_id") REFERENCES "public"."plan_nodes"("id") ON DELETE SET NULL ON UPDATE NO ACTION;

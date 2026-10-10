@@ -19,7 +19,12 @@ import {
 } from './_untrusted-repo.js';
 import { REFUTE_LENSES, buildRefutePrompt } from './workflow/08c-code-review.js';
 import { buildExpandPrompt, buildRootPrompt } from './plan/01-plan-build.js';
-import { buildAskPrompt, buildIntegratePrompt, type ClarifyRound } from './plan/_plan-clarify.js';
+import {
+  buildAskPrompt,
+  buildIntegratePrompt,
+  outlineExtraLines,
+  type ClarifyRound,
+} from './plan/_plan-clarify.js';
 import { buildAgentSelectorPrompt } from './workflow/_agent-selector.js';
 import { buildAgentMiningPrompt } from './workflow/03-phase-0a-discovery.js';
 import { buildEnrichPrompt } from './kb-author/01-enrich.js';
@@ -377,6 +382,12 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         label: `00b-plan-clarify buildAskPrompt (${mode})`,
         exportKey: 'step-engine/steps/plan/_plan-clarify.ts#buildAskPrompt',
         build: () => buildAskPrompt(d, '# Plan', [round]),
+      },
+      {
+        // A redraft after the outline's root was deleted carries the answered rounds.
+        label: `00b-plan-clarify outline redraft (${mode})`,
+        exportKey: 'step-engine/steps/plan/01-plan-build.ts#buildRootPrompt',
+        build: () => buildRootPrompt(d, permissive({ depth: 3 }), outlineExtraLines(d, [round])),
       },
       {
         label: `00b-plan-clarify buildIntegratePrompt (${mode})`,
@@ -1600,7 +1611,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(190);
+    ).toBe(192);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 

@@ -256,9 +256,30 @@ export function outsideOutline(
 /* Prompts                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Appended to `buildRootPrompt` for the outline the questions are asked about. */
-export function outlineExtraLines(d: Pick<PlanBuildDetect, 'mode'>): string[] {
+/** Appended to `buildRootPrompt` for the outline the questions are asked about. A REDRAFT, after
+ *  the outline's root was deleted, also carries every answered round: those rounds stay integrated,
+ *  so an outline drafted from the inputs alone would silently drop what the owner decided. */
+export function outlineExtraLines(
+  d: Pick<PlanBuildDetect, 'mode'>,
+  rounds: readonly ClarifyRound[] = [],
+): string[] {
+  const decided = rounds.some((r) => r.round > 0 && r.answered);
   return [
+    ...(decided
+      ? [
+          [
+            '## What the owner already decided',
+            'This outline is being drafted AGAIN: the previous one was deleted after the owner had',
+            'answered questions about it. Their answers below still stand. Build every one of them',
+            'into this outline, and do not re-open as a `decision` node anything they settled.',
+            '',
+            UNTRUSTED_FENCE_LEGEND.join('\n'),
+            '',
+            ...historyLines(rounds),
+          ].join('\n'),
+          '',
+        ]
+      : []),
     [
       '## Before anything is broken down',
       'The owner will be asked clarifying questions about this outline before it is expanded.',
