@@ -93,6 +93,14 @@ function changedExcerpt(before: string, after: string): { before: string; after:
 }
 
 function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPolicy): string {
+  // A protected path in the change under any status (git can report a move as AD + ??) may have moved its bytes; a capped list can hide it.
+  const protectedChanged =
+    artifact.truncated ||
+    artifact.files.some(
+      (file) =>
+        secretMaskDeniesPath(policy, file.path) ||
+        (file.oldPath !== undefined && secretMaskDeniesPath(policy, file.oldPath)),
+    );
   const files = artifact.files.map((file) => {
     const metadata = { path: file.path, oldPath: file.oldPath, status: file.status };
     // Do not relay a masked file through the host-built diff, even when masking is off.
@@ -102,6 +110,9 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
       (file.oldPath && secretMaskDeniesPath(policy, file.oldPath))
     ) {
       return { ...metadata, note: 'secret content omitted' };
+    }
+    if (protectedChanged && file.status !== 'deleted') {
+      return { ...metadata, note: 'content withheld: a protected file was removed in this change' };
     }
     if (file.binary || file.truncated) return { ...metadata, note: 'content unavailable' };
     return { ...metadata, ...changedExcerpt(file.oldContent, file.newContent) };
