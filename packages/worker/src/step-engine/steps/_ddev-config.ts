@@ -19,6 +19,9 @@ function scalarText(node: unknown, text: string): string | null {
   if (!isScalar(node) || typeof node.value !== 'string') return null;
   const value = node.value.trim();
   if (!value) return null;
+  // yaml.v3 resolves a plain null spelling before decoding, so DDEV keeps its default.
+  if (node.tag === 'tag:yaml.org,2002:null') return null;
+  if (node.type === 'PLAIN' && !node.tag && /^(?:null|Null|NULL|~)$/.test(value)) return null;
   // A quoted " #" is not a comment; handed on whole with its quotes, 07c refuses it rather than reading the text before it.
   if (node.type?.startsWith('QUOTE') && /[ \t]#/.test(value) && node.range) {
     return text.slice(node.range[0], node.range[1]);

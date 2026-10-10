@@ -339,6 +339,17 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig(cfg).dbType).toBeNull();
   });
 
+  it('reads plain YAML nulls as absent, and a quoted null as text', () => {
+    expect(
+      parseDdevConfig('database: {type: null, version: ~}\nphp_version: NULL\n'),
+    ).toMatchObject({
+      dbType: null,
+      dbVersion: null,
+      phpVersion: null,
+    });
+    expect(parseDdevConfig('php_version: "null"\n').phpVersion).toBe('null');
+  });
+
   it('reads a merged top-level field', () => {
     expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
   });
