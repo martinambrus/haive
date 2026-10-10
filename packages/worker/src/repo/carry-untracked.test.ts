@@ -3,8 +3,9 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from '
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
-import { carryUntrackedRuntimeFiles } from './carry-untracked.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { configService } from '@haive/shared';
+import { carryUntrackedForTask, carryUntrackedRuntimeFiles } from './carry-untracked.js';
 import { WORKTREE_SUBDIR } from './worktree-paths.js';
 
 const exec = promisify(execFile);
@@ -144,5 +145,22 @@ describe('carryUntrackedRuntimeFiles', () => {
     const res = await carryUntrackedRuntimeFiles(repo, wt);
 
     expect(res).toEqual({ copied: [], skippedExisting: 0, failed: 0 });
+  });
+});
+
+describe('carryUntrackedForTask', () => {
+  it('returns empty rather than throwing when the config read fails', async () => {
+    const spy = vi
+      .spyOn(configService, 'getBoolean')
+      .mockRejectedValue(new Error('ConfigService not initialized'));
+    try {
+      await expect(carryUntrackedForTask({} as never, 't1', '/nope', '/nope')).resolves.toEqual({
+        copied: [],
+        skippedExisting: 0,
+        failed: 0,
+      });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
