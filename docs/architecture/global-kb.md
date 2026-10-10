@@ -211,7 +211,15 @@ omitted: [{id, hash, title, why: 'budget' | 'refused'}], reason?, errorClass?,
 filesRulesUnmatched?}`, where `why` is
 `{scope: 'always'}` or `{scope: 'files', glob, via?}`, `via: 'named'` when only a named path
 selected the rule. `reason` is `switched_off`, `unavailable` or `too_large`; `filesRulesUnmatched`
-counts the project's `files` rules that matched no written, estimated or named path (absent when 0). NULL means the run was not opted in or predates the column. `stripHaivePreamble`
+counts the project's `files` rules that matched no written, estimated or named path (absent when 0). NULL means the run was not opted in or predates the column.
+A write-mode stamp with unmatched rules also carries `similarity`, RECORDED and never injected (PR7b;
+PR8 sets per-rule floors from these records): at dispatch `{status: 'pending', scores}` with one
+`{id, hash, title, score: null}` per unmatched rule; after the CLI starts, a detached scorer embeds the
+task text (title, description, spec opening; `queryHash` is its sha256), takes each rule's best cosine
+over its vectors in the global store, and amends the row by compare-and-set on `pending` to `ok` (with
+`model`, `queryHash`, `ms`) or `failed` with an error class only. It runs off the dispatch path because a
+cold embed measured 4.6-42.8 s. `config:globalKb:houseRulesSimilarity`: `off` scores nothing; anything
+else is record (seeded record); a read that throws is off. `stripHaivePreamble`
 removes a stored agent-rules block, then a stored house block, only at position 0, for replays, the
 agent-isolation scan and the persona bookkeeping; a marker quoted anywhere else never suppresses
 or duplicates the injection. An injected block counts as external text for agent isolation. When an
