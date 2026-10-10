@@ -282,7 +282,9 @@ function fixerFiles(previous: StepLoopPassRecord[]): {
     const out = previous[i]?.applyOutput as ValidateApply | undefined;
     if (out?.source === 'fixer') {
       const collected = out.implementationFiles ?? null;
-      if (!collected?.scanError) return { files: collected, scanFailed: false };
+      // A record stored before fixers re-read the change has no list: that is a re-read that did not happen.
+      if (collected === null) return { files: null, scanFailed: true };
+      if (!collected.scanError) return { files: collected, scanFailed: false };
       // A failed scan lacks the dirty files, so detect's list stands; an empty one fails the guard.
       return { files: collected.files.length > 0 ? null : collected, scanFailed: true };
     }

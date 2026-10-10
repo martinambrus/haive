@@ -1139,6 +1139,10 @@ describe('07b re-validation after a fix pass whose re-read failed', () => {
   it('says nothing of it after a fix pass whose re-read ran', () => {
     expect(revalidate({ ...fileSet(3, 3), scanError: null })).not.toContain(NOTICE);
   });
+
+  it('tells it too after a fix pass stored before the change was re-read, which has no list', () => {
+    expect(revalidate(undefined)).toContain(NOTICE);
+  });
 });
 
 describe('parseValidatorOutput: the rule fields', () => {
@@ -2117,7 +2121,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     expect(prompt).not.toContain('recorded BEFORE the fix agent edited');
   });
 
-  it("gives a validator pass detect's list, with the caveat, after a fixer output stored without a change", async () => {
+  it("gives a validator pass detect's list, with the caveat, and flags its coverage after a fixer output stored without a change", async () => {
     const dir = await checkout();
     const { ctx, detected } = await task(dir);
     const first = await pass(ctx, detected, 0, [], reply());
@@ -2131,7 +2135,8 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
 
     expect(prompt).toContain('- a.php');
     expect(prompt).toContain('recorded BEFORE the fix agent edited');
-    expect(second.changedFilesCoverage).toEqual({ listed: 2, total: 2 });
+    expect(prompt).toContain('The change could not be re-read after the fix');
+    expect(second.changedFilesCoverage).toEqual({ listed: 2, total: 2, scanFailed: true });
   });
 
   it('refuses to build the validator prompt when the fixer left no changed file', () => {
@@ -2198,7 +2203,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     expect(prompt).toContain('=== Brief (what the document was asked to cover) ===');
   });
 
-  it("keeps detect's protocol after a fixer output stored without a change", async () => {
+  it('runs the code protocol after a fixer output stored without a change, since its change was not re-read', async () => {
     const dir = await checkout(DOCS);
     const { ctx, detected } = await task(dir, DOCS);
     const first = await pass(ctx, detected, 0, [], reply());
@@ -2206,7 +2211,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
       passRecord(0, reply(), first),
       passRecord(1, FIXER_REPLY, mkValidateApply({ source: 'fixer' })),
     ];
-    expect(validatorPrompt(detected, previous)).toContain('You are the Documentation Validator');
+    expect(validatorPrompt(detected, previous)).toContain('You are the Implementation Validator');
   });
 
   it("runs the code protocol when the fixer's scan failed, whatever its list holds", () => {
