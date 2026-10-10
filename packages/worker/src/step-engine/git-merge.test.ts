@@ -508,6 +508,38 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  // The fixer's own rule hides the file it adds; restoring the rule file shows it, and nobody moved it.
+  it('moves a new file the fixer hid with its own ignore rule once that rule is restored', async () => {
+    const dir = await setupNamedConflict('base.txt');
+    try {
+      await writeFile(path.join(dir, '.gitignore'), 'cache/\n', 'utf8');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'main rules']);
+      await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const baseline = await captureFixBaseline(dir, noSecrets);
+      await writeFile(path.join(dir, 'base.txt'), 'resolved\n', 'utf8');
+      await writeFile(path.join(dir, 'secret.log'), 'fixer log\n', 'utf8');
+      await writeFile(path.join(dir, '.gitignore'), 'cache/\n*.log\n', 'utf8');
+      const out = await relocateFixerChanges(
+        dir,
+        baseline,
+        { taskId: 't1', runId: 'inv1' },
+        noSecrets,
+      );
+      expect(out?.unchecked).toBeUndefined();
+      expect([...(out?.moved ?? [])].sort()).toEqual(['.gitignore', 'secret.log']);
+      const read = (rel: string) => readFile(path.join(dir, rel), 'utf8');
+      expect(await read('.haive/merge-leftovers/t1/inv1/files/secret.log')).toBe('fixer log\n');
+      expect(await read('.gitignore')).toBe('cache/\n');
+      const strays = (await git(dir, ['ls-files', '-z', '-o', '--exclude-standard']))
+        .split('\0')
+        .filter((p) => p !== '' && !p.startsWith('.haive/'));
+      expect(strays).toEqual([]);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
   it('reports a new file whose name is not UTF-8 and leaves it where it is', async () => {
     const dir = await setupMergeWithOwnWork();
     const odd = Buffer.concat([

@@ -765,21 +765,27 @@ export async function relocateFixerChanges(
     c.dstMode !== GITLINK_MODE;
   const left: FixerLeftovers['left'] = [];
   const toMove: { path: string; status: string }[] = [];
-  // A tree that cannot be read still has its index put back: the commit takes the whole index.
-  const changed = await changesSince(dir, baseline, secrets);
-  const treeUnchecked = 'error' in changed ? changed.error : undefined;
-  if (!('error' in changed)) {
-    for (const c of changed.changes) {
+  const outsideChanges = (
+    changes: ReturnType<typeof rawChanges>,
+    seen: ReadonlySet<string>,
+  ): { path: string; status: string }[] => {
+    const found: { path: string; status: string }[] = [];
+    for (const c of changes) {
       const name = utf8Name(c.path);
       const p = name ?? shown(c.path);
-      if (!outside({ ...c, path: p })) continue;
+      if (!outside({ ...c, path: p }) || seen.has(p)) continue;
       if (name === null) {
         left.push({ path: p, reason: 'its name is not UTF-8' });
         continue;
       }
-      toMove.push({ path: name, status: c.status });
+      found.push({ path: name, status: c.status });
     }
-  }
+    return found;
+  };
+  // A tree that cannot be read still has its index put back: the commit takes the whole index.
+  const changed = await changesSince(dir, baseline, secrets);
+  let treeUnchecked = 'error' in changed ? changed.error : undefined;
+  if (!('error' in changed)) toMove.push(...outsideChanges(changed.changes, new Set()));
   const toUnstage: { name: string; path: string; blob: string | null }[] = [];
   let indexUnchecked: string | undefined;
   const staged = await gitRun(
@@ -808,15 +814,15 @@ export async function relocateFixerChanges(
     baseline: baseline.tree,
     after: 'error' in changed ? null : changed.after,
   };
+  const intent = {
+    journal: true,
+    complete: false,
+    ...record,
+    moving: toMove.map((c) => c.path),
+    unstaging: toUnstage.map(({ path, blob }) => ({ path, blob })),
+  };
   if (toMove.length > 0 || toUnstage.length > 0) {
     // Written before anything moves, so a restart part-way leaves what the next relocation reports.
-    const intent = {
-      journal: true,
-      complete: false,
-      ...record,
-      moving: toMove.map((c) => c.path),
-      unstaging: toUnstage.map(({ path, blob }) => ({ path, blob })),
-    };
     try {
       await writeFileNoFollow(root, manifestAt, `${JSON.stringify(intent, null, 2)}\n`, {
         createParents: true,
@@ -885,6 +891,44 @@ export async function relocateFixerChanges(
         await chmodNoFollow(root, `${prefix}${p}`, (now) => putBackMode(was, now)).catch(
           () => undefined,
         );
+      }
+    }
+  }
+  // A file the fixer's own rule hid shows once the rule file is back, and was never listed.
+  if (!('error' in changed) && toMove.some((c) => path.posix.basename(c.path) === '.gitignore')) {
+    const again = await changesSince(dir, baseline, secrets);
+    if ('error' in again) {
+      treeUnchecked = `${treeUnchecked ? `${treeUnchecked}; ` : ''}${again.error}`;
+    } else {
+      const seen = new Set([...toMove.map((c) => c.path), ...left.map((l) => l.path)]);
+      const late = outsideChanges(again.changes, seen).filter((c) => c.status === 'A');
+      const more = { ...intent, moving: [...intent.moving, ...late.map((c) => c.path)] };
+      const unrecorded =
+        late.length === 0
+          ? null
+          : await writeFileNoFollow(root, manifestAt, `${JSON.stringify(more, null, 2)}\n`, {
+              createParents: true,
+              owner,
+            }).then(
+              () => null,
+              (err: unknown) => (err instanceof Error ? err.message : String(err)),
+            );
+      for (const c of late) {
+        if (unrecorded !== null) {
+          left.push({ path: c.path, reason: `its leftovers could not be recorded: ${unrecorded}` });
+          continue;
+        }
+        try {
+          await renameNoFollow(root, `${prefix}${c.path}`, `${folder}/files/${c.path}`, {
+            noReplace: true,
+            createParents: true,
+            owner,
+          });
+          moved.push(c.path);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          left.push(await leftEntry(root, prefix, c.path, reason));
+        }
       }
     }
   }
