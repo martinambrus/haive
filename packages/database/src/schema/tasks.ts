@@ -1141,7 +1141,13 @@ export const cliInvocations = pgTable(
         model?: string;
         queryHash?: string;
         ms?: number;
-        scores?: Array<{ id: string; hash: string; title: string; score: number | null }>;
+        scores?: Array<{
+          id: string;
+          hash: string;
+          title: string;
+          score: number | null;
+          stale?: boolean;
+        }>;
       };
     }>(),
     /** The capability remedies the request was built with (nulls when the provider had no limits);
