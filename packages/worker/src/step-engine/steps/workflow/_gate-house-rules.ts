@@ -27,7 +27,7 @@ export interface ChangedFilesCoverage {
   total: number;
   /** The check the list was given to; the validator where absent. */
   givenTo?: 'code review';
-  /** The re-read of the change after the latest fix failed, so the list may lack what it added. */
+  /** A read of the change failed (at detect or after a fix), so the list may lack some of it. */
   scanFailed?: true;
 }
 
@@ -48,6 +48,7 @@ const RULE_REF_CHARS = 64;
 const TEXT_CHARS = 500;
 const CONFLICTS_MAX = 20;
 export const REREAD_FAILED = 'the change could not be re-read after a fix';
+const UNREAD_CHANGE = 'the change could not be fully read';
 
 // Cut by character, not by UTF-16 unit, so a pair is never split.
 function oneLine(value: unknown, max: number): string {
@@ -324,8 +325,8 @@ function cappedList(data: GateHouseRules): ChangedFilesCoverage | null {
     : null;
 }
 
-/** A check given rules whose list may lack what a fix added: the re-read after it failed. */
-const unreadAfterFix = (data: GateHouseRules): boolean =>
+/** A check given rules whose list may lack part of the change: a read of it failed. */
+const unreadChange = (data: GateHouseRules): boolean =>
   data.entries.length > 0 && data.changedFilesCoverage?.scanFailed === true;
 
 function caseOf(data: GateHouseRules): HouseCase | null {
@@ -336,7 +337,7 @@ function caseOf(data: GateHouseRules): HouseCase | null {
   if (
     data.omitted.length > 0 ||
     cappedList(data) !== null ||
-    unreadAfterFix(data) ||
+    unreadChange(data) ||
     data.modifiedAfterCheck === true
   ) {
     return 'partial';
@@ -390,7 +391,7 @@ function bodyOf(data: GateHouseRules): string {
                 `${capped.total - capped.listed} changed files beyond ${checkName(capped)}'s list of ${capped.listed}`,
               ),
             ]),
-        ...(unreadAfterFix(data) ? [bullet('files a fix added, if any', REREAD_FAILED)] : []),
+        ...(unreadChange(data) ? [bullet('files the read missed, if any', UNREAD_CHANGE)] : []),
         ...(data.modifiedAfterCheck === true
           ? [bullet('changes made after the last house-rules check')]
           : []),
@@ -438,7 +439,7 @@ export function houseRulesRow(data: GateHouseRules | null | undefined): StatusSu
     capped === null
       ? ''
       : `${checkName(capped)} was given ${capped.listed} of ${capped.total} changed files`,
-    unreadAfterFix(data) ? REREAD_FAILED : '',
+    unreadChange(data) ? UNREAD_CHANGE : '',
     data.modifiedAfterCheck === true
       ? 'the change was modified after the last house-rules check'
       : '',

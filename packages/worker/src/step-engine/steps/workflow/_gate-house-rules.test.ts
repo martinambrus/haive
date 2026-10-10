@@ -1572,16 +1572,16 @@ describe('houseRulesRow', () => {
     ).toBe('ENFORCED');
   });
 
-  it('says the change could not be re-read after a fix, and lists what a fix added as not checked', () => {
+  it('says the change could not be fully read, and lists what the read missed as not checked', () => {
     const row = houseRulesRow(data({ entries: [rule()], changedFilesCoverage: unread }))!;
-    expect(row.detail).toBe('1 rule(s) checked; the change could not be re-read after a fix');
+    expect(row.detail).toBe('1 rule(s) checked; the change could not be fully read');
     expect(row.body).toBe(
       [
         '## Checked',
         '- Rule `42ac658a` No inline SVGs — every change',
         '',
         '## Not checked',
-        '- files a fix added, if any — the change could not be re-read after a fix',
+        '- files the read missed, if any — the change could not be fully read',
       ].join('\n'),
     );
   });
@@ -1596,14 +1596,14 @@ describe('houseRulesRow', () => {
       }),
     )!;
     expect(row.detail).toBe(
-      '1 rule(s) checked; 1 not checked; the validator was given 100 of 150 changed files; the change could not be re-read after a fix; the change was modified after the last house-rules check',
+      '1 rule(s) checked; 1 not checked; the validator was given 100 of 150 changed files; the change could not be fully read; the change was modified after the last house-rules check',
     );
     expect(row.body).toContain(
       [
         '## Not checked',
         '- Rule Did not fit — left out of the prompt: it did not fit the prompt budget',
         "- 50 changed files beyond the validator's list of 100",
-        '- files a fix added, if any — the change could not be re-read after a fix',
+        '- files the read missed, if any — the change could not be fully read',
         '- changes made after the last house-rules check',
       ].join('\n'),
     );
@@ -1620,10 +1620,10 @@ describe('houseRulesRow', () => {
     )!;
     expect(row.statusLabel).toBe('CONFLICT');
     expect(row.detail).toBe(
-      '1 rule(s) checked; the change could not be re-read after a fix; 1 conflict(s); 1 violation(s) open',
+      '1 rule(s) checked; the change could not be fully read; 1 conflict(s); 1 violation(s) open',
     );
     expect(row.body).toContain(
-      '## Not checked\n- files a fix added, if any — the change could not be re-read after a fix',
+      '## Not checked\n- files the read missed, if any — the change could not be fully read',
     );
   });
 
