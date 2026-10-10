@@ -24,6 +24,7 @@ export { resetDagCurrentLevelForRetry } from './dag-reset.js';
 export { ZERO_MERGE_RETRIES } from './merge-retry-reset.js';
 export { CLOSED_GAP_INTO_IDLE_MS } from './closed-gap.js';
 export {
+  isDuplicateDatabase,
   isLockNotAvailable,
   isUniqueViolation,
   isUniqueViolationOf,
