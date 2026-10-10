@@ -557,6 +557,13 @@ describe('review-loop prompts carry the spec', () => {
     );
   });
 
+  it('shows in_scope on the issue entry of the exact template', () => {
+    const template = reviewerPrompt(issue, 'INDEX')
+      .split('\n')
+      .find((l) => l.startsWith('{ "verdict"'));
+    expect(template).toContain('"in_scope": "yes|no"');
+  });
+
   it('warns the advisor before it drops a criterion', () => {
     expect(advisorPrompt(issue, 'INDEX')).toContain('before proposing drop_criteria');
   });

@@ -1031,7 +1031,7 @@ export function reviewerPrompt(
     INVARIANT_CITATION,
     '',
     'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "verdict": "approve|fix_required|block", "criteria_results": [{ "criterion": "...", "passed": true, "note": "" }], "issues": [{ "severity": "high|medium|low", "file": "path", "description": "...", "suggestion": "..." }] }',
+    '{ "verdict": "approve|fix_required|block", "criteria_results": [{ "criterion": "...", "passed": true, "note": "" }], "issues": [{ "severity": "high|medium|low", "file": "path", "description": "...", "suggestion": "...", "in_scope": "yes|no" }] }',
     'Verdict rules: approve = every acceptance criterion passes — choose approve even if you still have low-severity or cosmetic suggestions; list them under issues and they are tracked as debt, not a merge blocker.',
     'fix_required = at least one issue makes an acceptance criterion fail and a fix coder can address it. block = a fundamental problem (broken build, security hole, wrong approach) that cannot be approved.',
   ]

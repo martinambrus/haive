@@ -148,10 +148,12 @@ export async function loadInsightOutputs(
             (!f.file || findingIdentity({ file: i.location, description: w }) === id),
         ),
       );
-      if (!covered)
+      if (!covered) {
+        const field = (text: string) => collapseToLine(text).replaceAll('|', '/');
         lines.push(
-          `- INSIGHT: ${collapseToLine(f.description).replaceAll('|', '/')} | ${f.file ?? ''} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
+          `- INSIGHT: ${field(f.description)} | ${field(f.file ?? '')} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
         );
+      }
     }
   }
   return lines.length > 0
