@@ -51,4 +51,20 @@ describe('planBuildRequestSchema', () => {
     expect(out.success).toBe(true);
     expect(out.data).not.toHaveProperty('document');
   });
+
+  it('carries the clarify choice and a questioner CLI', () => {
+    const out = planBuildRequestSchema.safeParse({
+      mode: 'from_repo',
+      clarify: true,
+      questionerCliProviderId: '00000000-0000-4000-8000-000000000001',
+    });
+    expect(out.data).toMatchObject({ clarify: true });
+  });
+
+  it('refuses a questioner that is not a provider id', () => {
+    expect(
+      planBuildRequestSchema.safeParse({ mode: 'from_repo', questionerCliProviderId: 'codex' })
+        .success,
+    ).toBe(false);
+  });
 });

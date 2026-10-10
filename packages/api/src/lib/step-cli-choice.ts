@@ -13,6 +13,20 @@ function clampEffort(name: CliProviderName, level: string | null | undefined): s
   return scale && scale.values.includes(level) ? level : null;
 }
 
+/** The user's provider, refused with 404 when it is not theirs and 409 when it is disabled. */
+export async function loadUsableProvider(
+  db: Pick<Database, 'query'>,
+  userId: string,
+  cliProviderId: string,
+): Promise<{ name: CliProviderName }> {
+  const provider = await db.query.cliProviders.findFirst({
+    where: and(eq(schema.cliProviders.id, cliProviderId), eq(schema.cliProviders.userId, userId)),
+  });
+  if (!provider) throw new HttpError(404, 'CLI provider not found');
+  if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+  return provider;
+}
+
 /** Record one (step, role) CLI choice for THIS task, and, when `remember` is set, as the user's
  *  saved (user, step, role) preference too, which every later task of theirs reads. A pick on a
  *  step card is about the task in front of the person, so it stays there unless they ask for
@@ -38,11 +52,7 @@ export async function writeStepCliChoice(
   const { userId, taskId, stepId, role, cliProviderId, remember } = params;
   let effortLevel: string | null = null;
   if (cliProviderId) {
-    const provider = await db.query.cliProviders.findFirst({
-      where: and(eq(schema.cliProviders.id, cliProviderId), eq(schema.cliProviders.userId, userId)),
-    });
-    if (!provider) throw new HttpError(404, 'CLI provider not found');
-    if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+    const provider = await loadUsableProvider(db, userId, cliProviderId);
     effortLevel = clampEffort(provider.name, params.requestedEffort);
   }
   await db.transaction(async (tx) => {

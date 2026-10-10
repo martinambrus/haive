@@ -55,6 +55,9 @@ import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { enqueuePlanTask, spawnPlanTask } from '../lib/spawn-plan-task.js';
+import { loadUsableProvider, writeStepCliChoice } from '../lib/step-cli-choice.js';
+
+const PLAN_CLARIFY_STEP_ID = '00b-plan-clarify';
 import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advisories.js';
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
 import { getTaskQueue } from '../queues.js';
@@ -1097,6 +1100,35 @@ async function resolveProvider(
   return fallback?.id ?? null;
 }
 
+/** The CLIs the plan starter preselects: the one a build would plan on, and the questioner this
+ *  user last picked, while it is still enabled. */
+planRoutes.get('/:id/plan/build/clis', async (c) => {
+  const { userId, repositoryId } = await requireOwnedRepo(c);
+  const db = getDb();
+  const planner = await resolveProvider(userId, repositoryId);
+  const saved = await db.query.userStepCliRolePreferences.findFirst({
+    where: and(
+      eq(schema.userStepCliRolePreferences.userId, userId),
+      eq(schema.userStepCliRolePreferences.stepId, PLAN_CLARIFY_STEP_ID),
+      eq(schema.userStepCliRolePreferences.role, 'questioner'),
+    ),
+    columns: { cliProviderId: true },
+  });
+  const questioner = saved?.cliProviderId
+    ? await db.query.cliProviders.findFirst({
+        where: and(
+          eq(schema.cliProviders.id, saved.cliProviderId),
+          eq(schema.cliProviders.enabled, true),
+        ),
+        columns: { id: true },
+      })
+    : undefined;
+  return c.json({
+    plannerCliProviderId: planner,
+    questionerCliProviderId: questioner?.id ?? planner,
+  });
+});
+
 planRoutes.post('/:id/plan/build', async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
@@ -1109,6 +1141,16 @@ planRoutes.post('/:id/plan/build', async (c) => {
     throw new HttpError(409, 'This repository is not ready for uploads yet');
   }
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
+  const clarify = body.mode === 'greenfield' ? body.clarify !== false : body.clarify === true;
+  if (clarify && (await findPlanRoot(getDb(), repositoryId))) {
+    throw new HttpError(
+      409,
+      'This repository already has a plan. Clarifying questions shape a new one; use the plan chat to change an existing plan.',
+    );
+  }
+  // Checked before the task exists: the seed below runs after its row is written.
+  const questioner = clarify ? body.questionerCliProviderId : undefined;
+  if (questioner) await loadUsableProvider(getDb(), userId, questioner);
   const taskId = await spawnPlanTask({
     userId,
     repositoryId,
@@ -1121,9 +1163,26 @@ planRoutes.post('/:id/plan/build', async (c) => {
     metadata: {
       planBuildMode: body.mode,
       ...(body.deferStart ? { planBuildDeferred: true } : {}),
+      ...(clarify ? { planClarify: true } : {}),
     },
     cliProviderId,
     ignoreSavedStepClis: Boolean(body.cliProviderId),
+    // The questioner is its own seat, so its pick is a step choice and is remembered for the
+    // next build; the planner is the task's own CLI.
+    ...(questioner
+      ? {
+          seed: (taskId: string) =>
+            writeStepCliChoice(getDb(), {
+              userId,
+              taskId,
+              stepId: PLAN_CLARIFY_STEP_ID,
+              role: 'questioner',
+              cliProviderId: questioner,
+              requestedEffort: null,
+              remember: true,
+            }),
+        }
+      : {}),
     // Uploads cannot ride a seed hook: the api does not know how many files are
     // coming or whether they all arrive. So the row is created unstarted and the
     // client finalizes with the `start` action once every upload succeeds —
