@@ -67,7 +67,10 @@ const PLAN_CLARIFY_STEP_ID = '00b-plan-clarify';
 /** A build asking clarifying questions, or about to expand the outline they shaped, owns the
  *  plan's root until it ends: deleting or replacing it would leave the questions about, or the
  *  expansion working on, a plan the owner's answers never reached. */
-async function refuseRootChangeDuringClarify(repositoryId: string): Promise<void> {
+async function refuseRootChangeDuringClarify(
+  repositoryId: string,
+  message = 'A plan build is asking clarifying questions about this outline. Finish or cancel it before deleting or replacing the plan root.',
+): Promise<void> {
   const open = await getDb()
     .select({ metadata: schema.tasks.metadata })
     .from(schema.tasks)
@@ -79,10 +82,7 @@ async function refuseRootChangeDuringClarify(repositoryId: string): Promise<void
       ),
     );
   if (open.some((t) => (t.metadata as { planClarify?: unknown } | null)?.planClarify === true)) {
-    throw new HttpError(
-      409,
-      'A plan build is asking clarifying questions about this outline. Finish or cancel it before deleting or replacing the plan root.',
-    );
+    throw new HttpError(409, message);
   }
 }
 
@@ -1333,6 +1333,12 @@ planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {
   const nodeId = c.req.param('nodeId');
   const body = planChatRequestSchema.parse(await c.req.json());
   const node = await requireNode(repositoryId, nodeId);
+  // A chat's agent patches the whole plan, the root included, and would race the planner folding
+  // the owner's answers in. The questions form's own steering box is the way to change it then.
+  await refuseRootChangeDuringClarify(
+    repositoryId,
+    'A plan build is asking clarifying questions about this outline. Use its "Anything else the planner should know" box, or finish or cancel the build, before chatting about the plan.',
+  );
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
 
   // The opening turn is recorded here rather than by the step: the step's detect

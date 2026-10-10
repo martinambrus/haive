@@ -38,7 +38,8 @@ also writes a round 0 naming the root it drafted (`root_id`, nulled if that root
 the step refuses any other root (`assertOwnOutline`): one written before it started, or one someone
 recreated while a round was parked. The api also refuses to delete the root, or to create one, while a clarifying build is open
 (`refuseRootChangeDuringClarify`): through the questions AND through 01's depth form, since a root
-rebuilt there by 01 alone would carry none of the answers; cancel the build to change it. Behind
+rebuilt there by 01 alone would carry none of the answers; cancel the build to change it. A plan
+chat is refused then too: its agent patches the whole plan and would race the answers being folded in. Behind
 that, a deleted root with no replacement is simply redrafted, under a numbered agent id
 (`clarify-outline-N`), since a step never re-sends an id it already has a row for. A
 node's `sourceTaskId` cannot serve, since every later patch, a canvas edit included, rewrites it. Its folds drop any node placed below the root

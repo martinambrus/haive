@@ -196,6 +196,17 @@ describe('the plan root while a clarifying build is open', () => {
     expect(res.status).toBe(409);
   });
 
+  it('refuses to start a plan chat', async () => {
+    withOpenBuild(true);
+    const res = await app.request(`/${REPO}/plan/nodes/${ROOT_ID}/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'Split payments out.' }),
+    });
+    expect(res.status).toBe(409);
+    expect(spawnPlanTask).not.toHaveBeenCalled();
+  });
+
   it('leaves the root alone for a build that asks no questions', async () => {
     withOpenBuild(false);
     const res = await app.request(`/${REPO}/plan/nodes/${ROOT_ID}`, { method: 'DELETE' });
