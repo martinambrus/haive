@@ -1811,6 +1811,8 @@ describe('gate-2 shows a long validator report from both ends', () => {
   });
 });
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 describe('gate-2 says when it cuts a long manual checklist', () => {
   const ran = { ran: true, passed: true, output: '' };
   const INTRO =
@@ -1881,6 +1883,86 @@ describe("a person's words cannot open or close a fence", () => {
     for (const text of [gate2, qa, directive]) {
       expect(text).toContain('pasted by the agent');
       expect(banners(text)).toBe(0);
+    }
+  });
+});
+
+describe('gate-2 says when it cuts a check output or the smoke excerpt', () => {
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/repos/u/r',
+    round: 0,
+    db: { query: { tasks: { findFirst: vi.fn(async () => null) } } },
+    logger: { info: vi.fn(), warn: vi.fn() },
+  } as never;
+  const green = { ran: true, passed: true, command: 'pnpm run check', output: '' };
+  const fence = (t: string): string => ['```', t, '```'].join('\n');
+
+  beforeEach(() => {
+    m.getTaskEnvTemplate.mockReset().mockResolvedValue(null);
+    m.resolveTaskDirectAccess.mockReset().mockResolvedValue(false);
+    m.hasWorkspaceEntry.mockReset().mockResolvedValue(false);
+    m.resolveScreenshotRoot.mockReset().mockResolvedValue('/repos/u/r');
+    m.loadTaskSimilarSites.mockReset().mockResolvedValue({ sites: [], omitted: 0 });
+    m.loadUnactedInsights.mockReset().mockResolvedValue({ insights: [], omitted: 0 });
+    m.loadGateHouseRules.mockReset().mockResolvedValue(null);
+    m.changeFingerprint.mockReset().mockResolvedValue(null);
+  });
+
+  const testsRow = async (test: Record<string, unknown>) => {
+    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _t: unknown, id: string) =>
+      id === '08-phase-5-verify'
+        ? { output: { test, lint: green, typecheck: green, passed: false, runtimeSmoke: null } }
+        : null,
+    );
+    const detected = await gate2VerifyApprovalStep.detect!(ctx);
+    const schema = gate2VerifyApprovalStep.form!(ctx, detected)!;
+    return { detected, row: (schema.statusSummary ?? []).find((r) => r.label === 'Tests') };
+  };
+  const failedRun = (output: string, extra: Record<string, unknown> = {}) => ({
+    ran: true,
+    passed: false,
+    command: 'pnpm test',
+    output,
+    ...extra,
+  });
+  const LONG = `FAIL first line\n${'noise line\n'.repeat(950)}Tests: 3 failed`;
+
+  it('keeps the start and the verdict of a long failing run, and says what it left out', async () => {
+    expect(LONG.length).toBeGreaterThan(10_000);
+    const { row } = await testsRow(failedRun(LONG));
+    expect(row?.body).toContain('FAIL first line');
+    expect(row?.body).toContain('Tests: 3 failed');
+    expect(row?.body).toMatch(/\[… [\d,]+ characters? omitted …\]/);
+  });
+
+  it('shows a 3,999 character output byte for byte', async () => {
+    const out = `${'x'.repeat(3_998)}!`;
+    expect(out).toHaveLength(3_999);
+    const { row } = await testsRow(failedRun(out));
+    expect(row?.body).toBe(fence(out));
+  });
+
+  it('does not cut an already excerpted stored output again', async () => {
+    const first = await testsRow(failedRun(LONG));
+    const stored = first.detected.verify.test!.output;
+    const second = await testsRow(failedRun(stored));
+    expect(second.detected.verify.test!.output).toBe(stored);
+    expect(second.row?.body).toBe(first.row?.body);
+    expect(second.row?.body).toContain('Tests: 3 failed');
+  });
+
+  it('keeps the verdict of a check that did not run too', async () => {
+    const { row } = await testsRow({ ran: false, note: 'runner missing', output: LONG });
+    expect(row?.body).toContain('Tests: 3 failed');
+    expect(row?.body).toMatch(/characters? omitted/);
+  });
+
+  it('does not split an emoji that straddles the check output cut', async () => {
+    for (const lead of ['', 'x']) {
+      const { row } = await testsRow(failedRun(`${lead}${'\u{1F600}'.repeat(5_000)}`));
+      expect(row?.body).not.toMatch(LONE_SURROGATE);
+      expect(row?.body).toMatch(/omitted/);
     }
   });
 });

@@ -415,6 +415,17 @@ function reportExcerpt(report: string): string {
     : report;
 }
 
+const CHECK_OUTPUT_CHARS = 4000;
+// excerptDiagnosis measured up to 45 characters over its budget, so what it returns stays within the cap and a second pass leaves it alone.
+const CHECK_OUTPUT_ROOM = 150;
+
+// A run's verdict is at the end of its output, so a cut keeps both ends.
+function checkOutputExcerpt(output: string): string {
+  return output.length > CHECK_OUTPUT_CHARS
+    ? excerptDiagnosis(output, CHECK_OUTPUT_CHARS - CHECK_OUTPUT_ROOM, false)
+    : output;
+}
+
 const CHECKLIST_EXCERPT_CHARS = 12_000;
 
 function checklistExcerpt(checklist: string): string {
@@ -467,7 +478,7 @@ function liteCheck(c?: StoredCheck): LiteCheck | null {
   return {
     ran: c.ran !== false,
     passed: c.passed === true,
-    output: (c.output ?? '').slice(0, 4000),
+    output: checkOutputExcerpt(c.output ?? ''),
     ...(typeof blocking === 'number' && typeof preExisting === 'number'
       ? { scope: { blocking, preExisting } }
       : {}),
@@ -980,7 +991,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           statusLabel: 'NOT RUN',
           detail: c.note,
           ...(c.output.trim() && c.output.trim() !== c.note?.trim()
-            ? { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }
+            ? { body: fenced(checkOutputExcerpt(c.output)), defaultOpen: false }
             : {}),
         });
         continue;
@@ -997,7 +1008,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         ...(detail ? { detail } : {}),
         ...(c.passed || !c.output.trim()
           ? {}
-          : { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }),
+          : { body: fenced(checkOutputExcerpt(c.output)), defaultOpen: false }),
       });
     }
     // Omitting a check nobody selected is right — a skipped check is not a failure — but with ALL
