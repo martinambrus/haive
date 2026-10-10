@@ -172,6 +172,60 @@ describe('parseDdevConfig: line endings and quoted comment marks', () => {
   });
 });
 
+describe('parseDdevConfig: a document read as YAML', () => {
+  it('reads a trailing comment after a top-level quoted value', () => {
+    expect(parseDdevConfig('php_version: "8.3" # lts\n').phpVersion).toBe('8.3');
+  });
+
+  it('reads a comment after `database:` and a quoted type', () => {
+    const cfg = "database: # engine\n  type: 'postgres'\n  version: '10.11'\n";
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'postgres', dbVersion: '10.11' });
+  });
+
+  it('reads the flow-mapping form of `database:`', () => {
+    const cfg = 'database: {type: mysql, version: "8.0"}\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'mysql', dbVersion: '8.0' });
+  });
+
+  it('keeps a number as the text written, not the number it coerces to', () => {
+    const cfg = 'php_version: 8.10\ndatabase:\n  type: mariadb\n  version: 10.11\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ phpVersion: '8.10', dbVersion: '10.11' });
+  });
+
+  it('reads a non-scalar where a scalar is expected as null', () => {
+    const cfg = 'php_version: [8, 3]\ndatabase:\n  type:\n    a: b\n  version: "8.0"\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({
+      phpVersion: null,
+      dbType: null,
+      dbVersion: '8.0',
+    });
+  });
+
+  it('falls back to the line readers for a document YAML reports errors for', () => {
+    const cfg = [
+      'php_version: "8.3"',
+      'docroot: web',
+      'docroot: web2',
+      'database:',
+      '  type: mysql',
+      '  version: "8.0"',
+      '',
+    ].join('\n');
+    expect(parseDdevConfig(cfg)).toEqual({
+      phpVersion: '8.3',
+      dbType: 'mysql',
+      dbVersion: '8.0',
+      webserver: null,
+      docroot: 'web',
+    });
+  });
+
+  it('falls back for bad indentation too', () => {
+    const cfg = 'php_version: 8.2\ndatabase:\n  type: mysql\n version: 8.0\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ phpVersion: '8.2', dbType: 'mysql' });
+  });
+});
+
 describe('ddevUrlFromConfigText', () => {
   it('derives https://<name>.ddev.site from the booted config (default tld)', () => {
     expect(ddevUrlFromConfigText(MARIADB_CONFIG)).toBe('https://myproject.ddev.site');
@@ -184,6 +238,12 @@ describe('ddevUrlFromConfigText', () => {
 
   it('reads a quoted name', () => {
     expect(ddevUrlFromConfigText('name: "my-app"\n')).toBe('https://my-app.ddev.site');
+  });
+
+  it('reads a quoted project_tld', () => {
+    expect(ddevUrlFromConfigText('name: "my-app"\nproject_tld: "ddev.local"\n')).toBe(
+      'https://my-app.ddev.local',
+    );
   });
 
   it('returns null when name is absent (never a meaningless localhost)', () => {

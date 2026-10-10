@@ -1,15 +1,53 @@
-// Shared, dependency-free parser for the handful of `.ddev/config.yaml` fields
-// Haive reads (php/db/webserver/docroot). Regex-based on purpose — the worker
-// carries no YAML dependency and these are flat top-level scalars or one-level
-// `database:` block scalars. Shared by onboarding env detection (01-env-detect)
-// and the workflow DDEV reconcile step (07c-ddev-reconcile) so both interpret
-// the config identically.
+// Shared parser for the handful of `.ddev/config.yaml` fields Haive reads
+// (php/db/webserver/docroot): top-level scalars and one-level `database:` scalars,
+// read with the `yaml` package. A document `yaml` reports errors for falls back to
+// the line readers below. Shared by onboarding env detection (01-env-detect), the
+// workflow DDEV reconcile step (07c-ddev-reconcile) and env-replicate
+// (01-declare-deps) so all interpret the config identically.
+import { isMap, isScalar, parseDocument } from 'yaml';
+import type { YAMLMap } from 'yaml';
 
-/** Match a top-level `key: value` scalar (optionally double-quoted). */
-export function matchYamlField(text: string, key: string): string | null {
+/** Match a top-level `key: value` scalar (optionally double-quoted), line by line. */
+function lineField(text: string, key: string): string | null {
   const re = new RegExp(`^${key}:\\s*"?([^"\\n]+)"?\\s*$`, 'm');
   const m = text.match(re);
   return m && m[1] ? m[1].trim() : null;
+}
+
+/** A scalar's text, never a coerced number (`8.10` stays `8.10`); null for a map, a sequence or an empty value. */
+function scalarText(node: unknown, text: string): string | null {
+  if (!isScalar(node) || typeof node.value !== 'string') return null;
+  const value = node.value.trim();
+  if (!value) return null;
+  // A quoted " #" is not a comment; handed on whole with its quotes, 07c refuses it rather than reading the text before it.
+  if (node.type?.startsWith('QUOTE') && /[ \t]#/.test(value) && node.range) {
+    return text.slice(node.range[0], node.range[1]);
+  }
+  return value;
+}
+
+function topLevelMap(text: string): YAMLMap | null {
+  const doc = parseDocument(text, { schema: 'failsafe' });
+  return doc.errors.length === 0 && isMap(doc.contents) ? doc.contents : null;
+}
+
+/** One parse of `text`; every read from it uses that parse, or the line readers when YAML refuses the document. */
+function ddevReader(text: string) {
+  const map = topLevelMap(text);
+  return {
+    field: (key: string): string | null =>
+      map ? scalarText(map.get(key, true), text) : lineField(text, key),
+    blockField: (block: string, key: string): string | null => {
+      if (!map) return lineBlockField(text, block, key);
+      const inner = map.get(block, true);
+      return isMap(inner) ? scalarText(inner.get(key, true), text) : null;
+    },
+  };
+}
+
+/** Match a top-level `key: value` scalar as YAML reads it. */
+export function matchYamlField(text: string, key: string): string | null {
+  return ddevReader(text).field(key);
 }
 
 /** The DDEV project's primary URL derived from its `.ddev/config.yaml` WITHOUT
@@ -19,9 +57,10 @@ export function matchYamlField(text: string, key: string): string | null {
  *  null when `name:` is absent. Best-effort prefill — the authoritative URL is
  *  still `ddev describe -j` (ddevPrimaryUrl) once the runner is up. */
 export function ddevUrlFromConfigText(text: string): string | null {
-  const name = matchYamlField(text, 'name');
+  const read = ddevReader(text);
+  const name = read.field('name');
   if (!name) return null;
-  const tld = matchYamlField(text, 'project_tld') ?? 'ddev.site';
+  const tld = read.field('project_tld') ?? 'ddev.site';
   return `https://${name}.${tld}`;
 }
 
@@ -36,8 +75,8 @@ function yamlScalarValue(rest: string): string | null {
   return value.trim() || null;
 }
 
-/** Match a `key: value` scalar one level inside a `block:` mapping, as YAML reads the value. */
-export function matchYamlBlockField(text: string, block: string, key: string): string | null {
+/** Match a `key: value` scalar one level inside a `block:` mapping, line by line. */
+function lineBlockField(text: string, block: string, key: string): string | null {
   const blockRe = new RegExp(`^${block}:\\s*\\n((?:[ \\t]+.+\\r?\\n?)+)`, 'm');
   const blockMatch = text.match(blockRe);
   if (!blockMatch || !blockMatch[1]) return null;
@@ -45,6 +84,11 @@ export function matchYamlBlockField(text: string, block: string, key: string): s
   const fieldRe = new RegExp(`^[ \\t]+${key}:\\s*([^\\n]*)$`, 'm');
   const m = inner.match(fieldRe);
   return m ? yamlScalarValue(m[1] ?? '') : null;
+}
+
+/** Match a `key: value` scalar one level inside a `block:` mapping, as YAML reads the value. */
+export function matchYamlBlockField(text: string, block: string, key: string): string | null {
+  return ddevReader(text).blockField(block, key);
 }
 
 export interface DdevConfigFields {
@@ -59,12 +103,13 @@ export interface DdevConfigFields {
  *  migrate). All null when absent — a config that declares none of them yields
  *  an all-null record that compares equal to another all-null record (no drift). */
 export function parseDdevConfig(text: string): DdevConfigFields {
+  const read = ddevReader(text);
   return {
-    phpVersion: matchYamlField(text, 'php_version'),
-    dbType: matchYamlBlockField(text, 'database', 'type'),
-    dbVersion: matchYamlBlockField(text, 'database', 'version'),
-    webserver: matchYamlField(text, 'webserver_type'),
-    docroot: matchYamlField(text, 'docroot'),
+    phpVersion: read.field('php_version'),
+    dbType: read.blockField('database', 'type'),
+    dbVersion: read.blockField('database', 'version'),
+    webserver: read.field('webserver_type'),
+    docroot: read.field('docroot'),
   };
 }
 
