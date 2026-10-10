@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { Database } from '@haive/database';
+import { CONFIG_KEYS, configService } from '@haive/shared';
 
 const h = vi.hoisted(() => ({
   tree: null as string | null | Error,
@@ -565,6 +566,91 @@ describe('selectForDispatch', () => {
       kb({ rules: [files(['src/*.php']), files(['web/*.css'])] }),
     );
     expect(out.entries.map((e) => e.why)).toEqual([{ scope: 'files', glob: 'src/*.php' }]);
+  });
+
+  describe('the similarity record of a write dispatch', () => {
+    const setting = (value: string | null | Error) =>
+      vi.spyOn(configService, 'get').mockImplementation(async (key) => {
+        if (key !== CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_SIMILARITY) return null;
+        if (value instanceof Error) throw value;
+        return value;
+      });
+    const readsOf = (spy: ReturnType<typeof setting>) =>
+      spy.mock.calls.filter(([key]) => key === CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_SIMILARITY);
+    const readyTree = async () => {
+      h.tree = await repo();
+      h.setup = { output: { baseBranch: 'main' } };
+    };
+    afterEach(() => vi.restoreAllMocks());
+
+    it.each([['record'], [null], ['on'], ['nonsense']])(
+      'is pending for exactly the files rules no glob matched when the setting reads %j',
+      async (value) => {
+        setting(value);
+        await readyTree();
+        const twig = files(['**/*.twig']);
+        const scss = rule({
+          title: `Styles\n  stay   thin`,
+          spec: { mode: 'files', globs: ['**/*.scss'] },
+        });
+        const out = await select(
+          { mode: 'write' },
+          kb({
+            rules: [files(['**/*.tpl.php']), twig, rule(), scss],
+            refused: [{ id: 'r', hash: 'h', title: 'Bad', why: 'refused' as const }],
+          }),
+        );
+        expect(out.similarity).toEqual({
+          status: 'pending',
+          scores: [twig, scss].map((r) => ({
+            id: r.id,
+            hash: r.hash,
+            title: r.title.replace(/\s+/g, ' '),
+            score: null,
+          })),
+        });
+        expect(out.similarity?.scores).toHaveLength(out.filesRulesUnmatched ?? -1);
+      },
+    );
+
+    it('is absent for a review, for off and for a setting that cannot be read, and reads nothing for a review', async () => {
+      await readyTree();
+      const rules = [files(['**/*.twig'])];
+      const review = setting('record');
+      expect((await select({ mode: 'review' }, kb({ rules }))).similarity).toBeUndefined();
+      expect(readsOf(review)).toHaveLength(0);
+      for (const value of ['off', new Error('redis is gone')]) {
+        setting(value);
+        const out = await select({ mode: 'write' }, kb({ rules }));
+        expect(out.similarity).toBeUndefined();
+        expect(out.filesRulesUnmatched).toBe(1);
+      }
+    });
+
+    it('is absent, and the setting unread, with no unmatched rule, no files rule or an unreadable change', async () => {
+      const spy = setting('record');
+      await readyTree();
+      const matched = await select({ mode: 'write' }, kb({ rules: [files(['**/*.tpl.php'])] }));
+      const always = await select({ mode: 'write' }, kb({ rules: [rule()] }));
+      expect(matched.similarity).toBeUndefined();
+      expect(always.similarity).toBeUndefined();
+      expect(readsOf(spy)).toHaveLength(1);
+      h.tree = null;
+      const unread = await select({ mode: 'write' }, kb({ rules: [files(['**/*.twig'])] }));
+      expect(unread.similarity).toBeUndefined();
+      expect(readsOf(spy)).toHaveLength(1);
+    });
+
+    it('is absent when the rules half is switched off or unavailable', async () => {
+      const spy = setting('record');
+      expect(
+        (await select({ mode: 'write' }, kb({ status: 'disabled' as const }))).similarity,
+      ).toBeUndefined();
+      expect(
+        (await select({ mode: 'write' }, kb({ status: 'unavailable' as const }))).similarity,
+      ).toBeUndefined();
+      expect(readsOf(spy)).toHaveLength(0);
+    });
   });
 
   it('carries the rows it refused into the omitted', async () => {

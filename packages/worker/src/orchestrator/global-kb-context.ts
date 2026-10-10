@@ -58,7 +58,7 @@ type Tx = Parameters<Parameters<GlobalKbDb['transaction']>[0]>[0];
 
 /** `SET LOCAL` in a transaction of its own: the server stops a statement the client gave up on, and a
  *  pooler's other sessions never see the setting. */
-const timed = <T>(gdb: GlobalKbDb, ms: number, run: (tx: Tx) => Promise<T>): Promise<T> =>
+export const timed = <T>(gdb: GlobalKbDb, ms: number, run: (tx: Tx) => Promise<T>): Promise<T> =>
   gdb.transaction(async (tx) => {
     await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${Math.trunc(ms)}ms'`));
     return run(tx);

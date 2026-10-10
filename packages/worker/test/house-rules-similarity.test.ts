@@ -1,0 +1,410 @@
+import { createHash } from 'node:crypto';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
+import type { Database } from '@haive/database';
+import type { HouseRulesStamp } from '@haive/shared/global-kb';
+import { resolveEmbedBudget } from '@haive/shared/rag';
+
+const h = vi.hoisted(() => ({
+  text: 'Add a cart icon\nShow it in the header.',
+  embed: vi.fn(async (..._args: unknown[]): Promise<number[][]> => [[0.6, 0.8]]),
+  rows: [] as Array<{ id: string; hash: string | null; score: number | string }>,
+  hasVector: true,
+  jsonRows: [] as Array<{ id: string; hash: string | null; embedding: unknown }>,
+  storeError: null as Error | null,
+  strict: true,
+  storeCalls: [] as Array<{ sql: string; params: unknown[] }>,
+  storeOptions: [] as unknown[],
+  settings: {
+    namespace: 'default',
+    ollamaUrl: 'http://embed.invalid:11434',
+    embedModel: 'embed-model',
+    embeddingDimensions: 2,
+  } as Record<string, unknown>,
+}));
+
+vi.mock('../src/orchestrator/house-rules-dispatch.js', () => ({
+  readTaskText: async () => h.text,
+}));
+vi.mock('@haive/shared/rag', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/rag')>();
+  return {
+    ...actual,
+    ollamaEmbed: h.embed,
+    resolveEmbedBudget: async () => ({ ...(await actual.resolveEmbedBudget()), strict: h.strict }),
+  };
+});
+vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveGlobalKbSettings: async () => h.settings,
+  withGlobalKb: async (
+    _db: unknown,
+    fn: (ctx: { db: unknown }) => Promise<unknown>,
+    options: unknown,
+  ) => {
+    h.storeOptions.push(options);
+    if (h.storeError) throw h.storeError;
+    const tx = {
+      execute: async (query: SQL) => {
+        const built = new PgDialect().sqlToQuery(query);
+        h.storeCalls.push({ sql: built.sql, params: built.params });
+        if (built.sql.includes('information_schema')) return h.hasVector ? [{ '?column?': 1 }] : [];
+        if (built.sql.includes('embedding_json')) return h.jsonRows;
+        if (built.sql.includes('r.vector')) {
+          if (!h.hasVector) throw new Error('column r.vector does not exist');
+          return h.rows;
+        }
+        return [];
+      },
+    };
+    return fn({ db: { transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } });
+  },
+}));
+
+import {
+  SIMILARITY_QUERY_MAX_CHARS,
+  scoreHouseRulesInBackground,
+} from '../src/orchestrator/house-rules-similarity.js';
+
+const INV = '11111111-1111-4111-8111-111111111111';
+const TASK = '22222222-2222-4222-8222-222222222222';
+const A = '0000000a-0000-4000-8000-00000000000a';
+const B = '0000000b-0000-4000-8000-00000000000b';
+const C = '0000000c-0000-4000-8000-00000000000c';
+
+const candidate = (id: string, title: string) => ({ id, hash: `hr1:${title}`, title, score: null });
+const pendingStamp = (ids: Array<[string, string]> = [[A, 'Alpha']]): HouseRulesStamp => ({
+  mode: 'write',
+  entries: [],
+  omitted: [],
+  similarity: { status: 'pending', scores: ids.map(([id, title]) => candidate(id, title)) },
+});
+
+const updates: Array<{ sql: string; params: unknown[] }> = [];
+let updateFails = false;
+const db = {
+  execute: async (query: SQL) => {
+    const built = new PgDialect().sqlToQuery(query);
+    updates.push({ sql: built.sql, params: built.params });
+    if (updateFails) throw new Error('database is down');
+    return [];
+  },
+} as unknown as Database;
+
+const recordWritten = async (): Promise<Record<string, unknown>> => {
+  await vi.waitFor(() => expect(updates).toHaveLength(1));
+  return JSON.parse(updates[0]!.params[0] as string) as Record<string, unknown>;
+};
+
+beforeEach(() => {
+  updates.length = 0;
+  updateFails = false;
+  h.text = 'Add a cart icon\nShow it in the header.';
+  h.rows = [];
+  h.hasVector = true;
+  h.jsonRows = [];
+  h.strict = true;
+  h.storeError = null;
+  h.storeCalls = [];
+  h.storeOptions = [];
+  h.embed.mockReset();
+  h.embed.mockResolvedValue([[0.6, 0.8]]);
+});
+afterEach(() => vi.restoreAllMocks());
+
+describe('scoring the unmatched files rules of a write dispatch', () => {
+  it('amends the pending record with the best cosine per rule, null for a rule with no vector', async () => {
+    h.rows = [
+      { id: A, hash: 'hr1:Alpha', score: '0.8123456' },
+      { id: C, hash: 'hr1:Gamma', score: 0.25 },
+    ];
+    scoreHouseRulesInBackground(
+      db,
+      INV,
+      TASK,
+      pendingStamp([
+        [A, 'Alpha'],
+        [B, 'Beta'],
+        [C, 'Gamma'],
+      ]),
+    );
+    const record = await recordWritten();
+
+    expect(Object.keys(record).sort()).toEqual(['model', 'ms', 'queryHash', 'scores', 'status']);
+    expect(record).toMatchObject({
+      status: 'ok',
+      model: 'embed-model',
+      queryHash: createHash('sha256').update(h.text).digest('hex'),
+    });
+    expect(typeof record.ms).toBe('number');
+    expect(record.scores).toEqual([
+      { ...candidate(A, 'Alpha'), score: 0.8123456 },
+      candidate(B, 'Beta'),
+      { ...candidate(C, 'Gamma'), score: 0.25 },
+    ]);
+  });
+
+  it('embeds the task text once, on the default budget, and binds the ids as a text literal', async () => {
+    scoreHouseRulesInBackground(
+      db,
+      INV,
+      TASK,
+      pendingStamp([
+        [A, 'Alpha'],
+        [B, 'Beta'],
+      ]),
+    );
+    await recordWritten();
+
+    expect(h.embed).toHaveBeenCalledExactlyOnceWith('http://embed.invalid:11434', 'embed-model', [
+      h.text,
+    ]);
+    const read = h.storeCalls.find((call) => call.sql.includes('embed_status'))!;
+    expect(read.params).toContain(`{${A},${B}}`);
+    expect(read.sql).toContain('embed_status');
+    expect(h.storeCalls[0]!.sql).toContain('statement_timeout');
+    expect(h.storeOptions[0]).toMatchObject({ deadlineMs: 6_000, settings: h.settings });
+  });
+
+  it('scores a store without pgvector from its jsonb vectors, the best cosine per rule', async () => {
+    h.hasVector = false;
+    h.jsonRows = [
+      { id: A, hash: 'hr1:Alpha', embedding: [1, 0] },
+      { id: A, hash: 'hr1:Alpha', embedding: '[0,1]' },
+      { id: C, hash: 'hr1:Gamma', embedding: [0.6, 0.8] },
+      { id: C, hash: 'hr1:Gamma', embedding: [1, 0] },
+    ];
+    scoreHouseRulesInBackground(
+      db,
+      INV,
+      TASK,
+      pendingStamp([
+        [A, 'Alpha'],
+        [B, 'Beta'],
+        [C, 'Gamma'],
+      ]),
+    );
+    const record = await recordWritten();
+
+    expect(record.status).toBe('ok');
+    const scores = record.scores as Array<{ id: string; score: number | null }>;
+    expect(scores.map((x) => x.id)).toEqual([A, B, C]);
+    expect(scores[0]!.score).toBeCloseTo(0.8, 9);
+    expect(scores[1]!.score).toBeNull();
+    expect(scores[2]!.score).toBeCloseTo(1, 9);
+  });
+
+  it.each([
+    ['pgvector', true],
+    ['jsonb', false],
+  ])(
+    'leaves a rule re-enforced since the stamp unscored and marked stale, on a %s store',
+    async (_label, hasVector) => {
+      h.hasVector = hasVector;
+      h.rows = [
+        { id: A, hash: 'hr1:Alpha', score: 0.7 },
+        { id: C, hash: 'hr1:Gamma-edited', score: 0.9 },
+      ];
+      h.jsonRows = [
+        { id: A, hash: 'hr1:Alpha', embedding: [0.6, 0.8] },
+        { id: C, hash: 'hr1:Gamma-edited', embedding: [0.6, 0.8] },
+      ];
+      scoreHouseRulesInBackground(
+        db,
+        INV,
+        TASK,
+        pendingStamp([
+          [A, 'Alpha'],
+          [B, 'Beta'],
+          [C, 'Gamma'],
+        ]),
+      );
+      const record = await recordWritten();
+
+      expect(record.scores).toEqual([
+        { ...candidate(A, 'Alpha'), score: hasVector ? 0.7 : expect.closeTo(1, 9) },
+        candidate(B, 'Beta'),
+        { ...candidate(C, 'Gamma'), score: null, stale: true },
+      ]);
+    },
+  );
+
+  it('scores through a cold embedder load that outlasts the old 30 s budget', async () => {
+    const coldLoadMs = 42_800;
+    const { embedTimeoutMs } = await resolveEmbedBudget();
+    h.embed.mockImplementation(async (...args: unknown[]) => {
+      const budget = (args[3] as { timeoutMs?: number } | undefined)?.timeoutMs ?? embedTimeoutMs;
+      if (coldLoadMs > budget) throw Object.assign(new Error('aborted'), { name: 'TimeoutError' });
+      return [[0.6, 0.8]];
+    });
+    h.rows = [{ id: A, hash: 'hr1:Alpha', score: 0.5 }];
+    scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+    const record = await recordWritten();
+
+    expect(record.status).toBe('ok');
+  });
+
+  it('embeds a bounded query, cut between characters', async () => {
+    h.text = `${'a'.repeat(SIMILARITY_QUERY_MAX_CHARS - 1)}\u{1f600}tail`;
+    scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+    const record = await recordWritten();
+
+    const embedded = (h.embed.mock.calls[0]![2] as string[])[0]!;
+    expect(embedded).toBe('a'.repeat(SIMILARITY_QUERY_MAX_CHARS - 1));
+    expect(record.queryHash).toBe(createHash('sha256').update(embedded).digest('hex'));
+  });
+
+  it('amends only a row whose record is still pending, and writes nothing else', async () => {
+    scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+    await recordWritten();
+
+    const { sql: text, params } = updates[0]!;
+    expect(text).toContain('jsonb_set(house_rules');
+    expect(text).toContain("house_rules->'similarity'->>'status' = 'pending'");
+    expect(params).toContain(INV);
+  });
+
+  it.each([
+    [
+      'an embedder that times out',
+      () => h.embed.mockRejectedValue(Object.assign(new Error('x'), { name: 'TimeoutError' })),
+      'timeout',
+    ],
+    [
+      'an embedder that refuses the connection',
+      () =>
+        h.embed.mockRejectedValue(
+          Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }),
+        ),
+      'refused',
+    ],
+    [
+      'an embedder that answers 500',
+      () => h.embed.mockRejectedValue(new Error('Ollama embed failed (500): host embed.invalid')),
+      'other',
+    ],
+    [
+      'a vector of another width than the index',
+      () => h.embed.mockResolvedValue([[0.1, 0.2, 0.3]]),
+      'other',
+    ],
+    ['an embedder that returns nothing', () => h.embed.mockResolvedValue([]), 'other'],
+    [
+      'a store that outlives its deadline',
+      () => {
+        h.storeError = Object.assign(new Error('global KB call exceeded 6000 ms'), {
+          code: 'GLOBAL_KB_DEADLINE',
+        });
+      },
+      'timeout',
+    ],
+    [
+      'a store that refuses a login',
+      () => {
+        h.storeError = Object.assign(new Error('password for kb.internal.example'), {
+          code: '28P01',
+        });
+      },
+      'auth',
+    ],
+  ])(
+    'records failed and the class, and nothing of the error, for %s',
+    async (_label, arm, errorClass) => {
+      arm();
+      scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+      const record = await recordWritten();
+
+      expect(record).toStrictEqual({ status: 'failed', errorClass });
+    },
+  );
+
+  it.each([
+    ['pgvector', true],
+    ['jsonb', false],
+  ])(
+    'scores no rule while strict embedding is off, since hash vectors are stored as embedded, on a %s store',
+    async (_label, hasVector) => {
+      h.strict = false;
+      h.hasVector = hasVector;
+      h.rows = [{ id: A, hash: 'hr1:Alpha', score: 0.9 }];
+      h.jsonRows = [{ id: A, hash: 'hr1:Alpha', embedding: [0.6, 0.8] }];
+      scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+      const record = await recordWritten();
+
+      expect(record).toStrictEqual({ status: 'failed', errorClass: 'unknown_provenance' });
+      expect(h.embed).not.toHaveBeenCalled();
+    },
+  );
+
+  it('records failed for a task with no text to compare, without embedding', async () => {
+    h.text = ' \n \n';
+    scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+
+    expect(await recordWritten()).toStrictEqual({ status: 'failed', errorClass: 'other' });
+    expect(h.embed).not.toHaveBeenCalled();
+  });
+
+  it('returns a promise that settles only once the record is written', async () => {
+    let release: (v: number[][]) => void = () => {};
+    h.embed.mockReturnValue(new Promise<number[][]>((resolve) => (release = resolve)));
+    const settled = vi.fn();
+    const done = scoreHouseRulesInBackground(db, INV, TASK, pendingStamp()).then(settled);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(settled).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    release([[0.6, 0.8]]);
+    await done;
+    expect(updates).toHaveLength(1);
+  });
+
+  it('marks a record abandoned, and settles, when the scoring outlives its budget', async () => {
+    vi.useFakeTimers();
+    try {
+      h.embed.mockReturnValue(new Promise<number[][]>(() => {}));
+      const settled = vi.fn();
+      const done = scoreHouseRulesInBackground(db, INV, TASK, pendingStamp()).then(settled);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(240_000);
+      await done;
+
+      expect(JSON.parse(updates[0]!.params[0] as string)).toStrictEqual({
+        status: 'failed',
+        errorClass: 'abandoned',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never throws, nor leaves a rejection, when the amendment itself cannot be written', async () => {
+    updateFails = true;
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    process.off('unhandledRejection', unhandled);
+
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it('does nothing for a stamp that is absent, has no record, or holds one that is not pending', async () => {
+    const base: HouseRulesStamp = { mode: 'write', entries: [], omitted: [] };
+    const stamps: Array<HouseRulesStamp | null> = [
+      null,
+      base,
+      { ...base, similarity: { status: 'pending', scores: [] } },
+      { ...base, similarity: { status: 'ok', scores: [candidate(A, 'Alpha')] } },
+      { ...base, similarity: { status: 'failed', errorClass: 'timeout' } },
+    ];
+    for (const stamp of stamps) scoreHouseRulesInBackground(db, INV, TASK, stamp);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(h.embed).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    expect(h.storeOptions).toEqual([]);
+  });
+});

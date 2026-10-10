@@ -3,11 +3,15 @@ import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 
 const stubs = vi.hoisted(() => ({
+  scoreHouseRules: vi.fn((..._args: unknown[]): Promise<void> | undefined => undefined),
   executeByKind: vi.fn(),
   resumeStepIfLinked: vi.fn(async () => {}),
   recordLedgerEntry: vi.fn(async (..._args: unknown[]) => {}),
 }));
 
+vi.mock('../src/orchestrator/house-rules-similarity.js', () => ({
+  scoreHouseRulesInBackground: stubs.scoreHouseRules,
+}));
 vi.mock('../src/queues/cli-exec/exec-core.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   executeByKind: stubs.executeByKind,
@@ -196,6 +200,94 @@ describe('a cli run start', () => {
       const started = runWrites(writes).find((w) => 'startedAt' in w.set);
       expect('houseRules' in started!.set).toBe(false);
     }
+  });
+
+  it('writes the similarity record of the stamp intact, and starts its scoring once the run started', async () => {
+    const { db, writes } = fakeDb({});
+    stubs.executeByKind.mockResolvedValue(ok);
+    stubs.scoreHouseRules.mockClear();
+    const houseRules = {
+      mode: 'write',
+      entries: [],
+      omitted: [],
+      filesRulesUnmatched: 1,
+      similarity: {
+        status: 'pending',
+        scores: [{ id: 'a', hash: 'hr1:abc', title: 'No inline svgs', score: null }],
+      },
+    };
+    await handleCliExecJob(db, { ...base, spec: { houseRules } });
+
+    const started = runWrites(writes).find((w) => 'startedAt' in w.set);
+    expect(started?.set.houseRules).toEqual(houseRules);
+    expect(stubs.scoreHouseRules).toHaveBeenCalledExactlyOnceWith(db, RUN, base.taskId, houseRules);
+  });
+
+  it('does not complete the job while its scorer is alive, and still completes once it settles', async () => {
+    const { db } = fakeDb({});
+    stubs.executeByKind.mockResolvedValue(ok);
+    let release: () => void = () => {};
+    stubs.scoreHouseRules.mockReturnValueOnce(new Promise<void>((resolve) => (release = resolve)));
+    const settled = vi.fn();
+    const job = handleCliExecJob(db, {
+      ...base,
+      spec: {
+        houseRules: {
+          mode: 'write',
+          entries: [],
+          omitted: [],
+          similarity: { status: 'pending', scores: [] },
+        },
+      },
+    }).then(settled);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(stubs.executeByKind).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    release();
+    await job;
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the rest of the stamp when its similarity record is malformed, and scores nothing', async () => {
+    const { db, writes } = fakeDb({});
+    stubs.executeByKind.mockResolvedValue(ok);
+    stubs.scoreHouseRules.mockClear();
+    await handleCliExecJob(db, {
+      ...base,
+      spec: {
+        houseRules: { mode: 'write', entries: [], omitted: [], similarity: { status: 'x' } },
+      },
+    });
+
+    const started = runWrites(writes).find((w) => 'startedAt' in w.set);
+    expect(JSON.parse(JSON.stringify(started?.set.houseRules))).toStrictEqual({
+      mode: 'write',
+      entries: [],
+      omitted: [],
+    });
+    expect(JSON.parse(JSON.stringify(stubs.scoreHouseRules.mock.calls[0]?.[3]))).toStrictEqual({
+      mode: 'write',
+      entries: [],
+      omitted: [],
+    });
+  });
+
+  it('starts no scoring for a run that never started', async () => {
+    const { db } = fakeDb({ supersededBeforeStart: true });
+    stubs.scoreHouseRules.mockClear();
+    await handleCliExecJob(db, {
+      ...base,
+      spec: {
+        houseRules: {
+          mode: 'write',
+          entries: [],
+          omitted: [],
+          similarity: { status: 'pending', scores: [] },
+        },
+      },
+    });
+    expect(stubs.scoreHouseRules).not.toHaveBeenCalled();
   });
 
   it('runs nothing once the run was superseded after the job read it', async () => {

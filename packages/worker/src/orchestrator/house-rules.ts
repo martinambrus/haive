@@ -12,6 +12,7 @@ import {
   type EnforceSpec,
   type GlobalKbEntry,
   type GlobalKbErrorClass,
+  type HouseRulesSimilarity,
   type HouseRulesStamp,
 } from '@haive/shared/global-kb';
 import { withAgentRules } from './agent-rules.js';
@@ -206,9 +207,9 @@ function rank(
   changedFiles: readonly string[] | null,
   estimatedFiles: readonly string[],
   namedFiles: readonly string[],
-): { ranked: Ranked[]; unmatched: number } {
+): { ranked: Ranked[]; unmatched: HouseRuleCandidate[] } {
   const ranked: Ranked[] = [];
-  let unmatched = 0;
+  const unmatched: HouseRuleCandidate[] = [];
   for (const rule of rules) {
     const size = houseRuleBytes(rule, { enforce: rule.spec, shortId: provisionalId(rule.id) });
     if (rule.spec.mode === 'always') {
@@ -230,7 +231,7 @@ function rank(
         named === null ? { scope: 'files', glob } : { scope: 'files', glob, via: 'named' };
       ranked.push({ rule, why, tier: written === null ? 2 : 1, size });
     } else {
-      unmatched += 1;
+      unmatched.push(rule);
     }
   }
   ranked.sort(
@@ -284,6 +285,8 @@ export interface HouseRuleSelection {
   block: string | null;
   /** `files` rules that matched no written, estimated or named path, which a later write may still match. */
   filesRulesUnmatched?: number;
+  /** Set when the caller asked for the unmatched `files` rules to be scored: one pending entry per such rule. */
+  similarity?: HouseRulesSimilarity;
 }
 
 export const disabledSelection = (): HouseRuleSelection => ({
@@ -318,6 +321,7 @@ export function selectHouseRules(input: {
   estimatedFiles?: readonly string[];
   namedFiles?: readonly string[];
   budgetBytes?: number;
+  similarity?: boolean;
 }): HouseRuleSelection {
   const { mode, changedFiles } = input;
   const framing = framingOf(mode, input.findings === true);
@@ -362,7 +366,20 @@ export function selectHouseRules(input: {
       entries,
       omitted: [...(input.refused ?? []), ...leftOut],
       block: kept.length === 0 && leftOut.length === 0 ? null : renderBlock(framing, kept, notice),
-      ...(unmatched > 0 ? { filesRulesUnmatched: unmatched } : {}),
+      ...(unmatched.length > 0 ? { filesRulesUnmatched: unmatched.length } : {}),
+      ...(input.similarity === true && unmatched.length > 0
+        ? {
+            similarity: {
+              status: 'pending',
+              scores: unmatched.map((rule) => ({
+                id: rule.id,
+                hash: rule.hash,
+                title: houseRuleStampTitle(rule.title),
+                score: null,
+              })),
+            },
+          }
+        : {}),
     };
   }
 }
@@ -385,7 +402,10 @@ export function houseRulesStampOf(
     };
   }
   const unmatched = selection.filesRulesUnmatched ?? 0;
-  const counted = unmatched > 0 ? { filesRulesUnmatched: unmatched } : {};
+  const counted = {
+    ...(unmatched > 0 ? { filesRulesUnmatched: unmatched } : {}),
+    ...(selection.similarity ? { similarity: selection.similarity } : {}),
+  };
   if (tooLarge) {
     return {
       mode,

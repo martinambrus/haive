@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger } from '@haive/shared';
+import { CONFIG_KEYS, configService, logger, parseHouseRulesSimilarityMode } from '@haive/shared';
 import { readFileNoFollow } from '@haive/shared/fs-safe';
 import type { GlobalKbErrorClass } from '@haive/shared/global-kb';
 import { gitRun } from '../repo/git-exec.js';
@@ -117,7 +117,7 @@ const SPEC_STEP_05A = '05a-resolve-spec-warnings';
 const TASK_TEXT_READ_CHARS = 262_144;
 
 /** The task's title and description, then its freshest spec: the highest round, then 05a, 05, 04. */
-async function readTaskText(db: Database, taskId: string): Promise<string> {
+export async function readTaskText(db: Database, taskId: string): Promise<string> {
   const { tasks, taskSteps } = schema;
   const rows = (await db.execute(sql`
     select left(${tasks.title}, ${TASK_TEXT_READ_CHARS}::int) as title,
@@ -169,6 +169,17 @@ async function readNamedFiles(
   }
 }
 
+/** Whether a write dispatch records how close the task is to its unmatched `files` rules; a setting
+ *  that cannot be read means off, so a broken config does no extra IO. */
+async function recordsSimilarity(): Promise<boolean> {
+  try {
+    const raw = await configService.get(CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_SIMILARITY);
+    return parseHouseRulesSimilarityMode(raw) === 'record';
+  } catch {
+    return false;
+  }
+}
+
 /** Reads the change only when a `files` rule is there to be scoped by it. */
 export async function selectForDispatch(
   db: Database,
@@ -196,6 +207,8 @@ export async function selectForDispatch(
     changedFiles,
     estimatedFiles: plannedFiles(request.estimatedFiles),
     namedFiles: named,
+    similarity:
+      scoped && changedFiles !== null && request.mode === 'write' && (await recordsSimilarity()),
   });
 }
 

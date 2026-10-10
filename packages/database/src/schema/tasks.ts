@@ -1135,6 +1135,20 @@ export const cliInvocations = pgTable(
       reason?: 'switched_off' | 'unavailable' | 'too_large';
       errorClass?: 'timeout' | 'refused' | 'auth' | 'other';
       filesRulesUnmatched?: number;
+      similarity?: {
+        status: 'pending' | 'ok' | 'failed';
+        errorClass?: 'timeout' | 'refused' | 'auth' | 'other' | 'unknown_provenance' | 'abandoned';
+        model?: string;
+        queryHash?: string;
+        ms?: number;
+        scores?: Array<{
+          id: string;
+          hash: string;
+          title: string;
+          score: number | null;
+          stale?: boolean;
+        }>;
+      };
     }>(),
     /** The capability remedies the request was built with (nulls when the provider had no limits);
      *  NULL on rows written before the column. Migration 0177. */
