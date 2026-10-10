@@ -21,10 +21,11 @@ import {
   UNTRUSTED_CLOSE,
   fenceSafe,
   safeKey,
+  collapseToLine,
 } from './steps/_untrusted-repo.js';
 import { ROOT_CAUSE_LINES, repeatedFlagLines } from './steps/workflow/_fix-loop.js';
 import { isOutOfScope, SCOPE_FENCE_INSIGHTS } from './steps/_scope-fence.js';
-import { INSIGHTS_INSTRUCTION } from './steps/workflow/08e-insights-triage.js';
+import { INSIGHTS_INSTRUCTION, parseInsights } from './steps/workflow/08e-insights-triage.js';
 import {
   changedFilesBlock,
   collectChangeSet,
@@ -1112,6 +1113,31 @@ export function parseReviewerOutput(
   return out;
 }
 
+const insightText = (t: string): string => collapseToLine(t).toLowerCase();
+
+/** The reviewer's raw reply with each withheld finding added as an `## INSIGHTS` line, the form
+ *  08e and the gates scan for, unless an insight there already covers it (same file, same words). */
+export function withInsightLines(raw: string | null, withheld: ReviewerOutput['issues']): string {
+  const base = raw ?? '';
+  const have = parseInsights([{ stepId: '', raw: base }], Number.POSITIVE_INFINITY);
+  const lines = withheld
+    .filter((f) => {
+      const text = insightText(f.description);
+      return !have.some((i) => {
+        const words = [insightText(i.title), insightText(i.description)];
+        return (
+          (!f.file || i.location.includes(f.file)) &&
+          words.some((w) => w.includes(text) || (w.length >= 12 && text.includes(w)))
+        );
+      });
+    })
+    .map(
+      (f) =>
+        `- INSIGHT: ${collapseToLine(f.description).replaceAll('|', '/')} | ${f.file ?? ''} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
+    );
+  return lines.length > 0 ? `${base}${base ? '\n\n' : ''}## INSIGHTS\n${lines.join('\n')}\n` : base;
+}
+
 /** A fix_required verdict whose own structured signals say the work is done:
  *  every acceptance criterion passed and every raised issue is explicitly
  *  low-severity (cosmetic). These resolve as debt instead of looping the
@@ -1446,6 +1472,14 @@ export async function ingestReviewRun(
         'failed_unrecoverable',
         `reviewer returned no valid reviewer verdict${inv.errorMessage ? `: ${inv.errorMessage}` : ''}`,
       );
+    }
+    if (verdict.withheld) {
+      const raw = withInsightLines(inv.rawOutput, verdict.withheld);
+      if (raw !== (inv.rawOutput ?? ''))
+        await ra.db
+          .update(schema.cliInvocations)
+          .set({ rawOutput: raw })
+          .where(eq(schema.cliInvocations.id, inv.id));
     }
     if (verdict.verdict === 'approve') {
       return setResolution(

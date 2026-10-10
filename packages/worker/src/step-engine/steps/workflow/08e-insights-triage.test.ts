@@ -15,6 +15,12 @@ describe('parseInsights', () => {
     expect(ins[0]!.id).toBe('i-1');
   });
 
+  it('reads every ## INSIGHTS section of one output', () => {
+    const raw =
+      '## INSIGHTS\n- INSIGHT: One | a.ts:1 | x\n\n## INSIGHTS\n- INSIGHT: Two | b.ts:2 | y\n';
+    expect(parseInsights([{ stepId: 's', raw }]).map((i) => i.title)).toEqual(['One', 'Two']);
+  });
+
   it('dedupes by title+location across outputs and caps ids sequentially', () => {
     const raw = '## INSIGHTS\n- INSIGHT: Same | a.ts:1 | one\n';
     const ins = parseInsights([

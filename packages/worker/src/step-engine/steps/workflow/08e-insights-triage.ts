@@ -85,9 +85,8 @@ export function parseInsights(outputs: { stepId: string; raw: string }[], limit 
   const out: Insight[] = [];
   for (const { stepId, raw } of outputs) {
     if (!raw) continue;
-    const m = /##\s*INSIGHTS\b([\s\S]*?)(?:\n##\s|\n```|$)/i.exec(raw);
-    if (!m) continue;
-    for (const line of m[1]!.split('\n')) {
+    const sections = [...raw.matchAll(/##\s*INSIGHTS\b([\s\S]*?)(?=\n##\s|\n```|$)/gi)];
+    for (const line of sections.flatMap((m) => m[1]!.split('\n'))) {
       const im = /^\s*[-*]\s*INSIGHT:\s*(.+)$/i.exec(line);
       if (!im) continue;
       const parts = im[1]!.split('|').map((p) => p.trim());
