@@ -218,7 +218,9 @@ PR8 sets per-rule floors from these records): at dispatch `{status: 'pending', s
 task text (title, description, spec opening; `queryHash` is its sha256), takes each rule's best cosine
 over its vectors in the global store, and amends the row by compare-and-set on `pending` to `ok` (with
 `model`, `queryHash`, `ms`) or `failed` with an error class only. It runs off the dispatch path because a
-cold embed measured 4.6-42.8 s. `config:globalKb:houseRulesSimilarity`: `off` scores nothing; anything
+cold embed measured 4.6-42.8 s, with the ingest budget (`RAG_EMBED_TIMEOUT_MS`, 240 s, admin-tunable), not
+a query's. It reads `vector` or, on a store without pgvector, `embedding_json`, and scores a rule only
+while its enforced hash still equals the stamped one; a rule edited since gets `score: null, stale: true`. `config:globalKb:houseRulesSimilarity`: `off` scores nothing; anything
 else is record (seeded record); a read that throws is off. `stripHaivePreamble`
 removes a stored agent-rules block, then a stored house block, only at position 0, for replays, the
 agent-isolation scan and the persona bookkeeping; a marker quoted anywhere else never suppresses
