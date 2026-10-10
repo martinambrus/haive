@@ -288,7 +288,7 @@ guarantee, so it is a bonus gate and must not be turned into a requirement by ma
 dimension-aware.
 
 **7 · `scan-remediate`** — declares the `dagExecute` hook and supplies a fix-oriented coder prompt.
-**Reusing the executor needs no core change:** `resolveDagPhase`
+**Reusing the executor needs no core change to find its plan:** `resolveDagPhase`
 (`step-engine/dag-executor.ts:1505`) loads its plan by `taskDagPlans.taskId`, not from `06b`, so the
 module inherits per-level isolated worktrees, parallel coders, the barrier, level-by-level merge,
 checkpointing and crash recovery wholesale. This is the single largest piece of reuse in the plan.
@@ -311,12 +311,27 @@ pre-answer included, and 01 falls back to `HEAD`, so remediation refuses there a
 built on a tip the source has moved away from is work its push cannot land. A check that cannot
 be answered, a history too shallow to connect the commits, refuses rather than guesses.
 
-**One thing it inherits must change.** The DAG's fail-fast guard (`pickFatalProviderError`) cancels
+**Two things it inherits must change.** The first is the DAG's fail-fast guard (`pickFatalProviderError`) cancels
 every in-flight sibling coder when one coder's run carries a fatal provider headline, and a security
 fix the provider's filter refuses carries one, so one refused issue would stop its whole level.
 Taking the guard away alone would send that issue to the advisor instead, which can re-send the
 refused content. The first new core change covers both; the refused issue's findings stay recorded
 as not remediated, naming the refusal.
+
+The second is what an issue that fails for good does to the step. With per-issue review off,
+`resolveDagPhase` fails the step as soon as a level has a failed coder, and with it on, an
+escalation that cannot replan aborts it, so `scan-remediate` itself ends `failed` and nothing after
+it runs, the report included. That fits a workflow task, whose plan is one change that is wrong
+without every part of it. A scan's issues are independent fixes a person picked one by one, and
+an unfixed one is a line in the report, not a reason to throw the others away. So `scan-remediate`
+declares a record-and-continue failure policy on its `dagExecute` hook (see Core changes): an
+issue that ends `failed_unrecoverable`, after the advisor and replanner have run as they do today,
+is recorded on its row, its level merges what finished, an issue that depends on it is not
+dispatched and is recorded as blocked with a marker in `concerns` naming the failed issue, and the
+step completes. A refusal before dispatch — the landing-branch checks above — is recorded the same
+way, its reason on every planned issue, and its findings are listed as offered no remediation.
+What a Retry is expected to cure still fails the step: an environment halt (`coderEnvHalt`) or a
+crash, where the report waits for the Retry rather than recording a transient fault as a verdict.
 
 **8 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
 a workflow task ends. Several of them emit `loop_back`, and the data-driven task types
@@ -721,7 +736,7 @@ Two are already written into the two modularity plans (`5aa4704`):
 - Module `composableSteps` union into `composable_step_catalog`, namespaced `module.<id>.<stepId>`.
 - Module-seeded task-type definitions, and the dangling-reference rule when a module is removed.
 
-Seven more follow from how the scan runs. The first, the insights reader's limit and the last
+Eight more follow from how the scan runs. The first, the insights reader's limit and the last
 stand on their own and can ship
 ahead of the module:
 
@@ -777,6 +792,13 @@ ahead of the module:
   records every step in the span `skipped` when it is false. This belongs with the task-type seed
   in `rippling-wibbling-puffin`, whose composition validator then also checks a guarded span holds
   no step a later unguarded one depends on.
+- **The DAG executor takes a record-and-continue failure policy.** A `dagExecute` hook can declare
+  it, and core's own steps never do, so a workflow task's DAG keeps failing as it does. Under it,
+  the two sites that fail the step on an issue failure (`resolveDagPhase`'s review-off level
+  check and an escalation that cannot replan) record the failure and let the level merge its other
+  issues, a dependent of the failed issue ends `failed_unrecoverable` with a blocked-by marker in
+  `concerns` — no new `dag_issue_outcome` value, as with the refusal marker — and an environment
+  halt still fails the step.
 - **`loadUnactedInsights` takes a limit.** It slices to `INSIGHTS_AT_GATE` (30) itself, which suits
   a gate row and not a report that lists everything. The gates pass that constant, `scan-report`
   passes none, and the omitted count keeps its meaning for both.
@@ -964,7 +986,10 @@ former, and this module does both kinds of write.
   status message on a step changes no entry's reason.
 - A triage that picks nothing, and a remediation whose every issue fails, each reach `scan-report`
   with the guarded steps recorded `skipped`: no reviewer runs `assertReviewableChange` on an empty
-  change set, and nothing is committed. Where an issue was planned, `12-worktree-cleanup` still
+  change set, and nothing is committed. Under the record-and-continue policy, a remediation whose
+  only issue fails with review off, and one whose escalation cannot replan, each end `scan-remediate`
+  `done`, and a refusal before dispatch lists every planned finding as offered no remediation,
+  naming the reason. Where an issue was planned, `12-worktree-cleanup` still
   runs and the integration worktree and its branch are gone afterwards.
 - An issue holding two findings whose coder reports a different file set still classifies both
   findings by that issue's outcome, and a finding whose issue an advisor split is merged only when
@@ -989,6 +1014,9 @@ former, and this module does both kinds of write.
   base named `+topic` updates `refs/heads/+topic` from `refs/heads/+topic` and nothing else.
 - A seed span whose predicate is false records each of its steps `skipped` and runs the step after
   it; one whose predicate is true runs as if unguarded.
+- Under the record-and-continue policy, a level with one failed issue merges its others and the
+  step completes, a dependent of the failed issue is recorded blocked and never dispatched, and an
+  environment halt still fails the step; without the policy, every existing DAG test is unchanged.
 - `loadUnactedInsights` with no limit returns every unpicked insight; with `INSIGHTS_AT_GATE` the
   gates still show 30 and count the rest.
 
