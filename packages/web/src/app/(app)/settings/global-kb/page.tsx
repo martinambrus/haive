@@ -26,6 +26,7 @@ import {
   houseRuleBadge,
 } from '@/lib/house-rules';
 import { bodyToSave } from '@/lib/body-edit';
+import { changedFields } from '@/lib/config-diff';
 import { isCardActivation } from '@/lib/card-keys';
 import {
   Badge,
@@ -216,6 +217,32 @@ const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
 
 /** A saved ollamaUrl maps back to a mode: the bundled URL (or empty) is internal,
  *  anything else is an external server the user pointed at. */
+function savedConfig(c: {
+  enabled: boolean;
+  digestEnabled: boolean;
+  mode: 'internal' | 'external';
+  namespace: string;
+  ollamaMode: 'internal' | 'external';
+  ollamaUrl: string;
+  embedModel: string;
+  embedDimensions: number;
+  archiveRetentionDays: number;
+}) {
+  return {
+    enabled: c.enabled,
+    digestEnabled: c.digestEnabled,
+    mode: c.mode,
+    namespace: c.namespace,
+    ollamaUrl:
+      c.ollamaMode === 'internal'
+        ? IN_STACK_OLLAMA_URL
+        : c.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL,
+    embedModel: c.embedModel,
+    embedDimensions: c.embedDimensions,
+    archiveRetentionDays: c.archiveRetentionDays,
+  };
+}
+
 function deriveOllamaMode(url: string): 'internal' | 'external' {
   return url && url !== IN_STACK_OLLAMA_URL ? 'external' : 'internal';
 }
@@ -513,6 +540,7 @@ export default function GlobalKbPage() {
     msg: string | null;
   }>({ busy: false, ok: null, msg: null });
   const [cfgLoaded, setCfgLoaded] = useState(false);
+  const loadedConfig = useRef<ReturnType<typeof savedConfig> | null>(null);
   const [connExpanded, setConnExpanded] = useState(false);
   const connChecked = useRef(false);
 
@@ -532,6 +560,7 @@ export default function GlobalKbPage() {
         archiveRetentionDays: cc.archiveRetentionDays,
         connectionString: '',
       }));
+      loadedConfig.current = savedConfig({ ...cc, ollamaMode: deriveOllamaMode(cc.ollamaUrl) });
       setCfgSet(cc.connectionStringSet);
       setCanEnforce(cc.canEnforce === true);
       setInstanceNamespace(cc.namespace);
@@ -544,10 +573,7 @@ export default function GlobalKbPage() {
 
   // Internal mode has no URL field; collapse the mode back to a concrete URL
   // (mirrors onboarding 04's apply) for both save and the Ollama test.
-  const effectiveOllamaUrl =
-    cfg.ollamaMode === 'internal'
-      ? IN_STACK_OLLAMA_URL
-      : cfg.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL;
+  const effectiveOllamaUrl = savedConfig(cfg).ollamaUrl;
   // The database test is admin-only, so for anyone else the database is simply not checked.
   const connOk = cfg.enabled && (!canEnforce || dbTest.ok === true) && ollamaTest.ok === true;
   // Null until the first-load check resolves; keeps the collapsed header from
@@ -610,20 +636,18 @@ export default function GlobalKbPage() {
       setCfgMsg('Archive retention must be a whole number from 0 to 3650 days.');
       return;
     }
+    const current = savedConfig(cfg);
+    const payload: Record<string, unknown> = loadedConfig.current
+      ? changedFields(loadedConfig.current, current)
+      : current;
+    if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
+    if (Object.keys(payload).length === 0) {
+      setCfgMsg('Nothing changed.');
+      return;
+    }
     setCfgBusy(true);
     setCfgMsg(null);
     try {
-      const payload: Record<string, unknown> = {
-        enabled: cfg.enabled,
-        digestEnabled: cfg.digestEnabled,
-        mode: cfg.mode,
-        namespace: cfg.namespace,
-        ollamaUrl: effectiveOllamaUrl,
-        embedModel: cfg.embedModel,
-        embedDimensions: cfg.embedDimensions,
-        archiveRetentionDays: cfg.archiveRetentionDays,
-      };
-      if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
       await api.put('/global-kb/config', payload);
       await loadConfig();
       await load();
