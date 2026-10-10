@@ -330,7 +330,7 @@ function cutFencedBodies(text: string, budget: number): string {
   for (const { start, end, share } of bodies) {
     const body = text.slice(start, end);
     out += text.slice(copied, start);
-    out += body.length > share ? cutMiddle(body, share, (piece) => piece) : body;
+    out += body.length > share ? cutMiddle(body, share, (piece) => piece, true) : body;
     copied = end;
   }
   return out + text.slice(copied);

@@ -1167,6 +1167,26 @@ describe('excerptDiagnosis', () => {
     }
   });
 
+  it("frames a cut agent body like a whole-text cut and leaves a person's words as they are", () => {
+    const person = 'Please fix the layout.\n\nKeep it small.';
+    const code = `\`\`\`ts\n${numbered('code', 300)}\n\`\`\``;
+    const small = numbered('small', 3);
+    const text = [person, fencedAgentBlock(code), 'Then this:', fencedAgentBlock(small)].join('\n');
+    const out = excerptDiagnosis(text, 800, true);
+    const [cut = '', kept = ''] = fenceBodies(out);
+    const lines = cut.split('\n');
+    const marker = lines.findIndex((l) => OMISSION.test(l));
+    expect(marker).toBeGreaterThan(0);
+    expect(lines[marker - 1]).toBe('');
+    expect(lines[marker + 1]).toBe('');
+    expect(scanFences(lines).length).toBe(2);
+    expect(scanFences(lines).every((f) => f.close !== null)).toBe(true);
+    expect(fencedLines(lines)[marker]).toBe(false);
+    expect(out.startsWith(`${person}\n${UNTRUSTED_OPEN}`)).toBe(true);
+    expect(out).toContain(`${UNTRUSTED_CLOSE}\nThen this:\n${UNTRUSTED_OPEN}`);
+    expect(kept).toBe(`\n${small}\n`);
+  });
+
   it('gives a short fenced block no more than it needs', () => {
     const small = numbered('small', 5);
     const text = [fencedAgentBlock(small), fencedAgentBlock(numbered('big', 400))].join('\n');
@@ -1398,7 +1418,7 @@ describe('what the fix prompt keeps of a long diagnosis', () => {
     const body = bodies[0] ?? '';
     expect(body.split(OMISSION)).toHaveLength(2);
     const marker = body.match(OMISSION)?.[0] ?? '';
-    expect(body.length).toBeLessThanOrEqual(6000 + marker.length + 2);
+    expect(body.length).toBeLessThanOrEqual(6000 + marker.length + 4);
   });
 
   it('shows the oscillation gate the findings of an adversarial-QA request bounded', () => {
