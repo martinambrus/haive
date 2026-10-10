@@ -11,6 +11,7 @@ import {
   answerFieldId,
   buildClarifyForm,
   nextMove,
+  openQuestionsTodo,
   outlineExtraLines,
   outsideOutline,
   parseQuestions,
@@ -566,6 +567,20 @@ describe('clarify helpers', () => {
       ],
     );
     expect(verdicts.map((v) => v.status)).toEqual(['settled', 'open']);
+  });
+
+  it('keeps an open question todo whatever the outline left out', () => {
+    expect(
+      openQuestionsTodo([
+        { op: 'upsert', nodeRef: 'a', kind: 'decision' },
+        { op: 'upsert', nodeRef: 'b', kind: 'research', status: 'done' },
+        { op: 'upsert', nodeRef: 'c', kind: 'component' },
+      ]),
+    ).toEqual([
+      { op: 'upsert', nodeRef: 'a', kind: 'decision', status: 'todo' },
+      { op: 'upsert', nodeRef: 'b', kind: 'research', status: 'done' },
+      { op: 'upsert', nodeRef: 'c', kind: 'component' },
+    ]);
   });
 
   it('keeps every new node directly under the root', () => {

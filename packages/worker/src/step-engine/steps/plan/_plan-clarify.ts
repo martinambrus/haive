@@ -260,6 +260,19 @@ export function outsideOutline(
   return { kept, dropped };
 }
 
+/** Open questions arrive `todo` whatever the agent omitted: a `from_repo` outline greens every
+ *  upsert without a status (`withMinedStatus`), and a question nobody answered is not done. */
+export function openQuestionsTodo(ops: readonly unknown[]): unknown[] {
+  return ops.map((op) => {
+    const o = op as Record<string, unknown>;
+    return o?.op === 'upsert' &&
+      (o.kind === 'decision' || o.kind === 'research') &&
+      o.status === undefined
+      ? { ...o, status: 'todo' }
+      : op;
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* Prompts                                                             */
 /* ------------------------------------------------------------------ */

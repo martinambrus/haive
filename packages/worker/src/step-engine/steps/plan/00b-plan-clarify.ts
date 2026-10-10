@@ -37,6 +37,7 @@ import {
   integrateAgentId,
   integrateRoundOf,
   nextMove,
+  openQuestionsTodo,
   outlineExtraLines,
   outsideOutline,
   parseQuestions,
@@ -202,7 +203,7 @@ async function foldOutline(
       async (tx) => {
         const applied = await applyAgentPatch(
           tx,
-          { ...patch, ops: withMinedStatus(kept, d.build.mode) },
+          { ...patch, ops: withMinedStatus(openQuestionsTodo(kept), d.build.mode) },
           { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
         );
         // Round 0 names the root THIS task drafted (see `assertOwnOutline`). A redrafted outline,
