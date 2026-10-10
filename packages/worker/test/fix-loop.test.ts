@@ -1130,6 +1130,56 @@ describe('excerptDiagnosis', () => {
     expect(out).toMatch(OMISSION);
   });
 
+  describe('a block opened with a run longer than the synthetic cap', () => {
+    const long = '`'.repeat(17);
+    const prose = numbered('prose', 12);
+    const closed = (lines: string[]): boolean => scanFences(lines).every((f) => f.close !== null);
+
+    it('is cut outside of when the head ends inside it and its closer is omitted', () => {
+      const text = `intro\n${long}\n${numbered('code', 300)}\n${long}\n${prose}`;
+      const out = excerptDiagnosis(text, 800, false);
+      const lines = out.split('\n');
+      const marker = lines.findIndex((l) => OMISSION.test(l));
+      expect(marker).toBeGreaterThan(0);
+      expect(lines.slice(0, marker).join('\n')).toBe('intro\n');
+      expect(scanFences(lines)).toHaveLength(0);
+      expect(out.endsWith(prose.slice(-300))).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(800 + 120);
+    });
+
+    it('is cut outside of when the tail starts inside it, after its closer', () => {
+      const outro = numbered('outro', 3);
+      const text = `${numbered('intro', 12)}\n${long}\n${numbered('code', 300)}\n${long}\n${outro}`;
+      const out = excerptDiagnosis(text, 800, false);
+      const lines = out.split('\n');
+      const marker = lines.findIndex((l) => OMISSION.test(l));
+      expect(marker).toBeGreaterThan(0);
+      expect(closed(lines)).toBe(true);
+      expect(fencedLines(lines)[marker]).toBe(false);
+      expect(scanFences(lines)).toHaveLength(0);
+      expect(out.endsWith(`\n\n${outro}`)).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(800 + 120);
+    });
+
+    it('drops the rest of a block that never closes instead of leaving it open', () => {
+      const text = `intro\n${long}\n${numbered('code', 300)}`;
+      const out = excerptDiagnosis(text, 800, false);
+      const lines = out.split('\n');
+      expect(scanFences(lines)).toHaveLength(0);
+      expect(out.startsWith('intro\n')).toBe(true);
+      expect(out).toMatch(/\[… [\d,]+ characters omitted …\]$/);
+    });
+
+    it('drops the tail of a block opened before the cut that never closes', () => {
+      const text = `${numbered('intro', 12)}\n${long}\n${numbered('code', 300)}`;
+      const out = excerptDiagnosis(text, 800, false);
+      const lines = out.split('\n');
+      expect(closed(lines)).toBe(true);
+      expect(scanFences(lines)).toHaveLength(0);
+      expect(out).toMatch(/\[… [\d,]+ characters omitted …\]$/);
+    });
+  });
+
   it('adds no fence line when the cut falls outside every block', () => {
     const text = `${'prose '.repeat(600)}\n\`\`\`\ncode\n\`\`\`\n${'prose '.repeat(600)}`;
     const out = excerptDiagnosis(text, 400, false);

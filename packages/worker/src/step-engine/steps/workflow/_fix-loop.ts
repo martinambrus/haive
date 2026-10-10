@@ -283,6 +283,28 @@ function openFenceRun(text: string): string | null {
     : null;
 }
 
+/** The head cut back to before a block still open at its end whose opener run exceeds the cap. */
+function headBeforeLongFence(head: string): string {
+  const lines = head.split('\n');
+  const open = scanFences(lines).find((fence) => fence.close === null);
+  const opener = open ? fenceOpener(lines[open.open] ?? '') : null;
+  return open && opener && opener.run.length > MAX_SYNTHETIC_FENCE
+    ? lines.slice(0, open.open).join('\n')
+    : head;
+}
+
+/** The tail from the line after the closer of a block it starts inside whose opener run exceeds the
+ *  cap, or empty when that block never closes. */
+function tailAfterLongFence(text: string, tail: string): string {
+  const lines = text.split('\n');
+  const before = text.slice(0, text.length - tail.length).split('\n');
+  const open = scanFences(before).find((fence) => fence.close === null);
+  const opener = open ? fenceOpener(before[open.open] ?? '') : null;
+  if (!open || !opener || opener.run.length <= MAX_SYNTHETIC_FENCE) return tail;
+  const close = scanFences(lines).find((fence) => fence.open === open.open)?.close ?? null;
+  return close === null ? '' : lines.slice(close + 1).join('\n');
+}
+
 /** The first and last halves of `budget` around one line stating the count dropped. Each end is
  *  repaired alone: one repair over both would fence a head that sits outside any fence. */
 function cutMiddle(
@@ -291,8 +313,14 @@ function cutMiddle(
   repair: (piece: string) => string,
   framed = false,
 ): string {
-  const headLines = headPiece(text, Math.ceil(budget / 2)).split('\n');
-  const tailText = tailPiece(text, Math.floor(budget / 2));
+  let headText = headPiece(text, Math.ceil(budget / 2));
+  let tailText = tailPiece(text, Math.floor(budget / 2));
+  // A block with a run too long to re-synthesize is cut around, never through.
+  if (framed) {
+    headText = headBeforeLongFence(headText);
+    tailText = tailAfterLongFence(text, tailText);
+  }
+  const headLines = headText.split('\n');
   const tailLines = tailText.split('\n');
   // A BEGIN ending the head, or an END starting the tail, would be repaired into an empty fence.
   if (headLines.at(-1) === UNTRUSTED_OPEN) headLines.pop();
@@ -307,8 +335,10 @@ function cutMiddle(
   return [
     repair(headRun ? `${head}\n${headRun}` : head),
     omitted,
-    repair(tailRun ? `${tailRun}\n${tail}` : tail),
-  ].join('\n\n');
+    tail ? repair(tailRun ? `${tailRun}\n${tail}` : tail) : '',
+  ]
+    .filter((part, i) => part !== '' || i === 1)
+    .join('\n\n');
 }
 
 /** The first `max` characters of `text`, then `marker` on its own line. A BEGIN banner ending the
