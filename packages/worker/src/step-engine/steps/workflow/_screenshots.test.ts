@@ -147,7 +147,12 @@ describe('resolveScreenshotRoot', () => {
     ({
       taskId: 'task-1',
       workspacePath: '/repos/repo',
-      db: { query: { tasks: { findFirst: async () => ({ worktreePath }) } } },
+      db: {
+        query: {
+          tasks: { findFirst: async () => ({ worktreePath }) },
+          taskSteps: { findFirst: async () => undefined },
+        },
+      },
     }) as unknown as StepContext;
 
   it('resolves the task worktree, not the repo root', async () => {

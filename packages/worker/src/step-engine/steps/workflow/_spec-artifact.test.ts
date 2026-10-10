@@ -12,11 +12,21 @@ vi.mock('../../workspace-probe.js', () => ({
   hasWorkspaceEntry: (...args: unknown[]) => hasWorkspaceEntry(...args),
 }));
 
-vi.mock('@haive/database', () => ({ schema: { tasks: { id: 'id' } } }));
-vi.mock('drizzle-orm', () => ({ eq: () => undefined }));
+vi.mock('@haive/database', () => ({
+  schema: {
+    tasks: { id: 'id' },
+    taskSteps: { taskId: 'taskId', stepId: 'stepId', round: 'round' },
+  },
+}));
+vi.mock('drizzle-orm', () => ({
+  eq: () => undefined,
+  and: () => undefined,
+  desc: () => undefined,
+}));
 
 const configGet = vi.fn();
-vi.mock('@haive/shared', () => ({
+vi.mock('@haive/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared')>()),
   CONFIG_KEYS: { SPEC_VIEW_MODE: 'config:output:specViewMode' },
   configService: { get: (...args: unknown[]) => configGet(...args) },
   SPEC_VIEW_MODES: ['toc', 'full'],
@@ -48,7 +58,12 @@ function wireSteps(spec: string, worktreePath: string | null): void {
 
 function ctx(): Ctx {
   return {
-    db: { query: { tasks: { findFirst: async () => ({ worktreePath: taskWorktreePath }) } } },
+    db: {
+      query: {
+        tasks: { findFirst: async () => ({ worktreePath: taskWorktreePath }) },
+        taskSteps: { findFirst: async () => undefined },
+      },
+    },
     taskId: 'task-1',
     sandboxWorkdir: '/haive/workdir',
     logger: { warn: vi.fn(), info: vi.fn() },

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { decidedWorktreePath, loadTaskWorktreeDecision } from '../../../repo/task-worktree.js';
 
 export interface TaskMeta {
   title: string;
@@ -46,22 +47,16 @@ export async function resolveDdevWorkspace(
 ): Promise<DdevWorkspace | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { userId: true, repositoryId: true, worktreePath: true },
+    columns: { userId: true, repositoryId: true, worktreeBranch: true, worktreePath: true },
   });
   if (!task?.repositoryId) return null;
 
-  const rows = await db
-    .select()
-    .from(schema.taskSteps)
-    .where(
-      and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '01-worktree-setup')),
-    )
-    .limit(1);
-  const step = rows[0];
-  const wt = step?.output as { worktreePath?: string } | null;
-  // A run_app Skip ends 01 without a worktree, while the column may still name an old one.
-  const recorded =
-    step?.status === 'skipped' ? repoPath : (task.worktreePath ?? wt?.worktreePath ?? repoPath);
+  const decision = await loadTaskWorktreeDecision(db, {
+    taskId,
+    columnBranch: task.worktreeBranch,
+    columnPath: task.worktreePath,
+  });
+  const recorded = decidedWorktreePath(decision, repoPath) ?? repoPath;
 
   // Worktree path relative to the repo root (e.g. ".haive/worktrees/<branch>", or
   // "" when there's no worktree). Appended to the known `<userId>/<repoId>` volume

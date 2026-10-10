@@ -3,6 +3,7 @@ import { schema, type Database } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { gitExec } from '../../../repo/git-exec.js';
+import { decidedWorktreePath, loadTaskWorktreeDecision } from '../../../repo/task-worktree.js';
 
 /**
  * Commits that reached this repository without Haive making them.
@@ -201,12 +202,17 @@ export async function resolveExternalDrift(
 ): Promise<ExternalDrift> {
   const task = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
-    columns: { repositoryId: true, worktreePath: true },
+    columns: { repositoryId: true, worktreeBranch: true, worktreePath: true },
   });
   // Resolved before the early return so every path reports the tree it looked at.
   const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
   const wt = prev?.output as { worktreePath?: string; baseBranch?: string } | null;
-  const worktreePath = wt?.worktreePath ?? task?.worktreePath ?? ctx.workspacePath;
+  const decision = await loadTaskWorktreeDecision(ctx.db, {
+    taskId: ctx.taskId,
+    columnBranch: task?.worktreeBranch,
+    columnPath: task?.worktreePath,
+  });
+  const worktreePath = decidedWorktreePath(decision, ctx.repoPath) ?? ctx.workspacePath;
   if (!task?.repositoryId) return { ...NOTHING, worktreePath };
   const repositoryId = task.repositoryId;
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { resolveDispatch, resolveTaskDispatch } from '../src/orchestrator/dispatcher.js';
 import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
@@ -43,6 +43,11 @@ import {
 import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
 import { DDEV_GENERATED_BOUNDARY_MARKER } from '../src/repo/ddev-generated-boundary.js';
 import { HOUSE_RULES_END } from '@haive/shared/global-kb';
+import { makePointerFixture, type PointerFixture } from './support/worktree-pointer-db.js';
+
+vi.hoisted(() => {
+  process.env.REPO_STORAGE_ROOT = `${process.env.TMPDIR ?? '/tmp'}/wt-pointer-dispatcher-${process.pid}-${Math.random().toString(36).slice(2)}`;
+});
 
 function surface(ragEnabled: boolean): McpSurface {
   return {
@@ -91,6 +96,11 @@ const sampleSubAgentSpec: SubAgentSpec = {
 };
 
 describe('resolveDispatch', () => {
+  let liveFx: PointerFixture | undefined;
+  afterEach(async () => {
+    await liveFx?.cleanup();
+  });
+
   it.each(cliAdapterRegistry.names())(
     'keeps the preferred %s provider for gate-3 message generation',
     (name) => {
@@ -577,9 +587,12 @@ describe('resolveDispatch', () => {
   });
 
   it('derives the production boundary from the same task target as the mount', async () => {
+    liveFx = await makePointerFixture();
+    await liveFx.mkWorktree();
     const task = {
+      userId: 'u1',
       envTemplateId: null,
-      repositoryId: 'repo-1',
+      repositoryId: 'r1',
       worktreeBranch: 'feature/x',
     };
     const db = {

@@ -61,8 +61,10 @@ import {
   HOST_REPO_ROOT,
   invocationRepoSubpath,
   invocationUsesWorktreeGitBoundary,
+  resolveInvocationWorktreeBranch,
   WORKER_REPO_STORAGE_ROOT,
 } from '../../repo/worktree-git-boundary.js';
+import { loadRepositoryRoot, resolveTaskWorktree } from '../../repo/task-worktree.js';
 
 export { HOST_REPO_ROOT } from '../../repo/worktree-git-boundary.js';
 
@@ -507,6 +509,7 @@ export async function resolveInvocationRepoMount(
       userId: true,
       repositoryId: true,
       worktreeBranch: true,
+      worktreePath: true,
       type: true,
       metadata: true,
     },
@@ -559,12 +562,18 @@ export async function resolveInvocationRepoMount(
   // otherwise the bare repo-root subpath (a task with no worktree — onboarding).
   // The rule itself lives in invocationRepoSubpath (repo/worktree-git-boundary.ts): the
   // dispatcher needs the same answer and cannot import this file.
+  const worktreeBranch = await resolveInvocationWorktreeBranch(
+    db,
+    taskId,
+    { ...task, repositoryId: task.repositoryId },
+    worktreeRel,
+  );
   const subpath = invocationRepoSubpath({
     storagePath: repo.storagePath,
     localPath: repo.localPath,
     userId: task.userId,
     repositoryId: task.repositoryId,
-    worktreeBranch: task.worktreeBranch,
+    worktreeBranch,
     worktreeRel,
   });
   // A local-path repo is the only case it declines, and that branch returned above. Narrowed
@@ -577,7 +586,7 @@ export async function resolveInvocationRepoMount(
   const hasWorktree = invocationUsesWorktreeGitBoundary({
     storagePath: repo.storagePath,
     localPath: repo.localPath,
-    worktreeBranch: task.worktreeBranch,
+    worktreeBranch,
     worktreeRel,
   });
 
@@ -679,6 +688,21 @@ export async function ensureRepoMountWritable(repoMount: DockerVolumeMount | nul
 }
 
 export async function resolveTaskSandboxWorkdir(db: Database, taskId: string): Promise<string> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { userId: true, repositoryId: true, worktreeBranch: true, worktreePath: true },
+  });
+  if (task?.repositoryId) {
+    const worktree = await resolveTaskWorktree(
+      db,
+      { taskId, columnBranch: task.worktreeBranch, columnPath: task.worktreePath },
+      await loadRepositoryRoot(db, task.repositoryId),
+    );
+    return worktree.kind === 'worktree'
+      ? sandboxWorktreePath(SANDBOX_WORKDIR, worktree.branch)
+      : SANDBOX_WORKDIR;
+  }
+
   const row = await db.query.taskSteps.findFirst({
     where: and(
       eq(schema.taskSteps.taskId, taskId),
@@ -693,10 +717,6 @@ export async function resolveTaskSandboxWorkdir(db: Database, taskId: string): P
   // disk. Falling straight through to SANDBOX_WORKDIR would run the agent in the
   // PARENT checkout instead of its worktree, and would silently drop the worktree
   // gitfile mask. The task row survives a reset; rebuild the path from the branch.
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { worktreeBranch: true },
-  });
   if (task?.worktreeBranch) return sandboxWorktreePath(SANDBOX_WORKDIR, task.worktreeBranch);
   return SANDBOX_WORKDIR;
 }
