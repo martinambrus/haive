@@ -1,7 +1,7 @@
 import { databaseName } from '../naming/index.js';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
-import { isDuplicateDatabase, type Database } from '@haive/database';
+import { hasPgCode, isDuplicateDatabase, type Database } from '@haive/database';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { logger } from '../logger/index.js';
 
@@ -20,8 +20,7 @@ export const RAG_TABLE = 'ai_rag_embeddings';
 const PGVECTOR_UNAVAILABLE_CODES: ReadonlySet<string> = new Set(['0A000', '58P01', '42501']);
 
 export function isPgvectorUnavailable(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null | undefined)?.code;
-  return typeof code === 'string' && PGVECTOR_UNAVAILABLE_CODES.has(code);
+  return [...PGVECTOR_UNAVAILABLE_CODES].some((code) => hasPgCode(err, code));
 }
 
 /** The `source_type` values that carry PROJECT KNOWLEDGE, as opposed to code.

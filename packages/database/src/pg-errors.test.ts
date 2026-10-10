@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  hasPgCode,
   isDuplicateDatabase,
   isUniqueViolation,
   isUndefinedTable,
@@ -134,5 +135,23 @@ describe('isDuplicateDatabase', () => {
     expect(isDuplicateDatabase(Object.assign(new Error('already exists'), { code: '42P07' }))).toBe(
       false,
     );
+  });
+});
+
+describe('hasPgCode', () => {
+  it('matches the code on the error, on its cause, and nowhere else', () => {
+    const driver = Object.assign(new Error('in use'), { code: '55006' });
+    expect(hasPgCode(driver, '55006')).toBe(true);
+    expect(hasPgCode(Object.assign(new Error('Failed query'), { cause: driver }), '55006')).toBe(
+      true,
+    );
+    expect(hasPgCode(driver, '40P01')).toBe(false);
+    expect(hasPgCode(null, '55006')).toBe(false);
+  });
+
+  it('stops on a cyclic cause chain', () => {
+    const a: { cause?: unknown } = {};
+    a.cause = a;
+    expect(hasPgCode(a, '55006')).toBe(false);
   });
 });
