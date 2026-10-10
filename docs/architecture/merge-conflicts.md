@@ -113,11 +113,12 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   what that one's relocations never did. Nothing is recorded under `HOST_REPO_ROOT`: the sandbox
   mounts a local-path repository read-only, so no fixer can write there. A cancel runs no step
   code, so once it has stopped the task's sandboxes it does this itself (`settleCancelledMerges`):
-  for each merge the task's rows record with a fixer in flight, outside the task's own worktree and a
-  person's checkout, it moves the changes aside and reports them as above, then aborts the merge, an
-  abort that fails being a `merge.abort_failed` event and not a failed cancel. A task's worktree is
-  removed whole, a fixer's changes with the rest of the task's work, and a plan merge's scratch
-  worktree waits for the next pass or a Save or Pull, as above.
+  for each merge the task's rows record with a fixer in flight that still stands, outside a person's
+  checkout, it moves the changes aside and reports them as above, then aborts the merge, an abort
+  that fails being a `merge.abort_failed` event and not a failed cancel. A task's worktree the
+  cleanup removed takes a fixer's changes with the rest of the task's work; one it kept (shared with
+  another live task) is settled like any other tree. A plan merge's scratch worktree waits for the
+  next pass or a Save or Pull, as above.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.
