@@ -646,6 +646,46 @@ describe('phase5VerifyStep.apply', () => {
       expect(out.degradedNote).not.toContain('not selected');
     });
 
+    describe('classifies the environment on the whole output, not on the stored excerpt', () => {
+      const MARKER = "browserType.launch: Executable doesn't exist at /root/.cache/chrome";
+      const failingRun = (markerFromEnd: number) => {
+        const body = 'noise line\n'.repeat(900);
+        const text = `FIRST\n${body}${MARKER}\n${'tail line\n'.repeat(markerFromEnd / 10)}Tests: 3 failed`;
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+          args.includes('curl')
+            ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+            : { exitCode: 1, output: text },
+        );
+        return text;
+      };
+      const run = () =>
+        runApply(
+          { test: PHPUNIT, testFramework: 'playwright' },
+          { runTest: true, runLint: false, runTypecheck: false },
+        );
+
+      it('catches a marker the excerpt cut out of the middle', async () => {
+        const text = failingRun(3000);
+        const out = await run();
+
+        expect(text.length).toBeGreaterThan(10_000);
+        expect(out.test.output).not.toContain(MARKER);
+        expect(out.test.output.length).toBeLessThanOrEqual(4000);
+        expect(out.test.ran).toBe(false);
+        expect(out.degradedNote).toContain('NOT known to be green');
+        expect(JSON.stringify(out)).not.toContain('"raw"');
+      });
+
+      it('still catches a marker inside the stored tail', async () => {
+        failingRun(200);
+        const out = await run();
+
+        expect(out.test.output).toContain(MARKER);
+        expect(out.test.ran).toBe(false);
+        expect(JSON.stringify(out)).not.toContain('"raw"');
+      });
+    });
+
     // The user ticked these slots; "not selected" would say the opposite of what happened.
     it('names every slot whose runner was unavailable in the card note, and calls none of them unselected', async () => {
       ensureAppServing.mockResolvedValue({ mode: 'none', url: null });

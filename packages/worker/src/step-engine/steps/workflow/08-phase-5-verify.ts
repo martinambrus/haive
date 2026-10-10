@@ -323,6 +323,8 @@ interface SlotRun {
   ran: boolean;
   exitCode: number;
   output: string;
+  /** The whole output, for a classifier; never stored. */
+  raw: string;
 }
 
 /** A shell reports a missing command as 127; a host binary that cannot start reads the same. */
@@ -338,7 +340,13 @@ async function execSlot(
   extraArgs: string[] = [],
 ): Promise<SlotRun> {
   if (cmd.kind === 'ddev') {
-    if (!handle) return { ran: false, exitCode: 1, output: 'DDEV runner unavailable — skipped' };
+    if (!handle)
+      return {
+        ran: false,
+        exitCode: 1,
+        output: 'DDEV runner unavailable — skipped',
+        raw: 'DDEV runner unavailable — skipped',
+      };
     // A full suite is minutes of silence, and a fixed status line is indistinguishable from a
     // stuck task. Same live status every long DDEV op already uses: latest line + an elapsed
     // counter that ticks through silent phases.
@@ -352,7 +360,12 @@ async function execSlot(
         }),
       { initialLine: cmd.argv.join(' ') },
     );
-    return { ran: true, exitCode: res.exitCode, output: checkOutputExcerpt(res.output) };
+    return {
+      ran: true,
+      exitCode: res.exitCode,
+      output: checkOutputExcerpt(res.output),
+      raw: res.output,
+    };
   }
   try {
     const [bin, ...rest] = cmd.argv;
@@ -365,16 +378,32 @@ async function execSlot(
         maxBuffer: 10 * 1024 * 1024,
       }),
     );
-    return { ran: true, exitCode: 0, output: checkOutputExcerpt(`${stdout}${stderr}`) };
+    const raw = `${stdout}${stderr}`;
+    return { ran: true, exitCode: 0, output: checkOutputExcerpt(raw), raw };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: unknown };
     const exitCode = typeof e.code === 'number' ? e.code : e.code === 'ENOENT' ? NOT_FOUND_EXIT : 1;
-    return {
-      ran: true,
-      exitCode,
-      output: checkOutputExcerpt(`${e.stdout ?? ''}${e.stderr ?? ''}`),
-    };
+    const raw = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    return { ran: true, exitCode, output: checkOutputExcerpt(raw), raw };
   }
+}
+
+async function runSlotRaw(
+  slot: 'test' | 'lint' | 'typecheck',
+  cmd: SlotCommand,
+  ctx: StepContext,
+  workspace: string,
+  handle: DdevRunnerHandle | null,
+): Promise<{ check: CheckResult; raw: string }> {
+  const run = await execSlot(cmd, ctx, workspace, handle);
+  const check = {
+    ran: run.ran,
+    passed: run.ran && run.exitCode === 0,
+    command: cmd.label,
+    output: run.output,
+    ...(run.ran ? {} : { note: `DDEV runner unavailable — ${slot} not run` }),
+  };
+  return { check, raw: run.raw };
 }
 
 async function runSlot(
@@ -384,14 +413,7 @@ async function runSlot(
   workspace: string,
   handle: DdevRunnerHandle | null,
 ): Promise<CheckResult> {
-  const run = await execSlot(cmd, ctx, workspace, handle);
-  return {
-    ran: run.ran,
-    passed: run.ran && run.exitCode === 0,
-    command: cmd.label,
-    output: run.output,
-    ...(run.ran ? {} : { note: `DDEV runner unavailable — ${slot} not run` }),
-  };
+  return (await runSlotRaw(slot, cmd, ctx, workspace, handle)).check;
 }
 
 const REPORT_DIR = '.haive/verify';
@@ -769,17 +791,18 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       await ensureDdevPlaywrightBrowsers(ddevHandle, '');
       await killStalePlaywrightRuns(ddevHandle);
     }
-    let test =
+    const testRun =
       values.runTest && testCmd
-        ? await runSlot('test', testCmd, ctx, workspacePath, ddevHandle)
-        : skippedResult();
+        ? await runSlotRaw('test', testCmd, ctx, workspacePath, ddevHandle)
+        : { check: skippedResult(), raw: '' };
+    let test = testRun.check;
     // An environment that cannot run a browser is not a failing test, and this step's fixLoop
     // routes ANY failing check back to implementation — so without this a missing browser
     // burns a whole round on something no agent can repair, which is the exact failure 08b's
     // own guard exists for. `ran: false` keeps it out of `passed` the same way a skipped slot
     // is kept out, and the note below says so rather than letting it read as green.
     const testEnvBlocker =
-      test.ran && !test.passed ? classifyTestEnvFailure(testFramework ?? null, test.output) : null;
+      test.ran && !test.passed ? classifyTestEnvFailure(testFramework ?? null, testRun.raw) : null;
     if (testEnvBlocker) {
       test = {
         ...test,
