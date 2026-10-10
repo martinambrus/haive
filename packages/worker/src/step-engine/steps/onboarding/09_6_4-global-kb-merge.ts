@@ -186,6 +186,7 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     const results = (args.agentMiningResults ?? []) as AgentMiningResult[];
     const mergedDrafts = new Set<string>();
     const leftDraft = new Set<string>();
+    const editedDraft = new Set<string>();
     let merged = 0;
     try {
       const settings = await resolveGlobalKbSettings();
@@ -207,13 +208,18 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
               const [hit] = await gdb
                 .update(globalKbEntries)
                 .set({ body, embedStatus: 'pending', updatedAt: new Date() })
-                .where(stillDraft)
+                .where(and(stillDraft, eq(globalKbEntries.body, p.draftBody)))
                 .returning({ id: globalKbEntries.id });
               if (hit) {
                 mergedDrafts.add(p.draftId);
                 merged += 1;
               } else {
-                leftDraft.add(p.draftId);
+                const [row] = await gdb
+                  .select({ status: globalKbEntries.status })
+                  .from(globalKbEntries)
+                  .where(eq(globalKbEntries.id, p.draftId))
+                  .limit(1);
+                (row?.status === 'draft' ? editedDraft : leftDraft).add(p.draftId);
               }
             }
             // Activation archives the superseded entry, so a description it carried would otherwise be
@@ -256,7 +262,9 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
           status: 'failed' as const,
           errorMessage: leftDraft.has(p.draftId)
             ? 'no longer a draft when the merge finished'
-            : (r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged')),
+            : editedDraft.has(p.draftId)
+              ? 'edited while the merge ran; the edit was kept'
+              : (r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged')),
         };
       }),
     );

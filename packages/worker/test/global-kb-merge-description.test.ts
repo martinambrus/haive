@@ -51,7 +51,7 @@ function setup(draftDescription: string | null, existingDescription: string | nu
   const ctx = { db: fake.db, taskId: TASK, logger: { info() {}, warn() {} } } as never;
   const draft = () => fake.rows(globalKbEntries).find((r) => r.id === DRAFT)!;
   const edit = (values: Record<string, unknown>) => fake.patch(globalKbEntries, DRAFT, values);
-  return { ctx, draft, edit, writes: () => writes };
+  return { ctx, fake, draft, edit, writes: () => writes };
 }
 
 const merged = [
@@ -189,6 +189,27 @@ describe('the merge step and descriptions', () => {
       });
       expect(out).toMatchObject({ merged: 0, skipped: 1 });
       expect(out.degradedNote).toContain('no longer a draft');
+    });
+
+    it('keeps a body a person edited after detect, and the loss note says so', async () => {
+      const out = await applyAfter({ body: 'edited by a person' }, merged);
+
+      expect(state.draft()).toMatchObject({
+        status: 'draft',
+        body: 'edited by a person',
+        embedStatus: null,
+      });
+      expect(out).toMatchObject({ merged: 0, skipped: 1 });
+      expect(out.degradedNote).toContain('edited while the merge ran');
+      expect(out.degradedNote).not.toContain('no longer a draft');
+    });
+
+    it('merges a draft whose body is still the one detect read', async () => {
+      const out = await applyAfter({ description: 'Typed after detect.' }, merged);
+
+      expect(state.draft().body).toBe(MERGED.trim());
+      expect(out).toMatchObject({ merged: 1, skipped: 0 });
+      expect(out.degradedNote).toBeUndefined();
     });
 
     it('does not take an inherited description once it is active', async () => {
