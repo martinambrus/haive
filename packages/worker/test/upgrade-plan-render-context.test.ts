@@ -191,6 +191,16 @@ describe('01 plans from a portable-only column', () => {
     expect(detected.renderCtxSnapshot.enabledCliProviders).toEqual([CLAUDE_IMPORT]);
   });
 
+  it('W1c: completes an amp-only user to the .claude/agents fallback target', async () => {
+    const detected = await planOf({
+      column: portableOnly(),
+      providers: [{ name: 'amp', enabled: true }],
+    }).detect();
+    expect(detected.renderCtxSnapshot.agentTargets).toEqual([
+      { dir: '.claude/agents', format: 'markdown', supportsLsp: false },
+    ]);
+  });
+
   // W2
   it('W2: offers the RTK settings file it finds for removal once RTK is off, and the block left in AGENTS.md', async () => {
     await mkdir(join(repo, '.claude'));

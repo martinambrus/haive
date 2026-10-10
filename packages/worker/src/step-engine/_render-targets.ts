@@ -14,11 +14,19 @@ export interface RenderTargets {
   agentTargets: AgentRenderTarget[];
 }
 
+/** Where agents land when no enabled provider has a file-based agents directory (Amp alone). */
+export const FALLBACK_AGENT_TARGET: AgentRenderTarget = {
+  dir: '.claude/agents',
+  format: 'markdown',
+  supportsLsp: false,
+};
+
 /** The half of a render context that follows the user's CLI providers: their rules-file metadata
  *  and one agent target per agents directory. `lspLanguages` is what the tooling step recorded. */
 export function renderTargetsFor(
   providerRows: ReadonlyArray<{ name: CliProviderName; enabled: boolean }>,
   lspLanguages: readonly string[],
+  options: { agentsFallback?: boolean } = {},
 ): RenderTargets {
   // Carry per-CLI rules-file metadata into detect so the rtk-config items
   // can fan out per CLI without re-querying the adapter registry inside
@@ -59,7 +67,10 @@ export function renderTargetsFor(
       existingTarget.supportsLsp = true;
     }
   }
-  return { enabledCliProviders, agentTargets: Array.from(agentTargetsByDir.values()) };
+  const agentTargets = Array.from(agentTargetsByDir.values());
+  if (agentTargets.length === 0 && options.agentsFallback)
+    agentTargets.push({ ...FALLBACK_AGENT_TARGET });
+  return { enabledCliProviders, agentTargets };
 }
 
 /** The render context of a column. One the sync wrote holds no per-install fields, so each it lacks
@@ -68,7 +79,9 @@ export function renderContextFromColumn(
   column: RenderContextColumn,
   providerRows: ReadonlyArray<{ name: CliProviderName; enabled: boolean }>,
 ): TemplateRenderContext {
-  const derived = renderTargetsFor(providerRows, column.lspLanguages);
+  const derived = renderTargetsFor(providerRows, column.lspLanguages, {
+    agentsFallback: true,
+  });
   return {
     projectInfo: column.projectInfo,
     framework: column.framework,

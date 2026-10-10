@@ -1441,7 +1441,7 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
       container.projectName ??
       (gitRemoteName && !looksLikeBadName(gitRemoteName) ? gitRemoteName : null) ??
       (dbRepoName && !looksLikeBadName(dbRepoName) ? dbRepoName : null) ??
-      dirBasename;
+      (looksLikeBadName(dirBasename) ? 'unnamed-repo' : dirBasename);
     const data: EnvDetectData = {
       project: {
         name: projectName,

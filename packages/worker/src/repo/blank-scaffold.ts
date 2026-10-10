@@ -2,15 +2,12 @@ import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import type { Database, DbTx } from '@haive/database';
 import { schema } from '@haive/database';
-import { getCliProviderMetadata } from '@haive/shared';
-import { cliAdapterRegistry } from '../cli-adapters/registry.js';
-import type { CliProviderName } from '../cli-adapters/types.js';
+import { renderTargetsFor } from '../step-engine/_render-targets.js';
 import {
   expandManifestFor,
   type ExpandedRendering,
   type TemplateRenderContext,
 } from '../step-engine/template-manifest.js';
-import type { AgentRenderTarget } from '../step-engine/steps/onboarding/_agent-templates.js';
 import type { ProjectInfo } from '../step-engine/steps/onboarding/07-generate-files.js';
 
 /** A project that does not exist yet: every field a detector would have filled
@@ -67,39 +64,18 @@ export async function buildBlankRenderContext(
     .where(eq(schema.repositories.id, args.repositoryId))
     .limit(1);
 
-  const enabled = providerRows.filter((p) => p.enabled);
-
-  // Same fan-out rule as 07-generate-files: one target per agents directory,
-  // shared where two CLIs write to the same one. `supportsLsp` is false
-  // throughout — LSP follows configured languages, and a blank repo has none.
-  const byDir = new Map<string, AgentRenderTarget>();
-  for (const p of enabled) {
-    const meta = getCliProviderMetadata(p.name as CliProviderName);
-    if (!meta.projectAgentsDir || !meta.agentFileFormat) continue;
-    if (byDir.has(meta.projectAgentsDir)) continue;
-    byDir.set(meta.projectAgentsDir, {
-      dir: meta.projectAgentsDir,
-      format: meta.agentFileFormat,
-      supportsLsp: false,
-    });
-  }
+  // A blank repository seeds no agent, so an Amp-only user records no agent target.
+  const { enabledCliProviders, agentTargets } = renderTargetsFor(providerRows, []);
 
   return {
     projectInfo: blankProjectInfo(args.repoName),
     framework: null,
     acceptedAgentIds: [],
     customAgentSpecs: [],
-    agentTargets: [...byDir.values()],
+    agentTargets,
     lspLanguages: [],
     rtkEnabled: repoRow?.rtkEnabled ?? false,
-    enabledCliProviders: enabled.map((p) => {
-      const adapter = cliAdapterRegistry.get(p.name as CliProviderName);
-      return {
-        name: p.name as CliProviderName,
-        rulesFile: adapter.rulesFile,
-        rulesFileMode: adapter.rulesFileMode,
-      };
-    }),
+    enabledCliProviders,
   };
 }
 

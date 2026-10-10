@@ -275,6 +275,13 @@ describe('envDetectStep', () => {
     expect(data.project.name).toBe('cool-project');
   });
 
+  it('does not use a uuid basename as the project name when nothing else names it', async () => {
+    const repoPath = path.join(tmpRoot, '9afb49bc-7f8b-4a9f-b32c-fafa32a073f6');
+    await mkdir(repoPath, { recursive: true });
+    const data = await runDetect(repoPath);
+    expect(data.project.name).toBe('unnamed-repo');
+  });
+
   it('falls back to dir basename when name is unrecoverable from disk', async () => {
     // No .git, no container config, no DB — basename is the only signal.
     const data = await runDetect(tmpRoot);

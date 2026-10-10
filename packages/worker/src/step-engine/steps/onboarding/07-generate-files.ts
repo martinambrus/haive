@@ -22,7 +22,7 @@ import {
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
 import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
-import { renderTargetsFor } from '../../_render-targets.js';
+import { FALLBACK_AGENT_TARGET, renderTargetsFor } from '../../_render-targets.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   type AgentSpec,
@@ -604,7 +604,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       if (repoRow[0]) rtkEnabled = repoRow[0].rtkEnabled;
     }
 
-    const { enabledCliProviders, agentTargets } = renderTargetsFor(providerRows, lspLanguages);
+    const { enabledCliProviders, agentTargets } = renderTargetsFor(providerRows, lspLanguages, {
+      agentsFallback: true,
+    });
     const agentExt = (format: 'markdown' | 'toml'): string => (format === 'toml' ? 'toml' : 'md');
 
     const candidates = [
@@ -805,9 +807,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const targets =
       detected.agentTargets && detected.agentTargets.length > 0
         ? detected.agentTargets
-        : ([
-            { dir: '.claude/agents', format: 'markdown' as const, supportsLsp: false },
-          ] satisfies AgentRenderTarget[]);
+        : [FALLBACK_AGENT_TARGET];
     if (detected.agentTargets && detected.agentTargets.length === 0) {
       ctx.logger.warn(
         'no enabled CLI provider has a file-based agents directory; writing to .claude/agents as fallback',

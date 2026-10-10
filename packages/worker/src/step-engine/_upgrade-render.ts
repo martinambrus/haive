@@ -29,7 +29,7 @@ import {
   type BundleWithMeta,
   type LoaderLogger,
 } from './_custom-bundle-loader.js';
-import { renderContextFromColumn } from './_render-targets.js';
+import { FALLBACK_AGENT_TARGET, renderContextFromColumn } from './_render-targets.js';
 import { resolveSkillTargetDirs } from './steps/onboarding/_helpers.js';
 import type { GenerateFilesDetect } from './steps/onboarding/07-generate-files.js';
 import { buildBlankRenderContext } from '../repo/blank-scaffold.js';
@@ -220,7 +220,7 @@ export async function resolveRenderContext(
   // lazy-backfill path. The resulting context reflects best-effort recovery;
   // conflicts get surfaced to the user via the plan UI.
   const fallbackAgentTargets: TemplateRenderContext['agentTargets'] = [
-    { dir: '.claude/agents', format: 'markdown', supportsLsp: false },
+    { ...FALLBACK_AGENT_TARGET },
   ];
 
   const lspLanguages = detect.lspLanguages ?? [];
