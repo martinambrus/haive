@@ -32,7 +32,11 @@ supersedes their invocations, dropping the spend from statistics. Rounds live in
 `plan_clarify_rounds`, and every move (`nextMove`) is decided from that table and the plan root, so
 a Retry, a reopen and a redelivered submit all land on the same step; answers are written only
 while `answered_at` is null, and a field id carries its round, so a stale submit for an earlier
-round reopens the form instead. Its folds drop any node placed below the root
+round reopens the form instead. The route refuses a repository that already has a plan, but only
+when the task is created, and a deferred build waits while its files upload; so the outline fold
+also writes a round 0, and a root with no round 0 is one this task did not draft and the step
+refuses it (`assertOwnOutline`). A node's `sourceTaskId` cannot serve, since every later patch,
+a canvas edit included, rewrites it. Its folds drop any node placed below the root
 (`outsideOutline`): 01's frontier expands component LEAVES only, so a decision put under a
 component would take that component out of the build with nothing reporting it.
 

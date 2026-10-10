@@ -25,6 +25,7 @@ import { applyAgentPatch, applyAgentPatchOnce, parsePlanPatch } from './_plan-pr
 import {
   OUTLINE_AGENT_ID,
   askAgentId,
+  assertOwnOutline,
   askRoundOf,
   buildAskPrompt,
   buildClarifyForm,
@@ -185,12 +186,36 @@ async function foldOutline(
     applyAgentPatchOnce(
       ctx,
       result.agentId,
-      (tx) =>
-        applyAgentPatch(
+      async (tx) => {
+        const applied = await applyAgentPatch(
           tx,
           { ...patch, ops: withMinedStatus(kept, d.build.mode) },
           { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
-        ),
+        );
+        // Round 0 records that THIS task drafted the outline (see `assertOwnOutline`). Written
+        // only while absent: a re-rolled outline folds again over the same row.
+        const [marked] = await tx
+          .select({ id: schema.planClarifyRounds.id })
+          .from(schema.planClarifyRounds)
+          .where(
+            and(
+              eq(schema.planClarifyRounds.taskId, ctx.taskId),
+              eq(schema.planClarifyRounds.round, 0),
+            ),
+          )
+          .limit(1);
+        if (!marked) {
+          const now = new Date();
+          await tx.insert(schema.planClarifyRounds).values({
+            taskId: ctx.taskId,
+            round: 0,
+            action: 'continue',
+            answeredAt: now,
+            integratedAt: now,
+          });
+        }
+        return applied;
+      },
       (applied) => partialApplyNote([...dropped, ...applied.dropped]),
     ),
   );
@@ -336,6 +361,7 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const d = detected as PlanClarifyDetect | null;
       if (!d?.build.repositoryId) return [];
+      assertOwnOutline(d.hasRoot, d.rounds);
       const dispatch = await dispatchFor(ctx, d, nextMove(d.hasRoot, d.rounds), d.rounds);
       return dispatch ? [dispatch] : [];
     },
@@ -375,6 +401,7 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
     }
 
     const hasRoot = (await findPlanRoot(ctx.db, repositoryId)) !== null;
+    assertOwnOutline(hasRoot, rounds);
     const move = nextMove(hasRoot, rounds);
     if (move.kind === 'form') throw new ReopenStepFormError(`round ${move.round} awaits answers`);
     if (move.kind === 'done') {
@@ -383,7 +410,7 @@ export const planClarifyStep: StepDefinition<PlanClarifyDetect, PlanClarifyApply
       } catch (err) {
         ctx.logger.warn({ err }, 'plan mirror write failed after clarifying questions');
       }
-      return { rounds: rounds.length, outcome: 'built' };
+      return { rounds: rounds.filter((r) => r.round > 0).length, outcome: 'built' };
     }
     if (args.miningWaveExhausted === true) {
       throw new Error(`Could not start the next agent (${move.kind}); retry this step.`);

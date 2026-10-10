@@ -85,6 +85,21 @@ export function hasContent(r: Pick<ClarifyRound, 'answers' | 'steer'>): boolean 
   return (r.answers?.length ?? 0) > 0 || Boolean(r.steer?.trim());
 }
 
+/**
+ * Refuses a plan this task did not draft. The build route checks that a repository has no plan
+ * when the task is created, but a deferred build can wait while its files upload, and a root
+ * written meanwhile by another build or by hand would otherwise be questioned and patched as if
+ * it were this task's outline. Round 0, written with the outline, is the proof of ownership:
+ * a node's `sourceTaskId` is not, since every later patch rewrites it.
+ */
+export function assertOwnOutline(hasRoot: boolean, rounds: readonly ClarifyRound[]): void {
+  if (hasRoot && !rounds.some((r) => r.round === 0)) {
+    throw new Error(
+      'This repository got a plan before this build started, and clarifying questions only shape a new outline. Skip this step to build into the existing plan, or change it through the plan chat.',
+    );
+  }
+}
+
 /** What the step does next, decided from the plan root and the stored rounds alone, so a Retry,
  *  a reopen and a fresh apply pass all reach the same answer. */
 export function nextMove(hasRoot: boolean, rounds: readonly ClarifyRound[]): ClarifyMove {
@@ -280,7 +295,7 @@ function briefLines(d: PlanBuildDetect): string[] {
 function historyLines(rounds: readonly ClarifyRound[]): string[] {
   const out: string[] = [];
   for (const r of rounds) {
-    if (!r.answered) continue;
+    if (!r.answered || r.round === 0) continue;
     out.push(`### Round ${r.round}`);
     for (const q of r.questions) {
       const answer = r.answers?.find((a) => a.questionId === q.id)?.answer;

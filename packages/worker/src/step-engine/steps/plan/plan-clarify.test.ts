@@ -62,13 +62,23 @@ const build = {
   hasPdfInputs: false,
 } as PlanBuildDetect;
 
-function setup() {
+function setup({ ownOutline = true } = {}) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskStepAgentMinings: schema.taskStepAgentMinings,
     planClarifyRounds: schema.planClarifyRounds,
   });
+  // A root that exists before a test starts is this task's own outline unless the test says not.
+  if (plan.root && ownOutline) {
+    fake.insert(schema.planClarifyRounds, {
+      taskId: TASK,
+      round: 0,
+      action: 'continue',
+      answeredAt: new Date(),
+      integratedAt: new Date(),
+    });
+  }
   const ctx = {
     db: fake.db,
     taskId: TASK,
@@ -107,7 +117,8 @@ function setup() {
       isFinalMiningAttempt: final,
     });
   const rounds = () => fake.rows(schema.planClarifyRounds);
-  return { fake, ctx, mined, apply, rounds };
+  const round1 = () => rounds().find((r) => r.round === 1)!;
+  return { fake, ctx, mined, apply, rounds, round1 };
 }
 
 const json = (v: unknown) => '```json\n' + JSON.stringify(v) + '\n```';
@@ -144,7 +155,7 @@ beforeEach(() => {
 
 describe('00b-plan-clarify apply', () => {
   it('drafts the outline, then asks the questioner', async () => {
-    const { mined, apply } = setup();
+    const { mined, apply, rounds } = setup();
     const outline = mined(
       'clarify-outline',
       json({
@@ -169,23 +180,24 @@ describe('00b-plan-clarify apply', () => {
     ]);
     const ops = (plan.patches[0] as { ops: { nodeRef: string }[] }).ops.map((o) => o.nodeRef);
     expect(ops).toEqual(['tmp-root', 'tmp-pay']);
+    expect(rounds()).toEqual([expect.objectContaining({ round: 0, action: 'continue' })]);
   });
 
   it('records the questions and parks on the form, which shows them', async () => {
     plan.root = { id: ROOT };
-    const { mined, apply, rounds } = setup();
+    const { mined, apply, rounds, round1 } = setup();
     expect(await thrown(apply([mined('clarify-ask-r1', questions)]))).toBeInstanceOf(
       ReopenStepFormError,
     );
-    expect(rounds()).toHaveLength(1);
-    expect(rounds()[0]).toMatchObject({ round: 1, nothingOpen: false, answeredAt: null });
+    expect(rounds().filter((r) => r.round !== 0)).toHaveLength(1);
+    expect(round1()).toMatchObject({ round: 1, nothingOpen: false, answeredAt: null });
     const form = planClarifyStep.form!({} as never, {
       build,
       hasRoot: true,
       rounds: [
         {
           round: 1,
-          questions: rounds()[0]!.questions as ClarifyRound['questions'],
+          questions: round1()!.questions as ClarifyRound['questions'],
           nothingOpen: false,
           answers: null,
           steer: null,
@@ -201,7 +213,7 @@ describe('00b-plan-clarify apply', () => {
 
   it('sends answers to the planner, then asks again with its verdicts', async () => {
     plan.root = { id: ROOT };
-    const { mined, apply, rounds } = setup();
+    const { mined, apply, round1 } = setup();
     await thrown(apply([mined('clarify-ask-r1', questions)]));
 
     const values = {
@@ -216,14 +228,14 @@ describe('00b-plan-clarify apply', () => {
     ]);
     expect(toPlanner.dispatches[0]!.prompt).toContain('The owner answered: Stripe');
     expect(toPlanner.dispatches[0]!.prompt).toContain('The owner also said: Mobile first.');
-    expect(rounds()[0]).toMatchObject({
+    expect(round1()).toMatchObject({
       answers: [{ questionId: 'payments', answer: 'Stripe' }],
       action: 'continue',
     });
 
     // A redelivered submit carrying other values must not overwrite the recorded answers.
     await thrown(apply([], { ...values, [answerFieldId(1, 'payments')]: 'PayPal' }));
-    expect(rounds()[0]!.answers).toEqual([{ questionId: 'payments', answer: 'Stripe' }]);
+    expect(round1()!.answers).toEqual([{ questionId: 'payments', answer: 'Stripe' }]);
 
     const integrated = mined(
       'clarify-integrate-r1',
@@ -236,15 +248,15 @@ describe('00b-plan-clarify apply', () => {
     const next = (await thrown(apply([integrated]))) as MiningWaveError;
     expect(next.dispatches.map((x) => x.agentId)).toEqual(['clarify-ask-r2']);
     expect(next.dispatches[0]!.prompt).toContain('Which currencies?');
-    expect(rounds()[0]!.integratedAt).not.toBeNull();
+    expect(round1()!.integratedAt).not.toBeNull();
   });
 
   it('ignores a submit meant for an earlier round', async () => {
     plan.root = { id: ROOT };
-    const { mined, apply, rounds } = setup();
+    const { mined, apply, round1 } = setup();
     await thrown(apply([mined('clarify-ask-r1', questions)]));
     expect(await thrown(apply([], { action__r0: 'build' }))).toBeInstanceOf(ReopenStepFormError);
-    expect(rounds()[0]!.answeredAt).toBeNull();
+    expect(round1()!.answeredAt).toBeNull();
   });
 
   it('builds at once when the owner adds nothing and chooses to build', async () => {
@@ -293,6 +305,20 @@ describe('00b-plan-clarify apply', () => {
     const err = (await thrown(apply([reply], {}, false))) as Error;
     expect(err).not.toBeInstanceOf(MiningRetryError);
     expect(err.message).toContain('Retry this step');
+  });
+
+  it('refuses a plan another build or a person created before this task started', async () => {
+    plan.root = { id: ROOT };
+    const { apply } = setup({ ownOutline: false });
+    const err = (await thrown(apply([]))) as Error;
+    expect(err.message).toContain('got a plan before this build started');
+    const select = planClarifyStep.agentMining!.selectAgents({
+      ctx: {} as StepContext,
+      detected: { build, hasRoot: true, rounds: [] },
+      formValues: {},
+      llmOutput: undefined,
+    });
+    expect(((await thrown(select)) as Error).message).toContain('got a plan before');
   });
 
   it('does nothing under the LLM bypass', async () => {
