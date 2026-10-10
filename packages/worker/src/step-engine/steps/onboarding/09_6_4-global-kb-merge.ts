@@ -55,6 +55,12 @@ export function extractMergedArticle(raw: string | null | undefined): string {
   return raw.trim();
 }
 
+/** The agent's merged article, or '' when it failed or came back too short to trust over real content. */
+function usableBody(r: AgentMiningResult | undefined): string {
+  const body = r?.status === 'done' ? extractMergedArticle(r.rawOutput) : '';
+  return body.length >= 40 ? body : '';
+}
+
 /** A pair whose bodies already match has nothing to merge, so no agent is spent on it. */
 function nothingToMerge(p: MergePair): boolean {
   return p.draftBody.trim() === p.existingBody.trim();
@@ -196,9 +202,8 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
         await withGlobalKb(ctx.db, async ({ db: gdb }) => {
           for (const p of pairs) {
             const r = results.find((x) => x.agentId === `merge:${p.draftId}`);
-            const body = r?.status === 'done' ? extractMergedArticle(r.rawOutput) : '';
-            // Guard against an empty / truncated merge clobbering real content.
-            const usable = body.length >= 40;
+            const body = usableBody(r);
+            const usable = body !== '';
             // Agents run up to an hour; a draft activated meanwhile is no longer ours to write.
             const stillDraft = and(
               eq(globalKbEntries.id, p.draftId),
@@ -273,7 +278,7 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
             ? 'no longer a draft when the merge finished'
             : editedDraft.has(p.draftId)
               ? 'edited while the merge ran; the edit was kept'
-              : writeFailed && !finishedDraft.has(p.draftId)
+              : writeFailed && !finishedDraft.has(p.draftId) && usableBody(r) !== ''
                 ? 'the merged article was not written: the knowledge base write failed'
                 : (r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged')),
         };

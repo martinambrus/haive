@@ -328,21 +328,28 @@ describe('the merge step and descriptions', () => {
       rawOutput: `<<<MERGED\n${MERGED}\nMERGED>>>`,
     });
 
-    async function applyThrowingOn(failingWrite: number | null) {
+    const THIRD = '00000000-0000-4000-8000-0000000000f4';
+
+    async function applyThrowingOn(failingWrite: number | null, third?: Record<string, unknown>) {
       state = setup(null, null);
-      state.fake.insert(globalKbEntries, {
-        namespace: 'default',
-        category: 'best_practice',
-        facets: {},
-        source: 'promoted',
-        id: SECOND,
-        title: 'Second draft',
-        body: 'second body',
-        status: 'draft',
-        sourceTaskId: TASK,
-        supersedesEntryId: EXISTING,
-        description: null,
-      });
+      for (const [id, title] of [
+        [SECOND, 'Second draft'],
+        ...(third ? [[THIRD, 'Third draft']] : []),
+      ]) {
+        state.fake.insert(globalKbEntries, {
+          namespace: 'default',
+          category: 'best_practice',
+          facets: {},
+          source: 'promoted',
+          id,
+          title,
+          body: `${title} body`,
+          status: 'draft',
+          sourceTaskId: TASK,
+          supersedesEntryId: EXISTING,
+          description: null,
+        });
+      }
       let writes = 0;
       state.fake.hooks.beforeUpdate = () => {
         writes += 1;
@@ -351,7 +358,7 @@ describe('the merge step and descriptions', () => {
       const detected = await globalKbMergeStep.detect!(state.ctx);
       return globalKbMergeStep.apply!(state.ctx, {
         detected,
-        agentMiningResults: [result(DRAFT), result(SECOND)],
+        agentMiningResults: [result(DRAFT), result(SECOND), ...(third ? [third] : [])],
       } as never);
     }
 
@@ -370,6 +377,31 @@ describe('the merge step and descriptions', () => {
       expect(out.degradedNote).toContain('Second draft');
       expect(out.degradedNote).toContain('the merged article was not written');
       expect(out.degradedNote).not.toContain('Draft (');
+    });
+
+    it.each<[string, Record<string, unknown>, string]>([
+      [
+        'a failed agent',
+        {
+          agentId: `merge:${THIRD}`,
+          status: 'failed',
+          rawOutput: null,
+          errorMessage: 'agent died',
+        },
+        'agent died',
+      ],
+      [
+        'an unusable reply',
+        { agentId: `merge:${THIRD}`, status: 'done', rawOutput: 'too short' },
+        'no usable merged article in the reply',
+      ],
+    ])('gives a pair with %s its own reason, not a failed write', async (_, third, reason) => {
+      const out = await applyThrowingOn(1, third);
+
+      expect(out).toMatchObject({ merged: 0, skipped: 3 });
+      expect(out.degradedNote).toContain('Second draft');
+      expect(out.degradedNote).toContain('the merged article was not written');
+      expect(out.degradedNote).toContain(reason);
     });
 
     it('labels nothing as a failed write when no write throws', async () => {
