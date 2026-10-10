@@ -1845,6 +1845,8 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     const now = new Date();
     const contrib = computeFoldContribution(step, now.getTime());
     redrive = await db.transaction(async (tx) => {
+      // The repository lock first, in the order the worker's revivals take it, before any row lock.
+      if (movesTask) await refuseReviveBesideLive(tx, id);
       // A failed step still carries its ended cli_invocation. Without superseding
       // it here, the re-advance below makes resolveLlmPhase re-read that old
       // invocation and re-surface its error (and its provider) instead of
