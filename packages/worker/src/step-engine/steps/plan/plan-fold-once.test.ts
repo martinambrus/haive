@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import type { ApplyPlanPatchResult } from '@haive/shared/plan';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import { applyAgentPatch, applyAgentPatchOnce } from './_plan-prompt.js';
 import { partialApplyNote } from './01-plan-build.js';
@@ -72,8 +73,18 @@ const ctx = (db: Database) =>
     logger: { warn: () => {}, info: () => {} },
   }) as unknown as StepContext;
 
-const applied = { created: [], updated: [], dropped: [], strippedCodeLinks: [] } as never;
-const thinner = { created: [], updated: [], dropped: ['one op'], strippedCodeLinks: [] } as never;
+const applied = {
+  created: [],
+  updated: [],
+  dropped: [],
+  strippedCodeLinks: [],
+} as unknown as ApplyPlanPatchResult;
+const thinner = {
+  created: [],
+  updated: [],
+  dropped: ['one op'],
+  strippedCodeLinks: [],
+} as unknown as ApplyPlanPatchResult;
 const noNote = () => null;
 
 describe('applyAgentPatchOnce', () => {

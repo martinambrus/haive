@@ -433,7 +433,11 @@ function sourceGuidance(d: PlanBuildDetect): string {
 /** The INITIAL mining dispatch's prompt (wave 0), distinct from `buildExpandPrompt`'s per-node one.
  *  Exported for the prompt-path tripwire: its `sourceGuidance` has a branch per build mode, and only a
  *  real mode string reaches any but the fallback. */
-export function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string {
+export function buildRootPrompt(
+  d: PlanBuildDetect,
+  values: FormValues,
+  extra: readonly string[] = [],
+): string {
   return [
     `You are drafting the top of a project plan for "${d.repoName}".`,
     '',
@@ -462,6 +466,7 @@ export function buildRootPrompt(d: PlanBuildDetect, values: FormValues): string 
     'hosting account. These are first-class parts of a plan and are usually the ones that get',
     'forgotten.',
     '',
+    ...extra,
     PLAN_PATCH_CONTRACT,
   ]
     .filter(Boolean)
