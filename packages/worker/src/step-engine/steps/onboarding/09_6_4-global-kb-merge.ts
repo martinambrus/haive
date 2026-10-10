@@ -217,11 +217,16 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
                 merged += 1;
               } else {
                 const [row] = await gdb
-                  .select({ status: globalKbEntries.status })
+                  .select({ status: globalKbEntries.status, body: globalKbEntries.body })
                   .from(globalKbEntries)
                   .where(eq(globalKbEntries.id, p.draftId))
                   .limit(1);
-                (row?.status === 'draft' ? editedDraft : leftDraft).add(p.draftId);
+                if (row?.status === 'draft' && row.body === body) {
+                  mergedDrafts.add(p.draftId);
+                  merged += 1;
+                } else {
+                  (row?.status === 'draft' ? editedDraft : leftDraft).add(p.draftId);
+                }
               }
             }
             // Activation archives the superseded entry, so a description it carried would otherwise be

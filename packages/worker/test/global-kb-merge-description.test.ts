@@ -204,6 +204,14 @@ describe('the merge step and descriptions', () => {
       expect(out.degradedNote).not.toContain('no longer a draft');
     });
 
+    it('counts a draft already holding the merged body as merged, as a replayed apply finds it', async () => {
+      const out = await applyAfter({ body: MERGED.trim() }, merged);
+
+      expect(state.draft()).toMatchObject({ status: 'draft', body: MERGED.trim() });
+      expect(out).toMatchObject({ merged: 1, skipped: 0 });
+      expect(out.degradedNote).toBeUndefined();
+    });
+
     it('merges a draft whose body is still the one detect read', async () => {
       const out = await applyAfter({ description: 'Typed after detect.' }, merged);
 
