@@ -294,8 +294,10 @@ function fixerFiles(previous: StepLoopPassRecord[]): {
   scanFailed: boolean;
 } {
   const last = previous[previous.length - 1]?.applyOutput as BrowserVerifyApply | undefined;
-  const collected = last?.source === 'fixer' ? last.implementationFiles : undefined;
-  if (collected === undefined) return { files: null, scanFailed: false };
+  if (last?.source !== 'fixer') return { files: null, scanFailed: false };
+  const collected = last.implementationFiles;
+  // A fix pass with no list never re-read the change, however it came to be stored that way.
+  if (collected === undefined) return { files: null, scanFailed: true };
   return collected.scanError
     ? { files: null, scanFailed: true }
     : { files: collected, scanFailed: false };

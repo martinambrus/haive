@@ -746,17 +746,18 @@ describe('08a re-test after a fix pass', () => {
     expect(prompt).toContain('- d.js');
   });
 
-  it('gives the re-tester the first tester prompt after a fix pass stored before it collected the change', async () => {
+  const UNREAD = /\nThe change could not be re-read after the last fix[\s\S]*?what a list names\./;
+
+  it("gives the re-tester detect's list and the unread notice after a fix pass stored before it collected the change", async () => {
     const dir = await checkout();
     const { detected } = await detectOn(dir, 'ddev');
     const fixer = { source: 'fixer', failures: [], fixesApplied: [], screenshots: [] };
 
-    expect(retestPrompt(detected, [record(0, testerOut), record(1, fixer)])).toBe(
-      firstPrompt(detected),
-    );
-  });
+    const prompt = retestPrompt(detected, [record(0, testerOut), record(1, fixer)]);
 
-  const UNREAD = /\nThe change could not be re-read after the last fix[\s\S]*?what a list names\./;
+    expect(prompt).toMatch(UNREAD);
+    expect(prompt.replace(UNREAD, '')).toBe(firstPrompt(detected));
+  });
 
   it.each([
     ['whose scan failed', ['a.js']],
@@ -821,8 +822,8 @@ describe('08a re-test after a fix pass', () => {
 
     expect(m.collectImplementationFiles).not.toHaveBeenCalled();
     expect(fixer).not.toHaveProperty('implementationFiles');
-    expect(retestPrompt(detected, [record(0, testerOut), record(1, fixer)])).toBe(
-      firstPrompt(detected),
-    );
+    const prompt = retestPrompt(detected, [record(0, testerOut), record(1, fixer)]);
+    expect(prompt).toMatch(UNREAD);
+    expect(prompt.replace(UNREAD, '')).toBe(firstPrompt(detected));
   });
 });
