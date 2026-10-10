@@ -31,6 +31,7 @@ import {
   fileCoverage,
   NO_CHANGE_SET_FALLBACK,
   isDocsOnlyChange,
+  type ChangedLineNotes,
   type ImplementationFileSet,
 } from './_impl-changes.js';
 import { loadTaskMeta } from './_task-meta.js';
@@ -275,23 +276,42 @@ function latestValidator(previous: StepLoopPassRecord[]): ValidateApply | null {
   return null;
 }
 
-/** The change the latest fixer collected, given to the validator after it in place of detect's. */
+/** The change every fixer pass collected, united and given to the validator after it in place
+ *  of detect's. A pass whose re-read failed or was never stored sets `scanFailed`. */
 function fixerFiles(previous: StepLoopPassRecord[]): {
   files: ImplementationFileSet | null;
   scanFailed: boolean;
 } {
+  const sets: (ImplementationFileSet | null)[] = [];
   for (let i = previous.length - 1; i >= 0; i -= 1) {
     const out = previous[i]?.applyOutput as ValidateApply | undefined;
-    if (out?.source === 'fixer') {
-      const collected = out.implementationFiles ?? null;
-      // A record stored before fixers re-read the change has no list: that is a re-read that did not happen.
-      if (collected === null) return { files: null, scanFailed: true };
-      if (!collected.scanError) return { files: collected, scanFailed: false };
-      // A failed scan lacks the dirty files, so detect's list stands; an empty one fails the guard.
-      return { files: collected.files.length > 0 ? null : collected, scanFailed: true };
-    }
+    // A record stored before fixers re-read the change has no list: that is a re-read that did not happen.
+    if (out?.source === 'fixer') sets.push(out.implementationFiles ?? null);
   }
-  return { files: null, scanFailed: false };
+  if (sets.length === 0) return { files: null, scanFailed: false };
+  const scanFailed = sets.some((set) => set === null || Boolean(set.scanError));
+  const read = sets.filter((set): set is ImplementationFileSet => set !== null && !set.scanError);
+  if (read.length === 0) {
+    // A failed scan lacks the dirty files, so detect's list stands; an empty one fails the guard.
+    const latest = sets[0]!;
+    return { files: latest === null || latest.files.length > 0 ? null : latest, scanFailed };
+  }
+  const files = [...new Set(read.flatMap((set) => set.files))];
+  const changedLines: ChangedLineNotes = {};
+  for (const set of [...read].reverse()) {
+    for (const f of set.files) delete changedLines[f];
+    Object.assign(changedLines, set.changedLines);
+  }
+  return {
+    files: {
+      files,
+      total: Math.max(files.length, ...read.map((set) => set.total)),
+      truncated: read.some((set) => set.truncated),
+      scanError: null,
+      changedLines,
+    },
+    scanFailed,
+  };
 }
 
 function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {

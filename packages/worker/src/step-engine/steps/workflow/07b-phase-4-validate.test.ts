@@ -1145,6 +1145,57 @@ describe('07b re-validation after a fix pass whose re-read failed', () => {
   });
 });
 
+describe('07b re-validation after several fix passes', () => {
+  const NOTICE = 'The change could not be re-read after the fix';
+  const set = (files: string[], scanError: string | null = null) => ({
+    files,
+    total: files.length,
+    truncated: false,
+    scanError,
+  });
+  const revalidate = (...fixerSets: unknown[]) =>
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: {
+        sandboxWorktreePath: '/ws',
+        spec: 'spec',
+        taskBrief: 'THE USER REQUEST',
+        dependencyPolicy: ownedPolicy,
+        debtBlock: '',
+        honoredBlock: '',
+        browserTesting: false,
+        docsOnly: false,
+        implementationFiles: set(['detect.php']),
+      } as never,
+      formValues: {},
+      iteration: 2 * fixerSets.length,
+      previousIterations: fixerSets.flatMap((implementationFiles, i) => [
+        { iteration: 2 * i, applyOutput: mkValidateApply({}) },
+        {
+          iteration: 2 * i + 1,
+          applyOutput: { ...mkValidateApply({}), source: 'fixer', implementationFiles },
+        },
+      ]) as never,
+    });
+
+  it('lists the files of every fix pass, not only the latest', () => {
+    const prompt = revalidate(set(['first.php']), set(['second.php']));
+    expect(prompt).toContain('- first.php');
+    expect(prompt).toContain('- second.php');
+  });
+
+  it('keeps the earlier list when the latest fix pass could not re-read the change', () => {
+    const prompt = revalidate(set(['first.php']), set([], 'git failed'));
+    expect(prompt).toContain('- first.php');
+    expect(prompt).toContain(NOTICE);
+  });
+
+  it('tells it when an earlier fix pass could not re-read, whatever the latest did', () => {
+    const prompt = revalidate(set([], 'git failed'), set(['second.php']));
+    expect(prompt).toContain('- second.php');
+    expect(prompt).toContain(NOTICE);
+  });
+});
+
 describe('parseValidatorOutput: the rule fields', () => {
   it('keeps the rule of an issue and the conflicts at the top level', () => {
     const p = parseValidatorOutput(reply({ issues: [violation()], conflicts: [conflict()] }))!;
@@ -2284,14 +2335,13 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
     expect(next.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
   });
 
-  it('stores the coverage without the flag once a later fixer pass has re-read the change', async () => {
+  it('keeps the flag once a later fixer pass has re-read the change, since an earlier one could not', async () => {
     const { ctx, detected, passes } = await validateBrokenFixValidate();
     const fixer = await pass(ctx, detected, 3, passes, FIXER_REPLY);
     expect(fixer.implementationFiles?.scanError).toBeNull();
     const previous = [...passes, passRecord(3, FIXER_REPLY, fixer)];
     const third = await pass(ctx, detected, 4, previous, reply({ verdict: 'VALID' }));
-    expect(third.changedFilesCoverage).toEqual({ listed: 3, total: 3 });
-    expect('scanFailed' in third.changedFilesCoverage!).toBe(false);
+    expect(third.changedFilesCoverage).toEqual({ listed: 3, total: 3, scanFailed: true });
   });
 
   it('runs the code protocol on the validator pass after a fixer whose scan failed on a docs-only change', async () => {
