@@ -4,6 +4,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import type { HouseRulesStamp } from '@haive/shared/global-kb';
+import { resolveEmbedBudget } from '@haive/shared/rag';
 
 const h = vi.hoisted(() => ({
   text: 'Add a cart icon\nShow it in the header.',
@@ -49,7 +50,6 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
 }));
 
 import {
-  SIMILARITY_EMBED_TIMEOUT_MS,
   SIMILARITY_QUERY_MAX_CHARS,
   scoreHouseRulesInBackground,
 } from '../src/orchestrator/house-rules-similarity.js';
@@ -129,7 +129,7 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
     ]);
   });
 
-  it('embeds the task text once, with its own budget, and binds the ids as a text literal', async () => {
+  it('embeds the task text once, on the default budget, and binds the ids as a text literal', async () => {
     scoreHouseRulesInBackground(
       db,
       INV,
@@ -141,17 +141,29 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
     );
     await recordWritten();
 
-    expect(h.embed).toHaveBeenCalledExactlyOnceWith(
-      'http://embed.invalid:11434',
-      'embed-model',
-      [h.text],
-      { timeoutMs: SIMILARITY_EMBED_TIMEOUT_MS },
-    );
+    expect(h.embed).toHaveBeenCalledExactlyOnceWith('http://embed.invalid:11434', 'embed-model', [
+      h.text,
+    ]);
     const read = h.storeCalls.find((call) => call.sql.includes('ai_rag_embeddings'))!;
     expect(read.params).toContain(`{${A},${B}}`);
     expect(read.sql).toContain('embed_status');
     expect(h.storeCalls[0]!.sql).toContain('statement_timeout');
     expect(h.storeOptions[0]).toMatchObject({ deadlineMs: 6_000, settings: h.settings });
+  });
+
+  it('scores through a cold embedder load that outlasts the old 30 s budget', async () => {
+    const coldLoadMs = 42_800;
+    const { embedTimeoutMs } = await resolveEmbedBudget();
+    h.embed.mockImplementation(async (...args: unknown[]) => {
+      const budget = (args[3] as { timeoutMs?: number } | undefined)?.timeoutMs ?? embedTimeoutMs;
+      if (coldLoadMs > budget) throw Object.assign(new Error('aborted'), { name: 'TimeoutError' });
+      return [[0.6, 0.8]];
+    });
+    h.rows = [{ id: A, score: 0.5 }];
+    scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+    const record = await recordWritten();
+
+    expect(record.status).toBe('ok');
   });
 
   it('embeds a bounded query, cut between characters', async () => {

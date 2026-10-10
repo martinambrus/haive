@@ -16,8 +16,6 @@ import { readTaskText } from './house-rules-dispatch.js';
 
 const log = logger.child({ module: 'house-rules-similarity' });
 
-/** A cold model load measured 4.6-42.8 s and aborting an embed cancels the load, so this is long. */
-export const SIMILARITY_EMBED_TIMEOUT_MS = 30_000;
 /** The embedding model's context is 4096 tokens; the title, description and spec opening stay well inside it. */
 export const SIMILARITY_QUERY_MAX_CHARS = 2_500;
 
@@ -48,9 +46,8 @@ async function measure(
   const settings = await resolveGlobalKbSettings();
   const { ollamaUrl, embedModel, embeddingDimensions } = settings;
   if (!ollamaUrl || !embedModel) throw new Error('no embedder is configured');
-  const [vector] = await ollamaEmbed(ollamaUrl, embedModel, [query], {
-    timeoutMs: SIMILARITY_EMBED_TIMEOUT_MS,
-  });
+  // Default = ingest budget (RAG_EMBED_TIMEOUT_MS): a cold load measured 42.8 s and an abort cancels it.
+  const [vector] = await ollamaEmbed(ollamaUrl, embedModel, [query]);
   if (vector?.length !== embeddingDimensions) {
     throw new Error('the query vector is not the width of the index');
   }
