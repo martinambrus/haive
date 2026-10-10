@@ -117,7 +117,7 @@ const SPEC_STEP_05A = '05a-resolve-spec-warnings';
 const TASK_TEXT_READ_CHARS = 262_144;
 
 /** The task's title and description, then its freshest spec: the highest round, then 05a, 05, 04. */
-async function readTaskText(db: Database, taskId: string): Promise<string> {
+export async function readTaskText(db: Database, taskId: string): Promise<string> {
   const { tasks, taskSteps } = schema;
   const rows = (await db.execute(sql`
     select left(${tasks.title}, ${TASK_TEXT_READ_CHARS}::int) as title,

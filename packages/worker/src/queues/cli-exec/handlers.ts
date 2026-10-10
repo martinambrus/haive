@@ -106,6 +106,7 @@ import {
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
 import { agentRulesOf } from '../../orchestrator/agent-rules.js';
 import { houseRulesOf } from '../../orchestrator/house-rules.js';
+import { scoreHouseRulesInBackground } from '../../orchestrator/house-rules-similarity.js';
 import {
   cleanupTaskAuthVolumes,
   clearTaskAuthPreparationState,
@@ -263,6 +264,7 @@ export async function handleCliExecJob(
     log.info({ invocationId: payload.invocationId }, 'cli invocation superseded before it started');
     return;
   }
+  scoreHouseRulesInBackground(db, row.id, payload.taskId, houseRules);
 
   // Work resumed: this invocation is now running, so close any waiting_cli park the step
   // accrued (initial queue wait, or a rate-limit/allowance park between waves) by folding
