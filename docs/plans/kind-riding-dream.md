@@ -330,6 +330,15 @@ integration worktree under `REPO_IS_DATA_ACTING_LINES`, the guard for a pass tha
 scan's report. It runs whatever triage chose, an empty selection included, since a scan whose
 triage picked nothing is a report and nothing else.
 
+**Nothing between triage and the report may stand in its way.** Every reviewer in the tail fails
+on an empty change set (`assertReviewableChange`, `_impl-changes.ts`), deliberately, so a scan
+whose triage planned nothing, or whose every issue failed to merge, would fail in the tail and
+never reach this step. The seed therefore guards two spans of its run list (see Core changes):
+`00a-sync-base` through `scan-remediate` run only when `scan-plan-remediation` wrote at least one
+issue, and `scan-fix` plus the tail only when at least one issue merged. A guarded-out step is
+recorded `skipped`, never `done`, so no skipped review reads as an approval, and the commit gate is
+skipped with them, so nothing is committed.
+
 **Every report carries a `Found, not fixed` section, and nothing turns it off.** A workflow task
 surfaces what it left behind only at review time: an agent MAY add a `## INSIGHTS` block
 (`INSIGHTS_INSTRUCTION`), and gates 2 and 3 show whatever 08e did not pick as one collapsed,
@@ -347,19 +356,22 @@ reason and most severe first within each group:
   read-only folder import, a detached HEAD), with the reason triage gave;
 - findings whose DAG issue did not merge: refused by the provider (the refusal marker in
   `concerns`), failed, or cancelled, naming which;
+- findings whose DAG issue merged, as remediation attempted and unconfirmed: a merge proves the
+  issue's worktree landed, not that its coder repaired each finding grouped into it, so they stay
+  listed until a later scan no longer raises them;
 - findings an earlier scan recorded that are still present and were not picked this time, naming
   the scan that first recorded them;
 - out-of-scope observations under a diff target (`raw.inScope = false`);
 - `## INSIGHTS` the remediation coders, `scan-fix` and the core tail noted and 08e did not pick,
-  read through `loadUnactedInsights` rather than re-parsed; `scan-remediate`'s coder prompt and
+  read through `loadUnactedInsights` with no limit (see Core changes) rather than re-parsed;
+  `scan-remediate`'s coder prompt and
   `scan-fix` carry `INSIGHTS_INSTRUCTION` as 07 does.
 
 Each entry's reason is derived from structural state — the triage step's output, the issue's
 `task_dag_issues` outcome and marker, `review_findings.disposition` and `raw` — never from a
 message column or an agent's prose, the rule `step-banners.ts` keeps for banners. The section never
-claims a finding was fixed: a merged issue moves its findings out of the section, but `fixed` stays
-unwritten (`review-findings.md`), and only a re-scan that no longer raises a finding is evidence of
-a fix. What the scan never looked at — a REFUSED dimension, a per-file cap's truncation, an
+claims a finding was fixed: `fixed` stays unwritten (`review-findings.md`), and only a re-scan
+that no longer raises a finding is evidence of a fix. What the scan never looked at — a REFUSED dimension, a per-file cap's truncation, an
 escaping symlink, a submodule — is a coverage gap, not a found defect, and sits beside the section
 in the coverage record, never inside it. Nothing is capped here: the per-file cap upstream already
 bounds volume, the step shows counts per reason, and the dashboard lists every entry.
@@ -698,7 +710,8 @@ Two are already written into the two modularity plans (`5aa4704`):
 - Module `composableSteps` union into `composable_step_catalog`, namespaced `module.<id>.<stepId>`.
 - Module-seeded task-type definitions, and the dangling-reference rule when a module is removed.
 
-Five more follow from how the scan runs. The first and the last stand on their own and can ship
+Seven more follow from how the scan runs. The first, the insights reader's limit and the last
+stand on their own and can ship
 ahead of the module:
 
 - **A provider's content-filter refusal is a per-agent outcome, not a dead provider.** The fan-out
@@ -746,6 +759,16 @@ ahead of the module:
   workspace, and a cancel runs no step code that could remove the snapshot itself. Widen it to a
   repository task's scratch workspace, keeping its settled-or-cancelled and no-pending-recap
   guards, so a failed scan keeps its snapshot for the Retry as a failed task keeps its Editor.
+- **A task-type seed can guard a span of its run list.** A composed step runs or skips by its own
+  `shouldRun`, and a core step's knows nothing of the module, so nothing lets `deep_scan` skip the
+  tail when there is no change to review. A seed names a contiguous span and a predicate the module
+  supplies, read from structural rows (`task_dag_plans` and `task_dag_issues` here), and the runner
+  records every step in the span `skipped` when it is false. This belongs with the task-type seed
+  in `rippling-wibbling-puffin`, whose composition validator then also checks a guarded span holds
+  no step a later unguarded one depends on.
+- **`loadUnactedInsights` takes a limit.** It slices to `INSIGHTS_AT_GATE` (30) itself, which suits
+  a gate row and not a report that lists everything. The gates pass that constant, `scan-report`
+  passes none, and the omitted count keeps its meaning for both.
 - **`00a-sync-base` fences its refspecs.** Its fetches put `base` straight after `origin`
   (`fetch origin <base>:refs/heads/<base>`, `fetch --deepen=50 origin <base>`) with no
   `--end-of-options`, and `base` comes from a free-text field, so a value shaped like an option is
@@ -924,9 +947,13 @@ former, and this module does both kinds of write.
   renders the one-line empty statement rather than omitting the section. Fixtures put one entry in
   each reason group — not picked, no authoritative side, no remediation offered, a refused issue,
   a failed issue, still present from an earlier scan, out of scope, an unpicked coder insight —
-  and each lands under its own reason; a merged issue's findings are absent and no row is written
-  `fixed`; a REFUSED dimension appears in the coverage record and not in the section; a stale
+  and each lands under its own reason; a merged issue's findings are listed as remediation
+  attempted and unconfirmed, and no row is written `fixed`; more than 30 unpicked insights are all
+  listed; a REFUSED dimension appears in the coverage record and not in the section; a stale
   status message on a step changes no entry's reason.
+- A triage that picks nothing, and a remediation whose every issue fails, each reach `scan-report`
+  with the guarded steps recorded `skipped`: no reviewer runs `assertReviewableChange` on an empty
+  change set, and nothing is committed.
 
 **Core (in the worker suite, shipped with the core changes):**
 - The fan-out barrier fails the step on a rate-limit, auth or server-error row and degrades on a
@@ -945,14 +972,20 @@ former, and this module does both kinds of write.
 - `00a-sync-base` refuses a `base` that starts with `-` or breaks git's ref-name rules, and every
   fetch it runs carries its refspec after `--end-of-options` with the source fully qualified, so a
   base named `+topic` updates `refs/heads/+topic` from `refs/heads/+topic` and nothing else.
+- A seed span whose predicate is false records each of its steps `skipped` and runs the step after
+  it; one whose predicate is true runs as if unguarded.
+- `loadUnactedInsights` with no limit returns every unpicked insight; with `INSIGHTS_AT_GATE` the
+  gates still show 30 and count the rest.
 
 **End to end on the dev stack:**
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
    `review_findings` with `deep-scan:` reviewer ids and the coverage record names the fifteen
    dimensions that did not run.
 2. Triage two findings in one file; confirm remediation creates one DAG issue, one worktree, and
-   merges, and that the report's `Found, not fixed` section lists every finding left unpicked and
-   neither of the two merged ones.
+   merges, and that the report's `Found, not fixed` section lists every finding left unpicked, and
+   the two merged ones as remediation attempted and unconfirmed.
+2b. Run a scan and pick nothing at triage; confirm the task ends on `scan-report` with the
+   remediation steps and the tail recorded `skipped` and every verified finding in the section.
 3. Re-scan; confirm the already-fixed finding does not reappear and the report says what is new.
 3b. Run coherence alone over this repo's own rules, `AGENTS.md` and KB; confirm every finding cites
    two `file:line` sides, and that the carve-out `2fffb947` added is not raised as a conflict.
