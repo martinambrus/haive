@@ -24,7 +24,7 @@ import {
 } from './steps/_untrusted-repo.js';
 import { ROOT_CAUSE_LINES, repeatedFlagLines } from './steps/workflow/_fix-loop.js';
 import { isOutOfScope, SCOPE_FENCE_INSIGHTS } from './steps/_scope-fence.js';
-import { INSIGHTS_INSTRUCTION } from './steps/workflow/08e-insights-triage.js';
+import { findingIdentity, INSIGHTS_INSTRUCTION } from './steps/workflow/08e-insights-triage.js';
 import {
   changedFilesBlock,
   collectChangeSet,
@@ -1266,11 +1266,25 @@ async function setResolution(
     .where(eq(schema.taskDagIssues.id, issue.id));
 }
 
+/** The findings withheld in any round, the earlier ones first, each identity once. */
+function unionWithheld(
+  earlier: ReviewerOutput['withheld'],
+  latest: ReviewerOutput['withheld'],
+): NonNullable<ReviewerOutput['withheld']> {
+  const seen = new Set<string>();
+  return [...(earlier ?? []), ...(latest ?? [])].filter((f) => {
+    const id = findingIdentity(f);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 async function acceptWithDebt(
   db: Database,
   issue: DagIssueRow,
   reviewIssues: unknown[],
-  round?: { stuckCount: number; innerIteration: number },
+  round?: { stuckCount: number; innerIteration: number; reviewerVerdict?: ReviewerOutput },
 ): Promise<void> {
   const existing = (issue.debtItems ?? []) as unknown[];
   await db
@@ -1447,43 +1461,46 @@ export async function ingestReviewRun(
         `reviewer returned no valid reviewer verdict${inv.errorMessage ? `: ${inv.errorMessage}` : ''}`,
       );
     }
+    const previousVerdict = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
+    const withheld = unionWithheld(
+      previousVerdict.success ? previousVerdict.data.withheld : undefined,
+      verdict.withheld,
+    );
+    if (withheld.length > 0) verdict.withheld = withheld;
+    const kept = verdict.withheld
+      ? {
+          stuckCount: issue.stuckCount,
+          innerIteration: issue.innerIteration,
+          reviewerVerdict: verdict,
+        }
+      : undefined;
     if (verdict.verdict === 'approve') {
-      return setResolution(
-        ra.db,
-        issue,
-        'approved',
-        undefined,
-        verdict.withheld
-          ? {
-              stuckCount: issue.stuckCount,
-              innerIteration: issue.innerIteration,
-              reviewerVerdict: verdict,
-            }
-          : undefined,
-      );
+      return setResolution(ra.db, issue, 'approved', undefined, kept);
     }
-    if (verdict.verdict === 'block') return setResolution(ra.db, issue, 'failed_unrecoverable');
+    if (verdict.verdict === 'block') {
+      return setResolution(ra.db, issue, 'failed_unrecoverable', undefined, kept);
+    }
     // fix_required whose criteria all pass and whose only issues are cosmetic →
     // approve (folding the nits into debt) instead of looping on polish.
     if (fixRequiredIsCosmetic(verdict)) {
       return verdict.issues.length > 0
-        ? acceptWithDebt(ra.db, issue, verdict.issues)
-        : setResolution(ra.db, issue, 'approved');
+        ? acceptWithDebt(ra.db, issue, verdict.issues, kept)
+        : setResolution(ra.db, issue, 'approved', undefined, kept);
     }
     // fix_required
-    const previous = reviewerOutputSchema.safeParse(issue.reviewerVerdict);
     // A shorter list than last time is not evidence that the omitted criteria passed.
     const progressed =
       verdict.criteria_results.length > 0 &&
-      previous.success &&
-      verdict.criteria_results.length >= previous.data.criteria_results.length &&
-      failedCriteriaCount(verdict) < failedCriteriaCount(previous.data);
+      previousVerdict.success &&
+      verdict.criteria_results.length >= previousVerdict.data.criteria_results.length &&
+      failedCriteriaCount(verdict) < failedCriteriaCount(previousVerdict.data);
     const newStuck = progressed ? 1 : issue.stuckCount + 1;
     const newIter = issue.innerIteration + 1;
     if (newStuck >= STUCK_LIMIT) {
       return acceptWithDebt(ra.db, issue, verdict.issues, {
         stuckCount: newStuck,
         innerIteration: newIter,
+        ...(verdict.withheld ? { reviewerVerdict: verdict } : {}),
       });
     }
     if (newIter >= MAX_REVIEW_ITERS) {

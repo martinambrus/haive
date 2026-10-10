@@ -180,6 +180,19 @@ describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
     expect(ins.map((i) => i.title).sort()).toEqual(['Extract helper', 'legacy']);
   });
 
+  it('does not let an unrelated insight at the same file cover a distinct finding', async () => {
+    const raw = '## INSIGHTS\n- INSIGHT: Remove legacy shim | lib.ts:9 | dead code\n';
+    const ins = await titles([{ stepId: '06c-dag-execute', raw }], [verdict]);
+    expect(ins.map((i) => i.title).sort()).toEqual(['Remove legacy shim', 'legacy']);
+  });
+
+  it('covers a finding only by an identical one, whatever its case and spacing', async () => {
+    const raw = '## INSIGHTS\n- INSIGHT:   LEGACY  | lib.ts:9 | dead code\n';
+    const ins = await titles([{ stepId: '06c-dag-execute', raw }], [verdict]);
+    expect(ins).toHaveLength(1);
+    expect(ins[0]!.location).toBe('lib.ts:9');
+  });
+
   it('ignores a verdict that withheld nothing and one that is not a verdict', async () => {
     const none = { verdict: 'approve', criteria_results: [], issues: [] };
     expect(await titles([], [none, null, 'x', { withheld: 'x' }])).toEqual([]);

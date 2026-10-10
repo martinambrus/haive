@@ -2292,7 +2292,11 @@ describe('ingestReviewRun: a review that failed only on out-of-scope findings', 
   const pass = [{ criterion: 'AC1', passed: true }];
   const actualDispatch = vi.mocked(resolveTaskDispatch).getMockImplementation()!;
 
-  async function run(parsedOutput: Record<string, unknown>, rawOutput: string | null = null) {
+  async function run(
+    parsedOutput: Record<string, unknown>,
+    rawOutput: string | null = null,
+    reviewerVerdict: Record<string, unknown> | null = null,
+  ) {
     const { db, inserts, updates } = makeSpawnDb();
     vi.mocked(resolveTaskDispatch).mockImplementation(async () => workingDispatchPlan());
     const ra = {
@@ -2323,7 +2327,7 @@ describe('ingestReviewRun: a review that failed only on out-of-scope findings', 
       debtItems: [],
       errorMessage: null,
       endedAt: null,
-      reviewerVerdict: null,
+      reviewerVerdict,
     } as never;
     try {
       await ingestReviewRun(
@@ -2371,6 +2375,47 @@ describe('ingestReviewRun: a review that failed only on out-of-scope findings', 
     expect(r.prompt).toBeUndefined();
     expect(r.resolved?.resolution).toBe('approved');
     expect(r.resolved?.reviewerVerdict?.withheld).toHaveLength(1);
+  });
+
+  it('keeps the withheld findings on a block that rests on an in-scope blocker', async () => {
+    const r = await run({ verdict: 'block', criteria_results: pass, issues: [written, legacy] });
+    expect(r.resolved?.resolution).toBe('failed_unrecoverable');
+    expect(r.resolved?.reviewerVerdict?.withheld?.map((i) => i.description)).toEqual(['legacy']);
+  });
+
+  it('keeps them on a cosmetic acceptance', async () => {
+    const low = { severity: 'low', file: 'a.ts', description: 'nit' };
+    const r = await run({ verdict: 'fix_required', criteria_results: pass, issues: [low, legacy] });
+    expect(r.resolved?.resolution).toBe('completed_with_debt');
+    expect(r.resolved?.reviewerVerdict?.withheld).toHaveLength(1);
+  });
+
+  it('carries a finding an earlier round withheld into the next verdict, once', async () => {
+    const old = { severity: 'high', file: 'old.ts', description: 'Old  Finding', in_scope: 'no' };
+    const r = await run(
+      { verdict: 'block', criteria_results: pass, issues: [written, legacy, old] },
+      null,
+      {
+        verdict: 'fix_required',
+        criteria_results: pass,
+        issues: [],
+        withheld: [{ ...old, description: 'old finding' }],
+      },
+    );
+    expect(r.resolved?.reviewerVerdict?.withheld?.map((i) => i.description)).toEqual([
+      'old finding',
+      'legacy',
+    ]);
+  });
+
+  it('keeps an earlier round withheld finding when the last verdict withheld nothing', async () => {
+    const r = await run({ verdict: 'approve', criteria_results: pass, issues: [] }, null, {
+      verdict: 'fix_required',
+      criteria_results: pass,
+      issues: [],
+      withheld: [legacy],
+    });
+    expect(r.resolved?.reviewerVerdict?.withheld?.map((i) => i.description)).toEqual(['legacy']);
   });
 
   it('sends the fix coder only the in-scope finding', async () => {

@@ -105,6 +105,12 @@ export function parseInsights(outputs: { stepId: string; raw: string }[], limit 
   return out;
 }
 
+const normalizeFinding = (text: string): string => collapseToLine(text).toLowerCase();
+
+/** The identity of a finding: its file (without a trailing line number) and description, normalized. */
+export const findingIdentity = (f: { file?: string | null; description: string }): string =>
+  `${normalizeFinding((f.file ?? '').replace(/:\d+(-\d+)?$/, ''))}::${normalizeFinding(f.description)}`;
+
 /** The raw output of every step invocation of the task that carries an `## INSIGHTS` block, in the
  *  order they ran, then one block per finding a DAG reviewer withheld as outside its issue's lines
  *  (kept on the issue's verdict, not in the reply) that no insight above already covers. */
@@ -134,14 +140,14 @@ export async function loadInsightOutputs(
   for (const { reviewerVerdict } of verdicts) {
     const parsed = reviewerOutputSchema.safeParse(reviewerVerdict);
     for (const f of parsed.success ? (parsed.data.withheld ?? []) : []) {
-      const text = collapseToLine(f.description).toLowerCase();
-      const covered = written.some((i) => {
-        const words = [i.title, i.description].map((w) => collapseToLine(w).toLowerCase());
-        return (
-          (!f.file || i.location.includes(f.file)) &&
-          words.some((w) => w.includes(text) || (w.length >= 12 && text.includes(w)))
-        );
-      });
+      const id = findingIdentity(f);
+      const covered = written.some((i) =>
+        [i.title, i.description].some(
+          (w) =>
+            normalizeFinding(w) === normalizeFinding(f.description) &&
+            (!f.file || findingIdentity({ file: i.location, description: w }) === id),
+        ),
+      );
       if (!covered)
         lines.push(
           `- INSIGHT: ${collapseToLine(f.description).replaceAll('|', '/')} | ${f.file ?? ''} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
