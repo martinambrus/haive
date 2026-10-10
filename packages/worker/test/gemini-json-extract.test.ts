@@ -53,6 +53,24 @@ describe('extractGeminiJsonOutput', () => {
   it('accepts an empty response string', () => {
     expect(extractGeminiJsonOutput(JSON.stringify({ response: '' }))!.responseText).toBe('');
   });
+
+  it('sums api.totalLatencyMs across models as model time', () => {
+    const doc = JSON.stringify({
+      response: 'ok',
+      stats: {
+        models: {
+          'gemini-2.5-pro': { api: { totalRequests: 2, totalLatencyMs: 4200 }, tokens: {} },
+          'gemini-2.5-flash': { api: { totalRequests: 1, totalLatencyMs: 300 }, tokens: {} },
+        },
+      },
+    });
+    expect(extractGeminiJsonOutput(doc)!.apiDurationMs).toBe(4500);
+  });
+
+  it('reports no model time when no model carries a latency', () => {
+    expect(extractGeminiJsonOutput(TWO_MODEL_DOC)!.apiDurationMs).toBeNull();
+    expect(extractGeminiJsonOutput(JSON.stringify({ response: 'x' }))!.apiDurationMs).toBeNull();
+  });
 });
 
 describe('normalizeClaudeUsage', () => {

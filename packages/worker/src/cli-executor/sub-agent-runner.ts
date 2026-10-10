@@ -18,6 +18,7 @@ export interface SubAgentStepTrace {
   parsed: unknown;
   error?: string;
   tokenUsage?: CliTokenUsage | null;
+  apiDurationMs?: number | null;
   /** The codex turn failure that cut this sub-step at the output limit. */
   outputLimit?: string;
 }
@@ -29,6 +30,19 @@ export interface SubAgentRunResult {
   exitCode: number;
   /** Whole-invocation usage: sum of every sub-step (incl. synthesis). */
   tokenUsage: CliTokenUsage | null;
+  /** Σ sub-step model time; null when a sub-step with usage reported none, so the tokens it
+   *  divides always cover the same sub-steps. */
+  apiDurationMs: number | null;
+}
+
+function totalApiDurationMs(trace: SubAgentStepTrace[]): number | null {
+  let total: number | null = null;
+  for (const step of trace) {
+    if (!step.tokenUsage) continue;
+    if (step.apiDurationMs == null) return null;
+    total = (total ?? 0) + step.apiDurationMs;
+  }
+  return total;
 }
 
 export type PromptToCliSpec = (prompt: string) => CliCommandSpec;
@@ -58,6 +72,7 @@ export async function runSequentialSubAgent(
         trace,
         exitCode: traceEntry.exitCode ?? 1,
         tokenUsage,
+        apiDurationMs: totalApiDurationMs(trace),
       };
     }
     if (step.collectInto) {
@@ -81,6 +96,7 @@ export async function runSequentialSubAgent(
     trace,
     exitCode: synthesisTrace.exitCode ?? 1,
     tokenUsage,
+    apiDurationMs: totalApiDurationMs(trace),
   };
 }
 
@@ -98,6 +114,7 @@ async function runOneStep(
   // raw stdout — exactly the legacy behavior for older binaries.
   let text = result.stdout;
   let tokenUsage: CliTokenUsage | null = null;
+  let apiDurationMs: number | null = null;
   let outputLimit: string | undefined;
   if (spec.outputFormat === 'codex-jsonl') {
     const extracted = extractCodexJsonlOutput(result.stdout);
@@ -119,6 +136,7 @@ async function runOneStep(
     if (extracted) {
       text = extracted.responseText;
       tokenUsage = extracted.tokenUsage;
+      apiDurationMs = extracted.apiDurationMs;
     }
   }
   const parsed = outputLimit === undefined ? safeParse(step.expectJsonOutput, text) : null;
@@ -130,6 +148,7 @@ async function runOneStep(
     durationMs: result.durationMs,
     parsed,
     tokenUsage,
+    apiDurationMs,
     ...(result.error ? { error: result.error } : {}),
     ...(outputLimit === undefined ? {} : { outputLimit }),
   };

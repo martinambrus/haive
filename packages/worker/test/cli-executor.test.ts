@@ -236,6 +236,48 @@ describe('runSequentialSubAgent', () => {
     expect(result.collected).toEqual({ scan: { found: 1 }, labels: { labels: ['x'] } });
     expect(result.synthesis).toBe('All good');
     expect(result.tokenUsage).toEqual({ inputTokens: 15, outputTokens: 3, totalTokens: 18 });
+    // These envelopes carry no api.totalLatencyMs, so no model time is recorded at all.
+    expect(result.apiDurationMs).toBeNull();
+  });
+
+  const timedGem = (response: string, latency: number | null) =>
+    JSON.stringify({
+      response,
+      stats: {
+        models: {
+          'gemini-2.5-pro': {
+            ...(latency === null ? {} : { api: { totalLatencyMs: latency } }),
+            tokens: { prompt: 10, candidates: 2, total: 12, cached: 0, thoughts: 0, tool: 0 },
+          },
+        },
+      },
+    });
+  const buildGemini = (prompt: string): CliCommandSpec => ({
+    command: 'gemini',
+    args: ['--output-format', 'json', '-p', prompt],
+    env: {},
+    outputFormat: 'gemini-json',
+  });
+
+  it('sums gemini model time across every sub-step', async () => {
+    const spawner = mockSpawner({
+      scan: { stdout: timedGem('<<<JSON>>>{"found":1}<<<ENDJSON>>>', 1000) },
+      label: { stdout: timedGem('{"labels":["x"]}', 500) },
+      'final report': { stdout: timedGem('All good', 250) },
+    });
+    const result = await runSequentialSubAgent(sequentialInvocation, buildGemini, spawner);
+    expect(result.apiDurationMs).toBe(1750);
+  });
+
+  it('reports no model time when a sub-step with usage reported none', async () => {
+    const spawner = mockSpawner({
+      scan: { stdout: timedGem('<<<JSON>>>{"found":1}<<<ENDJSON>>>', 1000) },
+      label: { stdout: timedGem('{"labels":["x"]}', null) },
+      'final report': { stdout: timedGem('All good', 250) },
+    });
+    const result = await runSequentialSubAgent(sequentialInvocation, buildGemini, spawner);
+    expect(result.tokenUsage?.outputTokens).toBe(6);
+    expect(result.apiDurationMs).toBeNull();
   });
 });
 
