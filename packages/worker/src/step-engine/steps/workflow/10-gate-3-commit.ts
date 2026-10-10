@@ -93,10 +93,12 @@ function changedExcerpt(before: string, after: string): { before: string; after:
 }
 
 function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPolicy): string {
-  // Git may not pair a moved protected file, so it can arrive as a deleted file plus an added one.
-  const protectedRemoved = artifact.files.some(
-    (file) => file.status === 'deleted' && secretMaskDeniesPath(policy, file.path),
-  );
+  // Git may not pair a moved protected file, and a capped list may not show the deletion at all.
+  const protectedRemoved =
+    artifact.truncated ||
+    artifact.files.some(
+      (file) => file.status === 'deleted' && secretMaskDeniesPath(policy, file.path),
+    );
   const files = artifact.files.map((file) => {
     const metadata = { path: file.path, oldPath: file.oldPath, status: file.status };
     // Do not relay a masked file through the host-built diff, even when masking is off.

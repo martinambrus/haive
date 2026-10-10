@@ -196,6 +196,19 @@ describe('10-gate-3-commit message generation', () => {
       expect(filesOf(text).find((f) => f.path === 'renamed.txt')?.note).toBe(WITHHELD);
     });
 
+    it('withholds added files when the capped list cannot show every removal', async () => {
+      const repo = await seedWith({ 'secret.env': 'SECRET=abc\n' });
+      await rm(path.join(repo, 'secret.env'));
+      for (let i = 0; i < 520; i += 1) {
+        await writeFile(path.join(repo, `a-${String(i).padStart(3, '0')}.txt`), `copy ${i}\n`);
+      }
+      await git(repo, ['add', '-A']);
+      const text = await contextOf(repo);
+      expect(text).toContain('"truncated":true');
+      expect(text).not.toContain('copy 0');
+      expect(text).toContain(`{"path":"a-000.txt","status":"added","note":"${WITHHELD}"}`);
+    });
+
     it('leaves the context unchanged when no protected file was removed', async () => {
       const repo = await seedWith({ 'gone.txt': 'old\n' });
       await rm(path.join(repo, 'gone.txt'));
