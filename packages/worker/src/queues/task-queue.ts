@@ -16,6 +16,7 @@ import {
 } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import {
+  checkRevive,
   isUniqueViolationOf,
   ONE_LIVE_UPGRADE_INDEX,
   schema,
@@ -468,8 +469,10 @@ async function markTaskWaiting(
 }
 
 /** Point the running task at a step. With a fence, only while it holds: false when a Retry moved
- *  the task on or a Stop failed it, and nothing was written. */
-async function markTaskRunningWithStep(
+ *  the task on or a Stop failed it, and nothing was written. A revival of a failed onboarding or
+ *  upgrade makes the creation's checks under the creation's lock, in the transaction that revives
+ *  it, and leaves the task failed when one refuses. */
+export async function markTaskRunningWithStep(
   db: Database | DbHandle,
   taskId: string,
   stepId: string,
@@ -478,8 +481,8 @@ async function markTaskRunningWithStep(
   fence?: TaskFence,
 ): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  try {
-    const [pointed] = await db
+  const point = async (handle: Database | DbHandle) => {
+    const [pointed] = await handle
       .update(schema.tasks)
       .set({
         status: 'running',
@@ -503,16 +506,32 @@ async function markTaskRunningWithStep(
       .where(taskWriteTarget(taskId, fence))
       .returning({ id: schema.tasks.id });
     return pointed !== undefined;
+  };
+  const refuse = async (reason: string, extra: Record<string, unknown> = {}) => {
+    logger.info(
+      { taskId, stepId, reason },
+      'revive refused: the exclusion on the repository holds',
+    );
+    await appendEvent(db, taskId, null, 'upgrade.revive_refused', {
+      stepId,
+      reason,
+      ...extra,
+    }).catch(() => undefined);
+    return false;
+  };
+  try {
+    if (!fence?.reviveFailed) return await point(db);
+    const refused = await db.transaction(async (tx) => {
+      const check = await checkRevive(tx, taskId);
+      if (check?.refusal) return check.refusal;
+      return (await point(tx)) ? null : 'overtaken';
+    });
+    if (refused === null) return true;
+    if (refused === 'overtaken') return false;
+    return await refuse(refused.reason, 'taskId' in refused ? { otherTaskId: refused.taskId } : {});
   } catch (err) {
     if (!fence?.reviveFailed || !isUniqueViolationOf(err, ONE_LIVE_UPGRADE_INDEX)) throw err;
-    logger.info(
-      { taskId, stepId },
-      'revive refused: another upgrade or rollback of the repository is live',
-    );
-    await appendEvent(db, taskId, null, 'upgrade.revive_refused', { stepId }).catch(
-      () => undefined,
-    );
-    return false;
+    return refuse('live-upgrade-index');
   }
 }
 

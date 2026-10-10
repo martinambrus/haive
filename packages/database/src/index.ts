@@ -47,3 +47,13 @@ export {
   type RootClaimHandle,
   type RootClaimKind,
 } from './repo-root-claim.js';
+export {
+  LIVE_TASK_STATUSES,
+  checkRevive,
+  liveTaskIdOfType,
+  lockRepositoryRow,
+  type LockedRepository,
+  type ReviveCheck,
+  type ReviveRefusal,
+  type ReviveTask,
+} from './repository-task-lock.js';

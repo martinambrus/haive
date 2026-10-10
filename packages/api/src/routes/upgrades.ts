@@ -1,7 +1,10 @@
 import { Hono } from 'hono';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
+  checkRevive,
   isRootClaimLive,
+  liveTaskIdOfType,
+  lockRepositoryRow,
   rootClaimRefusal,
   schema,
   type DbTx,
@@ -46,7 +49,6 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
   LIVE_TASK_STATUSES,
-  liveOnboardingTaskId,
   renderContextAdmitsUpgrade,
   type RepositoryForUpgrade,
   upgradeAdmission,
@@ -661,23 +663,12 @@ export async function refuseBesideLiveUpgrade(
   db: ReturnType<typeof getDb> | DbTx,
   repositoryId: string,
 ): Promise<void> {
-  const [live] = await db
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, repositoryId),
-        eq(schema.tasks.type, 'onboarding_upgrade'),
-        inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
-      ),
-    )
-    .limit(1);
-  if (live) {
-    throw new HttpError(
-      409,
-      `An upgrade or rollback is already in progress for this repository (task ${live.id})`,
-    );
-  }
+  const liveId = await liveTaskIdOfType(db, repositoryId, 'onboarding_upgrade');
+  if (liveId) throw new HttpError(409, liveUpgradeMessage(liveId));
+}
+
+function liveUpgradeMessage(taskId: string): string {
+  return `An upgrade or rollback is already in progress for this repository (task ${taskId})`;
 }
 
 /** Run `work` in a transaction holding the repository's onboarding and upgrade lock, so the checks
@@ -693,25 +684,7 @@ export async function withRepositoryTaskLock<T>(
 }
 
 async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
-  );
-  const [repo] = await tx
-    .select({
-      id: schema.repositories.id,
-      source: schema.repositories.source,
-      renderContext: schema.repositories.renderContext,
-      status: schema.repositories.status,
-      storagePath: schema.repositories.storagePath,
-      localPath: schema.repositories.localPath,
-      onboardedAt: schema.repositories.onboardedAt,
-      onboardingResetAt: schema.repositories.onboardingResetAt,
-      rootClaimedAt: schema.repositories.rootClaimedAt,
-      rootClaimKind: schema.repositories.rootClaimKind,
-    })
-    .from(schema.repositories)
-    .where(eq(schema.repositories.id, repositoryId))
-    .for('update');
+  const repo = await lockRepositoryRow(tx, repositoryId);
   if (!repo) throw new HttpError(404, 'Repository not found');
   if (isRootClaimLive(repo.rootClaimedAt)) {
     throw new HttpError(409, rootClaimRefusal(repo.rootClaimKind as RootClaimKind | null));
@@ -721,42 +694,37 @@ async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
 
 /** Call first in the transaction that moves an onboarding or upgrade task out of a non-live
  *  status. Creation checks under the repository lock, and a failed task is not live, so the
- *  revival takes the same lock and makes the creation's checks: an onboarding beside a live
- *  upgrade or rollback, an upgrade or rollback beside a live onboarding, a live root claim. */
+ *  revival takes the same lock and makes the creation's checks (`checkRevive`, which the worker's
+ *  revival runs too): an onboarding beside a live upgrade or rollback, an upgrade or rollback
+ *  beside a live onboarding, a live root claim. An upgrade or rollback is also admitted again, as
+ *  at creation, so one a reset has since cut off cannot continue. */
 export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<void> {
-  const [task] = await tx
-    .select({
-      type: schema.tasks.type,
-      userId: schema.tasks.userId,
-      repositoryId: schema.tasks.repositoryId,
-      metadata: schema.tasks.metadata,
-    })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, taskId));
-  if (!task?.repositoryId || (task.type !== 'onboarding' && task.type !== 'onboarding_upgrade')) {
-    return;
+  const check = await checkRevive(tx, taskId);
+  if (!check) return;
+  const rollback = (check.task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
+  const action = rollback ? 'rolled back' : 'upgraded';
+  const refusal = check.refusal;
+  if (refusal) {
+    switch (refusal.reason) {
+      case 'no-repository':
+        throw new HttpError(404, 'Repository not found');
+      case 'root-claim':
+        throw new HttpError(409, rootClaimRefusal(refusal.claimKind));
+      case 'live-upgrade':
+        throw new HttpError(409, liveUpgradeMessage(refusal.taskId));
+      case 'live-onboarding':
+        throw new HttpError(
+          409,
+          upgradeRefusalMessage(
+            { admitted: false, reason: 'live-onboarding', taskId: refusal.taskId },
+            action,
+          ),
+        );
+    }
   }
-  await lockRepositoryTasks(tx, task.repositoryId);
-  const [current] = await tx
-    .select({ status: schema.tasks.status })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, taskId));
-  if (!current || (LIVE_TASK_STATUSES as readonly string[]).includes(current.status)) return;
-  if (task.type === 'onboarding') {
-    await refuseBesideLiveUpgrade(tx, task.repositoryId);
-    return;
-  }
-  const liveId = await liveOnboardingTaskId(tx, task.userId, task.repositoryId);
-  if (liveId) {
-    const rollback = (task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
-    throw new HttpError(
-      409,
-      upgradeRefusalMessage(
-        { admitted: false, reason: 'live-onboarding', taskId: liveId },
-        rollback ? 'rolled back' : 'upgraded',
-      ),
-    );
-  }
+  if (check.task.type !== 'onboarding_upgrade') return;
+  const admission = await upgradeAdmission(tx, check.task.userId, check.repo);
+  if (!admission.admitted) throw new HttpError(409, upgradeRefusalMessage(admission, action));
 }
 
 /** Insert an upgrade or a rollback task only while no other one of the repository is live and no

@@ -139,6 +139,16 @@ function setup(
     completedAt: fake.now(),
     ...revival.task,
   });
+  if (type === 'onboarding_upgrade') {
+    fake.insert(schema.tasks, {
+      userId: USER,
+      repositoryId: REPO,
+      type: 'onboarding',
+      title: 'onboarding',
+      status: 'completed',
+      completedAt: new Date(Date.now() - 60_000),
+    });
+  }
   if (other) {
     fake.insert(schema.tasks, {
       id: OTHER,
@@ -208,6 +218,37 @@ describe.each([
         if (!revival.worker) expect(t.task().status).not.toBe('failed');
         expect(h.add).toHaveBeenCalledTimes(1);
       }
+    });
+  });
+});
+
+describe.each([
+  ['an upgrade', undefined, 'upgraded'],
+  ['a rollback', { mode: 'rollback' }, 'rolled back'],
+])('reviving a failed %s after a repository reset', (_n, metadata, action) => {
+  describe.each(revivals)('by $name', (revival) => {
+    const failedWith = { ...revival, task: { ...revival.task, metadata } };
+
+    it('answers 409 and stays failed once a reset has cut it off', async () => {
+      const t = setup('onboarding_upgrade', failedWith, undefined, {
+        onboardingResetAt: new Date(),
+      });
+      const res = await revival.request();
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        error: expect.stringContaining(
+          `no onboarding has finished since, so it cannot be ${action}`,
+        ),
+      });
+      expect(t.task()).toMatchObject({ status: 'failed', orchestrationEpoch: 3 });
+      expect(h.add).not.toHaveBeenCalled();
+    });
+
+    it('still revives when no reset happened', async () => {
+      const t = setup('onboarding_upgrade', failedWith);
+      expect((await revival.request()).status).toBe(200);
+      if (!revival.worker) expect(t.task().status).not.toBe('failed');
+      expect(h.add).toHaveBeenCalledTimes(1);
     });
   });
 });

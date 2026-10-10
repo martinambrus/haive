@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray, isNull, max } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import { LIVE_TASK_STATUSES, schema, type DbTx } from '@haive/database';
 import { CLI_PROVIDER_LIST } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -14,14 +14,7 @@ import type { Database } from '../db.js';
  * `waiting_user` is in the LIVE set deliberately: a run parked on a form is the normal state
  * of onboarding for most of its life, and it is exactly the state the repo was misread in.
  */
-export const LIVE_TASK_STATUSES = [
-  'created',
-  'queued',
-  'running',
-  'paused',
-  'waiting_user',
-  'waiting_pr',
-] as const;
+export { LIVE_TASK_STATUSES };
 
 /**
  * The newest `generated_at` among the LIVE `onboarding_artifacts` rows of each repository.

@@ -453,7 +453,7 @@ export const tasks = pgTable(
     // which had no index at all and ran hourly.
     index('tasks_status_completed_at_idx').on(table.status, table.completedAt),
     // An upgrade and a rollback side by side apply and revert the same files, so a Retry must not
-    // revive one beside another either. The statuses are the api's LIVE_TASK_STATUSES.
+    // revive one beside another either. The statuses are LIVE_TASK_STATUSES (repository-task-lock).
     uniqueIndex(ONE_LIVE_UPGRADE_INDEX)
       .on(table.repositoryId)
       .where(
