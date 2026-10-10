@@ -5,7 +5,7 @@ import { removeNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { hardenGitArgs } from '@haive/shared/git-args';
-import { and, asc, desc, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -1087,13 +1087,11 @@ planRoutes.delete('/:id/plan/edges/:edgeId', async (c) => {
 /* Task spawning                                                       */
 /* ------------------------------------------------------------------ */
 
-/** Validate the caller's chosen provider, or fall back to the one this repo last
- *  RAN on, so a plan task started from a button lands on the provider the user
- *  already used for this repo instead of an arbitrary enabled one. That is the
- *  `cliProviderId` field of `/tasks/last-cli` — deliberately not its `cliChoice`,
- *  which is what the new-task form remembers and can legitimately be "none": a
- *  plan task started from a button has no dropdown to show that in. Null is a
- *  legitimate answer: the dispatcher resolves a provider per step anyway. */
+/** Validate the caller's chosen provider, or fall back to an ENABLED one the user already ran:
+ *  this repo's latest task, else their latest task anywhere, else their oldest enabled provider,
+ *  so a plan task started from a button lands on the CLI the person actually uses. The two plan
+ *  pickers in the web preselect from `GET /:id/plan/build/clis`, which calls this with no pick.
+ *  Null is a legitimate answer: the dispatcher resolves a provider per step anyway. */
 async function resolveProvider(
   userId: string,
   repositoryId: string,
@@ -1106,22 +1104,26 @@ async function resolveProvider(
     await loadUsableProvider(db, userId, cliProviderId);
     return cliProviderId;
   }
-  const lastUsed = await db.query.tasks.findFirst({
-    where: and(
-      eq(schema.tasks.userId, userId),
-      eq(schema.tasks.repositoryId, repositoryId),
-      isNotNull(schema.tasks.cliProviderId),
-    ),
-    orderBy: [desc(schema.tasks.createdAt)],
-    columns: { cliProviderId: true },
-  });
-  if (lastUsed?.cliProviderId) return lastUsed.cliProviderId;
-  const fallback = await db.query.cliProviders.findFirst({
+  const enabled = await db.query.cliProviders.findMany({
     where: and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)),
     columns: { id: true },
     orderBy: [asc(schema.cliProviders.createdAt)],
   });
-  return fallback?.id ?? null;
+  if (enabled.length === 0) return null;
+  const enabledIds = enabled.map((provider) => provider.id);
+  for (const scope of [eq(schema.tasks.repositoryId, repositoryId), undefined]) {
+    const lastUsed = await db.query.tasks.findFirst({
+      where: and(
+        eq(schema.tasks.userId, userId),
+        scope,
+        inArray(schema.tasks.cliProviderId, enabledIds),
+      ),
+      orderBy: [desc(schema.tasks.createdAt)],
+      columns: { cliProviderId: true },
+    });
+    if (lastUsed?.cliProviderId) return lastUsed.cliProviderId;
+  }
+  return enabled[0]!.id;
 }
 
 /** The CLIs the plan starter preselects: the one a build would plan on, and the questioner this

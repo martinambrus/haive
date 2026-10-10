@@ -42,6 +42,7 @@ import {
   type PlanMergeConflict,
   type PlanMergeState,
   type CliProvider,
+  getPlanBuildClis,
   getPlanMerge,
   startPlanMerge,
   type PlanSnapshotHealth,
@@ -321,7 +322,7 @@ export default function PlanPage() {
   }, [repositoryId]);
 
   // Loaded only once there is a conflict to resolve, since that is the only thing on
-  // this page that picks a CLI. Preselected from the repo's last-used, exactly as the
+  // this page that picks a CLI. Preselected from the server's pick, exactly as the
   // plan chat's picker does — but OFFERED, because the fallback is whatever ran last
   // and that is not necessarily a model that can resolve a merge. MEASURED: left to
   // the fallback it chose a 1.7b fixture-capture model, which answered by asking which
@@ -331,20 +332,16 @@ export default function PlanPage() {
     let cancelled = false;
     void Promise.all([
       api.get<{ providers: CliProvider[] }>('/cli-providers'),
-      api
-        .get<{ cliProviderId: string | null }>(
-          `/tasks/last-cli?repositoryId=${encodeURIComponent(repositoryId)}`,
-        )
-        .catch(() => ({ cliProviderId: null })),
+      getPlanBuildClis(repositoryId).catch(() => ({ plannerCliProviderId: null })),
     ])
-      .then(([res, last]) => {
+      .then(([res, clis]) => {
         if (cancelled) return;
         const enabled = res.providers.filter((p) => p.enabled);
         setMergeProviders(enabled);
         setMergeProviderId((current) => {
           if (current) return current;
-          const lastId = last.cliProviderId;
-          if (lastId && enabled.some((p) => p.id === lastId)) return lastId;
+          const plannerId = clis.plannerCliProviderId;
+          if (plannerId && enabled.some((p) => p.id === plannerId)) return plannerId;
           return enabled[0]?.id ?? '';
         });
       })
