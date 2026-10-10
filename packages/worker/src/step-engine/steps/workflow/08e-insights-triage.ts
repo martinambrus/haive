@@ -11,6 +11,7 @@ import {
 } from '../_untrusted-repo.js';
 import { hydrateNoSpecBrief, resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
 // `## INSIGHTS` block to their output noting OPTIONAL improvements out of scope
@@ -61,7 +62,8 @@ export function readTriageOutcome(llmOutput: unknown): {
   changes: string[];
   notes: string;
 } {
-  const out = (llmOutput ?? {}) as { implemented?: unknown; notes?: unknown };
+  const parsed = typeof llmOutput === 'string' ? parseJsonLoose(llmOutput) : llmOutput;
+  const out = (parsed ?? {}) as { implemented?: unknown; notes?: unknown };
   const changes = Array.isArray(out.implemented)
     ? out.implemented.filter((c): c is string => typeof c === 'string' && c.trim() !== '')
     : [];

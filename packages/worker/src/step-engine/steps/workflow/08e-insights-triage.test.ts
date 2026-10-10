@@ -59,6 +59,20 @@ describe('readTriageOutcome', () => {
     });
   });
 
+  it('reads the fenced JSON reply the runner hands over as a string', () => {
+    const raw = 'Done.\n\n```json\n{ "implemented": ["Extracted helper"], "notes": "" }\n```\n';
+    expect(readTriageOutcome(raw)).toEqual({
+      implemented: true,
+      changes: ['Extracted helper'],
+      notes: '',
+    });
+    expect(readTriageOutcome('no json here')).toEqual({
+      implemented: false,
+      changes: [],
+      notes: '',
+    });
+  });
+
   it('is not implemented when the output is missing or malformed', () => {
     const none = { implemented: false, changes: [], notes: '' };
     expect(readTriageOutcome(null)).toEqual(none);
