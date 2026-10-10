@@ -118,7 +118,9 @@ its `[high]` finding. `excerptDiagnosis` (`_fix-loop.ts`) now serves every reade
 diagnosis to 07 or to a person. For a person's source (`HUMAN_REJECT_SOURCES`) the text OUTSIDE
 the fences — their words and Haive's framing — stays whole and only the fenced agent parts are
 cut, head and tail; any other source is cut head and tail as a whole; one marker states what was
-omitted and the fences stay balanced. Budgets: 6,000 for the defect block and the honored
+omitted and the fences stay balanced. The marker is its own paragraph, and a markdown fence a cut
+splits is closed before it and reopened after it (found with `scanFences`), so the rest of a cut
+report never renders as one code block (MEASURED: a 34,247-char reply's excerpt held 3 fence lines). Budgets: 6,000 for the defect block and the honored
 constraints, 1,500 per side of the oscillation gate and for the cap gate, 800 for 07's form, and 400 per prior-round
 entry, where a person's entry is cut too because that block is background. 07b's validator report
 is cut once, at 8,000, the size gate 2 shows, and records the reply's full length (`reportChars`), so
