@@ -147,6 +147,11 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
         ctx.logger.warn({ err }, 'could not checkpoint RAG usage input');
         d.ragUsage = { queries: [], runs: [] };
       }
+      // skipIf runs before refresh. A parked PR can gain or lose classifiable
+      // evidence; decide again now without reserving a CLI or spending tokens.
+      if (d.ragUsage.queries.length === 0 || !d.ragUsage.runs.some((run) => run.turns.length > 0)) {
+        return false;
+      }
     },
     buildPrompt: ({ detected }) =>
       buildRagUsagePrompt((detected as PrWaitDetect).ragUsage ?? { queries: [], runs: [] }),

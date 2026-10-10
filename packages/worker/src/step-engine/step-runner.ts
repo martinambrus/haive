@@ -752,7 +752,11 @@ async function resolveLlmPhase(
     if (await hasLiveInvocation(db, current.id)) {
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
     }
-    await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+    const prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+    if (prepared === false) {
+      ctx.logger.info({ phase: 'llm' }, 'preparation skipped an unnecessary invocation');
+      return { resolved: true, llmOutput: null, llmInvocationId: null, current };
+    }
   }
 
   // For loop iterations > 0, prefer the loop's iteration-aware prompt

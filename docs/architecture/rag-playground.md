@@ -25,8 +25,9 @@ Result prose uses `MarkdownView` with enhanced transformations disabled.
 The terminal workflow step `13-pr-wait` reviews query usage on both PR and non-PR
 paths. The optional LLM runs after the PR wait form, with no tools or MCP servers,
 and refreshes and checkpoints its evidence at dispatch because a reopened PR can
-have added queries. A task with only zero-hit or uncaptured queries skips the
-classifier. Evidence-loading, model and assessment-storage failures never block
+have added queries. A task with only zero-hit or uncaptured queries, or no timed model prose, skips
+the classifier. Preparation can return false after refreshing a parked PR, which
+the runner handles before building a prompt, reserving a CLI or enqueueing a job. Evidence-loading, model and assessment-storage failures never block
 finalization; cancellation still propagates.
 
 The review is an inference about recorded actions, not proof of an agent's private
