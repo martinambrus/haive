@@ -25,7 +25,7 @@ const DUPLICATE_DATABASE = '42P04';
  *
  * Depth-bounded so a cyclic `cause` chain cannot spin.
  */
-function hasPgCode(err: unknown, code: string): boolean {
+export function hasPgCode(err: unknown, code: string): boolean {
   for (let e: unknown = err, depth = 0; e != null && depth < 5; depth++) {
     if (typeof e === 'object' && 'code' in e && (e as { code?: unknown }).code === code) {
       return true;
