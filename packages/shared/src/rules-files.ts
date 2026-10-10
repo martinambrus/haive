@@ -47,11 +47,12 @@ export async function readUpgradeFile(repoPath: string, rel: string): Promise<Up
 export function deletableClaim(
   read: UpgradeRead,
   claim: { templateId: string; writtenHash: string },
+  opts: { regionExtracted?: boolean } = {},
 ): boolean {
   if (read.kind === 'absent') return true;
   if (read.kind === 'unread') return false;
   let text = read.text;
-  if (claim.templateId === CLI_RULES_TEMPLATE_ID) {
+  if (claim.templateId === CLI_RULES_TEMPLATE_ID && !opts.regionExtracted) {
     const region = extractRegion(text, CLI_RULES_START, CLI_RULES_END);
     if (region === null) return true;
     text = region;

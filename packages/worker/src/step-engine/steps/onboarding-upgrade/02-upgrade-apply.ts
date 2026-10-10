@@ -557,11 +557,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       return stripped === null ? [] : [{ entry: e, stripped }];
     });
     // 02 deletes a file only while it holds the bytes its row records, so deletion is offered for
-    // those and for a path already gone, as the banner counts them.
+    // those and for a path already gone, as the banner counts them. 01 stores a rules region already
+    // cut out of AGENTS.md.
     const removes = (e: UpgradePlanEntry) =>
       deletableClaim(
         e.currentContent === null ? { kind: 'absent' } : { kind: 'text', text: e.currentContent },
         { templateId: e.templateId, writtenHash: e.baselineWrittenHash ?? '' },
+        { regionExtracted: true },
       );
     const removable = obsolete.filter((e) => !strippable.some((s) => s.entry === e) && removes(e));
     if (removable.length > 0) {

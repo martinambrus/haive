@@ -283,6 +283,19 @@ describe('upgradeApplyStep.form() — obsolete files', () => {
     );
     expect(values(schema, 'selectedObsoleteRemovals')).toEqual(['e:AGENTS.md']);
   });
+
+  it('does not offer an edited rules region for deletion', () => {
+    const schema = callFormOrNull(
+      plan([
+        obsolete('AGENTS.md', '<!-- region -->\nrules, edited\n', {
+          templateId: 'cli-rules',
+          templateKind: 'cli-rules-block',
+          baselineWrittenHash: hashOf('<!-- region -->\nrules\n'),
+        }),
+      ]),
+    );
+    expect(multi(schema, 'selectedObsoleteRemovals')).toBeNull();
+  });
 });
 
 describe('upgradeApplyStep.form() — diff details on conflict radio fields', () => {
