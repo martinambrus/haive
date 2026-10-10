@@ -2,12 +2,20 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { StepSupersededError, updateOwnedStep } from '../../step-ownership.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import { killTaskDdevRunners } from '../../../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../../../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../../../sandbox/ide-runner.js';
+import {
+  buildRagUsagePrompt,
+  loadRagUsageInput,
+  saveRagUsage,
+  type RagUsageInput,
+} from './_rag-usage.js';
 
 interface PrWaitDetect {
+  ragUsage?: RagUsageInput;
   /** True when this task opened a pull request (12-worktree-cleanup create_pr). When
    *  false the step is a no-op pass-through and the task completes normally. */
   pending: boolean;
@@ -27,8 +35,8 @@ interface PrWaitApply {
 /** Terminal step of the create_pr close-out path. When a PR was opened, it parks the
  *  task in waiting_pr while the PR is reviewed (shedding the ddev/IDE runtime but
  *  keeping the worktree), then on merge (auto via the poller) or a manual Finalize it
- *  removes the worktree and lets the task complete. A verified no-op for every task
- *  that did not open a PR, so it is safe as the always-present terminal step. */
+ *  removes the worktree and lets the task complete. Every path also records a
+ *  best-effort RAG usage review before completion. */
 export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
   metadata: {
     id: '13-pr-wait',
@@ -36,8 +44,8 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
     index: 15,
     title: 'Pull request',
     description:
-      'Waits for the pull request opened at cleanup to merge, then removes the worktree and finishes the task. A no-op when no PR was opened.',
-    requiresCli: false,
+      'Waits for the pull request opened at cleanup to merge, then removes the worktree and finishes the task. Without a PR, only the RAG usage review runs.',
+    requiresCli: true,
   },
 
   // When this step parks (a PR is open), show the task as waiting_pr rather than the
@@ -71,6 +79,7 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
       ]);
     }
     return {
+      ragUsage: await readUsage(ctx),
       pending,
       prUrl: task?.prUrl ?? null,
       prProvider: task?.prProvider ?? null,
@@ -108,8 +117,54 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
     };
   },
 
+  llm: {
+    requiredCapabilities: [],
+    optional: true,
+    disableTools: true,
+    toolProfile: 'none',
+    skipAgentRules: true,
+    timeoutMs: 120_000,
+    skipIf: ({ detected }) => {
+      const d = detected as PrWaitDetect;
+      // A reopened PR can gain queries after detect; refresh it at finalization.
+      return (
+        !d.pending &&
+        d.ragUsage !== undefined &&
+        !d.ragUsage.queries.some((q) => q.hitCount > 0 && q.hits !== null)
+      );
+    },
+    async prepare({ ctx, detected }) {
+      const d = detected as PrWaitDetect;
+      d.ragUsage = await readUsage(ctx);
+      // A PR can remain open while agents do more work. Preserve this refreshed
+      // input so apply validates the same evidence after the CLI resumes the step.
+      try {
+        await updateOwnedStep(ctx.db, ctx.taskStepId, { detectOutput: d });
+      } catch (err) {
+        if (err instanceof StepSupersededError) throw err;
+        ctx.throwIfCancelled();
+        ctx.logger.warn({ err }, 'could not checkpoint RAG usage input');
+        d.ragUsage = { queries: [], runs: [] };
+      }
+      // skipIf runs before refresh. A parked PR can gain or lose classifiable
+      // evidence; decide again now without reserving a CLI or spending tokens.
+      if (d.ragUsage.queries.length === 0 || !d.ragUsage.runs.some((run) => run.turns.length > 0)) {
+        return false;
+      }
+    },
+    buildPrompt: ({ detected }) =>
+      buildRagUsagePrompt((detected as PrWaitDetect).ragUsage ?? { queries: [], runs: [] }),
+  },
+
   async apply(ctx, args): Promise<PrWaitApply> {
     const d = args.detected;
+    try {
+      const input = d.ragUsage ?? (await readUsage(ctx));
+      await saveRagUsage(ctx, input, args.llmOutput);
+    } catch (err) {
+      ctx.throwIfCancelled();
+      ctx.logger.warn({ err }, 'RAG usage review unavailable; continuing finalization');
+    }
     if (!d.pending) {
       return { finalized: false, removed: false, message: 'no pull request; nothing to wait for' };
     }
@@ -137,3 +192,13 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
     };
   },
 };
+
+async function readUsage(ctx: StepContext): Promise<RagUsageInput> {
+  try {
+    return await loadRagUsageInput(ctx);
+  } catch (err) {
+    ctx.throwIfCancelled();
+    ctx.logger.warn({ err }, 'could not load RAG usage evidence');
+    return { queries: [], runs: [] };
+  }
+}

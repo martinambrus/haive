@@ -135,6 +135,7 @@ async function logRagQuery(
   try {
     await db.insert(schema.ragQueryLog).values({
       taskId,
+      resultHits: hits,
       query,
       topK,
       hitCount: hits.length,
@@ -312,8 +313,19 @@ ragRoutes.post('/search', async (c) => {
     typeof body?.top_k === 'number' && Number.isInteger(body.top_k) && body.top_k > 0
       ? Math.min(body.top_k, 50)
       : undefined;
-  const effectiveTopK = topK ?? DEFAULT_RAG_SEARCH_CONFIG.topK;
 
+  const hits = await executeRagSearch(taskId, query, topK);
+  await logRagQuery(getDb(), taskId, query, topK ?? null, hits);
+  return c.json({ hits });
+});
+
+/** Used by agent calls and the user playground; playground runs never enter task telemetry. */
+export async function executeRagSearch(
+  taskId: string,
+  query: string,
+  topK?: number,
+): Promise<RagSearchHit[]> {
+  const effectiveTopK = topK ?? DEFAULT_RAG_SEARCH_CONFIG.topK;
   const db = getDb();
   const { prefs, projectName, facets, repositoryId } = await resolveTaskRagContext(db, taskId);
   // Read once and pass to BOTH stores, so the switch cannot be half-applied.
@@ -465,6 +477,5 @@ ragRoutes.post('/search', async (c) => {
   }
 
   const hits = expandGlobalHits(mergeHits(localHits, globalHits, effectiveTopK), globalBodies);
-  await logRagQuery(db, taskId, query, topK ?? null, hits);
-  return c.json({ hits });
-});
+  return hits;
+}

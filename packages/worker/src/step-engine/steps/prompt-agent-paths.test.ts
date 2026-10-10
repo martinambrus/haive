@@ -876,6 +876,8 @@ const SCANNED_PROMPT_EXPORTS = [
  * waves, then dag-executor's direct dispatches were each found one review at a time.
  */
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
+  'step-engine/steps/workflow/_rag-usage.ts#buildRagUsagePrompt':
+    '13-pr-wait llm builder, already scanned through the registry',
   'cli-adapters/antigravity.ts#antigravityStdinPrompt':
     'wraps an already-built prompt for stdin; adds no text of its own',
   'cli-adapters/prompt-delivery.ts#deliverPrompt':
@@ -1552,7 +1554,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(184);
+    ).toBe(185);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 

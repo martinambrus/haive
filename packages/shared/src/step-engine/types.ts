@@ -371,6 +371,7 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   { id: '11-phase-8-learning', workflowType: 'workflow', title: 'Phase 8: Learning capture' },
   { id: '11d-skill-sync', workflowType: 'workflow', title: 'Skill sync' },
   { id: '11f-plan-reconcile', workflowType: 'workflow', title: 'Plan reconcile' },
+  { id: '13-pr-wait', workflowType: 'workflow', title: 'Pull request' },
   // kb-author
   { id: '01-kb-enrich', workflowType: 'kb_author', title: 'Knowledge base enrichment' },
   // plan canvas — 02-advisory-decision is deliberately absent: it runs no CLI,

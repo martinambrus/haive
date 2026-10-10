@@ -1,7 +1,38 @@
-import { describe, expect, it } from 'vitest';
-import { createCleanTranscriptBuffer } from '../src/queues/cli-exec/clean-transcript-buffer.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  CLEAN_TRANSCRIPT_MAX_CHUNKS,
+  createCleanTranscriptBuffer,
+} from '../src/queues/cli-exec/clean-transcript-buffer.js';
 
 describe('createCleanTranscriptBuffer', () => {
+  it('keeps distinct model timestamps and offsets while preserving merged display text', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(2000);
+    try {
+      const buf = createCleanTranscriptBuffer();
+      buf.pushModel('before query');
+      buf.pushModel('after query');
+      const segment = buf.toTranscript()!.segments[0]!;
+      expect(segment.at).toBe(1000);
+      expect(segment.text).toBe('before query\n\nafter query');
+      expect(segment.proseChunks).toEqual([
+        { at: 1000, start: 0, end: 12 },
+        { at: 2000, start: 14, end: 25 },
+      ]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+  it('bounds timing metadata without cutting the displayed prose or spanning dropped fragments', () => {
+    const buf = createCleanTranscriptBuffer();
+    for (let i = 0; i < CLEAN_TRANSCRIPT_MAX_CHUNKS + 3; i++) buf.pushModel('x');
+    const segment = buf.toTranscript()!.segments[0]!;
+    expect(segment.proseChunks).toHaveLength(CLEAN_TRANSCRIPT_MAX_CHUNKS);
+    expect(segment.proseChunks![0]!.start).toBe(9);
+    expect(segment.proseChunks!.every((c) => segment.text.slice(c.start, c.end) === 'x')).toBe(
+      true,
+    );
+    expect(segment.text.split('\n\n')).toHaveLength(CLEAN_TRANSCRIPT_MAX_CHUNKS + 3);
+  });
   it('merges consecutive model pushes into one segment', () => {
     const buf = createCleanTranscriptBuffer();
     buf.pushModel('first');

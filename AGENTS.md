@@ -257,6 +257,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 ### Prompts and retrieval
 
+- [RAG playground and usage review](docs/architecture/rag-playground.md): personal query replay,
+  saved results, finalization assessments and evidence bounds. `rag-playground.ts`, `_rag-usage.ts`.
 - [Retrieval protocol](docs/architecture/retrieval-protocol.md): the discover-then-ground block
   and its variants. `_retrieval-guidance.ts`.
 - [Prompt containment](docs/architecture/prompt-containment.md): repo-is-data guards, fences,

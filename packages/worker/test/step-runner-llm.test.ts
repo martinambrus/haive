@@ -240,6 +240,34 @@ function makeProvider(): CliProviderRecord {
 }
 
 describe('advanceStep LLM phase', () => {
+  it('runs apply without a CLI reservation when preparation finds nothing to classify', async () => {
+    const state = freshState();
+    const stepDef = baseStep();
+    const prepare = vi.fn(async () => false as const);
+    const buildPrompt = vi.fn(() => 'unused prompt');
+    const apply = vi.fn(stepDef.apply);
+    stepDef.llm = { ...stepDef.llm!, optional: true, prepare, buildPrompt };
+    stepDef.apply = apply;
+    const enqueueCliInvocation = vi.fn();
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation },
+    });
+    expect(result.status).toBe('done');
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledOnce();
+    expect(apply.mock.calls[0]![1].llmOutput).toBeNull();
+    expect(buildPrompt).not.toHaveBeenCalled();
+    expect(enqueueCliInvocation).not.toHaveBeenCalled();
+    expect(state.inserts.filter((entry) => entry.table === 'cli_invocations')).toEqual([]);
+  });
   it.each(cliAdapterRegistry.names())(
     'generates gate-3 copy with %s before parking the form, and reuses it on submission',
     async (name) => {

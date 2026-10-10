@@ -24,6 +24,7 @@ import { integrationsRoutes } from './routes/integrations.js';
 import { globalKbRoutes } from './routes/global-kb.js';
 import { internalRoutes } from './routes/internal.js';
 import { ragRoutes } from './routes/rag.js';
+import { ragPlaygroundRoutes } from './routes/rag-playground.js';
 import { ddevControlRoutes } from './routes/ddev-control.js';
 import { systemRoutes } from './routes/system.js';
 import { taskRoutes } from './routes/tasks.js';
@@ -102,6 +103,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/usage-window', usageWindowRoutes);
   app.route('/stats', statsRoutes);
   app.route('/rag', ragRoutes);
+  app.route('/rag/playground', ragPlaygroundRoutes);
   app.route('/ddev', ddevControlRoutes);
   app.route('/internal', internalRoutes);
   app.route('/global-kb', globalKbRoutes);

@@ -3,7 +3,7 @@ import { cleanupUser, getSql } from '../helpers/db.js';
 import { registerUser } from '../helpers/auth.js';
 
 /**
- * The settings section: seven tabs, each one user-scoped row.
+ * The settings section: eight tabs, each one user-scoped row.
  *
  * Two depths, deliberately. The tab-bar test is REACHABILITY only — each tab navigates and
  * renders a heading of its own, which is what catches a renamed route or a layout that takes the
@@ -22,6 +22,7 @@ const TABS = [
   { label: 'Git Credentials', path: '/settings/credentials' },
   { label: 'Git Identity', path: '/settings/git-identity' },
   { label: 'Global KB', path: '/settings/global-kb' },
+  { label: 'RAG Playground', path: '/settings/rag-playground' },
   { label: 'Integrations', path: '/settings/integrations' },
   { label: 'Notifications', path: '/settings/notifications' },
 ] as const;

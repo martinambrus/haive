@@ -48,6 +48,20 @@ function setup() {
 }
 
 describe('the fake database', () => {
+  it('applies pagination after filtering and ordering, regardless of builder order', async () => {
+    const { fake, row } = setup();
+    for (const name of ['c.md', 'a.md', 'b.md']) fake.insert(t, row(name));
+    fake.insert(t, row('other.md', { taskId: TASK2 }));
+    const query = () =>
+      fake.db
+        .select({ filename: t.filename })
+        .from(t)
+        .where(eq(t.taskId, TASK))
+        .orderBy(asc(t.filename));
+    expect(await query().limit(1).offset(1)).toEqual([{ filename: 'b.md' }]);
+    expect(await query().offset(2).limit(1)).toEqual([{ filename: 'c.md' }]);
+    expect(await query().limit(1).offset(3)).toEqual([]);
+  });
   it('evaluates only the conditions it was built for', () => {
     const { fake, row } = setup();
     const a = fake.insert(t, row('a.md'));

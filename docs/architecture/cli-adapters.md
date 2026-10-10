@@ -45,3 +45,10 @@ repository definition as described in [Per-call agent isolation](agent-isolation
 discovery miners carry their selected persona's title, description and field in the prompt.
 
 The sub-agent emulator splits a single sub-agent specification into either a native `Task()` call (Claude Code) or a sequential prompt script (everything else). A sequential script runs inside a single `cli-exec-queue` job — the runner is an in-memory for-loop over the sub-steps, with no per-sub-step DB writes. A crash mid-script therefore fails the whole invocation; restart re-runs from sub-step 0. (Mid-script resume would require persisting each sub-step's parsed output to `cli_invocations` before moving on — not implemented.)
+
+The Clean transcript's model segments keep their merged display text and first
+`at`, plus optional `proseChunks` offsets and timestamps for each captured model
+fragment. RAG usage review needs those timestamps to distinguish pre-query prose
+from later actions within the same displayed segment. Timing metadata is capped
+at 8,192 fragments per invocation; dropping old offsets leaves the display text
+intact. Older transcripts lack this metadata and remain valid.

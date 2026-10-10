@@ -137,7 +137,9 @@ export interface LlmInvocationSpec {
    *  e.g. 08a starts the runner's headed-browser desktop so the chrome-devtools
    *  MCP can connect to it. Idempotent; awaited each dispatch (incl. loop
    *  passes). Skipped under HAIVE_TEST_BYPASS_LLM. */
-  prepare?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
+  // Return false when refreshed input makes this invocation unnecessary; apply
+  // still runs with null llmOutput. Other preparation hooks return void.
+  prepare?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void | false>;
   /** Like `prepare`, but run only once THIS job has WON the dispatch — after the
    *  cli_invocations insert the live-per-step unique index backs, before the job is
    *  enqueued. Use for anything DESTRUCTIVE or exclusive: `08`/`09_2` empty the shared

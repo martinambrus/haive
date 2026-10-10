@@ -6,6 +6,7 @@ import {
   doublePrecision,
   timestamp,
   index,
+  jsonb,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 import { tasks } from './tasks.js';
@@ -33,6 +34,14 @@ export const ragQueryLog = pgTable(
     maxRrf: doublePrecision('max_rrf').notNull().default(0),
     maxDense: doublePrecision('max_dense').notNull().default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
+    // NULL predates result capture; [] is a recorded search with no hits.
+    resultHits: jsonb('result_hits').$type<unknown[]>(),
+    usageAssessment: jsonb('usage_assessment').$type<{
+      status: 'used' | 'unused' | 'unknown';
+      reason: string;
+      evidence: Array<{ invocationId: string; quote: string }>;
+      assessedAt: string;
+    }>(),
   },
   (table) => [index('rag_query_log_task_created_idx').on(table.taskId, table.createdAt)],
 );

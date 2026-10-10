@@ -220,3 +220,9 @@ cap. That transaction first locks the source row while it is still the pass's ow
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
 which would otherwise answer the new form with what was typed into the old one.
+
+An LLM preparation hook may return `false` when refreshed inputs make the
+invocation unnecessary. `resolveLlmPhase` then returns null output to apply
+before constructing the prompt or reserving a run. RAG finalization uses this
+when a parked PR's current history has no classifiable evidence; its initial
+`skipIf` must still allow refresh because reopening can have added queries.

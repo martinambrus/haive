@@ -99,7 +99,7 @@ async function persisted(
 
 /** One dispatch as the runner makes it: the payload read back, `prepare`, then the builder. */
 async function dispatch(
-  step: { llm?: { prepare?: (args: never) => Promise<void> } },
+  step: { llm?: { prepare?: (args: never) => Promise<void | false> } },
   payload: string,
   build: (detected: never) => string,
 ): Promise<string> {
