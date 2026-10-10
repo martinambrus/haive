@@ -1101,7 +1101,15 @@ export function parseReviewerOutput(
   const parsed = reviewerOutputSchema.safeParse(candidate);
   if (!parsed.success) return null;
   const issues = parsed.data.issues.filter((i) => !isOutOfScope(i));
-  return { ...parsed.data, issues };
+  const withheld = parsed.data.issues.filter(isOutOfScope);
+  const out: ReviewerOutput = { ...parsed.data, issues, withheld: undefined };
+  if (withheld.length === 0) return out;
+  out.withheld = withheld;
+  // A fix_required/block that rested only on withheld findings is a pass; a failed criterion keeps it.
+  if (out.verdict !== 'approve' && issues.length === 0 && failedCriteriaCount(out) === 0) {
+    out.verdict = 'approve';
+  }
+  return out;
 }
 
 /** A fix_required verdict whose own structured signals say the work is done:
@@ -1439,7 +1447,21 @@ export async function ingestReviewRun(
         `reviewer returned no valid reviewer verdict${inv.errorMessage ? `: ${inv.errorMessage}` : ''}`,
       );
     }
-    if (verdict.verdict === 'approve') return setResolution(ra.db, issue, 'approved');
+    if (verdict.verdict === 'approve') {
+      return setResolution(
+        ra.db,
+        issue,
+        'approved',
+        undefined,
+        verdict.withheld
+          ? {
+              stuckCount: issue.stuckCount,
+              innerIteration: issue.innerIteration,
+              reviewerVerdict: verdict,
+            }
+          : undefined,
+      );
+    }
     if (verdict.verdict === 'block') return setResolution(ra.db, issue, 'failed_unrecoverable');
     // fix_required whose criteria all pass and whose only issues are cosmetic →
     // approve (folding the nits into debt) instead of looping on polish.

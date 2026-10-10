@@ -2286,6 +2286,106 @@ describe('ingestReviewRun: stuck counts reviews without progress', () => {
   });
 });
 
+describe('ingestReviewRun: a review that failed only on out-of-scope findings', () => {
+  const legacy = { severity: 'high', file: 'lib.ts', description: 'legacy', in_scope: 'no' };
+  const written = { severity: 'high', file: 'lib.ts', description: 'written line is wrong' };
+  const pass = [{ criterion: 'AC1', passed: true }];
+  const actualDispatch = vi.mocked(resolveTaskDispatch).getMockImplementation()!;
+
+  async function run(parsedOutput: Record<string, unknown>) {
+    const { db, inserts, updates } = makeSpawnDb();
+    vi.mocked(resolveTaskDispatch).mockImplementation(async () => workingDispatchPlan());
+    const ra = {
+      db,
+      issues: [],
+      level: {} as never,
+      current: { id: 'step1' } as never,
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } } as never,
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+    } as never;
+    const row = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 0,
+      stuckCount: 0,
+      reviewInfraRetries: 0,
+      branchName: 'main--ISSUE-1',
+      worktreePath: '/does/not/matter',
+      sandboxWorktreePath: '/does/not/matter',
+      filesModified: [],
+      similarSites: [],
+      debtItems: [],
+      errorMessage: null,
+      endedAt: null,
+      reviewerVerdict: null,
+    } as never;
+    try {
+      await ingestReviewRun(
+        ra,
+        row,
+        { id: 'run', role: 'reviewer' } as never,
+        inv({ parsedOutput }),
+      );
+    } finally {
+      vi.mocked(resolveTaskDispatch).mockImplementation(actualDispatch);
+    }
+    const patches = updates.filter((u) => u.table === schema.taskDagIssues).map((u) => u.patch);
+    const resolved = patches.find((p) => p.resolution) as
+      | { resolution: string; reviewerVerdict?: { withheld?: { description: string }[] } }
+      | undefined;
+    const prompt = inserts.find((i) => i.table === schema.cliInvocations)?.values.prompt as
+      string | undefined;
+    return { resolved, prompt };
+  }
+
+  it('approves a fix_required verdict and keeps the withheld findings in the record', async () => {
+    const r = await run({ verdict: 'fix_required', criteria_results: pass, issues: [legacy] });
+    expect(r.prompt).toBeUndefined();
+    expect(r.resolved?.resolution).toBe('approved');
+    expect(r.resolved?.reviewerVerdict?.withheld?.map((i) => i.description)).toEqual(['legacy']);
+  });
+
+  it('approves it when the reviewer listed no criteria at all', async () => {
+    const r = await run({ verdict: 'fix_required', issues: [legacy] });
+    expect(r.prompt).toBeUndefined();
+    expect(r.resolved?.resolution).toBe('approved');
+  });
+
+  it('approves a block verdict the same way', async () => {
+    const r = await run({ verdict: 'block', criteria_results: pass, issues: [legacy] });
+    expect(r.prompt).toBeUndefined();
+    expect(r.resolved?.resolution).toBe('approved');
+    expect(r.resolved?.reviewerVerdict?.withheld).toHaveLength(1);
+  });
+
+  it('sends the fix coder only the in-scope finding', async () => {
+    const r = await run({
+      verdict: 'fix_required',
+      criteria_results: pass,
+      issues: [written, legacy],
+    });
+    expect(r.resolved).toBeUndefined();
+    expect(r.prompt).toContain('written line is wrong');
+    expect(r.prompt).not.toContain('legacy');
+  });
+
+  it('keeps fix_required when a criterion failed, whatever the findings', async () => {
+    const r = await run({
+      verdict: 'fix_required',
+      criteria_results: [{ criterion: 'AC1', passed: false }],
+      issues: [legacy],
+    });
+    expect(r.resolved).toBeUndefined();
+    expect(r.prompt).toContain('Reviewer findings:');
+  });
+});
+
 describe('ingestReviewRun: a reviewer that started, produced no verdict, and was superseded', () => {
   it('re-dispatches the reviewer without charging reviewInfraRetries', async () => {
     const { db, inserts, updates } = makeSpawnDb();
