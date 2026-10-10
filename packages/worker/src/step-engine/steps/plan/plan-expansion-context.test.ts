@@ -307,6 +307,17 @@ describe('knowledge-base filenames in the root prompt', () => {
     }
   });
 
+  it('drops a name the fence would rewrite, and keeps an ordinary one unchanged', () => {
+    const prompt = buildRootPrompt(
+      { ...base, kbFiles: ['ARCHITECTURE.md', 'docs/API====Security.md', 'src/a\tb.md'] },
+      { depthBudget: 3, breadthCap: 6 },
+    );
+
+    expect(prompt).toContain('2 file(s): ARCHITECTURE.md, src/a\tb.md)');
+    expect(prompt).not.toContain('API=');
+    expect(prompt).not.toContain('API Security');
+  });
+
   it('says so plainly when the filter leaves nothing', () => {
     const prompt = buildRootPrompt(
       { ...base, kbFiles: ['x\ny.md'] },

@@ -18,8 +18,8 @@ import {
   UNTRUSTED_FENCE_LEGEND,
   collapseToLine,
   fencedAgentBlock,
-  isSingleLine,
 } from '../_untrusted-repo.js';
+import { isListableName } from './_impl-changes.js';
 import { resolveReviewDimensions } from '@haive/shared/review';
 import {
   dimensionScopeLines,
@@ -584,7 +584,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         // rewritten: `resolveKbReferences` resolves an id AS IT IS, so `API Security`
         // reduced to `API_Security` points the writer at a page that does not exist — the
         // same reason `listKbFiles` drops a name rather than collapsing it.
-        `Relevant KB ids: ${detected.relevantKbIds.filter(isSingleLine).join(', ') || '(none)'}`,
+        `Relevant KB ids: ${detected.relevantKbIds.filter(isListableName).join(', ') || '(none)'}`,
         '',
         INSIGHTS_INSTRUCTION,
       ].join('\n');

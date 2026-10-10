@@ -389,5 +389,20 @@ describe('renderBlockingList', () => {
         '(+1 more not shown)',
       ]);
     });
+
+    it('leaves out a path the fence would rewrite, counts it, and keeps a TAB name unchanged', () => {
+      const text = renderBlockingList(
+        [
+          violation({ path: 'docs/API====Security.php' }),
+          violation({ path: 'src/a\tb.php', line: 7 }),
+        ],
+        0,
+      );
+
+      expect(text.split('\n')).toEqual([
+        'src/a\tb.php:7: [ERROR] Missing function doc comment (Drupal.Commenting.FunctionComment.Missing)',
+        '(+1 more not shown)',
+      ]);
+    });
   });
 });
