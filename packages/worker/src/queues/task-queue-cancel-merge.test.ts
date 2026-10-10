@@ -162,6 +162,21 @@ describe('settleCancelledMerges', () => {
     expect(h.patches).toEqual([]);
   });
 
+  it('leaves alone the same feature merged again onto a base that moved', async () => {
+    const dir = await openConflict();
+    const state = await stateFor(dir, true);
+    await git(dir, ['merge', '--abort']);
+    await writeFile(path.join(dir, 'other.txt'), 'base moved\n');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'base moved']);
+    await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']).catch(() => undefined);
+    const h = makeDb([{ id: 'row1', state }], null);
+    await settleCancelledMerges(h.db, 'task-1');
+    expect(await mergeOpen(dir)).toBe(true);
+    expect(h.events).toEqual([]);
+    expect(h.patches).toEqual([]);
+  });
+
   it('finishes when the abort fails, and says so', async () => {
     const dir = await openConflict();
     const state = await stateFor(dir, true);

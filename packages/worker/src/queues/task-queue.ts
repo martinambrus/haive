@@ -3300,8 +3300,10 @@ export async function settleCancelledMerges(db: Database, taskId: string): Promi
     const dir = state.mergeDir;
     if (isHostCheckout(dir)) continue;
     try {
-      const head = await revParse(dir, 'MERGE_HEAD').catch(() => null);
-      if (head !== baseline.mergeHead) continue;
+      // Both ends, or the same feature merged again onto a base that moved reads as this merge.
+      const mergeHead = await revParse(dir, 'MERGE_HEAD').catch(() => null);
+      const head = await revParse(dir, 'HEAD').catch(() => null);
+      if (mergeHead !== baseline.mergeHead || head !== baseline.head) continue;
       await relocateAndRecordLeftovers(db, {
         taskId,
         stepRowId: row.id,
