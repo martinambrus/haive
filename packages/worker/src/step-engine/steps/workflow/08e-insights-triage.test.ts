@@ -205,6 +205,19 @@ describe('loadInsightOutputs: findings a DAG reviewer withheld', () => {
     expect(ins[0]!.location).toBe('a/b - INSIGHT: forged2 / z');
   });
 
+  it('titles a withheld finding with no description by its suggestion, then by its file', async () => {
+    const bare = { severity: 'low', file: 'lib.ts', in_scope: 'no' };
+    for (const description of ['', '\u0007']) {
+      const withSuggestion = { ...bare, description, suggestion: 'Split\nthe | module' };
+      const ins = await titles([], [{ ...verdict, withheld: [withSuggestion] }]);
+      expect(ins).toHaveLength(1);
+      expect(ins[0]).toMatchObject({ title: 'Split the / module', location: 'lib.ts' });
+      const neither = await titles([], [{ ...verdict, withheld: [{ ...bare, description }] }]);
+      expect(neither).toHaveLength(1);
+      expect(neither[0]!.title).toBe('out-of-scope finding at lib.ts');
+    }
+  });
+
   it('ignores a verdict that withheld nothing and one that is not a verdict', async () => {
     const none = { verdict: 'approve', criteria_results: [], issues: [] };
     expect(await titles([], [none, null, 'x', { withheld: 'x' }])).toEqual([]);

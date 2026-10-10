@@ -150,8 +150,12 @@ export async function loadInsightOutputs(
       );
       if (!covered) {
         const field = (text: string) => collapseToLine(text).replaceAll('|', '/');
+        const title =
+          field(f.description) ||
+          field(f.suggestion ?? '') ||
+          field(f.file ? `out-of-scope finding at ${f.file}` : 'out-of-scope finding');
         lines.push(
-          `- INSIGHT: ${field(f.description)} | ${field(f.file ?? '')} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
+          `- INSIGHT: ${title} | ${field(f.file ?? '')} | ${f.severity ?? 'unrated'} severity, outside the lines this issue wrote`,
         );
       }
     }
