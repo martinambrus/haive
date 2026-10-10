@@ -19,6 +19,7 @@ import {
 } from './_untrusted-repo.js';
 import { REFUTE_LENSES, buildRefutePrompt } from './workflow/08c-code-review.js';
 import { buildExpandPrompt, buildRootPrompt } from './plan/01-plan-build.js';
+import { buildAskPrompt, buildIntegratePrompt, type ClarifyRound } from './plan/_plan-clarify.js';
 import { buildAgentSelectorPrompt } from './workflow/_agent-selector.js';
 import { buildAgentMiningPrompt } from './workflow/03-phase-0a-discovery.js';
 import { buildEnrichPrompt } from './kb-author/01-enrich.js';
@@ -342,6 +343,47 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         permissive({ depth: 3 }),
       ),
   })),
+  // 00b's questioner and its answer-folding planner. Real fixtures rather than the proxy: the
+  // integrate prompt has an arm per build mode, and both render an answered round's history.
+  ...(['greenfield', 'from_repo'] as const).flatMap((mode) => {
+    const d = permissive({
+      mode,
+      repoName: 'haive',
+      inputIndexPath: mode === 'greenfield' ? '_PLAN_INPUTS.md' : null,
+      brief: 'A booking site for small clubs.',
+    });
+    const round: ClarifyRound = {
+      round: 1,
+      questions: [
+        {
+          id: 'payments',
+          topic: 'Payments',
+          question: 'Who takes payment?',
+          why: 'scope',
+          suggestions: ['Stripe'],
+        },
+      ],
+      nothingOpen: false,
+      answers: [{ questionId: 'payments', answer: 'Stripe, card only.' }],
+      steer: 'Mobile first.',
+      action: 'continue',
+      answered: true,
+      outcome: null,
+      integrated: false,
+    };
+    return [
+      {
+        label: `00b-plan-clarify buildAskPrompt (${mode})`,
+        exportKey: 'step-engine/steps/plan/_plan-clarify.ts#buildAskPrompt',
+        build: () => buildAskPrompt(d, '# Plan', [round]),
+      },
+      {
+        label: `00b-plan-clarify buildIntegratePrompt (${mode})`,
+        exportKey: 'step-engine/steps/plan/_plan-clarify.ts#buildIntegratePrompt',
+        build: () => buildIntegratePrompt(d, '# Plan', [round], round),
+      },
+    ];
+  }),
   // BOTH plan modes. `d.mode === 'from_repo'` is a strict comparison against a literal, which a proxy
   // always fails — so the two `from_repo` arms, one of which splices the whole retrieval protocol,
   // were never rendered. The bare-proxy source above is kept: it IS the greenfield arm, and keeping it
@@ -1554,7 +1596,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(185);
+    ).toBe(190);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1758,6 +1800,12 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // corrector REWRITES it, and a rewritten spec is 07's assignment.
     for (const { key, prompt } of await eachPrompt('07b-phase-4-validate')) {
       expect(prompt, key).toContain(key.includes('fixer') ? ACTING : REVIEWING);
+    }
+    // 00b: the questioner only asks, its planner rewrites the outline 01 expands.
+    for (const { key, prompt } of await eachPrompt('00b-plan-clarify')) {
+      const asks = key.includes('buildAskPrompt') || key.includes('clarify-ask');
+      expect(prompt, key).toContain(asks ? ONE_CLASS : AUTHORING);
+      expect(prompt, key).not.toContain(asks ? AUTHORING : ONE_CLASS);
     }
     for (const { key, prompt } of await eachPrompt('05-phase-0b5-spec-quality')) {
       expect(prompt, key).toContain(key.includes('corrector') ? AUTHORING : ONE_CLASS);

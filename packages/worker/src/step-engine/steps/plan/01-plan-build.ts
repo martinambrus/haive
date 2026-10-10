@@ -129,6 +129,9 @@ export interface PlanBuildDetect {
   /** Stamped by detect so the opt-in form keys on it: a row detected before the form existed
    *  reuses its saved detect output, lacks this, and keeps building instead of asking mid-build. */
   askToRun?: boolean;
+  /** Every node so far came from THIS task, i.e. the outline `00b-plan-clarify` drafted with the
+   *  user, so the depth form says it expands that outline rather than merging into a plan. */
+  outlineFromThisTask?: boolean;
 }
 
 export interface PlanBuildApply {
@@ -624,6 +627,7 @@ export function createPlanBuildStep(
       let repoName = 'this project';
       let existingNodeCount = 0;
       let hasRoot = false;
+      let outlineFromThisTask = false;
       if (repositoryId) {
         const [repo] = await ctx.db
           .select({ name: schema.repositories.name })
@@ -634,6 +638,7 @@ export function createPlanBuildStep(
         const nodes = await loadPlanSkeletons(ctx.db, repositoryId);
         existingNodeCount = nodes.length;
         hasRoot = nodes.some((n) => n.parentId === null);
+        outlineFromThisTask = nodes.length > 0 && nodes.every((n) => n.sourceTaskId === ctx.taskId);
       }
 
       // Read from 00-plan-inputs rather than re-derived here. That step already
@@ -654,6 +659,7 @@ export function createPlanBuildStep(
         visualOnlyInputs: visualOnlyInputsOf(inputs),
         hasPdfInputs: inputs?.hasPdfInputs === true,
         ...(opts.askToRun ? { askToRun: true } : {}),
+        ...(outlineFromThisTask ? { outlineFromThisTask: true } : {}),
       };
     },
 
@@ -685,8 +691,9 @@ export function createPlanBuildStep(
       if (!opts.askForBudget) return null;
       return {
         title: 'Plan depth',
-        description:
-          detected.existingNodeCount > 0
+        description: detected.outlineFromThisTask
+          ? `The outline you shaped in the clarifying questions has ${detected.existingNodeCount} node(s). This step breaks it down further.`
+          : detected.existingNodeCount > 0
             ? `This repository already has ${detected.existingNodeCount} plan node(s). New work is MERGED into the existing plan — nothing is deleted.`
             : 'How far should the plan be broken down?',
         fields: [
