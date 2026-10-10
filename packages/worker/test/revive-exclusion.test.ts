@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ONE_LIVE_UPGRADE_INDEX, schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { markTaskRunningWithStep } from '../src/queues/task-queue.js';
+import { markTaskRunningWithStep, markTaskWaiting } from '../src/queues/task-queue.js';
 
 vi.mock('../src/db.js', () => ({
   getDb: vi.fn(() => {
@@ -19,6 +19,7 @@ function setup(
   type: string,
   other?: { type: string; status: string },
   repo: Record<string, unknown> = {},
+  status = 'failed',
 ) {
   const fake = createFakeDb({
     tasks: schema.tasks,
@@ -40,7 +41,7 @@ function setup(
     repositoryId: REPO,
     type,
     title: type,
-    status: 'failed',
+    status,
     errorMessage: 'boom',
     orchestrationEpoch: 3,
     currentStepId: STEP,
@@ -74,7 +75,11 @@ function setup(
       epoch: 3,
       reviveFailed,
     });
-  return { fake, task, events, revive };
+  const reviveUnfenced = () =>
+    markTaskRunningWithStep(fake.db as unknown as Database, TASK, STEP, 1, 0);
+  const park = (fence?: { epoch: number; reviveFailed?: boolean }) =>
+    markTaskWaiting(fake.db as unknown as Database, TASK, STEP, 1, 0, 'waiting_user', fence);
+  return { fake, task, events, revive, reviveUnfenced, park };
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -83,6 +88,7 @@ describe('the worker reviving a failed onboarding or upgrade', () => {
   it.each([
     ['an onboarding', 'onboarding', 'onboarding_upgrade'],
     ['an upgrade', 'onboarding_upgrade', 'onboarding'],
+    ['an onboarding', 'onboarding', 'onboarding'],
   ])('refuses %s beside a live opposing task and leaves it failed', async (_n, type, otherType) => {
     for (const status of ['created', 'queued', 'running', 'waiting_user']) {
       const t = setup(type, { type: otherType, status });
@@ -128,6 +134,17 @@ describe('the worker reviving a failed onboarding or upgrade', () => {
     expect(await t.revive()).toBe(true);
   });
 
+  it('checks nothing for a task that is already live, whatever holds the repository', async () => {
+    const t = setup(
+      'onboarding',
+      { type: 'onboarding_upgrade', status: 'running' },
+      { rootClaimedAt: new Date(), rootClaimKind: 'reset', rootClaimOwner: 'x' },
+      'running',
+    );
+    expect(await t.reviveUnfenced()).toBe(true);
+    expect(t.events()).toEqual([]);
+  });
+
   it('does not hold a task of another type', async () => {
     const t = setup('workflow', { type: 'onboarding_upgrade', status: 'running' });
     expect(await t.revive()).toBe(true);
@@ -138,6 +155,20 @@ describe('the worker reviving a failed onboarding or upgrade', () => {
     expect(await t.revive(false)).toBe(false);
     expect(t.task().status).toBe('failed');
     expect(t.events()).toEqual([]);
+  });
+
+  it.each([
+    ['a write with no fence', (t: ReturnType<typeof setup>) => t.reviveUnfenced()],
+    ['a park with no fence', (t: ReturnType<typeof setup>) => t.park()],
+    [
+      'a park that may revive',
+      (t: ReturnType<typeof setup>) => t.park({ epoch: 3, reviveFailed: true }),
+    ],
+  ])('refuses %s beside a live upgrade', async (_n, write) => {
+    const t = setup('onboarding', { type: 'onboarding_upgrade', status: 'running' });
+    expect(await write(t)).toBe(false);
+    expect(t.task()).toMatchObject({ status: 'failed', errorMessage: 'boom' });
+    expect(t.events()).toEqual(['upgrade.revive_refused']);
   });
 
   it('still reports the index refusal as before', async () => {

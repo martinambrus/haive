@@ -49,6 +49,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
   LIVE_TASK_STATUSES,
+  liveOnboardingMessage,
   renderContextAdmitsUpgrade,
   type RepositoryForUpgrade,
   upgradeAdmission,
@@ -715,10 +716,12 @@ export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<
       case 'live-onboarding':
         throw new HttpError(
           409,
-          upgradeRefusalMessage(
-            { admitted: false, reason: 'live-onboarding', taskId: refusal.taskId },
-            action,
-          ),
+          check.task.type === 'onboarding'
+            ? liveOnboardingMessage(refusal.taskId)
+            : upgradeRefusalMessage(
+                { admitted: false, reason: 'live-onboarding', taskId: refusal.taskId },
+                action,
+              ),
         );
     }
   }

@@ -162,6 +162,7 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
   it.each([
     ['an onboarding beside a live upgrade', { type: 'onboarding', live: 'onboarding_upgrade' }],
     ['an upgrade beside a live onboarding', { type: 'onboarding_upgrade', live: 'onboarding' }],
+    ['an onboarding beside another live onboarding', { type: 'onboarding', live: 'onboarding' }],
   ] as const)('refuses %s', async (_n, c) => {
     const t = setup({ ...admitted(), type: c.type, live: { type: c.live, status: 'running' } });
     expect(await t.resume()).toBe(false);

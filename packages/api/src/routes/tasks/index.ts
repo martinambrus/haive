@@ -56,6 +56,7 @@ import {
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
 import {
+  liveOnboardingMessage,
   liveOnboardingTaskId,
   upgradeAdmission,
   upgradeRefusalMessage,
@@ -718,10 +719,7 @@ taskRoutes.post('/', async (c) => {
     ({ task, queued } = await withRepositoryTaskLock(db, repositoryId, async (tx) => {
       const liveId = await liveOnboardingTaskId(tx, userId, repositoryId);
       if (liveId) {
-        throw new HttpError(
-          409,
-          `Onboarding is already running for this repository (task ${liveId})`,
-        );
+        throw new HttpError(409, liveOnboardingMessage(liveId));
       }
       await refuseBesideLiveUpgrade(tx, repositoryId);
       const row = firstRow(await insertTask(tx));

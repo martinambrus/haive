@@ -98,6 +98,16 @@ const revivals: Revival[] = [
     step: { status: 'waiting_form', waitingStartedAt: new Date() },
     request: () => json(`/${TASK}/steps/${STEP}/submit`, { values: {} }),
   },
+  {
+    name: 'a CLI switch on the failed step',
+    step: { status: 'failed', iterationCount: 0 },
+    request: () =>
+      app.request(`/${TASK}/steps/${STEP}/cli-provider`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cliProviderId: null }),
+      }),
+  },
 ];
 
 /** A failed `type` task on a step, and beside it a task of `otherType` at `otherStatus`. */
@@ -113,6 +123,7 @@ function setup(
     taskEvents: schema.taskEvents,
     cliInvocations: schema.cliInvocations,
     taskStepAgentMinings: schema.taskStepAgentMinings,
+    taskStepCliChoices: schema.taskStepCliChoices,
     taskDagPlans: schema.taskDagPlans,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
@@ -183,6 +194,7 @@ function setup(
 describe.each([
   ['an onboarding', 'onboarding', 'an upgrade', 'onboarding_upgrade', 'upgrade or rollback'],
   ['an upgrade', 'onboarding_upgrade', 'an onboarding', 'onboarding', 'Onboarding is still'],
+  ['an onboarding', 'onboarding', 'another onboarding', 'onboarding', 'Onboarding is already'],
 ])('reviving a failed %s', (_n, type, _o, otherType, refusal) => {
   describe.each(revivals)('by $name', (revival) => {
     it.each(['created', 'queued', 'running', 'waiting_user'])(

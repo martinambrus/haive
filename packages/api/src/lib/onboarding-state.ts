@@ -39,6 +39,11 @@ export async function liveOnboardingTaskId(
   return facts?.liveTaskId ?? null;
 }
 
+/** The 409 text for an onboarding that would run beside another one. */
+export function liveOnboardingMessage(taskId: string): string {
+  return `Onboarding is already running for this repository (task ${taskId})`;
+}
+
 /** The 409 text for a refused admission; `action` names what was refused. */
 export function upgradeRefusalMessage(
   refusal: Exclude<UpgradeAdmission, { admitted: true }>,

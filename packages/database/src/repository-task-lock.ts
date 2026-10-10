@@ -83,9 +83,9 @@ export type ReviveCheck =
 
 /**
  * The checks that decide whether a failed onboarding or upgrade may be revived, under the lock
- * creation takes: a live root claim, then an onboarding beside a live upgrade or rollback, or an
- * upgrade or rollback beside a live onboarding. Call it in the transaction that revives the task.
- * Null when the task is of another type, has no repository, or is already live.
+ * creation takes: a live root claim, then an onboarding beside a live upgrade, rollback or other
+ * onboarding, or an upgrade or rollback beside a live onboarding. Call it in the transaction that
+ * revives the task. Null when the task is of another type, has no repository, or is already live.
  */
 export async function checkRevive(tx: DbTx, taskId: string): Promise<ReviveCheck | null> {
   const [row] = await tx
@@ -108,24 +108,25 @@ export async function checkRevive(tx: DbTx, taskId: string): Promise<ReviveCheck
   };
   const repo = await lockRepositoryRow(tx, task.repositoryId);
   if (!repo) return { task, refusal: { reason: 'no-repository' } };
+  const [current] = await tx
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId));
+  if (!current || (LIVE_TASK_STATUSES as readonly string[]).includes(current.status)) return null;
   if (isRootClaimLive(repo.rootClaimedAt)) {
     return {
       task,
       refusal: { reason: 'root-claim', claimKind: repo.rootClaimKind as RootClaimKind | null },
     };
   }
-  const [current] = await tx
-    .select({ status: schema.tasks.status })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, taskId));
-  if (!current || (LIVE_TASK_STATUSES as readonly string[]).includes(current.status)) return null;
   let refusal: ReviveRefusal | null = null;
   if (task.type === 'onboarding') {
-    const liveId = await liveTaskIdOfType(tx, task.repositoryId, 'onboarding_upgrade');
-    if (liveId) refusal = { reason: 'live-upgrade', taskId: liveId };
-  } else {
-    const liveId = await liveTaskIdOfType(tx, task.repositoryId, 'onboarding', task.userId);
-    if (liveId) refusal = { reason: 'live-onboarding', taskId: liveId };
+    const upgradeId = await liveTaskIdOfType(tx, task.repositoryId, 'onboarding_upgrade');
+    if (upgradeId) refusal = { reason: 'live-upgrade', taskId: upgradeId };
+  }
+  if (!refusal) {
+    const onboardingId = await liveTaskIdOfType(tx, task.repositoryId, 'onboarding', task.userId);
+    if (onboardingId) refusal = { reason: 'live-onboarding', taskId: onboardingId };
   }
   return refusal ? { task, refusal } : { task, repo, refusal: null };
 }

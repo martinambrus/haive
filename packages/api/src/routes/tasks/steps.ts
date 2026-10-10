@@ -235,6 +235,8 @@ async function moveTaskToStep(
   now: Date,
   opts: { fromFailed?: boolean } = {},
 ) {
+  // The task leaves `failed` here for every caller, so the revival checks sit here too.
+  await refuseReviveBesideLive(tx, taskId);
   await resetRowsForRerun(tx, taskId, leftActive, now);
   const [bumped] = await tx
     .update(schema.tasks)
