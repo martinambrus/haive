@@ -14,6 +14,7 @@ import {
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
 } from '../../../sandbox/app-runner.js';
+import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { buildCommitDiffArtifact } from '../workflow/_commit-diff.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../../../repo/git-push.js';
@@ -109,14 +110,18 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       // navigation failure must not block the gate from rendering.
       if (viewMode === 'vnc' && runtime.mode === 'ddev') {
         await startBrowserDesktop(runtime.handle);
-        await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
-          timeoutMs: 60_000,
-        });
+        await runnerExec(
+          runtime.handle,
+          `node /opt/browser-probe-connect.js ${shellQuote(appUrl)}`,
+          {
+            timeoutMs: 60_000,
+          },
+        );
       } else if (viewMode === 'vnc' && runtime.mode === 'app-runner') {
         await startAppBrowserDesktop(runtime.handle);
         await appRunnerExec(
           runtime.handle,
-          `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+          `node /opt/browser/browser-probe-connect.js ${shellQuote(appUrl)}`,
           { timeoutMs: 60_000 },
         );
       }

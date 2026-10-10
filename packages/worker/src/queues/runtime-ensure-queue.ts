@@ -28,6 +28,7 @@ import {
   appRunnerAccessUrls,
   appRunnerExec,
 } from '../sandbox/app-runner.js';
+import { shellQuote } from '../sandbox/shell-quote.js';
 
 // The worker side of the VNC "ensure runtime" handshake. The api enqueues a job
 // here when the live Browser panel opens; the worker brings the task's app +
@@ -55,12 +56,16 @@ async function navigateDesktopTo(
   try {
     const r =
       runtime.mode === 'ddev'
-        ? await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${url}'`, {
-            timeoutMs: 30_000,
-          })
+        ? await runnerExec(
+            runtime.handle,
+            `node /opt/browser-probe-connect.js ${shellQuote(url)}`,
+            {
+              timeoutMs: 30_000,
+            },
+          )
         : await appRunnerExec(
             runtime.handle,
-            `node /opt/browser/browser-probe-connect.js '${url}'`,
+            `node /opt/browser/browser-probe-connect.js ${shellQuote(url)}`,
             { timeoutMs: 30_000 },
           );
     if (r.exitCode !== 0)
