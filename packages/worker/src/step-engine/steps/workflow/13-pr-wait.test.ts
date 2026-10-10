@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { eq } from 'drizzle-orm';
 import type { StepContext } from '../../step-definition.js';
+import { StepSupersededError } from '../../step-ownership.js';
 import { prWaitStep } from './13-pr-wait.js';
 
 describe('finalization RAG review', () => {
@@ -161,6 +162,28 @@ describe('finalization RAG review', () => {
       expect(prWaitStep.llm!.skipIf!({ detected, formValues: {} })).toBe(false);
       expect(await prWaitStep.llm!.prepare!({ ctx, detected, formValues: {} })).toBe(false);
       expect(detected.ragUsage.queries).toEqual([]);
+    },
+  );
+  it.each(['pending', 'skipped', 'failed'] as const)(
+    'does not restore cleared detect output when the step becomes %s during evidence loading',
+    async (status) => {
+      const { fake, ctx, detected } = setup();
+      const findQueries = fake.db.query.ragQueryLog.findMany.bind(fake.db.query.ragQueryLog);
+      vi.spyOn(fake.db.query.ragQueryLog, 'findMany').mockImplementationOnce(async (...args) => {
+        const queries = await findQueries(...args);
+        await fake.db
+          .update(schema.taskSteps)
+          .set({ status, detectOutput: null })
+          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+        return queries;
+      });
+      await expect(
+        prWaitStep.llm!.prepare!({ ctx, detected, formValues: {} }),
+      ).rejects.toBeInstanceOf(StepSupersededError);
+      const row = await fake.db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, ctx.taskStepId),
+      });
+      expect(row).toMatchObject({ status, detectOutput: null });
     },
   );
   it('allows dispatch when reopening added captured hits and timestamped agent prose', async () => {

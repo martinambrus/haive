@@ -25,10 +25,13 @@ Result prose uses `MarkdownView` with enhanced transformations disabled.
 The terminal workflow step `13-pr-wait` reviews query usage on both PR and non-PR
 paths. The optional LLM runs after the PR wait form, with no tools or MCP servers,
 and refreshes and checkpoints its evidence at dispatch because a reopened PR can
-have added queries. A task with only zero-hit or uncaptured queries, or no timed model prose, skips
+have added queries. The checkpoint uses `updateOwnedStep`; a Retry, Skip or Stop
+that took the row rejects the superseded pass without restoring its cleared state.
+A task with only zero-hit or uncaptured queries, or no timed model prose, skips
 the classifier. Preparation can return false after refreshing a parked PR, which
-the runner handles before building a prompt, reserving a CLI or enqueueing a job. Evidence-loading, model and assessment-storage failures never block
-finalization; cancellation still propagates.
+the runner handles before building a prompt, reserving a CLI or enqueueing a job.
+Evidence-loading, model and assessment-storage failures never block finalization;
+cancellation and superseded-pass errors still propagate.
 
 The review is an inference about recorded actions, not proof of an agent's private
 reasoning. Green means the classifier found explicit evidence of use; amber means
@@ -40,7 +43,7 @@ a model turn after the query, names a returned source path and belongs to a run
 overlapping the query's timestamp. It rejects fabricated quotes, unrelated runs,
 duplicate assessments and historical queries without saved hits. The playground
 shows the reason and evidence. Raw stream logs are excluded because they contain
-tool results: quoting retrieval itself would be circular evidence. Untimestamped
+tool results: quoting retrieval itself would be circular evidence.
 Each new Clean transcript records `proseChunks` offsets and timestamps while
 keeping its merged display text. The collector bounds timing metadata to 8,192
 fragments across the invocation and removes only their offsets when that budget
@@ -53,7 +56,8 @@ with a run’s completion time would manufacture evidence of later use.
 
 Every recorded query receives an assessment, including unknown when the model
 fails or evidence is missing. Apply sets neutral defaults and zero-hit verdicts
-for the task in bulk, then saves the validated assessments for selected queries. The evidence payload is bounded to 80,000 characters before it is returned from
+for the task in bulk, then saves the validated assessments for selected queries.
+The evidence payload is bounded to 80,000 characters before it is returned from
 loading, so neither detect nor dispatch checkpoints full article/transcript bodies
 in the task-step output that the UI polls. The prompt reuses the same bound,
 with result snippets capped at 1,200 characters and run prose limited to the last

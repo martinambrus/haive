@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { StepSupersededError, updateOwnedStep } from '../../step-ownership.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import { killTaskDdevRunners } from '../../../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../../../sandbox/app-runner.js';
@@ -138,11 +139,9 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
       // A PR can remain open while agents do more work. Preserve this refreshed
       // input so apply validates the same evidence after the CLI resumes the step.
       try {
-        await ctx.db
-          .update(schema.taskSteps)
-          .set({ detectOutput: d })
-          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+        await updateOwnedStep(ctx.db, ctx.taskStepId, { detectOutput: d });
       } catch (err) {
+        if (err instanceof StepSupersededError) throw err;
         ctx.throwIfCancelled();
         ctx.logger.warn({ err }, 'could not checkpoint RAG usage input');
         d.ragUsage = { queries: [], runs: [] };
