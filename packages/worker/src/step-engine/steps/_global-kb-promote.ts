@@ -371,7 +371,7 @@ export async function loadActiveGlobalArticlesForTask(
             isNull(globalKbEntries.supersededAt),
           ),
         )
-        .orderBy(desc(globalKbEntries.updatedAt))
+        .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
         .limit(ARTICLE_SCAN_LIMIT);
       const compatible = rows.filter((r) => facetsMatchProject(r.facets, projectFacets));
       if (compatible.length === 0) return empty;

@@ -618,7 +618,7 @@ globalKbRoutes.get('/entries', async (c) => {
       .select()
       .from(globalKbEntries)
       .where(where)
-      .orderBy(desc(globalKbEntries.updatedAt))
+      .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
       .limit(pageSize)
       .offset((page - 1) * pageSize);
 

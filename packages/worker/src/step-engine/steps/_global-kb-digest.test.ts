@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { sql, type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import {
   emptyProjectFacetSet,
   type GlobalKbFacets,
@@ -7,6 +9,7 @@ import {
 import {
   facetsMatchProject,
   globalKbDigestPrompt,
+  readDigestRows,
   selectDigest,
   withGlobalKbDigest,
   type GlobalKbDigest,
@@ -332,5 +335,20 @@ describe('facetsMatchProject and tags', () => {
     expect(facetsMatchProject({ framework: ['laravel'], tags: ['performance'] }, project)).toBe(
       false,
     );
+  });
+});
+
+describe('readDigestRows', () => {
+  it('orders rows with equal update times by id, so the list is the same on every read', async () => {
+    let order: SQL[] = [];
+    const chain = {
+      from: () => chain,
+      where: () => chain,
+      orderBy: (...args: SQL[]) => ((order = args), chain),
+      limit: async () => [],
+    };
+    await readDigestRows({ select: () => chain } as never, 'default');
+    const rendered = new PgDialect().sqlToQuery(sql.join(order, sql`, `)).sql;
+    expect(rendered).toBe('"global_kb_entries"."updated_at" desc, "global_kb_entries"."id" desc');
   });
 });

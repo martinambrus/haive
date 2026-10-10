@@ -134,7 +134,7 @@ export function readDigestRows(
         isNull(globalKbEntries.supersededAt),
       ),
     )
-    .orderBy(desc(globalKbEntries.updatedAt))
+    .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
     .limit(DIGEST_SCAN_LIMIT);
 }
 
