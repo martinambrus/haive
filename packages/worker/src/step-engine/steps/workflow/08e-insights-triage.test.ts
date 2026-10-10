@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseInsights } from './08e-insights-triage.js';
+import { insightsTriageStep, parseInsights, readTriageOutcome } from './08e-insights-triage.js';
+import type { StepContext } from '../../step-definition.js';
 
 describe('parseInsights', () => {
   it('parses INSIGHT lines after a ## INSIGHTS heading', () => {
@@ -41,5 +42,56 @@ describe('parseInsights', () => {
     expect(parseInsights([{ stepId: 's', raw: 'just output, no insights' }])).toEqual([]);
     expect(parseInsights([{ stepId: 's', raw: '' }])).toEqual([]);
     expect(parseInsights([])).toEqual([]);
+  });
+});
+
+describe('readTriageOutcome', () => {
+  it('is implemented only when the agent listed a change', () => {
+    expect(readTriageOutcome({ implemented: ['Extracted helper'], notes: 'n' })).toEqual({
+      implemented: true,
+      changes: ['Extracted helper'],
+      notes: 'n',
+    });
+    expect(readTriageOutcome({ implemented: [], notes: 'nothing to do' })).toEqual({
+      implemented: false,
+      changes: [],
+      notes: 'nothing to do',
+    });
+  });
+
+  it('is not implemented when the output is missing or malformed', () => {
+    const none = { implemented: false, changes: [], notes: '' };
+    expect(readTriageOutcome(null)).toEqual(none);
+    expect(readTriageOutcome(undefined)).toEqual(none);
+    expect(readTriageOutcome({ implemented: true })).toEqual(none);
+    expect(readTriageOutcome({ implemented: ['', 3, '  '] })).toEqual(none);
+  });
+});
+
+describe('insightsTriageStep.apply', () => {
+  const insight = { id: 'i-1', sourceStep: 's', title: 'T', location: '', description: '' };
+  const ctx = { logger: { info: () => {} } } as unknown as StepContext;
+  const detected = { worktreePath: '', sandboxWorktreePath: '', spec: '', insights: [insight] };
+
+  it('does not report a pick as implemented when the agent made no change', async () => {
+    const out = await insightsTriageStep.apply(ctx, {
+      detected,
+      formValues: { selectedInsights: ['i-1'] },
+      llmOutput: { implemented: [], notes: 'already done' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(out).toMatchObject({ selected: [insight], implemented: false, notes: 'already done' });
+  });
+
+  it('reports implemented with the changes the agent listed', async () => {
+    const out = await insightsTriageStep.apply(ctx, {
+      detected,
+      formValues: { selectedInsights: ['i-1'] },
+      llmOutput: { implemented: ['Did T'], notes: '' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(out).toMatchObject({ implemented: true, changes: ['Did T'] });
   });
 });

@@ -50,7 +50,26 @@ interface TriageApply {
   selected: Insight[];
   skipped: number;
   implemented: boolean;
+  changes: string[];
   notes: string;
+}
+
+/** What the fix agent reported. `implemented` holds only when it listed a change, since a
+ *  selection alone says nothing about what the agent did. */
+export function readTriageOutcome(llmOutput: unknown): {
+  implemented: boolean;
+  changes: string[];
+  notes: string;
+} {
+  const out = (llmOutput ?? {}) as { implemented?: unknown; notes?: unknown };
+  const changes = Array.isArray(out.implemented)
+    ? out.implemented.filter((c): c is string => typeof c === 'string' && c.trim() !== '')
+    : [];
+  return {
+    implemented: changes.length > 0,
+    changes,
+    notes: typeof out.notes === 'string' ? out.notes : '',
+  };
 }
 
 /** Parse `## INSIGHTS` blocks from a list of raw agent outputs. Each insight
@@ -225,17 +244,16 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
     const sel = ((args.formValues as { selectedInsights?: string[] }).selectedInsights ??
       []) as string[];
     const selected = d.insights.filter((i) => sel.includes(i.id));
-    const implemented = selected.length > 0;
+    const outcome = readTriageOutcome(selected.length > 0 ? args.llmOutput : null);
     ctx.logger.info(
-      { found: d.insights.length, selected: selected.length, implemented },
+      { found: d.insights.length, selected: selected.length, implemented: outcome.implemented },
       'insight triage complete',
     );
     return {
       insightsFound: d.insights.length,
       selected,
       skipped: d.insights.length - selected.length,
-      implemented,
-      notes: '',
+      ...outcome,
     };
   },
 };
