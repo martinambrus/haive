@@ -93,7 +93,7 @@ function changedExcerpt(before: string, after: string): { before: string; after:
 }
 
 function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPolicy): string {
-  // Git may not pair a moved protected file, and a capped list may not show the deletion at all.
+  // A moved protected file can surface as an added or a modified file, and a capped list can hide its deletion.
   const protectedRemoved =
     artifact.truncated ||
     artifact.files.some(
@@ -109,7 +109,7 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
     ) {
       return { ...metadata, note: 'secret content omitted' };
     }
-    if (protectedRemoved && file.status === 'added') {
+    if (protectedRemoved && file.status !== 'deleted') {
       return { ...metadata, note: 'content withheld: a protected file was removed in this change' };
     }
     if (file.binary || file.truncated) return { ...metadata, note: 'content unavailable' };

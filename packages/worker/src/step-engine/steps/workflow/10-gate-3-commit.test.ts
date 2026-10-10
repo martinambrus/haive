@@ -196,6 +196,14 @@ describe('10-gate-3-commit message generation', () => {
       expect(filesOf(text).find((f) => f.path === 'renamed.txt')?.note).toBe(WITHHELD);
     });
 
+    it('withholds a tracked file a protected file was moved over', async () => {
+      const repo = await seedWith({ 'secret.env': 'SECRET=abc\n', 'public.txt': 'hello\n' });
+      await rename(path.join(repo, 'secret.env'), path.join(repo, 'public.txt'));
+      const text = await contextOf(repo);
+      expect(text).not.toContain('SECRET=abc');
+      expect(filesOf(text).find((f) => f.path === 'public.txt')?.note).toBe(WITHHELD);
+    });
+
     it('withholds added files when the capped list cannot show every removal', async () => {
       const repo = await seedWith({ 'secret.env': 'SECRET=abc\n' });
       await rm(path.join(repo, 'secret.env'));
@@ -230,9 +238,8 @@ describe('10-gate-3-commit message generation', () => {
       );
     });
 
-    it('keeps the excerpt of a modified file', async () => {
+    it('keeps the excerpt of a modified file when no protected file was removed', async () => {
       const repo = await seedWith({ 'secret.env': 'SECRET=abc\n', 'm.txt': 'before\n' });
-      await rm(path.join(repo, 'secret.env'));
       await writeFile(path.join(repo, 'm.txt'), 'after edit\n');
       const text = await contextOf(repo);
       expect(text).toContain('after edit');
