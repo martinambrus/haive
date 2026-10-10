@@ -1893,6 +1893,80 @@ async function main(): Promise<void> {
     .from(schema.tasks)
     .where(eq(schema.tasks.id, linkTaskId));
   check('the TASK itself survives the plan', survivingTask.length === 1, survivingTask.length);
+
+  /* --- 20. clarify rounds: the guarantees only a real Postgres can give ---- */
+
+  const [clarifyRepo] = await db
+    .insert(schema.repositories)
+    .values({ userId, name: 'plan-smoke-clarify', source: 'blank', status: 'ready' })
+    .returning();
+  const clarifyBuilt = await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Clarify root' }] },
+    { repositoryId: clarifyRepo!.id, origin: 'llm' },
+  );
+  const clarifyRootId = clarifyBuilt.created[0]!;
+  const clarifyTasks = await db
+    .insert(schema.tasks)
+    .values(
+      ['a', 'b'].map((suffix) => ({
+        userId,
+        type: 'workflow' as const,
+        title: `plan-smoke clarify fixture ${suffix}`,
+        repositoryId: clarifyRepo!.id,
+        status: 'running' as const,
+      })),
+    )
+    .returning();
+  const [clarifyTaskA, clarifyTaskB] = clarifyTasks;
+  const roundsOf = async (taskId: string) =>
+    db
+      .select({ id: schema.planClarifyRounds.id, rootId: schema.planClarifyRounds.rootId })
+      .from(schema.planClarifyRounds)
+      .where(eq(schema.planClarifyRounds.taskId, taskId));
+
+  await db
+    .insert(schema.planClarifyRounds)
+    .values({ taskId: clarifyTaskA!.id, round: 0, rootId: clarifyRootId });
+  await db.insert(schema.planClarifyRounds).values({ taskId: clarifyTaskA!.id, round: 1 });
+  await db
+    .insert(schema.planClarifyRounds)
+    .values({ taskId: clarifyTaskB!.id, round: 0, rootId: clarifyRootId });
+
+  let duplicateCode: unknown;
+  try {
+    await db.insert(schema.planClarifyRounds).values({ taskId: clarifyTaskA!.id, round: 1 });
+  } catch (err) {
+    duplicateCode =
+      (err as { code?: string }).code ?? (err as { cause?: { code?: string } }).cause?.code;
+  }
+  check('a second row for the same task and round is refused', duplicateCode === '23505', {
+    duplicateCode,
+    rows: (await roundsOf(clarifyTaskA!.id)).length,
+  });
+
+  await db.delete(schema.planNodes).where(eq(schema.planNodes.id, clarifyRootId));
+  const afterRootDelete = await roundsOf(clarifyTaskA!.id);
+  check(
+    'deleting the plan root keeps the round and nulls its root_id',
+    afterRootDelete.length === 2 && afterRootDelete.every((r) => r.rootId === null),
+    afterRootDelete,
+  );
+
+  await db.delete(schema.tasks).where(eq(schema.tasks.id, clarifyTaskA!.id));
+  check(
+    'deleting the task deletes its rounds',
+    (await roundsOf(clarifyTaskA!.id)).length === 0,
+    await roundsOf(clarifyTaskA!.id),
+  );
+  check(
+    "another task's rounds are untouched",
+    (await roundsOf(clarifyTaskB!.id)).length === 1,
+    await roundsOf(clarifyTaskB!.id),
+  );
+
+  await db.delete(schema.tasks).where(eq(schema.tasks.id, clarifyTaskB!.id));
+  await db.delete(schema.repositories).where(eq(schema.repositories.id, clarifyRepo!.id));
 }
 
 main()

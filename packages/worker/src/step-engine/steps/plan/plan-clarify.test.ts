@@ -11,6 +11,7 @@ import type { PlanBuildDetect } from './01-plan-build.js';
 import {
   actionFieldId,
   answerFieldId,
+  buildAskPrompt,
   buildClarifyForm,
   nextMove,
   openQuestionsTodo,
@@ -449,6 +450,37 @@ describe('00b-plan-clarify apply', () => {
       `The owner picked this answer the questioner had suggested:\n${UNTRUSTED_OPEN}\nStripe`,
     );
     expect(prompt).toContain('The owner answered: Club members only');
+  });
+
+  it('asks the questioner to re-ask an open item under its own id', () => {
+    const prompt = buildAskPrompt(build, '# Plan', [
+      {
+        round: 1,
+        questions: [
+          {
+            id: 'club-tenancy',
+            topic: '',
+            question: 'One club or many?',
+            why: '',
+            suggestions: [],
+          },
+        ],
+        nothingOpen: false,
+        answers: [{ questionId: 'club-tenancy', answer: 'maybe later' }],
+        steer: null,
+        action: 'continue',
+        answered: true,
+        outcome: {
+          summary: '',
+          verdicts: [{ questionId: 'club-tenancy', status: 'open', note: 'Unclear.' }],
+          dropped: [],
+        },
+        integrated: true,
+        rootId: null,
+      },
+    ]);
+    expect(prompt).toContain('Question `club-tenancy`');
+    expect(prompt).toMatch(/same `id`/);
   });
 
   it('carries the answered rounds into a redrafted outline', () => {
