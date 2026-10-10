@@ -1958,6 +1958,40 @@ describe('gate-2 says when it cuts a check output or the smoke excerpt', () => {
     expect(row?.body).toMatch(/characters? omitted/);
   });
 
+  const smokeBlock = async (errorExcerpt: string): Promise<string> => {
+    const detected = {
+      codeAudit: null,
+      liveBrowser: null,
+      runtimeSmoke: { ran: true, passed: false, httpStatus: 500, url: 'u', errorExcerpt },
+    };
+    const out = await gate2VerifyApprovalStep.apply!(ctx, {
+      formValues: { decision: 'reject' },
+      detected,
+    } as never);
+    return out.runtimeErrors;
+  };
+
+  it('keeps the head of a long smoke excerpt and says how much it left out', async () => {
+    const text = `ERR-HEAD ${'x'.repeat(2_991)}`;
+    expect(text).toHaveLength(3_000);
+    const block = await smokeBlock(text);
+    expect(block).toContain(text.slice(0, 1_200));
+    expect(block).not.toContain(text.slice(0, 1_201));
+    expect(block).toContain('[… 1,800 more characters of the response excerpt are not shown …]');
+  });
+
+  it('shows a smoke excerpt within its budget unchanged', async () => {
+    const text = 'y'.repeat(1_200);
+    expect(await smokeBlock(text)).toContain(`\n${text}`);
+    expect(await smokeBlock(text)).not.toContain('not shown');
+  });
+
+  it('does not split an emoji that straddles the smoke cut', async () => {
+    const block = await smokeBlock(`${'a'.repeat(1_199)}\u{1F600}${'b'.repeat(100)}`);
+    expect(block).not.toMatch(LONE_SURROGATE);
+    expect(block).toContain('[… 102 more characters of the response excerpt are not shown …]');
+  });
+
   it('does not split an emoji that straddles the check output cut', async () => {
     for (const lead of ['', 'x']) {
       const { row } = await testsRow(failedRun(`${lead}${'\u{1F600}'.repeat(5_000)}`));

@@ -426,6 +426,22 @@ function checkOutputExcerpt(output: string): string {
     : output;
 }
 
+// The first `max` characters without a split surrogate pair, and a note counting what is left out.
+function headWithNote(
+  text: string,
+  max: number,
+  what: string,
+): { head: string; note: string } | null {
+  if (text.length <= max) return null;
+  const end = (text.charCodeAt(max - 1) & 0xfc00) === 0xd800 ? max - 1 : max;
+  const left = text.length - end;
+  const one = left === 1;
+  return {
+    head: text.slice(0, end),
+    note: `[… ${left.toLocaleString('en-US')} more ${one ? 'character' : 'characters'} of the ${what} ${one ? 'is' : 'are'} not shown …]`,
+  };
+}
+
 const CHECKLIST_EXCERPT_CHARS = 12_000;
 
 function checklistExcerpt(checklist: string): string {
@@ -499,6 +515,11 @@ function parseProbeErrors(raw: string | undefined): {
   return { consoleErrors: toList(obj?.consoleErrors), networkErrors: toList(obj?.networkErrors) };
 }
 
+function smokeExcerpt(excerpt: string): string {
+  const cut = headWithNote(excerpt, 1200, 'response excerpt');
+  return cut ? `${cut.head}\n${cut.note}` : excerpt;
+}
+
 /** Concrete runtime errors handed to a rejected-at-gate-2 fixer: the live browser's
  *  captured console/network errors plus the mandatory HTTP smoke's body excerpt. The
  *  human's prose says WHAT is wrong; this says exactly what the runtime reported, so the
@@ -516,7 +537,7 @@ function buildRuntimeErrorsBlock(detected: VerifyGateDetect): string {
   if (rs?.ran && runtimeSmokeVerdict(rs) !== 'pass' && rs.errorExcerpt) {
     lines.push(
       `Runtime HTTP smoke${rs.httpStatus !== null ? ` (HTTP ${rs.httpStatus})` : ''} at ${rs.url ?? 'the app'} — response excerpt:`,
-      rs.errorExcerpt.slice(0, 1200),
+      smokeExcerpt(rs.errorExcerpt),
     );
   }
   return lines.join('\n');
