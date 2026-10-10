@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { appRunnerName, ddevRunnerName, logger } from '@haive/shared';
+import { hasLeadingHaiveBlock } from '../../repo/ddev-generated-boundary.js';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import {
   ddevCaVolumeName,
@@ -334,6 +335,8 @@ export function appReachPrompt(reach: ReachableApp): string {
  *  verification that needs to execute the app") the MCP surface block already says, from the
  *  absence of the browser and container tools that would run it. */
 export function withAppReach(prompt: string, reach: AppReach | null): string {
-  if (!reach || !isReachableApp(reach) || prompt.includes(APP_REACH_MARKER)) return prompt;
+  if (!reach || !isReachableApp(reach) || hasLeadingHaiveBlock(prompt, APP_REACH_MARKER)) {
+    return prompt;
+  }
   return `${appReachPrompt(reach)}\n\n${prompt}`;
 }

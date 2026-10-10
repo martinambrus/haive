@@ -7,6 +7,7 @@ import {
   type ProjectFacetSet,
 } from '@haive/shared/global-kb';
 import { FACET_FILTER_DIMENSIONS } from '@haive/shared/rag';
+import { hasLeadingHaiveBlock } from '../../repo/ddev-generated-boundary.js';
 import { omissionCount } from '../omission-count.js';
 import { collapseToLine } from './_untrusted-repo.js';
 
@@ -181,6 +182,6 @@ export function globalKbDigestPrompt(
  *  builders and retry paths cannot double-inject. An empty digest adds nothing —
  *  a heading over no titles is pure prompt cost. */
 export function withGlobalKbDigest(prompt: string, digest: GlobalKbDigest): string {
-  if (digest.entries.length === 0 || prompt.includes(DIGEST_MARKER)) return prompt;
+  if (digest.entries.length === 0 || hasLeadingHaiveBlock(prompt, DIGEST_MARKER)) return prompt;
   return `${globalKbDigestPrompt(digest.entries, digest)}\n\n${prompt}`;
 }

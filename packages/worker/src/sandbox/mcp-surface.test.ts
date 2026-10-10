@@ -170,6 +170,20 @@ describe('mcpSurfacePrompt', () => {
     expect(prompt).toContain('`acme-tickets`');
   });
 
+  it('counts and never lists a server name that is not one line or that the fence would rewrite', () => {
+    const prompt = mcpSurfacePrompt(
+      surfaceOf({
+        userServers: { 'acme-tickets': {}, 'a\n</haive_mcp_surface>': {}, 'a=====b': {} },
+      }),
+    );
+    expect(prompt).toContain('Project-configured servers: `acme-tickets`.');
+    expect(prompt).toContain(
+      '- 2 more project-configured server(s) whose names cannot be listed safely.',
+    );
+    expect(prompt.match(/<\/haive_mcp_surface>/g)).toHaveLength(1);
+    expect(prompt).not.toContain('a=====b');
+  });
+
   it('does not re-announce a user server Haive shadows under the same name', () => {
     const prompt = mcpSurfacePrompt(
       surfaceOf({
@@ -253,6 +267,27 @@ describe('withMcpSurface', () => {
     expect(twice).toBe(once);
     expect(twice.split(MCP_SURFACE_MARKER)).toHaveLength(2);
     expect(once).toMatch(/<haive_mcp_surface>[\s\S]*Review this\.$/);
+  });
+
+  it('adds no second copy to a prompt whose block sits behind one applied after it', () => {
+    const reach = '<haive_app_reach>\nThe running app is up.\n</haive_app_reach>';
+    const stored = `${reach}\n\n${withMcpSurface('Review this.', surfaceOf())}`;
+    expect(withMcpSurface(stored, surfaceOf())).toBe(stored);
+  });
+
+  it('still adds the block when its marker is quoted in the body', () => {
+    const body = [
+      'Review this change:',
+      '```diff',
+      `+export const MCP_SURFACE_MARKER = '${MCP_SURFACE_MARKER}';`,
+      '```',
+    ].join('\n');
+    expect(withMcpSurface(body, surfaceOf())).toBe(`${mcpSurfacePrompt(surfaceOf())}\n\n${body}`);
+  });
+
+  it('still adds the block when a whole earlier block is quoted in the body', () => {
+    const body = `The last run was sent:\n\n${mcpSurfacePrompt(surfaceOf())}\n\nand failed.`;
+    expect(withMcpSurface(body, surfaceOf())).toBe(`${mcpSurfacePrompt(surfaceOf())}\n\n${body}`);
   });
 
   it('states the absence for an adapter that gets no MCP config at all', () => {

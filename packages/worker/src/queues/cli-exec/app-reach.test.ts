@@ -106,6 +106,30 @@ describe('withAppReach', () => {
     expect(once).toContain('BODY');
   });
 
+  it('adds no second copy to a prompt whose block sits behind one applied after it', () => {
+    const app = reachable({ mode: 'sandbox_http' });
+    const digest = '<haive_global_kb_index>\nA house standard.\n</haive_global_kb_index>';
+    const stored = `${digest}\n\n${withAppReach('BODY', app)}`;
+    expect(withAppReach(stored, app)).toBe(stored);
+  });
+
+  it('still adds the block when its marker is quoted in the body', () => {
+    const app = reachable({ mode: 'sandbox_http' });
+    const body = [
+      'Review this change:',
+      '```diff',
+      "+const APP_REACH_MARKER = '<haive_app_reach>';",
+      '```',
+    ].join('\n');
+    expect(withAppReach(body, app)).toBe(`${appReachPrompt(app)}\n\n${body}`);
+  });
+
+  it('still adds the block when a whole earlier block is quoted in the body', () => {
+    const app = reachable({ mode: 'sandbox_http' });
+    const body = `The last run was sent:\n\n${appReachPrompt(app)}\n\nand failed.`;
+    expect(withAppReach(body, app)).toBe(`${appReachPrompt(app)}\n\n${body}`);
+  });
+
   it('says nothing at all when there is no resolved reach', () => {
     expect(withAppReach('BODY', null)).toBe('BODY');
   });
