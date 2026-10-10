@@ -210,6 +210,11 @@ earlier task's row counts only when that row's issue text is the same text, not 
 after the fingerprint's normalization, which drops digits and ids and so can hand a different
 defect the earlier row's fingerprint; anything else is new, the safer of the two mistakes, and a
 defect that moved lines between scans still matches, since its text did not change.
+A still-present finding gets a row of THIS task too, carrying the scan that first recorded it in
+`raw`: the dedupe index is per task, so the two rows never collide, and every later write about the
+finding — triage's disposition, the issue it was planned into — lands on this scan's row and never
+rewrites an earlier task's history, the current-scope rule `review-findings.md` keeps for both of
+its UPDATE paths.
 Out-of-scope output under a diff target is recorded with `raw.inScope = false` and listed apart.
 
 **Its rows are the product, so its write is not the telemetry one.** `recordReviewFindings` is
@@ -273,8 +278,9 @@ so this changes nothing for the other sixteen, `comment-debt` and `dead-code` in
 findings names one path, and several such findings in a file being fixed by one agent is the right
 unit anyway. All at level 0 unless a dependency is declared. Every issue names the commit its
 findings were read at, so a coder working on a newer tip knows which revision their line numbers
-describe. Each finding's row records the `issueKey` it was planned into, in `review_findings.raw`,
-written here once and never again: the issue's own `filesModified` starts as its paths but the
+describe. Each finding's row from THIS scan (see `scan-record`, which gives a still-present
+finding one too) records the plan id and `issueKey` it was planned into, in `review_findings.raw`,
+written here once and never again — the key alone is unique only within one plan: the issue's own `filesModified` starts as its paths but the
 executor overwrites it with what the coder reported (`dag-executor.ts`), so it cannot say which
 findings an issue held. A finding's outcome is its issue's; when an advisor split the issue, the
 sub-issues it spawned (`parentIssueId`) do not say which of them took which finding, so the
@@ -386,8 +392,8 @@ setting and no `visibleWhen`, it renders open, and when it is empty it says so i
 than disappearing, since a missing section reads exactly like a clean one. It lists, grouped by
 reason and most severe first within each group:
 
-- verified findings triage did not pick, which are written `dismissed_human` the way 08d2 writes
-  what gate 1.5 left out;
+- verified findings triage did not pick, whose rows from this scan are written `dismissed_human`
+  the way 08d2 writes what gate 1.5 left out, an earlier scan's row untouched;
 - coherence findings left with no authoritative side, so recorded and never planned;
 - findings triage could offer no remediation for (a landing branch without the scanned commit, a
   read-only folder import, a detached HEAD), with the reason triage gave;
@@ -407,7 +413,7 @@ reason and most severe first within each group:
   `scan-fix` carry `INSIGHTS_INSTRUCTION` as 07 does.
 
 Each entry's reason is derived from structural state — the triage step's output, the issue's
-`task_dag_issues` outcome, marker and `mergeStatus` reached through the `issueKey` its finding's
+`task_dag_issues` outcome, marker and `mergeStatus` reached through the plan id and `issueKey` its finding's
 `raw` records, `review_findings.disposition` and `raw` — never from a
 message column or an agent's prose, the rule `step-banners.ts` keeps for banners. The section never
 claims a finding was fixed: `fixed` stays unwritten (`review-findings.md`), and only a re-scan
@@ -893,7 +899,7 @@ former, and this module does both kinds of write.
   until the module handles it. No count is hardcoded anywhere but prose.
 - The verifier tally: 2-of-3 dismisses (inverted from `08c`), and an unreadable voter does not.
 - `scan-plan-remediation` puts two findings in one file into ONE issue, and two files into two.
-- Findings already recorded are deduped on a re-scan; a repeat run reports only what is new, and a
+- Findings already recorded are labelled still present on a re-scan, never new, and a
   coherence pair reported with its two sides swapped fingerprints identically.
 - Coherence raises a pair with both sides cited, and does NOT raise when one side states a carve-out
   naming the other.
@@ -943,7 +949,10 @@ former, and this module does both kinds of write.
 - Under a diff target: coherence raises a pair only when a side lies in the changed lines;
   `dead-code` raises a pre-existing symbol whose last caller the target removed; `comment-debt`
   raises nothing outside the changed lines and the blocks around them.
-- A scan that re-finds a recorded finding lists it as still present, neither as new nor dropped.
+- A scan that re-finds a recorded finding lists it as still present, neither as new nor dropped,
+  and writes a row of its own for it; triaging and remediating that finding writes the disposition
+  and the plan association on the new row and leaves the earlier task's row byte-for-byte
+  unchanged.
 - Triage marks a finding whose file differs between the scanned commit and the landing tip, and
   offers no remediation when the landing branch does not contain the scanned commit.
 - A diff target that deletes a function and renames a file puts both files' base-side versions in
