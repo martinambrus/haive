@@ -68,7 +68,12 @@ async function main() {
   log.info({ localHead }, 'local clone advanced');
 
   log.info('re-parse + persist bundle_items at new HEAD');
-  const parsed = await parseBundle(bundleId, db, log);
+  const parsed = await parseBundle(
+    bundleId,
+    db,
+    log,
+    process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles',
+  );
   const counts = await persistBundleItems(db, bundleId, parsed);
   log.info({ counts, ambiguous: parsed.ambiguous.length }, 'persisted bundle items');
 

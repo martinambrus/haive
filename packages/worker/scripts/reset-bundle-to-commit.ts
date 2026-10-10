@@ -33,10 +33,8 @@ import {
   type ExpandedRendering,
   type TemplateRenderContext,
 } from '../src/step-engine/template-manifest.js';
-import {
-  loadBundlesForExpansion,
-  resolveSkillTargets,
-} from '../src/step-engine/_custom-bundle-loader.js';
+import { loadBundlesForExpansion } from '../src/step-engine/_custom-bundle-loader.js';
+import { resolveSkillTargetDirs } from '../src/step-engine/steps/onboarding/_helpers.js';
 
 function runGit(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -92,7 +90,12 @@ async function main() {
   log.info({ localHead }, 'local clone reset');
 
   log.info('step 2: re-parse + persist bundle_items');
-  const parsed = await parseBundle(bundleId, db, log);
+  const parsed = await parseBundle(
+    bundleId,
+    db,
+    log,
+    process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles',
+  );
   const counts = await persistBundleItems(db, bundleId, parsed);
   log.info({ counts, ambiguous: parsed.ambiguous.length }, 'persisted bundle items');
 
@@ -120,7 +123,7 @@ async function main() {
 
   log.info('step 5: expand bundle and write artifact rows + disk files');
   const bundles = await loadBundlesForExpansion(db, bundle.repositoryId, log);
-  const skillTargets = await resolveSkillTargets(db, bundle.userId);
+  const skillTargets = await resolveSkillTargetDirs(db, bundle.userId);
   const onlyThisBundle = bundles.filter((b) => b.id === bundleId);
   const expanded: ExpandedRendering[] = expandCustomBundlesFor(
     onlyThisBundle,

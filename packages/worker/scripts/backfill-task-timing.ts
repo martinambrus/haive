@@ -76,16 +76,23 @@ function parkedMs(intervals: { start: number; end: number }[]): number {
   const sorted = intervals
     .filter((i) => Number.isFinite(i.start) && Number.isFinite(i.end) && i.end >= i.start)
     .sort((a, b) => a.start - b.start);
-  if (sorted.length < 2) return 0;
-  const merged: { start: number; end: number }[] = [sorted[0]];
+  const first = sorted[0];
+  if (!first || sorted.length < 2) return 0;
+  const merged: { start: number; end: number }[] = [first];
+  let last = first;
   for (const cur of sorted.slice(1)) {
-    const last = merged[merged.length - 1];
     if (cur.start <= last.end) last.end = Math.max(last.end, cur.end);
-    else merged.push({ ...cur });
+    else {
+      last = { ...cur };
+      merged.push(last);
+    }
   }
   let park = 0;
   for (let i = 1; i < merged.length; i += 1) {
-    const gap = merged[i].start - merged[i - 1].end;
+    const prev = merged[i - 1];
+    const next = merged[i];
+    if (!prev || !next) continue;
+    const gap = next.start - prev.end;
     if (gap > PARK_GAP_THRESHOLD_MS) park += gap;
   }
   return park;
