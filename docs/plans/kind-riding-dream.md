@@ -273,7 +273,13 @@ so this changes nothing for the other sixteen, `comment-debt` and `dead-code` in
 findings names one path, and several such findings in a file being fixed by one agent is the right
 unit anyway. All at level 0 unless a dependency is declared. Every issue names the commit its
 findings were read at, so a coder working on a newer tip knows which revision their line numbers
-describe.
+describe. Each finding's row records the `issueKey` it was planned into, in `review_findings.raw`,
+written here once and never again: the issue's own `filesModified` starts as its paths but the
+executor overwrites it with what the coder reported (`dag-executor.ts`), so it cannot say which
+findings an issue held. A finding's outcome is its issue's; when an advisor split the issue, the
+sub-issues it spawned (`parentIssueId`) do not say which of them took which finding, so the
+finding counts as merged only when every sub-issue merged and otherwise takes the worst outcome
+among them.
 
 One cheap post-check falls out of that: when every finding in an issue is `comment-debt`, the
 remediation diff must touch **comment lines only** — a mechanical assertion no other dimension can
@@ -337,7 +343,11 @@ never reach this step. The seed therefore guards two spans of its run list (see 
 `00a-sync-base` through `scan-remediate` run only when `scan-plan-remediation` wrote at least one
 issue, and `scan-fix` plus the tail only when at least one issue merged. A guarded-out step is
 recorded `skipped`, never `done`, so no skipped review reads as an approval, and the commit gate is
-skipped with them, so nothing is committed.
+skipped with them, so nothing is committed. `12-worktree-cleanup` stays outside the second span and
+under the first: once `01-worktree-setup` has made the integration worktree, completion removes it
+only for a cancelled or `run_app` task (`cleanupTaskResources`, `task-queue.ts`), so a scan where
+nothing merged must still run the cleanup or leave a worktree and branch behind on every such run.
+With nothing merged its branch holds no commit of its own, so the cleanup merges nothing.
 
 **Every report carries a `Found, not fixed` section, and nothing turns it off.** A workflow task
 surfaces what it left behind only at review time: an agent MAY add a `## INSIGHTS` block
@@ -368,7 +378,8 @@ reason and most severe first within each group:
   `scan-fix` carry `INSIGHTS_INSTRUCTION` as 07 does.
 
 Each entry's reason is derived from structural state — the triage step's output, the issue's
-`task_dag_issues` outcome and marker, `review_findings.disposition` and `raw` — never from a
+`task_dag_issues` outcome, marker and `mergeStatus` reached through the `issueKey` its finding's
+`raw` records, `review_findings.disposition` and `raw` — never from a
 message column or an agent's prose, the rule `step-banners.ts` keeps for banners. The section never
 claims a finding was fixed: `fixed` stays unwritten (`review-findings.md`), and only a re-scan
 that no longer raises a finding is evidence of a fix. What the scan never looked at — a REFUSED dimension, a per-file cap's truncation, an
@@ -953,7 +964,11 @@ former, and this module does both kinds of write.
   status message on a step changes no entry's reason.
 - A triage that picks nothing, and a remediation whose every issue fails, each reach `scan-report`
   with the guarded steps recorded `skipped`: no reviewer runs `assertReviewableChange` on an empty
-  change set, and nothing is committed.
+  change set, and nothing is committed. Where an issue was planned, `12-worktree-cleanup` still
+  runs and the integration worktree and its branch are gone afterwards.
+- An issue holding two findings whose coder reports a different file set still classifies both
+  findings by that issue's outcome, and a finding whose issue an advisor split is merged only when
+  every sub-issue merged, otherwise taking the worst sub-issue outcome.
 
 **Core (in the worker suite, shipped with the core changes):**
 - The fan-out barrier fails the step on a rate-limit, auth or server-error row and degrades on a
