@@ -115,15 +115,21 @@ export function classifyDrift(
     return { kind: 'none', migrateTarget: null, unsupportedReason: null };
   }
   const targetBlock = yamlDatabase(target.dbType, target.dbVersion);
-  const baseBlock = yamlDatabase(baseline.dbType, baseline.dbVersion);
+  const baseType = baseline.dbType ? yamlScalar(baseline.dbType) : null;
+  const baseVersion = baseline.dbVersion ? yamlScalar(baseline.dbVersion) : null;
   const targetDb = targetBlock ? `${targetBlock.type}:${targetBlock.version}` : null;
-  const baseDb = baseBlock ? `${baseBlock.type}:${baseBlock.version}` : null;
+  const baseDb =
+    baseType || baseVersion ? `${baseType ?? '(default)'}:${baseVersion ?? '(default)'}` : null;
 
-  // Half a recorded database cannot say what it was, so only the hash decides.
-  const baseHalfRecorded = !baseline.dbType !== !baseline.dbVersion;
+  // A half-recorded baseline compares only the field it recorded; none recorded is always a change.
+  const dbChanged =
+    targetBlock !== null &&
+    ((!baseType && !baseVersion) ||
+      (baseType !== null && baseType !== targetBlock.type) ||
+      (baseVersion !== null && baseVersion !== targetBlock.version));
 
-  if (targetBlock && !baseHalfRecorded && targetDb !== baseDb) {
-    if (targetBlock.type === 'postgres' || baseBlock?.type === 'postgres') {
+  if (targetBlock && dbChanged) {
+    if (targetBlock.type === 'postgres' || baseType === 'postgres') {
       return {
         kind: 'unsupported',
         migrateTarget: null,

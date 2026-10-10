@@ -141,6 +141,35 @@ describe('classifyDrift', () => {
     }
   });
 
+  it('a half-recorded baseline compares only the field it recorded', () => {
+    const typeOnly = { dbType: 'mariadb', dbVersion: null };
+    const versionOnly = { dbType: null, dbVersion: '10.11' };
+    const pg = classifyDrift(
+      baseline(typeOnly),
+      target({ dbType: 'postgres', dbVersion: '16' }),
+      HASH_B,
+    );
+    expect(pg.kind).toBe('unsupported');
+    expect(pg.unsupportedReason).toContain('PostgreSQL');
+    const my = classifyDrift(
+      baseline(typeOnly),
+      target({ dbType: 'mysql', dbVersion: '8.0' }),
+      HASH_B,
+    );
+    expect(my.kind).toBe('db-migrate');
+    expect(my.migrateTarget).toBe('mysql:8.0');
+    const same = target({ dbType: 'mariadb', dbVersion: '10.11' });
+    expect(classifyDrift(baseline(typeOnly), same, HASH_B).kind).toBe('restart');
+    expect(classifyDrift(baseline(versionOnly), same, HASH_B).kind).toBe('restart');
+    const bumped = classifyDrift(
+      baseline(versionOnly),
+      target({ dbType: 'mariadb', dbVersion: '11.4' }),
+      HASH_B,
+    );
+    expect(bumped.kind).toBe('db-migrate');
+    expect(bumped.migrateTarget).toBe('mariadb:11.4');
+  });
+
   it('refuses a version whose quoted text holds " #" rather than migrating to the text before it', () => {
     const r = classifyDrift(baseline(), target({ dbVersion: "'10.11 # lts'" }), HASH_B);
     expect(r.kind).toBe('unsupported');
