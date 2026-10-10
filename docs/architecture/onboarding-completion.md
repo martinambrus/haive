@@ -64,7 +64,9 @@ upgrade could start on a reset repository, so its rows prove nothing. The banner
 an upgrade on a repository with no reset and any earlier upgrade task, which POST /tasks then
 refuses. A rollback is gated alike
 because it puts back files a reset removed. Each refusal has its own 409 text
-(`upgradeRefusalMessage`).
+(`upgradeRefusalMessage`). An onboarding and an upgrade or rollback of one repository are created
+under one lock (`withRepositoryTaskLock`), each refusing the other inside it, so two requests at the
+same moment cannot both start.
 
 **A clone is admitted by its render context column.** A repository cloned from another install's
 onboarded commit has neither a completed onboarding task nor an artifact row, only the column the
