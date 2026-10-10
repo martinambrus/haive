@@ -39,6 +39,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
   LIVE_TASK_STATUSES,
+  liveOnboardingTaskId,
   renderContextAdmitsUpgrade,
   upgradeAdmission,
   upgradeRefusalMessage,
@@ -668,19 +669,40 @@ export async function refuseBesideLiveUpgrade(
   }
 }
 
-/** Insert an upgrade or a rollback task only while no other one of the repository is live, since two
- *  running side by side apply and revert the same files. Serialised per repository, so two clicks
- *  cannot both pass the check. */
-export async function insertUpgradeTask<T>(
+/** Run `work` in a transaction holding the repository's onboarding and upgrade lock, so the checks
+ *  it makes and the insert it ends with cannot interleave with another creator's. */
+export async function withRepositoryTaskLock<T>(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
-  insert: (tx: DbTx) => Promise<T>,
+  work: (tx: DbTx) => Promise<T>,
 ): Promise<T> {
   return db.transaction(async (tx) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
     );
+    return work(tx);
+  });
+}
+
+/** Insert an upgrade or a rollback task only while no other one of the repository is live and no
+ *  onboarding runs, since two running side by side apply and revert the same files. Serialised per
+ *  repository with onboarding's creation, so two clicks cannot both pass the check. */
+export async function insertUpgradeTask<T>(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  repositoryId: string,
+  action: 'upgraded' | 'rolled back',
+  insert: (tx: DbTx) => Promise<T>,
+): Promise<T> {
+  return withRepositoryTaskLock(db, repositoryId, async (tx) => {
     await refuseBesideLiveUpgrade(tx, repositoryId);
+    const taskId = await liveOnboardingTaskId(tx, userId, repositoryId);
+    if (taskId) {
+      throw new HttpError(
+        409,
+        upgradeRefusalMessage({ admitted: false, reason: 'live-onboarding', taskId }, action),
+      );
+    }
     return insert(tx);
   });
 }
@@ -741,30 +763,36 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
     throw new HttpError(409, upgradeRefusalMessage(admission, 'rolled back'));
   }
 
-  const { task, queued } = await insertUpgradeTask(db, repositoryId, async (tx) => {
-    const priorUpgrade = await latestUpgradeToRollBack(tx, repositoryId);
-    if (!priorUpgrade) {
-      throw new HttpError(
-        409,
-        'No completed upgrade to roll back: none has completed, or the last one was rolled back',
-      );
-    }
-    const [row] = await tx
-      .insert(schema.tasks)
-      .values({
-        userId,
-        type: 'onboarding_upgrade',
-        title: `Rollback upgrade: ${repo.name}`,
-        description: 'Revert the most recent onboarding upgrade for this repository.',
-        repositoryId,
-        metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade },
-        status: 'created',
-      })
-      .returning();
-    if (!row) throw new HttpError(500, 'Failed to create rollback task');
-    // Queued with the insert: a `created` rollback left behind would block the next one.
-    return { task: row, queued: await markQueuedForStart(tx, row.id) };
-  });
+  const { task, queued } = await insertUpgradeTask(
+    db,
+    userId,
+    repositoryId,
+    'rolled back',
+    async (tx) => {
+      const priorUpgrade = await latestUpgradeToRollBack(tx, repositoryId);
+      if (!priorUpgrade) {
+        throw new HttpError(
+          409,
+          'No completed upgrade to roll back: none has completed, or the last one was rolled back',
+        );
+      }
+      const [row] = await tx
+        .insert(schema.tasks)
+        .values({
+          userId,
+          type: 'onboarding_upgrade',
+          title: `Rollback upgrade: ${repo.name}`,
+          description: 'Revert the most recent onboarding upgrade for this repository.',
+          repositoryId,
+          metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade },
+          status: 'created',
+        })
+        .returning();
+      if (!row) throw new HttpError(500, 'Failed to create rollback task');
+      // Queued with the insert: a `created` rollback left behind would block the next one.
+      return { task: row, queued: await markQueuedForStart(tx, row.id) };
+    },
+  );
 
   if (queued) await enqueueStart(task.id, userId);
 

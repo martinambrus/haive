@@ -260,3 +260,48 @@ describe('starting an upgrade', () => {
     expect(t.upgradeTasks()).toHaveLength(1);
   });
 });
+
+const startOnboarding = () =>
+  app.request('/tasks', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'onboarding', title: 'Onboarding', repositoryId: REPO }),
+  });
+
+describe('an onboarding and an upgrade or rollback of one repository', () => {
+  const liveKinds = (fake: ReturnType<typeof repoWith>['fake']) =>
+    fake
+      .rows(schema.tasks)
+      .filter((r) => r.type !== 'onboarding' || r.title === 'Onboarding')
+      .filter((r) => r.status === 'created' || r.status === 'queued')
+      .map((r) => r.type);
+
+  it('are not both created when started at the same moment', async () => {
+    const t = repoWith([]);
+    const statuses = (await Promise.all([startOnboarding(), startUpgrade()]))
+      .map((r) => r.status)
+      .sort();
+    expect(statuses).toEqual([201, 409]);
+    expect(liveKinds(t.fake)).toHaveLength(1);
+  });
+
+  it('are not both created when an onboarding and a rollback start at the same moment', async () => {
+    const t = repoWith([{ status: 'completed', completedAt: 1 }]);
+    const statuses = (await Promise.all([startOnboarding(), rollBack()]))
+      .map((r) => r.status)
+      .sort();
+    expect(statuses).toEqual([201, 409]);
+    expect(liveKinds(t.fake)).toHaveLength(1);
+  });
+
+  it('refuses an onboarding while an upgrade or a rollback is live', async () => {
+    const t = repoWith([
+      { status: 'completed', completedAt: 1 },
+      { mode: 'rollback', status: 'running' },
+    ]);
+    const res = await startOnboarding();
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain(t.ids[1]);
+    expect(liveKinds(t.fake)).toEqual([]);
+  });
+});

@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray, isNull, max } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import { CLI_PROVIDER_LIST } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -126,7 +126,7 @@ export const NO_ONBOARDING_TASKS: OnboardingTaskFacts = {
  * the SQL also verifies source and reset state. Other callers need only onboarding history.
  */
 export async function loadOnboardingTaskFacts(
-  db: Database,
+  db: Database | DbTx,
   userId: string,
   repositoryIds: string[],
   blankRepositoryIds: string[] = [],
@@ -399,6 +399,16 @@ export async function renderContextAdmitsUpgrade(
     onboardingResetAt: repo.onboardingResetAt,
     facts,
   }).onboarded;
+}
+
+/** The newest live onboarding task of the repository, or null. */
+export async function liveOnboardingTaskId(
+  db: Database | DbTx,
+  userId: string,
+  repositoryId: string,
+): Promise<string | null> {
+  const facts = (await loadOnboardingTaskFacts(db, userId, [repositoryId])).get(repositoryId);
+  return facts?.liveTaskId ?? null;
 }
 
 export type UpgradeAdmission =

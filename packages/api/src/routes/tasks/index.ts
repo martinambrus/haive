@@ -56,8 +56,7 @@ import {
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
 import {
-  loadOnboardingTaskFacts,
-  NO_ONBOARDING_TASKS,
+  liveOnboardingTaskId,
   upgradeAdmission,
   upgradeRefusalMessage,
 } from '../../lib/onboarding-state.js';
@@ -95,7 +94,7 @@ import {
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
 import { retryTaskAtStep, stepRoutes } from './steps.js';
-import { insertUpgradeTask } from '../upgrades.js';
+import { insertUpgradeTask, refuseBesideLiveUpgrade, withRepositoryTaskLock } from '../upgrades.js';
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 
@@ -433,21 +432,6 @@ taskRoutes.post('/', async (c) => {
     if (!repo) throw new HttpError(404, 'Repository not found');
   }
 
-  // Two onboarding runs on one repository write the same `.claude/` files, the same KB and
-  // the same scope list, so the second is a corruption path rather than a queue. Refused
-  // here only — a workflow or run_app task on a repo mid-onboarding stays the caller's call.
-  if (body.type === 'onboarding' && body.repositoryId) {
-    const facts =
-      (await loadOnboardingTaskFacts(db, userId, [body.repositoryId])).get(body.repositoryId) ??
-      NO_ONBOARDING_TASKS;
-    if (facts.liveTaskId) {
-      throw new HttpError(
-        409,
-        `Onboarding is already running for this repository (task ${facts.liveTaskId})`,
-      );
-    }
-  }
-
   if (body.type === 'onboarding_upgrade') {
     if (!body.repositoryId) {
       throw new HttpError(400, 'onboarding_upgrade tasks require a repositoryId');
@@ -711,10 +695,33 @@ taskRoutes.post('/', async (c) => {
   let task: typeof schema.tasks.$inferSelect;
   let queued: typeof schema.tasks.$inferSelect | undefined;
   if (body.type === 'onboarding_upgrade') {
-    ({ task, queued } = await insertUpgradeTask(db, body.repositoryId!, async (tx) => {
-      const row = firstRow(await insertTask(tx));
-      return { task: row, queued: await settle(tx, row) };
-    }));
+    ({ task, queued } = await insertUpgradeTask(
+      db,
+      userId,
+      body.repositoryId!,
+      'upgraded',
+      async (tx) => {
+        const row = firstRow(await insertTask(tx));
+        return { task: row, queued: await settle(tx, row) };
+      },
+    ));
+  } else if (body.type === 'onboarding' && body.repositoryId) {
+    // Two onboarding runs on one repository write the same `.claude/` files, the same KB and
+    // the same scope list, and an upgrade beside one rewrites them, so the check shares the
+    // upgrade's lock. A workflow or run_app task on a repo mid-onboarding stays the caller's call.
+    const repositoryId = body.repositoryId;
+    task = await withRepositoryTaskLock(db, repositoryId, async (tx) => {
+      const liveId = await liveOnboardingTaskId(tx, userId, repositoryId);
+      if (liveId) {
+        throw new HttpError(
+          409,
+          `Onboarding is already running for this repository (task ${liveId})`,
+        );
+      }
+      await refuseBesideLiveUpgrade(tx, repositoryId);
+      return firstRow(await insertTask(tx));
+    });
+    queued = await settle(db, task);
   } else {
     task = await db.transaction(async (tx) => {
       const row = firstRow(await insertTask(tx));
