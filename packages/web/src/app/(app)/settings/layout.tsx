@@ -9,6 +9,7 @@ const SETTINGS_TABS = [
   { label: 'Git Credentials', href: '/settings/credentials' },
   { label: 'Git Identity', href: '/settings/git-identity' },
   { label: 'Global KB', href: '/settings/global-kb' },
+  { label: 'RAG Playground', href: '/settings/rag-playground' },
   { label: 'Integrations', href: '/settings/integrations' },
   { label: 'Notifications', href: '/settings/notifications' },
 ];

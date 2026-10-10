@@ -133,6 +133,7 @@ interface SelectQuery extends PromiseLike<FakeRow[]> {
   where(cond: unknown): SelectQuery;
   orderBy(...orders: unknown[]): SelectQuery;
   limit(n: number): SelectQuery;
+  offset(n: number): SelectQuery;
   /** A row lock, taken as a no-op: with no isolation there is nothing to lock against. */
   for(strength: string, config?: unknown): SelectQuery;
 }
@@ -305,7 +306,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
 
   function select(table: PgTable, opts: Record<string, unknown> = {}): FakeRow[] {
     for (const k of Object.keys(opts)) {
-      if (!['where', 'orderBy', 'columns', 'limit'].includes(k)) {
+      if (!['where', 'orderBy', 'columns', 'limit', 'offset'].includes(k)) {
         throw new Error(`fake db: unsupported option "${k}"`);
       }
     }
@@ -315,6 +316,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     for (const order of [opts.orderBy].flat().reverse()) {
       if (order !== undefined) rows = sortBy(table, rows, order);
     }
+    if (typeof opts.offset === 'number') rows = rows.slice(opts.offset);
     if (typeof opts.limit === 'number') rows = rows.slice(0, opts.limit);
     const kept =
       opts.columns === undefined
@@ -334,6 +336,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       where: (cond) => ((opts.where = cond), query),
       orderBy: (...orders) => ((opts.orderBy = orders), query),
       limit: (n) => ((opts.limit = n), query),
+      offset: (n) => ((opts.offset = n), query),
       for: () => query,
       then: (ok, bad) => Promise.resolve().then(run).then(ok, bad),
     };

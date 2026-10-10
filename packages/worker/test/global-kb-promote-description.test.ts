@@ -54,6 +54,7 @@ function setupLinkable(rows: Array<Record<string, unknown>>) {
     where: (cond) => unordered(query.where(cond)),
     orderBy: () => unordered(query),
     limit: (n) => unordered(query.limit(n)),
+    offset: (n) => unordered(query.offset(n)),
     for: () => unordered(query),
     then: (ok, bad) => query.then(ok, bad),
   });

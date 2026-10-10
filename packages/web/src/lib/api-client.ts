@@ -1136,6 +1136,14 @@ export interface RagQueryEntry {
   maxRrf: number;
   maxDense: number;
   createdAt: string;
+  usageAssessment?: RagUsageAssessment | null;
+}
+
+export interface RagUsageAssessment {
+  status: 'used' | 'unused' | 'unknown';
+  reason: string;
+  evidence: Array<{ invocationId: string; quote: string }>;
+  assessedAt: string;
 }
 
 // Local mirrors of GET /tasks/:id/tool-usage (packages/api/src/routes/tasks/steps.ts), which

@@ -1,3 +1,5 @@
+import { formatRagHits } from '@haive/shared/rag';
+
 /** Container path where the haive-rag MCP server file is bind-mounted, and the
  *  source of that file. The server is a dependency-free Node ESM script that
  *  speaks MCP over stdio (newline-delimited JSON-RPC) and proxies the single
@@ -29,6 +31,8 @@ function result(id, res) {
 function error(id, code, message) {
   send({ jsonrpc: '2.0', id, error: { code, message } });
 }
+
+${formatRagHits.toString()}
 
 const TOOL = {
   name: 'rag_search',
@@ -72,17 +76,7 @@ async function ragSearch(args) {
   if (hits.length === 0) {
     return { isError: false, text: 'No RAG hits — ground directly with ' + GROUNDING_TOOLS + '.' };
   }
-  const lines = hits.map((h, i) => {
-    const scope = h.scope === 'global' ? '[global] ' : h.scope === 'local' ? '[local] ' : '';
-    const loc = scope + h.sourcePath + (h.sectionId ? ' #' + h.sectionId : '');
-    const score = typeof h.rrf === 'number' ? h.rrf.toFixed(4) : '?';
-    return (
-      '### ' + (i + 1) + '. ' + loc + '  (rrf=' + score + ', dense=' +
-      (typeof h.denseSim === 'number' ? h.denseSim.toFixed(3) : '?') + ')\n' +
-      (h.content || '')
-    );
-  });
-  return { isError: false, text: lines.join('\n\n---\n\n') };
+  return { isError: false, text: formatRagHits(hits) };
 }
 
 async function handle(msg) {

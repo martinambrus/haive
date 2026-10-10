@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { ragUsageStyle } from '@/lib/rag-usage';
 import { useParams } from 'next/navigation';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
@@ -4250,7 +4251,7 @@ function StepCardImpl({
         </button>
       )}
       {ranAgent && showRagStats && (
-        <RagStatsPanel taskId={taskId} stepId={step.stepId} live={!step.endedAt} />
+        <RagStatsPanel taskId={taskId} stepId={step.stepId} live={!taskEnded} />
       )}
 
       {step.cliInvocationCount > 0 && (
@@ -4373,10 +4374,9 @@ function RagStatsPanel({
           if (!cancelled) setError((e as Error).message ?? 'Failed to load RAG stats');
         });
     void load();
-    // Only a running step can gain queries: the endpoint bounds its window at
-    // `endedAt ?? now`, so once the step has ended its result set is frozen and a
-    // poll could never return anything new. `live` flips to false when the step
-    // finishes, which clears the interval on the spot.
+    // Query counts freeze when the step ends, but usage assessments arrive at
+    // finalization. Poll while the task is live; its completion triggers one
+    // final fetch through this effect's dependency on `live`.
     if (!live) {
       return () => {
         cancelled = true;
@@ -4428,6 +4428,7 @@ function RagStatsPanel({
           <thead className="sticky top-0 bg-neutral-900 text-neutral-400">
             <tr>
               <th className="px-2 py-1 font-medium">Query</th>
+              <th className="px-2 py-1 font-medium">Usage</th>
               <th className="px-2 py-1 text-right font-medium">hits</th>
               <th className="px-2 py-1 text-right font-medium">kb</th>
               <th className="px-2 py-1 text-right font-medium">code</th>
@@ -4439,8 +4440,22 @@ function RagStatsPanel({
           </thead>
           <tbody className="text-neutral-300">
             {queries.map((q) => (
-              <tr key={q.id} className="border-t border-neutral-800 align-top">
-                <td className="px-2 py-1 font-mono">{q.query}</td>
+              <tr
+                key={q.id}
+                className={`border-t border-neutral-800 align-top ${ragUsageStyle(q.usageAssessment).className}`}
+              >
+                <td className="px-2 py-1 font-mono">
+                  <Link
+                    href={`/settings/rag-playground?queryId=${q.id}`}
+                    className="text-indigo-300 hover:underline"
+                    title="Inspect results and rerun in RAG Playground"
+                  >
+                    {q.query}
+                  </Link>
+                </td>
+                <td className="px-2 py-1" title={ragUsageStyle(q.usageAssessment).title}>
+                  {ragUsageStyle(q.usageAssessment).label}
+                </td>
                 <td className="px-2 py-1 text-right">{q.hitCount}</td>
                 <td className="px-2 py-1 text-right text-indigo-300">{q.kbHits}</td>
                 <td className="px-2 py-1 text-right text-emerald-300">{q.codeHits}</td>
@@ -4460,6 +4475,11 @@ function RagStatsPanel({
         <span className="text-emerald-300">{codePct}% code</span> /{' '}
         <span className="text-amber-300">{runbookPct}% runbook</span> /{' '}
         <span className="text-sky-300">{learningPct}% learning</span>
+      </p>
+      <p className="text-[11px] leading-relaxed text-neutral-500">
+        Finalization reviews usage: green means evidence of use, amber means no results or an
+        explicit rejection, and neutral means unclear or not assessed. Open a query to inspect its
+        results and review evidence.
       </p>
       <p className="text-[11px] leading-relaxed text-neutral-500">
         RAG is a discovery tool: these counts measure pointers surfaced, not work done. The agent

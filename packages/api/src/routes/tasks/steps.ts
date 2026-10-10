@@ -489,6 +489,7 @@ stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
       id: schema.ragQueryLog.id,
       query: schema.ragQueryLog.query,
       topK: schema.ragQueryLog.topK,
+      usageAssessment: schema.ragQueryLog.usageAssessment,
       hitCount: schema.ragQueryLog.hitCount,
       kbHits: schema.ragQueryLog.kbHits,
       codeHits: schema.ragQueryLog.codeHits,

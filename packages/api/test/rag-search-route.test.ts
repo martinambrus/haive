@@ -10,6 +10,7 @@ type Hit = { sourcePath: string; rrf: number; sourceType: string };
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  recorded: [] as unknown[],
   localEmbed: {} as Embed,
   globalEmbed: {} as Embed,
   localHits: [] as Hit[],
@@ -79,7 +80,7 @@ import { Hono } from 'hono';
 import { CONFIG_KEYS, configService, secretsService } from '@haive/shared';
 import type { GlobalKbContext } from '@haive/shared/global-kb';
 import { signRagToken } from '@haive/shared/rag';
-import { ragRoutes } from '../src/routes/rag.js';
+import { ragRoutes, executeRagSearch } from '../src/routes/rag.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -125,6 +126,7 @@ async function search(): Promise<{ status: number; paths: string[] }> {
 
 beforeEach(() => {
   vi.stubEnv('CONFIG_ENCRYPTION_KEY', SECRET);
+  h.recorded = [];
   h.db = {
     query: {
       tasks: {
@@ -134,7 +136,11 @@ beforeEach(() => {
         findFirst: async () => ({ ragEmbedLexicalOnly: false, ragEmbedDegradedAt: null }),
       },
     },
-    insert: () => ({ values: async () => {} }),
+    insert: () => ({
+      values: async (row: unknown) => {
+        h.recorded.push(row);
+      },
+    }),
   };
   h.localEmbed = { vector: Array(DIMS).fill(0.1) };
   h.globalEmbed = { vector: Array(DIMS).fill(0.2) };
@@ -538,4 +544,22 @@ describe('rag_search, the local store', () => {
     expect(store.seen.queries).toBeGreaterThan(0);
     expect(elapsed).toBeLessThan(DEADLINE_MS);
   }, 20_000);
+});
+
+describe('RAG result snapshots', () => {
+  it('captures the final expanded response of an agent call', async () => {
+    await search();
+    expect(h.recorded).toHaveLength(1);
+    expect(h.recorded[0]).toMatchObject({
+      taskId: 'task-1',
+      resultHits: [
+        expect.objectContaining({ sourcePath: 'src/session.ts', scope: 'local' }),
+        expect.objectContaining({ sourcePath: 'global_kb/cookies-11111111.md', scope: 'global' }),
+      ],
+    });
+  });
+  it('leaves telemetry untouched when the playground uses the retrieval function', async () => {
+    await executeRagSearch('task-1', 'session cookies', 5);
+    expect(h.recorded).toEqual([]);
+  });
 });
