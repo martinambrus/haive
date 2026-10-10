@@ -66,7 +66,9 @@ refuses. A rollback is gated alike
 because it puts back files a reset removed. Each refusal has its own 409 text
 (`upgradeRefusalMessage`). An onboarding and an upgrade or rollback of one repository are created
 under one lock (`withRepositoryTaskLock`), each refusing the other inside it, so two requests at the
-same moment cannot both start.
+same moment cannot both start. The lock also takes the repository row and refuses while a reset holds
+the root claim ([Onboarding reset](onboarding-reset.md)), and an upgrade or rollback re-runs
+`upgradeAdmission` inside it, so a reset epoch stamped after the early check still refuses.
 
 **A clone is admitted by its render context column.** A repository cloned from another install's
 onboarded commit has neither a completed onboarding task nor an artifact row, only the column the
