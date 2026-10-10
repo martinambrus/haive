@@ -528,7 +528,7 @@ export async function collectChangedLineMap(
   if (scan.error !== null) return null;
   const baseBranch = await taskBaseBranch(ctx);
   const diff = await readChangeDiff(worktreePath, baseBranch);
-  const named = await readChangedPaths(worktreePath, baseBranch);
+  const named = await readChangedPaths(worktreePath, baseBranch, { forkPointOnly: true });
   // Without the list a binary or mode-only change is absent, and absent reads as untouched.
   if (named === null) return null;
   const diffed = diff === null ? new Map<string, DiffFile>() : parseDiffHunks(diff);
@@ -547,6 +547,12 @@ export async function collectChangedLineMap(
   }
   return map.size > 0 ? map : null;
 }
+
+/** The sentence a pass after a fix opens with when the fixer's re-read of the change failed. */
+export const CHANGE_UNREAD_AFTER_FIX_LEAD = [
+  'The change could not be re-read after the last fix, so files that fix created or changed may be',
+  'missing from any list above.',
+].join('\n');
 
 const SCAN_FAILED_NOTICE = [
   'COVERAGE: the change could not be read in full, so the list above may be missing files of it.',
@@ -675,7 +681,21 @@ export function assertReviewableChange(stepId: string, value: MaybeFileSet): voi
 /** Documentation file extensions. A change confined to these touches no executable
  *  code, which is what lets a reviewer swap its code dimensions for documentation
  *  ones (07b-phase-4-validate). */
-const DOC_EXTENSIONS = ['.md', '.mdx', '.rst', '.adoc', '.txt'];
+const DOC_EXTENSIONS = ['.md', '.mdx', '.rst', '.adoc'];
+
+/** A `.txt` is prose only by name or location: CMakeLists.txt and requirements.txt are code. */
+const PROSE_TXT_NAME = /^(readme|changelog|license|notice|authors|contributing)\.txt$/;
+
+function isDocumentationPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  if (DOC_EXTENSIONS.some((ext) => lower.endsWith(ext))) return true;
+  if (!lower.endsWith('.txt')) return false;
+  const parts = lower.split('/');
+  return (
+    PROSE_TXT_NAME.test(parts[parts.length - 1]!) ||
+    parts.slice(0, -1).some((d) => d === 'docs' || d === 'doc')
+  );
+}
 
 /**
  * Whether this change set is documentation only.
@@ -694,8 +714,5 @@ export function isDocsOnlyChange(value: MaybeFileSet): boolean {
   const set = asFileSet(value);
   if (!set || set.truncated || set.scanError) return false;
   if (set.files.length === 0) return false;
-  return set.files.every((f) => {
-    const lower = f.toLowerCase();
-    return DOC_EXTENSIONS.some((ext) => lower.endsWith(ext));
-  });
+  return set.files.every(isDocumentationPath);
 }

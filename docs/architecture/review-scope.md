@@ -43,14 +43,18 @@ file over the worktree's `.git` for every cli-exec invocation, so inside the san
 no `git status` and no `git diff`, and everything an agent knows about the change has to
 arrive in its prompt.
 
-A read that fails is never "no change". The committed half is read only against a real fork point:
-a base branch that is unrecorded or gone, or a `merge-base` that fails or outlives its bound, would
+A read that fails is never "no change". The committed half is read only against a real fork point: a
+base branch that is unrecorded or gone, or a `merge-base` that fails or outlives its bound, would
 otherwise diff against HEAD and, on a DAG task's clean tree, list nothing. Such a read, like a
 failed `git status`, sets the set's `scanError`: every reviewer's list then carries a COVERAGE
 paragraph saying it may miss files, the stored coverage carries `scanFailed`, and gate 2's
 validation, review, audit and QA rows read PARTIAL (the validation row says whether it happened
-before any fix or after one). Two other readers keep the HEAD fallback for now: the lint scope's
-`collectChangedLineMap` and the house-rules change read.
+before any fix or after one). The lint scope's `collectChangedLineMap` reads the same way and, when
+it cannot, runs lint unscoped with its note; the house-rules change read (`readChangedFiles`) does
+too when a base branch is recorded, so a gone base reads as unread rather than as the dirty files
+alone (with no base recorded, the dirty files are a single agent's whole change). `.txt` counts as
+documentation only for prose names (README, CHANGELOG, LICENSE, NOTICE, AUTHORS, CONTRIBUTING) and
+under `docs/` or `doc/`; `requirements.txt` and `CMakeLists.txt` are code.
 
 A pass after a fix is given the change as it stands, not as detect saw it: the 07b and 08a fix
 passes re-collect it and carry the list on their output, so the next validator or re-tester lists
@@ -62,10 +66,10 @@ nobody can tell whether the fixer added code. Gate 2's Implementation validation
 coverage the way the review rows read theirs, and holds Approve when 07b was given a capped list or
 when the change could not be re-read after a fix (`changedFilesCoverage.scanFailed`): then nobody
 knows whether the fix added files, and the House rules row is PARTIAL for the same reason (it says
-only that the change could not be fully read, since its data does not say when).
-The 07b re-validator and 08a's re-tester are each told so in their prompt, beside detect's list.
-08a's verdict is behavioural, so re-testing the failures exercises the fix whatever a list names,
-and 08c re-collects the change at its own detect, so gate 2's Browser testing row takes no mark.
+only that the change could not be fully read, since its data does not say when). The 07b
+re-validator and 08a's re-tester are each told so in their prompt, beside detect's list. 08a's
+verdict is behavioural, so re-testing the failures exercises the fix whatever a list names, and 08c
+re-collects the change at its own detect, so gate 2's Browser testing row takes no mark.
 
 Each path carries the LINES this change wrote (`lines 12-18, 45`, `new file`, `deleted`,
 `no line changes (mode or rename only)`). Measured against the MERGE-BASE with the task's base

@@ -40,6 +40,8 @@ export interface GateHouseRules {
   violations: { shortId: string; title: string; file: string; description: string }[];
   conflicts: RuleConflict[];
   changedFilesCoverage?: ChangedFilesCoverage;
+  /** The check had a rule in play: an entry, or a files rule that matched nothing in the change it read. */
+  inPlay?: true;
   /** The change moved after the last check, which had a rule in play. */
   modifiedAfterCheck?: boolean;
 }
@@ -208,14 +210,17 @@ const checkWith = (
   rules: GateHouseRules,
   stamp: HouseRulesStamp,
   output: Record<string, unknown>,
-): Check => ({
-  rules,
-  fingerprint:
-    typeof output.changeFingerprint === 'string' && output.changeFingerprint !== ''
-      ? output.changeFingerprint
-      : null,
-  inPlay: stamp.entries.length > 0 || (stamp.filesRulesUnmatched ?? 0) > 0,
-});
+): Check => {
+  const inPlay = stamp.entries.length > 0 || (stamp.filesRulesUnmatched ?? 0) > 0;
+  return {
+    rules: inPlay ? { ...rules, inPlay } : rules,
+    fingerprint:
+      typeof output.changeFingerprint === 'string' && output.changeFingerprint !== ''
+        ? output.changeFingerprint
+        : null,
+    inPlay,
+  };
+};
 
 async function validationCheck(db: Database, taskId: string): Promise<Check | null> {
   const validation = await loadPreviousStepOutput(db, taskId, '07b-phase-4-validate');
@@ -277,7 +282,12 @@ export async function loadGateHouseRules(
       : mergeChecks(validation.rules, review.rules);
   if (currentFingerprint === undefined || last.fingerprint === null || !last.inPlay) return rules;
   const now = await currentFingerprint();
-  return now === null || now === last.fingerprint ? rules : { ...rules, modifiedAfterCheck: true };
+  if (now === null) {
+    // Unread now (a read failed or the base is gone): whether the change moved is unknown, not "no".
+    const coverage = rules.changedFilesCoverage ?? { listed: 0, total: 0 };
+    return { ...rules, changedFilesCoverage: { ...coverage, scanFailed: true } };
+  }
+  return now === last.fingerprint ? rules : { ...rules, modifiedAfterCheck: true };
 }
 
 function mergeChecks(validation: GateHouseRules, review: GateHouseRules): GateHouseRules {
@@ -317,17 +327,20 @@ const CASES: Record<
   enforced: { status: 'pass', label: 'ENFORCED', holdsApprove: false },
 };
 
-/** A check's list, when rules were given to it and it did not list every changed file. */
+const ruleInPlay = (data: GateHouseRules): boolean =>
+  data.inPlay === true || data.entries.length > 0;
+
+/** A check's list, when a rule was in play for it and it did not list every changed file. */
 function cappedList(data: GateHouseRules): ChangedFilesCoverage | null {
   const coverage = data.changedFilesCoverage;
-  return data.entries.length > 0 && coverage !== undefined && coverage.listed < coverage.total
+  return ruleInPlay(data) && coverage !== undefined && coverage.listed < coverage.total
     ? coverage
     : null;
 }
 
-/** A check given rules whose list may lack part of the change: a read of it failed. */
+/** A check with a rule in play whose list may lack part of the change: a read of it failed. */
 const unreadChange = (data: GateHouseRules): boolean =>
-  data.entries.length > 0 && data.changedFilesCoverage?.scanFailed === true;
+  ruleInPlay(data) && data.changedFilesCoverage?.scanFailed === true;
 
 function caseOf(data: GateHouseRules): HouseCase | null {
   if (data.conflicts.length > 0) return 'conflict';

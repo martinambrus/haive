@@ -312,6 +312,7 @@ describe('loadGateHouseRules', () => {
       mode: 'review',
       reason: 'unavailable',
       errorClass: 'timeout',
+      inPlay: true,
       entries: [
         { shortId: shorts.get(RULE_A), title: 'No inline SVGs', why: ALWAYS },
         {
@@ -656,6 +657,7 @@ describe('loadGateHouseRules: the code review as the later check', () => {
       mode: 'review',
       reason: 'unavailable',
       errorClass: 'timeout',
+      inPlay: true,
       entries: [{ shortId: shortC, title: 'Stylesheets stay in files', why: ALWAYS }],
       omitted: [{ title: 'Late', why: 'refused' }],
       violations: [],
@@ -928,12 +930,13 @@ describe('loadGateHouseRules: the change after the last check', () => {
     expect(moved.asked.count).toBe(0);
   });
 
-  it('reads a change it could not fingerprint now as a change that did not move', async () => {
+  it('reads a change it could not fingerprint now as unread, never as one that did not move', async () => {
     const w = checkedByValidator();
     const loaded = await loadGateHouseRules(w.db, TASK, {
       currentFingerprint: change(null).currentFingerprint,
     });
     expect('modifiedAfterCheck' in loaded!).toBe(false);
+    expect(loaded!.changedFilesCoverage?.scanFailed).toBe(true);
   });
 
   it('compares with the code review, the later check, when it ran with a stamp', async () => {
@@ -1098,6 +1101,31 @@ describe('loadGateHouseRules: whose list of changed files was capped', () => {
     );
     expect(own!.changedFilesCoverage).toEqual({ listed: 5, total: 5, givenTo: 'code review' });
     expect('scanFailed' in own!.changedFilesCoverage!).toBe(false);
+  });
+
+  describe('a check whose files rules matched nothing', () => {
+    const rowAfter = async (coverage: Record<string, unknown>, unmatched = 2) => {
+      const w = world();
+      w.step07b(validatorOutput({ changedFilesCoverage: coverage }));
+      w.invocation(VALIDATOR, stamp({ entries: [], filesRulesUnmatched: unmatched }));
+      return houseRulesRow(await loadGateHouseRules(w.db, TASK));
+    };
+
+    it('shows the unread change, since the rule may match a file the read missed', async () => {
+      const row = await rowAfter({ listed: 3, total: 3, scanFailed: true });
+      expect(row?.statusLabel).toBe('PARTIAL');
+      expect(row?.detail).toContain('the change could not be fully read');
+    });
+
+    it('shows the capped list too', async () => {
+      const row = await rowAfter({ listed: 100, total: 150 });
+      expect(row?.statusLabel).toBe('PARTIAL');
+      expect(row?.detail).toContain('was given 100 of 150 changed files');
+    });
+
+    it('shows no row when no rule was in play', async () => {
+      expect(await rowAfter({ listed: 3, total: 3, scanFailed: true }, 0)).toBeNull();
+    });
   });
 });
 

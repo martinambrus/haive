@@ -26,6 +26,7 @@ import {
 } from '../_untrusted-repo.js';
 import {
   assertReviewableChange,
+  CHANGE_UNREAD_AFTER_FIX_LEAD,
   changedFilesBlock,
   collectImplementationFiles,
   fileCoverage,
@@ -966,8 +967,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         changedFilesBlock(files, 'Changed files (your validation scope)', ''),
         ...(scanFailed
           ? [
-              'The change could not be re-read after the fix, so files the fix created or changed may be',
-              'missing from the list above. Review what the fix touched in full, and state plainly that the',
+              `${CHANGE_UNREAD_AFTER_FIX_LEAD} Review what the fix touched in full, and state plainly that the`,
               'list may be incomplete — do NOT report VALID as though it covered the whole change.',
             ]
           : []),
