@@ -27,6 +27,10 @@ const day = (bucket: string, over: Partial<StatsTimelineDay> = {}): StatsTimelin
   cacheReadTokens: 0,
   cacheCreationTokens: 0,
   totalTokens: 0,
+  throughput: {
+    wall: { tps: null, n: 0, sufficient: false },
+    api: { tps: null, medianTps: null, n: 0, sufficient: false },
+  },
   ...over,
 });
 

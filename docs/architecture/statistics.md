@@ -163,6 +163,43 @@ are near-unique too — so a "most used agents" list is ~1,400 entries tied at n
 `agent_title` is worse (1,456 distinct), because those are per-node prose rather than persona
 names. The only signal in that table is failure rate, which belongs on the reliability tab.
 
+## Throughput
+
+Output tokens per second is reported TWO ways, and neither stands in for the other.
+`summarizeThroughput` (`@haive/shared/stats`) is the one rule, used by `/stats/steps` (per provider
+× served model), `/stats/timeline` (per day) and the task page's per-step badge:
+
+- **Per model second** divides by `cli_invocations.api_duration_ms`: the claude family's
+  (claude-code, zai, ollama, muse, grok) own `duration_api_ms`, and for gemini the sum of
+  `stats.models.*.api.totalLatencyMs`, which gemini-cli 0.63 adds up from every API response's
+  duration. It includes prompt processing and time to first token, so it is not pure decode
+  speed. codex reports no timing and amp's stream carries none, so their rows are NULL and render
+  a dash, never a rate estimated from wall time. antigravity's `duration_seconds` is agy's whole
+  run, i.e. wall time, so it is not read as model time either.
+- **The sequential sub-agent runner** (codex, gemini, amp) sums its sub-steps' model time, and
+  records NULL when any sub-step that reported tokens reported no time, so the tokens divided
+  always cover the same sub-steps.
+- **Per wall-clock second** divides by `ended_at - started_at`, tool calls and sandbox included.
+
+MEASURED on the dev install over 30 days, claude-opus-5-5 reads 93 tok/s per model second against
+31 per wall-clock second, since model time was 33% of its runs. Wall time alone misstates model
+speed by 3x.
+
+**The value is cumulative, so the LAST result event wins**, like the result usage beside it: a
+steered run carried 27,366 then 35,255 ms against 39,571 ms of wall clock. Migration `0182`
+backfilled 2,719 rows from `stream_log` by parsing each line as JSON and keeping the last `type:
+"result"` line, never by key position; the binary writes `duration_api_ms` BEFORE `type`. gemini
+rows are NOT backfilled: gemini-cli pretty-prints its JSON across many lines, and no gemini row
+existed on the dev install to test a parser against, so only runs after 0181 carry it.
+
+**Each side's numerator and denominator cover the same runs.** A run with no recorded usage enters
+neither side; a run without model time enters only the wall side. Σtokens / Σtime is the headline
+and the per-run median rides beside it on the model side, because one long run dominates the
+aggregate: MEASURED, gemma4:31b-cloud reads 53 aggregate against a 15 median. Rates below
+`MIN_SAMPLES_FOR_TREND` render as `n=…`, and the trend chart leaves such a day as a gap rather
+than a point. Colours are `THROUGHPUT_COLORS`: model speed keeps the output-token violet, validated
+as a pair with teal-600 against `#0a0a0a`.
+
 ## Agents, skills and MCP tools
 
 `GET /stats/tool-usage` and `GET /tasks/:id/tool-usage` read `cli_invocations.tool_usage` through

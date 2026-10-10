@@ -1491,6 +1491,7 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
     createdAt: schema.cliInvocations.createdAt,
     errorMessage: schema.cliInvocations.errorMessage,
     tokenUsage: schema.cliInvocations.tokenUsage,
+    apiDurationMs: schema.cliInvocations.apiDurationMs,
     // Size only, never the prompt itself — the median row is ~95 KB and the largest 1.19 MB,
     // and this list is polled every 2s per step. It lets the terminal label its collapsed
     // "initial prompt" turn before anyone pays to fetch the body.

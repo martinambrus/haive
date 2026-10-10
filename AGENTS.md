@@ -301,7 +301,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [Model pricing and spend](docs/architecture/model-pricing.md): cost precedence, billable and
   notional spend, price feeds, FX. `resolveCostDecision`, `model-prices.ts`.
 - [Statistics](docs/architecture/statistics.md): `/stats` endpoints, day bucketing, charts,
-  per-step spend, tool usage. `@haive/shared/stats`, `components/stats/`.
+  per-step spend, tool usage, throughput.
+  `@haive/shared/stats`, `components/stats/`, `summarizeThroughput`.
 
 ### Sandbox and runtime
 

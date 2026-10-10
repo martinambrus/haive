@@ -20,7 +20,9 @@ import {
   sampledRatio,
   normalizeTokens,
   sumNormalizedTokens,
+  summarizeThroughput,
   TASK_CLASSES,
+  type ThroughputRun,
   type UnusedToolingRow,
   typesForClass,
   type Delta,
@@ -493,6 +495,7 @@ interface DayAccumulator {
   >;
   tasksStarted: number;
   tasksCompleted: number;
+  throughputRuns: ThroughputRun[];
 }
 
 function emptyDay(): DayAccumulator {
@@ -504,6 +507,7 @@ function emptyDay(): DayAccumulator {
     tokensByProvider: new Map(),
     tasksStarted: 0,
     tasksCompleted: 0,
+    throughputRuns: [],
   };
 }
 
@@ -555,6 +559,8 @@ statsRoutes.get('/timeline', async (c) => {
       outputTokens: sql<number>`coalesce((${tu} ->> 'outputTokens')::numeric, 0)::bigint`,
       cacheReadTokens: sql<number>`coalesce((${tu} ->> 'cacheReadTokens')::numeric, 0)::bigint`,
       cacheCreationTokens: sql<number>`coalesce((${tu} ->> 'cacheCreationTokens')::numeric, 0)::bigint`,
+      reportedOutputTokens: sql<number | null>`(${tu} ->> 'outputTokens')::double precision`,
+      apiMs: schema.cliInvocations.apiDurationMs,
     })
     .from(schema.cliInvocations)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
@@ -587,6 +593,11 @@ statsRoutes.get('/timeline', async (c) => {
     d.notionalUsd += Number(row.notionalUsd) || 0;
     d.invocations += 1;
     if (row.endedAt) d.agentMs += Math.max(0, row.endedAt.getTime() - row.startedAt.getTime());
+    d.throughputRuns.push({
+      outputTokens: row.reportedOutputTokens === null ? null : Number(row.reportedOutputTokens),
+      wallMs: row.endedAt ? row.endedAt.getTime() - row.startedAt.getTime() : null,
+      apiMs: row.apiMs,
+    });
     const provider = row.provider ?? 'unknown';
     const t = d.tokensByProvider.get(provider) ?? {
       inputTokens: 0,
@@ -656,6 +667,7 @@ statsRoutes.get('/timeline', async (c) => {
         cacheReadTokens: tokens.cacheReadTokens,
         cacheCreationTokens: tokens.cacheCreationTokens,
         totalTokens: tokens.totalTokens,
+        throughput: summarizeThroughput(d.throughputRuns),
       };
     });
 
@@ -843,7 +855,7 @@ statsRoutes.get('/steps', async (c) => {
   const servedSql = sql<string | null>`${schema.cliInvocations.modelIdentity} ->> 'served'`;
   const tu = schema.cliInvocations.tokenUsage;
 
-  const [stepRows, modelRows, tokenRows] = await Promise.all([
+  const [stepRows, modelRows, tokenRows, throughputRows] = await Promise.all([
     db
       .select({
         stepId: schema.taskSteps.stepId,
@@ -901,7 +913,42 @@ statsRoutes.get('/steps', async (c) => {
       )
       .where(window)
       .groupBy(schema.taskSteps.stepId, schema.cliProviders.name),
+    db
+      .select({
+        provider: schema.cliProviders.name,
+        served: servedSql,
+        outputTokens: sql<number | null>`(${tu} ->> 'outputTokens')::double precision`,
+        wallMs: sql<
+          number | null
+        >`greatest(0, extract(epoch from (${schema.cliInvocations.endedAt} - ${schema.cliInvocations.startedAt})) * 1000)::double precision`,
+        apiMs: schema.cliInvocations.apiDurationMs,
+      })
+      .from(schema.cliInvocations)
+      .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+      .leftJoin(
+        schema.cliProviders,
+        eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId),
+      )
+      .where(window),
   ]);
+
+  const runsByModel = new Map<
+    string,
+    { provider: string | null; served: string | null; runs: ThroughputRun[] }
+  >();
+  for (const r of throughputRows) {
+    const key = JSON.stringify([r.provider, r.served]);
+    let group = runsByModel.get(key);
+    if (!group) {
+      group = { provider: r.provider, served: r.served, runs: [] };
+      runsByModel.set(key, group);
+    }
+    group.runs.push({
+      outputTokens: r.outputTokens === null ? null : Number(r.outputTokens),
+      wallMs: r.wallMs === null ? null : Number(r.wallMs),
+      apiMs: r.apiMs,
+    });
+  }
 
   // Per step, normalise each provider's totals and THEN add them — never the reverse; the sum
   // of raw fields mixes two definitions of `input`. A row whose provider was deleted (the FK
@@ -975,6 +1022,15 @@ statsRoutes.get('/steps', async (c) => {
         invocations: Number(r.invocations) || 0,
         agentMs: Number(r.agentMs) || 0,
         differs: Number(r.differs) || 0,
+      }))
+      .sort((a, b) => b.invocations - a.invocations),
+    // Per provider AND model: one model served through two providers runs at two speeds.
+    throughput: [...runsByModel.values()]
+      .map((g) => ({
+        provider: g.provider,
+        served: g.served,
+        invocations: g.runs.length,
+        ...summarizeThroughput(g.runs),
       }))
       .sort((a, b) => b.invocations - a.invocations),
   });
