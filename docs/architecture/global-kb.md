@@ -43,6 +43,9 @@ written, by the enrich task or a promotion, and `09_6_4` gives it again whether 
 succeeded, never over one written since and never to a draft activated meanwhile. A promotion whose
 body is identical to a same-topic entry's that lacks a description links to that entry directly,
 with no embedding check, and `09_6_4` spends no merge agent on a pair whose bodies already match.
+Its merged body replaces a draft only while the draft still holds the body detect read: a person's
+edit made while the merge agents ran (up to an hour) is kept, and the loss note says so; a pair a
+failed knowledge-base write never reached is noted as not written, not as an unusable reply.
 It is never embedded, so a description-only edit queues no re-embed. A person sees it wherever an
 entry can be activated: on its card and in its dialog in Settings → Global KB, where Edit
 description sets it, beside the existing entry's in a superseding draft's "Updates existing" view,

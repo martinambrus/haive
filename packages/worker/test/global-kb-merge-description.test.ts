@@ -51,7 +51,7 @@ function setup(draftDescription: string | null, existingDescription: string | nu
   const ctx = { db: fake.db, taskId: TASK, logger: { info() {}, warn() {} } } as never;
   const draft = () => fake.rows(globalKbEntries).find((r) => r.id === DRAFT)!;
   const edit = (values: Record<string, unknown>) => fake.patch(globalKbEntries, DRAFT, values);
-  return { ctx, draft, edit, writes: () => writes };
+  return { ctx, fake, draft, edit, writes: () => writes };
 }
 
 const merged = [
@@ -191,6 +191,35 @@ describe('the merge step and descriptions', () => {
       expect(out.degradedNote).toContain('no longer a draft');
     });
 
+    it('keeps a body a person edited after detect, and the loss note says so', async () => {
+      const out = await applyAfter({ body: 'edited by a person' }, merged);
+
+      expect(state.draft()).toMatchObject({
+        status: 'draft',
+        body: 'edited by a person',
+        embedStatus: null,
+      });
+      expect(out).toMatchObject({ merged: 0, skipped: 1 });
+      expect(out.degradedNote).toContain('edited while the merge ran');
+      expect(out.degradedNote).not.toContain('no longer a draft');
+    });
+
+    it('counts a draft already holding the merged body as merged, as a replayed apply finds it', async () => {
+      const out = await applyAfter({ body: MERGED.trim() }, merged);
+
+      expect(state.draft()).toMatchObject({ status: 'draft', body: MERGED.trim() });
+      expect(out).toMatchObject({ merged: 1, skipped: 0 });
+      expect(out.degradedNote).toBeUndefined();
+    });
+
+    it('merges a draft whose body is still the one detect read', async () => {
+      const out = await applyAfter({ description: 'Typed after detect.' }, merged);
+
+      expect(state.draft().body).toBe(MERGED.trim());
+      expect(out).toMatchObject({ merged: 1, skipped: 0 });
+      expect(out.degradedNote).toBeUndefined();
+    });
+
     it('does not take an inherited description once it is active', async () => {
       await applyAfter({ status: 'active' }, []);
 
@@ -288,6 +317,98 @@ describe('the merge step and descriptions', () => {
       expect(out).toMatchObject({ merged: 1, skipped: 1 });
       expect(out.degradedNote).toContain('Lost draft');
       expect(out.degradedNote).not.toContain('Twin draft');
+    });
+  });
+
+  describe('a knowledge base write that throws', () => {
+    const SECOND = '00000000-0000-4000-8000-0000000000f3';
+    const result = (id: string) => ({
+      agentId: `merge:${id}`,
+      status: 'done',
+      rawOutput: `<<<MERGED\n${MERGED}\nMERGED>>>`,
+    });
+
+    const THIRD = '00000000-0000-4000-8000-0000000000f4';
+
+    async function applyThrowingOn(failingWrite: number | null, third?: Record<string, unknown>) {
+      state = setup(null, null);
+      for (const [id, title] of [
+        [SECOND, 'Second draft'],
+        ...(third ? [[THIRD, 'Third draft']] : []),
+      ]) {
+        state.fake.insert(globalKbEntries, {
+          namespace: 'default',
+          category: 'best_practice',
+          facets: {},
+          source: 'promoted',
+          id,
+          title,
+          body: `${title} body`,
+          status: 'draft',
+          sourceTaskId: TASK,
+          supersedesEntryId: EXISTING,
+          description: null,
+        });
+      }
+      let writes = 0;
+      state.fake.hooks.beforeUpdate = () => {
+        writes += 1;
+        if (writes === failingWrite) throw new Error('connection reset');
+      };
+      const detected = await globalKbMergeStep.detect!(state.ctx);
+      return globalKbMergeStep.apply!(state.ctx, {
+        detected,
+        agentMiningResults: [result(DRAFT), result(SECOND), ...(third ? [third] : [])],
+      } as never);
+    }
+
+    it('labels the pair it threw on and the pair it never reached as a failed write', async () => {
+      const out = await applyThrowingOn(1);
+
+      expect(out).toMatchObject({ merged: 0, skipped: 2 });
+      expect(out.degradedNote).toContain('the merged article was not written');
+      expect(out.degradedNote).not.toContain('no usable merged article');
+    });
+
+    it('keeps the label of a pair finished before the throw', async () => {
+      const out = await applyThrowingOn(2);
+
+      expect(out).toMatchObject({ merged: 1, skipped: 1 });
+      expect(out.degradedNote).toContain('Second draft');
+      expect(out.degradedNote).toContain('the merged article was not written');
+      expect(out.degradedNote).not.toContain('Draft (');
+    });
+
+    it.each<[string, Record<string, unknown>, string]>([
+      [
+        'a failed agent',
+        {
+          agentId: `merge:${THIRD}`,
+          status: 'failed',
+          rawOutput: null,
+          errorMessage: 'agent died',
+        },
+        'agent died',
+      ],
+      [
+        'an unusable reply',
+        { agentId: `merge:${THIRD}`, status: 'done', rawOutput: 'too short' },
+        'no usable merged article in the reply',
+      ],
+    ])('gives a pair with %s its own reason, not a failed write', async (_, third, reason) => {
+      const out = await applyThrowingOn(1, third);
+
+      expect(out).toMatchObject({ merged: 0, skipped: 3 });
+      expect(out.degradedNote).toContain('Second draft');
+      expect(out.degradedNote).toContain('the merged article was not written');
+      expect(out.degradedNote).toContain(reason);
+    });
+
+    it('labels nothing as a failed write when no write throws', async () => {
+      const out = await applyThrowingOn(null);
+
+      expect(out).toMatchObject({ merged: 2, skipped: 0 });
+      expect(out.degradedNote).toBeUndefined();
     });
   });
 });

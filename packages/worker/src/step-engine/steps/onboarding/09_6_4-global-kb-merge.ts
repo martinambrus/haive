@@ -55,6 +55,12 @@ export function extractMergedArticle(raw: string | null | undefined): string {
   return raw.trim();
 }
 
+/** The agent's merged article, or '' when it failed or came back too short to trust over real content. */
+function usableBody(r: AgentMiningResult | undefined): string {
+  const body = r?.status === 'done' ? extractMergedArticle(r.rawOutput) : '';
+  return body.length >= 40 ? body : '';
+}
+
 /** A pair whose bodies already match has nothing to merge, so no agent is spent on it. */
 function nothingToMerge(p: MergePair): boolean {
   return p.draftBody.trim() === p.existingBody.trim();
@@ -186,6 +192,9 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     const results = (args.agentMiningResults ?? []) as AgentMiningResult[];
     const mergedDrafts = new Set<string>();
     const leftDraft = new Set<string>();
+    const editedDraft = new Set<string>();
+    const finishedDraft = new Set<string>();
+    let writeFailed = false;
     let merged = 0;
     try {
       const settings = await resolveGlobalKbSettings();
@@ -193,9 +202,8 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
         await withGlobalKb(ctx.db, async ({ db: gdb }) => {
           for (const p of pairs) {
             const r = results.find((x) => x.agentId === `merge:${p.draftId}`);
-            const body = r?.status === 'done' ? extractMergedArticle(r.rawOutput) : '';
-            // Guard against an empty / truncated merge clobbering real content.
-            const usable = body.length >= 40;
+            const body = usableBody(r);
+            const usable = body !== '';
             // Agents run up to an hour; a draft activated meanwhile is no longer ours to write.
             const stillDraft = and(
               eq(globalKbEntries.id, p.draftId),
@@ -207,13 +215,23 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
               const [hit] = await gdb
                 .update(globalKbEntries)
                 .set({ body, embedStatus: 'pending', updatedAt: new Date() })
-                .where(stillDraft)
+                .where(and(stillDraft, eq(globalKbEntries.body, p.draftBody)))
                 .returning({ id: globalKbEntries.id });
               if (hit) {
                 mergedDrafts.add(p.draftId);
                 merged += 1;
               } else {
-                leftDraft.add(p.draftId);
+                const [row] = await gdb
+                  .select({ status: globalKbEntries.status, body: globalKbEntries.body })
+                  .from(globalKbEntries)
+                  .where(eq(globalKbEntries.id, p.draftId))
+                  .limit(1);
+                if (row?.status === 'draft' && row.body === body) {
+                  mergedDrafts.add(p.draftId);
+                  merged += 1;
+                } else {
+                  (row?.status === 'draft' ? editedDraft : leftDraft).add(p.draftId);
+                }
               }
             }
             // Activation archives the superseded entry, so a description it carried would otherwise be
@@ -225,10 +243,12 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
                 .set({ description: inherited, updatedAt: new Date() })
                 .where(and(stillDraft, isNull(globalKbEntries.description)));
             }
+            finishedDraft.add(p.draftId);
           }
         });
       }
     } catch (err) {
+      writeFailed = true;
       ctx.logger.warn({ err }, 'global KB merge: applying merged bodies failed');
     }
     // Unmerged drafts stay linked for manual review/merge at 09_6_5.
@@ -256,7 +276,11 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
           status: 'failed' as const,
           errorMessage: leftDraft.has(p.draftId)
             ? 'no longer a draft when the merge finished'
-            : (r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged')),
+            : editedDraft.has(p.draftId)
+              ? 'edited while the merge ran; the edit was kept'
+              : writeFailed && !finishedDraft.has(p.draftId) && usableBody(r) !== ''
+                ? 'the merged article was not written: the knowledge base write failed'
+                : (r?.errorMessage ?? (r ? 'no usable merged article in the reply' : 'not merged')),
         };
       }),
     );
