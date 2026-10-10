@@ -697,12 +697,13 @@ export async function handleBuildSandboxImageJob(
 
   const { tag: imageTag, shared } = resolution;
   const previousDbTag = provider.sandboxImageTag;
-  // In the tag's turn, which a removal of the tag also takes, and only while its image stands.
-  const claim = () =>
-    withImageTagLock(imageTag, async () => {
-      if (!(await defaultDockerRunner.inspect(imageTag)).exists) return null;
-      return markProvidersReady(db, imageTag, provider.id, shared);
-    });
+  type Claimed = Awaited<ReturnType<typeof markProvidersReady>> | null;
+  // Only while the image stands, in the tag's turn, which a removal of the tag also takes.
+  const claimNow = async (): Promise<Claimed> => {
+    if (!(await defaultDockerRunner.inspect(imageTag)).exists) return null;
+    return markProvidersReady(db, imageTag, provider.id, shared);
+  };
+  const claim = () => withImageTagLock(imageTag, claimNow);
   const removeReplaced = async (replaced: string[]) => {
     for (const tag of replaced) await removeOnceBuilt(db, provider.id, tag, imageTag);
   };
@@ -731,11 +732,17 @@ export async function handleBuildSandboxImageJob(
     }
   }
 
+  let ownClaim: Claimed | undefined;
   let build = inFlightBuilds.get(imageTag);
   if (build) {
     log.info({ providerId: provider.id, imageTag }, 'joining a sandbox image build of this tag');
   } else {
-    const started = buildImage(resolution, provider.id);
+    // The build and its claim share one turn, so a removal of the tag never falls between them.
+    const started = withImageTagLock(imageTag, async () => {
+      const built = await buildImage(resolution, provider.id);
+      if (built.exitCode === 0) ownClaim = await claimNow();
+      return built;
+    });
     build = started;
     inFlightBuilds.set(imageTag, started);
     const settle = () => {
@@ -746,7 +753,8 @@ export async function handleBuildSandboxImageJob(
 
   try {
     const result = await build;
-    const claimed = result.exitCode === 0 ? await claim() : null;
+    const claimed =
+      result.exitCode === 0 ? (ownClaim !== undefined ? ownClaim : await claim()) : null;
     if (claimed) {
       await removeReplaced(claimed.replaced);
       if (!claimed.self) return await superseded();
