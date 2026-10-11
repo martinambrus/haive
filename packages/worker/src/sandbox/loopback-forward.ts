@@ -48,11 +48,3 @@ export function loopbackForwardSetup(fwd: LoopbackForward): {
     `else echo ${shellQuote(`haive: node is not on this image, so localhost:${port} does not reach ${target}`)} >&2; fi; `;
   return { file: { containerPath: SCRIPT_PATH, content: FORWARD_SCRIPT }, prefix };
 }
-
-/** `prefix` as the first command of a provider wrapper, below its shebang (the runner's own default when it has none). */
-export function prefixWrapper(wrapper: string, prefix: string): string {
-  const nl = wrapper.indexOf('\n');
-  const shebang = wrapper.startsWith('#!') ? (nl < 0 ? wrapper : wrapper.slice(0, nl)) : null;
-  const rest = shebang === null ? wrapper : wrapper.slice(shebang.length + 1);
-  return `${shebang ?? '#!/bin/bash'}\n${prefix}\n${rest}`;
-}
