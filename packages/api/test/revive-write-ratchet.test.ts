@@ -506,10 +506,36 @@ function taskOfPredicate(sf: ts.SourceFile, e: ts.Expression, depth: number): st
   if (!helper || body?.length !== 1 || !ts.isReturnStatement(body[0]!) || !body[0].expression) {
     return null;
   }
+  // Only the top-level declaration may bind the name: a local one would shadow it at the call.
+  if (bindingsOf(sf, callee) !== 1 || reassigns(sf, callee)) return null;
   const inner = taskOfPredicate(sf, body[0].expression, depth + 1);
   const at = helper.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === inner);
   const passed = at < 0 ? undefined : e.arguments[at];
   return passed && ts.isIdentifier(passed) ? passed.text : null;
+}
+
+/** How many declarations in the file bind `name`. */
+function bindingsOf(sf: ts.SourceFile, name: string): number {
+  let count = 0;
+  const visit = (n: ts.Node): void => {
+    const named = (n as { name?: ts.Node }).name;
+    if (
+      named &&
+      ts.isIdentifier(named) &&
+      named.text === name &&
+      (ts.isVariableDeclaration(n) ||
+        ts.isFunctionDeclaration(n) ||
+        ts.isParameter(n) ||
+        ts.isBindingElement(n) ||
+        ts.isClassDeclaration(n) ||
+        ts.isImportSpecifier(n))
+    ) {
+      count += 1;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return count;
 }
 
 function isTasksIdColumn(n: ts.Node | undefined): boolean {
@@ -855,6 +881,16 @@ describe('a live-status write on a task row', () => {
         `await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
       ),
     ).toEqual([true]);
+  });
+
+  it('reads no task through a predicate helper a local binding shadows', () => {
+    const src = `function byId(taskId) { return eq(schema.tasks.id, taskId); }
+      async function f(tx, id, otherId) {
+        const byId = () => eq(schema.tasks.id, otherId);
+        await ${GUARD}(tx, id);
+        await tx.update(schema.tasks).set({ status: 'running' }).where(byId(id));
+      }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
   });
 
   it('exempts no created-only predicate when eq or and is shadowed', () => {
