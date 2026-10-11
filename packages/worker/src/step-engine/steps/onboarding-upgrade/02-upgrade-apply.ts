@@ -1145,7 +1145,10 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
             continue;
           }
-          if (seen === null) continue;
+          if (!restored && !seen) {
+            warnings.push(`did not record keeping ${entry.diskPath}: it changed while it was read`);
+            continue;
+          }
           consumedPreimageIds.push(earlier.id);
           if (restored) {
             writtenPaths.push(rel);

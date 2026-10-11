@@ -391,6 +391,20 @@ describe('an upgrade apply retried after it failed part-way', () => {
     });
   });
 
+  it('records no Keep and keeps the pre-image when the held rewrite finds no file to read', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+    beforeRewrite.run = () => rm(join(s.root, EDITED));
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContainEqual(expect.stringContaining('did not record keeping'));
+    expect(s.byId([s.editedRow])[0]?.lastObservedDiskHash).not.toBe(hashOf(NEW));
+    beforeRewrite.run = null;
+  });
+
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
     const s = await setup();
     failOneCommit(s);
