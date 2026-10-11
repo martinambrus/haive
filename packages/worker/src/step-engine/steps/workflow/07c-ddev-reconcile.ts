@@ -315,7 +315,9 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
     // config now reads as ABSENT, so this step skips rather than reconciling against a file outside
     // the tree — the same verdict `01c-ddev-env` reaches for the same file.
     const cfg = ddevConfigRef(ws.workspace);
-    return (await lstatNoFollow(cfg.anchor, cfg.rel))?.kind === 'file';
+    if ((await lstatNoFollow(cfg.anchor, cfg.rel))?.kind !== 'file') return false;
+    // No drift needs no runner, so decide it here, before runtime admission; apply keeps its own check.
+    return (await loadReconcileState(ctx)).drift.kind !== 'none';
   },
 
   async detect(ctx: StepContext): Promise<ReconcileDetect> {

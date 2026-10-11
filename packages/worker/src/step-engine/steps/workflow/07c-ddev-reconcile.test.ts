@@ -863,4 +863,41 @@ describe('07c-ddev-reconcile: the baseline a reconcile last applied', () => {
     rows = [{ output: NOOP_OUTPUT }];
     expect((await ddevReconcileStep.detect!(ctx)).baseline).toEqual(BOOT);
   });
+
+  describe('shouldRun', () => {
+    const appliedRows = () => {
+      rows = [{ output: NOOP_OUTPUT }, { output: { action: 'restart', appliedBaseline: B1 } }];
+    };
+
+    it('is false when .ddev/ is unchanged since the last applied baseline', async () => {
+      appliedRows();
+      expect(await ddevReconcileStep.shouldRun!(ctx)).toBe(false);
+    });
+
+    it('is true when .ddev/ changed since the last applied baseline', async () => {
+      appliedRows();
+      m.hashDdevInputs.mockResolvedValue('h2');
+      expect(await ddevReconcileStep.shouldRun!(ctx)).toBe(true);
+    });
+
+    it('is true for a changed config Haive cannot read faithfully', async () => {
+      appliedRows();
+      m.hashDdevInputs.mockResolvedValue('h2');
+      await writeConfig('name: app\ndatabase: { !!binary dHlwZQ==: postgres, version: "16" }\n');
+      expect(await ddevReconcileStep.shouldRun!(ctx)).toBe(true);
+    });
+
+    it('is false when 01c recorded no baseline', async () => {
+      m.loadPreviousStepOutput.mockResolvedValue({ output: { started: true } });
+      m.hashDdevInputs.mockResolvedValue('h2');
+      expect(await ddevReconcileStep.shouldRun!(ctx)).toBe(false);
+    });
+
+    it('is false when .ddev/config.yaml is absent', async () => {
+      appliedRows();
+      m.hashDdevInputs.mockResolvedValue('h2');
+      await rm(path.join(workspace, '.ddev/config.yaml'));
+      expect(await ddevReconcileStep.shouldRun!(ctx)).toBe(false);
+    });
+  });
 });
