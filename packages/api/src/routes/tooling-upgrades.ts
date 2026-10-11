@@ -15,6 +15,8 @@ import {
 } from '@haive/shared';
 import {
   RAG_TABLE,
+  openExistingRagDatabase,
+  ragDatabaseName,
   ragRowsAwaitReembed,
   resolveRagConnection,
   type RagConnection,
@@ -258,6 +260,7 @@ const RAG_REEMBED_STATEMENT_TIMEOUT_MS = 3_000;
 const RAG_REEMBED_DEADLINE_MS = 60_000;
 const RAG_PROBE_DEADLINE_MS = 10_000;
 const QUERY_CANCELED = '57014';
+const UNDEFINED_TABLE = '42P01';
 
 class ReembedDeadline extends Error {}
 
@@ -267,6 +270,7 @@ class ReembedDeadline extends Error {}
 async function openRagStore(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
+  opts: { existingOnly?: boolean } = {},
 ): Promise<RagConnection | null> {
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, repositoryId),
@@ -294,13 +298,18 @@ async function openRagStore(
         'default')
       : 'default';
 
+  const dims = typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560;
+  // A read must not create the internal database it is asking about.
+  if (opts.existingOnly && t.ragMode === 'internal') {
+    return openExistingRagDatabase(db, ragDatabaseName(projectName), dims);
+  }
   return resolveRagConnection(
     {
       ragMode: t.ragMode as RagMode,
       ragConnectionString: t.ragConnectionString || null,
       ollamaUrl: t.ollamaUrl || null,
       embeddingModel: t.embeddingModel || null,
-      embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
+      embeddingDimensions: dims,
     },
     db,
     projectName,
@@ -321,12 +330,18 @@ async function ragStoreAwaitsReembedBounded(
     timer = setTimeout(() => reject(new ReembedDeadline()), RAG_PROBE_DEADLINE_MS);
   });
   const probe = async () => {
-    held.conn = await openRagStore(db, repositoryId);
+    held.conn = await openRagStore(db, repositoryId, { existingOnly: true });
     if (!held.conn) return false;
-    return held.conn.pg.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_REEMBED_STATEMENT_TIMEOUT_MS}ms'`);
-      return ragRowsAwaitReembed(tx, repositoryId);
-    });
+    try {
+      return await held.conn.pg.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_REEMBED_STATEMENT_TIMEOUT_MS}ms'`);
+        return ragRowsAwaitReembed(tx, repositoryId);
+      });
+    } catch (err) {
+      // A store with no index table holds no rows to re-embed.
+      if ((err as { code?: unknown } | null)?.code === UNDEFINED_TABLE) return false;
+      throw err;
+    }
   };
   try {
     return await Promise.race([probe(), deadline]);

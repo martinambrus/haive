@@ -11,6 +11,9 @@ const h = vi.hoisted(() => ({
   ended: 0,
   awaiting: false,
   probeError: false,
+  existingOpened: [] as string[],
+  internalExists: false,
+  tableMissing: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -24,6 +27,23 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/rag')>();
   return {
     ...actual,
+    openExistingRagDatabase: async (_db: unknown, dbName: string) => {
+      h.existingOpened.push(dbName);
+      if (!h.internalExists) return null;
+      return {
+        mode: 'internal',
+        embeddingDimensions: 8,
+        pg: {
+          begin: async () => {
+            throw Object.assign(new Error('relation does not exist'), {
+              code: h.tableMissing ? '42P01' : 'XX000',
+            });
+          },
+          end: async () => {},
+        },
+        close: async () => {},
+      };
+    },
     resolveRagConnection: async (...args: Parameters<typeof actual.resolveRagConnection>) => {
       h.openOptions.push(args[3]);
       if (h.realStore) return actual.resolveRagConnection(...args);
@@ -72,7 +92,16 @@ const app = new Hono<AppEnv>();
 app.route('/', toolingUpgradeRoutes);
 app.onError(errorHandler);
 
-function setup(ragConnectionString: string, configured = true, degraded = false) {
+function setup(
+  ragConnectionString: string,
+  configured = true,
+  degraded = false,
+  tooling: Record<string, unknown> = {
+    ragMode: 'external',
+    ragConnectionString,
+    embeddingDimensions: 8,
+  },
+) {
   const fake = createFakeDb({ repositories: schema.repositories });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -85,7 +114,7 @@ function setup(ragConnectionString: string, configured = true, degraded = false)
     onboardingTooling: configured
       ? {
           schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
-          tooling: { ragMode: 'external', ragConnectionString, embeddingDimensions: 8 },
+          tooling,
         }
       : null,
   });
@@ -265,6 +294,35 @@ describe('forcing a re-embed of a repository', () => {
 
 describe('retrying the embedding of a degraded repository', () => {
   const STORE = 'postgres://rag:rag@127.0.0.1:1/rag';
+
+  const internalSetup = () => {
+    const fake = setup(STORE, true, true, { ragMode: 'internal', embeddingDimensions: 8 });
+    h.existingOpened = [];
+    h.internalExists = false;
+    h.tableMissing = false;
+    return fake;
+  };
+
+  it('opens an internal store only if it exists, and clears when there is none', async () => {
+    const fake = internalSetup();
+
+    const res = await retry();
+
+    expect(h.existingOpened).toHaveLength(1);
+    expect(h.openOptions).toEqual([]);
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt ?? null).toBeNull();
+    expect(await res.json()).toMatchObject({ degradationKept: false });
+  });
+
+  it('clears when the internal store has no index table yet', async () => {
+    const fake = internalSetup();
+    h.internalExists = true;
+    h.tableMissing = true;
+
+    await retry();
+
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt ?? null).toBeNull();
+  });
 
   it('keeps the degradation while the store holds rows awaiting re-embed', async () => {
     const fake = setup(STORE, true, true);
