@@ -526,6 +526,14 @@ export async function runRagIndexSync(
     // hash rows (which ranks worse than not using the dense half at all). The existing
     // `useOllama && health.degradedAt` clear below lifts it when this run finishes.
     if (useOllama && opts.ollamaUrlDerived && !health.degradedAt && !health.lexicalOnly) {
+      // Stored before the reset, so a run that dies after it leaves no NULL hash over a hash vector
+      // unflagged; a reset that finds nothing leaves the flag for this run's own clear.
+      await requireRagEmbedDegraded(
+        ctx.db,
+        repositoryId,
+        'Indexed without an embedding endpoint (the URL was stripped from the committed onboarding mirror). Re-embedding now.',
+      );
+      health.degradedAt = new Date();
       const reset = await conn.pg.unsafe(
         `UPDATE ${RAG_TABLE} SET chunk_hash = NULL
           WHERE repository_id = $1 AND chunk_hash IS NOT NULL`,
@@ -536,13 +544,6 @@ export async function runRagIndexSync(
           { repositoryId, rows: reset.count },
           'embedding endpoint was re-derived; forcing a re-embed of hash-indexed chunks',
         );
-        await recordRagEmbedDegraded(
-          ctx.db,
-          repositoryId,
-          'Indexed without an embedding endpoint (the URL was stripped from the committed onboarding mirror). Re-embedding now.',
-          ctx.logger,
-        );
-        health.degradedAt = new Date();
       }
     }
 
