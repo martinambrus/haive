@@ -627,8 +627,8 @@ taskRoutes.post('/', async (c) => {
   if (body.feature) metadata.feature = body.feature;
   if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
 
-  const insertTask = (handle: typeof db | DbTx) =>
-    handle
+  const insertTask = async (handle: typeof db | DbTx) =>
+    await handle
       .insert(schema.tasks)
       .values({
         userId,

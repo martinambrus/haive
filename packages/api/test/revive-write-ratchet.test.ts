@@ -373,13 +373,7 @@ function detachedTaskBuilder(call: ts.CallExpression): boolean {
   ) {
     top = top.parent;
   }
-  const p = top.parent;
-  return (
-    (ts.isVariableDeclaration(p) && p.initializer === top) ||
-    (ts.isBinaryExpression(p) &&
-      p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      p.right === top)
-  );
+  return !ts.isAwaitExpression(top.parent) && !ts.isExpressionStatement(top.parent);
 }
 
 function liveWrites(
@@ -783,6 +777,8 @@ describe('a live-status write on a task row', () => {
       ),
     ).toBe(1);
     expect(count(`const rows = await db.insert(schema.tasks).values(v).returning();`)).toBe(0);
+    expect(count(`await applyUpsert(db.insert(schema.tasks).values(v));`)).toBe(1);
+    expect(count(`return db.insert(schema.tasks).values(v);`)).toBe(1);
   });
 
   it('counts a local patch that is replaced or assigned into', () => {
