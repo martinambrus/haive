@@ -285,7 +285,7 @@ export function isReachableApp(reach: AppReach): reach is ReachableApp {
  *  reaches for curl, fails, and — measured on a live run — falls back to its PROVIDER's
  *  built-in web tool, which is worse than useless: it runs on the provider's host, cannot
  *  reach a private hostname by construction, and ships the task's URLs to a third party. */
-export function appReachPrompt(reach: ReachableApp): string {
+export function appReachPrompt(reach: ReachableApp, servesOtherTree = false): string {
   const lines: string[] = [APP_REACH_MARKER];
 
   if (reach.mode === 'sandbox_http') {
@@ -322,6 +322,12 @@ export function appReachPrompt(reach: ReachableApp): string {
     );
   }
 
+  if (servesOtherTree) {
+    lines.push(
+      "It serves the task's own worktree, not the one you are working in: your changes are not in",
+      'it until they are merged, so what the app shows says nothing about them either way.',
+    );
+  }
   lines.push(
     "Your own model provider's built-in web tools (web_reader, WebFetch and the like) are NOT",
     "an oracle here: they run on the provider's servers, cannot reach this task's private",
@@ -340,9 +346,13 @@ export function appReachPrompt(reach: ReachableApp): string {
  *  something that was never on the table. The one thing worth saying there ("do not plan
  *  verification that needs to execute the app") the MCP surface block already says, from the
  *  absence of the browser and container tools that would run it. */
-export function withAppReach(prompt: string, reach: AppReach | null): string {
+export function withAppReach(
+  prompt: string,
+  reach: AppReach | null,
+  servesOtherTree = false,
+): string {
   if (!reach || !isReachableApp(reach) || hasLeadingHaiveBlock(prompt, APP_REACH_MARKER)) {
     return prompt;
   }
-  return `${appReachPrompt(reach)}\n\n${prompt}`;
+  return `${appReachPrompt(reach, servesOtherTree)}\n\n${prompt}`;
 }

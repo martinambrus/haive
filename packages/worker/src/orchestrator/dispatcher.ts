@@ -69,7 +69,12 @@ import {
   withMcpSurface,
   type McpSurface,
 } from '../sandbox/mcp-surface.js';
-import { resolveAppReach, withAppReach, type AppReach } from '../queues/cli-exec/app-reach.js';
+import {
+  isReachableApp,
+  resolveAppReach,
+  withAppReach,
+  type AppReach,
+} from '../queues/cli-exec/app-reach.js';
 import {
   resolveModelLimits,
   visionDisallowedTools,
@@ -160,6 +165,9 @@ export interface DispatchRequest {
    *  address. Computed by resolveTaskDispatch; exposed on the pure resolver only for
    *  deterministic unit tests. Null means say nothing about the app. */
   appReach?: AppReach | null;
+  /** The invocation runs in a worktree other than the one the task's app runner serves (a DAG
+   *  issue coder, a merge fixer), so the app shows none of its changes. Computed with appReach. */
+  appServesOtherTree?: boolean;
   /** Stack-matching global KB titles, with their descriptions, to advertise. Computed by
    *  resolveTaskDispatch; exposed on the pure resolver only for deterministic
    *  unit tests. Empty means there is nothing to advertise. */
@@ -317,6 +325,11 @@ export async function resolveTaskDispatch(
     resolveAgentIsolationEnabled(),
     resolveAgentRulesInjectionEnabled(),
   ]);
+  const appServesOtherTree =
+    isReachableApp(appReach) &&
+    req.worktreeRel !== undefined &&
+    (await resolveInvocationWorkerTree(db, taskId, req.worktreeRel)) !==
+      (await resolveInvocationWorkerTree(db, taskId));
   const houseRuleSelection = houseRules
     ? await selectForDispatch(db, taskId, houseRules, req.worktreeRel, globalKb)
     : undefined;
@@ -332,6 +345,7 @@ export async function resolveTaskDispatch(
     mcpSurface,
     globalKbDigest: globalKb.digest,
     appReach,
+    appServesOtherTree,
     codexAppServer,
     hasRepo,
     agentIsolation,
@@ -590,7 +604,11 @@ function buildCliSidePlan(
     // may not have, and a measured run showed agents burning their budget on curl and then
     // falling back to their provider's own web tool, which can never reach a private host.
     // Applied at this choke point so it reaches sub-agent and synthesis prompts too.
-    const reachBounded = withAppReach(mcpBounded, req.appReach ?? null);
+    const reachBounded = withAppReach(
+      mcpBounded,
+      req.appReach ?? null,
+      req.appServesOtherTree === true,
+    );
     // House standards from other projects, as titles. They live behind rag_search and
     // nowhere else — grep cannot reach them — so they are worth prompt tokens exactly
     // when that tool is actually wired for this invocation. Gated on the resolved
