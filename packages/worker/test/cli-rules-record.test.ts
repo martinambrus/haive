@@ -17,7 +17,7 @@ const hash = (s: string): string => sha256Hex(normalizeContent(s));
 describe('cliRulesRegionRecord', () => {
   it('claims the region as Haive output when it is the render', () => {
     expect(cliRulesRegionRecord(onDisk(render), render, new Set())).toEqual({
-      content: normalizeContent(onDisk(render)),
+      content: onDisk(render),
       templateContentHash: hash(render),
       writtenHash: hash(render),
       haiveWritten: true,
@@ -28,7 +28,7 @@ describe('cliRulesRegionRecord', () => {
     const older = buildCliRulesBlock(['An older rule.']) as string;
     const record = cliRulesRegionRecord(onDisk(older), render, new Set([hash(older)]));
     expect(record).toEqual({
-      content: normalizeContent(onDisk(older)),
+      content: onDisk(older),
       templateContentHash: hash(older),
       writtenHash: hash(older),
       haiveWritten: true,
@@ -40,11 +40,19 @@ describe('cliRulesRegionRecord', () => {
     expect(edited).not.toBe(render);
     const record = cliRulesRegionRecord(onDisk(edited), render, new Set([hash('other')]));
     expect(record).toEqual({
-      content: normalizeContent(onDisk(edited)),
+      content: onDisk(edited),
       templateContentHash: hash(edited),
       writtenHash: hash(render),
       haiveWritten: false,
     });
+  });
+
+  it('records the region as it stood on disk and hashes its normalized form', () => {
+    const region = render.replace(/\n/g, '  \r\n').replace('Keep', '\n\n\nKeep');
+    const record = cliRulesRegionRecord(region, render, new Set());
+    expect(record.content).toBe(region);
+    expect(record.templateContentHash).toBe(hash(region));
+    expect(record.haiveWritten).toBe(hash(region) === hash(render));
   });
 
   it('keeps only the region, never the text around it', () => {

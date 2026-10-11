@@ -364,6 +364,16 @@ describe('pathContent', () => {
     expect(await hashAt(root, 'AGENTS.md', CLI_RULES_TEMPLATE_KIND)).toBe(before);
   });
 
+  it('returns the rules region as it stands on disk, hashed normalized', async () => {
+    const root = await repo();
+    const raw = `${CLI_RULES_START}\r\nKeep every change small.  \r\n\r\n\r\n\r\nTwo.\t\r\n${CLI_RULES_END}`;
+    await writeFile(join(root, 'AGENTS.md'), `# One\r\n\r\n${raw}\r\n`, 'utf8');
+    expect(await pathContent(root, 'AGENTS.md', CLI_RULES_TEMPLATE_KIND)).toEqual({
+      content: raw,
+      hash: sha256Hex(normalizeContent(raw)),
+    });
+  });
+
   it('refuses a link or a directory at the path instead of reading it as absent', async () => {
     const root = await repo();
     await writeFile(join(root, 'target.md'), 'body\n', 'utf8');
