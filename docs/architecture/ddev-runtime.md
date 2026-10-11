@@ -11,6 +11,8 @@ too. `DdevBoots` keeps the old boot held until teardown settles, then a survivin
 with the current settings. Only a caller for the same subpath joins a boot: one for another
 subpath (a Retry of `01-worktree-setup` moved the worktree mid-boot) waits it out, stoppable on
 its own signal, and then boots its own, where the boot-subpath label check recreates the runner.
+Only a boot that succeeded or was stopped releases it: any other failure, a teardown that could
+not remove the half-made runner among them, is that caller's failure too, as it is a joiner's.
 The app runner coalesces the same way. Every coalesced caller's signal reaches the shared boot,
 including a step that joins a signal-less runtime-ensure job. The shared signal also cancels runner-image
 inspection/build and stale-image pruning before a container exists. A completed runtime is

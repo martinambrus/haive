@@ -265,8 +265,11 @@ export async function ensureAppRunnerStarted(
   const inFlight = inFlightAppRunnerBoots.get(taskId);
   if (inFlight && inFlight.subpath !== repoSubpath) {
     // Another subpath's boot: wait it out, then boot this one (the boot-subpath check recreates).
+    // Only a stop releases the wait; any other failure is this caller's too, as for a joiner.
     await rejectOnAbort(
-      inFlight.boot.catch(() => undefined),
+      inFlight.boot.catch((err: unknown) => {
+        if (!(err instanceof RuntimeSlotAbortedError)) throw err;
+      }),
       signal,
       taskId,
     );

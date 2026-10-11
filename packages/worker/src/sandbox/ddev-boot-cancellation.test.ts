@@ -30,6 +30,32 @@ describe('DDEV cold-boot cancellation', () => {
     expect(own).toHaveBeenCalledOnce();
   });
 
+  it('hands a caller for another subpath the boot failure instead of booting over it', async () => {
+    const boots = new DdevBoots<string>();
+    const first = deferred<string>();
+    const a = boots.ensure('task', undefined, () => first.promise, 'ws/a');
+    const aError = a.catch((err: unknown) => err);
+    const own = vi.fn(async () => 'b');
+    const b = boots.ensure('task', undefined, own, 'ws/b');
+    const failure = new Error('removing the incomplete runner failed');
+    first.reject(failure);
+    expect(await aError).toBe(failure);
+    await expect(b).rejects.toBe(failure);
+    expect(own).not.toHaveBeenCalled();
+  });
+
+  it('boots its own for a caller for another subpath once that boot was stopped', async () => {
+    const boots = new DdevBoots<string>();
+    const first = deferred<string>();
+    const a = boots.ensure('task', undefined, () => first.promise, 'ws/a');
+    const aError = a.catch((err: unknown) => err);
+    const own = vi.fn(async () => 'b');
+    const b = boots.ensure('task', undefined, own, 'ws/b');
+    first.reject(new DdevBootAbortedError());
+    expect(await aError).toBeInstanceOf(DdevBootAbortedError);
+    await expect(b).resolves.toBe('b');
+  });
+
   it('lets a caller waiting for another subpath stop on its own signal without stopping the boot', async () => {
     const boots = new DdevBoots<string>();
     const first = deferred<string>();

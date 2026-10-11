@@ -61,7 +61,8 @@ export class DdevBoots<T> {
   }
 }
 
-/** Waits for `p` to settle either way; rejects only when `signal` aborts first. */
+/** Waits out another subpath's boot: resolves once it succeeded or was stopped, and rejects with
+ *  any other failure, which may have left its runner half-removed, or when `signal` aborts. */
 function settledOrAborted(p: Promise<unknown>, signal: AbortSignal | undefined): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const onAbort = (): void => reject(new DdevBootAbortedError());
@@ -69,7 +70,7 @@ function settledOrAborted(p: Promise<unknown>, signal: AbortSignal | undefined):
     void p
       .then(
         () => resolve(),
-        () => resolve(),
+        (err: unknown) => (err instanceof DdevBootAbortedError ? resolve() : reject(err)),
       )
       .finally(() => signal?.removeEventListener('abort', onAbort));
   });
