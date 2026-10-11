@@ -51,10 +51,12 @@ function writtenStatus(call: ts.CallExpression): string | null {
   return null;
 }
 
-/** Whether the object a name holds gains a `status` in the function around the write. */
+/** Whether the object a name holds may carry a `status`: it gains one in the function around the
+ *  write, or it is not declared there at all (a parameter, an import, an outer binding). */
 function objectMayCarryStatus(at: ts.Node, name: string): boolean {
   const fn = enclosingFunction(at);
   if (!fn) return true;
+  let declared = false;
   let found = false;
   const visit = (n: ts.Node): void => {
     if (
@@ -66,6 +68,7 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
     ) {
       found = true;
     }
+    if (ts.isVariableDeclaration(n) && n.name.getText() === name) declared = true;
     if (
       ts.isVariableDeclaration(n) &&
       n.name.getText() === name &&
@@ -80,7 +83,7 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
     if (!found) ts.forEachChild(n, visit);
   };
   visit(fn);
-  return found;
+  return found || !declared;
 }
 
 /** Whether the `.where(...)` after this `.set(...)` holds only a created task: the created equality
@@ -130,10 +133,9 @@ function nameOf(fn: ts.FunctionLikeDeclaration): string | null {
 }
 
 function isGuardStatement(st: ts.Statement): boolean {
-  if (!ts.isExpressionStatement(st)) return false;
-  let e: ts.Expression = st.expression;
-  if (ts.isAwaitExpression(e)) e = e.expression;
-  return ts.isCallExpression(e) && e.expression.getText() === GUARD;
+  if (!ts.isExpressionStatement(st) || !ts.isAwaitExpression(st.expression)) return false;
+  const call = st.expression.expression;
+  return ts.isCallExpression(call) && call.expression.getText() === GUARD;
 }
 
 /** Whether a guard call runs on every path to the node: it is a statement earlier in one of the
@@ -260,6 +262,23 @@ describe('a live-status write on a task row', () => {
         `const patch = {}; patch.title = 't'; await db.update(schema.tasks).set({ ...patch, updatedAt: now }).where(eq(schema.tasks.id, id));`,
       ),
     ).toEqual([]);
+  });
+
+  it('does not count a guard call that is not awaited', () => {
+    const src = `async function route() {
+      await db.transaction(async (tx) => {
+        ${GUARD}(tx, id);
+        await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      });
+    }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('treats a patch it cannot see declared as one that may carry a status', () => {
+    const src = `async function f(patch) {
+      await db.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));
+    }`;
+    expect(liveWrites('x.ts', src).map((w) => w.status)).toEqual(['<computed>']);
   });
 
   it('exempts only a predicate that holds a created task alone', () => {
