@@ -411,6 +411,21 @@ describe('ragHybridSearch identifier statistics', () => {
     expect(logged).not.toContain('content_tsv');
   });
 
+  it.each([
+    ['the hybrid branch', VEC, false],
+    ['the lexical-only branch', [], true],
+  ])('counts no task row toward df or the total on %s', async (_branch, vec, lexicalOnly) => {
+    const { conn, calls } = recordingConn();
+
+    await ragHybridSearch(conn, vec, QUERY, { lexicalOnly }, undefined, 'repo-1');
+
+    const stats = calls.find((c) => c.statement.includes('AS t(term)'))!.statement;
+    expect(stats).toContain(
+      "FROM ai_rag_embeddings WHERE repository_id = $2 AND source_type <> 'task'",
+    );
+    expect(stats).toContain("WHERE repository_id = $2 AND source_type <> 'task' AND e.content_tsv");
+  });
+
   it('logs nothing when the statistics read succeeds', async () => {
     const { conn } = fakeStore({ transaction: false, statisticsFail: false });
 

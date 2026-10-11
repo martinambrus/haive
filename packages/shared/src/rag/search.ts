@@ -344,12 +344,14 @@ async function identifierIdfs(
   // Own numbering: $1 is the term array, facet params follow, repository_id last.
   const fc = facetFilter ? buildFacetClause(facetFilter, 2) : null;
   const repoParam = 2 + (fc?.params.length ?? 0);
+  // Task rows are never searched, so they must not count toward df or the total either.
   const conds = [
     ...(fc ? [fc.core] : []),
     ...(repositoryId ? [`repository_id = $${repoParam}`] : []),
+    EXCLUDE_TASK_ROWS,
   ];
-  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-  const scoped = conds.length ? `${conds.join(' AND ')} AND ` : '';
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const scoped = `${conds.join(' AND ')} AND `;
   const statistics = (pg: Pick<RagConnection['pg'], 'unsafe'>) =>
     pg.unsafe(
       `
