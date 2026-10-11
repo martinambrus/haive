@@ -1190,18 +1190,24 @@ export function buildDdevCommand(
   return buildDdevLockedCommand(projectDir, `ddev ${ddevArgs}`, timeoutMs);
 }
 
+/** Characters that make an unquoted word something only the shell can resolve: an expansion, an
+ *  operator or redirection, a glob or brace pattern, or a newline (a command separator). */
+const SHELL_OPAQUE = '$`;|&<>()*?[]{}\n';
+
 /** The bash word starting at or after `from`, quotes removed, with its source end; null at the end
- *  of `text`; 'opaque' for anything only the shell can resolve (an expansion, an operator, an open
- *  quote). */
+ *  of `text`; 'opaque' for anything only the shell can resolve (see SHELL_OPAQUE, a comment, a
+ *  tilde, a line continuation, an open quote). */
 function nextShellWord(
   text: string,
   from: number,
 ): { value: string; end: number } | null | 'opaque' {
+  const blank = (ch: string | undefined) => ch === ' ' || ch === '\t';
   let i = from;
-  while (i < text.length && /\s/.test(text[i]!)) i++;
+  while (blank(text[i])) i++;
   if (i >= text.length) return null;
+  if (text[i] === '#' || text[i] === '~') return 'opaque';
   let value = '';
-  while (i < text.length && !/\s/.test(text[i]!)) {
+  while (i < text.length && !blank(text[i])) {
     const ch = text[i]!;
     if (ch === "'") {
       const close = text.indexOf("'", i + 1);
@@ -1212,6 +1218,7 @@ function nextShellWord(
       i++;
       while (i < text.length && text[i] !== '"') {
         if (text[i] === '$' || text[i] === '`') return 'opaque';
+        if (text[i] === '\\' && text[i + 1] === '\n') return 'opaque';
         if (text[i] === '\\' && '$`"\\'.includes(text[i + 1] ?? '')) i++;
         value += text[i];
         i++;
@@ -1219,10 +1226,10 @@ function nextShellWord(
       if (i >= text.length) return 'opaque';
       i++;
     } else if (ch === '\\') {
-      if (i + 1 >= text.length) return 'opaque';
+      if (i + 1 >= text.length || text[i + 1] === '\n') return 'opaque';
       value += text[i + 1];
       i += 2;
-    } else if ('$`;|&<>()'.includes(ch)) {
+    } else if (SHELL_OPAQUE.includes(ch)) {
       return 'opaque';
     } else {
       value += ch;
@@ -1288,9 +1295,12 @@ function ddevExecHead(
   }
 }
 
-// ddev's quoteArgs (cmd/ddev/cmd/exec.go): from two words up, one holding `" \t\r\n#` is double-quoted.
-const DDEV_QUOTE_ARGS =
-  'c=; unset f; if [ $# -lt 2 ]; then c="$*"; else for a; do case $a in *[\\"\\ \\#$\'\\t\\r\\n\']*) a="\\"${a//\\"/\\\\\\"}\\"";; esac; c="$c${f+ }$a"; f=1; done; fi';
+/** The line ddev's quoteArgs (cmd/ddev/cmd/exec.go) builds for a non-raw exec: one word as is;
+ *  from two up, a word holding `" \t\r\n#` double-quoted with `"` escaped. */
+function ddevQuoteArgs(words: string[]): string {
+  if (words.length < 2) return words.join(' ');
+  return words.map((w) => (/[" \t\r\n#]/.test(w) ? `"${w.replaceAll('"', '\\"')}"` : w)).join(' ');
+}
 
 /** Killing the runner's ddev client leaves the command running in the web container, so a
  *  web-container `exec` carries its own deadline, just under the host's. Anything else passes through.
@@ -1302,8 +1312,16 @@ function withWebContainerDeadline(ddevArgs: string, timeoutMs: number): string {
   if (head === null || rest.trim() === '' || head.service !== 'web') return `ddev ${ddevArgs}`;
   const deadline = `timeout --kill-after=5s ${Math.max(1, Math.ceil(timeoutMs / 1000) - 10)}s`;
   if (head.raw) return `ddev ${ddevArgs.slice(0, head.end)} ${deadline}${rest}`;
-  // The newline ends any `#` comment in the words before the wrapper, which a comment would swallow.
-  return `{ set --${rest}\n} && { ${DDEV_QUOTE_ARGS}; } && ddev ${ddevArgs.slice(0, head.flagsEnd)} --raw -- ${deadline} bash -c "$c"`;
+  // Only a plain word list is wrapped: anything the runner's shell must resolve stays unwrapped.
+  const words: string[] = [];
+  for (let at = head.end; ;) {
+    const word = nextShellWord(ddevArgs, at);
+    if (word === null) break;
+    if (word === 'opaque') return `ddev ${ddevArgs}`;
+    words.push(word.value);
+    at = word.end;
+  }
+  return `ddev ${ddevArgs.slice(0, head.flagsEnd)} --raw -- ${deadline} bash -c ${shellQuote(ddevQuoteArgs(words))}`;
 }
 
 function buildDdevLockedCommand(

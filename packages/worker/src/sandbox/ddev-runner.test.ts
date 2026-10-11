@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
+import { shellQuote } from './shell-quote.js';
 import {
   decideDdevRecovery,
   isHostPortCollision,
@@ -49,18 +50,17 @@ describe('DDEV lifecycle commands across worker restarts', () => {
 
   it('stops an exec command inside the web container at the deadline, after any exec flags', () => {
     const shell = (args: string, ms = 60_000) => buildDdevCommand('/repos/x', args, ms).shell;
-    const join = /&& \{ (.*); \} &&/.exec(shell('exec a b'))?.[1];
-    const wrap = (head: string, rest: string, secs = 50) =>
-      `cd /repos/x && { set -- ${rest}\n} && { ${join}; } && ddev ${head} --raw -- timeout --kill-after=5s ${secs}s bash -c "$c"`;
+    const wrap = (head: string, inner: string, secs = 50) =>
+      `cd /repos/x && ddev ${head} --raw -- timeout --kill-after=5s ${secs}s bash -c ${shellQuote(inner)}`;
     expect(shell('exec vendor/bin/phpunit')).toBe(wrap('exec', 'vendor/bin/phpunit'));
     expect(shell("exec 'APP_ENV=prod php artisan migrate'")).toBe(
-      wrap('exec', "'APP_ENV=prod php artisan migrate'"),
+      wrap('exec', 'APP_ENV=prod php artisan migrate'),
     );
-    expect(shell("exec 'echo a | wc -c'")).toBe(wrap('exec', "'echo a | wc -c'"));
+    expect(shell("exec 'echo a | wc -c'")).toBe(wrap('exec', 'echo a | wc -c'));
     expect(shell('exec -s web mysql')).toBe(wrap('exec -s web', 'mysql'));
     expect(shell("exec '--service' 'web' ls")).toBe(wrap("exec '--service' 'web'", 'ls'));
     expect(shell("'exec' '-d' '/v/a'\\''b' 'pytest'")).toBe(
-      wrap("'exec' '-d' '/v/a'\\''b'", "'pytest'"),
+      wrap("'exec' '-d' '/v/a'\\''b'", 'pytest'),
     );
     expect(shell('exec --dir=/v/a php -v')).toBe(wrap('exec --dir=/v/a', 'php -v'));
     expect(shell('exec -q -u root -p my-project id -u')).toBe(
@@ -69,7 +69,20 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     expect(shell('exec --project my-project ls')).toBe(wrap('exec --project my-project', 'ls'));
     expect(shell('exec -- ls -la')).toBe(wrap('exec', 'ls -la'));
     expect(shell('exec php -v', 5_000)).toBe(wrap('exec', 'php -v', 1));
-    expect(shell('exec -d /x echo $HOME')).toBe(wrap('exec -d /x', 'echo $HOME'));
+    expect(shell('exec bash -c "echo hi | cat"')).toBe(wrap('exec', 'bash -c "echo hi | cat"'));
+    for (const plain of [
+      'exec -d /x echo $HOME',
+      'exec php artisan migrate | tee migrate.log',
+      'exec php artisan migrate # production',
+      'exec ls *.php',
+      'exec ls ~/x',
+      'exec php -v\nrm -rf x',
+      'exec php -v && echo ok',
+      'exec php -v > out.txt',
+      'exec echo a\\\nb',
+    ]) {
+      expect(shell(plain)).toBe(`cd /repos/x && ddev ${plain}`);
+    }
     expect(shell('exec -sweb ls')).toBe(wrap('exec -sweb', 'ls'));
     expect(shell('exec')).toBe('cd /repos/x && ddev exec');
     expect(buildDdevCommand('/repos/x', 'exec php -v', 60_000).hostTimeoutMs).toBe(60_000);
@@ -129,7 +142,12 @@ describe('DDEV lifecycle commands across worker restarts', () => {
       'APP_ENV=prod php -r "echo 1;"',
     );
     expect(argv('exec php -v').at(-1)).toBe('php -v');
-    expect(argv('exec php artisan migrate # production').at(-1)).toBe('php artisan migrate');
+    expect(argv('exec php artisan migrate # production')).toEqual([
+      'exec',
+      'php',
+      'artisan',
+      'migrate',
+    ]);
     expect(argv(`exec -s web -- mysql -e 'select 1 #x' "a\\"b" ''`)).toEqual([
       'exec',
       '-s',
