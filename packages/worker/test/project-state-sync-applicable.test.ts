@@ -650,6 +650,21 @@ describe('D11: a set an earlier sync left behind its column is recomputed at boo
 
     expect(s.setOf()).toEqual(P);
   });
+
+  // A release adds a template while a repository from before the column waits for its next write.
+  it.each([
+    ['a stale set', P.filter((id) => id !== 'agents-index')],
+    ['no set', null],
+  ])(
+    'writes the set 01 computes from the snapshot of a repository with no column and %s',
+    async (_n, set) => {
+      const s = await setup({ set, claims: BASE_CLAIMS });
+
+      await recomputeSyncedApplicableSets(s.fake.db as unknown as Database);
+
+      expect(s.setOf()).toEqual(P);
+    },
+  );
 });
 
 describe('D2: 01 writes the set the sync wrote', () => {

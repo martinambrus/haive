@@ -20,8 +20,10 @@ person's bytes, a link, a file past 1 MiB) stays quiet, since no plan could fini
 items and the cli-rules region keep their per-repository comparison, and a NULL set reads as the
 installed one. A repository with no claim keeps its set until 01's first plan: with no claims a
 recomputed set makes every applicable template read as changed. Boot recomputes the set of every
-repository with a column and a claim (`recomputeSyncedApplicableSets`), since a sync from before
-the set followed the column moved the column alone and no later sync of the same files repairs it.
+repository with a claim (`recomputeSyncedApplicableSets`): a sync from before the set followed the
+column moved the column alone, and a release adds templates no stored set holds, so without it a new
+template stayed out of the banner until the next 12, 01, 02 or 04 write. A repository with no column
+resolves its context from its snapshots, as 01 does, and keeps its set when none resolves.
 
 **An item `REFERENCE_CONTEXT` renders empty carries its own `referenceCtx`.** A hash of nothing
 never changes, so the banner could never see such an item's body change: the three PHP LSP plugin
