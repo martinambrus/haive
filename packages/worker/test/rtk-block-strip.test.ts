@@ -168,16 +168,16 @@ describe('restoreRtkBlocks', () => {
 
   it('puts the whole file back while it holds what the strip left', async () => {
     await put(left);
-    expect(await restore()).toEqual({ outcome: 'restored' });
+    expect(await restore()).toMatchObject({ outcome: 'restored' });
     expect(await now()).toBe(before);
   });
 
   it('adds the block back at the end of a file edited since, the way 07 appends it', async () => {
     await put(`${left}Later notes.\n`);
-    expect(await restore()).toEqual({ outcome: 'restored' });
+    expect(await restore()).toMatchObject({ outcome: 'restored' });
     expect(await now()).toBe(`${left}Later notes.\n${LEGACY_REF}`);
     await put('@AGENTS.md');
-    expect(await restore()).toEqual({ outcome: 'restored' });
+    expect(await restore()).toMatchObject({ outcome: 'restored' });
     expect(await now()).toBe(`@AGENTS.md\n${LEGACY_REF}`);
   });
 

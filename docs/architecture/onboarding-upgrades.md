@@ -323,7 +323,30 @@ with the portable fields alone, the owner's enabled ones. Then comes the newest 
 recorded the choice, ahead of one from before RTK (`pickSnapshotRow`, by `newestArtifactsFirst`),
 since an upgrade replaces only the paths it writes and rows from several runs stay live side by
 side. So the banner and the plan read the same context, and a repository whose snapshots all
-predate RTK stays quiet. Only a re-onboarding writes the block.
+predate RTK stays quiet.
+
+**An upgrade offers the RTK block back, unticked.** 07 is the only writer of the block, so once an
+upgrade took it out, only a re-onboarding used to restore it. 01 now lists `AGENTS.md` in
+`rtkBlockRestorable` when ALL hold: the context recorded an RTK choice and RTK is on
+(`rtkBlockToRestore`, the mirror of `rtkLeftoversToRemove`); a provider is enabled, as 07 requires;
+AGENTS.md reads as text and holds no RTK marker (a link or an unreadable file is not offered); and
+Haive's newest record for AGENTS.md is a strip (`RTK_BLOCK_RECORD`), not a put-back
+(`RTK_BLOCK_RESTORE_RECORD`). The strip record is the proof that Haive took the block out: a file
+with none is left alone, since a person may have deleted the block on purpose. Only AGENTS.md is
+ever offered, because 07 writes the block nowhere else, so a strip record for CLAUDE.md or
+GEMINI.md offers nothing. 02's checkbox (`restoreRtkBlock`) defaults to unticked, since the block
+is text in a file the person owns and may have judged it unwanted. A ticked box records what the
+file held and what the append leaves (`RTK_BLOCK_RESTORE_RECORD`, superseded like a strip record)
+before it writes, then appends the block the way 07 does, through `rewriteFileIfNoFollow` and only
+while no marker stands (`appendRtkBlock`). A retry takes the earlier attempt's record while the file
+still holds what that attempt left, so the block is never appended twice. The output carries
+`rtkBlockRestores`, and a refusal is a warning, never a throw. A rollback writes the recorded
+bytes back (`takeOutRestoredRtkBlock`) only while the file still holds what the restore left; a file
+edited or removed since is kept and named, and one already holding the recorded bytes counts as taken
+out. A rollback records what it did to the block (a strip record when it takes the block out, a
+restore record when it puts it back), so the newest record is always Haive's last action on it. The
+banner (`upgrade-status`) does not count this offer: it is unticked, so an upgrade applied
+as offered would change nothing, and the banner promises changes.
 
 **"Keep my edits" is a decision; Skip is not.** Both leave the file alone. Keep also records the
 version declined, so the next upgrade offers only a newer one. On a live row it moves

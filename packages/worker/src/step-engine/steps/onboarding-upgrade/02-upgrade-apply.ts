@@ -44,21 +44,26 @@ import {
 } from '../../../project-state/write.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import {
+  appendRtkBlock,
   cliRulesRegionRecord,
   enabledImportRulesFiles,
   loadCliRulesRenderHashes,
   restoreRulesImportStubs,
+  RTK_BLOCK_HOME,
   RTK_BLOCK_RECORD,
+  RTK_BLOCK_RESTORE_RECORD,
   stripRtkBlocks,
   type RulesImportStubOutcome,
 } from '../onboarding/_rules-files.js';
-import { withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
+import { buildRtkAwarenessBlock, withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
 import {
   backfillRecord,
   recordableContext,
   type UpgradePlanOutput,
   type UpgradePlanEntry,
 } from './01-upgrade-plan.js';
+
+const RESTORE_RTK_BLOCK_FIELD = 'restoreRtkBlock';
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
@@ -396,6 +401,9 @@ export interface UpgradeApplyOutput {
   /** Every rules file this run took an RTK block out of, with the record of what it held, so a
    *  rollback puts the block back. Optional likewise. */
   rtkBlockStrips?: RtkBlockStrip[];
+  /** Every rules file this run put the RTK block back into, with the record of what it held, so a
+   *  rollback takes the block out again. Optional likewise. */
+  rtkBlockRestores?: RtkBlockStrip[];
   /** Every row this run untracked: superseded with its file left alone, so a rollback puts it back
    *  live. Optional likewise. */
   untrackedRowIds?: string[];
@@ -672,6 +680,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           'RTK is switched off for this repository, so the RTK block comes out of ' +
           `${rtkBlocks.map((f) => `\`${f}\``).join(', ')}.`,
         variant: 'info',
+      });
+    }
+
+    if ((detected.rtkBlockRestorable ?? []).includes(RTK_BLOCK_HOME)) {
+      fields.push({
+        type: 'checkbox',
+        id: RESTORE_RTK_BLOCK_FIELD,
+        label: `Put the RTK block back into \`${RTK_BLOCK_HOME}\``,
+        description: 'RTK is on again, and an earlier upgrade took the block out.',
+        default: false,
       });
     }
 
@@ -1315,6 +1333,24 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       }
     }
 
+    // A record whose write did not land would read as Haive's last action on the block.
+    const dropRecords = async (ids: string[]) => {
+      if (ids.length === 0) return;
+      await ctx.db
+        .delete(schema.onboardingArtifacts)
+        .where(inArray(schema.onboardingArtifacts.id, ids));
+    };
+
+    // A retry finds the block an earlier attempt took out gone, or put in standing, and takes that
+    // attempt's record while the file still holds what it left: anything else there is not its doing.
+    const earlierRecord = async (templateId: string, file: string) => {
+      const earlier = earlierRecords.get(`${templateId}\n${file}`);
+      if (!earlier) return undefined;
+      const now = await readUpgradeFile(ctx.repoPath, file);
+      const left = now.kind === 'text' ? sha256Hex(normalizeContent(now.text)) : null;
+      return left === earlier.lastObservedDiskHash ? earlier.id : undefined;
+    };
+
     // The RTK block is no manifest item, so no obsolete entry takes it out once RTK is off.
     const rtkBlockStrips: RtkBlockStrip[] = [];
     if (
@@ -1345,15 +1381,6 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         });
         recorded.set(file, recordId);
       });
-      // A retry finds the block an earlier attempt took out gone, and takes that attempt's record
-      // while the file still holds what that strip left: anything else there is not its doing.
-      const earlierStrip = async (file: string) => {
-        const earlier = earlierRecords.get(`${RTK_BLOCK_RECORD}\n${file}`);
-        if (!earlier) return undefined;
-        const now = await readUpgradeFile(ctx.repoPath, file);
-        const left = now.kind === 'text' ? sha256Hex(normalizeContent(now.text)) : null;
-        return left === earlier.lastObservedDiskHash ? earlier.id : undefined;
-      };
       for (const strip of strips) {
         if (strip.result === 'refused') {
           warnings.push(`could not check ${strip.file} for an RTK block: ${strip.error}`);
@@ -1362,11 +1389,64 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           strip.result === 'stripped'
             ? recorded.get(strip.file)
             : strip.result === 'none'
-              ? await earlierStrip(strip.file)
+              ? await earlierRecord(RTK_BLOCK_RECORD, strip.file)
               : undefined;
+        const unwritten = recorded.get(strip.file);
+        if (strip.result !== 'stripped' && unwritten !== undefined) await dropRecords([unwritten]);
         if (recordId === undefined) continue;
         writtenPaths.push(strip.file);
         rtkBlockStrips.push({ file: strip.file, recordId });
+      }
+    }
+
+    // Only AGENTS.md, where 07 writes the block, and only when the person ticked the box.
+    const rtkBlockRestores: RtkBlockStrip[] = [];
+    if (
+      values[RESTORE_RTK_BLOCK_FIELD] === true &&
+      (plan.rtkBlockRestorable ?? []).includes(RTK_BLOCK_HOME)
+    ) {
+      const recorded: string[] = [];
+      const put = await appendRtkBlock(
+        ctx.repoPath,
+        RTK_BLOCK_HOME,
+        buildRtkAwarenessBlock(),
+        async (before, after) => {
+          const beforeHash = sha256Hex(normalizeContent(before));
+          const id = await insertRecord({
+            userId: ctx.userId,
+            repositoryId: plan.repositoryId,
+            taskId: ctx.taskId,
+            diskPath: RTK_BLOCK_HOME,
+            templateId: RTK_BLOCK_RESTORE_RECORD,
+            templateKind: RTK_BLOCK_RESTORE_RECORD,
+            templateSchemaVersion: 1,
+            templateContentHash: beforeHash,
+            writtenHash: beforeHash,
+            writtenContent: before,
+            lastObservedDiskHash: sha256Hex(normalizeContent(after)),
+            formValuesSnapshot: rowContext,
+            sourceStepId: '02-upgrade-apply',
+            source: 'backfill',
+            haiveVersion,
+          });
+          recorded.push(id);
+        },
+      );
+      if (put.result === 'absent') {
+        warnings.push(`did not put back the RTK block in ${RTK_BLOCK_HOME}: it was removed`);
+      } else if (put.result === 'refused') {
+        warnings.push(`did not put back the RTK block in ${RTK_BLOCK_HOME}: ${put.error}`);
+      }
+      if (put.result !== 'appended') await dropRecords(recorded);
+      const recordId =
+        put.result === 'appended'
+          ? recorded[0]
+          : put.result === 'standing'
+            ? await earlierRecord(RTK_BLOCK_RESTORE_RECORD, RTK_BLOCK_HOME)
+            : undefined;
+      if (recordId !== undefined) {
+        writtenPaths.push(RTK_BLOCK_HOME);
+        rtkBlockRestores.push({ file: RTK_BLOCK_HOME, recordId });
       }
     }
 
@@ -1572,6 +1652,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       ],
       removedPaths,
       rtkBlockStrips,
+      rtkBlockRestores,
       untrackedRowIds,
     };
   },

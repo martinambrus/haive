@@ -98,6 +98,7 @@ const DETECT_KEYS = [
   'renderCtxSnapshot',
   'repositoryId',
   'rtkBlockLeftovers',
+  'rtkBlockRestorable',
   'rtkFollowsLive',
 ];
 
@@ -169,7 +170,7 @@ describe('01 plans from a portable-only column', () => {
     expect(Object.keys(detected.renderCtxSnapshot).sort()).toEqual(CONTEXT_KEYS);
     expect('rtkChoiceRecorded' in detected.renderCtxSnapshot).toBe(false);
     expect(detected.rtkFollowsLive).toBe(true);
-    // No field is added to what a plan persists.
+    // The plan persists only the fields DETECT_KEYS names.
     expect(Object.keys(detected).sort()).toEqual(DETECT_KEYS);
     // What 07 itself derives for the same rows and languages: gemini, which is off, is in neither.
     const derived = renderTargetsFor(

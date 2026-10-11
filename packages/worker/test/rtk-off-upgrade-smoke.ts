@@ -522,6 +522,53 @@ async function main(): Promise<void> {
       { bucket: settingsEntry(back.detected)?.bucket },
     );
 
+    // ---- the RTK block offered back: left unticked, then ticked, then rolled back -----------
+    const restoreField = back.form?.fields.find((f) => f.id === 'restoreRtkBlock');
+    check(
+      'with RTK back on the block the off-upgrade took out is offered back, unticked',
+      JSON.stringify(back.detected.rtkBlockRestorable) === JSON.stringify(['AGENTS.md']) &&
+        restoreField?.type === 'checkbox' &&
+        restoreField.default === false,
+      { restorable: back.detected.rtkBlockRestorable, restoreField },
+    );
+    const backValues = defaultValues(back.form);
+    backValues.selectedNew = [];
+    const applyBack = () =>
+      upgradeApplyStep.apply(back.applyCtx, {
+        detected: back.plan,
+        formValues: backValues,
+        iteration: 0,
+        previousIterations: [],
+      });
+    await applyBack();
+    check('left unticked, AGENTS.md is untouched', (await readOrNull('AGENTS.md')) === agentsMd, {
+      now: await readOrNull('AGENTS.md'),
+    });
+    backValues.restoreRtkBlock = true;
+    const backApplied = await applyBack();
+    check(
+      'ticked, the block is back and AGENTS.md is handed to the commit',
+      (await readOrNull('AGENTS.md')) === `${agentsMd}${buildRtkAwarenessBlock()}` &&
+        backApplied.writtenPaths?.includes('AGENTS.md') === true &&
+        backApplied.rtkBlockRestores?.length === 1,
+      { now: await readOrNull('AGENTS.md'), restores: backApplied.rtkBlockRestores },
+    );
+    await finish(back.applyCtx, backApplied);
+    const backRollback = await rollback('rtk-off-upgrade-smoke restore rollback');
+    check(
+      'a rollback takes the block back out',
+      (await readOrNull('AGENTS.md')) === agentsMd &&
+        !backRollback.warnings.some((w) => w.includes('AGENTS.md')),
+      { now: await readOrNull('AGENTS.md'), warnings: backRollback.warnings },
+    );
+    const afterRestoreRollback = await upgrade('rtk-off-upgrade-smoke after restore rollback');
+    check(
+      'and it is offered again, since the rollback took the block out',
+      JSON.stringify(afterRestoreRollback.detected.rtkBlockRestorable) ===
+        JSON.stringify(['AGENTS.md']),
+      afterRestoreRollback.detected.rtkBlockRestorable,
+    );
+
     // ---- a rollback of the upgrade that removed it ------------------------------------------
     await finish(again.applyCtx, againApplied);
     const againRollback = await rollback('rtk-off-upgrade-smoke again rollback');

@@ -62,6 +62,11 @@ describe('offering the rollback of an upgrade that only removed things', () => {
     expect(await upgrades([{ completedAt: 1, applied }])).toBe(true);
   });
 
+  it('offers it for an upgrade that only put the RTK block back', async () => {
+    const applied = { removedPaths: [], rtkBlockRestores: [{ file: 'AGENTS.md', recordId: 'r1' }] };
+    expect(await upgrades([{ completedAt: 1, applied }])).toBe(true);
+  });
+
   it('stops offering it once a rollback completes after that upgrade', async () => {
     expect(
       await upgrades([
