@@ -11,7 +11,7 @@
  * the gate has passed and the upgrade is being kept. Safe to re-run: every entry is idempotent,
  * which is what lets an interrupted commit simply repeat.
  */
-import { configService, logger } from '@haive/shared';
+import { configService, logger, secretsService } from '@haive/shared';
 import { initDatabase } from './db.js';
 import { runDestructiveDataMigrations } from './data-migrations.js';
 
@@ -26,6 +26,8 @@ async function main(): Promise<void> {
   // configService, because at least one entry is flag-gated and reads its switch from Redis.
   await configService.initialize(redisUrl);
   const db = initDatabase(databaseUrl);
+  // The provider env drop encrypts with the master key.
+  await secretsService.initialize(db);
 
   await runDestructiveDataMigrations(db);
   log.info('destructive data migrations complete');
