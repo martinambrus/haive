@@ -43,7 +43,12 @@ import {
   RTK_REF_MARKER_START,
   type RtkRenderInputs,
 } from './_rtk-templates.js';
-import { ensureRulesImportStub, isLinkToAgentsMd, planRulesFiles } from './_rules-files.js';
+import {
+  ensureRulesImportStub,
+  isLinkToAgentsMd,
+  planRulesFiles,
+  RULES_IMPORT_LINE,
+} from './_rules-files.js';
 
 export { planRulesFiles, type RulesPlan } from './_rules-files.js';
 
@@ -941,11 +946,17 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       if (stub === 'refused') continue;
       if (stub === 'created') wroteFiles.push(rf);
       else if (stub === 'appended') appendedFiles.push(rf);
-      else skippedFiles.push(rf);
+      else {
+        skippedFiles.push(rf);
+        if (stub === 'skipped-link' || !(await holdsRender(rf, `${RULES_IMPORT_LINE}\n`))) {
+          leftAsIs.push(rf);
+        }
+      }
     }
     for (const rf of rulesPlan.copyFiles) {
       if (await isLinkToAgentsMd(ctx.repoPath, rf)) {
         skippedFiles.push(rf);
+        leftAsIs.push(rf);
         continue;
       }
       await appendOrCreate(
