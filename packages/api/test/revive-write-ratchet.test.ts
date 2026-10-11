@@ -807,8 +807,26 @@ function nextSubstitution(n: ts.Node): ts.Expression | null {
   return owner.templateSpans[at]?.expression ?? null;
 }
 
-/** Drizzle's `sql` tag, under its own name or the one an import gives it. */
+function importsDrizzleAs(sf: ts.SourceFile, name: string): boolean {
+  return sf.statements.some(
+    (st) =>
+      ts.isImportDeclaration(st) &&
+      (st.moduleSpecifier as ts.StringLiteral).text === 'drizzle-orm' &&
+      st.importClause?.namedBindings !== undefined &&
+      ts.isNamespaceImport(st.importClause.namedBindings) &&
+      st.importClause.namedBindings.name.text === name,
+  );
+}
+
+/** Drizzle's `sql` tag, under its own name, an import's alias, or a namespace import. */
 function isSqlTag(tag: ts.Expression): boolean {
+  if (
+    ts.isPropertyAccessExpression(tag) &&
+    tag.name.text === 'sql' &&
+    ts.isIdentifier(tag.expression)
+  ) {
+    return importsDrizzleAs(tag.getSourceFile(), tag.expression.text);
+  }
   if (!ts.isIdentifier(tag)) return false;
   if (tag.text === 'sql') return true;
   let found = false;
@@ -829,7 +847,7 @@ function isSqlTag(tag: ts.Expression): boolean {
 const RAW_SQL_CALLS = new Set(['raw', 'execute', 'unsafe', 'query']);
 
 /** Text that reaches a query: a `sql` template, or an argument of a raw-SQL call, through
- *  concatenation, parentheses, template substitutions and a variable it is stored in. */
+ *  concatenation, parentheses and template substitutions. */
 function inSqlContext(n: ts.Node): boolean {
   let at: ts.Node = n;
   for (;;) {
@@ -843,14 +861,6 @@ function inSqlContext(n: ts.Node): boolean {
         RAW_SQL_CALLS.has(p.expression.name.text)
       );
     }
-    if (ts.isVariableDeclaration(p) && p.initializer === at && ts.isIdentifier(p.name)) {
-      // An exported value is used in files this walk does not read, so it counts as query text.
-      const stmt = p.parent.parent;
-      const exported =
-        ts.isVariableStatement(stmt) &&
-        (ts.getModifiers(stmt) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
-      return exported || usedInSql(at.getSourceFile(), p.name);
-    }
     const passes =
       (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
       ts.isParenthesizedExpression(p) ||
@@ -861,37 +871,34 @@ function inSqlContext(n: ts.Node): boolean {
   }
 }
 
-/** Whether a variable holding text is used as query text anywhere in its file. */
-function usedInSql(sf: ts.SourceFile, name: ts.Identifier): boolean {
-  let found = false;
-  const visit = (n: ts.Node): void => {
-    if (ts.isIdentifier(n) && n !== name && n.text === name.text && inSqlContext(n)) found = true;
-    if (!found) ts.forEachChild(n, visit);
-  };
-  visit(sf);
-  return found;
-}
+const TASK_TABLE = String.raw`(only\s+)?("?\w+"?\s*\.\s*)?"?tasks"?`;
+// Shaped as a statement, not just named: "Update tasks before retrying" has no SET.
+const TASK_MUTATION = new RegExp(
+  [
+    String.raw`\bupdate\s+${TASK_TABLE}(\s+(as\s+)?\w+)?\s+set\b`,
+    String.raw`\binsert\s+into\s+${TASK_TABLE}\s*(\(|values\b|select\b|default\b|overriding\b)`,
+    String.raw`\bdelete\s+from\s+${TASK_TABLE}([^\w$-]|$)`,
+    String.raw`\bmerge\s+into\s+${TASK_TABLE}\b[\s\S]*\busing\b`,
+    String.raw`\btruncate\s+(table\s+)?${TASK_TABLE}([^\w$-]|$)`,
+    String.raw`\bcopy\s+${TASK_TABLE}\s*(\(|from\b)`,
+  ].join('|'),
+  'i',
+);
+const DANGLING_TARGET =
+  /\b(update|insert\s+into|merge\s+into|delete\s+from|truncate(\s+table)?)\s+(only\s+)?("?\w+"?\s*\.\s*)?$/i;
 
-/** Query text whose mutating statement targets the tasks table, such as a raw `sql` UPDATE: no
- *  builder is there to read, so any such text is reported rather than parsed. Comments are dropped. */
+/** Text holding a mutating statement on the tasks table, wherever it flows (a raw `sql` UPDATE,
+ *  a constant run later): no builder is there to read. Comments are dropped. */
 function writesTasksAsText(n: ts.Node): boolean {
   if (!ts.isStringLiteralLike(n) && !ts.isTemplateLiteralToken(n)) return false;
-  if (!inSqlContext(n)) return false;
   const text = n.text.replace(/\/\*[\s\S]*?\*\/|--[^\n]*/g, ' ');
+  if (TASK_MUTATION.test(text)) return true;
   // A fragment ending at a mutation's target names it elsewhere (a concatenation, a raw chunk).
-  if (
-    /\b(update|insert\s+into|merge\s+into|delete\s+from|truncate(\s+table)?)\s+(only\s+)?("?\w+"?\s*\.\s*)?$/i.test(
-      text,
-    )
-  ) {
-    const target = nextSubstitution(n);
-    return !(
-      target &&
-      (isTasksTable(target) || (ts.isIdentifier(target) && NON_TASK_TABLES.has(target.text)))
-    );
-  }
-  return /\b(update|insert\s+into|merge\s+into|delete\s+from|truncate(\s+table)?|copy)\s+(only\s+)?("?\w+"?\s*\.\s*)?"?tasks"?([^\w$-]|$)/i.test(
-    text,
+  if (!DANGLING_TARGET.test(text) || !inSqlContext(n)) return false;
+  const target = nextSubstitution(n);
+  return !(
+    target &&
+    (isTasksTable(target) || (ts.isIdentifier(target) && NON_TASK_TABLES.has(target.text)))
   );
 }
 
@@ -991,6 +998,10 @@ describe('a live-status write on a task row', () => {
     ).toBe(1);
     expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
     expect(found("throw new HttpError(409, 'Update tasks before retrying');")).toBe(0);
+    expect(found(`let q; q = "UPDATE tasks SET status = 'running'"; await tx.unsafe(q);`)).toBe(1);
+    expect(
+      found("import * as orm from 'drizzle-orm'; orm.sql`UPDATE ${table} SET status = 1`;"),
+    ).toBe(1);
     expect(found(`export const reviveTask = "UPDATE tasks SET status = 'running'";`)).toBe(1);
     expect(
       found(
