@@ -1,3 +1,4 @@
+import { buildLspMarketplaceCommands } from './_lsp-marketplace.js';
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { CLAUDE_FAMILY_SKILLS_ENV, claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
@@ -28,19 +29,6 @@ const MUSE_EFFORT_SCALE: EffortScale = {
   values: ['low', 'medium', 'high', 'xhigh'],
   max: 'xhigh',
 };
-
-// PHP intentionally absent — see the CLAUDE_LSP_PLUGINS note in claude-code.ts.
-// Haive installs no phpactor binary; PHP LSP is intelephense via the local
-// drupal-php-lsp plugin, so php must not map to the marketplace phpactor plugin.
-const MUSE_LSP_PLUGINS: Record<string, string> = {
-  typescript: 'vtsls',
-  python: 'pyright',
-  go: 'gopls',
-  rust: 'rust-analyzer',
-  java: 'jdtls',
-};
-const MUSE_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
-const MUSE_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 
 // Meta Model API root. Anthropic-wire-compatible, so the claude binary drives it
 // unchanged once ANTHROPIC_BASE_URL points here.
@@ -148,39 +136,6 @@ export class MuseAdapter extends BaseCliAdapter {
     provider: CliProviderRecord,
     opts: PluginInstallOpts,
   ): PluginInstallCommand[] {
-    const exec = this.resolveExecutable(provider);
-    const cmds: PluginInstallCommand[] = [];
-    const lspPlugins = opts.lspLanguages
-      .map((lang) => MUSE_LSP_PLUGINS[lang === 'php-extended' ? 'php' : lang])
-      .filter((v): v is string => !!v);
-    const uniqueLsp = [...new Set(lspPlugins)];
-    if (uniqueLsp.length > 0) {
-      cmds.push({
-        description: `Add ${MUSE_LSP_MARKETPLACE_REF} marketplace`,
-        command: exec,
-        args: ['plugin', 'marketplace', 'add', MUSE_LSP_MARKETPLACE_REF],
-        egressDomains: ['github.com'],
-      });
-      for (const name of uniqueLsp) {
-        cmds.push({
-          description: `Install LSP plugin ${name}`,
-          command: exec,
-          args: ['plugin', 'install', `${name}@${MUSE_LSP_MARKETPLACE_ID}`],
-        });
-      }
-    }
-    if (opts.drupalLspPath) {
-      cmds.push({
-        description: 'Add local drupal-lsp marketplace',
-        command: exec,
-        args: ['plugin', 'marketplace', 'add', opts.drupalLspPath],
-      });
-      cmds.push({
-        description: 'Install drupal-php-lsp plugin',
-        command: exec,
-        args: ['plugin', 'install', 'drupal-php-lsp@drupal-lsp-marketplace'],
-      });
-    }
-    return cmds;
+    return buildLspMarketplaceCommands({ exec: this.resolveExecutable(provider), opts });
   }
 }

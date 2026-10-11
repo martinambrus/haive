@@ -1,3 +1,4 @@
+import { buildLspMarketplaceCommands } from './_lsp-marketplace.js';
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { CLAUDE_FAMILY_SKILLS_ENV, claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
@@ -16,21 +17,6 @@ const CLAUDE_EFFORT_SCALE: EffortScale = {
   values: ['low', 'medium', 'high', 'xhigh', 'max'],
   max: 'max',
 };
-
-// PHP is intentionally absent: the Piebald-AI/claude-code-lsps marketplace has
-// no intelephense plugin (only phpactor, whose binary Haive does not install).
-// Haive standardizes PHP LSP on intelephense via its own local drupal-php-lsp
-// plugin (installed for php and php-extended alike), so php must NOT resolve to
-// the marketplace phpactor plugin here.
-const CLAUDE_LSP_PLUGINS: Record<string, string> = {
-  typescript: 'vtsls',
-  python: 'pyright',
-  go: 'gopls',
-  rust: 'rust-analyzer',
-  java: 'jdtls',
-};
-const CLAUDE_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
-const CLAUDE_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 
 export class ClaudeCodeAdapter extends BaseCliAdapter {
   readonly providerName = 'claude-code' as const;
@@ -102,39 +88,6 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
     provider: CliProviderRecord,
     opts: PluginInstallOpts,
   ): PluginInstallCommand[] {
-    const exec = this.resolveExecutable(provider);
-    const cmds: PluginInstallCommand[] = [];
-    const lspPlugins = opts.lspLanguages
-      .map((lang) => CLAUDE_LSP_PLUGINS[lang === 'php-extended' ? 'php' : lang])
-      .filter((v): v is string => !!v);
-    const uniqueLsp = [...new Set(lspPlugins)];
-    if (uniqueLsp.length > 0) {
-      cmds.push({
-        description: `Add ${CLAUDE_LSP_MARKETPLACE_REF} marketplace`,
-        command: exec,
-        args: ['plugin', 'marketplace', 'add', CLAUDE_LSP_MARKETPLACE_REF],
-        egressDomains: ['github.com'],
-      });
-      for (const name of uniqueLsp) {
-        cmds.push({
-          description: `Install LSP plugin ${name}`,
-          command: exec,
-          args: ['plugin', 'install', `${name}@${CLAUDE_LSP_MARKETPLACE_ID}`],
-        });
-      }
-    }
-    if (opts.drupalLspPath) {
-      cmds.push({
-        description: 'Add local drupal-lsp marketplace',
-        command: exec,
-        args: ['plugin', 'marketplace', 'add', opts.drupalLspPath],
-      });
-      cmds.push({
-        description: 'Install drupal-php-lsp plugin',
-        command: exec,
-        args: ['plugin', 'install', 'drupal-php-lsp@drupal-lsp-marketplace'],
-      });
-    }
-    return cmds;
+    return buildLspMarketplaceCommands({ exec: this.resolveExecutable(provider), opts });
   }
 }

@@ -1,5 +1,6 @@
 import { posix } from 'node:path';
 import { SANDBOX_USER_HOME } from '../sandbox/sandbox-identity.js';
+import { buildLspMarketplaceCommands } from './_lsp-marketplace.js';
 import { BaseCliAdapter } from './base-adapter.js';
 import type {
   CliCommandSpec,
@@ -9,24 +10,6 @@ import type {
   PluginInstallOpts,
 } from './types.js';
 import { deliverPrompt } from './prompt-delivery.js';
-
-// PHP intentionally absent — see the CLAUDE_LSP_PLUGINS note in claude-code.ts.
-// Haive installs no phpactor binary; PHP LSP is intelephense via the local
-// drupal-php-lsp plugin, so php must not map to the marketplace phpactor plugin.
-//
-// Grok reads the CLAUDE marketplace format: `grok plugin marketplace add
-// Piebald-AI/claude-code-lsps` followed by `grok plugin install vtsls@claude-code-lsps`
-// installs cleanly and `grok plugin details` reports the plugin's `LSP servers`
-// component. Verified against grok 1.0.3 — this is not assumed from the docs.
-const GROK_LSP_PLUGINS: Record<string, string> = {
-  typescript: 'vtsls',
-  python: 'pyright',
-  go: 'gopls',
-  rust: 'rust-analyzer',
-  java: 'jdtls',
-};
-const GROK_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
-const GROK_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 
 /** grok loads project skills and project instructions only in a TRUSTED folder, and a headless
  *  run is never trusted: MEASURED on 1.0.34, every grok run listed 0 repo skills and no AGENTS.md.
@@ -165,53 +148,28 @@ export class GrokAdapter extends BaseCliAdapter {
     provider: CliProviderRecord,
     opts: PluginInstallOpts,
   ): PluginInstallCommand[] {
-    const exec = this.resolveExecutable(provider);
-    const cmds: PluginInstallCommand[] = [];
-    const lspPlugins = opts.lspLanguages
-      .map((lang) => GROK_LSP_PLUGINS[lang === 'php-extended' ? 'php' : lang])
-      .filter((v): v is string => !!v);
-    const uniqueLsp = [...new Set(lspPlugins)];
+    // Grok reads the CLAUDE marketplace format (verified against grok 1.0.3, not assumed from
+    // the docs).
+    //
     // `--trust` on every install: grok keeps a plugin's hooks and MCP servers
     // INACTIVE until the plugin is trusted, so an untrusted LSP plugin installs
     // successfully and then does nothing. The claude-family adapters need no
     // equivalent because Claude Code has no such gate.
-    if (uniqueLsp.length > 0) {
-      cmds.push({
-        description: `Add ${GROK_LSP_MARKETPLACE_REF} marketplace`,
-        command: exec,
-        args: ['plugin', 'marketplace', 'add', GROK_LSP_MARKETPLACE_REF],
-        egressDomains: ['github.com'],
-      });
-      for (const name of uniqueLsp) {
-        cmds.push({
-          description: `Install LSP plugin ${name}`,
-          command: exec,
-          args: ['plugin', 'install', `${name}@${GROK_LSP_MARKETPLACE_ID}`, '--trust'],
-        });
-      }
-    }
-    if (opts.drupalLspPath) {
-      // The qualifier is the FOLDER BASENAME, not the `name` inside
-      // `.claude-plugin/marketplace.json`. This is the one place grok and claude-code
-      // genuinely diverge on the Claude plugin format, so do not "unify" it with
-      // claude-code's `drupal-php-lsp@drupal-lsp-marketplace`: grok registers a LOCAL
-      // marketplace source under the directory it was added from, and installing against
-      // the manifest name fails with `Unknown marketplace "drupal-lsp-marketplace".
-      // Registered marketplaces: - drupal-php-lsp (local/drupal-php-lsp)`. Measured
-      // against grok 1.0.3. The REMOTE marketplace above needs no such treatment —
-      // `claude-code-lsps` is already the repo basename grok derives.
-      const localMarketplaceId = posix.basename(opts.drupalLspPath);
-      cmds.push({
-        description: 'Add local drupal-lsp marketplace',
-        command: exec,
-        args: ['plugin', 'marketplace', 'add', opts.drupalLspPath],
-      });
-      cmds.push({
-        description: 'Install drupal-php-lsp plugin',
-        command: exec,
-        args: ['plugin', 'install', `drupal-php-lsp@${localMarketplaceId}`, '--trust'],
-      });
-    }
-    return cmds;
+    //
+    // The local qualifier is the FOLDER BASENAME, not the `name` inside
+    // `.claude-plugin/marketplace.json`. This is the one place grok and claude-code
+    // genuinely diverge on the Claude plugin format, so do not "unify" it with
+    // claude-code's `drupal-php-lsp@drupal-lsp-marketplace`: grok registers a LOCAL
+    // marketplace source under the directory it was added from, and installing against
+    // the manifest name fails with `Unknown marketplace "drupal-lsp-marketplace".
+    // Registered marketplaces: - drupal-php-lsp (local/drupal-php-lsp)`. Measured
+    // against grok 1.0.3. The REMOTE marketplace needs no such treatment —
+    // `claude-code-lsps` is already the repo basename grok derives.
+    return buildLspMarketplaceCommands({
+      exec: this.resolveExecutable(provider),
+      opts,
+      trust: true,
+      localMarketplaceId: (drupalLspPath) => posix.basename(drupalLspPath),
+    });
   }
 }
