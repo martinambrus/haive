@@ -87,6 +87,9 @@ export interface RagPopulateApply {
 
 const SOURCE_PREFIXES = [`${KB_DIR}/`];
 
+const HASH_WITH_ENDPOINT_REASON =
+  'Hash vectors were written because the embedding endpoint did not answer and strict embedding is off. They are re-embedded on the next sync.';
+
 /* ------------------------------------------------------------------ */
 /* File collection                                                     */
 /* ------------------------------------------------------------------ */
@@ -199,7 +202,7 @@ export async function insertChunk(
   sourcePath: string,
   sectionId: string,
   chunkIndex: number,
-  chunkHash: string,
+  chunkHash: string | null,
   content: string,
   embedding: number[],
   upsert: boolean,
@@ -380,7 +383,7 @@ async function embedAndStore(opts: {
   embeddingModel: string | null;
   embeddingDimensions: number;
   sync: IncrementalSync | null;
-}): Promise<{ embedded: number; skipped: number }> {
+}): Promise<{ embedded: number; skipped: number; hashedWithEndpoint: boolean }> {
   const { sync } = opts;
   const toEmbed: RagChunk[] = [];
   let skipped = 0;
@@ -397,6 +400,7 @@ async function embedAndStore(opts: {
   }
 
   let embedded = 0;
+  let hashedWithEndpoint = false;
   const batchSize = await resolveEmbedBatchSize();
   for (let batchStart = 0; batchStart < toEmbed.length; batchStart += batchSize) {
     opts.ctx.throwIfCancelled();
@@ -435,6 +439,8 @@ async function embedAndStore(opts: {
       throw new RagEmbedFailureError(outcome.reason);
     }
     const embeddings = outcome.embeddings;
+    const hashedHere = outcome.kind === 'hashed' && !!opts.ollamaUrl && !!opts.embeddingModel;
+    if (hashedHere) hashedWithEndpoint = true;
     for (let i = 0; i < batch.length; i += 1) {
       const chunk = batch[i]!;
       await insertChunk(
@@ -446,7 +452,7 @@ async function embedAndStore(opts: {
         opts.filePath,
         chunk.sectionId,
         chunk.chunkIndex,
-        chunk.chunkHash,
+        hashedHere ? null : chunk.chunkHash,
         chunk.content,
         embeddings[i]!,
         sync !== null,
@@ -454,7 +460,7 @@ async function embedAndStore(opts: {
       embedded += 1;
     }
   }
-  return { embedded, skipped };
+  return { embedded, skipped, hashedWithEndpoint };
 }
 
 /* ------------------------------------------------------------------ */
@@ -763,6 +769,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       let codeFileCount = 0;
       let chunksEmbedded = 0;
       let chunksSkipped = 0;
+      let hashedWithEndpoint = false;
 
       // --- KB files ---
       const totalKb = detected.kbFiles.length;
@@ -824,6 +831,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         });
         chunksEmbedded += kbRes.embedded;
         chunksSkipped += kbRes.skipped;
+        hashedWithEndpoint ||= kbRes.hashedWithEndpoint;
       }
 
       // --- Code files ---
@@ -886,6 +894,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         });
         chunksEmbedded += codeRes.embedded;
         chunksSkipped += codeRes.skipped;
+        hashedWithEndpoint ||= codeRes.hashedWithEndpoint;
       }
 
       let chunksDeleted = 0;
@@ -924,7 +933,27 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       );
       // A completed run with real embeddings is the only evidence that clears the
       // degradation — a hash-mode run proves nothing about whether embeddings work.
-      if (useOllama && health.degradedAt) {
+      if (hashedWithEndpoint) {
+        await recordRagEmbedDegraded(
+          ctx.db,
+          repositoryId ?? null,
+          HASH_WITH_ENDPOINT_REASON,
+          ctx.logger,
+        );
+        await ctx.db
+          .update(schema.taskSteps)
+          .set({
+            warningMessage: composeRagWarning(
+              embedDeviceWarning(embedDevice),
+              ragEmbedWarning({
+                degradedAt: health.degradedAt ?? new Date(),
+                degradedReason: HASH_WITH_ENDPOINT_REASON,
+                lexicalOnly: false,
+              }),
+            ),
+          })
+          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      } else if (useOllama && health.degradedAt) {
         await clearRagEmbedDegraded(ctx.db, repositoryId ?? null, ctx.logger);
       }
       return {

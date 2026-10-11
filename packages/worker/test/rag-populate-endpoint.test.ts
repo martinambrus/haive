@@ -1,0 +1,196 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { schema } from '@haive/database';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { StepContext } from '../src/step-engine/step-definition.js';
+
+const mocks = vi.hoisted(() => ({
+  strict: true,
+  embedFails: false,
+  ollamaEmbed: vi.fn(async (_url: string, _model: string, texts: string[]) => {
+    if (mocks.embedFails) throw new Error('connection refused');
+    return texts.map(() => [0.1, 0.2]);
+  }),
+}));
+vi.mock('@haive/shared/rag', async (original) => ({
+  ...(await original<object>()),
+  ollamaEmbed: mocks.ollamaEmbed,
+  resolveEmbedBudget: async () => ({
+    embedTimeoutMs: 1000,
+    queryTimeoutMs: 1000,
+    warmupTimeoutMs: 1000,
+    batchSize: 8,
+    strict: mocks.strict,
+  }),
+}));
+vi.mock('../src/step-engine/steps/onboarding/_rag-connection.js', async (original) => ({
+  ...(await original<object>()),
+  resolveRagConnection: async () => conn,
+  ensureRagSchema: async () => ({ usedPgvector: false, tableName: 'ai_rag_embeddings' }),
+}));
+vi.mock('../src/step-engine/steps/onboarding/_rag-embed.js', async (original) => ({
+  ...(await original<object>()),
+  warmOllamaModel: async () => false,
+}));
+
+const { ragPopulateStep, RagEmbedFailureError } =
+  await import('../src/step-engine/steps/onboarding/10-rag-populate.js').then(async (m) => ({
+    ragPopulateStep: m.ragPopulateStep,
+    RagEmbedFailureError: (await import('../src/step-engine/steps/_rag-embed-health.js'))
+      .RagEmbedFailureError,
+  }));
+
+const KB = '.haive-data/knowledge_base/architecture.md';
+let root: string;
+let rows: Map<string, { hash: string | null; params: unknown[] }>;
+let repo: Record<string, unknown>;
+let conn: unknown;
+let ctx: StepContext;
+
+const detected = (over: Record<string, unknown> = {}) => ({
+  kbFiles: [{ relPath: KB, sizeBytes: 60 }],
+  codeFiles: [],
+  ollamaReachable: false,
+  ollamaUrl: 'http://ollama:11434' as string | null,
+  embeddingModel: 'qwen3-embedding:4b' as string | null,
+  embeddingDimensions: 2,
+  ragMode: 'internal' as const,
+  ragConnectionString: null,
+  projectName: 'p',
+  ...over,
+});
+
+const populate = (d: ReturnType<typeof detected>) =>
+  ragPopulateStep.apply(ctx, {
+    detected: d,
+    formValues: { populateMode: 'incremental' },
+    iteration: 0,
+    previousIterations: [],
+  });
+
+beforeEach(async () => {
+  vi.clearAllMocks();
+  mocks.strict = true;
+  mocks.embedFails = false;
+  root = await mkdtemp(join(tmpdir(), 'haive-rag-populate-'));
+  await mkdir(join(root, '.haive-data/knowledge_base'), { recursive: true });
+  await writeFile(
+    join(root, KB),
+    '# Architecture\n\nThe app stores its documents in PostgreSQL.\n',
+  );
+  rows = new Map();
+  repo = { ragEmbedDegradedAt: null, ragEmbedDegradedReason: null, ragEmbedLexicalOnly: false };
+  conn = {
+    close: async () => {},
+    pg: {
+      unsafe: async (query: string, params: unknown[] = []) => {
+        if (query.includes('INSERT INTO')) {
+          rows.set(JSON.stringify([params[3], params[4], params[5]]), {
+            hash: params[6] as string | null,
+            params,
+          });
+        }
+        if (query.includes('SELECT source_path, section_id, chunk_index, chunk_hash'))
+          return [...rows.values()].map((r) => ({
+            source_path: r.params[3],
+            section_id: r.params[4],
+            chunk_index: r.params[5],
+            chunk_hash: r.hash,
+          }));
+        return Object.assign([], { count: 0 });
+      },
+    },
+  };
+  ctx = {
+    db: {
+      query: {
+        tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) },
+        repositories: { findFirst: async () => repo },
+      },
+      update: (table: unknown) => ({
+        set: (values: Record<string, unknown>) => ({
+          where: async () => {
+            if (table === schema.repositories) Object.assign(repo, values);
+            return [];
+          },
+        }),
+      }),
+    },
+    taskId: 'task-1',
+    taskStepId: 'step-1',
+    repoPath: root,
+    workspacePath: root,
+    emitProgress: async () => {},
+    throwIfCancelled: () => {},
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  } as unknown as StepContext;
+});
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+const storedHashes = () => [...rows.values()].map((r) => r.hash);
+
+describe('onboarding populate with an embedding endpoint configured', () => {
+  it('hashes and passes when no endpoint is configured, with real hashes and no degradation', async () => {
+    const result = await populate(
+      detected({ ollamaUrl: null, embeddingModel: null, ollamaReachable: false }),
+    );
+    expect(result.usedOllama).toBe(false);
+    expect(mocks.ollamaEmbed).not.toHaveBeenCalled();
+    expect(rows.size).toBeGreaterThan(0);
+    expect(storedHashes().every((h) => typeof h === 'string')).toBe(true);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('leaves a NULL chunk_hash and degradation when strict is off and the embed fails', async () => {
+    mocks.strict = false;
+    mocks.embedFails = true;
+    await populate(detected({ ollamaReachable: true }));
+    expect(rows.size).toBeGreaterThan(0);
+    expect(storedHashes().every((h) => h === null)).toBe(true);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+
+    mocks.embedFails = false;
+    mocks.ollamaEmbed.mockClear();
+    const healed = await populate(detected({ ollamaReachable: true }));
+    expect(mocks.ollamaEmbed).toHaveBeenCalled();
+    expect(healed.chunksEmbedded).toBe(rows.size);
+    expect(storedHashes().every((h) => typeof h === 'string')).toBe(true);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('keeps a degradation recorded earlier when this run wrote hash vectors', async () => {
+    mocks.strict = false;
+    mocks.embedFails = true;
+    repo.ragEmbedDegradedAt = new Date(0);
+    await populate(detected({ ollamaReachable: true }));
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('writes the same rows as before when embedding works', async () => {
+    await populate(detected({ ollamaReachable: true }));
+    expect([...rows.values()].map((r) => r.params)).toMatchInlineSnapshot(`
+      [
+        [
+          "task-1",
+          "repo-1",
+          "kb",
+          ".haive-data/knowledge_base/architecture.md",
+          "architecture",
+          0,
+          "90e379bc783064249992bd15e1d88b7b4d619a316d4ec7b0172d3c80dfa761ee",
+          "[.haive-data/knowledge_base/architecture.md > Architecture]
+
+      # Architecture
+
+      The app stores its documents in PostgreSQL.",
+          "[0.1,0.2]",
+        ],
+      ]
+    `);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+});

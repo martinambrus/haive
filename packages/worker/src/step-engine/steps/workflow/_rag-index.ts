@@ -55,6 +55,9 @@ import {
 } from '../_rag-embed-health.js';
 import { indexTaskEmbedding, TASK_EMBED_SOURCE_TYPE } from './_task-embedding.js';
 
+const HASH_WITH_ENDPOINT_REASON =
+  'Hash vectors were written because the embedding endpoint did not answer and strict embedding is off. They are re-embedded on the next sync.';
+
 /* ------------------------------------------------------------------ */
 /* Shared RAG indexing — used by 02-pre-rag-sync (run start, indexes  */
 /* the main checkout) and 11c-rag-reindex (post-commit, indexes the   */
@@ -575,6 +578,7 @@ export async function runRagIndexSync(
     let embedSkippedChunks = 0;
     let embedFailureReason: string | null = null;
     let realEmbeddingSucceeded = false;
+    let hashedWithEndpoint = false;
     const embedBatchSize = await resolveEmbedBatchSize();
 
     const kbFiles = await collectKbFiles(repoPath);
@@ -743,6 +747,8 @@ export async function runRagIndexSync(
         }
         const embeddings = outcome.embeddings;
         if (outcome.kind === 'embedded') realEmbeddingSucceeded = true;
+        const hashedHere = outcome.kind === 'hashed' && useOllama;
+        if (hashedHere) hashedWithEndpoint = true;
 
         for (let i = 0; i < batch.length; i += 1) {
           const { chunk, action } = batch[i]!;
@@ -760,7 +766,7 @@ export async function runRagIndexSync(
                 relPath,
                 chunk.sectionId,
                 chunk.chunkIndex,
-                chunk.chunkHash,
+                hashedHere ? null : chunk.chunkHash,
                 chunk.content,
                 literal,
               ],
@@ -779,7 +785,7 @@ export async function runRagIndexSync(
                 relPath,
                 chunk.sectionId,
                 chunk.chunkIndex,
-                chunk.chunkHash,
+                hashedHere ? null : chunk.chunkHash,
                 chunk.content,
                 json,
               ],
@@ -868,7 +874,13 @@ export async function runRagIndexSync(
     // An unchanged scan proves nothing about an endpoint that previously failed.
     // A small real batch lets a healthy endpoint recover without requiring a file
     // edit, while an outage (or an explicitly enabled hash fallback) keeps the flag.
-    if (useOllama && health.degradedAt && !embedFailureReason && !realEmbeddingSucceeded) {
+    if (
+      useOllama &&
+      health.degradedAt &&
+      !embedFailureReason &&
+      !hashedWithEndpoint &&
+      !realEmbeddingSucceeded
+    ) {
       const outcome = await embedBatch({
         ollamaUrl: prefs.ollamaUrl,
         model: prefs.embeddingModel,
@@ -888,6 +900,10 @@ export async function runRagIndexSync(
       await recordRagEmbedDegraded(ctx.db, repositoryId, embedFailureReason, ctx.logger);
       health.degradedAt ??= new Date();
       health.degradedReason = embedFailureReason;
+    } else if (hashedWithEndpoint) {
+      await recordRagEmbedDegraded(ctx.db, repositoryId, HASH_WITH_ENDPOINT_REASON, ctx.logger);
+      health.degradedAt ??= new Date();
+      health.degradedReason = HASH_WITH_ENDPOINT_REASON;
     } else if (realEmbeddingSucceeded && health.degradedAt) {
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
       health.degradedAt = null;

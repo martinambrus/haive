@@ -1286,3 +1286,107 @@ describe('workflow RAG source scope before each ingestion', () => {
     expect(writes).toEqual([]);
   });
 });
+
+describe('hash vectors written while an embedding endpoint is configured', () => {
+  const sync = async () =>
+    ragReindexStep.apply(ctx, {
+      detected: await ragReindexStep.detect!(ctx),
+      formValues: { runReindex: true },
+      iteration: 0,
+      previousIterations: [],
+    });
+  const hashes = () =>
+    [...indexedChunks.entries()].flatMap(([path, rows]) =>
+      rows.map((row) => [path, row.chunk_hash] as const),
+    );
+  const hashedOnce = (texts: string[]) => ({
+    kind: 'hashed' as const,
+    embeddings: texts.map(() => [0.3, 0.4]),
+  });
+
+  it('leaves a NULL chunk_hash and records degradation, which a sibling batch that embedded does not clear', async () => {
+    mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
+    const first = await sync();
+    expect(first.inserted).toBeGreaterThanOrEqual(2);
+    const nulls = hashes().filter(([, hash]) => hash === null);
+    expect(nulls).toHaveLength(1);
+    expect(hashes().filter(([, hash]) => hash !== null).length).toBeGreaterThanOrEqual(1);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(repo.ragEmbedDegradedReason).toEqual(expect.any(String));
+    expect(warnings.at(-1)).toContain('RAG embeddings are failing');
+  });
+
+  it('re-embeds those rows as updates on the next healthy sync and clears the flag', async () => {
+    mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
+    await sync();
+    const hashedPath = hashes().find(([, hash]) => hash === null)![0];
+    mocks.embed.mockClear();
+
+    const healed = await sync();
+    expect(healed.inserted).toBe(0);
+    expect(healed.updated).toBeGreaterThanOrEqual(1);
+    expect(mocks.embed).toHaveBeenCalledTimes(1);
+    expect(mocks.embed.mock.calls[0]![0].texts.join('\n')).toBe(
+      indexedChunks
+        .get(hashedPath)!
+        .map((row) => row.content)
+        .join('\n'),
+    );
+    expect(hashes().every(([, hash]) => hash !== null)).toBe(true);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+    expect(warnings.at(-1)).toBeNull();
+  });
+
+  it('keeps the real hash and records nothing when no endpoint is configured', async () => {
+    mocks.embed.mockImplementation(async ({ texts }) => hashedOnce(texts));
+    const detected = await ragReindexStep.detect!(ctx);
+    await runRagIndexSync(ctx, {
+      repoPath: worktree,
+      prefs: { ...detected.ragToolingPrefs!, ollamaUrl: null, embeddingModel: null },
+      projectName: detected.projectName,
+      ollamaReachable: false,
+      codeCollect: detected.codeCollect,
+    });
+    expect(hashes().length).toBeGreaterThanOrEqual(2);
+    expect(hashes().every(([, hash]) => typeof hash === 'string')).toBe(true);
+    expect(mocks.embed.mock.calls.every(([opts]) => opts.useOllama === false)).toBe(true);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('writes the same rows as before when embedding works', async () => {
+    await sync();
+    expect(inserts).toMatchInlineSnapshot(`
+      [
+        [
+          "task-1",
+          "repo-1",
+          "kb",
+          ".haive-data/knowledge_base/architecture.md",
+          "architecture",
+          0,
+          "90e379bc783064249992bd15e1d88b7b4d619a316d4ec7b0172d3c80dfa761ee",
+          "[.haive-data/knowledge_base/architecture.md > Architecture]
+
+      # Architecture
+
+      The app stores its documents in PostgreSQL.",
+          "[0.1,0.2]",
+        ],
+        [
+          "task-1",
+          "repo-1",
+          "code",
+          "app.ts",
+          "function-greeting",
+          0,
+          "c2cb0fd3dd89b0e03d7c2ea26a1e60baf779b69372feaa4e4b2dccaf06cd0ebe",
+          "[app.ts > function greeting]
+
+      function greeting() { return "hello"; }",
+          "[0.1,0.2]",
+        ],
+      ]
+    `);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+});
