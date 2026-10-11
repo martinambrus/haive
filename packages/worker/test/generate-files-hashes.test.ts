@@ -151,6 +151,45 @@ describe('generateFilesStep.apply — recorded write hashes', () => {
     expect(await readFile(path.join(repo, CONFIG), 'utf8')).toBe('{"mine":true}');
   });
 
+  it('reports a skipped file as left as is only when it does not already hold the render', async () => {
+    const run = () =>
+      generateFilesStep.apply(ctx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected: detect(),
+        formValues: {},
+      });
+    await run();
+    const rerun = await run();
+    expect(rerun.skippedFiles).toContain(CONFIG);
+    expect(rerun.leftAsIs ?? []).not.toContain(CONFIG);
+
+    await writeFile(path.join(repo, CONFIG), '{"mine":true}', 'utf8');
+    expect((await run()).leftAsIs).toContain(CONFIG);
+  });
+
+  it('reports a rules file that already imports AGENTS.md as left as is unless it is the stub', async () => {
+    const run = () =>
+      generateFilesStep.apply(ctx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected: {
+          ...detect(),
+          enabledCliProviders: [
+            { name: 'claude-code', rulesFile: 'CLAUDE.md', rulesFileMode: 'import' },
+          ],
+        },
+        formValues: {},
+      });
+    expect((await run()).wroteFiles).toContain('CLAUDE.md');
+    expect((await run()).leftAsIs ?? []).not.toContain('CLAUDE.md');
+
+    await writeFile(path.join(repo, 'CLAUDE.md'), 'my notes\n@AGENTS.md\n', 'utf8');
+    const mine = await run();
+    expect(mine.skippedFiles).toContain('CLAUDE.md');
+    expect(mine.leftAsIs).toContain('CLAUDE.md');
+  });
+
   it('writes the RTK settings files for the enabled CLIs, and records their hashes', async () => {
     const out = await generateFilesStep.apply(ctx(), {
       iteration: 0,

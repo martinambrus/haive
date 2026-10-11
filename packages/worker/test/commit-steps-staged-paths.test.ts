@@ -43,13 +43,14 @@ async function repoWithAgents(): Promise<string> {
   return repo;
 }
 
-function mkCtx(repo: string): StepContext {
+function mkCtx(repo: string, generateOutput: unknown = null): StepContext {
   const chain: Record<string, unknown> = {};
   Object.assign(chain, {
     from: () => chain,
     where: () => chain,
     orderBy: () => chain,
-    limit: async () => [],
+    limit: async () =>
+      generateOutput ? [{ detectOutput: null, output: generateOutput, iterations: [] }] : [],
     then: (resolve: (v: unknown) => unknown) => resolve([]),
   });
   const table = { findFirst: async () => undefined, findMany: async () => [] };
@@ -77,6 +78,39 @@ describe('commit steps report the staged paths by their real names', () => {
     });
     expect(out.commitPerformed).toBe(true);
     expect(out.stagedPaths.filter((p) => p.startsWith('.claude/')).sort()).toEqual(EXPECTED);
+  });
+
+  it('12-post-onboarding leaves a file 07 left as it is for its owner to commit', async () => {
+    const run = async (generateOutput: unknown) => {
+      const repo = await repoWithAgents();
+      await writeFile(path.join(repo, 'CLAUDE.md'), 'my own notes\n');
+      const out = await postOnboardingStep.apply(mkCtx(repo, generateOutput), {
+        detected: { hasGit: true, currentBranch: 'main' } as never,
+        formValues: { commit: true, commitMessage: 'chore: onboard' },
+        iteration: 0,
+        previousIterations: [],
+      });
+      return out.stagedPaths;
+    };
+    expect(
+      await run({ wroteFiles: [], skippedFiles: ['CLAUDE.md'], leftAsIs: ['CLAUDE.md'] }),
+    ).not.toContain('CLAUDE.md');
+    expect(await run({ wroteFiles: [], skippedFiles: [] })).toContain('CLAUDE.md');
+  });
+
+  it('12-post-onboarding leaves such a file out even when its directory is staged', async () => {
+    const repo = await repoWithAgents();
+    const out = await postOnboardingStep.apply(
+      mkCtx(repo, { wroteFiles: [], skippedFiles: [], leftAsIs: ['.claude/agents/é.md'] }),
+      {
+        detected: { hasGit: true, currentBranch: 'main' } as never,
+        formValues: { commit: true, commitMessage: 'chore: onboard' },
+        iteration: 0,
+        previousIterations: [],
+      },
+    );
+    expect(out.stagedPaths).toContain('.claude/agents/q"uote.md');
+    expect(out.stagedPaths).not.toContain('.claude/agents/é.md');
   });
 
   it('03-upgrade-commit', async () => {

@@ -49,7 +49,7 @@ import {
 } from '../../template-manifest.js';
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
 import { writeInstallManifestFromLiveRows } from '../../_install-manifest.js';
-import type { GenerateFilesDetect } from './07-generate-files.js';
+import type { GenerateFilesApply, GenerateFilesDetect } from './07-generate-files.js';
 import { gitExec } from '../../../repo/git-exec.js';
 
 const DEFAULT_COMMIT_MESSAGE = [
@@ -707,11 +707,12 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       .from(schema.tasks)
       .where(eq(schema.tasks.id, ctx.taskId))
       .limit(1);
-    const stagePaths = await resolveStagePaths(
-      ctx.db,
-      ctx.userId,
-      taskRow[0]?.repositoryId ?? null,
-    );
+    // A person's own file 07 left untouched is theirs to commit, however a template names it.
+    const generated = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
+    const leftAsIs = new Set((generated?.output as GenerateFilesApply | null)?.leftAsIs ?? []);
+    const stagePaths = (
+      await resolveStagePaths(ctx.db, ctx.userId, taskRow[0]?.repositoryId ?? null)
+    ).filter((rel) => !leftAsIs.has(rel));
     const existingPaths: string[] = [];
     for (const rel of stagePaths) {
       if ((await lstatNoFollow(ctx.repoPath, rel)) !== null) existingPaths.push(rel);
@@ -754,7 +755,8 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
       // staged but uncommitted). Every path here is a curated deliverable, so force it.
       if (keep.length > 0) {
-        await gitExec(['add', '-f', '--', ...keep], {
+        const excluded = [...leftAsIs].map((rel) => `:(exclude,literal)${rel}`);
+        await gitExec(['add', '-f', '--', ...keep, ...excluded], {
           cwd: ctx.repoPath,
           maxBuffer: GIT_MAX_BUFFER,
         });

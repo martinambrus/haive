@@ -5,6 +5,7 @@ import {
   isNotUtf8Error,
   isPathContainmentError,
   lstatNoFollow,
+  readFileNoFollow,
   readdirNoFollow,
   renameNoFollow,
   updateFileNoFollow,
@@ -42,7 +43,12 @@ import {
   RTK_REF_MARKER_START,
   type RtkRenderInputs,
 } from './_rtk-templates.js';
-import { ensureRulesImportStub, isLinkToAgentsMd, planRulesFiles } from './_rules-files.js';
+import {
+  ensureRulesImportStub,
+  isLinkToAgentsMd,
+  planRulesFiles,
+  RULES_IMPORT_LINE,
+} from './_rules-files.js';
 
 export { planRulesFiles, type RulesPlan } from './_rules-files.js';
 
@@ -236,6 +242,10 @@ export function projectInfoMarkdown(info: ProjectInfo): string {
 export interface GenerateFilesApply {
   wroteFiles: string[];
   skippedFiles: string[];
+  /** The person's own files this run left untouched, a subset of `skippedFiles`: one that already
+   *  existed where a template would go, and a rules file that is not UTF-8. 12 never stages them.
+   *  Optional: outputs written before this existed must still parse. */
+  leftAsIs?: string[];
   agentCount: number;
   /** Unmanaged agent definitions moved out of the pick list, when the user asked.
    *  Present only when something moved — a step output is what a later reader has,
@@ -725,6 +735,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
 
     const wroteFiles: string[] = [];
     const skippedFiles: string[] = [];
+    const leftAsIs: string[] = [];
     const appendedFiles: string[] = [];
     const quarantinedAgentFiles: { from: string; to: string }[] = [];
     const wroteFileHashes: Record<string, string> = {};
@@ -737,12 +748,21 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       wroteFileHashes[rel] = sha256Hex(normalizeContent(contents));
     };
 
+    const holdsRender = async (rel: string, contents: string): Promise<boolean> => {
+      const cap = Buffer.byteLength(contents, 'utf8') + 1;
+      const read = await readFileNoFollow(ctx.repoPath, rel, { maxBytes: cap }).catch(() => null);
+      if (read === null || read.data.length >= cap) return false;
+      return normalizeContent(read.data.toString('utf8')) === normalizeContent(contents);
+    };
+
     const writeIfAllowed = async (rel: string, contents: string): Promise<void> => {
       // `lstatNoFollow` rather than the old `stat` probe: `stat` follows a link, and reports a
       // DANGLING one as absent — so the exists check could pass and the write then land on whatever
       // the link names. replace-atomic (the default) because every file here is machine-parsed.
       if ((await lstatNoFollow(ctx.repoPath, rel)) !== null && !overwrite) {
         skippedFiles.push(rel);
+        // A file already holding this render is not the person's (an interrupted earlier apply).
+        if (!(await holdsRender(rel, contents))) leftAsIs.push(rel);
         return;
       }
       await writeFileNoFollow(ctx.repoPath, rel, contents, { createParents: true });
@@ -754,6 +774,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       if (!isNotUtf8Error(err)) throw err;
       ctx.logger.warn({ rel }, 'left a file that is not valid UTF-8 as it is');
       skippedFiles.push(rel);
+      leftAsIs.push(rel);
       return 'refused' as const;
     };
 
@@ -925,11 +946,17 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       if (stub === 'refused') continue;
       if (stub === 'created') wroteFiles.push(rf);
       else if (stub === 'appended') appendedFiles.push(rf);
-      else skippedFiles.push(rf);
+      else {
+        skippedFiles.push(rf);
+        if (stub === 'skipped-link' || !(await holdsRender(rf, `${RULES_IMPORT_LINE}\n`))) {
+          leftAsIs.push(rf);
+        }
+      }
     }
     for (const rf of rulesPlan.copyFiles) {
       if (await isLinkToAgentsMd(ctx.repoPath, rf)) {
         skippedFiles.push(rf);
+        leftAsIs.push(rf);
         continue;
       }
       await appendOrCreate(
@@ -987,6 +1014,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     return {
       wroteFiles: [...wroteFiles, ...appendedFiles],
       skippedFiles,
+      leftAsIs,
       agentCount: agents.length,
       ...(quarantinedAgentFiles.length > 0 ? { quarantinedAgentFiles } : {}),
       // LAST on purpose. `maybeEnqueueStepSummary` hands the step-summary model
