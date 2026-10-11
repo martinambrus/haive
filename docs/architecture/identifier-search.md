@@ -43,7 +43,10 @@ on a 9,197-row store: tsvector total 8.9 MB to 10 MB, 9.3 lexemes added per chun
 lexemes and MEASURED `ts_rank_cd` returns exactly 0 for them, so the usual ranker cannot order
 identifier matches at all. IDF also fixes flooding: `mpdf` is in 22.8% of chunks and
 `pdf_generator` in 0.03%, and an unweighted OR let the common term bury the rare one —
-`ln(N/df)` separates them 1.48 vs 8.03 and needs no tuned threshold.
+`ln(N/df)` separates them 1.48 vs 8.03 and needs no tuned threshold. A term every scoped row holds
+has `ln(1) = 0` yet is still known, so a seen term weighs at least 1e-6. Before the IDF, a chunk
+whose `section_id` names a query term (the symbol it defines, `~n` stripped) ranks first: by summed
+IDF alone, callers tied with or outranked the definition (MEASURED, see the RAG plan's F16).
 
 **`identifierCandidates` (3) bounds the INJECTION, and lowering the weight is the wrong knob.**
 The ranker is a third RRF input at full weight, but drawing `candidatePool` candidates let it

@@ -328,8 +328,13 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   with the identifier lexemes computed on the fly: 14 identifier queries whose gold chunk is the
   function's definition went from MRR 0.143 (hit@8 2/14) to 0.595 (11/14), and 8 prose queries kept
   byte-identical pages. Three of the remaining misses (`CheckAdminLogin`, `getMultiPages`,
-  `compareOldSettings`) are lost because callers tie with or outrank the definition on the summed
-  IDF: the ranker cannot tell where a name is defined. → P2.
+  `compareOldSettings`) were lost because callers tie with or outrank the definition on the summed
+  IDF. The ranker now puts a chunk whose `section_id` names a query term (`function-<name>`,
+  `method-<Owner>-<name>`, `class-<name>`) ahead of its mentions: identifier MRR 0.595 → 0.821 on the
+  lexical-only branch and 0.512 → 0.643 on the hybrid one, prose and negative pages identical, and
+  `CheckAdminLogin` from a miss to rank 1. `getMultiPages` and `compareOldSettings` still miss: their
+  definition chunk's body never contains the name, so no lexical ranker selects it. That is the
+  chunker gap F1/F9 describe, not a ranking one. → P1.
 
 ## Phases
 
