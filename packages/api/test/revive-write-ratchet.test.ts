@@ -376,15 +376,8 @@ function tasksAliases(file: string, text: string): string[] {
       (ts.isBinaryExpression(n) &&
         n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
         n.right.getText() === 'schema.tasks') ||
-      (ts.isVariableDeclaration(n) &&
-        ts.isObjectBindingPattern(n.name) &&
-        n.initializer?.getText() === 'schema' &&
-        n.name.elements.some((e) => (e.propertyName ?? e.name).getText() === 'tasks')) ||
       (ts.isImportDeclaration(n) && importRenamesTasks(n)) ||
-      (ts.isElementAccessExpression(n) &&
-        n.expression.getText() === 'schema' &&
-        ts.isStringLiteralLike(n.argumentExpression) &&
-        n.argumentExpression.text === 'tasks')
+      schemaEscapes(n)
     ) {
       out.push(`${file}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`);
     }
@@ -392,6 +385,17 @@ function tasksAliases(file: string, text: string): string[] {
   };
   visit(sf);
   return out;
+}
+
+/** `schema` used as a value other than `schema.<table>`: an alias, a destructure, a computed key or
+ *  an argument can each reach the tasks table under a name the scan does not read. */
+function schemaEscapes(n: ts.Node): boolean {
+  if (!ts.isIdentifier(n) || n.text !== 'schema') return false;
+  const p = n.parent;
+  if (ts.isPropertyAccessExpression(p)) return false;
+  if (ts.isImportSpecifier(p) || ts.isTypeQueryNode(p) || ts.isQualifiedName(p)) return false;
+  if ((ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p)) && p.name === n) return false;
+  return true;
 }
 
 /** An import from the database package that reaches the tasks table under another name: `tasks`
@@ -460,6 +464,10 @@ describe('a live-status write on a task row', () => {
     expect(found(`let t; t = schema.tasks;`)).toBe(1);
     expect(found(`const { tasks } = schema;`)).toBe(1);
     expect(found(`db.update(schema['tasks']).set({ status: 'running' });`)).toBe(1);
+    expect(found(`const tables = schema; db.update(tables.tasks).set({ status: 'x' });`)).toBe(1);
+    expect(found(`let tables; tables = schema;`)).toBe(1);
+    expect(found(`write({ schema });`)).toBe(1);
+    expect(found(`type T = typeof schema; const x = { schema: 1 };`)).toBe(0);
     expect(found(`db.update(schema.tasks).set({ status: 'running' });`)).toBe(0);
   });
 
