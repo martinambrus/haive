@@ -232,17 +232,19 @@ export async function ensureGlobalKbSchema(
     END;
     $$ LANGUAGE plpgsql
   `);
+  // On a content write only (a hash-only UPDATE must not recompute the tsvector); a trigger
+  // created without `OF content` is replaced in the same transaction.
   await step(async (tx) => {
-    const triggerExists = await tx.unsafe(
-      `SELECT 1 FROM pg_trigger WHERE tgname = 'trg_global_content_tsv'`,
-    );
-    if (triggerExists.length === 0) {
-      await tx.unsafe(`
-        CREATE TRIGGER trg_global_content_tsv
-          BEFORE INSERT OR UPDATE ON ${VECTORS_TABLE}
-          FOR EACH ROW EXECUTE FUNCTION update_content_tsv()
-      `);
-    }
+    const existing = (await tx.unsafe(
+      `SELECT tgattr::text = '' AS stale FROM pg_trigger WHERE tgname = 'trg_global_content_tsv' AND tgrelid = '${VECTORS_TABLE}'::regclass`,
+    )) as unknown as Array<{ stale?: boolean }>;
+    if (existing.length > 0 && !existing[0]!.stale) return;
+    await tx.unsafe(`DROP TRIGGER IF EXISTS trg_global_content_tsv ON ${VECTORS_TABLE}`);
+    await tx.unsafe(`
+      CREATE TRIGGER trg_global_content_tsv
+        BEFORE INSERT OR UPDATE OF content ON ${VECTORS_TABLE}
+        FOR EACH ROW EXECUTE FUNCTION update_content_tsv()
+    `);
   });
 
   // Facet values are stored LOWERCASE, because retrieval compares them two ways and only one

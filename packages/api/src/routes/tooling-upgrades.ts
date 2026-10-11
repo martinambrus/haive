@@ -246,6 +246,13 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
 
 // The connect bound rag_search puts on a project store (routes/rag.ts).
 const RAG_REEMBED_CONNECT_TIMEOUT_SECONDS = 3;
+// Measured on 4,000 production-shape rows: 8 batches of 500, the longest statement 1.5 s, 9.7 s in all.
+const RAG_REEMBED_BATCH_ROWS = 500;
+const RAG_REEMBED_STATEMENT_TIMEOUT_MS = 3_000;
+const RAG_REEMBED_DEADLINE_MS = 60_000;
+const QUERY_CANCELED = '57014';
+
+class ReembedDeadline extends Error {}
 
 /** Force every chunk of a repository's RAG index to be re-embedded on the next
  *  sync, WITHOUT deleting anything: nulling `chunk_hash` makes the incremental
@@ -259,7 +266,9 @@ const RAG_REEMBED_CONNECT_TIMEOUT_SECONDS = 3;
  *
  *  Resolves the RAG target from the repo's own onboarding mirrors rather than a
  *  task's step outputs, since this runs from a settings page with no task in hand.
- *  Returns false when the repo has no usable RAG config — nothing to re-embed. */
+ *  Returns false when the repo has no usable RAG config — nothing to re-embed.
+ *  Resets in bounded batches, so a stopped run is not rolled back: running it again
+ *  continues, since it only touches rows that still hold a hash. */
 async function forceRagReembed(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
@@ -300,16 +309,47 @@ async function forceRagReembed(
     },
     db,
     projectName,
-    { connectTimeoutSeconds: RAG_REEMBED_CONNECT_TIMEOUT_SECONDS },
+    { connectTimeoutSeconds: RAG_REEMBED_CONNECT_TIMEOUT_SECONDS, fetchTypes: false },
   );
   if (!conn) return false;
+  const progress = { reset: 0 };
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ReembedDeadline()), RAG_REEMBED_DEADLINE_MS);
+  });
+  const resetBatches = async () => {
+    for (;;) {
+      const res = await conn.pg.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_REEMBED_STATEMENT_TIMEOUT_MS}ms'`);
+        return tx.unsafe(
+          `UPDATE ${RAG_TABLE} SET chunk_hash = NULL
+            WHERE id IN (
+              SELECT id FROM ${RAG_TABLE}
+              WHERE repository_id = $1 AND chunk_hash IS NOT NULL
+              ORDER BY id LIMIT ${RAG_REEMBED_BATCH_ROWS}
+            )`,
+          [repositoryId],
+        );
+      });
+      if (res.count === 0) return;
+      progress.reset += res.count;
+    }
+  };
   try {
-    await conn.pg.unsafe(`UPDATE ${RAG_TABLE} SET chunk_hash = NULL WHERE repository_id = $1`, [
-      repositoryId,
-    ]);
+    await Promise.race([resetBatches(), deadline]);
     return true;
+  } catch (err) {
+    void conn.pg.end({ timeout: 0 }).catch(() => {});
+    if (!(err instanceof ReembedDeadline) && (err as { code?: string }).code !== QUERY_CANCELED) {
+      throw err;
+    }
+    throw new HttpError(
+      503,
+      `The re-embed is not finished: the RAG store did not answer in time after ${progress.reset} chunks were marked. Run it again to continue where it stopped.`,
+    );
   } finally {
-    await conn.close();
+    clearTimeout(timer);
+    await conn.close().catch(() => {});
   }
 }
 

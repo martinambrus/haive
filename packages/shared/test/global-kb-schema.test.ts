@@ -16,7 +16,7 @@ function fakeConn(
     vectorThrows?: string;
     lockThrowsOnce?: string;
     hnswThrows?: boolean;
-    triggersExist?: boolean;
+    triggersExist?: 'current' | 'stale';
   } = {},
 ): {
   conn: EnsureConn;
@@ -44,7 +44,9 @@ function fakeConn(
       if (opts.hnswThrows && q.includes('USING hnsw')) {
         return Promise.reject(new Error('hnsw unavailable'));
       }
-      if (opts.triggersExist && q.includes('FROM pg_trigger')) return Promise.resolve([{}]);
+      if (q.includes('FROM pg_trigger') && opts.triggersExist) {
+        return Promise.resolve([{ stale: opts.triggersExist === 'stale' }]);
+      }
       return Promise.resolve([]);
     },
   });
@@ -249,7 +251,11 @@ describe('ensureGlobalKbSchema', () => {
     expect(txs.filter((tx) => tx.length > 2).map((tx) => tx.slice(1).map(head))).toEqual([
       ['ALTER TABLE global_kb_entries DROP', 'ALTER TABLE global_kb_entries ADD'],
       ['SELECT 1 FROM pg_trigger', 'CREATE TRIGGER trg_global_kb_clear_enforced_hash BEFORE'],
-      ['SELECT 1 FROM pg_trigger', 'CREATE TRIGGER trg_global_content_tsv BEFORE'],
+      [
+        "SELECT tgattr::text = ''",
+        'DROP TRIGGER IF EXISTS',
+        'CREATE TRIGGER trg_global_content_tsv BEFORE',
+      ],
     ]);
   });
 
@@ -306,11 +312,34 @@ describe('ensureGlobalKbSchema', () => {
   });
 
   it('creates neither trigger again when both exist, and still converges the functions', async () => {
-    const { conn, queries } = fakeConn({ triggersExist: true });
+    const { conn, queries } = fakeConn({ triggersExist: 'current' });
     await ensureGlobalKbSchema(conn);
 
     expect(queries()).not.toContain('CREATE TRIGGER');
+    expect(queries()).not.toContain('DROP TRIGGER');
     expect(queries()).toContain('CREATE OR REPLACE FUNCTION global_kb_clear_enforced_hash()');
+  });
+
+  // A hash-only UPDATE must not recompute every row's tsvector: the trigger fires on content writes.
+  it('creates the tsvector trigger for content writes only', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+
+    expect(queries()).toContain('BEFORE INSERT OR UPDATE OF content ON ai_rag_embeddings');
+    expect(queries()).not.toMatch(/BEFORE INSERT OR UPDATE ON/);
+  });
+
+  it('replaces a tsvector trigger that fires on every update, in the one transaction', async () => {
+    const { conn, transactions } = fakeConn({ triggersExist: 'stale' });
+    await ensureGlobalKbSchema(conn);
+    const replacing = transactions().find((tx) => tx.some((q) => q.includes('DROP TRIGGER')))!;
+
+    expect(replacing.map((q) => q.trim().split(/\s+/).slice(0, 3).join(' '))).toEqual([
+      'SELECT pg_advisory_xact_lock(hashtext())',
+      'SELECT tgattr::text =',
+      'DROP TRIGGER IF',
+      'CREATE TRIGGER trg_global_content_tsv',
+    ]);
   });
 
   it('rolls back only its own step when the HNSW index is refused, and carries on', async () => {

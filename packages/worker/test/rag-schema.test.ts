@@ -12,7 +12,9 @@ const pgError = (code: string) => Object.assign(new Error(`SQLSTATE ${code}`), {
 const drizzleError = (code: string) =>
   Object.assign(new Error('Failed query: CREATE EXTENSION'), { cause: pgError(code) });
 
-function fakeConn(opts: { vectorThrows?: string; wrapped?: boolean } = {}): {
+function fakeConn(
+  opts: { vectorThrows?: string; wrapped?: boolean; trigger?: 'stale' | 'current' } = {},
+): {
   conn: RagConnection;
   queries: () => string;
 } {
@@ -32,7 +34,16 @@ function fakeConn(opts: { vectorThrows?: string; wrapped?: boolean } = {}): {
   }) as unknown as { unsafe: (q: string, params?: unknown[]) => Promise<unknown[]> };
   pg.unsafe = (q: string) => {
     captured.push(q);
+    if (q.includes('FROM pg_trigger') && opts.trigger) {
+      return Promise.resolve([{ stale: opts.trigger === 'stale' }]);
+    }
     return Promise.resolve([]);
+  };
+  (pg as unknown as { begin: unknown }).begin = async (run: (tx: typeof pg) => unknown) => {
+    captured.push('BEGIN');
+    const result = await run(pg);
+    captured.push('COMMIT');
+    return result;
   };
   const conn = {
     mode: 'internal',
@@ -98,6 +109,32 @@ describe('ensureRagSchema', () => {
       expect(sql).toContain('array_to_tsvector');
       expect(sql).toContain('trg_content_tsv');
     }
+  });
+
+  // A hash-only UPDATE (the forced re-embed) must not recompute every row's tsvector.
+  it('creates the tsvector trigger for content writes only, in one transaction', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureRagSchema(conn);
+    const sql = queries();
+
+    expect(sql).toMatch(
+      /BEGIN\nSELECT tgattr::text = '' AS stale[^]*?CREATE TRIGGER trg_content_tsv\s+BEFORE INSERT OR UPDATE OF content ON ai_rag_embeddings[^]*?COMMIT/,
+    );
+    expect(sql).not.toMatch(/BEFORE INSERT OR UPDATE ON/);
+  });
+
+  it('replaces a trigger that fires on every update, and leaves a current one alone', async () => {
+    const stale = fakeConn({ trigger: 'stale' });
+    await ensureRagSchema(stale.conn);
+    expect(stale.queries()).toContain(
+      'DROP TRIGGER IF EXISTS trg_content_tsv ON ai_rag_embeddings',
+    );
+    expect(stale.queries()).toContain('UPDATE OF content');
+
+    const current = fakeConn({ trigger: 'current' });
+    await ensureRagSchema(current.conn);
+    expect(current.queries()).not.toContain('DROP TRIGGER');
+    expect(current.queries()).not.toContain('CREATE TRIGGER');
   });
 
   it.each(['58P01', '42501'])(
