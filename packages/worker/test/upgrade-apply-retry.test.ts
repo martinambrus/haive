@@ -20,7 +20,10 @@ import type {
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 
-const beforeRewrite = vi.hoisted(() => ({ run: null as null | (() => Promise<void>) }));
+const beforeRewrite = vi.hoisted(() => ({
+  run: null as null | (() => Promise<void>),
+  parked: false,
+}));
 vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
   return {
@@ -29,6 +32,10 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
       const run = beforeRewrite.run;
       beforeRewrite.run = null;
       if (run) await run();
+      if (beforeRewrite.parked) {
+        beforeRewrite.parked = false;
+        throw new real.ParkedFileError(args[1], `.parked-${args[1]}`, 'EEXIST');
+      }
       return real.rewriteFileIfNoFollow(...args);
     },
   };
@@ -408,6 +415,23 @@ describe('an upgrade apply retried after it failed part-way', () => {
         .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
     ).toBe(false);
     beforeRewrite.run = null;
+  });
+
+  it('spends the pre-image when the held rewrite parked the render and could not put it back', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+    beforeRewrite.parked = true;
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContainEqual(expect.stringContaining('did not put back'));
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
+    ).toBe(false);
   });
 
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {

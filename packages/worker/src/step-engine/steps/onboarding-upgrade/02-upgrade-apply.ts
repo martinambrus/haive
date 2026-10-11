@@ -2,6 +2,7 @@ import {
   decodeUtf8Strict,
   errno,
   isPathContainmentError,
+  ParkedFileError,
   removeFileIfNoFollow,
   rewriteFileIfNoFollow,
   toSafeRel,
@@ -1141,6 +1142,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               { maxBytes: RULES_FILE_READ_CAP },
             );
           } catch (err) {
+            // The render was moved off the path and something else took it: that write is gone too.
+            if (err instanceof ParkedFileError) consumedPreimageIds.push(earlier.id);
             const msg = err instanceof Error ? err.message : String(err);
             warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
             continue;
