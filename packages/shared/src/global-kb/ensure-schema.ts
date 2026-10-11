@@ -273,31 +273,7 @@ export async function ensureGlobalKbSchema(
     `);
   });
 
-  // No row cap: the ensure runs once per process, so a capped pass would never get a second one.
-  try {
-    const unstamped = `FROM ${VECTORS_TABLE} WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)`;
-    const counted = await step((tx) =>
-      tx.unsafe(`SELECT count(*)::int AS n ${unstamped}`, [identifierTsvSentinelQuery()]),
-    );
-    const pending = Number((counted[0] as { n?: number } | undefined)?.n ?? 0);
-    const maxPasses = Math.ceil(pending / IDENTIFIER_BACKFILL_BATCH) + 1;
-    let total = 0;
-    for (let pass = 0; pending > 0 && pass < maxPasses; pass++) {
-      const result = await step((tx) =>
-        tx.unsafe(
-          `UPDATE ${VECTORS_TABLE} SET content = content
-             WHERE id IN (SELECT id ${unstamped} LIMIT $2)`,
-          [identifierTsvSentinelQuery(), IDENTIFIER_BACKFILL_BATCH],
-        ),
-      );
-      const rows = result.count ?? 0;
-      total += rows;
-      if (rows < IDENTIFIER_BACKFILL_BATCH) break;
-    }
-    if (total > 0) log.info({ rows: total }, 'backfilled identifier lexemes into content_tsv');
-  } catch (err) {
-    log.warn({ err }, 'identifier tsv backfill failed; lexical identifier search may be stale');
-  }
+  await backfillGlobalIdentifierTsv(step);
 
   // Facet values are stored LOWERCASE, because retrieval compares them two ways and only one
   // can be lenient: `facetsMatchProject` lowercases in JS while `buildFacetClause` uses jsonb
@@ -396,4 +372,37 @@ export async function ensureGlobalKbSchema(
   }
 
   return { usedPgvector };
+}
+
+/** Rewrites every global vector row whose `content_tsv` lacks the identifier stamp; warns, never
+ *  throws. No row cap, since the ensure runs it once per process; the reconcile sweep re-runs it. */
+export async function backfillGlobalIdentifierTsv(
+  step: (
+    run: (tx: postgres.TransactionSql) => Promise<postgres.RowList<postgres.Row[]>>,
+  ) => Promise<postgres.RowList<postgres.Row[]>>,
+): Promise<void> {
+  try {
+    const unstamped = `FROM ${VECTORS_TABLE} WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)`;
+    const counted = await step((tx) =>
+      tx.unsafe(`SELECT count(*)::int AS n ${unstamped}`, [identifierTsvSentinelQuery()]),
+    );
+    const pending = Number((counted[0] as { n?: number } | undefined)?.n ?? 0);
+    const maxPasses = Math.ceil(pending / IDENTIFIER_BACKFILL_BATCH) + 1;
+    let total = 0;
+    for (let pass = 0; pending > 0 && pass < maxPasses; pass++) {
+      const result = await step((tx) =>
+        tx.unsafe(
+          `UPDATE ${VECTORS_TABLE} SET content = content
+             WHERE id IN (SELECT id ${unstamped} LIMIT $2)`,
+          [identifierTsvSentinelQuery(), IDENTIFIER_BACKFILL_BATCH],
+        ),
+      );
+      const rows = result.count ?? 0;
+      total += rows;
+      if (rows < IDENTIFIER_BACKFILL_BATCH) break;
+    }
+    if (total > 0) log.info({ rows: total }, 'backfilled identifier lexemes into content_tsv');
+  } catch (err) {
+    log.warn({ err }, 'identifier tsv backfill failed; lexical identifier search may be stale');
+  }
 }

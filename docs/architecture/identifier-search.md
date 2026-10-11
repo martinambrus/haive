@@ -78,6 +78,8 @@ task wait for the whole rewrite.
 **The global KB store carries the same lexemes.** `ensureGlobalKbSchema` installs the same
 function body and runs the same backfill through its bounded step, but with no row cap: the
 ensure runs once per process, so a capped pass would never get a second one. It counts the
-unstamped rows first and stops after `ceil(count / batch) + 1` passes. Before
+unstamped rows first and stops after `ceil(count / batch) + 1` passes. The ensure is memoized and
+its backfill only warns, so a pass lost to a timeout or a dropped connection would wait for a
+restart; the worker's 5-minute reconcile sweep therefore runs `backfillGlobalIdentifierTsv` too. Before
 that the global store's `content_tsv` was plain `to_tsvector('english', …)`, so only camelCase
 names survived the parser whole and a snake_case identifier could never match the global half.
