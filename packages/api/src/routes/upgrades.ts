@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import {
-  checkRevive,
   isRootClaimLive,
   liveTaskIdOfType,
   lockRepositoryRow,
@@ -57,6 +56,7 @@ import {
   upgradeAdmission,
   upgradeRefusalMessage,
 } from '../lib/onboarding-state.js';
+import { reviveRefusal } from '@haive/shared/onboarding-admission';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 
 export const upgradeRoutes = new Hono<AppEnv>();
@@ -731,12 +731,12 @@ async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
  *  beside a live onboarding, a live root claim. An upgrade or rollback is also admitted again, as
  *  at creation, so one a reset has since cut off cannot continue. */
 export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<void> {
-  const check = await checkRevive(tx, taskId);
-  if (!check) return;
-  const rollback = (check.task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
+  const verdict = await reviveRefusal(tx, taskId);
+  if (!verdict) return;
+  const rollback = (verdict.task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
   const action = rollback ? 'rolled back' : 'upgraded';
-  const refusal = check.refusal;
-  if (refusal) {
+  if ('refusal' in verdict) {
+    const refusal = verdict.refusal;
     switch (refusal.reason) {
       case 'no-repository':
         throw new HttpError(404, 'Repository not found');
@@ -747,7 +747,7 @@ export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<
       case 'live-onboarding':
         throw new HttpError(
           409,
-          check.task.type === 'onboarding'
+          verdict.task.type === 'onboarding'
             ? liveOnboardingMessage(refusal.taskId)
             : upgradeRefusalMessage(
                 { admitted: false, reason: 'live-onboarding', taskId: refusal.taskId },
@@ -755,10 +755,9 @@ export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<
               ),
         );
     }
+    return;
   }
-  if (check.task.type !== 'onboarding_upgrade') return;
-  const admission = await upgradeAdmission(tx, check.task.userId, check.repo);
-  if (!admission.admitted) throw new HttpError(409, upgradeRefusalMessage(admission, action));
+  throw new HttpError(409, upgradeRefusalMessage(verdict.admission, action));
 }
 
 /** Insert an upgrade or a rollback task only while no other one of the repository is live and no
