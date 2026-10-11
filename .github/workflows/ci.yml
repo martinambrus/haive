@@ -179,6 +179,11 @@ jobs:
       - name: Run worker smokes
         run: pnpm --filter @haive/worker smoke:ci
 
+      - name: Agent pool script on a real Redis
+        run: pnpm --filter @haive/worker exec vitest run src/queues/cli-exec/agent-lease.test.ts
+        env:
+          HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
+
       # The migration runner's live-database coverage. Not part of smoke:ci, which is
       # worker-scoped; this package had no smoke of its own before.
       - name: Run migration smokes
