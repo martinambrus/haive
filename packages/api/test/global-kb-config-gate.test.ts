@@ -9,7 +9,13 @@ const h = vi.hoisted(() => ({
   vectorType: null as string | null,
   checks: [] as unknown[],
   connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
-    pg: async () => [],
+    pg: Object.assign(async () => [], {
+      begin: (run: (t: { unsafe: (text: string) => Promise<unknown[]> }) => unknown) =>
+        run({
+          unsafe: async (text: string) => (text.startsWith('SET') ? [] : rows(text)),
+        }),
+      end: async () => {},
+    }),
     close: async () => {},
   })),
 }));
@@ -42,15 +48,12 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
   resolveGlobalKbSettings: async () => h.settings,
-  resolveGlobalKbConnection: (settings: unknown, db: unknown) => h.connect(settings, db),
-  withGlobalKb: async (
-    _db: unknown,
-    fn: (ctx: unknown) => Promise<unknown>,
-    opts: { deadlineMs?: number; connectTimeoutSeconds?: number },
-  ) => {
-    h.checks.push(opts);
-    const tx = { unsafe: async (text: string) => (text.startsWith('SET') ? [] : rows(text)) };
-    return fn({ conn: { pg: { begin: (run: (t: typeof tx) => unknown) => run(tx) } } });
+  resolveGlobalKbConnection: (settings: unknown, db: unknown, opts?: unknown) => {
+    if (opts !== undefined) h.checks.push(opts);
+    return h.connect(settings, db);
+  },
+  withGlobalKb: async () => {
+    throw new Error('the dims check must not ensure the schema');
   },
 }));
 
@@ -328,10 +331,7 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     await put(widen);
 
     expect(h.checks).toEqual([
-      expect.objectContaining({
-        connectTimeoutSeconds: expect.any(Number),
-        deadlineMs: expect.any(Number),
-      }),
+      expect.objectContaining({ connectTimeoutSeconds: expect.any(Number), fetchTypes: false }),
     ]);
   });
 

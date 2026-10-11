@@ -283,11 +283,15 @@ const VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS = 3;
 const VECTOR_CHECK_DEADLINE_MS = 6_000;
 const VECTOR_CHECK_STATEMENT_TIMEOUT_MS = 3_000;
 
-/** The width of the store's `vector` column: null when there is none (a jsonb store, or no table yet), NaN when it has no fixed width. */
+/** The width of the store's `vector` column: null when there is none (a jsonb store, or no table yet), NaN when it has no fixed width.
+ *  A bare connection: `withGlobalKb` would first ensure the schema, creating the column at the saved width. */
 async function storeVectorWidth(settings: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) {
-  return withGlobalKb(
-    getDb(),
-    ({ conn }) =>
+  const conn = await resolveGlobalKbConnection(settings, getDb(), {
+    connectTimeoutSeconds: VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
+    fetchTypes: false,
+  });
+  try {
+    return await withTimeout(
       conn.pg.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL statement_timeout = '${VECTOR_CHECK_STATEMENT_TIMEOUT_MS}ms'`);
         const columns = (await tx.unsafe(
@@ -296,12 +300,15 @@ async function storeVectorWidth(settings: Awaited<ReturnType<typeof resolveGloba
         )) as unknown as Array<{ type: string }>;
         return columns.length > 0 ? Number(/\((\d+)\)/.exec(columns[0]!.type)?.[1]) : null;
       }),
-    {
-      connectTimeoutSeconds: VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
-      deadlineMs: VECTOR_CHECK_DEADLINE_MS,
-      settings,
-    },
-  );
+      VECTOR_CHECK_DEADLINE_MS,
+      'the global KB store did not answer the vector width check in time',
+    );
+  } catch (err) {
+    void conn.pg.end({ timeout: 0 }).catch(() => {});
+    throw err;
+  } finally {
+    await conn.close().catch(() => {});
+  }
 }
 
 globalKbRoutes.get('/config', async (c) => {
