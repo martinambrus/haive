@@ -452,6 +452,8 @@ async function main(): Promise<void> {
     log.error({ err }, 'workflow-commit smoke failed');
     console.error('[smoke] FAILED:', err);
   } finally {
+    // Closing the worker first lets its job finish recording the completion event before the rows go.
+    if (state.worker) await state.worker.close().catch(() => {});
     try {
       const db = getDb();
       if (state.taskId) {
@@ -467,7 +469,6 @@ async function main(): Promise<void> {
       log.warn({ err: cleanupErr }, 'cleanup failed');
     }
     if (state.queue) await state.queue.close().catch(() => {});
-    if (state.worker) await state.worker.close().catch(() => {});
     await closeTaskQueue().catch(() => {});
     await closeRedis().catch(() => {});
     if (state.fixtureDir) {
