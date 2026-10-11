@@ -314,6 +314,35 @@ describe('an upgrade apply retried after it failed part-way', () => {
     expect(s.byId([s.rulesRow!])[0]?.lastObservedDiskHash).toBe(hashOf(MY_REGION));
   });
 
+  it("keeps the plan's row live with the person's bytes when the failed attempt had committed", async () => {
+    const s = await setup();
+    await symlink(s.outside, join(s.root, '.haive'));
+    await expect(s.apply()).rejects.toThrow();
+    await rm(join(s.root, '.haive'));
+
+    s.answerConflicts('keep_ours');
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
+    const live = s.fake
+      .rows(schema.onboardingArtifacts)
+      .filter((r) => r.diskPath === EDITED && r.supersededAt === null);
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({ id: s.editedRow, lastObservedDiskHash: hashOf(MINE) });
+  });
+
+  it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await writeFile(join(s.root, EDITED), 'SAVED SINCE\n', 'utf8');
+
+    s.answerConflicts('keep_ours');
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe('SAVED SINCE\n');
+  });
+
   it('never names a row something else retired meanwhile as the one it replaced', async () => {
     const s = await setup();
     failOneCommit(s);

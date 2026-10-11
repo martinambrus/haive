@@ -829,7 +829,11 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // Superseded baselines of what a hook strip replaced.
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     // Live rows whose conflict was answered "Keep my edits", moved to the version declined.
-    const keptInPlace: { id: string; update: ReturnType<typeof keptRowUpdate> }[] = [];
+    const keptInPlace: {
+      id: string;
+      diskPath: string;
+      update: ReturnType<typeof keptRowUpdate>;
+    }[] = [];
     // Baselines of what a removal took, each written before the removal it records.
     const removalRecords: string[] = [];
     // What stood at each written path, recorded before the write.
@@ -1100,33 +1104,46 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           rel !== null &&
           earlier?.lastObservedDiskHash &&
           earlier.writtenContent !== null &&
-          entry.newContent &&
-          kept.hash === sha256Hex(normalizeContent(entry.newContent))
+          entry.newContent
         ) {
           const restore = earlier.writtenContent;
+          const renderHash = sha256Hex(normalizeContent(entry.newContent));
+          const rules = entry.templateKind === CLI_RULES_TEMPLATE_KIND;
+          let restored = false;
           try {
-            if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
-              const read = await readUpgradeFile(ctx.repoPath, rel);
-              if (read.kind !== 'text') throw new Error('the file changed while it was read');
-              await writeFileNoFollow(
-                ctx.repoPath,
-                rel,
-                upsertRegion(read.text, restore, CLI_RULES_START, CLI_RULES_END),
-              );
-            } else {
-              await writeFileNoFollow(ctx.repoPath, rel, restore);
-            }
+            // Checked and written on one held file, so a save landing meanwhile is kept.
+            await rewriteFileIfNoFollow(
+              ctx.repoPath,
+              rel,
+              (data) => {
+                const text = data.toString('utf8');
+                if (!Buffer.from(text, 'utf8').equals(data)) return null;
+                const standing = rules ? extractRegion(text, CLI_RULES_START, CLI_RULES_END) : text;
+                if (standing === null || sha256Hex(normalizeContent(standing)) !== renderHash) {
+                  return null;
+                }
+                restored = true;
+                return Buffer.from(
+                  rules ? upsertRegion(text, restore, CLI_RULES_START, CLI_RULES_END) : restore,
+                  'utf8',
+                );
+              },
+              { maxBytes: RULES_FILE_READ_CAP },
+            );
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
             continue;
           }
-          writtenPaths.push(rel);
-          kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
+          if (restored) {
+            writtenPaths.push(rel);
+            kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
+          }
         }
         if (entry.liveArtifactId) {
           keptInPlace.push({
             id: entry.liveArtifactId,
+            diskPath: entry.diskPath,
             update: keptRowUpdate(entry, entry.currentTemplateContentHash, kept, liveBundleItemIds),
           });
           continue;
@@ -1620,7 +1637,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             .where(inArray(schema.onboardingArtifacts.id, markers));
         }
         for (const k of keptInPlace) {
-          await tx
+          const updated = await tx
             .update(schema.onboardingArtifacts)
             .set({ ...k.update, updatedAt: now })
             .where(
@@ -1628,7 +1645,29 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
                 eq(schema.onboardingArtifacts.id, k.id),
                 isNull(schema.onboardingArtifacts.supersededAt),
               ),
-            );
+            )
+            .returning({ id: schema.onboardingArtifacts.id });
+          if (updated.length > 0) continue;
+          // An attempt of this task that committed and then failed retired the row for its own
+          // write: that row goes, and the one the plan saw comes back carrying the decision.
+          const ours = await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(
+              and(
+                eq(schema.onboardingArtifacts.taskId, ctx.taskId),
+                eq(schema.onboardingArtifacts.sourceStepId, '02-upgrade-apply'),
+                eq(schema.onboardingArtifacts.source, 'upgrade'),
+                eq(schema.onboardingArtifacts.diskPath, k.diskPath),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            )
+            .returning({ id: schema.onboardingArtifacts.id });
+          if (ours.length === 0) continue;
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ ...k.update, supersededAt: null, updatedAt: now })
+            .where(eq(schema.onboardingArtifacts.id, k.id));
         }
         if (baselineRows.length > 0) {
           // Insert as already-superseded so the live upgrade row is the only
