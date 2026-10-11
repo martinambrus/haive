@@ -121,7 +121,7 @@ export async function writeProjectStateRecord(
     });
   } catch (err) {
     if (err instanceof ProjectStateMovedError) throw err;
-    const cleared = await clearRenderContext(db, repositoryId);
+    const cleared = await clearRenderContext(db, repositoryId, expectedColumns);
     throw new ProjectStateWriteError(err, written, !cleared);
   }
   return written;
@@ -155,11 +155,24 @@ export async function refuseMovedColumn(
 }
 
 /** A column this write could not move would read as newer than the rows its writer just wrote, so it
- *  is cleared and every reader falls back to those rows' snapshot. */
-async function clearRenderContext(db: Database, repositoryId: string): Promise<boolean> {
+ *  is cleared and every reader falls back to those rows' snapshot. One a sync moved past `expected`
+ *  meanwhile is newer than both and stays. */
+async function clearRenderContext(
+  db: Database,
+  repositoryId: string,
+  expected?: unknown[],
+): Promise<boolean> {
   try {
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
+      if (expected) {
+        try {
+          await refuseMovedColumn(tx, repositoryId, expected);
+        } catch (err) {
+          if (err instanceof ProjectStateMovedError) return;
+          throw err;
+        }
+      }
       await tx
         .update(schema.repositories)
         .set({ renderContext: null })

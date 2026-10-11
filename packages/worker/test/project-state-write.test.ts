@@ -324,6 +324,27 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
     }
   });
 
+  it('clears the column after a failed write, unless a sync moved it before the clear', async () => {
+    for (const syncLands of [false, true]) {
+      const s = await setup();
+      await s.write(context(), true);
+      const planned = s.columnOf(REPO);
+      s.fake.hooks.beforeUpdate = () => {
+        if (s.lockKeys.length === 2) throw new Error('database refused');
+      };
+      s.hook.onLock = () => {
+        if (syncLands && s.lockKeys.length === 3) {
+          s.fake.patch(schema.repositories, REPO, { renderContext: { by: 'sync' } });
+        }
+      };
+
+      await expect(s.write(context(), false, { expectedColumns: [planned] })).rejects.toThrow(
+        'database refused',
+      );
+      expect(s.columnOf(REPO)).toEqual(syncLands ? { by: 'sync' } : null);
+    }
+  });
+
   it('writes when the column is one the writer expected, or none', async () => {
     const s = await setup();
     await s.write(context(), true, { expectedColumns: [{ planned: 'elsewhere' }] });
