@@ -6,7 +6,7 @@ const h = vi.hoisted(() => ({
   settings: {} as Record<string, unknown>,
   set: vi.fn(async (_key: string, _value: string) => {}),
   setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
-  holdsVectors: false,
+  vectorType: null as string | null,
   checks: [] as unknown[],
   connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
     pg: async () => [],
@@ -14,7 +14,8 @@ const h = vi.hoisted(() => ({
   })),
 }));
 
-const rows = () => (h.holdsVectors ? [{ '?column?': 1 }] : []);
+const rows = (text: string) =>
+  text.includes('format_type') && h.vectorType !== null ? [{ type: h.vectorType }] : [];
 
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
 vi.mock('../src/queues.js', () => ({ getGlobalKbSyncQueue: vi.fn(), getTaskQueue: vi.fn() }));
@@ -48,7 +49,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
     opts: { deadlineMs?: number; connectTimeoutSeconds?: number },
   ) => {
     h.checks.push(opts);
-    const tx = { unsafe: async (text: string) => (text.startsWith('SET') ? [] : rows()) };
+    const tx = { unsafe: async (text: string) => (text.startsWith('SET') ? [] : rows(text)) };
     return fn({ conn: { pg: { begin: (run: (t: typeof tx) => unknown) => run(tx) } } });
   },
 }));
@@ -103,7 +104,7 @@ beforeEach(() => {
   h.set.mockClear();
   h.setSecret.mockClear();
   h.connect.mockClear();
-  h.holdsVectors = false;
+  h.vectorType = null;
   h.checks = [];
   h.role = 'admin';
   h.flags = new Map();
@@ -304,8 +305,8 @@ describe('PUT /global-kb/config by an admin', () => {
 describe('PUT /global-kb/config with a different embedding width', () => {
   const widen = { ...PAGE, embedDimensions: 1024 };
 
-  it('is refused with 409 while the store holds vectors, and writes nothing', async () => {
-    h.holdsVectors = true;
+  it('is refused with 409 while the store has a vector column of another width, rows or not, and writes nothing', async () => {
+    h.vectorType = 'vector(2560)';
     const res = await put(widen);
 
     expect(res.status).toBe(409);
@@ -315,7 +316,7 @@ describe('PUT /global-kb/config with a different embedding width', () => {
   });
 
   it('is refused for a regular user too, before any other field of the save is written', async () => {
-    h.holdsVectors = true;
+    h.vectorType = 'vector(2560)';
     h.role = 'user';
 
     expect((await put({ ...widen, digestEnabled: false })).status).toBe(409);
@@ -323,7 +324,7 @@ describe('PUT /global-kb/config with a different embedding width', () => {
   });
 
   it('reads the store under a connect timeout and a deadline', async () => {
-    h.holdsVectors = true;
+    h.vectorType = 'vector(2560)';
     await put(widen);
 
     expect(h.checks).toEqual([
@@ -334,11 +335,25 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     ]);
   });
 
-  it('is accepted on an empty store', async () => {
+  it('is accepted when the store has no vector column or no table yet', async () => {
     const res = await put(widen);
 
     expect(res.status).toBe(200);
     expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '1024']);
+  });
+
+  it('is accepted when the column already has the new width', async () => {
+    h.vectorType = 'vector(1024)';
+    const res = await put(widen);
+
+    expect(res.status).toBe(200);
+    expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '1024']);
+  });
+
+  it('is refused when the column carries no width, which no new width can match', async () => {
+    h.vectorType = 'vector';
+
+    expect((await put(widen)).status).toBe(409);
   });
 
   it('is refused together with a store switch, whose vectors it cannot read', async () => {
@@ -353,7 +368,7 @@ describe('PUT /global-kb/config with a different embedding width', () => {
   });
 
   it('is not checked, and accepted, when the width is unchanged', async () => {
-    h.holdsVectors = true;
+    h.vectorType = 'vector(2560)';
     const res = await put(PAGE);
 
     expect(res.status).toBe(200);

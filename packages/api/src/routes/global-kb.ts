@@ -283,13 +283,18 @@ const VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS = 3;
 const VECTOR_CHECK_DEADLINE_MS = 6_000;
 const VECTOR_CHECK_STATEMENT_TIMEOUT_MS = 3_000;
 
-async function storeHoldsVectors(settings: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) {
+/** The width of the store's `vector` column: null when there is none (a jsonb store, or no table yet), NaN when it has no fixed width. */
+async function storeVectorWidth(settings: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) {
   return withGlobalKb(
     getDb(),
     ({ conn }) =>
       conn.pg.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL statement_timeout = '${VECTOR_CHECK_STATEMENT_TIMEOUT_MS}ms'`);
-        return (await tx.unsafe(`SELECT 1 FROM ai_rag_embeddings LIMIT 1`)).length > 0;
+        const columns = (await tx.unsafe(
+          `SELECT format_type(a.atttypid, a.atttypmod) AS type FROM pg_attribute a
+            WHERE a.attrelid = to_regclass('ai_rag_embeddings') AND a.attname = 'vector' AND NOT a.attisdropped`,
+        )) as unknown as Array<{ type: string }>;
+        return columns.length > 0 ? Number(/\((\d+)\)/.exec(columns[0]!.type)?.[1]) : null;
       }),
     {
       connectTimeoutSeconds: VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
@@ -346,12 +351,15 @@ globalKbRoutes.put('/config', async (c) => {
       'embed_dimensions_with_store_change',
     );
   }
-  if (dimsChange && (await storeHoldsVectors(saved))) {
-    throw new HttpError(
-      409,
-      'the store holds vectors of the current width; clear them and re-embed before changing the embedding dimensions',
-      'embed_dimensions_locked',
-    );
+  if (dimsChange) {
+    const width = await storeVectorWidth(saved);
+    if (width !== null && width !== d.embedDimensions) {
+      throw new HttpError(
+        409,
+        "the store's vector column has another width and cannot be resized here; the embedding dimensions must match it",
+        'embed_dimensions_locked',
+      );
+    }
   }
   if (isAdmin && d.enabled !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
