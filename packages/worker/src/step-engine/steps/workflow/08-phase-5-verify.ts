@@ -16,8 +16,9 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import {
   DDEV_PROJECT_MOUNT,
   ddevExec,
-  ddevRunnerRunning,
+  ddevRunnerLife,
   type DdevRunnerHandle,
+  type RunnerLife,
 } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
 import { shellQuote } from '../../../sandbox/shell-quote.js';
@@ -368,6 +369,13 @@ const NOT_FOUND_EXIT = 127;
 
 const SLOT_TIMEOUT_MS = 600_000;
 
+/** Whether the runner went away or started again during a run; unknown either side says no. */
+function runnerLost(before: RunnerLife, after: RunnerLife): boolean {
+  if (after === null) return false;
+  if (after.state !== 'up') return true;
+  return before !== null && before.state === 'up' && before.startedAt !== after.startedAt;
+}
+
 async function execSlot(
   cmd: SlotCommand,
   ctx: StepContext,
@@ -388,6 +396,7 @@ async function execSlot(
     const guardAt = cmd.argv.indexOf(DDEV_PM_GUARD);
     const marker = `pm-missing-${randomBytes(8).toString('hex')}`;
     const argv = cmd.argv.map((word, i) => (i === guardAt ? markedPmGuard(marker) : word));
+    const before = await ddevRunnerLife(handle);
     const res = await withDdevProgress(
       ctx,
       `Running ${cmd.label}`,
@@ -399,7 +408,7 @@ async function execSlot(
       { initialLine: cmd.argv.join(' ') },
     );
     // A runner lost mid-run (Docker restart, OOM, an external rm) is no failure an agent can fix.
-    if (res.exitCode !== 0 && !(await ddevRunnerRunning(handle).catch(() => true))) {
+    if (res.exitCode !== 0 && runnerLost(before, await ddevRunnerLife(handle))) {
       const note = `the DDEV runner stopped during ${cmd.label} — not run`;
       return { ran: false, note, exitCode: res.exitCode, output: note, raw: res.output };
     }
