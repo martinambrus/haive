@@ -94,6 +94,8 @@ describe('phase5VerifyStep.detect lint runners', () => {
     await put('core/phpcs.xml.dist', '<ruleset/>');
     await put('core/phpstan.neon.dist', '');
     await put('core/phpunit.xml.dist', '<phpunit/>');
+    await mkdir(path.join(workspace, 'core/lib'));
+    await put('core/lib/Drupal.php', '<?php');
 
     const out = await detect();
 
@@ -121,6 +123,21 @@ describe('phase5VerifyStep.detect lint runners', () => {
       'app/jest.config.js (below the repository root)',
       "contrib/phpcs.xml (not the project's)",
       'vendor/phpunit.xml (vendor)',
+    ]);
+  });
+
+  it('labels a core/ without Drupal core as below the root, and declines every root config name', async () => {
+    for (const d of ['core', 'py']) await mkdir(path.join(workspace, d));
+    await put('core/phpunit.xml', '<phpunit/>');
+    await put('py/pytest.ini', '');
+    await put('py/.phpcs.xml', '<ruleset/>');
+    await put('py/phpstan.dist.neon', '');
+
+    expect((await detect()).declinedConfigs).toEqual([
+      'core/phpunit.xml (below the repository root)',
+      'py/.phpcs.xml (below the repository root)',
+      'py/phpstan.dist.neon (below the repository root)',
+      'py/pytest.ini (below the repository root)',
     ]);
   });
 

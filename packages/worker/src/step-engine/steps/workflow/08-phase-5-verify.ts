@@ -37,7 +37,7 @@ import {
 import { checkOutputExcerpt } from './_fix-loop.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
-import type { TestFramework } from './08b-test-management.js';
+import { DRUPAL_CORE_MARKER, type TestFramework } from './08b-test-management.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { collectChangedLineMap, type ChangedLineMap } from './_impl-changes.js';
 import {
@@ -335,6 +335,11 @@ function pick(scripts: Record<string, string>, names: string[]): string | null {
   return null;
 }
 
+const PHPUNIT_CONFIGS = ['phpunit.xml', 'phpunit.xml.dist'];
+const PYTEST_CONFIGS = ['pytest.ini', 'pyproject.toml', 'tox.ini'];
+const PHPCS_CONFIGS = ['phpcs.xml', 'phpcs.xml.dist', '.phpcs.xml'];
+const PHPSTAN_CONFIGS = ['phpstan.neon', 'phpstan.neon.dist', 'phpstan.dist.neon'];
+
 /** Resolve the three verify-slot commands across JS / composer / PHP / Python.
  *  Precedence per slot: JS package script → composer script → framework binary. */
 async function resolveSlots(
@@ -353,10 +358,10 @@ async function resolveSlots(
     for (const n of names) if (await hasWorkspaceEntry(workspace, n)) return true;
     return false;
   };
-  const hasPhpunit = await has('phpunit.xml', 'phpunit.xml.dist');
-  const hasPytest = await has('pytest.ini', 'pyproject.toml', 'tox.ini');
-  const hasPhpcs = await has('phpcs.xml', 'phpcs.xml.dist', '.phpcs.xml');
-  const hasPhpstan = await has('phpstan.neon', 'phpstan.neon.dist', 'phpstan.dist.neon');
+  const hasPhpunit = await has(...PHPUNIT_CONFIGS);
+  const hasPytest = await has(...PYTEST_CONFIGS);
+  const hasPhpcs = await has(...PHPCS_CONFIGS);
+  const hasPhpstan = await has(...PHPSTAN_CONFIGS);
 
   const testJs = pick(pmScripts, ['test', 'test:unit', 'test:ci']);
   const test = testJs
@@ -401,12 +406,10 @@ async function resolveSlots(
 }
 
 const DECLINED_CONFIG_FILES = [
-  'phpcs.xml',
-  'phpcs.xml.dist',
-  'phpstan.neon',
-  'phpstan.neon.dist',
-  'phpunit.xml',
-  'phpunit.xml.dist',
+  ...PHPUNIT_CONFIGS,
+  ...PYTEST_CONFIGS,
+  ...PHPCS_CONFIGS,
+  ...PHPSTAN_CONFIGS,
   'jest.config.js',
   'jest.config.ts',
   'jest.config.mjs',
@@ -424,8 +427,8 @@ const THIRD_PARTY_DIRS = new Set([
   'thirdparty',
 ]);
 
-function declinedReason(dir: string): string {
-  if (dir === 'core') return 'Drupal core';
+function declinedReason(dir: string, drupalCore: boolean): string {
+  if (dir === 'core' && drupalCore) return 'Drupal core';
   if (dir === 'vendor' || dir === 'node_modules') return 'vendor';
   if (THIRD_PARTY_DIRS.has(dir)) return "not the project's";
   return 'below the repository root';
@@ -436,6 +439,7 @@ async function findDeclinedConfigs(workspace: string): Promise<string[]> {
   const { anchor, prefix } = workspaceAnchor(workspace);
   const entries = (await readdirNoFollow(anchor, prefix === '' ? '' : prefix.slice(0, -1))) ?? [];
   const found: string[] = [];
+  const drupalCore = await hasWorkspaceEntry(workspace, DRUPAL_CORE_MARKER);
   for (const dir of entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'))) {
     const hits: string[] = [];
     for (const name of ['package.json', 'composer.json']) {
@@ -445,7 +449,8 @@ async function findDeclinedConfigs(workspace: string): Promise<string[]> {
     for (const name of DECLINED_CONFIG_FILES) {
       if (await hasWorkspaceEntry(workspace, `${dir.name}/${name}`)) hits.push(name);
     }
-    for (const name of hits) found.push(`${dir.name}/${name} (${declinedReason(dir.name)})`);
+    for (const name of hits)
+      found.push(`${dir.name}/${name} (${declinedReason(dir.name, drupalCore)})`);
   }
   return found.sort();
 }

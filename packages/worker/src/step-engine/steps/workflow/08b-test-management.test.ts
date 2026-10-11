@@ -346,10 +346,16 @@ describe('scanTestInfra', () => {
       cypress: '',
       'core/cypress.config.js': '',
       'core/phpunit.xml.dist': '',
+      'core/lib/Drupal.php': '',
     });
     const infra = await scanTestInfra(dir);
     expect(infra.frameworks).not.toContain('phpunit');
     expect(infra.roots.cypress).toBeNull();
+  });
+
+  it('roots a framework at a core/ that is not Drupal core', async () => {
+    const dir = await tree({ cypress: '', 'core/cypress.config.js': '' });
+    expect((await scanTestInfra(dir)).roots.cypress).toBe('core');
   });
 
   it('does not root a framework inside installed dependencies', async () => {
