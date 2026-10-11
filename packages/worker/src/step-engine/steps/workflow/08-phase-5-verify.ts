@@ -354,10 +354,9 @@ async function resolveSlots(
 
 interface SlotRun {
   ran: boolean;
-  note?: string;
   exitCode: number;
   output: string;
-  /** Why a host command did not run. */
+  /** Why a command did not run. */
   note?: string;
   /** The whole output, for a classifier; never stored. */
   raw: string;
