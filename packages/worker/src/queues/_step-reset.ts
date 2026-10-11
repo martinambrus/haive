@@ -390,17 +390,24 @@ async function refuseAutoResume(
     eventType: 'upgrade.revive_refused',
     payload: { stepId, reason, ...(otherTaskId ? { otherTaskId } : {}) },
   });
+  const failed = and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed'));
+  if (!watchSince) {
+    // A watch from before awaiting_provider_since cannot be told from a later cleared one, so it
+    // is only dropped: no notice beats a false one.
+    await db
+      .update(schema.tasks)
+      .set({
+        awaitingAllowanceProviderId: null,
+        awaitingProviderReason: null,
+        allowanceResetAt: null,
+        updatedAt: new Date(),
+      })
+      .where(and(failed, isNull(schema.tasks.awaitingProviderSince)));
+    return;
+  }
   await db
     .update(schema.tasks)
     .set({ allowanceReplenishedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(schema.tasks.id, taskId),
-        eq(schema.tasks.status, 'failed'),
-        // A Retry that failed again since armed a new watch, which this refusal says nothing about.
-        watchSince
-          ? eq(schema.tasks.awaitingProviderSince, watchSince)
-          : isNull(schema.tasks.awaitingProviderSince),
-      ),
-    );
+    // A Retry that failed again since armed a new watch, which this refusal says nothing about.
+    .where(and(failed, eq(schema.tasks.awaitingProviderSince, watchSince)));
 }

@@ -250,7 +250,9 @@ answered form and the allowance auto-resume run `checkRevive`, and for an upgrad
 repository row in the transaction that revives. A worker refusal leaves the task failed and records
 `upgrade.revive_refused` with its reason. A refused auto-resume does not retry each tick. It takes
 the poller's notify path instead: it stamps `allowance_replenished_at` and keeps the provider, so the
-person gets the "allowance is back" notice and decides whether to Retry. Both
+person gets the "allowance is back" notice and decides whether to Retry. The stamp is fenced to the
+refused watch's `awaiting_provider_since`; a watch from before that column, which a later cleared
+one cannot be told from, is dropped without a notice. Both
 create routes write the task, its event and its move to `queued` in one transaction, since no sweep
 starts or ends a `created` task, and one left by a failure part-way would block every later upgrade
 and rollback. The migration fails the ones an older release left that way before it builds the

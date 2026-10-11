@@ -215,7 +215,11 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
       ...admitted(),
       type: 'onboarding',
       live: { type: 'onboarding_upgrade', status: 'running' },
-      task: { awaitingAllowanceProviderId: PROVIDER, awaitingProviderReason: 'rate_limit' },
+      task: {
+        awaitingAllowanceProviderId: PROVIDER,
+        awaitingProviderReason: 'rate_limit',
+        awaitingProviderSince: new Date(Date.now() - DAY),
+      },
     });
     expect(await t.resume()).toBe(false);
     expect(t.task()).toMatchObject({
@@ -224,6 +228,18 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
       awaitingProviderReason: 'rate_limit',
     });
     expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
+  });
+
+  it('drops a watch from before its start was recorded, without a notice', async () => {
+    const t = setup({
+      ...admitted(),
+      type: 'onboarding',
+      live: { type: 'onboarding_upgrade', status: 'running' },
+      task: { awaitingAllowanceProviderId: PROVIDER, awaitingProviderReason: 'rate_limit' },
+    });
+    expect(await t.resume()).toBe(false);
+    expect(t.task()).toMatchObject({ status: 'failed', awaitingAllowanceProviderId: null });
+    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
   });
 
   it('leaves a newer watch alone when the task was retried and failed again meanwhile', async () => {
