@@ -396,7 +396,7 @@ function guarded(
     scope.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === n);
   const follow = (n: string, c: ts.CallExpression): string | null => {
     const at = indexOf(n);
-    if (at < 0) return n;
+    if (at < 0) return capturedAlike(scope, c, n) ? n : null;
     const passed = c.arguments[at];
     return passed && ts.isIdentifier(passed) ? passed.text : null;
   };
@@ -417,6 +417,46 @@ function guarded(
     calls.length > 0 &&
     calls.every((c) => guarded(sf, c, follow(tx, c), follow(task, c), depth + 1))
   );
+}
+
+/** Whether a name the helper captures means the same binding at a call site: no function between
+ *  either of them and the scope they share declares it again. */
+function capturedAlike(helper: ts.FunctionLikeDeclaration, call: ts.Node, name: string): boolean {
+  const outer = new Set<ts.Node>();
+  for (let f = enclosingFunction(helper); f; f = enclosingFunction(f)) outer.add(f);
+  let shared: ts.Node | null = null;
+  for (let f = enclosingFunction(call); f; f = enclosingFunction(f)) {
+    if (outer.has(f)) {
+      shared = f;
+      break;
+    }
+    if (declaresDirectly(f, name)) return false;
+  }
+  for (let f = enclosingFunction(helper); f && f !== shared; f = enclosingFunction(f)) {
+    if (declaresDirectly(f, name)) return false;
+  }
+  return true;
+}
+
+function declaresDirectly(fn: ts.FunctionLikeDeclaration, name: string): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (
+      (ts.isVariableDeclaration(n) ||
+        ts.isParameter(n) ||
+        ts.isBindingElement(n) ||
+        ts.isFunctionDeclaration(n)) &&
+      n.name &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name &&
+      (ts.isParameter(n) ? n.parent === fn : enclosingFunction(n) === fn)
+    ) {
+      found = true;
+    }
+    if (!found && (n === fn || !ts.isFunctionLike(n))) ts.forEachChild(n, visit);
+  };
+  visit(fn);
+  return found;
 }
 
 /** Whether `name` is assigned anywhere in `scope`: a reassigned handle can lock in one transaction
@@ -1030,6 +1070,28 @@ describe('a live-status write on a task row', () => {
       liveWrites('x.ts', `async function f(db, id) { ${body} }`).map((w) => w.covered);
     expect(covered(`await db.update(schema.tasks).set!({ status: 'running' });`)).toEqual([false]);
     expect(covered(`await (db.update(schema.tasks).set)({ status: 'running' });`)).toEqual([false]);
+  });
+
+  it('does not let a call site rebind what a helper captures', () => {
+    const src = `async function route(tx, id) {
+        async function revive() {
+          await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+        }
+        async function other(tx, id) {
+          await ${GUARD}(tx, id);
+          await revive();
+        }
+        await other(tx2, id2);
+      }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+    const same = `async function route(tx, id) {
+        async function revive() {
+          await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+        }
+        await ${GUARD}(tx, id);
+        await revive();
+      }`;
+    expect(liveWrites('x.ts', same).map((w) => w.covered)).toEqual([true]);
   });
 
   it('does not cover a named write helper that escapes under another name', () => {
