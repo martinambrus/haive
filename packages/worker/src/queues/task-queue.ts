@@ -61,6 +61,8 @@ import {
   registerAllSteps,
   dagTimeoutInfo,
   finishedStepResult,
+  isFreshStepEntry,
+  willSkipBeforeAdmission,
   miningTimeoutInfo,
   trailingTimeoutInfo,
   upsertRow,
@@ -2546,9 +2548,20 @@ async function handleAdvanceStep(
   // remains the last-resort backstop for the rare pre-check -> cold-boot race. A null kind means
   // this step will spawn no runner at all, so it takes no gate, no queue ticket and no
   // reservation — see resolveAdmissionRuntimeKind.
-  const runtimeKind = stepDef.needsRuntime
-    ? await resolveAdmissionRuntimeKind(db, ctx, stepDef.needsRuntime)
-    : null;
+  // A fresh step whose own shouldRun says skip takes no slot, ticket or preemption first.
+  const skipsBeforeAdmission =
+    stepDef.needsRuntime &&
+    stepDef.shouldRun &&
+    (existing == null || isFreshStepEntry(existing.status))
+      ? await willSkipBeforeAdmission(
+          { ...ctx, db, stepDef, round },
+          await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined),
+        )
+      : false;
+  const runtimeKind =
+    stepDef.needsRuntime && !skipsBeforeAdmission
+      ? await resolveAdmissionRuntimeKind(db, ctx, stepDef.needsRuntime)
+      : null;
   if (runtimeKind) {
     const admission = await runtimeAdmission(ctx.taskId, runtimeKind);
     if (admission.decision === 'park') {

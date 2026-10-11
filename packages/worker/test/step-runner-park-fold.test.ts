@@ -202,4 +202,16 @@ describe('advanceStep park fold on resume', () => {
       expect(foldCliParkOnResume).not.toHaveBeenCalled();
     }
   });
+
+  it('folds a runtime-slot park before a shouldRun skip, so the wait stays in timing', async () => {
+    const state: MockState = { taskStepRow: stepRow('pending', true), updates: [] };
+    const params = runParams(state);
+    params.stepDef = { ...applyingStep(), shouldRun: () => false } as StepDefinition;
+
+    const result = await advanceStep(params);
+
+    expect(result.status).toBe('skipped');
+    expect(foldCliParkOnResume).toHaveBeenCalledWith(expect.anything(), 'ts-1');
+    expect(state.updates.at(-1)?.patch).toMatchObject({ status: 'skipped' });
+  });
 });
