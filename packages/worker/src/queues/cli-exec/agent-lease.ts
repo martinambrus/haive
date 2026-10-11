@@ -82,21 +82,6 @@ export interface AcquireAgentLeaseOptions {
   pollMs?: number;
 }
 
-/** Slots held right now, expired fields pruned. A Redis failure reads as none. */
-export async function liveAgentLeaseCount(): Promise<number> {
-  try {
-    const redis = getRedis();
-    const all = await redis.hgetall(LEASE_KEY);
-    const now = Date.now();
-    const expired = Object.keys(all).filter((id) => !(Number(all[id]) > now));
-    if (expired.length > 0) await redis.hdel(LEASE_KEY, ...expired);
-    return Object.keys(all).length - expired.length;
-  } catch (err) {
-    log.warn({ err }, 'agent lease read failed; counting none');
-    return 0;
-  }
-}
-
 export interface AgentSlot {
   /** Idempotent; the heartbeat stops and the slot is free again. */
   release(): Promise<void>;

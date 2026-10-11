@@ -123,7 +123,7 @@ export async function cleanupTaskScratchWorkspace(db: Database, taskId: string):
   // `summaryForStepId`), and the job then returns at `handlers.ts`'s already-finalized guard
   // without stamping `endedAt` — so that row would read as pending forever and no later recap,
   // replacement included, could ever reap the workspace. The codebase's own definition of
-  // finalized is `endedAt OR supersededAt` (`finalizedInvocationIds`, the per-task cap count).
+  // finalized is `endedAt OR supersededAt` (`enforceTaskAgentCap`, the per-task cap count).
   const pendingSummary = await db.query.cliInvocations.findFirst({
     where: and(
       eq(schema.cliInvocations.taskId, taskId),

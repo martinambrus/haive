@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 
 const store = new Map<string, string>();
+const liveSlots = () => [...store.values()].filter((v) => Number(v) > Date.now()).length;
 const fakeRedis = {
   hset: async (_k: string, f: string, v: string) => void store.set(f, v),
   hgetall: async () => Object.fromEntries(store),
@@ -36,7 +37,6 @@ const {
   AgentLeaseTimeoutError,
   acquireAgentLease,
   clearAgentLeases,
-  liveAgentLeaseCount,
   tryAcquireAgentLease,
 } = await import('./agent-lease.js');
 const { enforceAgentLaneCap } = await import('./handlers.js');
@@ -73,7 +73,7 @@ describe('tryAcquireAgentLease', () => {
     await admitInvoke('1', 2);
     const lease = await tryAcquireAgentLease(deps(2));
     expect(lease).not.toBeNull();
-    expect(await liveAgentLeaseCount()).toBe(2);
+    expect(liveSlots()).toBe(2);
   });
 
   it('refuses when active invocations plus leases fill the pool', async () => {
@@ -94,7 +94,7 @@ describe('tryAcquireAgentLease', () => {
         }
       })(),
     ).rejects.toThrow('docker blew up');
-    expect(await liveAgentLeaseCount()).toBe(0);
+    expect(liveSlots()).toBe(0);
     expect(await tryAcquireAgentLease(deps(1))).not.toBeNull();
   });
 
@@ -102,23 +102,24 @@ describe('tryAcquireAgentLease', () => {
     const lease = await tryAcquireAgentLease(deps(1));
     await lease?.release();
     await lease?.release();
-    expect(await liveAgentLeaseCount()).toBe(0);
+    expect(liveSlots()).toBe(0);
   });
 
   it('stops counting a lease whose heartbeat stopped', async () => {
     vi.useFakeTimers();
     await tryAcquireAgentLease(deps(1));
-    expect(await liveAgentLeaseCount()).toBe(1);
+    expect(liveSlots()).toBe(1);
     store.set([...store.keys()][0] as string, String(Date.now() - 1));
-    expect(await liveAgentLeaseCount()).toBe(0);
-    expect(store.size).toBe(0);
+    expect(liveSlots()).toBe(0);
+    expect(await tryAcquireAgentLease(deps(1))).not.toBeNull();
+    expect(store.size).toBe(1);
   });
 
   it('keeps a held lease alive with its heartbeat', async () => {
     vi.useFakeTimers();
     const lease = await tryAcquireAgentLease(deps(1));
     await vi.advanceTimersByTimeAsync(10 * 60_000);
-    expect(await liveAgentLeaseCount()).toBe(1);
+    expect(liveSlots()).toBe(1);
     await lease?.release();
   });
 });
@@ -127,7 +128,7 @@ describe('concurrent acquirers', () => {
   it('lets exactly one of five take the last free slot', async () => {
     const got = await Promise.all(Array.from({ length: 5 }, () => tryAcquireAgentLease(deps(1))));
     expect(got.filter((l) => l !== null)).toHaveLength(1);
-    expect(await liveAgentLeaseCount()).toBe(1);
+    expect(liveSlots()).toBe(1);
   });
 
   it('never grants more leases than the cap leaves', async () => {
@@ -236,9 +237,9 @@ describe('clearAgentLeases', () => {
   it('clears every lease', async () => {
     await tryAcquireAgentLease(deps(5));
     await tryAcquireAgentLease(deps(5));
-    expect(await liveAgentLeaseCount()).toBe(2);
+    expect(liveSlots()).toBe(2);
     await clearAgentLeases();
-    expect(await liveAgentLeaseCount()).toBe(0);
+    expect(liveSlots()).toBe(0);
   });
 });
 
