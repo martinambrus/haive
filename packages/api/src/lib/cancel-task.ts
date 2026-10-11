@@ -1,6 +1,7 @@
 import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  logger,
   TASK_JOB_NAMES,
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
@@ -96,12 +97,17 @@ export async function cancelTaskRow(
 
 /** Enqueue the worker-side cancel job that tears down sandboxes, terminal
  *  sessions, env images, and auth volumes for the cancelled task. Must be
- *  called AFTER the row update has committed. Idempotent on the worker side. */
+ *  called AFTER the row update has committed. Idempotent on the worker side.
+ *  Never throws: the cancel already stands, and the worker's stalled sweep queues a lost teardown. */
 export async function enqueueCancelJob(taskId: string, userId: string): Promise<void> {
-  await getTaskQueue().add(TASK_JOB_NAMES.CANCEL, { taskId, userId } as TaskJobPayload, {
-    removeOnComplete: 50,
-    removeOnFail: 50,
-  });
+  try {
+    await getTaskQueue().add(TASK_JOB_NAMES.CANCEL, { taskId, userId } as TaskJobPayload, {
+      removeOnComplete: 50,
+      removeOnFail: 50,
+    });
+  } catch (err) {
+    logger.warn({ err, taskId }, 'cancel teardown not queued; the stalled sweep will queue it');
+  }
 }
 
 /** Find every non-terminal task pinned to the given repository for the given
