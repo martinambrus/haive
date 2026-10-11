@@ -6,13 +6,21 @@ import {
   type GlobalKbConnection,
   type GlobalKbSettings,
 } from './connection.js';
-import { ensureGlobalKbSchema } from './ensure-schema.js';
+import { backfillGlobalIdentifierTsv, ensureGlobalKbSchema } from './ensure-schema.js';
 import { GlobalKbDeadlineError } from './errors.js';
 import { createGlobalKbDb, type GlobalKbDb } from './schema.js';
 
 // Schema DDL is memoized per process and store: the first call for a store ensures it, calls
 // meanwhile wait for that one, and later calls skip it. The settings can switch stores at runtime.
 const schemaReady = new Map<string, Promise<unknown>>();
+// Stores whose identifier backfill failed or stopped early in this process: the memoized ensure
+// will not run it again, so the reconcile sweep retries it.
+const identifierBackfillOwed = new Set<string>();
+
+function noteIdentifierBackfill(key: string, done: boolean): void {
+  if (done) identifierBackfillOwed.delete(key);
+  else identifierBackfillOwed.add(key);
+}
 
 function storeKey(settings: GlobalKbSettings): string {
   if (settings.mode !== 'external') return settings.mode;
@@ -60,14 +68,18 @@ async function openAndRun<T>(
     if (shared) {
       await shared;
     } else if (opts.deadlineMs === undefined) {
-      const ready = ensureGlobalKbSchema(conn).catch((err: unknown) => {
-        schemaReady.delete(key);
-        throw err;
-      });
+      const ready = ensureGlobalKbSchema(conn).then(
+        (r) => noteIdentifierBackfill(key, r.identifierBackfillDone),
+        (err: unknown) => {
+          schemaReady.delete(key);
+          throw err;
+        },
+      );
       schemaReady.set(key, ready);
       await ready;
     } else {
-      await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs });
+      const r = await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs });
+      noteIdentifierBackfill(key, r.identifierBackfillDone);
       if (!schemaReady.has(key)) schemaReady.set(key, Promise.resolve());
     }
     const db = createGlobalKbDb(conn.pg);
@@ -111,4 +123,19 @@ export async function withGlobalKb<T>(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Retries the identifier backfill of the CURRENT store when this process's ensure of it failed or
+ *  stopped early; a converged store is not touched, since its count is a scan the index cannot serve. */
+export async function retryOwedGlobalIdentifierBackfill(haiveDb: Database): Promise<void> {
+  const settings = await resolveGlobalKbSettings();
+  const key = storeKey(settings);
+  if (!identifierBackfillOwed.has(key)) return;
+  await withGlobalKb(
+    haiveDb,
+    async ({ conn }) => {
+      noteIdentifierBackfill(key, await backfillGlobalIdentifierTsv((run) => conn.pg.begin(run)));
+    },
+    { settings },
+  );
 }

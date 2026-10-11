@@ -55,7 +55,7 @@ const IDENTIFIER_BACKFILL_BATCH = 2_000;
 export async function ensureGlobalKbSchema(
   conn: Pick<GlobalKbConnection, 'pg' | 'embeddingDimensions'>,
   opts: { timeoutMs?: number } = {},
-): Promise<{ usedPgvector: boolean }> {
+): Promise<{ usedPgvector: boolean; identifierBackfillDone: boolean }> {
   const timeoutMs =
     opts.timeoutMs === undefined ? undefined : Math.max(1, Math.floor(opts.timeoutMs));
   const step = <T>(run: (tx: postgres.TransactionSql) => Promise<T>) =>
@@ -273,7 +273,7 @@ export async function ensureGlobalKbSchema(
     `);
   });
 
-  await backfillGlobalIdentifierTsv(step);
+  const identifierBackfillDone = await backfillGlobalIdentifierTsv(step);
 
   // Facet values are stored LOWERCASE, because retrieval compares them two ways and only one
   // can be lenient: `facetsMatchProject` lowercases in JS while `buildFacetClause` uses jsonb
@@ -371,23 +371,16 @@ export async function ensureGlobalKbSchema(
     `);
   }
 
-  return { usedPgvector };
-}
-
-let identifierBackfillOwed = false;
-
-/** True after a backfill pass in this process failed or stopped early, so the sweep owes a retry. */
-export function globalIdentifierBackfillOwed(): boolean {
-  return identifierBackfillOwed;
+  return { usedPgvector, identifierBackfillDone };
 }
 
 /** Rewrites every global vector row whose `content_tsv` lacks the identifier stamp; warns, never
- *  throws. No row cap, since the ensure runs it once per process; the reconcile sweep re-runs it. */
+ *  throws, and answers whether it finished. No row cap: the ensure runs it once per process. */
 export async function backfillGlobalIdentifierTsv(
   step: (
     run: (tx: postgres.TransactionSql) => Promise<postgres.RowList<postgres.Row[]>>,
   ) => Promise<postgres.RowList<postgres.Row[]>>,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const unstamped = `FROM ${VECTORS_TABLE} WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)`;
     const counted = await step((tx) =>
@@ -412,10 +405,10 @@ export async function backfillGlobalIdentifierTsv(
         break;
       }
     }
-    identifierBackfillOwed = !finished;
     if (total > 0) log.info({ rows: total }, 'backfilled identifier lexemes into content_tsv');
+    return finished;
   } catch (err) {
-    identifierBackfillOwed = true;
     log.warn({ err }, 'identifier tsv backfill failed; lexical identifier search may be stale');
+    return false;
   }
 }

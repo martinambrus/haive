@@ -81,7 +81,8 @@ ensure runs once per process, so a capped pass would never get a second one. It 
 unstamped rows first and stops after `ceil(count / batch) + 1` passes. The ensure is memoized and
 its backfill only warns, so a pass lost to a timeout or a dropped connection would wait for a
 restart; the worker's 5-minute reconcile sweep therefore runs `backfillGlobalIdentifierTsv` again,
-but only while `globalIdentifierBackfillOwed()` says a pass in this process failed or stopped early,
+through `retryOwedGlobalIdentifierBackfill`, but only for the current store and only while that
+store's ensure in this process left the pass unfinished (owed debt is keyed like the schema memo),
 since its count of unstamped rows is a negative predicate the GIN index cannot serve. Before
 that the global store's `content_tsv` was plain `to_tsvector('english', …)`, so only camelCase
 names survived the parser whole and a snake_case identifier could never match the global half.

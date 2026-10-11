@@ -7,10 +7,7 @@ vi.mock('../src/logger/index.js', () => {
   return { logger: { child: () => child } };
 });
 
-import {
-  ensureGlobalKbSchema,
-  globalIdentifierBackfillOwed,
-} from '../src/global-kb/ensure-schema.js';
+import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
 import {
   IDENTIFIER_TSV_SENTINEL,
   identifierTsvSentinelQuery,
@@ -530,18 +527,21 @@ describe('ensureGlobalKbSchema', () => {
     it('logs a failure and still resolves', async () => {
       const { conn } = fakeConn({ unstampedRows: 1, backfillThrows: true });
 
-      await expect(ensureGlobalKbSchema(conn)).resolves.toEqual({ usedPgvector: true });
+      await expect(ensureGlobalKbSchema(conn)).resolves.toEqual({
+        usedPgvector: true,
+        identifierBackfillDone: false,
+      });
       expect(logged.warn).toHaveBeenCalledWith(
         expect.objectContaining({ err: expect.any(Error) }),
         expect.stringContaining('identifier'),
       );
-      expect(globalIdentifierBackfillOwed()).toBe(true);
     });
 
-    it('owes no retry once a pass finished', async () => {
-      await ensureGlobalKbSchema(fakeConn({ unstampedRows: 1, backfillThrows: true }).conn);
-      await ensureGlobalKbSchema(fakeConn({ unstampedRows: 1 }).conn);
-      expect(globalIdentifierBackfillOwed()).toBe(false);
+    it('reports a finished pass', async () => {
+      await expect(ensureGlobalKbSchema(fakeConn({ unstampedRows: 1 }).conn)).resolves.toEqual({
+        usedPgvector: true,
+        identifierBackfillDone: true,
+      });
     });
   });
 });

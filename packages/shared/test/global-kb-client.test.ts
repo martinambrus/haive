@@ -10,6 +10,7 @@ const h = vi.hoisted(() => ({
   ends: [] as unknown[],
   closes: 0,
   onEnd: undefined as (() => void) | undefined,
+  backfill: vi.fn<(step: unknown) => Promise<boolean>>(),
 }));
 
 vi.mock('../src/global-kb/connection.js', () => ({
@@ -32,7 +33,11 @@ vi.mock('../src/global-kb/connection.js', () => ({
     };
   },
 }));
-vi.mock('../src/global-kb/ensure-schema.js', () => ({ ensureGlobalKbSchema: h.ensure }));
+vi.mock('../src/global-kb/ensure-schema.js', () => ({
+  ensureGlobalKbSchema: async (...args: [{ store: string }]) =>
+    (await h.ensure(...args)) ?? { usedPgvector: true, identifierBackfillDone: true },
+  backfillGlobalIdentifierTsv: h.backfill,
+}));
 vi.mock('../src/global-kb/schema.js', () => ({ createGlobalKbDb: () => ({}) }));
 
 /** A fresh module each time: the ensure is remembered per process, i.e. per module instance. */
@@ -45,6 +50,7 @@ const haiveDb = {} as Parameters<Awaited<ReturnType<typeof load>>>[0];
 
 beforeEach(() => {
   h.ensure.mockReset();
+  h.backfill.mockReset();
   h.settings = { mode: 'internal', connectionString: null };
   h.connectOpts = [];
   h.connectDelayMs = 0;
@@ -124,6 +130,46 @@ describe('withGlobalKb', () => {
       'internal',
       'postgres://kb.example/one',
     ]);
+  });
+});
+
+describe('the owed identifier backfill', () => {
+  const loadClient = async () => {
+    vi.resetModules();
+    return import('../src/global-kb/client.js');
+  };
+  const storeA = { mode: 'external' as const, connectionString: 'postgres://kb.example/a' };
+
+  it("is retried for the store whose ensure left it unfinished, even after another store's ensure finished", async () => {
+    h.ensure.mockImplementation(async (conn) => ({
+      usedPgvector: true,
+      identifierBackfillDone: conn.store !== storeA.connectionString,
+    }));
+    h.backfill.mockResolvedValue(true);
+    const client = await loadClient();
+
+    h.settings = storeA;
+    await client.withGlobalKb(haiveDb, async () => undefined);
+    h.settings = { mode: 'internal', connectionString: null };
+    await client.withGlobalKb(haiveDb, async () => undefined);
+    await client.retryOwedGlobalIdentifierBackfill(haiveDb);
+    expect(h.backfill).not.toHaveBeenCalled();
+
+    h.settings = storeA;
+    await client.retryOwedGlobalIdentifierBackfill(haiveDb);
+    await client.retryOwedGlobalIdentifierBackfill(haiveDb);
+    expect(h.backfill).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays owed while the retry does not finish', async () => {
+    h.ensure.mockResolvedValue({ usedPgvector: true, identifierBackfillDone: false });
+    h.backfill.mockResolvedValue(false);
+    const client = await loadClient();
+
+    await client.withGlobalKb(haiveDb, async () => undefined);
+    await client.retryOwedGlobalIdentifierBackfill(haiveDb);
+    await client.retryOwedGlobalIdentifierBackfill(haiveDb);
+    expect(h.backfill).toHaveBeenCalledTimes(2);
   });
 });
 
