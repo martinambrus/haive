@@ -8,6 +8,18 @@ const fakeRedis = {
   hgetall: async () => Object.fromEntries(store),
   hdel: async (_k: string, ...fields: string[]) => void fields.forEach((f) => store.delete(f)),
   del: async () => void store.clear(),
+  // The same decision as ACQUIRE_LEASE_SCRIPT, run without an await so it is atomic like a script.
+  eval: async (_script: string, _n: number, _k: string, ...a: (string | number)[]) => {
+    const [now, expiry, , used, cap] = a.map(Number) as [number, number, number, number, number];
+    let live = 0;
+    for (const [f, v] of [...store]) {
+      if (Number(v) > now) live += 1;
+      else store.delete(f);
+    }
+    if (live + used >= cap) return [0, live];
+    store.set(String(a[2]), String(expiry));
+    return [1, live];
+  },
 };
 let activeJobs: unknown[] = [];
 
@@ -21,6 +33,7 @@ vi.mock('./_shared.js', async (importOriginal) => ({
 }));
 
 const {
+  ACQUIRE_LEASE_SCRIPT,
   AgentLeaseAbortedError,
   AgentLeaseTimeoutError,
   acquireAgentLease,
@@ -113,6 +126,71 @@ describe('tryAcquireAgentLease', () => {
     expect(await tryAcquireAgentLease({ db: finishedDb, agentCap: async () => 1 })).not.toBeNull();
   });
 });
+
+describe('concurrent acquirers', () => {
+  it('lets exactly one of five take the last free slot', async () => {
+    const got = await Promise.all(Array.from({ length: 5 }, () => tryAcquireAgentLease(deps(1))));
+    expect(got.filter((l) => l !== null)).toHaveLength(1);
+    expect(await liveAgentLeaseCount()).toBe(1);
+  });
+
+  it('never grants more leases than the cap leaves', async () => {
+    activeJobs = [invoke('1')];
+    const got = await Promise.all(Array.from({ length: 5 }, () => tryAcquireAgentLease(deps(3))));
+    expect(got.filter((l) => l !== null)).toHaveLength(2);
+  });
+});
+
+describe.skipIf(!process.env.HAIVE_LEASE_TEST_REDIS_URL)(
+  'ACQUIRE_LEASE_SCRIPT on a real Redis',
+  () => {
+    const key = 'haive:agent-lease-test';
+    async function withRedis(run: (r: import('ioredis').Redis) => Promise<void>): Promise<void> {
+      const { Redis } = await import('ioredis');
+      const r = new Redis(process.env.HAIVE_LEASE_TEST_REDIS_URL as string);
+      try {
+        await r.del(key);
+        await run(r);
+      } finally {
+        await r.del(key);
+        r.disconnect();
+      }
+    }
+    const take = (r: import('ioredis').Redis, now: number, id: string, used: number, cap: number) =>
+      r.eval(ACQUIRE_LEASE_SCRIPT, 1, key, now, now + 60_000, id, used, cap) as Promise<number[]>;
+
+    it('inserts for exactly one of five simultaneous callers on one free slot', async () => {
+      await withRedis(async (r) => {
+        const now = Date.now();
+        const res = await Promise.all(
+          Array.from({ length: 5 }, (_, i) => take(r, now, `l${i}`, 0, 1)),
+        );
+        expect(res.filter(([inserted]) => inserted === 1)).toHaveLength(1);
+        expect(await r.hlen(key)).toBe(1);
+      });
+    });
+
+    it('counts the active INVOKE jobs against the cap', async () => {
+      await withRedis(async (r) => {
+        const now = Date.now();
+        const res = await Promise.all(
+          Array.from({ length: 5 }, (_, i) => take(r, now, `l${i}`, 1, 3)),
+        );
+        expect(res.filter(([inserted]) => inserted === 1)).toHaveLength(2);
+      });
+    });
+
+    it('drops expired fields and reports the live count', async () => {
+      await withRedis(async (r) => {
+        const now = Date.now();
+        await r.hset(key, 'old', String(now - 1), 'live', String(now + 60_000));
+        expect(await take(r, now, 'new', 0, 5)).toEqual([1, 1]);
+        expect(await r.hkeys(key)).toEqual(expect.arrayContaining(['live', 'new']));
+        expect(await r.hexists(key, 'old')).toBe(0);
+      });
+    });
+  },
+);
 
 describe('acquireAgentLease', () => {
   it('waits, reports the wait, and takes the slot once it frees', async () => {

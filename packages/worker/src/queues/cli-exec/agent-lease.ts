@@ -22,6 +22,27 @@ const LEASE_KEY = 'haive:agent-lease';
 const LEASE_TTL_MS = 2 * 60_000;
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
+
+/** KEYS[1] the lease hash; ARGV: now, the new field's expiry, its id, active INVOKE jobs, the cap.
+ *  Prunes expired fields, then inserts only while live + INVOKE jobs stay below the cap. Returns
+ *  {inserted, live}. */
+export const ACQUIRE_LEASE_SCRIPT = `
+local fields = redis.call('HGETALL', KEYS[1])
+local now = tonumber(ARGV[1])
+local live = 0
+for i = 1, #fields, 2 do
+  if (tonumber(fields[i + 1]) or 0) > now then
+    live = live + 1
+  else
+    redis.call('HDEL', KEYS[1], fields[i])
+  end
+end
+if live + tonumber(ARGV[4]) >= tonumber(ARGV[5]) then
+  return {0, live}
+end
+redis.call('HSET', KEYS[1], ARGV[3], ARGV[2])
+return {1, live}
+`;
 /** How long a caller waits for a slot before giving up. */
 export const AGENT_LEASE_WAIT_MS = 10 * 60_000;
 
@@ -117,16 +138,22 @@ async function unfinishedActiveAgents(db: Database): Promise<number> {
 async function attempt(
   deps: AgentLeaseDeps,
 ): Promise<{ lease: AgentLease } | { busy: number; cap: number }> {
-  const [used, leases, cap] = await Promise.all([
-    unfinishedActiveAgents(deps.db),
-    liveAgentLeaseCount(),
-    deps.agentCap(),
-  ]);
-  // The reads are not atomic, so two callers can both see the last free slot: it overshoots by one.
-  if (used + leases >= cap) return { busy: used + leases, cap };
+  const [used, cap] = await Promise.all([unfinishedActiveAgents(deps.db), deps.agentCap()]);
   const id = randomUUID();
   const redis = getRedis();
-  await redis.hset(LEASE_KEY, id, String(Date.now() + LEASE_TTL_MS));
+  const now = Date.now();
+  // The INVOKE count is read outside Redis, so an INVOKE admitted meanwhile can overshoot by one.
+  const [inserted, live] = (await redis.eval(
+    ACQUIRE_LEASE_SCRIPT,
+    1,
+    LEASE_KEY,
+    now,
+    now + LEASE_TTL_MS,
+    id,
+    used,
+    cap,
+  )) as [number, number];
+  if (inserted !== 1) return { busy: used + live, cap };
   const beat = setInterval(() => {
     void redis.hset(LEASE_KEY, id, String(Date.now() + LEASE_TTL_MS)).catch((err: unknown) => {
       log.warn({ err, leaseId: id }, 'agent lease heartbeat failed');
