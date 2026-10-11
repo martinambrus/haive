@@ -399,15 +399,8 @@ function guarded(sf: ts.SourceFile, node: ts.Node, tx: string | null, depth = 0)
 function reassigns(scope: ts.Node, name: string): boolean {
   let found = false;
   const visit = (n: ts.Node): void => {
-    if (
-      ts.isBinaryExpression(n) &&
-      n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-      n.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
-      ts.isIdentifier(n.left) &&
-      n.left.text === name
-    ) {
-      found = true;
-    }
+    // Any target position: plain, compound, destructuring, ++/--, a for-of/for-in head.
+    if (ts.isIdentifier(n) && n.text === name && isWriteTarget(n)) found = true;
     if (!found) ts.forEachChild(n, visit);
   };
   visit(scope);
@@ -749,6 +742,16 @@ describe('a live-status write on a task row', () => {
     expect(
       covered(
         `await ${GUARD}(tx, id); { const tx = lockTx; await tx.update(schema.tasks).set({ status: 'running' }); }`,
+      ),
+    ).toEqual([false]);
+    expect(
+      covered(
+        `await ${GUARD}(tx, id); [tx] = [lockTx]; await tx.update(schema.tasks).set({ status: 'running' });`,
+      ),
+    ).toEqual([false]);
+    expect(
+      covered(
+        `await ${GUARD}(tx, id); for (tx of [lockTx]) await tx.update(schema.tasks).set({ status: 'running' });`,
       ),
     ).toEqual([false]);
     expect(
