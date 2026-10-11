@@ -144,6 +144,38 @@ function bindingOf(at: ts.Node, name: string): ts.VariableDeclaration | 'opaque'
   return null;
 }
 
+/** Whether an expression is written to: an assignment's left side, a destructuring target inside
+ *  one, an increment, a `delete`, or a `for…of`/`for…in` binding. */
+function isWriteTarget(n: ts.Node): boolean {
+  for (let cur = n, p = n.parent; p; cur = p, p = p.parent) {
+    if (
+      ts.isParenthesizedExpression(p) ||
+      ts.isArrayLiteralExpression(p) ||
+      ts.isObjectLiteralExpression(p) ||
+      ts.isSpreadElement(p) ||
+      ts.isSpreadAssignment(p) ||
+      (ts.isPropertyAssignment(p) && p.initializer === cur)
+    ) {
+      continue;
+    }
+    if (ts.isBinaryExpression(p)) {
+      return (
+        p.left === cur &&
+        p.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        p.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      );
+    }
+    if (ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) {
+      return (
+        p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken
+      );
+    }
+    if (ts.isDeleteExpression(p)) return true;
+    return (ts.isForOfStatement(p) || ts.isForInStatement(p)) && p.initializer === cur;
+  }
+  return false;
+}
+
 /** Whether a use of the patch could change it: anything but reading one of its properties or
  *  handing it to a `.set(...)`, since a helper, an alias or a replacement may give it a status. */
 function escapes(use: ts.Identifier): boolean {
@@ -211,8 +243,7 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
       (assignedKey === null || assignedKey === 'status') &&
       (n as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression.getText() ===
         name &&
-      ts.isBinaryExpression(n.parent) &&
-      n.parent.left === n
+      isWriteTarget(n)
     ) {
       found = true;
     }
@@ -517,6 +548,10 @@ describe('a live-status write on a task row', () => {
     expect(count(`const patch = {}; fillTaskPatch(patch);`)).toBe(1);
     expect(count(`const patch = {}; const alias = patch; alias.status = o;`)).toBe(1);
     expect(count(`const patch = { title: 't' }; log(patch.title);`)).toBe(0);
+    expect(count(`const patch = { title: 't' }; ({ status: patch.status } = o);`)).toBe(1);
+    expect(count(`const patch = { title: 't' }; [patch['status']] = o;`)).toBe(1);
+    expect(count(`const patch = { title: 't' }; delete patch.status;`)).toBe(1);
+    expect(count(`const patch = { title: 't' }; const x = { a: patch.status };`)).toBe(0);
     expect(count(`const patch = { title: 't' };`)).toBe(0);
   });
 
