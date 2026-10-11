@@ -578,7 +578,7 @@ export async function runRagIndexSync(
     let embedSkippedChunks = 0;
     let embedFailureReason: string | null = null;
     let realEmbeddingSucceeded = false;
-    let hashedWithEndpoint = false;
+    let hashedChunks = 0;
     const embedBatchSize = await resolveEmbedBatchSize();
 
     const kbFiles = await collectKbFiles(repoPath);
@@ -748,7 +748,20 @@ export async function runRagIndexSync(
         const embeddings = outcome.embeddings;
         if (outcome.kind === 'embedded') realEmbeddingSucceeded = true;
         const hashedHere = outcome.kind === 'hashed' && useOllama;
-        if (hashedHere) hashedWithEndpoint = true;
+        if (hashedHere) {
+          // Recorded before the first hashed upsert, so an aborted run still leaves the repo degraded.
+          if (hashedChunks === 0) {
+            await recordRagEmbedDegraded(
+              ctx.db,
+              repositoryId,
+              HASH_WITH_ENDPOINT_REASON,
+              ctx.logger,
+            );
+            health.degradedAt ??= new Date();
+            health.degradedReason = HASH_WITH_ENDPOINT_REASON;
+          }
+          hashedChunks += batch.length;
+        }
 
         for (let i = 0; i < batch.length; i += 1) {
           const { chunk, action } = batch[i]!;
@@ -878,7 +891,7 @@ export async function runRagIndexSync(
       useOllama &&
       health.degradedAt &&
       !embedFailureReason &&
-      !hashedWithEndpoint &&
+      hashedChunks === 0 &&
       !realEmbeddingSucceeded
     ) {
       const outcome = await embedBatch({
@@ -900,11 +913,7 @@ export async function runRagIndexSync(
       await recordRagEmbedDegraded(ctx.db, repositoryId, embedFailureReason, ctx.logger);
       health.degradedAt ??= new Date();
       health.degradedReason = embedFailureReason;
-    } else if (hashedWithEndpoint) {
-      await recordRagEmbedDegraded(ctx.db, repositoryId, HASH_WITH_ENDPOINT_REASON, ctx.logger);
-      health.degradedAt ??= new Date();
-      health.degradedReason = HASH_WITH_ENDPOINT_REASON;
-    } else if (realEmbeddingSucceeded && health.degradedAt) {
+    } else if (hashedChunks === 0 && realEmbeddingSucceeded && health.degradedAt) {
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
       health.degradedAt = null;
       health.degradedReason = null;

@@ -383,7 +383,8 @@ async function embedAndStore(opts: {
   embeddingModel: string | null;
   embeddingDimensions: number;
   sync: IncrementalSync | null;
-}): Promise<{ embedded: number; skipped: number; hashedWithEndpoint: boolean }> {
+  hashed: { chunks: number };
+}): Promise<{ embedded: number; skipped: number }> {
   const { sync } = opts;
   const toEmbed: RagChunk[] = [];
   let skipped = 0;
@@ -400,7 +401,6 @@ async function embedAndStore(opts: {
   }
 
   let embedded = 0;
-  let hashedWithEndpoint = false;
   const batchSize = await resolveEmbedBatchSize();
   for (let batchStart = 0; batchStart < toEmbed.length; batchStart += batchSize) {
     opts.ctx.throwIfCancelled();
@@ -440,7 +440,18 @@ async function embedAndStore(opts: {
     }
     const embeddings = outcome.embeddings;
     const hashedHere = outcome.kind === 'hashed' && !!opts.ollamaUrl && !!opts.embeddingModel;
-    if (hashedHere) hashedWithEndpoint = true;
+    if (hashedHere) {
+      // Recorded before the first hashed upsert, so an aborted run still leaves the repo degraded.
+      if (opts.hashed.chunks === 0) {
+        await recordRagEmbedDegraded(
+          opts.ctx.db,
+          opts.repositoryId,
+          HASH_WITH_ENDPOINT_REASON,
+          opts.ctx.logger,
+        );
+      }
+      opts.hashed.chunks += batch.length;
+    }
     for (let i = 0; i < batch.length; i += 1) {
       const chunk = batch[i]!;
       await insertChunk(
@@ -460,7 +471,7 @@ async function embedAndStore(opts: {
       embedded += 1;
     }
   }
-  return { embedded, skipped, hashedWithEndpoint };
+  return { embedded, skipped };
 }
 
 /* ------------------------------------------------------------------ */
@@ -770,7 +781,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       let codeFileCount = 0;
       let chunksEmbedded = 0;
       let chunksSkipped = 0;
-      let hashedWithEndpoint = false;
+      const hashed = { chunks: 0 };
 
       // --- KB files ---
       const totalKb = detected.kbFiles.length;
@@ -829,10 +840,10 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           embeddingModel: detected.embeddingModel,
           embeddingDimensions: detected.embeddingDimensions,
           sync,
+          hashed,
         });
         chunksEmbedded += kbRes.embedded;
         chunksSkipped += kbRes.skipped;
-        hashedWithEndpoint ||= kbRes.hashedWithEndpoint;
       }
 
       // --- Code files ---
@@ -892,10 +903,10 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           embeddingModel: detected.embeddingModel,
           embeddingDimensions: detected.embeddingDimensions,
           sync,
+          hashed,
         });
         chunksEmbedded += codeRes.embedded;
         chunksSkipped += codeRes.skipped;
-        hashedWithEndpoint ||= codeRes.hashedWithEndpoint;
       }
 
       let chunksDeleted = 0;
@@ -934,13 +945,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       );
       // A completed run with real embeddings is the only evidence that clears the
       // degradation — a hash-mode run proves nothing about whether embeddings work.
-      if (hashedWithEndpoint) {
-        await recordRagEmbedDegraded(
-          ctx.db,
-          repositoryId ?? null,
-          HASH_WITH_ENDPOINT_REASON,
-          ctx.logger,
-        );
+      if (hashed.chunks > 0) {
         await ctx.db
           .update(schema.taskSteps)
           .set({

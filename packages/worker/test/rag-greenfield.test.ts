@@ -63,6 +63,8 @@ let onboarding: { id: string } | null;
 let writes: Record<string, unknown>[];
 let warnings: Array<string | null>;
 let inserts: unknown[][];
+let order: string[];
+let failInsertAt: number | null;
 let stalePaths: string[];
 let deletedPaths: string[];
 let indexedChunks: Map<
@@ -105,6 +107,8 @@ beforeEach(async () => {
   writes = [];
   warnings = [];
   inserts = [];
+  order = [];
+  failInsertAt = null;
   stalePaths = [];
   deletedPaths = [];
   indexedChunks = new Map();
@@ -113,6 +117,9 @@ beforeEach(async () => {
     pg: {
       unsafe: async (query: string, params: unknown[] = []) => {
         if (query.includes('INSERT INTO')) {
+          order.push('insert');
+          if (failInsertAt !== null && order.filter((e) => e === 'insert').length === failInsertAt)
+            throw new Error('store went away');
           inserts.push(params);
           const rows = indexedChunks.get(params[3] as string) ?? [];
           const row = {
@@ -212,6 +219,7 @@ beforeEach(async () => {
             warnings.push(values.warningMessage as string | null);
           if (table !== schema.repositories) return [];
           if ('scopeExcludeGlobs' in values || 'ragEmbedDegradedAt' in values) {
+            if ('ragEmbedDegradedAt' in values) order.push('degraded');
             writes.push(values);
             Object.assign(repo, values);
             return [];
@@ -1314,6 +1322,23 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
     expect(repo.ragEmbedDegradedReason).toEqual(expect.any(String));
     expect(warnings.at(-1)).toContain('RAG embeddings are failing');
+  });
+
+  it('records the degradation once, before the first hashed row is upserted, so an aborted run keeps it', async () => {
+    mocks.embed.mockImplementation(async ({ texts }) => hashedOnce(texts));
+    failInsertAt = 2;
+    await expect(sync()).rejects.toThrow('store went away');
+    expect(order.slice(0, 2)).toEqual(['degraded', 'insert']);
+    expect(order.filter((event) => event === 'degraded')).toHaveLength(1);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('writes the degradation once for a run whose every batch fell back', async () => {
+    mocks.embed.mockImplementation(async ({ texts }) => hashedOnce(texts));
+    await sync();
+    expect(order.filter((event) => event === 'insert').length).toBeGreaterThanOrEqual(2);
+    expect(order.filter((event) => event === 'degraded')).toHaveLength(1);
+    expect(order[0]).toBe('degraded');
   });
 
   it('re-embeds those rows as updates on the next healthy sync and clears the flag', async () => {

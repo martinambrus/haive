@@ -44,6 +44,9 @@ const { ragPopulateStep, RagEmbedFailureError } =
 const KB = '.haive-data/knowledge_base/architecture.md';
 let root: string;
 let rows: Map<string, { hash: string | null; params: unknown[] }>;
+let order: string[];
+let failInsertAt: number | null;
+let warnings: Array<string | null>;
 let repo: Record<string, unknown>;
 let conn: unknown;
 let ctx: StepContext;
@@ -80,12 +83,18 @@ beforeEach(async () => {
     '# Architecture\n\nThe app stores its documents in PostgreSQL.\n',
   );
   rows = new Map();
+  order = [];
+  failInsertAt = null;
+  warnings = [];
   repo = { ragEmbedDegradedAt: null, ragEmbedDegradedReason: null, ragEmbedLexicalOnly: false };
   conn = {
     close: async () => {},
     pg: {
       unsafe: async (query: string, params: unknown[] = []) => {
         if (query.includes('INSERT INTO')) {
+          order.push('insert');
+          if (failInsertAt !== null && order.filter((e) => e === 'insert').length === failInsertAt)
+            throw new Error('store went away');
           rows.set(JSON.stringify([params[3], params[4], params[5]]), {
             hash: params[6] as string | null,
             params,
@@ -111,6 +120,10 @@ beforeEach(async () => {
       update: (table: unknown) => ({
         set: (values: Record<string, unknown>) => ({
           where: async () => {
+            if (table === schema.taskSteps && 'warningMessage' in values)
+              warnings.push(values.warningMessage as string | null);
+            if (table === schema.repositories && 'ragEmbedDegradedAt' in values)
+              order.push('degraded');
             if (table === schema.repositories) Object.assign(repo, values);
             return [];
           },
@@ -170,6 +183,28 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(healed.chunksEmbedded).toBe(rows.size);
     expect(storedHashes().every((h) => typeof h === 'string')).toBe(true);
     expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('records the degradation once, before the first hashed row is upserted, so an aborted run keeps it', async () => {
+    mocks.strict = false;
+    mocks.embedFails = true;
+    const other = '.haive-data/knowledge_base/other.md';
+    await writeFile(join(root, other), '# Other\n\nA second document about queues.\n');
+    failInsertAt = 2;
+    await expect(
+      populate(
+        detected({
+          ollamaReachable: true,
+          kbFiles: [
+            { relPath: KB, sizeBytes: 60 },
+            { relPath: other, sizeBytes: 40 },
+          ],
+        }),
+      ),
+    ).rejects.toThrow('store went away');
+    expect(order.slice(0, 2)).toEqual(['degraded', 'insert']);
+    expect(order.filter((event) => event === 'degraded')).toHaveLength(1);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
   it('keeps a degradation recorded earlier when this run wrote hash vectors', async () => {
