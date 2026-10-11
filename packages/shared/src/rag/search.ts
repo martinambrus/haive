@@ -467,6 +467,10 @@ export async function ragHybridSearch(
     // repo/facet filter is served by a bitmap index scan + exact sort (the planner's
     // own choice) — fast and exact — so no iterative_scan GUC (and thus no
     // transaction wrapper) is needed.
+    // A global row reached only by words reports no dense similarity: its vector was never ranked.
+    const denseSimFallback = 'COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))';
+    const denseSimSel = filter ? 'd.dense_sim' : denseSimFallback;
+    const hybridSim = filter ? 'COALESCE(d.dense_sim, 0)' : denseSimFallback;
     const sqlText = `
       WITH q AS (
         SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh,
@@ -523,10 +527,10 @@ export async function ragHybridSearch(
       )
       SELECT
         e.source_path, e.section_id, e.chunk_index, e.source_type, e.content, e.id,
-        COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q))) AS dense_sim,
+        ${denseSimSel} AS dense_sim,
         (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1)) AS ts_norm,
         (
-          $6 * COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))
+          $6 * ${hybridSim}
           + $7 * (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1))
         ) AS hybrid,
         (

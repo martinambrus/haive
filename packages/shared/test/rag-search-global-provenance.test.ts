@@ -55,6 +55,17 @@ describe('ragHybridSearch ranks only model vectors in the global dense half', ()
       );
     }
   });
+
+  it('reports no dense similarity for a global row that did not come through dense_c', async () => {
+    const { conn, statements } = capturingConn();
+    await ragHybridSearch(conn, QV, 'anything', {}, FILTER);
+
+    const search = statements.find((s) => s.includes('dense_c'))!;
+    const select = search.slice(search.indexOf('SELECT\n        e.source_path'));
+    expect(select).toContain('d.dense_sim AS dense_sim');
+    expect(select).not.toContain('1 - (e.vector <=> (SELECT qv FROM q))) AS dense_sim');
+    expect(select).toContain('ORDER BY rrf DESC');
+  });
 });
 
 describe('fetchKnowledgeCandidates on the global path', () => {
