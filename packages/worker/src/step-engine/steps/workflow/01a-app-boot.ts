@@ -1,7 +1,5 @@
-import { execFile } from 'node:child_process';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
-import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError, TaskCancelledError } from '../../step-definition.js';
@@ -16,7 +14,8 @@ import {
 } from '../../../sandbox/app-runner.js';
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 
-const exec = promisify(execFile);
+const HOST_EXEC_DISABLED =
+  'Host execution is disabled: Haive runs a project only inside a container. Build an environment template for this repository so the app can run in its app-runner.';
 
 type ContainerTool = 'ddev' | 'docker-compose' | 'none';
 type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun' | 'none';
@@ -127,28 +126,20 @@ async function detectFrameworkFiles(workspace: string): Promise<FrameworkFiles> 
 }
 
 function buildSuggestedCommand(
-  containerTool: ContainerTool,
   pm: PackageManager,
   devScript: string | null,
   fw: FrameworkFiles,
   port: number,
 ): string {
-  switch (containerTool) {
-    case 'ddev':
-      return 'ddev start';
-    case 'docker-compose':
-      return 'docker compose up -d';
-    case 'none':
-      if (devScript && pm !== 'none') return `${pm} run ${devScript}`;
-      // Deterministic framework fallbacks (bind 0.0.0.0 so the in-container
-      // browser reaches it on localhost regardless of the framework default).
-      if (fw.artisan) return `php artisan serve --host=0.0.0.0 --port=${port}`;
-      if (fw.managePy) return `python3 manage.py runserver 0.0.0.0:${port}`;
-      if (fw.rails) return `bundle exec rails server -b 0.0.0.0 -p ${port}`;
-      if (fw.phpPublicIndex) return `php -S 0.0.0.0:${port} -t public`;
-      if (fw.goMod) return 'go run .';
-      return '';
-  }
+  if (devScript && pm !== 'none') return `${pm} run ${devScript}`;
+  // Deterministic framework fallbacks (bind 0.0.0.0 so the in-container
+  // browser reaches it on localhost regardless of the framework default).
+  if (fw.artisan) return `php artisan serve --host=0.0.0.0 --port=${port}`;
+  if (fw.managePy) return `python3 manage.py runserver 0.0.0.0:${port}`;
+  if (fw.rails) return `bundle exec rails server -b 0.0.0.0 -p ${port}`;
+  if (fw.phpPublicIndex) return `php -S 0.0.0.0:${port} -t public`;
+  if (fw.goMod) return 'go run .';
+  return '';
 }
 
 function buildInstallCommand(
@@ -184,50 +175,6 @@ function guessPort(
   if (fw.rails) return 3000;
   if (fw.goMod) return 8080;
   return 3000;
-}
-
-async function runHostCommand(
-  cwd: string,
-  command: string,
-  timeoutMs = 120_000,
-): Promise<{ exitCode: number; output: string }> {
-  try {
-    const { stdout, stderr } = await exec('bash', ['-c', command], {
-      cwd,
-      timeout: timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    return { exitCode: 0, output: `${stdout}${stderr}`.slice(0, 4000) };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 4000) };
-  }
-}
-
-/** Legacy host-side health check (docker-compose / non-containerized none). */
-async function hostHealthCheck(
-  containerTool: ContainerTool,
-  cwd: string,
-): Promise<{ passed: boolean; url: string | null }> {
-  switch (containerTool) {
-    case 'ddev': {
-      const result = await runHostCommand(cwd, 'ddev describe -j', 30_000);
-      if (result.exitCode !== 0) return { passed: false, url: null };
-      try {
-        const parsed = JSON.parse(result.output) as Record<string, unknown>;
-        const raw = parsed?.raw as Record<string, unknown> | undefined;
-        return { passed: true, url: (raw?.primary_url as string) ?? null };
-      } catch {
-        return { passed: true, url: null };
-      }
-    }
-    case 'docker-compose': {
-      const result = await runHostCommand(cwd, 'docker compose ps --format json', 15_000);
-      return { passed: result.exitCode === 0, url: 'http://localhost' };
-    }
-    case 'none':
-      return { passed: true, url: 'http://localhost:3000' };
-  }
 }
 
 function parseRunRecipe(raw: unknown): RunRecipe | null {
@@ -297,13 +244,6 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
     const fw = await detectFrameworkFiles(workspace);
     const hasPackageJson = await hasWorkspaceFile(workspace, 'package.json');
     const suggestedPort = guessPort(containerTool, devScript, scripts, fw);
-    const suggestedBootCommand = buildSuggestedCommand(
-      containerTool,
-      pm,
-      devScript,
-      fw,
-      suggestedPort,
-    );
     const suggestedInstallCommand = buildInstallCommand(pm, fw, hasPackageJson);
 
     // Containerized path: a single-process (none) project with a ready env image
@@ -315,7 +255,10 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
     const repoSubpath = ws?.repoSubpath ?? null;
     const containerized = containerTool === 'none' && !!envImageTag && !!repoSubpath;
 
-    const skip = containerized ? false : !suggestedBootCommand;
+    const suggestedBootCommand = containerized
+      ? buildSuggestedCommand(pm, devScript, fw, suggestedPort)
+      : '';
+    const skip = !containerized;
 
     return {
       workspacePath: workspace,
@@ -330,7 +273,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
       envImageTag,
       repoSubpath,
       skip,
-      skipReason: skip ? 'No container tool or dev script detected' : null,
+      skipReason: skip ? HOST_EXEC_DISABLED : null,
     };
   },
 
@@ -578,39 +521,14 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
     }
 
     // --- Legacy host path (docker-compose, or none without an env image). ----
-    ctx.logger.info(
-      { bootCommand, workspace: detected.workspacePath },
-      'booting application (host)',
-    );
-    const result = await runHostCommand(detected.workspacePath, bootCommand, 180_000);
-    if (result.exitCode !== 0) {
-      ctx.logger.warn({ bootCommand, exitCode: result.exitCode }, 'app boot command failed');
-      return {
-        booted: false,
-        skipped: false,
-        bootCommand,
-        appUrl: null,
-        healthCheckPassed: false,
-        output: result.output,
-      };
-    }
-
-    let appUrl: string | null = null;
-    let healthCheckPassed = false;
-    if (values.runHealthCheck !== false) {
-      const hc = await hostHealthCheck(detected.containerTool, detected.workspacePath);
-      healthCheckPassed = hc.passed;
-      appUrl = hc.url;
-      ctx.logger.info({ healthCheckPassed, appUrl }, 'health check complete');
-    }
-
+    ctx.logger.warn({ bootCommand }, 'app boot refused: host execution is disabled');
     return {
-      booted: true,
+      booted: false,
       skipped: false,
       bootCommand,
-      appUrl,
-      healthCheckPassed,
-      output: result.output,
+      appUrl: null,
+      healthCheckPassed: false,
+      output: HOST_EXEC_DISABLED,
     };
   },
 };
