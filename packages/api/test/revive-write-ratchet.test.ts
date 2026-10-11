@@ -416,6 +416,8 @@ function guarded(
   const name = nameOf(scope);
   // Calls are read in this file only, by name: an export or a second binding of the name hides some.
   if (!name || depth > 3 || isExported(scope) || bindingsOf(sf, name) !== 1) return false;
+  // A generator's body runs when its iterator is driven, which is no call site's to say.
+  if ((scope as ts.FunctionDeclaration).asteriskToken) return false;
   const indexOf = (n: string) =>
     scope.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === n);
   const follow = (n: string, c: ts.CallExpression): string | null => {
@@ -1242,6 +1244,14 @@ describe('a live-status write on a task row', () => {
         await db.transaction(async (tx) => { await ${GUARD}(tx, id); later = make(tx, id); });
         await later;
       }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('does not cover a generator write helper', () => {
+    const src = `async function* revive(tx, id) {
+        await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      }
+      async function route(tx, id) { await ${GUARD}(tx, id); await revive(tx, id); }`;
     expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
   });
 
