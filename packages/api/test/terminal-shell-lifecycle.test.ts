@@ -4,6 +4,7 @@ import type { Redis } from 'ioredis';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
+  TERMINAL_EXIT_KEY_PREFIX,
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
@@ -16,6 +17,10 @@ import {
  *  events from the test to simulate worker replies. */
 class FakeRedis extends EventEmitter {
   private store = new Map<string, Map<string, string>>();
+  kv = new Map<string, string>();
+  async get(key: string): Promise<string | null> {
+    return this.kv.get(key) ?? null;
+  }
   hincrbyCalls: Array<{ key: string; field: string; delta: number; result: number }> = [];
   hsetCalls: Array<{ key: string; field: string; value: string }> = [];
   hsetnxCalls: Array<{ key: string; field: string; value: string; result: number }> = [];
@@ -492,6 +497,31 @@ describe('shell start directory and restart', () => {
     publisherFake.duplicates[0]!.emitOutput(`${TERMINAL_OUT_CHANNEL_PREFIX}sess-1`, raw);
     await new Promise((r) => setImmediate(r));
     expect(ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'exit')).toEqual(frame);
+  });
+
+  it('relays the end of a shell that ended before the subscribe', async () => {
+    publisherFake.kv.set(
+      `${TERMINAL_EXIT_KEY_PREFIX}sess-1`,
+      JSON.stringify({ type: 'exit', reason: 'restart' }),
+    );
+    const ws = await connect('task');
+    expect(ws.sent.map((f) => JSON.parse(f)).filter((f) => f.type === 'exit')).toEqual([
+      { type: 'exit', reason: 'restart' },
+    ]);
+    expect(ws.readyState).toBe(FakeWs.CLOSED);
+  });
+
+  it('relays the end of a shell that ended before the subscribe only once', async () => {
+    publisherFake.kv.set(`${TERMINAL_EXIT_KEY_PREFIX}sess-1`, JSON.stringify({ type: 'exit' }));
+    const ws = await connect('task');
+    publisherFake.duplicates[0]!.emitOutput(
+      `${TERMINAL_OUT_CHANNEL_PREFIX}sess-1`,
+      JSON.stringify({ type: 'exit' }),
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(ws.sent.map((f) => JSON.parse(f)).filter((f) => f.type === 'exit')).toEqual([
+      { type: 'exit' },
+    ]);
   });
 
   it('forwards a workdir probe and relays the answer as a workdir frame', async () => {

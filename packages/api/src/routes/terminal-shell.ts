@@ -10,6 +10,7 @@ import {
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
+  TERMINAL_EXIT_KEY_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
   TERMINAL_SESSION_PREFIX,
@@ -300,6 +301,19 @@ export async function runScopedShellSession(
   await subscriber.subscribe(outChannel, workdirChannel);
   if (cleanupRan) return;
 
+  let exited = false;
+  const deliverExit = (raw: string): void => {
+    if (exited) return;
+    exited = true;
+    const restarted = raw === JSON.stringify({ type: 'exit', reason: 'restart' });
+    sendJson(ws, restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' });
+    try {
+      ws.close(1000, 'pty_ended');
+    } catch {
+      // ignore
+    }
+  };
+
   subscriber.on('message', (channel, raw) => {
     if (ws.readyState !== WebSocket.OPEN) return;
     if (channel === workdirChannel) {
@@ -315,13 +329,7 @@ export async function runScopedShellSession(
     // Worker publishes raw PTY bytes (utf8 string). One special JSON message:
     // {"type":"exit"} signals the PTY ended (process exit / container gone).
     if (raw.startsWith('{"type":"exit"')) {
-      const restarted = raw === JSON.stringify({ type: 'exit', reason: 'restart' });
-      sendJson(ws, restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' });
-      try {
-        ws.close(1000, 'pty_ended');
-      } catch {
-        // ignore
-      }
+      deliverExit(raw);
       return;
     }
     sendJson(ws, { type: 'output', data: raw });
@@ -334,6 +342,11 @@ export async function runScopedShellSession(
     shell,
     ...(reply.workdirMismatch ? { workdirMismatch: reply.workdirMismatch } : {}),
   });
+  // A PTY that ended before the subscribe above published its one exit frame to nobody.
+  const endedBefore = await publisher
+    .get(`${TERMINAL_EXIT_KEY_PREFIX}${sessionId}`)
+    .catch(() => null);
+  if (endedBefore !== null && ws.readyState === WebSocket.OPEN) deliverExit(endedBefore);
 
   keepalive = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {

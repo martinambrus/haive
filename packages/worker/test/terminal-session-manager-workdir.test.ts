@@ -1,6 +1,10 @@
 import { PassThrough } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { TERMINAL_CTL_CHANNEL_PREFIX, type TerminalOpenResult } from '@haive/shared';
+import {
+  TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_EXIT_KEY_PREFIX,
+  type TerminalOpenResult,
+} from '@haive/shared';
 
 vi.mock('../src/queues/cli-exec-queue.js', () => ({
   resolveRepoMount: vi.fn(async () => ({ source: 'repo', target: '/haive/workdir' })),
@@ -36,6 +40,7 @@ interface Harness {
   sendCtl: (sessionId: string, frame: unknown) => Promise<void>;
   attaches: PassThrough[];
   published: () => string[];
+  stored: () => [string, string][];
   /** Each entry holds back the start of the next attach until it resolves. */
   attachGates: Promise<void>[];
 }
@@ -98,6 +103,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
   };
   const redis = {
     publish: vi.fn(async () => 0),
+    set: vi.fn(async () => 'OK'),
     hset: vi.fn(async () => 0),
     hsetnx: vi.fn(async () => 0),
   };
@@ -123,6 +129,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
     attaches,
     attachGates,
     published: () => redis.publish.mock.calls.map((c) => (c as unknown[])[1] as string),
+    stored: () => redis.set.mock.calls.map((c) => (c as unknown[]).slice(0, 2) as [string, string]),
     openTask: (userId = 'user-1') =>
       priv.openSession({
         op: 'open',
@@ -277,6 +284,19 @@ describe('restart shell', () => {
     expect(exits).toEqual([
       JSON.stringify({ type: 'exit', reason: 'restart' }),
       JSON.stringify({ type: 'exit', reason: 'restart' }),
+    ]);
+  });
+
+  it('keeps the end of a shell for an api that subscribes after the publish', async () => {
+    const h = harness(ROOT);
+    const reply = await h.openTask();
+    if (!reply.ok) throw new Error('open failed');
+    for (const a of h.attaches) a.end();
+    await vi.waitFor(() =>
+      expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toHaveLength(1),
+    );
+    expect(h.stored()).toEqual([
+      [`${TERMINAL_EXIT_KEY_PREFIX}${reply.sessionId}`, JSON.stringify({ type: 'exit' })],
     ]);
   });
 
