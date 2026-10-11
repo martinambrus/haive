@@ -346,6 +346,21 @@ describe('an upgrade apply retried after it failed part-way', () => {
     expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
   });
 
+  it('consumes the pre-image even when a Keep found the path edited and restored nothing', async () => {
+    const s = await setup();
+    await symlink(s.outside, join(s.root, '.haive'));
+    await expect(s.apply()).rejects.toThrow();
+    await writeFile(join(s.root, EDITED), 'SAVED SINCE\n', 'utf8');
+    s.answerConflicts('keep_ours');
+    await expect(s.apply()).rejects.toThrow();
+    await rm(join(s.root, '.haive'));
+    await writeFile(join(s.root, EDITED), NEW, 'utf8');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+  });
+
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
     const s = await setup();
     failOneCommit(s);

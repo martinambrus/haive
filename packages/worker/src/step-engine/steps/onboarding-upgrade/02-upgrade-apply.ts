@@ -838,7 +838,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const removalRecords: string[] = [];
     // What stood at each written path, recorded before the write.
     const preimageIds: string[] = [];
-    // Pre-images a retried Keep wrote back: once its decision commits, no later retry may restore one.
+    // Pre-images a retried Keep answered: once its decision commits, no later retry may restore one.
     const consumedPreimageIds: string[] = [];
     // An attempt that failed part-way leaves its records, and a path it rewrote no longer shows
     // what stood there, so a retry takes the newest record of each path from them.
@@ -1137,8 +1137,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
             continue;
           }
+          consumedPreimageIds.push(earlier.id);
           if (restored) {
-            consumedPreimageIds.push(earlier.id);
             writtenPaths.push(rel);
             kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
           }
