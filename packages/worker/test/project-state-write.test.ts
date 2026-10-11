@@ -12,7 +12,7 @@ import {
   normalizeProjectState,
   renderProjectState,
 } from '@haive/shared/project-state';
-import { writeProjectStateRecord } from '../src/project-state/write.js';
+import { ProjectStateMovedError, writeProjectStateRecord } from '../src/project-state/write.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -128,7 +128,7 @@ async function setup() {
   dirs.push(root);
   const repositories = schema.repositories;
   const sync = tableNamed('project_state_sync');
-  const fake = createFakeDb({ repositories, projectStateSync: sync });
+  const fake = createFakeDb({ repositories, projectStateSync: sync, tasks: schema.tasks });
   fake.insert(repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
   fake.insert(repositories, { id: OTHER, userId: USER, name: 'other', source: 'blank' });
 
@@ -226,13 +226,20 @@ async function setup() {
   const write = (
     c: Context,
     rtkChoiceRecorded: boolean,
-    over: { repositoryId?: string; repoPath?: string } = {},
+    over: {
+      repositoryId?: string;
+      repoPath?: string;
+      expectedColumns?: unknown[];
+      holdingTaskId?: string;
+    } = {},
   ): Promise<readonly string[]> =>
     writeProjectStateRecord(db, {
       repositoryId: over.repositoryId ?? REPO,
       repoPath: over.repoPath ?? root,
       context: c as never,
       rtkChoiceRecorded,
+      ...(over.expectedColumns ? { expectedColumns: over.expectedColumns } : {}),
+      ...(over.holdingTaskId ? { holdingTaskId: over.holdingTaskId } : {}),
     });
   const syncSeed = (values: Record<string, unknown>) =>
     fake.insert(sync, {
@@ -259,6 +266,93 @@ async function setup() {
 }
 
 const isWrite = (event: string) => /^(update|insert|delete) /.test(event);
+
+describe('writeProjectStateRecord: a column that moved past the writer', () => {
+  it('refuses before any file is written and leaves the newer column as it is', async () => {
+    const s = await setup();
+    await s.write(context(), true);
+    const newer = s.columnOf(REPO);
+    const filesBefore = s.onDisk();
+    const other = {
+      ...context(),
+      projectInfo: { ...(context().projectInfo as object), name: 'z' },
+    };
+
+    await expect(
+      s.write(other, true, { expectedColumns: [{ planned: 'elsewhere' }] }),
+    ).rejects.toBeInstanceOf(ProjectStateMovedError);
+    expect(s.columnOf(REPO)).toEqual(newer);
+    expect(s.onDisk()).toEqual(filesBefore);
+  });
+
+  it('checks and writes under one lock, so no sync can land between the check and the files', async () => {
+    const s = await setup();
+    await s.write(context(), true, { expectedColumns: [{ planned: 'here' }] });
+    expect(s.lockKeys).toHaveLength(1);
+
+    const t = await setup();
+    t.hook.onLock = () =>
+      t.fake.patch(schema.repositories, REPO, { renderContext: { by: 'sync' } });
+    await expect(
+      t.write(context(), true, { expectedColumns: [{ planned: 'here' }] }),
+    ).rejects.toBeInstanceOf(ProjectStateMovedError);
+    expect(t.onDisk()).toEqual({ format: null, render: null });
+  });
+
+  it('refuses once its task no longer holds the checkout, so a refresh may have moved it', async () => {
+    const TASK = '00000000-0000-4000-8000-0000000000c1';
+    for (const [status, refused] of [
+      ['running', false],
+      ['cancelled', true],
+    ] as const) {
+      const s = await setup();
+      s.fake.insert(schema.tasks, {
+        id: TASK,
+        userId: USER,
+        repositoryId: REPO,
+        status,
+        type: 'onboarding_upgrade',
+      });
+      const write = s.write(context(), true, { expectedColumns: [null], holdingTaskId: TASK });
+      if (refused) {
+        await expect(write).rejects.toBeInstanceOf(ProjectStateMovedError);
+        expect(s.onDisk()).toEqual({ format: null, render: null });
+      } else {
+        await write;
+        expect(s.onDisk()).toEqual(expectedFiles(context()));
+      }
+    }
+  });
+
+  it('clears the column after a failed write, unless a sync moved it before the clear', async () => {
+    for (const syncLands of [false, true]) {
+      const s = await setup();
+      await s.write(context(), true);
+      const planned = s.columnOf(REPO);
+      s.fake.hooks.beforeUpdate = () => {
+        if (s.lockKeys.length === 2) throw new Error('database refused');
+      };
+      s.hook.onLock = () => {
+        if (syncLands && s.lockKeys.length === 3) {
+          s.fake.patch(schema.repositories, REPO, { renderContext: { by: 'sync' } });
+        }
+      };
+
+      await expect(s.write(context(), false, { expectedColumns: [planned] })).rejects.toThrow(
+        'database refused',
+      );
+      expect(s.columnOf(REPO)).toEqual(syncLands ? { by: 'sync' } : null);
+    }
+  });
+
+  it('writes when the column is one the writer expected, or none', async () => {
+    const s = await setup();
+    await s.write(context(), true, { expectedColumns: [{ planned: 'elsewhere' }] });
+    const first = s.columnOf(REPO);
+    await s.write(context(), false, { expectedColumns: [first] });
+    expect(s.columnOf(REPO)).not.toEqual(first);
+  });
+});
 
 describe('writeProjectStateRecord: the files', () => {
   it('writes the record files under the repository, as the codec renders them, and nothing else', async () => {

@@ -40,6 +40,8 @@ import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bund
 import {
   failIfColumnStale,
   lockProjectState,
+  ProjectStateMovedError,
+  refuseMovedColumn,
   ProjectStateWriteError,
   renderContextColumnFor,
   writeProjectStateRecord,
@@ -92,6 +94,15 @@ export interface ApplySelections {
  *  row whose source bundle item is gone AND no other entry in the plan rewrites the
  *  same diskPath; that combination signals the file is now user-owned and should
  *  drop out of drift tracking on the next upgrade. */
+const PLAN_NO_LONGER_HOLDS =
+  "The repository's project settings changed after this upgrade was planned, so its plan " +
+  'no longer holds. Retry the plan step to plan the upgrade again.';
+
+/** The columns this plan may find: the one it read, or the one its own record write stores. */
+function plannedColumns(plan: UpgradePlanOutput): unknown[] {
+  return [plan.renderContextColumn, ownRecordColumn(plan)];
+}
+
 function ownRecordColumn(plan: UpgradePlanOutput): unknown {
   try {
     return renderContextColumnFor(
@@ -764,10 +775,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         !sameValue(now, plan.renderContextColumn) &&
         !sameValue(now, ownRecordColumn(plan))
       ) {
-        throw new Error(
-          "The repository's project settings changed after this upgrade was planned, so its plan " +
-            'no longer holds. Retry the plan step to plan the upgrade again.',
-        );
+        throw new Error(PLAN_NO_LONGER_HOLDS);
       }
     }
     const manifest = getTemplateManifest();
@@ -1618,7 +1626,19 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
     const customApplicable = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
     const applicableExpanded: ExpandedRendering[] = [...haiveApplicable, ...customApplicable];
-    await updateApplicableTemplateIds(ctx.db, plan.repositoryId, applicableExpanded);
+    if (plan.renderContextColumn === undefined) {
+      await updateApplicableTemplateIds(ctx.db, plan.repositoryId, applicableExpanded);
+    } else {
+      await ctx.db
+        .transaction(async (tx) => {
+          await lockProjectState(tx, plan.repositoryId);
+          await refuseMovedColumn(tx, plan.repositoryId, plannedColumns(plan));
+          await updateApplicableTemplateIds(tx, plan.repositoryId, applicableExpanded);
+        })
+        .catch((err: unknown) => {
+          throw err instanceof ProjectStateMovedError ? new Error(PLAN_NO_LONGER_HOLDS) : err;
+        });
+    }
 
     // Rewrite .haive/install.json to reflect the post-upgrade state. Query
     // live rows fresh so deletions and upgrades are both accounted for.
@@ -1628,6 +1648,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       manifest.setHash,
     );
 
+    ctx.throwIfCancelled();
     try {
       writtenPaths.push(
         ...(await writeProjectStateRecord(ctx.db, {
@@ -1635,10 +1656,14 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           repoPath: ctx.repoPath,
           context: renderCtx,
           rtkChoiceRecorded: plan.rtkFollowsLive === true,
+          ...(plan.renderContextColumn !== undefined
+            ? { expectedColumns: plannedColumns(plan), holdingTaskId: ctx.taskId }
+            : {}),
         })),
       );
     } catch (err) {
       failIfColumnStale(err);
+      if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);
       // The files stand on disk whatever the database kept, and the commit stages what is listed here.
       if (err instanceof ProjectStateWriteError) writtenPaths.push(...err.written);
       const message = err instanceof Error ? err.message : String(err);

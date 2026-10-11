@@ -184,6 +184,7 @@ async function setup({ region = true }: { region?: boolean } = {}) {
     repoPath: root,
     taskId: TASK,
     userId: USER,
+    throwIfCancelled: () => {},
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
   const apply = () =>

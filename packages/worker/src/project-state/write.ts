@@ -4,11 +4,13 @@ import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
   emptyProjectState,
+  sameValue,
   normalizeProjectState,
   portableRender,
   renderContextColumnSchema,
   renderProjectState,
 } from '@haive/shared/project-state';
+import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
 import type { TemplateRenderContext } from '../step-engine/template-manifest.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -26,6 +28,20 @@ export interface ProjectStateRecordInput {
   context: TemplateRenderContext;
   /** Whether `context.rtkEnabled` is a choice somebody made, rather than a default. */
   rtkChoiceRecorded: boolean;
+  /** The columns the writer planned against; a column found holding anything else (null aside)
+   *  refuses the write before a file changes. Omitted: written whatever the column holds. */
+  expectedColumns?: unknown[];
+  /** The task writing the record. Its write is refused once the task no longer holds the checkout,
+   *  since a refresh may then have fast-forwarded the record files under it. */
+  holdingTaskId?: string;
+}
+
+/** The column moved past what the writer planned against, so its record would undo a newer one. */
+export class ProjectStateMovedError extends Error {
+  constructor() {
+    super("The repository's project settings changed while this write was pending");
+    this.name = 'ProjectStateMovedError';
+  }
 }
 
 /** A write that failed once it had begun. `written` names the repository-relative record files standing
@@ -58,26 +74,42 @@ export function renderContextColumnFor(context: TemplateRenderContext, rtkChoice
  *  and the sync base to it in one transaction. Returns the repository-relative paths written. */
 export async function writeProjectStateRecord(
   db: Database,
-  { repositoryId, repoPath, context, rtkChoiceRecorded }: ProjectStateRecordInput,
+  {
+    repositoryId,
+    repoPath,
+    context,
+    rtkChoiceRecorded,
+    expectedColumns,
+    holdingTaskId,
+  }: ProjectStateRecordInput,
 ): Promise<string[]> {
   const written: string[] = [];
   try {
     // Refused before anything is written, so the column only ever holds what reads back.
     const column = renderContextColumnFor(context, rtkChoiceRecorded);
     const record = { ...emptyProjectState(), render: portableRender(column) };
-    for (const [rel, text] of renderProjectState(record)) {
-      const path = `${PROJECT_STATE_DIR}/${rel}`;
-      await writeFileNoFollow(repoPath, path, text, { createParents: true });
-      written.push(path);
-    }
-
     const synced = {
       baseSnapshot: normalizeProjectState(record),
       lastError: null,
       updatedAt: new Date(),
     };
+    const writeFiles = async (): Promise<void> => {
+      for (const [rel, text] of renderProjectState(record)) {
+        const path = `${PROJECT_STATE_DIR}/${rel}`;
+        await writeFileNoFollow(repoPath, path, text, { createParents: true });
+        written.push(path);
+      }
+    };
+    // A fenced write keeps the lock from its check to its last write, files included, so no sync
+    // lands between them; an unfenced one writes its files first, before any database write.
+    if (!expectedColumns) await writeFiles();
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
+      if (expectedColumns) {
+        await refuseMovedColumn(tx, repositoryId, expectedColumns);
+        if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId);
+        await writeFiles();
+      }
       await tx
         .update(schema.repositories)
         .set({ renderContext: column })
@@ -88,18 +120,59 @@ export async function writeProjectStateRecord(
         .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
     });
   } catch (err) {
-    const cleared = await clearRenderContext(db, repositoryId);
+    if (err instanceof ProjectStateMovedError) throw err;
+    const cleared = await clearRenderContext(db, repositoryId, expectedColumns);
     throw new ProjectStateWriteError(err, written, !cleared);
   }
   return written;
 }
 
+async function refuseReleasedCheckout(tx: Tx, taskId: string): Promise<void> {
+  const [task] = await tx
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  if (!task || !(CHECKOUT_HOLDING_TASK_STATUSES as readonly string[]).includes(task.status)) {
+    throw new ProjectStateMovedError();
+  }
+}
+
+/** Throws ProjectStateMovedError when the column holds a context none of `expected` is. Call it
+ *  under `lockProjectState`, in the transaction whose write it fences. */
+export async function refuseMovedColumn(
+  tx: Tx,
+  repositoryId: string,
+  expected: unknown[],
+): Promise<void> {
+  const [repo] = await tx
+    .select({ renderContext: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  const now = repo?.renderContext ?? null;
+  if (now !== null && !expected.some((c) => sameValue(now, c))) throw new ProjectStateMovedError();
+}
+
 /** A column this write could not move would read as newer than the rows its writer just wrote, so it
- *  is cleared and every reader falls back to those rows' snapshot. */
-async function clearRenderContext(db: Database, repositoryId: string): Promise<boolean> {
+ *  is cleared and every reader falls back to those rows' snapshot. One a sync moved past `expected`
+ *  meanwhile is newer than both and stays. */
+async function clearRenderContext(
+  db: Database,
+  repositoryId: string,
+  expected?: unknown[],
+): Promise<boolean> {
   try {
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
+      if (expected) {
+        try {
+          await refuseMovedColumn(tx, repositoryId, expected);
+        } catch (err) {
+          if (err instanceof ProjectStateMovedError) return;
+          throw err;
+        }
+      }
       await tx
         .update(schema.repositories)
         .set({ renderContext: null })

@@ -59,6 +59,7 @@ async function setup(agents: string | Buffer = AGENTS) {
       repoPath: root,
       taskId,
       userId: USER,
+      throwIfCancelled: () => {},
       logger: { info: noop, warn: noop, error: noop, debug: noop },
     }) as unknown as StepContext;
   const plan = {

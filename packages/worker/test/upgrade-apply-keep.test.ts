@@ -184,6 +184,7 @@ async function upgrade(paths: string[], templateId = 'agent.old') {
     repoPath: root,
     taskId: TASK,
     userId: USER,
+    throwIfCancelled: () => {},
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
   const plan = planOf(entries);

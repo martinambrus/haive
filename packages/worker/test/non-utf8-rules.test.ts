@@ -149,6 +149,7 @@ describe('02 and a rules file that is not UTF-8', () => {
       repoPath: root,
       taskId: TASK,
       userId: USER,
+      throwIfCancelled: () => {},
       logger: quietLogger,
     } as unknown as StepContext;
     return upgradeApplyStep.apply(ctx, {
@@ -291,6 +292,7 @@ describe('04 and a rules file that is not UTF-8', () => {
       repoPath: root,
       taskId: TASK,
       userId: USER,
+      throwIfCancelled: () => {},
       logger: quietLogger,
     } as unknown as StepContext;
     const detected = {
@@ -390,6 +392,7 @@ describe('the callers of updateFileNoFollow and a file that is not UTF-8', () =>
         repoPath: root,
         workspacePath: root,
         cliProviderId: null,
+        throwIfCancelled: () => {},
         logger: logger.child({ test: 'non-utf8-rules' }),
         emitProgress: async () => {},
       } as unknown as StepContext,

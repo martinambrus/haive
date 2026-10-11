@@ -303,7 +303,9 @@ context column holds another context than 01 read (`renderContextColumn`): a syn
 the upgrade task existed reads no live upgrade, and can commit after 01 planned from the old column,
 which 02 would otherwise write back. 02 reads the column under the sync's own lock
 (`lockProjectState`): a sync still in flight commits first, and one that starts later sees the live
-upgrade and defers. A cleared column is no sync, which always writes one. The RTK block is no manifest item, so 02 takes it
+upgrade and defers. A cleared column is no sync, which always writes one. The same check runs again inside each later write that would undo a newer sync, in the same locked transaction as that write (`refuseMovedColumn`): the applicable-template set 02 writes, and its record write (`expectedColumns`), whose files are then written under the lock as well. A Cancel releases the checkout while 02 is still applying, so a refresh can sync in that window; a write that finds the column moved refuses with the same message and leaves the newer column, set and record as they are. A sync that commits after one of those writes recomputes for itself. The record write also refuses once 02's own task no longer holds the checkout, and a refresh
+re-checks for a holding task and fast-forwards under that same lock (`repo/refresh.ts`), so a Cancel
+cannot let a fast-forward land between 02's check and its files. 02 also stops at a Cancel before its record write. The RTK block is no manifest item, so 02 takes it
 out of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
 plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to
@@ -330,6 +332,8 @@ renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07
 Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
 A writer (12, 02, 04) whose record write fails clears the column, so that order falls back to the
 snapshot its own rows carry rather than to a column it could not move (`writeProjectStateRecord`).
+A fenced write (02's) clears it only while it still holds a context 02 planned against: a sync
+that took the lock after the failed write and before the clear is newer than both, and stays.
 First comes the repository's render context column, whose RTK choice is its stored
 `rtkChoiceRecorded` and whose providers are its own or, for a column the project-state sync filled
 with the portable fields alone, the owner's enabled ones. Then comes the newest snapshot that

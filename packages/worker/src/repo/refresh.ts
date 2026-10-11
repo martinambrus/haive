@@ -10,13 +10,17 @@ import {
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
 import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
+import { lockProjectState } from '../project-state/write.js';
 import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-push.js';
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 const firstLine = (text: string): string => text.trim().split('\n')[0] ?? '';
 
 /** Tasks holding this repository's checkout right now. */
-export async function checkoutHoldingTasks(db: Database, repositoryId: string): Promise<number> {
+export async function checkoutHoldingTasks(
+  db: Pick<Database, 'query'>,
+  repositoryId: string,
+): Promise<number> {
   const rows = await db.query.tasks.findMany({
     where: and(
       eq(schema.tasks.repositoryId, repositoryId),
@@ -128,7 +132,14 @@ async function fastForward(
   }
   if (behind === 0) return null;
 
-  const merged = await gitRun(dest, ['merge', '--ff-only', target]);
+  // Under the project-state lock, and only while no task holds the checkout: an upgrade that is
+  // still writing its record takes that lock, and refuses once its task is no longer holding.
+  const merged = await db.transaction(async (tx) => {
+    await lockProjectState(tx, payload.repositoryId);
+    if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) return null;
+    return gitRun(dest, ['merge', '--ff-only', target]);
+  });
+  if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
   if (merged.code !== 0) {
     return `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`;
   }
