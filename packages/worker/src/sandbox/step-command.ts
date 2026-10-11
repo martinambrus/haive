@@ -12,7 +12,7 @@ import {
   acquireAgentLease,
   type AgentLease,
 } from '../queues/cli-exec/agent-lease.js';
-import { currentAgentCap } from '../queues/cli-exec/handlers.js';
+import { agentPoolCap } from '../queues/cli-exec/handlers.js';
 import { resolveAppReach } from '../queues/cli-exec/app-reach.js';
 import type { DockerVolumeMount } from './docker-runner.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
@@ -82,7 +82,7 @@ export async function runStepCommandInSandbox(
   let lease: AgentLease;
   try {
     lease = await acquireAgentLease(
-      { db: ctx.db, agentCap: currentAgentCap },
+      { db: ctx.db, agentCap: agentPoolCap },
       { signal: ctx.signal, ...(options.onWait ? { onWait: options.onWait } : {}) },
     );
   } catch (err) {

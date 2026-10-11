@@ -25,6 +25,7 @@ vi.mock('../queues/cli-exec/app-reach.js', async (importOriginal) => ({
 vi.mock('../queues/cli-exec/handlers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../queues/cli-exec/handlers.js')>()),
   currentAgentCap: async () => 3,
+  agentPoolCap: async () => 7,
 }));
 vi.mock('../queues/cli-exec-queue.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../queues/cli-exec-queue.js')>()),
@@ -98,6 +99,13 @@ beforeEach(() => {
 });
 
 describe('runStepCommandInSandbox', () => {
+  it('sizes its lease by the published pool cap, not a fresh read', async () => {
+    ran(0);
+    await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
+    const deps = acquireAgentLease.mock.calls[0]![0] as { agentCap: () => Promise<number> };
+    expect(await deps.agentCap()).toBe(7);
+  });
+
   it('starts the loopback forwarder, with host and port quoted, only when the reach asks for it', async () => {
     ran(0);
     await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
