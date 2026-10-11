@@ -34,6 +34,7 @@ import {
 } from '@haive/shared/fs-safe';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
+import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
@@ -647,56 +648,60 @@ repoRoutes.put('/upload/:id/chunk', async (c) => {
     throw new HttpError(400, 'chunk end exceeds totalSize');
   }
 
-  const claim = await db
-    .update(schema.repoUploads)
-    .set({ updatedAt: new Date() })
-    .where(
-      and(
-        eq(schema.repoUploads.id, row.id),
-        eq(schema.repoUploads.bytesReceived, start),
-        eq(schema.repoUploads.status, 'uploading'),
-      ),
-    )
-    .returning({ id: schema.repoUploads.id });
-  if (claim.length === 0) {
-    throw new HttpError(409, 'chunk races another writer');
-  }
-
-  const rawBody = c.req.raw.body;
-  if (!rawBody) throw new HttpError(400, 'request body is empty');
-  const storageRoot = uploadsStorageRoot();
-  const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Upload session archive');
-  // Written at the session's OWN offset instead of with `flags: 'a'`: the offset is the fact the
-  // row already tracks and the claim above just verified, where appending trusted the file's
-  // current length. Rolled back through this same descriptor, never through the name.
-  const fh = await openFileNoFollow(storageRoot, archiveRel, 'read-write', { strict: true }).catch(
-    (err: unknown) => containmentHttpError(err, 'Upload archive is outside the uploads directory'),
-  );
-  if (!fh) throw new HttpError(409, 'Upload archive is missing on disk');
-  try {
-    const written = await writeBodyToHeld(
-      rawBody,
-      fh,
-      expectedLen,
-      () => new HttpError(400, `chunk body length exceeds expected ${expectedLen}`),
-      start,
-    );
-    if (written !== expectedLen) {
-      throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
+  const updated = await withUploadChunkLock(db, 'repo', row.id, async (tx) => {
+    const claim = await tx
+      .update(schema.repoUploads)
+      .set({ updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.repoUploads.id, row.id),
+          eq(schema.repoUploads.bytesReceived, start),
+          eq(schema.repoUploads.status, 'uploading'),
+        ),
+      )
+      .returning({ id: schema.repoUploads.id });
+    if (claim.length === 0) {
+      throw new HttpError(409, 'chunk races another writer');
     }
-    await fh.close();
-  } catch (err) {
-    await fh.truncate(Number(row.bytesReceived)).catch(() => {});
-    await fh.close().catch(() => {});
-    if (err instanceof HttpError) throw err;
-    throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
-  }
 
-  const updated = await db
-    .update(schema.repoUploads)
-    .set({ bytesReceived: end + 1, updatedAt: new Date() })
-    .where(eq(schema.repoUploads.id, row.id))
-    .returning();
+    const rawBody = c.req.raw.body;
+    if (!rawBody) throw new HttpError(400, 'request body is empty');
+    const storageRoot = uploadsStorageRoot();
+    const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Upload session archive');
+    // Written at the session's OWN offset instead of with `flags: 'a'`: the offset is the fact the
+    // row already tracks and the claim above just verified, where appending trusted the file's
+    // current length. Rolled back through this same descriptor, never through the name.
+    const fh = await openFileNoFollow(storageRoot, archiveRel, 'read-write', {
+      strict: true,
+    }).catch((err: unknown) =>
+      containmentHttpError(err, 'Upload archive is outside the uploads directory'),
+    );
+    if (!fh) throw new HttpError(409, 'Upload archive is missing on disk');
+    try {
+      const written = await writeBodyToHeld(
+        rawBody,
+        fh,
+        expectedLen,
+        () => new HttpError(400, `chunk body length exceeds expected ${expectedLen}`),
+        start,
+      );
+      if (written !== expectedLen) {
+        throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
+      }
+      await fh.close();
+    } catch (err) {
+      await fh.truncate(Number(row.bytesReceived)).catch(() => {});
+      await fh.close().catch(() => {});
+      if (err instanceof HttpError) throw err;
+      throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
+    }
+
+    return tx
+      .update(schema.repoUploads)
+      .set({ bytesReceived: end + 1, updatedAt: new Date() })
+      .where(eq(schema.repoUploads.id, row.id))
+      .returning();
+  });
 
   return c.json({ session: sessionFromRow(updated[0]!) });
 });

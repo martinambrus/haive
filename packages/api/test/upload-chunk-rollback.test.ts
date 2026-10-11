@@ -443,6 +443,39 @@ describe('a chunk of a chunked upload that is rolled back', () => {
       );
     });
 
+    it('E8 refuses a second chunk of the same range while the first is being written, and keeps the first’s bytes', async () => {
+      const session = await seed(family);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const held = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(CHUNK.subarray(0, 20)));
+        },
+        async pull(controller) {
+          await gate;
+          controller.enqueue(new Uint8Array(CHUNK.subarray(20)));
+          controller.close();
+        },
+      });
+      const written = countWrites(() => {});
+      const first = put(family, held, { start: PREVIOUS.length, length: CHUNK.length });
+      for (let i = 0; i < 100 && written.bytes === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(written.bytes, 'the first chunk reached a write').toBeGreaterThan(0);
+
+      const second = await put(family, SHORT, { start: PREVIOUS.length, length: CHUNK.length });
+      release();
+      const res = await first;
+
+      expect(second.status, 'the second chunk is refused at once').toBe(409);
+      expect(res.status, 'the first chunk is accepted').toBe(200);
+      expect(received(family), 'the byte count advanced once').toBe(PREVIOUS.length + CHUNK.length);
+      expect(await readFile(session.file, 'latin1'), 'the file holds the first chunk').toBe(
+        Buffer.concat([PREVIOUS, CHUNK]).toString('latin1'),
+      );
+    });
+
     it('E2 pin: a good chunk lands at the session’s offset and advances its byte count', async () => {
       const session = await seed(family);
 
