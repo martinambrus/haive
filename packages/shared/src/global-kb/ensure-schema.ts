@@ -42,7 +42,6 @@ const RETIRED_FACET_INDEX_DIMENSIONS = [
 const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';
 
 const IDENTIFIER_BACKFILL_BATCH = 2_000;
-const IDENTIFIER_BACKFILL_MAX_ROWS = 40_000;
 
 /** Idempotent schema creation for the global KB store (both the source-of-truth
  *  `global_kb_entries` and the global `ai_rag_embeddings` vector table), run on
@@ -270,19 +269,20 @@ export async function ensureGlobalKbSchema(
     `);
   });
 
-  // `SET content = content` re-fires the trigger on rows without the sentinel; a failure only warns,
-  // since a stale lexical index degrades search while a throw would fail the global KB's first use.
+  // No row cap: the ensure runs once per process, so a capped pass would never get a second one.
   try {
+    const unstamped = `FROM ${VECTORS_TABLE} WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)`;
+    const counted = await step((tx) =>
+      tx.unsafe(`SELECT count(*)::int AS n ${unstamped}`, [IDENTIFIER_TSV_SENTINEL]),
+    );
+    const pending = Number((counted[0] as { n?: number } | undefined)?.n ?? 0);
+    const maxPasses = Math.ceil(pending / IDENTIFIER_BACKFILL_BATCH) + 1;
     let total = 0;
-    while (total < IDENTIFIER_BACKFILL_MAX_ROWS) {
+    for (let pass = 0; pending > 0 && pass < maxPasses; pass++) {
       const result = await step((tx) =>
         tx.unsafe(
           `UPDATE ${VECTORS_TABLE} SET content = content
-             WHERE id IN (
-               SELECT id FROM ${VECTORS_TABLE}
-               WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)
-               LIMIT $2
-             )`,
+             WHERE id IN (SELECT id ${unstamped} LIMIT $2)`,
           [IDENTIFIER_TSV_SENTINEL, IDENTIFIER_BACKFILL_BATCH],
         ),
       );

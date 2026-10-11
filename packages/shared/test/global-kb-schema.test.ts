@@ -26,7 +26,8 @@ function fakeConn(
     lockThrowsOnce?: string;
     hnswThrows?: boolean;
     triggersExist?: 'current' | 'stale';
-    backfillCounts?: number[];
+    unstampedRows?: number;
+    stamping?: boolean;
     backfillThrows?: boolean;
   } = {},
 ): {
@@ -35,7 +36,7 @@ function fakeConn(
   transactions: () => string[][];
   backfillParams: () => unknown[][];
 } {
-  const backfillCounts = [...(opts.backfillCounts ?? [])];
+  let unstamped = opts.unstampedRows ?? 0;
   const backfillParams: unknown[][] = [];
   const captured: string[] = [];
   let lockFailure = opts.lockThrowsOnce;
@@ -58,7 +59,12 @@ function fakeConn(
       if (q.includes('SET content = content')) {
         backfillParams.push(params ?? []);
         if (opts.backfillThrows) return Promise.reject(new Error('statement timeout'));
-        return Promise.resolve(Object.assign([], { count: backfillCounts.shift() ?? 0 }));
+        const done = Math.min(unstamped, Number(params?.[1]));
+        if (opts.stamping !== false) unstamped -= done;
+        return Promise.resolve(Object.assign([], { count: done }));
+      }
+      if (q.includes('count(*)') && q.includes('content_tsv')) {
+        return Promise.resolve([{ n: unstamped }]);
       }
       if (opts.hnswThrows && q.includes('USING hnsw')) {
         return Promise.reject(new Error('hnsw unavailable'));
@@ -458,7 +464,7 @@ describe('ensureGlobalKbSchema', () => {
     });
 
     it('runs through the bounded step, after the trigger, selecting rows without the sentinel', async () => {
-      const { conn, transactions, backfillParams } = fakeConn();
+      const { conn, transactions, backfillParams } = fakeConn({ unstampedRows: 5 });
       await ensureGlobalKbSchema(conn, { timeoutMs: 1500 });
       const txs = transactions();
       const [update] = updateTxs(txs);
@@ -476,23 +482,46 @@ describe('ensureGlobalKbSchema', () => {
       );
     });
 
-    it('goes on only while a batch comes back full, and stops at the cap', async () => {
-      const full = fakeConn({ backfillCounts: [2_000, 2_000, 7] });
+    it('counts the unstamped rows first, through the bounded step, and writes nothing when there are none', async () => {
+      const none = fakeConn({ unstampedRows: 0 });
+      await ensureGlobalKbSchema(none.conn, { timeoutMs: 1500 });
+      const counts = none
+        .transactions()
+        .filter((tx) => tx.some((q) => q.includes('count(*)') && q.includes('content_tsv')));
+      expect(counts).toHaveLength(1);
+      expect(counts[0]!.slice(0, 2)).toEqual([
+        'SET LOCAL lock_timeout = 1500',
+        'SET LOCAL statement_timeout = 1500',
+      ]);
+      expect(updateTxs(none.transactions())).toHaveLength(0);
+    });
+
+    it('goes on while a batch comes back full and stops on a short one', async () => {
+      const full = fakeConn({ unstampedRows: 4_007 });
       await ensureGlobalKbSchema(full.conn);
       expect(updateTxs(full.transactions())).toHaveLength(3);
       expect(logged.info).toHaveBeenCalledWith({ rows: 4_007 }, expect.any(String));
 
-      const partial = fakeConn({ backfillCounts: [1_999] });
+      const partial = fakeConn({ unstampedRows: 1_999 });
       await ensureGlobalKbSchema(partial.conn);
       expect(updateTxs(partial.transactions())).toHaveLength(1);
+    });
 
-      const endless = fakeConn({ backfillCounts: Array(100).fill(2_000) });
+    it('rewrites every unstamped row of a store larger than the per-repo cap in one ensure', async () => {
+      const { conn, transactions } = fakeConn({ unstampedRows: 50_000 });
+      await ensureGlobalKbSchema(conn);
+      expect(updateTxs(transactions())).toHaveLength(26);
+      expect(logged.info).toHaveBeenCalledWith({ rows: 50_000 }, expect.any(String));
+    });
+
+    it('stops a trigger that does not stamp after ceil(count / batch) + 1 passes', async () => {
+      const endless = fakeConn({ unstampedRows: 5_000, stamping: false });
       await ensureGlobalKbSchema(endless.conn);
-      expect(updateTxs(endless.transactions())).toHaveLength(20);
+      expect(updateTxs(endless.transactions())).toHaveLength(4);
     });
 
     it('logs a failure and still resolves', async () => {
-      const { conn } = fakeConn({ backfillThrows: true });
+      const { conn } = fakeConn({ unstampedRows: 1, backfillThrows: true });
 
       await expect(ensureGlobalKbSchema(conn)).resolves.toEqual({ usedPgvector: true });
       expect(logged.warn).toHaveBeenCalledWith(
