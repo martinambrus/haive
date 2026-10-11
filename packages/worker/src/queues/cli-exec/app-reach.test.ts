@@ -130,6 +130,12 @@ describe('withAppReach', () => {
     expect(withAppReach(body, app)).toBe(`${appReachPrompt(app)}\n\n${body}`);
   });
 
+  it('tells an invocation in another worktree that the app shows none of its changes', () => {
+    const app = reach({ mode: 'sandbox_http', url: 'https://x.ddev.site' });
+    expect(withAppReach('BODY', app, true)).toContain('not the one you are working in');
+    expect(withAppReach('BODY', app)).not.toContain('not the one you are working in');
+  });
+
   it('says nothing at all when there is no resolved reach', () => {
     expect(withAppReach('BODY', null)).toBe('BODY');
   });

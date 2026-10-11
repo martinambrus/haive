@@ -159,6 +159,28 @@ describe('resolveDispatch', () => {
     expect(plan.providerId).toBe('only');
   });
 
+  it('tells an invocation outside the served worktree that the app shows none of its changes', () => {
+    const appReach = {
+      mode: 'sandbox_http' as const,
+      url: 'https://x.ddev.site',
+      addHosts: [],
+      mounts: [],
+      env: {},
+      noProxyHosts: [],
+      tlsTrusted: true,
+    };
+    const prompt = (appServesOtherTree: boolean) =>
+      resolveDispatch({
+        providers: [makeProvider({ id: 'prov-claude', name: 'claude-code' })],
+        input: { kind: 'prompt', prompt: 'Implement ISSUE-1.', capabilities: [] },
+        invokeOpts: {},
+        appReach,
+        appServesOtherTree,
+      }).effectivePrompt;
+    expect(prompt(true)).toContain('not the one you are working in');
+    expect(prompt(false)).not.toContain('not the one you are working in');
+  });
+
   it('returns skip when there are no enabled providers', () => {
     const plan = resolveDispatch({
       providers: [],
