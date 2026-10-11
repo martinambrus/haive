@@ -14,6 +14,8 @@ const h = vi.hoisted(() => ({
   onEnd: undefined as (() => void) | undefined,
   backfill: vi.fn<(step: unknown) => Promise<boolean>>(),
   freshDims: null as string | null,
+  freshMode: 'internal' as string | null,
+  freshConnection: null as string | null,
 }));
 
 vi.mock('../src/global-kb/connection.js', () => ({
@@ -43,7 +45,13 @@ vi.mock('../src/global-kb/ensure-schema.js', () => ({
 }));
 vi.mock('../src/config/config.service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/config/config.service.js')>()),
-  configService: { getFresh: async () => h.freshDims },
+  configService: {
+    getFresh: async (key: string) => (key.endsWith(':mode') ? h.freshMode : h.freshDims),
+  },
+}));
+vi.mock('../src/config/secrets.service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/config/secrets.service.js')>()),
+  secretsService: { get: async () => h.freshConnection },
 }));
 vi.mock('../src/global-kb/schema.js', () => ({ createGlobalKbDb: () => ({}) }));
 
@@ -58,6 +66,8 @@ const haiveDb = {} as Parameters<Awaited<ReturnType<typeof load>>>[0];
 beforeEach(() => {
   h.ensure.mockReset();
   h.backfill.mockReset();
+  h.freshMode = 'internal';
+  h.freshConnection = null;
   h.settings = { mode: 'internal', connectionString: null };
   h.connectOpts = [];
   h.connectDelayMs = 0;
@@ -79,6 +89,21 @@ describe('withGlobalKb', () => {
 
     await withGlobalKb(haiveDb, async () => {});
     expect(asked).toEqual([16]);
+  });
+
+  it("keeps the opened store's width when the configured store has changed since", async () => {
+    const asked: number[] = [];
+    h.ensure.mockImplementation(async (_conn, opts) => {
+      h.freshMode = 'external';
+      h.freshConnection = 'postgres://kb.example/b';
+      h.freshDims = '16';
+      asked.push(await (opts as { resolveDims: () => Promise<number> }).resolveDims());
+    });
+    h.settings = { ...h.settings, embeddingDimensions: 8 };
+    const withGlobalKb = await load();
+
+    await withGlobalKb(haiveDb, async () => {});
+    expect(asked).toEqual([8]);
   });
 
   it('falls back to the settings width when Redis holds none', async () => {

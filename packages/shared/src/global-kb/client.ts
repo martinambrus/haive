@@ -7,6 +7,7 @@ import {
   type GlobalKbSettings,
 } from './connection.js';
 import { configService, CONFIG_KEYS } from '../config/config.service.js';
+import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
 import { backfillGlobalIdentifierTsv, ensureGlobalKbSchema } from './ensure-schema.js';
 import { GlobalKbDeadlineError } from './errors.js';
 import { createGlobalKbDb, type GlobalKbDb } from './schema.js';
@@ -64,13 +65,21 @@ async function openAndRun<T>(
   onOpen?.(conn);
   try {
     const key = storeKey(settings);
-    // Fresh, not cached: the api may have saved a new width a moment ago in another process.
+    // Fresh, not cached: the api may have saved a new width a moment ago in another process. It
+    // applies only while the configured store is still the one this call opened.
     const resolveDims = async () => {
-      const raw = Number.parseInt(
-        (await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS)) ?? '',
-        10,
-      );
-      return Number.isNaN(raw) ? settings.embeddingDimensions : raw;
+      const [mode, connectionString, dims] = await Promise.all([
+        configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE),
+        secretsService.get(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
+        configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS),
+      ]);
+      const current = storeKey({
+        ...settings,
+        mode: mode === 'external' ? 'external' : 'internal',
+        connectionString: connectionString || null,
+      });
+      const raw = Number.parseInt(dims ?? '', 10);
+      return current !== key || Number.isNaN(raw) ? settings.embeddingDimensions : raw;
     };
     // A call with a deadline never starts the shared ensure: its deadline kills the pool under it.
     const shared = schemaReady.get(key);
