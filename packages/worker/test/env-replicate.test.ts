@@ -142,23 +142,25 @@ describe('scanRepoForDeps', () => {
       expect(r.runtimes.find((x) => x.language === 'php')?.version).toBe('8.3');
     });
 
-    it('reads 500 blank-ish lines under `database:` of an invalid document in linear time', async () => {
+    // MEASURED: the `\s` regex this reader replaced took 58ms at 500 such lines and 3.3s at
+    // 2000 (cubic), so 2000 lines under a 1s bound fails it while leaving room for a loaded runner.
+    it('reads 2000 blank-ish lines under `database:` of an invalid document in linear time', async () => {
       const started = performance.now();
       const r = await scanWith([
         'name: a',
         'name: b',
         'database:',
-        ...Array<string>(500).fill('  '),
+        ...Array<string>(2000).fill('  '),
         '',
       ]);
-      expect(performance.now() - started).toBeLessThan(100);
+      expect(performance.now() - started).toBeLessThan(1000);
       expect(r.database.kind).toBe('none');
     });
 
-    it('reads 500 blank-ish lines under `database:` in linear time', async () => {
+    it('reads 2000 blank-ish lines under `database:` in linear time', async () => {
       const started = performance.now();
-      const r = await scanWith(['name: a', 'database:', ...Array<string>(500).fill('  '), '']);
-      expect(performance.now() - started).toBeLessThan(100);
+      const r = await scanWith(['name: a', 'database:', ...Array<string>(2000).fill('  '), '']);
+      expect(performance.now() - started).toBeLessThan(1000);
       expect(r.database.kind).toBe('none');
     });
   });
