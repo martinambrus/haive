@@ -155,7 +155,7 @@ export default function RepoToolingPage() {
     setRagEmbedBusy(action);
     setRagEmbedNote(null);
     try {
-      const res = await api.patch<{ reembedQueued?: boolean }>(
+      const res = await api.patch<{ reembedQueued?: boolean; degradationKept?: boolean }>(
         `/repositories/${repositoryId}/tooling`,
         { ragEmbedAction: action },
       );
@@ -166,7 +166,9 @@ export default function RepoToolingPage() {
           ? 'Every chunk is marked for re-embedding; the next RAG sync on this repository rebuilds the index. Existing rows stay searchable until they are replaced.'
           : action === 'accept_lexical_only'
             ? 'Search on this repository now ranks by full text alone.'
-            : 'Embeddings will be attempted again on the next RAG sync.',
+            : res.degradationKept
+              ? 'Embeddings will be attempted again on the next RAG sync. The warning stays until then: some chunks still hold fallback vectors awaiting re-embed, or the index could not be checked.'
+              : 'Embeddings will be attempted again on the next RAG sync.',
       );
     } catch (err) {
       setError((err as Error).message ?? 'Failed to update RAG embedding state');
