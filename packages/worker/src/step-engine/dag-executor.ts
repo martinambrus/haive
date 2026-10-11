@@ -68,6 +68,7 @@ import {
 import { loadTaskMeta } from './steps/workflow/_task-meta.js';
 import {
   isProviderOutage,
+  isProviderRefusal,
   PROVIDER_FATAL_HEADLINES,
   isCliTimeoutFailure,
   isOutputTruncationMessage,
@@ -896,6 +897,13 @@ async function runLevelMerge(
     await saveMergeState(db, level.id, state);
     await clearAiFix(db, m.current.id);
     if (unaborted) return haltUnaborted(m, branch, unaborted);
+    if (target && isProviderRefusal(inv.errorMessage)) {
+      return haltConflicts(
+        m,
+        [target],
+        'the provider refused the merge fixer, so it is not sent again',
+      );
+    }
     m.current = await setStepStatus(db, m.current.id, { status: 'running' });
     if (fixerCut && target) return startConflictFix(m, state, target, true);
     // fall through to the merge pass + halt/ok decision

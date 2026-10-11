@@ -1452,6 +1452,31 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       }
     });
 
+    it('refused, with auto-resolve on: aborted and halted, the same prompt not sent again', async () => {
+      const { h, integrationDir, result } = await ingest(
+        ended({
+          exitCode: 1,
+          errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`,
+          prompt: 'resolve the merge',
+        }),
+        true,
+        'half-resolved\n',
+      );
+      try {
+        expect(result.resolved).toBe(false);
+        if (!result.resolved) {
+          expect(result.result.status).toBe('failed');
+          expect(result.result.row.errorMessage).toContain('refused');
+        }
+        expect(h.invocationInserts).toHaveLength(0);
+        expect(
+          await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']),
+        ).not.toBe(0);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
     it('cut again after the notice, manual: handled as today, aborted and halted with no new fixer', async () => {
       const { h, integrationDir, result, state } = await ingest(
         ended({
