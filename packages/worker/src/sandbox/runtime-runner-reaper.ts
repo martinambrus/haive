@@ -96,10 +96,13 @@ export async function runnerSettled(
   db: Parameters<typeof hasLiveCliInvocation>[0],
   taskId: string,
 ): Promise<boolean> {
+  // The live-CLI read runs again after the Docker probe, which can take seconds: a run that started
+  // meanwhile may not have reached its first exec yet.
   return (
     !taskRunnerBusy(taskId) &&
     !(await hasLiveCliInvocation(db, taskId)) &&
-    !(await runnerExecLive(taskId))
+    !(await runnerExecLive(taskId)) &&
+    !(await hasLiveCliInvocation(db, taskId))
   );
 }
 

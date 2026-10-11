@@ -59,6 +59,11 @@ describe('a runner with an exec in flight', () => {
     expect(await runnerSettled({} as never, TASK)).toBe(true);
   });
 
+  it('is not settled when a CLI run starts while Docker is being asked', async () => {
+    m.live.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    expect(await runnerSettled({} as never, TASK)).toBe(false);
+  });
+
   it('is not settled while a CLI run is live, as before', async () => {
     m.live.mockResolvedValue(true);
     expect(await runnerSettled({} as never, TASK)).toBe(false);
