@@ -1118,7 +1118,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           entry.newContent
         ) {
           const restore = earlier.writtenContent;
-          const renderHash = sha256Hex(normalizeContent(entry.newContent));
+          const render = entry.newContent;
           const rules = entry.templateKind === CLI_RULES_TEMPLATE_KIND;
           let restored = false;
           // What the held file showed when the callback declined: the bytes the Keep records.
@@ -1132,7 +1132,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
                 const text = data.toString('utf8');
                 if (!Buffer.from(text, 'utf8').equals(data)) return null;
                 const standing = rules ? extractRegion(text, CLI_RULES_START, CLI_RULES_END) : text;
-                if (standing === null || sha256Hex(normalizeContent(standing)) !== renderHash) {
+                // The exact bytes written, not a normalized match: a save differing only in line
+                // endings or trailing space is the person's, and stays.
+                if (standing === null || standing !== render) {
                   const content =
                     standing === null ? null : rules ? normalizeContent(standing) : standing;
                   seen =

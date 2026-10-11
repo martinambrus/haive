@@ -485,6 +485,18 @@ describe('an upgrade apply retried after it failed part-way', () => {
     ).toBe(true);
   });
 
+  it('leaves a save that differs from the failed write only in line endings', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await writeFile(join(s.root, EDITED), NEW.replace(/\n/g, '\r\n'), 'utf8');
+    s.answerConflicts('keep_ours');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW.replace(/\n/g, '\r\n'));
+  });
+
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
     const s = await setup();
     failOneCommit(s);
