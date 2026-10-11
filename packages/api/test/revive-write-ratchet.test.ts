@@ -366,6 +366,19 @@ function liveWrites(
   return out;
 }
 
+/** An import from the database package that reaches the tasks table under another name: `tasks`
+ *  itself, a namespace, or `schema` renamed. */
+function importRenamesTasks(decl: ts.ImportDeclaration): boolean {
+  const from = (decl.moduleSpecifier as ts.StringLiteral).text;
+  const bindings = decl.importClause?.namedBindings;
+  if (!from.startsWith('@haive/database') || !bindings) return false;
+  if (ts.isNamespaceImport(bindings)) return true;
+  return bindings.elements.some((e) => {
+    const imported = (e.propertyName ?? e.name).text;
+    return imported === 'tasks' || (imported === 'schema' && e.name.text !== 'schema');
+  });
+}
+
 // A write that puts a task row back to a live status revives it, so it must run the revival's
 // exclusion on its own path, unless it only starts a task that was never live.
 describe('a live-status write on a task row', () => {
@@ -419,7 +432,8 @@ describe('a live-status write on a task row', () => {
           (ts.isVariableDeclaration(n) &&
             ts.isObjectBindingPattern(n.name) &&
             n.initializer?.getText() === 'schema' &&
-            n.name.elements.some((e) => (e.propertyName ?? e.name).getText() === 'tasks'))
+            n.name.elements.some((e) => (e.propertyName ?? e.name).getText() === 'tasks')) ||
+          (ts.isImportDeclaration(n) && importRenamesTasks(n))
         ) {
           out.push(
             `${relative(SRC, f)}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`,
@@ -431,6 +445,18 @@ describe('a live-status write on a task row', () => {
       return out;
     });
     expect(aliases).toEqual([]);
+  });
+
+  it('reads an import that renames the tasks table as an alias', () => {
+    const renames = (text: string) => {
+      const sf = ts.createSourceFile('x.ts', text, ts.ScriptTarget.Latest, true);
+      return importRenamesTasks(sf.statements[0] as ts.ImportDeclaration);
+    };
+    expect(renames(`import { tasks } from '@haive/database/schema';`)).toBe(true);
+    expect(renames(`import { tasks as t } from '@haive/database';`)).toBe(true);
+    expect(renames(`import * as db from '@haive/database/schema';`)).toBe(true);
+    expect(renames(`import { schema as s } from '@haive/database';`)).toBe(true);
+    expect(renames(`import { schema, type Database } from '@haive/database';`)).toBe(false);
   });
 
   it('does not count a guard in a sibling transaction', () => {
