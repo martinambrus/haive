@@ -85,6 +85,7 @@ export function MarkdownEditor({
   minHeight = '16rem',
   breaks = false,
   disabled = false,
+  onBaseline,
 }: {
   value: string;
   onChange: (markdown: string) => void;
@@ -96,9 +97,13 @@ export function MarkdownEditor({
    *  like markdown renders soft newlines as <br>, so the editor must serialize
    *  them as hard breaks or one edit would collapse its line structure. */
   breaks?: boolean;
+  /** Called once with the editor's own serialization of `value`. */
+  onBaseline?: (markdown: string) => void;
 }) {
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const onBaselineRef = useRef(onBaseline);
+  onBaselineRef.current = onBaseline;
   const lastEmitted = useRef(value);
 
   const editor = useEditor({
@@ -110,6 +115,7 @@ export function MarkdownEditor({
     editorProps: {
       attributes: { class: 'haive-md', style: `min-height:${minHeight}` },
     },
+    onCreate: ({ editor: e }) => onBaselineRef.current?.(getMarkdown(e)),
     onUpdate: ({ editor: e }) => {
       const md = getMarkdown(e);
       lastEmitted.current = md;

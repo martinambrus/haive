@@ -25,6 +25,9 @@ import {
   globsFromLines,
   houseRuleBadge,
 } from '@/lib/house-rules';
+import { bodyToSave } from '@/lib/body-edit';
+import { changedFields } from '@/lib/config-diff';
+import { isCardActivation } from '@/lib/card-keys';
 import {
   Badge,
   Button,
@@ -214,6 +217,32 @@ const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
 
 /** A saved ollamaUrl maps back to a mode: the bundled URL (or empty) is internal,
  *  anything else is an external server the user pointed at. */
+function savedConfig(c: {
+  enabled: boolean;
+  digestEnabled: boolean;
+  mode: 'internal' | 'external';
+  namespace: string;
+  ollamaMode: 'internal' | 'external';
+  ollamaUrl: string;
+  embedModel: string;
+  embedDimensions: number;
+  archiveRetentionDays: number;
+}) {
+  return {
+    enabled: c.enabled,
+    digestEnabled: c.digestEnabled,
+    mode: c.mode,
+    namespace: c.namespace,
+    ollamaUrl:
+      c.ollamaMode === 'internal'
+        ? IN_STACK_OLLAMA_URL
+        : c.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL,
+    embedModel: c.embedModel,
+    embedDimensions: c.embedDimensions,
+    archiveRetentionDays: c.archiveRetentionDays,
+  };
+}
+
 function deriveOllamaMode(url: string): 'internal' | 'external' {
   return url && url !== IN_STACK_OLLAMA_URL ? 'external' : 'internal';
 }
@@ -342,6 +371,7 @@ export default function GlobalKbPage() {
   const [descBusy, setDescBusy] = useState(false);
   const [descError, setDescError] = useState<string | null>(null);
   const [bodyEdit, setBodyEdit] = useState<string | null>(null);
+  const [bodyBaseline, setBodyBaseline] = useState<string | null>(null);
   const [bodyBusy, setBodyBusy] = useState(false);
   const [bodyError, setBodyError] = useState<string | null>(null);
   const [enforcePanel, setEnforcePanel] = useState<EnforcePanel | null>(null);
@@ -510,6 +540,7 @@ export default function GlobalKbPage() {
     msg: string | null;
   }>({ busy: false, ok: null, msg: null });
   const [cfgLoaded, setCfgLoaded] = useState(false);
+  const loadedConfig = useRef<ReturnType<typeof savedConfig> | null>(null);
   const [connExpanded, setConnExpanded] = useState(false);
   const connChecked = useRef(false);
 
@@ -529,6 +560,7 @@ export default function GlobalKbPage() {
         archiveRetentionDays: cc.archiveRetentionDays,
         connectionString: '',
       }));
+      loadedConfig.current = savedConfig({ ...cc, ollamaMode: deriveOllamaMode(cc.ollamaUrl) });
       setCfgSet(cc.connectionStringSet);
       setCanEnforce(cc.canEnforce === true);
       setInstanceNamespace(cc.namespace);
@@ -541,10 +573,7 @@ export default function GlobalKbPage() {
 
   // Internal mode has no URL field; collapse the mode back to a concrete URL
   // (mirrors onboarding 04's apply) for both save and the Ollama test.
-  const effectiveOllamaUrl =
-    cfg.ollamaMode === 'internal'
-      ? IN_STACK_OLLAMA_URL
-      : cfg.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL;
+  const effectiveOllamaUrl = savedConfig(cfg).ollamaUrl;
   // The database test is admin-only, so for anyone else the database is simply not checked.
   const connOk = cfg.enabled && (!canEnforce || dbTest.ok === true) && ollamaTest.ok === true;
   // Null until the first-load check resolves; keeps the collapsed header from
@@ -607,20 +636,18 @@ export default function GlobalKbPage() {
       setCfgMsg('Archive retention must be a whole number from 0 to 3650 days.');
       return;
     }
+    const current = savedConfig(cfg);
+    const payload: Record<string, unknown> = loadedConfig.current
+      ? changedFields(loadedConfig.current, current)
+      : current;
+    if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
+    if (Object.keys(payload).length === 0) {
+      setCfgMsg('Nothing changed.');
+      return;
+    }
     setCfgBusy(true);
     setCfgMsg(null);
     try {
-      const payload: Record<string, unknown> = {
-        enabled: cfg.enabled,
-        digestEnabled: cfg.digestEnabled,
-        mode: cfg.mode,
-        namespace: cfg.namespace,
-        ollamaUrl: effectiveOllamaUrl,
-        embedModel: cfg.embedModel,
-        embedDimensions: cfg.embedDimensions,
-        archiveRetentionDays: cfg.archiveRetentionDays,
-      };
-      if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
       await api.put('/global-kb/config', payload);
       await loadConfig();
       await load();
@@ -742,7 +769,6 @@ export default function GlobalKbPage() {
   // missing/purged predecessor (404) just falls back to the plain body view.
   useEffect(() => {
     setSupersededEntry(null);
-    setDraftView(selected?.status === 'draft' ? 'diff' : 'full');
     const supersedesId = selected?.supersedesEntryId;
     if (!supersedesId) return;
     let cancelled = false;
@@ -767,6 +793,12 @@ export default function GlobalKbPage() {
       cancelled = true;
     };
   }, [selected]);
+
+  useEffect(() => {
+    setDraftView(selected?.status === 'draft' ? 'diff' : 'full');
+    // Keyed on the id: a save replaces `selected` with the same entry and must keep the toggle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
 
   /** From the dialog the failure shows in the dialog, since the banner under the page is behind
    *  its overlay. */
@@ -1027,11 +1059,16 @@ export default function GlobalKbPage() {
       setBodyError('The article body cannot be empty.');
       return;
     }
+    const body = bodyToSave(e.body, bodyEdit, bodyBaseline);
+    if (body === undefined) {
+      setBodyEdit(null);
+      return;
+    }
     setBodyBusy(true);
     setBodyError(null);
     try {
       const res = await api.patch<{ entry: GlobalKbEntry }>(`/global-kb/entries/${e.id}`, {
-        body: bodyEdit,
+        body,
       });
       const saved = res.entry;
       setSelected((cur) => (cur?.id === e.id ? saved : cur));
@@ -1343,7 +1380,7 @@ export default function GlobalKbPage() {
               onChange={(ev) =>
                 setEnforcePanel({ ...panel, mode: ev.target.value as 'always' | 'files' })
               }
-              className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              className="h-10 w-full min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
             >
               <option value="files">when files match</option>
               <option value="always">always</option>
@@ -1521,7 +1558,7 @@ export default function GlobalKbPage() {
                   onChange={(e) =>
                     setCfg({ ...cfg, mode: e.target.value as 'internal' | 'external' })
                   }
-                  className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                  className="h-10 w-full min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
                 >
                   <option value="internal">internal (Haive-hosted)</option>
                   <option value="external">external (central/remote)</option>
@@ -1588,7 +1625,7 @@ export default function GlobalKbPage() {
               </div>
             )}
             <div className="flex flex-wrap gap-3">
-              <div className="flex flex-col gap-1.5">
+              <div className="flex min-w-0 max-w-full flex-col gap-1.5">
                 <Label htmlFor="cfg-ollama-mode">Ollama server</Label>
                 <select
                   id="cfg-ollama-mode"
@@ -1606,7 +1643,7 @@ export default function GlobalKbPage() {
                           : p.ollamaUrl,
                     }));
                   }}
-                  className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                  className="h-10 w-full min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
                 >
                   <option value="internal">Use Haive internal Ollama service</option>
                   <option value="external">Use an external Ollama server</option>
@@ -1755,13 +1792,13 @@ export default function GlobalKbPage() {
             />
           </div>
           <div className="flex flex-wrap gap-3">
-            <div className="flex flex-col gap-1.5">
+            <div className="flex min-w-0 max-w-full flex-col gap-1.5">
               <Label htmlFor="enrich-cli">CLI</Label>
               <select
                 id="enrich-cli"
                 value={enrich.cliProviderId}
                 onChange={(e) => setEnrich({ ...enrich, cliProviderId: e.target.value })}
-                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
                 <option value="">Select…</option>
                 {providers.map((p) => (
@@ -1782,7 +1819,7 @@ export default function GlobalKbPage() {
                     egressMode: e.target.value as 'none' | 'allowlist' | 'full',
                   })
                 }
-                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                className="h-10 w-full min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
                 <option value="none">
                   {enrich.repoId ? 'repo only (no web)' : 'no web access'}
@@ -1791,13 +1828,13 @@ export default function GlobalKbPage() {
                 <option value="full">full internet</option>
               </select>
             </div>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex min-w-0 max-w-full flex-col gap-1.5">
               <Label htmlFor="enrich-repo">Repository (optional)</Label>
               <select
                 id="enrich-repo"
                 value={enrich.repoId}
                 onChange={(e) => setEnrich({ ...enrich, repoId: e.target.value })}
-                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
               >
                 {/* Default. A house standard applies to every project, so writing one should not
                     require opening any — and anchoring is what scoped the first of these to the
@@ -1874,7 +1911,7 @@ export default function GlobalKbPage() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+            className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
             <option value="all">any status</option>
             <option value="active">active</option>
@@ -1886,7 +1923,7 @@ export default function GlobalKbPage() {
           <select
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value)}
-            className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+            className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
             <option value="all">any category</option>
             {CATEGORIES.map((c) => (
@@ -1899,7 +1936,7 @@ export default function GlobalKbPage() {
             <select
               value={frameworkFilter}
               onChange={(e) => setFrameworkFilter(e.target.value)}
-              className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              className="h-10 min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
             >
               <option value="all">any stack</option>
               {frameworks.map((f) => (
@@ -1959,7 +1996,7 @@ export default function GlobalKbPage() {
                 onKeyDown={
                   clickable
                     ? (ev) => {
-                        if (ev.key === 'Enter' || ev.key === ' ') {
+                        if (isCardActivation(ev)) {
                           ev.preventDefault();
                           setSelected(e);
                         }
@@ -2076,7 +2113,9 @@ export default function GlobalKbPage() {
                     </div>
                   )}
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
+                    <p className="min-w-0 text-xs break-words text-neutral-400 [overflow-wrap:anywhere]">
+                      {facetsSummary(e.facets)}
+                    </p>
                     {e.sourceTaskId && (
                       <a
                         href={`/tasks/${e.sourceTaskId}`}
@@ -2307,6 +2346,7 @@ export default function GlobalKbPage() {
                     disabled={busy || scopeBusy || descBusy || enforceOpen}
                     onClick={() => {
                       setBodyError(null);
+                      setBodyBaseline(null);
                       setBodyEdit(selected.body);
                     }}
                   >
@@ -2328,6 +2368,7 @@ export default function GlobalKbPage() {
                     key={selected.id}
                     value={bodyEdit}
                     onChange={setBodyEdit}
+                    onBaseline={setBodyBaseline}
                     disabled={bodyBusy || scopeBusy || descBusy || busy}
                     breaks={!looksLikeMarkdown(selected.body)}
                     placeholder="Write the article…"
