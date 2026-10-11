@@ -232,7 +232,7 @@ hash-fallback vector written with `RAG_EMBED_STRICT_ENABLED` off is never ranked
 still found by words. Rows written before the column existed are classified at boot
 (`classifyGlobalKbVectorProvenance`, convergent): a hash vector is a pure function of its chunk text, so
 a stored vector matching `hashEmbed(content, dims)` (cosine ≥ 0.9999) is `hashed` and anything else
-`model`, with no re-embed. `unknown_provenance` stays in the enum only so stored records parse. The
+`model`, with no re-embed. The global HNSW index is partial (`WHERE embed_kind = 'model'`, replacing the full one): pgvector filters after its candidate scan, so hash rows in the index would crowd model candidates out of the dense half (MEASURED with EXPLAIN: the filtered query scans the partial index). `unknown_provenance` stays in the enum only so stored records parse. The
 cli-exec job waits for its scorer before it completes (the CLI itself is never delayed), so a worker
 restart cannot strand a `pending` record; one still pending past the embed budget plus 15 s is
 `failed`/`abandoned`. `config:globalKb:houseRulesSimilarity`: `off` scores nothing; anything
