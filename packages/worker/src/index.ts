@@ -51,6 +51,7 @@ import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
 import { startDatabaseSnapshotCleanup } from './repo/database-snapshots.js';
 import { AgentPreemptionSweeper } from './sandbox/agent-preemption.js';
 import { CliPriorityDecaySweeper } from './queues/cli-exec/priority-decay.js';
+import { clearAgentLeases } from './queues/cli-exec/agent-lease.js';
 import { CliStreamLogReaper } from './queues/cli-exec/stream-log-retention.js';
 import {
   startRuntimeLimitsWatch,
@@ -98,6 +99,7 @@ async function main(): Promise<void> {
   // runtime runner, so a reservation from before this boot can only describe a boot that no
   // longer exists — leaving it would hold a slot out of the pool until its 45-min expiry.
   await clearRuntimeReservations();
+  await clearAgentLeases();
   // Same reasoning for the browser-desktop surcharges: every runner they described is gone.
   await clearBrowserSurcharges();
   // Before this process starts a worker, whose connection would read as the owner of every active job.

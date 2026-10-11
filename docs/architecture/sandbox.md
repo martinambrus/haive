@@ -112,6 +112,25 @@ read-only git-data boundary as task editors (`repoGitDataBoundary`), since code-
 and workspace tasks execute repository code; the repository Terminal remains the surface for git
 commits and pushes.
 
+## A step's project commands run in the sandbox
+
+`08-phase-5-verify` and `08b-test-management` do not start a project's tests, lint or typecheck in the
+worker process, which runs as root over the repository. `runStepCommandInSandbox`
+(`sandbox/step-command.ts`) runs the argv in the task's sandbox image instead, with the worktree
+mounted at `SANDBOX_WORKDIR` (read-write; read-only only for a local-path repository with no worktree),
+the git-data boundary and the secret masks. No auth volume and no provider env are passed: the
+project's own code runs there and has no use for the CLI's credentials. `cwdRel` is relative to the
+worktree root and must not leave it. The run holds an agent lease for its length (see
+[Runtime and agent capacity](runtime-capacity.md)).
+
+A command is reported as **not run**, never as a failing check, when the task has no CLI provider (so
+no image), the provider row is gone, no agent slot frees in time, or the binary is not on the image's
+PATH. The last is read from a Haive-owned exit status (`BINARY_MISSING_EXIT`, 199) of a preamble that
+checks `command -v`, so a project's own exit 127 stays the project's. A path the command writes
+back to the worktree is read by the worker from the worktree afterwards: the phpcs report goes under
+`.haive/verify` at the sandbox path, in a directory made writable for the sandbox user first. A DDEV
+project's checks still run in the DDEV runner (`kind: 'ddev'`).
+
 ## The task's current worktree
 
 `tasks.worktree_branch` and `worktree_path` are written once, by 01-worktree-setup, and kept as an

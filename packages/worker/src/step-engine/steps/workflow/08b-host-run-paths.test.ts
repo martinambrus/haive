@@ -6,11 +6,7 @@ const m = vi.hoisted(() => ({
   run: vi.fn(),
 }));
 
-vi.mock('node:child_process', async () => {
-  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-  const { promisify } = await import('node:util');
-  return { ...actual, execFile: Object.assign(vi.fn(), { [promisify.custom]: m.run }) };
-});
+vi.mock('../../../sandbox/step-command.js', () => ({ runStepCommandInSandbox: m.run }));
 vi.mock('./_app-runtime.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_app-runtime.js')>()),
   ensureAppServing: m.ensureAppServing,
@@ -60,7 +56,7 @@ describe('08b: the reported test paths a selective run is built from, by how the
   const SYNTAX = ['app/[id]/page.test.tsx', 'app/(group)/x.spec.ts', 'tests/a b Test.php'];
 
   beforeEach(() => {
-    m.run.mockReset().mockResolvedValue({ stdout: 'ok', stderr: '' });
+    m.run.mockReset().mockResolvedValue({ ran: true, exitCode: 0, output: 'ok' });
     m.ddevExec.mockReset().mockResolvedValue({ exitCode: 0, output: 'ok' });
     m.ensureAppServing.mockReset();
   });
@@ -70,9 +66,8 @@ describe('08b: the reported test paths a selective run is built from, by how the
     expect(m.ddevExec).not.toHaveBeenCalled();
     expect(m.run).toHaveBeenCalledTimes(1);
     expect(m.run).toHaveBeenCalledWith(
-      'npx',
-      ['vitest', 'run', ...SYNTAX],
-      expect.objectContaining({ cwd: '/wt' }),
+      expect.anything(),
+      expect.objectContaining({ argv: ['npx', 'vitest', 'run', ...SYNTAX], cwdRel: '' }),
     );
     expect(out.testRun).toMatchObject({ ran: true, passed: true });
     expect(out.testsPassed).toBe(true);
@@ -86,9 +81,8 @@ describe('08b: the reported test paths a selective run is built from, by how the
       frameworkRoots: { phpunit: '' },
     });
     expect(m.run).toHaveBeenCalledWith(
-      'vendor/bin/phpunit',
-      ['tests/a b Test.php'],
-      expect.objectContaining({ cwd: '/wt' }),
+      expect.anything(),
+      expect.objectContaining({ argv: ['vendor/bin/phpunit', 'tests/a b Test.php'], cwdRel: '' }),
     );
   });
 
@@ -120,9 +114,11 @@ describe('08b: the reported test paths a selective run is built from, by how the
       frameworkRoots: { phpunit: '' },
     });
     expect(m.run).toHaveBeenCalledWith(
-      'vendor/bin/phpunit',
-      ['tests/OkTest.php', 'tests/a b Test.php'],
       expect.anything(),
+      expect.objectContaining({
+        argv: ['vendor/bin/phpunit', 'tests/OkTest.php', 'tests/a b Test.php'],
+        cwdRel: '',
+      }),
     );
   });
 
@@ -135,9 +131,8 @@ describe('08b: the reported test paths a selective run is built from, by how the
       'tests/ok.spec.ts',
     ]);
     expect(m.run).toHaveBeenCalledWith(
-      'npx',
-      ['vitest', 'run', 'tests/ok.spec.ts'],
       expect.anything(),
+      expect.objectContaining({ argv: ['npx', 'vitest', 'run', 'tests/ok.spec.ts'], cwdRel: '' }),
     );
     expect(out.degradedNote).toContain('4 reported test files were dropped and did not run');
   });
@@ -153,9 +148,8 @@ describe('08b: the reported test paths a selective run is built from, by how the
     await apply(false, [bad, 'tests/ok.spec.ts']);
     expect(m.run).toHaveBeenCalledTimes(1);
     expect(m.run).toHaveBeenCalledWith(
-      'npx',
-      ['vitest', 'run', 'tests/ok.spec.ts'],
       expect.anything(),
+      expect.objectContaining({ argv: ['npx', 'vitest', 'run', 'tests/ok.spec.ts'], cwdRel: '' }),
     );
   });
 
@@ -168,7 +162,10 @@ describe('08b: the reported test paths a selective run is built from, by how the
 
   it('keeps ordinary paths on a host run, a dash inside a name included', async () => {
     await apply(false, ORDINARY);
-    expect(m.run).toHaveBeenCalledWith('npx', ['vitest', 'run', ...ORDINARY], expect.anything());
+    expect(m.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ argv: ['npx', 'vitest', 'run', ...ORDINARY], cwdRel: '' }),
+    );
   });
 
   it('keeps ordinary paths on a ddev run, a dash inside a name included', async () => {
@@ -181,9 +178,8 @@ describe('08b: the reported test paths a selective run is built from, by how the
     const out = await apply(false, ['/etc/x.spec.ts', 'tests/ok.spec.ts']);
     expect(m.run).toHaveBeenCalledTimes(1);
     expect(m.run).toHaveBeenCalledWith(
-      'npx',
-      ['vitest', 'run', 'tests/ok.spec.ts'],
       expect.anything(),
+      expect.objectContaining({ argv: ['npx', 'vitest', 'run', 'tests/ok.spec.ts'], cwdRel: '' }),
     );
     expect(out.testRun).toMatchObject({ ran: true, passed: true });
     expect(out.degradedNote).toContain('1 reported test file was dropped and did not run');
@@ -222,5 +218,54 @@ describe('08b: the reported test paths a selective run is built from, by how the
     expect(host.degradedNote).toContain('relative');
     expect(host.degradedNote).not.toContain('"._/@+-"');
     expect(ddev.degradedNote).toContain('"._/@+-"');
+  });
+
+  it('runs a project root below the worktree from that directory, in the sandbox', async () => {
+    await apply(false, ['web/tests/ok.spec.ts'], {
+      frameworkRoots: { vitest: 'web' },
+    });
+    expect(m.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        argv: ['npx', 'vitest', 'run', 'tests/ok.spec.ts'],
+        cwdRel: 'web',
+      }),
+    );
+  });
+
+  it('reports the written tests as not run, with the helper note, when the sandbox did not run them', async () => {
+    const note = 'not run: no CLI provider, so no sandbox image';
+    m.run.mockResolvedValue({ ran: false, note });
+    const out = await apply(false, ['tests/ok.spec.ts'], {}, []);
+    expect(m.run).toHaveBeenCalledTimes(1);
+    expect(out.testRun).toMatchObject({ ran: false, passed: false, output: note });
+    expect(out.testsPassed).toBeNull();
+    expect(out.degradedNote).toContain(note);
+    expect(out.degradedNote).toContain('NOT known to be green');
+  });
+
+  it('keeps the verdict of a failed run when the follow-up enumerate was not run', async () => {
+    m.run
+      .mockResolvedValueOnce({ ran: true, exitCode: 1, output: 'boom' })
+      .mockResolvedValueOnce({ ran: false, note: 'not run: no slot' });
+    const out = await testManagementStep.apply(ctx, {
+      detected: detected(false, {
+        primary: 'playwright',
+        frameworks: ['playwright'],
+        frameworkRoots: { playwright: '' },
+      }),
+      formValues: { action: 'manage', runTests: true },
+      iteration: 1,
+      previousIterations: [],
+      llmOutput: {
+        tests_created: ['tests/ok.spec.ts'],
+        tests_updated: [],
+        tests_deleted: [],
+        notes: '',
+      },
+    } as never);
+    expect(m.run).toHaveBeenCalledTimes(2);
+    expect(out.testRun).toMatchObject({ ran: true, passed: false });
+    expect(out.testsPassed).toBe(false);
   });
 });

@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
-import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import {
@@ -83,6 +83,7 @@ import {
   type CliExecDeps,
   type CliExecQueuePayload,
 } from './_shared.js';
+import { finalizedInvocationIds, liveAgentLeaseCount } from './agent-lease.js';
 import { enforceRuntimeHolderReserve } from './agent-reserve.js';
 import { executeByKind, interpretCliFailure } from './exec-core.js';
 import { fatalClassFromMessage } from './failure-class.js';
@@ -1235,6 +1236,11 @@ function clampParallelCap(n: number): number {
   return Math.max(1, Math.floor(n));
 }
 
+/** The agent pool's size right now: what the INVOKE gate admits against and a lease is sized by. */
+export async function currentAgentCap(): Promise<number> {
+  return clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
+}
+
 /** Pull/build a provider's in-stack Ollama model after a create/edit so it is
  *  ready without a worker restart. Delegates to provisionOllamaProvider, which
  *  updates model_provision_status. No-op for non-ollama providers. */
@@ -1312,31 +1318,6 @@ const PAUSE_DEFER_MS = 30_000;
  *  provision — because INVOKE is the only job name that spawns a sandboxed agent. */
 const LIGHT_JOB_LANE = 3;
 
-/** Of `ids`, those whose invocation is already finalized — ended, or superseded by a retry or
- *  a cancel. Fails OPEN (empty set): an unreadable answer ranks exactly as it did before this
- *  exclusion existed, which over-holds a slot rather than over-admitting agents. */
-async function finalizedInvocationIds(db: Database, ids: string[]): Promise<Set<string>> {
-  if (ids.length === 0) return new Set();
-  try {
-    const rows = await db
-      .select({ id: schema.cliInvocations.id })
-      .from(schema.cliInvocations)
-      .where(
-        and(
-          inArray(schema.cliInvocations.id, ids),
-          or(
-            isNotNull(schema.cliInvocations.endedAt),
-            isNotNull(schema.cliInvocations.supersededAt),
-          ),
-        ),
-      );
-    return new Set(rows.map((r) => r.id));
-  } catch (err) {
-    log.warn({ err }, 'agent-lane finalized lookup failed; ranking without the exclusion');
-    return new Set();
-  }
-}
-
 /** Position of `jobId` among the active INVOKE jobs that still have work to do, or -1 when it
  *  is not one of them.
  *
@@ -1379,7 +1360,7 @@ export function agentLaneRank(
  *  moves it are both honoured; id breaks a tie in enqueue order. Over-admission would need a job
  *  to be missing from a peer's read while outranking it, and BullMQ activates in queue order, so
  *  a job that outranks this one is already active by the time this one is. */
-async function enforceAgentLaneCap(
+export async function enforceAgentLaneCap(
   db: Database,
   job: Job<CliExecQueuePayload>,
   token: string | undefined,
@@ -1410,14 +1391,16 @@ async function enforceAgentLaneCap(
     log.warn({ err }, 'agent-lane rank failed; allowing job');
     return;
   }
-  if (rank < agentCap) return;
+  // A lease is a slot no job holds; the two reads are not atomic, so this overshoots by at most one.
+  const leases = await liveAgentLeaseCount();
+  if (rank < Math.max(0, agentCap - leases)) return;
   try {
     await job.moveToDelayed(Date.now() + PAUSE_DEFER_MS, token);
   } catch (err) {
     log.warn({ err }, 'agent-lane defer failed; allowing job');
     return;
   }
-  log.info({ jobId: job.id, rank, agentCap }, 'agent pool full; deferring invocation');
+  log.info({ jobId: job.id, rank, agentCap, leases }, 'agent pool full; deferring invocation');
   throw new DelayedError();
 }
 
@@ -1526,7 +1509,7 @@ export async function startCliExecWorker(
   let agentCap = STATIC_PARALLEL_AGENTS;
   let concurrency = STATIC_PARALLEL_AGENTS + LIGHT_JOB_LANE;
   try {
-    agentCap = clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
+    agentCap = await currentAgentCap();
     concurrency = agentCap + LIGHT_JOB_LANE;
   } catch {
     /* config not initialized — keep the default */
@@ -1619,7 +1602,7 @@ export async function startCliExecWorker(
     try {
       // The retune tracks the AGENT pool; the worker always runs LIGHT_JOB_LANE wider so a
       // sign-in or version refresh is never queued behind agents.
-      agentCap = clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
+      agentCap = await currentAgentCap();
       next = agentCap + LIGHT_JOB_LANE;
     } catch (err) {
       log.warn({ err }, 'cli-exec concurrency resolve failed; keeping the current value');
