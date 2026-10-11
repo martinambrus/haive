@@ -207,8 +207,6 @@ function rtkChoiceFollowsLive(
   return verdict.kind === 'blank' || (verdict.kind === 'onboarding' && verdict.rtkRecorded);
 }
 
-const AGENT_TARGET_KINDS: ReadonlySet<string> = new Set(['agent', 'custom-agent', 'agents-index']);
-
 const storedAgentTargetsSchema = z.array(z.object(agentTargetSchema.shape));
 
 /** The agent targets 01 renders with from the context it resolves, or null when it resolves none. */
@@ -509,8 +507,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     customCurrent
       .filter((c) => {
         const kind = customSpecs.get(c.templateId)?.kind === 'agent' ? 'agent' : 'skill';
-        if (kind === 'agent' && agentTargets === null) return false;
-        return !bundleItemRenders(kind, { agentTargets: agentTargets ?? [], skillDirs });
+        if (agentTargets === null) return false;
+        return !bundleItemRenders(kind, { agentTargets, skillDirs });
       })
       .map((c) => c.templateId),
   );
@@ -594,17 +592,16 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
 
   // A row at a path its template no longer renders to (the directory of a CLI since disabled) is
   // offered for removal by 01 whatever the hashes say, so its template reads as changed while 02 could
-  // remove it. The agent kinds are left out where no render context resolves.
+  // remove it. Where no render context resolves, 01 plans nothing, so no row is judged.
   const strandedTemplateIds = new Set<string>();
   const strandedObsolete = new Set<string>();
-  if (root) {
+  if (root && agentTargets !== null) {
     for (const a of liveArtifacts) {
       const id = a.templateId;
       if (!currentByTemplate.has(id) || !filteredInstalled.has(id)) continue;
-      if (agentTargets === null && AGENT_TARGET_KINDS.has(a.templateKind)) continue;
       const rendered = rendersAt(
         { ...a, specId: customSpecs.get(id)?.specId },
-        { agentTargets: agentTargets ?? [], skillDirs },
+        { agentTargets, skillDirs },
       );
       if (rendered) continue;
       const read = await readUpgradeFile(root, a.diskPath);

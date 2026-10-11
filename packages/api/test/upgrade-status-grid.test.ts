@@ -698,6 +698,23 @@ describe('the banner and the plan agree on the paths a template renders to', () 
     expect(got.obsoleteTemplateIds).toEqual([agent.templateId]);
   });
 
+  it('judges no path where no render context resolves, as 01 plans nothing there', async () => {
+    world({
+      providers: CLAUDE_ONLY,
+      column: null,
+      items: [item('sk', 'skill', SPEC_SKILL)],
+      rows: [
+        row('custom.b1.sk', 'custom-skill', '.claude/skills/sk/SKILL.md', 'h-c'),
+        row('custom.b1.sk', 'custom-skill', '.agents/skills/sk/SKILL.md', 'h-c'),
+      ],
+    });
+    state.repo = { ...(state.repo as Record<string, unknown>), source: 'git' };
+    state.rows.set(schema.taskSteps, []);
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([]);
+    expect(got.hasUpgradeAvailable).toBe(false);
+  });
+
   it('B4: reads the targets step 07 recorded when no column or snapshot is left', async () => {
     world({
       providers: BOTH_CLIS,
