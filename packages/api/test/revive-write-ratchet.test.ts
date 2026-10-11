@@ -405,6 +405,34 @@ describe('a live-status write on a task row', () => {
     expect(covered(`await ${GUARD}(tx, id); await run();`)).toEqual([true]);
   });
 
+  // Every check here reads a task-row write by its `schema.tasks` text, so nothing may rename it.
+  it('finds schema.tasks under no other name in the sources it checks', () => {
+    const aliases = sources(SRC).flatMap((f) => {
+      const sf = ts.createSourceFile(f, readFileSync(f, 'utf8'), ts.ScriptTarget.Latest, true);
+      const out: string[] = [];
+      const visit = (n: ts.Node): void => {
+        if (
+          (ts.isVariableDeclaration(n) && n.initializer?.getText() === 'schema.tasks') ||
+          (ts.isBinaryExpression(n) &&
+            n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            n.right.getText() === 'schema.tasks') ||
+          (ts.isVariableDeclaration(n) &&
+            ts.isObjectBindingPattern(n.name) &&
+            n.initializer?.getText() === 'schema' &&
+            n.name.elements.some((e) => (e.propertyName ?? e.name).getText() === 'tasks'))
+        ) {
+          out.push(
+            `${relative(SRC, f)}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`,
+          );
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(sf);
+      return out;
+    });
+    expect(aliases).toEqual([]);
+  });
+
   it('does not count a guard in a sibling transaction', () => {
     const src = `async function route() {
       await db.transaction(async (tx) => { await ${GUARD}(tx, id); });
