@@ -385,7 +385,7 @@ async function embedAndStore(opts: {
   embeddingModel: string | null;
   embeddingDimensions: number;
   sync: IncrementalSync | null;
-  hashed: { chunks: number };
+  hashed: { chunks: number; realEmbedding: boolean };
 }): Promise<{ embedded: number; skipped: number }> {
   const { sync } = opts;
   const toEmbed: RagChunk[] = [];
@@ -441,6 +441,7 @@ async function embedAndStore(opts: {
       throw new RagEmbedFailureError(outcome.reason);
     }
     const embeddings = outcome.embeddings;
+    if (outcome.kind === 'embedded') opts.hashed.realEmbedding = true;
     const hashedHere = outcome.kind === 'hashed' && !!opts.ollamaUrl && !!opts.embeddingModel;
     if (hashedHere) {
       // Recorded before the first hashed upsert, so an aborted run still leaves the repo degraded.
@@ -778,7 +779,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       let codeFileCount = 0;
       let chunksEmbedded = 0;
       let chunksSkipped = 0;
-      const hashed = { chunks: 0 };
+      const hashed = { chunks: 0, realEmbedding: false };
 
       // --- KB files ---
       const totalKb = detected.kbFiles.length;
@@ -961,6 +962,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           .where(eq(schema.taskSteps.id, ctx.taskStepId));
       } else if (
         useOllama &&
+        hashed.realEmbedding &&
         health.degradedAt &&
         !(await ragStoreAwaitsReembed(conn, repositoryId ?? null, ctx.logger))
       ) {

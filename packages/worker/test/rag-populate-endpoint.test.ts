@@ -248,6 +248,12 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(repo.ragEmbedDegradedAt).toBeNull();
   });
 
+  it('keeps the flag when the run embedded nothing for real', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    await populate(detected({ ollamaReachable: true, kbFiles: [] }));
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
   it('keeps the flag when the NULL-hash read fails', async () => {
     repo.ragEmbedDegradedAt = new Date(0);
     nullHashProbeFails = true;
