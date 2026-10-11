@@ -568,6 +568,28 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       });
     };
 
+    // Once per rollback task and file, whether this pass or an earlier attempt moved the block, and a
+    // failure fails the step: a rollback that moved the block without a record misleads the offer.
+    const ensureRtkBlockAction = async (
+      templateKind: string,
+      file: string,
+      held: string,
+      left: string,
+    ) => {
+      const [existing] = await ctx.db
+        .select({ id: schema.onboardingArtifacts.id })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.taskId, ctx.taskId),
+            eq(schema.onboardingArtifacts.templateKind, templateKind),
+            eq(schema.onboardingArtifacts.diskPath, file),
+          ),
+        )
+        .limit(1);
+      if (!existing) await recordRtkBlockAction(templateKind, file, held, left);
+    };
+
     // Ahead of the rules region, while a file nobody touched since still holds what the strip left.
     const strips = detected.rtkBlockStrips ?? [];
     const loadRtkRecords = (recordIds: string[], templateKind: string) =>
@@ -598,26 +620,30 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         warnings.push(`cannot put back the RTK block in ${strip.file}: no record of what it held`);
         continue;
       }
+      let back: Awaited<ReturnType<typeof restoreRtkBlocks>>;
       try {
-        const back = await restoreRtkBlocks(
+        back = await restoreRtkBlocks(
           ctx.repoPath,
           strip.file,
           record.writtenContent,
           record.lastObservedDiskHash,
         );
-        if (back.outcome === 'restored' || back.outcome === 'standing') {
-          revertedCount += 1;
-          if (back.outcome === 'restored' && strip.file === RTK_BLOCK_HOME) {
-            await recordRtkBlockAction(RTK_BLOCK_RESTORE_RECORD, strip.file, back.held, back.left);
-          }
-          continue;
-        }
-        const why = back.outcome === 'absent' ? 'it was removed after the upgrade' : back.reason;
-        warnings.push(`did not put back the RTK block in ${strip.file}: ${why}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         warnings.push(`could not put back the RTK block in ${strip.file}: ${msg}`);
+        continue;
       }
+      if (back.outcome === 'restored' || back.outcome === 'standing') {
+        revertedCount += 1;
+        if (strip.file === RTK_BLOCK_HOME) {
+          const held = back.outcome === 'restored' ? back.held : record.writtenContent;
+          const left = back.outcome === 'restored' ? back.left : record.writtenContent;
+          await ensureRtkBlockAction(RTK_BLOCK_RESTORE_RECORD, strip.file, held, left);
+        }
+        continue;
+      }
+      const why = back.outcome === 'absent' ? 'it was removed after the upgrade' : back.reason;
+      warnings.push(`did not put back the RTK block in ${strip.file}: ${why}`);
     }
 
     // The block a restore put in comes out only while the file still holds what the restore left.
@@ -636,26 +662,28 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         );
         continue;
       }
+      let back: Awaited<ReturnType<typeof takeOutRestoredRtkBlock>>;
       try {
-        const back = await takeOutRestoredRtkBlock(
+        back = await takeOutRestoredRtkBlock(
           ctx.repoPath,
           restore.file,
           record.writtenContent,
           record.lastObservedDiskHash,
         );
-        if (back.outcome === 'removed' || back.outcome === 'already') {
-          revertedCount += 1;
-          if (back.outcome === 'removed') {
-            await recordRtkBlockAction(RTK_BLOCK_RECORD, restore.file, back.held, back.left);
-          }
-          continue;
-        }
-        const why = back.outcome === 'absent' ? 'it was removed after the upgrade' : back.reason;
-        warnings.push(`did not take the RTK block back out of ${restore.file}: ${why}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         warnings.push(`could not take the RTK block back out of ${restore.file}: ${msg}`);
+        continue;
       }
+      if (back.outcome === 'removed' || back.outcome === 'already') {
+        revertedCount += 1;
+        const held = back.outcome === 'removed' ? back.held : record.writtenContent;
+        const left = back.outcome === 'removed' ? back.left : record.writtenContent;
+        await ensureRtkBlockAction(RTK_BLOCK_RECORD, restore.file, held, left);
+        continue;
+      }
+      const why = back.outcome === 'absent' ? 'it was removed after the upgrade' : back.reason;
+      warnings.push(`did not take the RTK block back out of ${restore.file}: ${why}`);
     }
 
     for (const target of detected.targets) {

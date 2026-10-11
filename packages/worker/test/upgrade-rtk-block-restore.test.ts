@@ -241,6 +241,24 @@ describe('rolling back an upgrade that put the RTK block back', () => {
     expect(await read('AGENTS.md')).toBe(AGENTS_LEFT);
   });
 
+  it('fails a rollback whose record cannot be written, and its retry writes the record', async () => {
+    const { fake, seedRestore, rollBack, read } = await setup();
+    const restores = await seedRestore();
+    let failed = false;
+    fake.hooks.beforeInsert = (table) => {
+      if (table !== schema.onboardingArtifacts || failed) return;
+      failed = true;
+      throw new Error('db unavailable');
+    };
+    await expect(rollBack(restores)).rejects.toThrow('db unavailable');
+    expect(await read('AGENTS.md')).toBe(AGENTS_LEFT);
+    await rollBack(restores);
+    const taken = fake
+      .rows(schema.onboardingArtifacts)
+      .filter((r) => r.templateKind === 'rtk-block' && r.taskId === ROLLBACK);
+    expect(taken).toHaveLength(1);
+  });
+
   it('(f) keeps a file edited since, and says why', async () => {
     const { root, seedRestore, rollBack, read } = await setup();
     const restores = await seedRestore();
