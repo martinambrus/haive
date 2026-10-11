@@ -13,7 +13,9 @@ import {
   type AgentLease,
 } from '../queues/cli-exec/agent-lease.js';
 import { currentAgentCap } from '../queues/cli-exec/handlers.js';
+import { resolveAppReach } from '../queues/cli-exec/app-reach.js';
 import type { DockerVolumeMount } from './docker-runner.js';
+import { NPM_CACHE_ENV, npmCacheMount } from './npm-cache.js';
 import { runInSandbox, SANDBOX_WORKDIR } from './sandbox-runner.js';
 
 /** Exit status of the Haive-owned preamble when the command's binary is not on the image's PATH,
@@ -40,7 +42,8 @@ export type StepCommandResult =
   { ran: false; note: string } | { ran: true; exitCode: number; output: string };
 
 /** Run one command of a step (a project's test, lint or typecheck) in the task's sandbox, as one
- *  agent of the pool: it holds an agent lease for the run. Reports `ran: false` when the image has
+ *  agent of the pool: it holds an agent lease for the run, and it reaches the task's app and the
+ *  shared npm cache as an agent does. Reports `ran: false` when the image has
  *  no such binary rather than failing the project's check. No auth volume and no provider env are
  *  passed: the project's own code runs here, and has no use for the CLI's credentials. */
 export async function runStepCommandInSandbox(
@@ -89,17 +92,21 @@ export async function runStepCommandInSandbox(
   }
   const { marker, preamble } = missingBinaryGuard();
   try {
+    const appReach = await resolveAppReach(ctx.db, ctx.taskId);
     const runnerOptions: Parameters<typeof runInSandbox>[1] = {
       workdir,
       taskId: ctx.taskId,
       invocationId: `lease:${lease.id}`,
     };
     if (sandboxImage) runnerOptions.image = sandboxImage;
-    if (mounts.length > 0) runnerOptions.extraMounts = mounts;
+    runnerOptions.extraMounts = [...mounts, ...appReach.mounts, npmCacheMount()];
+    if (appReach.addHosts.length > 0) runnerOptions.addHosts = appReach.addHosts;
+    if (appReach.noProxyHosts.length > 0) runnerOptions.noProxyHosts = appReach.noProxyHosts;
     if (provider.networkPolicy) runnerOptions.networkPolicy = provider.networkPolicy;
     const runSpec: Parameters<typeof runInSandbox>[0] = {
       command: 'sh',
       args: ['-c', preamble, 'sh', ...options.argv],
+      env: { ...NPM_CACHE_ENV, ...appReach.env },
       timeoutMs: options.timeoutMs,
       signal: ctx.signal,
     };

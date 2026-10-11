@@ -4,6 +4,7 @@ import { TaskCancelledError, type StepContext } from '../step-engine/step-defini
 const runInSandbox = vi.fn();
 const release = vi.fn(async () => undefined);
 const acquireAgentLease = vi.fn();
+const resolveAppReach = vi.fn();
 
 vi.mock('./sandbox-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./sandbox-runner.js')>()),
@@ -12,6 +13,10 @@ vi.mock('./sandbox-runner.js', async (importOriginal) => ({
 vi.mock('../queues/cli-exec/agent-lease.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../queues/cli-exec/agent-lease.js')>()),
   acquireAgentLease: (...args: unknown[]) => acquireAgentLease(...args),
+}));
+vi.mock('../queues/cli-exec/app-reach.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../queues/cli-exec/app-reach.js')>()),
+  resolveAppReach: (...args: unknown[]) => resolveAppReach(...args),
 }));
 vi.mock('../queues/cli-exec/handlers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../queues/cli-exec/handlers.js')>()),
@@ -76,6 +81,16 @@ beforeEach(() => {
   release.mockClear();
   acquireAgentLease.mockReset();
   acquireAgentLease.mockResolvedValue({ id: 'lease-1', release });
+  resolveAppReach.mockReset();
+  resolveAppReach.mockResolvedValue({
+    mode: 'none',
+    url: null,
+    addHosts: [],
+    mounts: [],
+    env: {},
+    noProxyHosts: [],
+    tlsTrusted: false,
+  });
 });
 
 describe('runStepCommandInSandbox', () => {
@@ -169,13 +184,16 @@ describe('runStepCommandInSandbox', () => {
     ran(0);
     await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], cwdRel: 'web', timeoutMs: 1 });
     const [spec, options] = runInSandbox.mock.calls[0]!;
-    expect(spec.env).toBeUndefined();
+    expect(spec.env).toEqual({ npm_config_cache: '/haive-npm-cache' });
     expect(spec.wrapperContent).toBeUndefined();
     expect(options.extraMounts.some((m: { kind?: string }) => m.kind === 'auth')).toBe(false);
     expect(options.extraMounts.map((m: { target: string }) => m.target)).toEqual([
       '/haive/workdir/.git',
       '/haive/workdir',
+      '/haive-npm-cache',
     ]);
+    expect(options.addHosts).toBeUndefined();
+    expect(options.noProxyHosts).toBeUndefined();
     expect(spec.extraFiles).toHaveLength(2);
     expect(options.taskId).toBe('task-1');
     expect(options.invocationId).toBe('lease:lease-1');
@@ -220,5 +238,33 @@ describe('runStepCommandInSandbox', () => {
     const signal = new AbortController().signal;
     await runStepCommandInSandbox(ctx({ signal }), { argv: ['pnpm'], timeoutMs: 1, onWait });
     expect(acquireAgentLease.mock.calls[0]![1]).toEqual({ signal, onWait });
+  });
+
+  it("gives the sandbox the task's app reach as an agent gets it", async () => {
+    ran(0);
+    resolveAppReach.mockResolvedValue({
+      mode: 'sandbox_http',
+      url: 'http://app-runner-task-1:3000',
+      addHosts: ['app.ddev.site:172.20.0.5'],
+      mounts: [{ source: 'ca-vol', subpath: 'rootCA.pem', target: '/etc/ssl/certs/ca.pem' }],
+      env: { NODE_EXTRA_CA_CERTS: '/etc/ssl/certs/ca.pem' },
+      noProxyHosts: ['app.ddev.site'],
+      tlsTrusted: true,
+    });
+    await runStepCommandInSandbox(ctx(), { argv: ['npx', 'playwright', 'test'], timeoutMs: 1 });
+    const [spec, options] = runInSandbox.mock.calls[0]!;
+    expect(resolveAppReach.mock.calls[0]![1]).toBe('task-1');
+    expect(options.extraMounts.map((m: { target: string }) => m.target)).toEqual([
+      '/haive/workdir/.git',
+      '/haive/workdir',
+      '/etc/ssl/certs/ca.pem',
+      '/haive-npm-cache',
+    ]);
+    expect(options.addHosts).toEqual(['app.ddev.site:172.20.0.5']);
+    expect(options.noProxyHosts).toEqual(['app.ddev.site']);
+    expect(spec.env).toEqual({
+      npm_config_cache: '/haive-npm-cache',
+      NODE_EXTRA_CA_CERTS: '/etc/ssl/certs/ca.pem',
+    });
   });
 });
