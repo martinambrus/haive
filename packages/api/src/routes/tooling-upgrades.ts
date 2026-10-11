@@ -309,7 +309,7 @@ async function forceRagReembed(
     },
     db,
     projectName,
-    { connectTimeoutSeconds: RAG_REEMBED_CONNECT_TIMEOUT_SECONDS },
+    { connectTimeoutSeconds: RAG_REEMBED_CONNECT_TIMEOUT_SECONDS, fetchTypes: false },
   );
   if (!conn) return false;
   const progress = { reset: 0 };

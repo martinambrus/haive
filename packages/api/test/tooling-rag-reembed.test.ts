@@ -136,7 +136,7 @@ describe('forcing a re-embed of a repository', () => {
       expect(update.statement).toContain('LIMIT 500');
       expect(update.params).toEqual([REPO]);
     }
-    expect(h.openOptions).toEqual([{ connectTimeoutSeconds: 3 }]);
+    expect(h.openOptions).toEqual([{ connectTimeoutSeconds: 3, fetchTypes: false }]);
   });
 
   it('sets a statement timeout inside every batch transaction, before its UPDATE', async () => {
