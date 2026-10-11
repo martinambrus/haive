@@ -366,6 +366,34 @@ function liveWrites(
   return out;
 }
 
+/** Every place in a source that reaches the tasks table other than as the text `schema.tasks`. */
+function tasksAliases(file: string, text: string): string[] {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const out: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (
+      (ts.isVariableDeclaration(n) && n.initializer?.getText() === 'schema.tasks') ||
+      (ts.isBinaryExpression(n) &&
+        n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        n.right.getText() === 'schema.tasks') ||
+      (ts.isVariableDeclaration(n) &&
+        ts.isObjectBindingPattern(n.name) &&
+        n.initializer?.getText() === 'schema' &&
+        n.name.elements.some((e) => (e.propertyName ?? e.name).getText() === 'tasks')) ||
+      (ts.isImportDeclaration(n) && importRenamesTasks(n)) ||
+      (ts.isElementAccessExpression(n) &&
+        n.expression.getText() === 'schema' &&
+        ts.isStringLiteralLike(n.argumentExpression) &&
+        n.argumentExpression.text === 'tasks')
+    ) {
+      out.push(`${file}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
 /** An import from the database package that reaches the tasks table under another name: `tasks`
  *  itself, a namespace, or `schema` renamed. */
 function importRenamesTasks(decl: ts.ImportDeclaration): boolean {
@@ -420,31 +448,19 @@ describe('a live-status write on a task row', () => {
 
   // Every check here reads a task-row write by its `schema.tasks` text, so nothing may rename it.
   it('finds schema.tasks under no other name in the sources it checks', () => {
-    const aliases = sources(SRC).flatMap((f) => {
-      const sf = ts.createSourceFile(f, readFileSync(f, 'utf8'), ts.ScriptTarget.Latest, true);
-      const out: string[] = [];
-      const visit = (n: ts.Node): void => {
-        if (
-          (ts.isVariableDeclaration(n) && n.initializer?.getText() === 'schema.tasks') ||
-          (ts.isBinaryExpression(n) &&
-            n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-            n.right.getText() === 'schema.tasks') ||
-          (ts.isVariableDeclaration(n) &&
-            ts.isObjectBindingPattern(n.name) &&
-            n.initializer?.getText() === 'schema' &&
-            n.name.elements.some((e) => (e.propertyName ?? e.name).getText() === 'tasks')) ||
-          (ts.isImportDeclaration(n) && importRenamesTasks(n))
-        ) {
-          out.push(
-            `${relative(SRC, f)}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`,
-          );
-        }
-        ts.forEachChild(n, visit);
-      };
-      visit(sf);
-      return out;
-    });
+    const aliases = sources(SRC).flatMap((f) =>
+      tasksAliases(relative(SRC, f), readFileSync(f, 'utf8')),
+    );
     expect(aliases).toEqual([]);
+  });
+
+  it('reads every other way to reach the tasks table as an alias', () => {
+    const found = (text: string) => tasksAliases('x.ts', text).length;
+    expect(found(`const t = schema.tasks;`)).toBe(1);
+    expect(found(`let t; t = schema.tasks;`)).toBe(1);
+    expect(found(`const { tasks } = schema;`)).toBe(1);
+    expect(found(`db.update(schema['tasks']).set({ status: 'running' });`)).toBe(1);
+    expect(found(`db.update(schema.tasks).set({ status: 'running' });`)).toBe(0);
   });
 
   it('reads an import that renames the tasks table as an alias', () => {
