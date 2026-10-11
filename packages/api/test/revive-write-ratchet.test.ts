@@ -32,19 +32,39 @@ function keyOf(name: ts.PropertyName | undefined): string | null {
   }
   return null;
 }
+/** The status a write sets: `.update(schema.tasks).set(...)`, or the `set` of an
+ *  `.insert(schema.tasks)...onConflictDoUpdate(...)`, which revives the row it collides with. */
 function writtenStatus(call: ts.CallExpression): string | null {
   const callee = call.expression;
-  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'set') return null;
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  const builder =
+    callee.name.text === 'set'
+      ? 'update'
+      : callee.name.text === 'onConflictDoUpdate'
+        ? 'insert'
+        : null;
+  if (builder === null) return null;
   let inner: ts.Expression = callee.expression;
   while (ts.isCallExpression(inner) || ts.isPropertyAccessExpression(inner)) {
     if (
       ts.isCallExpression(inner) &&
       ts.isPropertyAccessExpression(inner.expression) &&
-      inner.expression.name.text === 'update'
+      inner.expression.name.text === builder
     ) {
       if (!isTasksTable(inner.arguments[0])) return null;
-      const arg = call.arguments[0];
+      let arg = call.arguments[0];
       if (!arg) return null;
+      if (builder === 'insert') {
+        if (!ts.isObjectLiteralExpression(arg)) return UNKNOWN;
+        const named = arg.properties.filter((p) => keyOf(p.name) === 'set');
+        if (arg.properties.some((p) => ts.isSpreadAssignment(p) || keyOf(p.name) === null)) {
+          return UNKNOWN;
+        }
+        const set = named[named.length - 1];
+        if (!set) return null;
+        if (!ts.isPropertyAssignment(set)) return UNKNOWN;
+        arg = set.initializer;
+      }
       if (ts.isIdentifier(arg)) return objectMayCarryStatus(call, arg.text) ? UNKNOWN : null;
       if (!ts.isObjectLiteralExpression(arg)) return UNKNOWN;
       // Later properties override earlier ones, so the last that may carry a status decides.
@@ -712,6 +732,20 @@ describe('a live-status write on a task row', () => {
         `await ${GUARD}(tx, id); const update = tx.update(schema.tasks); await update.set({ status: 'running' });`,
       ),
     ).toEqual([true]);
+  });
+
+  it('counts an upsert that sets a live status on the row it collides with', () => {
+    const count = (body: string) =>
+      liveWrites(
+        'x.ts',
+        `async function f(v, s) { await db.insert(schema.tasks).values(v)${body}; }`,
+      ).length;
+    expect(
+      count(`.onConflictDoUpdate({ target: schema.tasks.id, set: { status: 'queued' } })`),
+    ).toBe(1);
+    expect(count(`.onConflictDoUpdate({ target: schema.tasks.id, set: s })`)).toBe(1);
+    expect(count(`.onConflictDoUpdate({ target: schema.tasks.id, set: { title: 't' } })`)).toBe(0);
+    expect(count(`.onConflictDoNothing()`)).toBe(0);
   });
 
   it('counts a local patch that is replaced or assigned into', () => {
