@@ -48,7 +48,13 @@ import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 
-const fakeCtx = { logger: logger.child({ test: '08c-apply' }) } as unknown as StepContext;
+const fakeCtx = {
+  logger: logger.child({ test: '08c-apply' }),
+  taskId: 't1',
+  taskStepId: 's1',
+  round: 0,
+  db: { insert: () => ({ values: () => ({ onConflictDoNothing: async () => undefined }) }) },
+} as unknown as StepContext;
 function mining(agentId: string, rawOutput: string | null): AgentMiningResult {
   return {
     agentId,

@@ -5,6 +5,15 @@ import type { CliExecJobPayload } from '@haive/shared';
 const stamp = vi.hoisted(() => `tree:${'ab'.repeat(20)}`);
 vi.mock('../src/build-stamp.js', () => ({ currentBuildStamp: () => stamp }));
 
+vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveGlobalKbContext: async () => ({
+    digest: { entries: [], omitted: 0, scanSaturated: false },
+    rules: [],
+    refused: [],
+    status: 'ok',
+  }),
+}));
 import { advanceStep, buildAgentMiningSummaryPrompt } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';

@@ -46,6 +46,16 @@ import { DDEV_GENERATED_BOUNDARY_MARKER } from '../src/repo/ddev-generated-bound
 import { HOUSE_RULES_END } from '@haive/shared/global-kb';
 import { makePointerFixture, type PointerFixture } from './support/worktree-pointer-db.js';
 
+vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveGlobalKbContext: async () => ({
+    digest: { entries: [], omitted: 0, scanSaturated: false },
+    rules: [],
+    refused: [],
+    status: 'ok',
+  }),
+}));
+
 vi.hoisted(() => {
   process.env.REPO_STORAGE_ROOT = `${process.env.TMPDIR ?? '/tmp'}/wt-pointer-dispatcher-${process.pid}-${Math.random().toString(36).slice(2)}`;
 });

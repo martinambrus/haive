@@ -1,6 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
+vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveGlobalKbContext: async () => ({
+    digest: { entries: [], omitted: 0, scanSaturated: false },
+    rules: [],
+    refused: [],
+    status: 'ok',
+  }),
+}));
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import type {
   StepDefinition,
