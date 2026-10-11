@@ -1689,6 +1689,13 @@ export function parseDdevProjectStatus(output: string): string | null {
   return null;
 }
 
+/** Whether the runner's DDEV project reports itself running. A stopped project still describes
+ *  cleanly, and `ddev exec` there starts it, so a caller that must not boot one asks this first. */
+export async function ddevProjectServing(handle: DdevRunnerHandle): Promise<boolean> {
+  const res = await ddevExec(handle, 'describe -j', { timeoutMs: 15_000 }).catch(() => null);
+  return res?.exitCode === 0 && parseDdevProjectStatus(res.output) === DDEV_STATUS_RUNNING;
+}
+
 /** The DDEV project's primary URL, via `ddev describe -j` inside the runner.
  *  Null when the project isn't running or the output can't be parsed. */
 export async function ddevPrimaryUrl(handle: DdevRunnerHandle): Promise<string | null> {
