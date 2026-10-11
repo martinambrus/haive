@@ -530,3 +530,60 @@ describe('ragHybridSearch lexical-only identifier ranker', () => {
     expect(statement.match(/repository_id = \$(\d+)/g)!.length).toBe(2);
   });
 });
+
+describe('ragHybridSearch identifier ranker prefers a definition', () => {
+  const VEC = [0.1, 0.2, 0.3, 0.4];
+  const identCte = (statement: string) => statement.match(/ident AS \([\s\S]*?\n {6}\),/)![0];
+
+  it.each([
+    ['hybrid', {}],
+    ['lexical-only', { lexicalOnly: true }],
+  ])('orders the %s ident CTE by the definition flag before the summed IDF', async (_b, cfg) => {
+    const { conn, calls } = recordingConn();
+
+    await ragHybridSearch(conn, VEC, 'getUserById validation', cfg);
+
+    const cte = identCte(calls.find((c) => c.statement.includes('ident AS ('))!.statement);
+    expect(cte).toMatch(/row_number\(\) OVER \(ORDER BY defines DESC, idf_score DESC, id\)/);
+    expect(cte).toMatch(/ORDER BY defines DESC, idf_score DESC\s+LIMIT 3/);
+  });
+
+  it.each([
+    ['hybrid', {}],
+    ['lexical-only', { lexicalOnly: true }],
+  ])(
+    'compares the section symbol, minus a ~n suffix, with each term on the %s branch',
+    async (_b, cfg) => {
+      const { conn, calls } = recordingConn();
+
+      await ragHybridSearch(conn, VEC, 'getUserById validation', cfg);
+
+      const main = calls.find((c) => c.statement.includes('ident AS ('))!;
+      const cte = identCte(main.statement);
+      const termsParam = Number(cte.match(/unnest\(\$(\d+)::text\[\], \$\d+::float8\[\]\)/)![1]);
+      expect(cte).toContain(`unnest($${termsParam}::text[]) AS d(term)`);
+      expect(cte).toContain("right(lower(split_part(e.section_id, '~', 1)), length(d.term) + 1)");
+      expect(cte).toContain("= '-' || d.term) AS defines");
+      expect(main.params[termsParam - 1]).toBe('{"getuserbyid"}');
+    },
+  );
+
+  it.each([
+    ['hybrid', {}],
+    ['lexical-only', { lexicalOnly: true }],
+  ])('leaves a query with no identifier without an ident CTE on the %s branch', async (_b, cfg) => {
+    const { conn, calls } = recordingConn();
+
+    await ragHybridSearch(conn, VEC, 'how do we validate the form', cfg);
+
+    const main = calls.find((c) => c.statement.includes('rrf'))!;
+    expect(main.statement).not.toContain('ident');
+    expect(main.statement).not.toContain('defines');
+    expect(main.params).toEqual(
+      'lexicalOnly' in cfg
+        ? ['how do we validate the form', 60, 8, 1]
+        : expect.not.arrayContaining([expect.stringContaining('{')]),
+    );
+    expect(calls.some((c) => c.statement.includes('AS t(term)'))).toBe(false);
+  });
+});

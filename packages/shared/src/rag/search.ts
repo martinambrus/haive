@@ -421,17 +421,20 @@ function identifierCteSql(
   queryParam: number,
 ): string {
   return `ident AS (
-        SELECT id, row_number() OVER (ORDER BY idf_score DESC, id) AS i_rank
+        SELECT id, row_number() OVER (ORDER BY defines DESC, idf_score DESC, id) AS i_rank
         FROM (
           SELECT e.id,
                  (SELECT COALESCE(sum(u.idf), 0)
                     FROM unnest($${termsParam}::text[], $${idfsParam}::float8[]) AS u(term, idf)
-                   WHERE e.content_tsv @@ ('''' || u.term || '''')::tsquery) AS idf_score
+                   WHERE e.content_tsv @@ ('''' || u.term || '''')::tsquery) AS idf_score,
+                 EXISTS (SELECT 1 FROM unnest($${termsParam}::text[]) AS d(term)
+                          WHERE right(lower(split_part(e.section_id, '~', 1)), length(d.term) + 1)
+                                = '-' || d.term) AS defines
           FROM ${RAG_TABLE} e
           WHERE e.content_tsv @@ $${queryParam}::tsquery${extra}
         ) s
         WHERE idf_score > 0
-        ORDER BY idf_score DESC
+        ORDER BY defines DESC, idf_score DESC
         LIMIT ${Math.max(0, cfg.identifierCandidates)}
       ),`;
 }
