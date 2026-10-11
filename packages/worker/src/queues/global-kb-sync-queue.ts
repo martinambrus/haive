@@ -7,7 +7,7 @@ import {
   logger,
   type GlobalKbSyncJobPayload,
 } from '@haive/shared';
-import { vectorLiteral } from '@haive/shared/rag';
+import { ollamaEmbed, probeOllama, vectorLiteral } from '@haive/shared/rag';
 import {
   embedBatch,
   resolveEmbedBatchSize,
@@ -424,6 +424,70 @@ export function pickLostSyncs<T extends { id: string }>(
   return pending.filter((e) => !queued.has(e.id));
 }
 
+// Entries re-embedded per sweep: a CPU batch measured 50-69 s, and the worker runs 2 syncs at once.
+const DRIFT_REEMBED_PER_SWEEP = 20;
+
+type SyncCandidate = { id: string; namespace: string };
+
+/** Active entries owning a vector that is not a current-model vector: a hash fallback, one written
+ *  before provenance (NULL model) or by another model. The rows are the record, so no status is
+ *  written and a crash mid re-embed is picked up again by the next sweep. */
+async function findDriftedEntries(embedModel: string): Promise<SyncCandidate[]> {
+  return withGlobalKb(
+    getDb(),
+    (ctx) =>
+      ctx.conn.pg.unsafe(
+        `SELECT e.id, e.namespace FROM global_kb_entries e
+          WHERE e.status = 'active' AND e.superseded_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM ai_rag_embeddings r
+               WHERE r.entry_id = e.id AND r.namespace = e.namespace
+                 AND (r.embed_kind IS DISTINCT FROM 'model' OR r.embed_model IS DISTINCT FROM $1)
+            )
+          ORDER BY e.id`,
+        [embedModel],
+      ) as unknown as Promise<SyncCandidate[]>,
+  );
+}
+
+/** Whether a re-embed would write current-model vectors the column can hold: the Ollama answers and
+ *  one probe embed has the width of the store's `vector` column (the configured width for a jsonb
+ *  store). Without it a sweep would queue syncs that rewrite hash rows or die on the insert. */
+async function embedderMatchesStore(settings: {
+  ollamaUrl: string | null;
+  embedModel: string | null;
+  embeddingDimensions: number;
+}): Promise<boolean> {
+  const { ollamaUrl, embedModel } = settings;
+  if (!ollamaUrl || !embedModel) return false;
+  if (!(await probeOllama(ollamaUrl))) {
+    log.warn({ ollamaUrl }, 'global KB re-embed skipped: the embedder does not answer');
+    return false;
+  }
+  try {
+    const columns = await withGlobalKb(
+      getDb(),
+      async (ctx) =>
+        (await ctx.conn.pg.unsafe(
+          `SELECT format_type(a.atttypid, a.atttypmod) AS type FROM pg_attribute a
+            WHERE a.attrelid = to_regclass('ai_rag_embeddings') AND a.attname = 'vector' AND NOT a.attisdropped`,
+        )) as unknown as Array<{ type: string }>,
+    );
+    const width = Number(
+      /\((\d+)\)/.exec(columns[0]?.type ?? '')?.[1] ?? settings.embeddingDimensions,
+    );
+    const [vector] = await ollamaEmbed(ollamaUrl, embedModel, ['global KB embedder probe']);
+    if (vector?.length === width) return true;
+    log.warn(
+      { model: embedModel, got: vector?.length ?? 0, width },
+      'global KB re-embed skipped: the embedder width is not the store width',
+    );
+  } catch (err) {
+    log.warn({ err }, 'global KB re-embed skipped: the embedder probe failed');
+  }
+  return false;
+}
+
 /** Re-queue the sync of every ACTIVE entry still `pending` with no job to embed it.
  *
  *  Writers commit `embed_status = 'pending'` and enqueue only afterwards, outside the transaction,
@@ -453,13 +517,19 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
         ),
       ),
   );
-  if (pending.length === 0) return;
+  const drifted = settings.embedModel ? await findDriftedEntries(settings.embedModel) : [];
+  if (pending.length === 0 && drifted.length === 0) return;
   const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
   try {
-    const lost = pickLostSyncs(
-      pending,
-      await queue.getJobs(['active', 'waiting', 'delayed', 'prioritized']),
-    );
+    const liveJobs = await queue.getJobs(['active', 'waiting', 'delayed', 'prioritized']);
+    const unqueued = pickLostSyncs(drifted, liveJobs);
+    const drift =
+      unqueued.length > 0 && (await embedderMatchesStore(settings))
+        ? unqueued.slice(0, DRIFT_REEMBED_PER_SWEEP)
+        : [];
+    const owed = new Map<string, SyncCandidate>();
+    for (const e of [...pending, ...drift]) owed.set(e.id, e);
+    const lost = pickLostSyncs([...owed.values()], liveJobs);
     for (const e of lost) {
       await queue.add(
         GLOBAL_KB_JOB_NAMES.SYNC_ENTRY,
@@ -473,7 +543,7 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
     }
     if (lost.length > 0) {
       log.info(
-        { requeued: lost.length, pending: pending.length },
+        { requeued: lost.length, pending: pending.length, drifted: drift.length },
         'requeued global KB syncs that were never queued',
       );
     }
