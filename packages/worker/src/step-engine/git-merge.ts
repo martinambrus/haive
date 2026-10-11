@@ -100,6 +100,15 @@ export async function openMerge(
         : { kind: 'refused', detail: gitDetail(res) };
   if (handBack && before && opened.kind !== 'refused') {
     await handBackWritten(handBack, dir, await differingFrom(dir, before));
+    // A worker that died after an earlier attempt's merge commit, before its hand-back, finds the
+    // merge already made: what that merge brought in is handed back now.
+    if (
+      opened.kind === 'merged' &&
+      (await revParse(dir, 'HEAD')) === before &&
+      (await revParse(dir, 'HEAD^2')) === (await revParse(dir, ref))
+    ) {
+      await handBackWritten(handBack, dir, await differingFrom(dir, 'HEAD^1'));
+    }
   }
   return opened;
 }

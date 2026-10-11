@@ -1438,6 +1438,33 @@ describe.runIf(process.getuid?.() === 0)('a root merge in a tree the sandbox use
   });
 });
 
+describe.runIf(process.getuid?.() === 0)('a root merge whose hand-back a crash cut off', () => {
+  it('hands back what the merge brought in when a later attempt finds it already made', async () => {
+    const dir = await setupSandboxOwnedMerge();
+    try {
+      await git(dir, ['checkout', '-q', 'main']);
+      await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+      await git(dir, ['commit', '-qam', 'revert main edit']);
+      await git(dir, ['checkout', '-q', 'feature/x']);
+      await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+      await git(dir, ['commit', '-qam', 'revert feature edit']);
+      await git(dir, ['checkout', '-q', 'main']);
+      await exec('chown', ['-R', '1000:1000', dir]);
+      // The earlier attempt: git merged as root, and the worker died before handing anything back.
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      expect((await lstat(path.join(dir, 'fdir', 'z.txt'))).uid).toBe(0);
+
+      expect(await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).toEqual({
+        kind: 'merged',
+      });
+      const rels = ['fdir', 'fdir/sub', 'fdir/sub/y.txt', 'fdir/z.txt'];
+      expect(await ownersOf(dir, rels)).toEqual(Object.fromEntries(rels.map((r) => [r, 1000])));
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
 describe('a root abort that cannot hand back a name', () => {
   it('warns naming a name that is not UTF-8', async () => {
     const { dir } = await setupOddNameMerge();
