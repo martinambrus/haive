@@ -67,7 +67,9 @@ import {
 } from './steps/workflow/_spec-artifact.js';
 import { loadTaskMeta } from './steps/workflow/_task-meta.js';
 import {
-  isFatalProviderFailure,
+  isProviderOutage,
+  isProviderRefusal,
+  PROVIDER_FATAL_HEADLINES,
   isCliTimeoutFailure,
   isOutputTruncationMessage,
   cliTimeoutBudgetMinutes,
@@ -436,7 +438,25 @@ async function haltForDagEnvironmentFailures(
  *  AFTER the one that hit a provider wall (429/quota, bad auth, 5xx). Pure so the
  *  DAG fail-fast guard's decision is unit-testable without a DB. */
 export function pickFatalProviderError(rows: { errorMessage: string | null }[]): string | null {
-  return rows.find((r) => isFatalProviderFailure(r.errorMessage))?.errorMessage ?? null;
+  return rows.find((r) => isProviderOutage(r.errorMessage))?.errorMessage ?? null;
+}
+
+/** Why a level with review off failed, naming the issues the provider refused apart. */
+export function levelFailureMessage(
+  level: number,
+  failed: { issueKey: string; concerns?: string | null; errorMessage?: string | null }[],
+): string {
+  const refused = failed.filter(issueRefused).map((f) => f.issueKey);
+  const head = `DAG level ${level} failed: ${failed.map((f) => f.issueKey).join(', ')}`;
+  return refused.length === 0
+    ? head
+    : `${head}; the provider refused ${refused.join(', ')}, so it is not retried with the same prompt`;
+}
+
+/** Read only from the error Haive records off the classified invocation, never from the
+ *  agent-written concerns, which can name anything. */
+function issueRefused(issue: { errorMessage?: string | null }): boolean {
+  return issue.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
 }
 
 /** Commit any uncommitted work in an issue worktree (belt-and-suspenders — the
@@ -877,6 +897,13 @@ async function runLevelMerge(
     await saveMergeState(db, level.id, state);
     await clearAiFix(db, m.current.id);
     if (unaborted) return haltUnaborted(m, branch, unaborted);
+    if (target && isProviderRefusal(inv.errorMessage)) {
+      return haltConflicts(
+        m,
+        [target],
+        'the provider refused the merge fixer, so it is not sent again',
+      );
+    }
     m.current = await setStepStatus(db, m.current.id, { status: 'running' });
     if (fixerCut && target) return startConflictFix(m, state, target, true);
     // fall through to the merge pass + halt/ok decision
@@ -1352,6 +1379,13 @@ export async function ingestReviewRun(
       .where(eq(schema.dagAgentRuns.id, run.id));
   };
   const fixed = parseCoderResult(inv);
+
+  // The same prompt is refused again, so a refused fix coder or reviewer fails the issue as refused.
+  if (inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter)) {
+    await consume();
+    await setResolution(ra.db, issue, 'failed_unrecoverable', inv.errorMessage);
+    return;
+  }
 
   // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
   // after it — so the replacement is named (claim) before the old run is marked done.
@@ -2315,6 +2349,7 @@ export async function resolveEscalationPhase(
   let inFlight = false;
   let reloop = false;
   for (const issue of failed) {
+    if (issueRefused(issue)) continue;
     if (issue.lastAdvisorAction === 'ESCALATE_TO_REPLAN') continue;
     const runs = await ea.db
       .select()
@@ -2365,6 +2400,19 @@ export async function resolveEscalationPhase(
     return { status: 'waiting', row };
   }
   if (reloop) return { status: 'reloop', row: ea.current };
+
+  const refused = failed.filter(issueRefused);
+  if (refused.length > 0) {
+    const msg =
+      `DAG escalation aborted at level ${ea.level.level}: the provider refused ` +
+      `${refused.map((i) => i.issueKey).join(', ')}; its content is not re-sent to an advisor or replanner`;
+    const row = await setStepStatus(ea.db, ea.current.id, {
+      status: 'failed',
+      errorMessage: msg,
+      endedAt: new Date(),
+    });
+    return { status: 'aborted', row, error: msg };
+  }
 
   // Outer loop: replanner when failures are broad / escalated.
   const fresh = await reReadLevelIssues(ea);
@@ -2729,6 +2777,10 @@ export async function resolveDagPhase(
         }
         if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
         const result = parseCoderResult(inv);
+        // A refusal fails the issue whatever partial result the coder printed before it.
+        const refused =
+          inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
+        if (refused) result.outcome = 'failed_unrecoverable';
         // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
         // finished, so re-running it — bounded by the coder's own infra_retries — honours
@@ -2846,7 +2898,9 @@ export async function resolveDagPhase(
             );
             continue; // re-dispatched by step (B) on the next loop pass
           }
-          if (cls === 'transient') {
+          if (refused) {
+            result.concerns = `${issue.issueKey} coder was refused by the provider. Not retrying: the same prompt is refused again.`;
+          } else if (cls === 'transient') {
             // Re-dispatch budget spent: a persistently-killed coder is an environment
             // problem (usually a runner OOM). Stamp the marker the ENVIRONMENT halt reads.
             result.concerns =
@@ -2863,6 +2917,7 @@ export async function resolveDagPhase(
             filesModified: result.parsed ? result.filesModified : (issue.filesModified ?? []),
             debtItems: result.debtItems,
             concerns: result.concerns,
+            ...(refused ? { errorMessage: inv.errorMessage } : {}),
             similarSites: mergeSimilarSites(issue.similarSites, result.similarSites),
             rawOutput: inv.rawOutput ?? null,
             endedAt: new Date(),
@@ -2909,7 +2964,7 @@ export async function resolveDagPhase(
       };
     }
     if (coderFailed.length > 0 && !plan.reviewEnabled) {
-      const msg = `DAG level ${curLevel.level} failed: ${coderFailed.map((f) => f.issueKey).join(', ')}`;
+      const msg = levelFailureMessage(curLevel.level, coderFailed);
       const updated = await setStepStatus(db, current.id, {
         status: 'failed',
         errorMessage: msg,

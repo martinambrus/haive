@@ -9,7 +9,7 @@ import {
   ZERO_MERGE_RETRIES,
 } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
-import { isFatalProviderFailure } from './cli-exec/failure-class.js';
+import { isProviderOutage } from './cli-exec/failure-class.js';
 import { refuseRevive, type ReviveRefused } from './_revive-check.js';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
@@ -305,7 +305,7 @@ export async function autoResumeFailedStep(
             eq(schema.taskStepAgentMinings.status, 'failed'),
           ),
         );
-      const outageAgents = failedAgents.filter((a) => isFatalProviderFailure(a.errorMessage));
+      const outageAgents = failedAgents.filter((a) => isProviderOutage(a.errorMessage));
       if (outageAgents.length > 0) {
         await tx
           .update(schema.taskStepAgentMinings)

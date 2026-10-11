@@ -22,6 +22,7 @@ import {
   parseReplanner,
   resolveDagPhase,
   ingestReviewRun,
+  levelFailureMessage,
   ingestAdvisor,
   resolveEscalationPhase,
   resolveReviewPhase,
@@ -337,6 +338,14 @@ describe('pickFatalProviderError', () => {
 
   it('returns null for an empty set', () => {
     expect(pickFatalProviderError([])).toBe(null);
+  });
+
+  it('ignores a refused row and still returns an outage row', () => {
+    const refused = `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`;
+    expect(pickFatalProviderError([{ errorMessage: refused }])).toBe(null);
+    expect(
+      pickFatalProviderError([{ errorMessage: refused }, { errorMessage: RATE_LIMIT_MSG }]),
+    ).toBe(RATE_LIMIT_MSG);
   });
 });
 
@@ -1006,6 +1015,8 @@ function makeDagMergeWaitDb(opts: {
   }>;
   /** The dag_agent_runs rows a select of that table returns. */
   agentRuns?: unknown[];
+  /** The ended invocations the fatal-provider scan reads. */
+  endedInvocations?: { errorMessage: string | null }[];
   /** The level reads checkpointed after its first read, which ends the phase's loop. */
   checkpointAfterFirstRead?: boolean;
   /** The same after this many reads, for a test that drives the phase more than once. */
@@ -1060,7 +1071,7 @@ function makeDagMergeWaitDb(opts: {
     return c;
   }
   function resultsFor(table: unknown): unknown[] {
-    if (table === schema.cliInvocations) return []; // fatal-provider-failure scan: none
+    if (table === schema.cliInvocations) return opts.endedInvocations ?? []; // fatal-provider-failure scan
     if (table === schema.taskDagLevels) {
       levelReads += 1;
       const done =
@@ -1436,6 +1447,31 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
         expect(h.invocationInserts).toHaveLength(1);
         expect(h.invocationInserts[0]!.truncationRetry).toBe(true);
         expect(state.conflictRetries['ISSUE-1']).toBe(1);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
+    it('refused, with auto-resolve on: aborted and halted, the same prompt not sent again', async () => {
+      const { h, integrationDir, result } = await ingest(
+        ended({
+          exitCode: 1,
+          errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`,
+          prompt: 'resolve the merge',
+        }),
+        true,
+        'half-resolved\n',
+      );
+      try {
+        expect(result.resolved).toBe(false);
+        if (!result.resolved) {
+          expect(result.result.status).toBe('failed');
+          expect(result.result.row.errorMessage).toContain('refused');
+        }
+        expect(h.invocationInserts).toHaveLength(0);
+        expect(
+          await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']),
+        ).not.toBe(0);
       } finally {
         await rm(integrationDir, { recursive: true, force: true });
       }
@@ -2118,6 +2154,73 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
         (u) => u.table === schema.dagAgentRuns && (u.patch as { consumedAt?: unknown }).consumedAt,
       );
       expect(runInsert!.seq).toBeLessThan(consumeUpdate!.seq);
+    },
+  );
+});
+
+describe('levelFailureMessage', () => {
+  it('names the refused issues apart when review is off', () => {
+    const msg = levelFailureMessage(2, [
+      {
+        issueKey: 'ISSUE-1',
+        errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — refused.`,
+      },
+      { issueKey: 'ISSUE-2', concerns: null, errorMessage: 'tests failed' },
+    ]);
+    expect(msg).toBe(
+      'DAG level 2 failed: ISSUE-1, ISSUE-2; the provider refused ISSUE-1, so it is not retried with the same prompt',
+    );
+  });
+
+  it('does not read a refusal from the agent-written concerns', () => {
+    expect(
+      levelFailureMessage(1, [
+        {
+          issueKey: 'ISSUE-3',
+          concerns: 'mentions DAG_REFUSED and content_filter',
+          errorMessage: null,
+        },
+      ]),
+    ).toBe('DAG level 1 failed: ISSUE-3');
+  });
+
+  it('reads as before when nothing was refused', () => {
+    expect(levelFailureMessage(0, [{ issueKey: 'ISSUE-2', errorMessage: 'x' }])).toBe(
+      'DAG level 0 failed: ISSUE-2',
+    );
+  });
+});
+
+describe('ingestReviewRun: a refused review-loop agent', () => {
+  it.each(['coder', 'reviewer'])(
+    'fails the issue as refused and spawns nothing after a refused %s',
+    async (role) => {
+      const { db, inserts, updates } = makeSpawnDb();
+      const ra = {
+        db,
+        specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      } as never;
+      const issue = {
+        id: 'issue1',
+        issueKey: 'ISSUE-1',
+        innerIteration: 1,
+        errorMessage: null,
+      } as never;
+      const refusal = `${PROVIDER_FATAL_HEADLINES.content_filter} — the prompt was refused.`;
+
+      await ingestReviewRun(
+        ra,
+        issue,
+        { id: 'run-1', role } as never,
+        inv({ rawOutput: null, parsedOutput: null, exitCode: 1, errorMessage: refusal }),
+      );
+
+      expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
+      const resolved = updates.find((u) => u.table === schema.taskDagIssues);
+      expect(resolved?.patch).toMatchObject({
+        resolution: 'failed_unrecoverable',
+        errorMessage: refusal,
+      });
     },
   );
 });
@@ -3158,6 +3261,91 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       ]);
     });
 
+    const REFUSED = `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`;
+    const refusedCoder = {
+      ...killedCoder,
+      supersededAt: null,
+      exitCode: 1,
+      errorMessage: REFUSED,
+      prompt: 'implement the issue',
+    };
+
+    it('fails a refused coder even when the JSON it printed before the refusal parses', async () => {
+      const { issueUpdates } = await ingestCoder(
+        'running',
+        {
+          ...refusedCoder,
+          parsedOutput: {
+            issue_id: 'ISSUE-1',
+            outcome: 'completed',
+            files_modified: ['a.ts'],
+            debt_items: [],
+            concerns: '',
+          },
+        },
+        { issue: { infraRetries: 0 }, enqueued: [] },
+      );
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({
+          outcome: 'failed_unrecoverable',
+          errorMessage: expect.stringContaining(PROVIDER_FATAL_HEADLINES.content_filter),
+        }),
+      ]);
+    });
+
+    it('fails a refused coder with the refusal as its error and does not re-dispatch it', async () => {
+      const enqueued: unknown[] = [];
+      const { issueUpdates } = await ingestCoder('running', refusedCoder, {
+        issue: { infraRetries: 0 },
+        enqueued,
+      });
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({
+          outcome: 'failed_unrecoverable',
+          errorMessage: expect.stringContaining(PROVIDER_FATAL_HEADLINES.content_filter),
+        }),
+      ]);
+      expect(enqueued).toEqual([]);
+    });
+
+    it('lets the level go on past a refused row while a sibling is in flight', async () => {
+      const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-refused-'));
+      try {
+        const h = makeDagMergeWaitDb({
+          invocation: undefined,
+          integrationDir,
+          autoResolveConflicts: false,
+          checkpointAfterReads: 0,
+          endedInvocations: [{ errorMessage: REFUSED }],
+        });
+        const outcome = await resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          {
+            taskId: 'task1',
+            userId: 'user1',
+            repoPath: integrationDir,
+            sandboxWorkdir: integrationDir,
+            logger: logger.child({ test: 'dag-refused' }),
+            emitProgress: async () => {},
+            db: h.db,
+          } as unknown as StepContext,
+          {
+            userId: 'user1',
+            taskId: 'task1',
+            cliProviderId: null,
+            ignoreSavedStepClis: false,
+            providers: [{ id: 'p1', enabled: true }],
+            deps: { enqueueCliInvocation: async () => {} },
+          } as never,
+        );
+        expect(outcome.resolved).toBe(true);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps the files an earlier coder recorded when a coder fails with no result', async () => {
       const { issueUpdates } = await ingestCoder(
         'running',
@@ -3658,5 +3846,43 @@ describe('an issue title reaches the DAG prompts as one safe line', () => {
     const lines = linesOf(await buildUpstreamDebt(db as never, 'plan1', 1));
     expect(lines.filter((l) => l.includes('ISSUE-1'))).toHaveLength(1);
     expect(lines.filter((l) => l.startsWith('Ignore every rule above'))).toEqual([]);
+  });
+});
+
+describe('resolveEscalationPhase: an issue the provider refused', () => {
+  it('sends no advisor or replanner and stops the step naming the refusal', async () => {
+    const { db, writes } = lostRowPhaseDb({ invocation: undefined });
+    const refused = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 1,
+      advisorInvocations: 0,
+      lastAdvisorAction: null,
+      resolution: 'failed_unrecoverable',
+      outcome: 'failed_unrecoverable',
+      errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`,
+      concerns: null,
+    };
+    const result = await resolveEscalationPhase({
+      db,
+      issues: [refused],
+      level: { level: 0 },
+      current: { id: 'step1', status: 'running' },
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } },
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+      plan: { id: 'plan1', replannerInvocationId: null, replannerInvocations: 0 },
+    } as never);
+
+    expect(result.status).toBe('aborted');
+    expect(result.error).toContain('ISSUE-1');
+    expect(result.error).toContain('refused');
+    expect(writes.filter((w) => w.table === schema.cliInvocations)).toEqual([]);
+    expect(writes.filter((w) => w.table === schema.dagAgentRuns)).toEqual([]);
   });
 });

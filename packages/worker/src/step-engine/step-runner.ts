@@ -54,7 +54,8 @@ import {
   isCliPreemptionFailure,
   isFreeRedispatch,
   isCliTimeoutFailure,
-  isFatalProviderFailure,
+  isProviderOutage,
+  isProviderRefusal,
   isOutputTruncationMessage,
   isTransientCliFailure,
   withoutPreemptions,
@@ -1361,8 +1362,9 @@ async function resolveAgentMiningPhase(
     // save are already spent by the time any row lands here, whereas a coder fan-out runs for
     // half an hour. Scans every row, not just the newest, because a sibling can finish AFTER
     // the one that hit the wall.
+    // A content-filter refusal is that one agent's failure and degrades like any other.
     const fatalAgent = existing.find(
-      (r) => r.status === 'failed' && isFatalProviderFailure(r.errorMessage),
+      (r) => r.status === 'failed' && isProviderOutage(r.errorMessage),
     );
     if (fatalAgent?.errorMessage) {
       ctx.logger.warn(
@@ -3930,6 +3932,8 @@ async function retryMiningAgents(
       userAsked(r) ||
       ((r.attempts < maxAttempts || runsFree(r)) &&
         !truncatedAgain(r) &&
+        // An apply re-roll would send a refused prompt again; only a person asking may.
+        !isProviderRefusal(r.errorMessage) &&
         !repeatsCapabilityRequest(
           r.errorMessage?.trim() ?? '',
           params.providers,
