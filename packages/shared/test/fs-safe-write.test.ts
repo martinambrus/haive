@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import {
   chmod,
   lstat,
@@ -822,6 +822,25 @@ describe('fs-safe write primitives', () => {
         expect(await readdir(root)).not.toContain(
           '.top.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
         );
+      });
+
+      it('keeps a stale FIFO without opening it, so a writer waiting on it stays blocked', async () => {
+        const fifo = path.join(
+          root,
+          'src',
+          '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+        );
+        await promisify(execFile)('mkfifo', [fifo]);
+        await ageBy(fifo, HOURS_2);
+        const writer = spawn('sh', ['-c', 'printf hi > "$1"', 'sh', fifo], { stdio: 'ignore' });
+        try {
+          await writeFileNoFollow(root, 'src/a.txt', 'next');
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          expect(writer.exitCode).toBeNull();
+          expect((await lstat(fifo)).isFIFO()).toBe(true);
+        } finally {
+          writer.kill();
+        }
       });
 
       it('keeps a temp replaced between its age check and its removal', async () => {

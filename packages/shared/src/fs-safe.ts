@@ -1675,10 +1675,9 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
         if (!TEMP_SUFFIX.test(suffix) || Number(suffix.slice(0, suffix.indexOf('-'))) >= PID_MAX) {
           continue;
         }
-        // Held until its removal is done, so its inode cannot be reused by a replacement.
-        const fh = await open(at(dir.fh.fd, name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK).catch(
-          () => null,
-        );
+        // Held until its removal is done, so its inode cannot be reused by a replacement. O_PATH
+        // stats a FIFO or device without opening it as one.
+        const fh = await open(at(dir.fh.fd, name), O_PATH | O_NOFOLLOW).catch(() => null);
         if (fh === null) continue;
         try {
           const st = await fh.stat({ bigint: true });
