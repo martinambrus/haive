@@ -6,6 +6,7 @@ import {
   volumePrefix,
 } from '../naming/index.js';
 export * from './default-agent-rules.js';
+export * from './secret-env.js';
 
 export const APP_NAME = 'Haive';
 
