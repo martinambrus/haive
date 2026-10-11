@@ -10,7 +10,7 @@ import { browserHostname, contentSecurityPolicy } from '@/lib/content-security-p
 const ACCESS_COOKIE = 'haive_access';
 const REFRESH_COOKIE = 'haive_refresh';
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const decision = decideRouteAccess({
     path: request.nextUrl.pathname,
     hasAccessCookie: request.cookies.has(ACCESS_COOKIE),
