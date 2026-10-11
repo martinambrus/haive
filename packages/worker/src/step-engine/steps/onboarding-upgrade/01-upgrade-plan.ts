@@ -248,7 +248,6 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const repositoryId = await requireRepositoryId(ctx);
     const manifest = getTemplateManifest();
     const liveRows = await loadLiveArtifacts(ctx.db, repositoryId);
-    const renderContextColumn = await readRenderContextColumnRaw(ctx.db, repositoryId);
     const resolved = await resolveRenderContext(ctx.db, {
       repositoryId,
       userId: ctx.userId,
@@ -425,7 +424,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       missingRulesImports,
       rtkBlockLeftovers,
       rtkBlockRestorable,
-      renderContextColumn,
+      renderContextColumn: resolved.column,
     };
   },
 
