@@ -279,6 +279,20 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
     expect(s.onDisk()).toEqual(filesBefore);
   });
 
+  it('checks and writes under one lock, so no sync can land between the check and the files', async () => {
+    const s = await setup();
+    await s.write(context(), true, { expectedColumns: [{ planned: 'here' }] });
+    expect(s.lockKeys).toHaveLength(1);
+
+    const t = await setup();
+    t.hook.onLock = () =>
+      t.fake.patch(schema.repositories, REPO, { renderContext: { by: 'sync' } });
+    await expect(
+      t.write(context(), true, { expectedColumns: [{ planned: 'here' }] }),
+    ).rejects.toBeInstanceOf(ProjectStateMovedError);
+    expect(t.onDisk()).toEqual({ format: null, render: null });
+  });
+
   it('writes when the column is one the writer expected, or none', async () => {
     const s = await setup();
     await s.write(context(), true, { expectedColumns: [{ planned: 'elsewhere' }] });

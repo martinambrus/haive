@@ -77,27 +77,27 @@ export async function writeProjectStateRecord(
     // Refused before anything is written, so the column only ever holds what reads back.
     const column = renderContextColumnFor(context, rtkChoiceRecorded);
     const record = { ...emptyProjectState(), render: portableRender(column) };
-    // Checked before the files, so a refused write leaves the newer record on disk untouched.
-    if (expectedColumns) {
-      await db.transaction(async (tx) => {
-        await lockProjectState(tx, repositoryId);
-        await refuseMoved(tx, repositoryId, expectedColumns);
-      });
-    }
-    for (const [rel, text] of renderProjectState(record)) {
-      const path = `${PROJECT_STATE_DIR}/${rel}`;
-      await writeFileNoFollow(repoPath, path, text, { createParents: true });
-      written.push(path);
-    }
-
     const synced = {
       baseSnapshot: normalizeProjectState(record),
       lastError: null,
       updatedAt: new Date(),
     };
+    const writeFiles = async (): Promise<void> => {
+      for (const [rel, text] of renderProjectState(record)) {
+        const path = `${PROJECT_STATE_DIR}/${rel}`;
+        await writeFileNoFollow(repoPath, path, text, { createParents: true });
+        written.push(path);
+      }
+    };
+    // A fenced write keeps the lock from its check to its last write, files included, so no sync
+    // lands between them; an unfenced one writes its files first, before any database write.
+    if (!expectedColumns) await writeFiles();
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
-      if (expectedColumns) await refuseMoved(tx, repositoryId, expectedColumns);
+      if (expectedColumns) {
+        await refuseMovedColumn(tx, repositoryId, expectedColumns);
+        await writeFiles();
+      }
       await tx
         .update(schema.repositories)
         .set({ renderContext: column })
@@ -115,7 +115,13 @@ export async function writeProjectStateRecord(
   return written;
 }
 
-async function refuseMoved(tx: Tx, repositoryId: string, expected: unknown[]): Promise<void> {
+/** Throws ProjectStateMovedError when the column holds a context none of `expected` is. Call it
+ *  under `lockProjectState`, in the transaction whose write it fences. */
+export async function refuseMovedColumn(
+  tx: Tx,
+  repositoryId: string,
+  expected: unknown[],
+): Promise<void> {
   const [repo] = await tx
     .select({ renderContext: schema.repositories.renderContext })
     .from(schema.repositories)

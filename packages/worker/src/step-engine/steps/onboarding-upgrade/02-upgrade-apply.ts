@@ -41,6 +41,7 @@ import {
   failIfColumnStale,
   lockProjectState,
   ProjectStateMovedError,
+  refuseMovedColumn,
   ProjectStateWriteError,
   renderContextColumnFor,
   writeProjectStateRecord,
@@ -96,6 +97,11 @@ export interface ApplySelections {
 const PLAN_NO_LONGER_HOLDS =
   "The repository's project settings changed after this upgrade was planned, so its plan " +
   'no longer holds. Retry the plan step to plan the upgrade again.';
+
+/** The columns this plan may find: the one it read, or the one its own record write stores. */
+function plannedColumns(plan: UpgradePlanOutput): unknown[] {
+  return [plan.renderContextColumn, ownRecordColumn(plan)];
+}
 
 function ownRecordColumn(plan: UpgradePlanOutput): unknown {
   try {
@@ -1620,7 +1626,19 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
     const customApplicable = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
     const applicableExpanded: ExpandedRendering[] = [...haiveApplicable, ...customApplicable];
-    await updateApplicableTemplateIds(ctx.db, plan.repositoryId, applicableExpanded);
+    if (plan.renderContextColumn === undefined) {
+      await updateApplicableTemplateIds(ctx.db, plan.repositoryId, applicableExpanded);
+    } else {
+      await ctx.db
+        .transaction(async (tx) => {
+          await lockProjectState(tx, plan.repositoryId);
+          await refuseMovedColumn(tx, plan.repositoryId, plannedColumns(plan));
+          await updateApplicableTemplateIds(tx, plan.repositoryId, applicableExpanded);
+        })
+        .catch((err: unknown) => {
+          throw err instanceof ProjectStateMovedError ? new Error(PLAN_NO_LONGER_HOLDS) : err;
+        });
+    }
 
     // Rewrite .haive/install.json to reflect the post-upgrade state. Query
     // live rows fresh so deletions and upgrades are both accounted for.
@@ -1639,7 +1657,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           context: renderCtx,
           rtkChoiceRecorded: plan.rtkFollowsLive === true,
           ...(plan.renderContextColumn !== undefined
-            ? { expectedColumns: [plan.renderContextColumn, ownRecordColumn(plan)] }
+            ? { expectedColumns: plannedColumns(plan) }
             : {}),
         })),
       );

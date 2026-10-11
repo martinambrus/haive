@@ -776,6 +776,22 @@ describe('D2e: 02 refuses a plan whose column moved after it was planned', () =>
     expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
   });
 
+  it('refuses at the set it writes when a sync commits after the up-front check', async () => {
+    const s = await setup({ column: column(BASE), base: BASE, set: P, claims: BASE_CLAIMS });
+    const detected = await s.plan();
+    let locks = 0;
+    s.fake.hooks.beforeLock = () => {
+      if (++locks === 2) {
+        s.fake.patch(schema.repositories, REPO, { renderContext: jsonb(column(TEAM)) });
+      }
+    };
+
+    await expect(s.applyPlan(detected)).rejects.toThrow(/changed after this upgrade was planned/);
+
+    expect(s.setOf()).toEqual(P);
+    expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
+  });
+
   it('records the column its render context came from, even when a sync commits between reads', async () => {
     const s = await setup({ column: column(BASE), base: BASE, set: P, claims: BASE_CLAIMS });
     const select = s.fake.db.select.bind(s.fake.db);
