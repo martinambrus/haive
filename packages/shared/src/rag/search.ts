@@ -435,7 +435,8 @@ export async function ragHybridSearch(
     // the global KB passes the facet filter. They are mutually exclusive today but
     // combine cleanly (AND) if both are ever supplied.
     const conds = [fc?.core, repoCond, EXCLUDE_TASK_ROWS].filter(Boolean) as string[];
-    const denseWhere = conds.length ? `WHERE ${conds.join('\n          AND ')}` : '';
+    const denseConds = filter ? [...conds, `embed_kind = 'model'`] : conds;
+    const denseWhere = denseConds.length ? `WHERE ${denseConds.join('\n          AND ')}` : '';
     const lexExtra = conds.map((c) => `\n          AND ${c}`).join('');
     // The identifier ranker is a THIRD input to the fusion, appended after every
     // existing param so none of the numbering above shifts. When the query holds
@@ -677,7 +678,7 @@ async function fetchKnowledgeCandidates(
   const repoParam = 5 + (fc?.params.length ?? 0);
   const conds = [
     `source_type = ANY($2::text[])`,
-    ...(fc ? [fc.core] : []),
+    ...(fc ? [fc.core, `embed_kind = 'model'`] : []),
     ...(repositoryId ? [`repository_id = $${repoParam}`] : []),
   ];
   const params: (string | number)[] = [

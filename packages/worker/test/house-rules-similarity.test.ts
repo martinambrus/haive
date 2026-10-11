@@ -9,9 +9,9 @@ import { resolveEmbedBudget } from '@haive/shared/rag';
 const h = vi.hoisted(() => ({
   text: 'Add a cart icon\nShow it in the header.',
   embed: vi.fn(async (..._args: unknown[]): Promise<number[][]> => [[0.6, 0.8]]),
-  rows: [] as Array<{ id: string; hash: string | null; score: number | string }>,
+  rows: [] as Array<{ id: string; hash: string | null; score: number | string; kind?: string }>,
   hasVector: true,
-  jsonRows: [] as Array<{ id: string; hash: string | null; embedding: unknown }>,
+  jsonRows: [] as Array<{ id: string; hash: string | null; embedding: unknown; kind?: string }>,
   storeError: null as Error | null,
   strict: true,
   storeCalls: [] as Array<{ sql: string; params: unknown[] }>,
@@ -50,10 +50,14 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
         const built = new PgDialect().sqlToQuery(query);
         h.storeCalls.push({ sql: built.sql, params: built.params });
         if (built.sql.includes('information_schema')) return h.hasVector ? [{ '?column?': 1 }] : [];
-        if (built.sql.includes('embedding_json')) return h.jsonRows;
+        const keep = <T extends { kind?: string }>(rows: T[]): T[] =>
+          built.sql.includes("r.embed_kind = 'model'")
+            ? rows.filter((row) => (row.kind ?? 'model') === 'model')
+            : rows;
+        if (built.sql.includes('embedding_json')) return keep(h.jsonRows);
         if (built.sql.includes('r.vector')) {
           if (!h.hasVector) throw new Error('column r.vector does not exist');
-          return h.rows;
+          return keep(h.rows);
         }
         return [];
       },
@@ -323,19 +327,52 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
     ['pgvector', true],
     ['jsonb', false],
   ])(
-    'scores no rule while strict embedding is off, since hash vectors are stored as embedded, on a %s store',
+    'scores a model row and not a hash row, with strict embedding off, on a %s store',
     async (_label, hasVector) => {
       h.strict = false;
       h.hasVector = hasVector;
-      h.rows = [{ id: A, hash: 'hr1:Alpha', score: 0.9 }];
-      h.jsonRows = [{ id: A, hash: 'hr1:Alpha', embedding: [0.6, 0.8] }];
-      scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+      h.rows = [
+        { id: A, hash: 'hr1:Alpha', score: 0.9, kind: 'hashed' },
+        { id: C, hash: 'hr1:Gamma', score: 0.5, kind: 'model' },
+      ];
+      h.jsonRows = [
+        { id: A, hash: 'hr1:Alpha', embedding: [0.6, 0.8], kind: 'hashed' },
+        { id: C, hash: 'hr1:Gamma', embedding: [1, 0], kind: 'model' },
+      ];
+      scoreHouseRulesInBackground(
+        db,
+        INV,
+        TASK,
+        pendingStamp([
+          [A, 'Alpha'],
+          [C, 'Gamma'],
+        ]),
+      );
       const record = await recordWritten();
 
-      expect(record).toStrictEqual({ status: 'failed', errorClass: 'unknown_provenance' });
-      expect(h.embed).not.toHaveBeenCalled();
+      expect(record.status).toBe('ok');
+      const scores = record.scores as Array<{ id: string; score: number | null }>;
+      expect(
+        scores.map((x) => [x.id, x.score === null ? null : Math.round(x.score * 10) / 10]),
+      ).toEqual([
+        [A, null],
+        [C, hasVector ? 0.5 : 0.6],
+      ]);
+      expect(h.embed).toHaveBeenCalledOnce();
     },
   );
+
+  it('reads only model rows from the store, on both variants', async () => {
+    for (const hasVector of [true, false]) {
+      h.hasVector = hasVector;
+      h.storeCalls = [];
+      updates.length = 0;
+      scoreHouseRulesInBackground(db, INV, TASK, pendingStamp());
+      await recordWritten();
+      const read = h.storeCalls.find((call) => call.sql.includes('embed_status'))!;
+      expect(read.sql).toContain("r.embed_kind = 'model'");
+    }
+  });
 
   it('records failed for a task with no text to compare, without embedding', async () => {
     h.text = ' \n \n';
