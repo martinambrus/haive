@@ -9,9 +9,21 @@ import { resolveEmbedBudget } from '@haive/shared/rag';
 const h = vi.hoisted(() => ({
   text: 'Add a cart icon\nShow it in the header.',
   embed: vi.fn(async (..._args: unknown[]): Promise<number[][]> => [[0.6, 0.8]]),
-  rows: [] as Array<{ id: string; hash: string | null; score: number | string; kind?: string }>,
+  rows: [] as Array<{
+    id: string;
+    hash: string | null;
+    score: number | string;
+    kind?: string;
+    model?: string;
+  }>,
   hasVector: true,
-  jsonRows: [] as Array<{ id: string; hash: string | null; embedding: unknown; kind?: string }>,
+  jsonRows: [] as Array<{
+    id: string;
+    hash: string | null;
+    embedding: unknown;
+    kind?: string;
+    model?: string;
+  }>,
   storeError: null as Error | null,
   strict: true,
   storeCalls: [] as Array<{ sql: string; params: unknown[] }>,
@@ -50,10 +62,17 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
         const built = new PgDialect().sqlToQuery(query);
         h.storeCalls.push({ sql: built.sql, params: built.params });
         if (built.sql.includes('information_schema')) return h.hasVector ? [{ '?column?': 1 }] : [];
-        const keep = <T extends { kind?: string }>(rows: T[]): T[] =>
-          built.sql.includes("r.embed_kind = 'model'")
-            ? rows.filter((row) => (row.kind ?? 'model') === 'model')
-            : rows;
+        const keep = <T extends { kind?: string; model?: string }>(rows: T[]): T[] =>
+          rows
+            .filter(
+              (row) =>
+                !built.sql.includes("r.embed_kind = 'model'") || (row.kind ?? 'model') === 'model',
+            )
+            .filter(
+              (row) =>
+                !built.sql.includes('r.embed_model =') ||
+                built.params.includes(row.model ?? 'embed-model'),
+            );
         if (built.sql.includes('embedding_json')) return keep(h.jsonRows);
         if (built.sql.includes('r.vector')) {
           if (!h.hasVector) throw new Error('column r.vector does not exist');
@@ -372,6 +391,37 @@ describe('scoring the unmatched files rules of a write dispatch', () => {
       const read = h.storeCalls.find((call) => call.sql.includes('embed_status'))!;
       expect(read.sql).toContain("r.embed_kind = 'model'");
     }
+  });
+
+  it.each([
+    ['pgvector', true],
+    ['jsonb', false],
+  ])('ignores rows written by another model, on a %s store', async (_label, hasVector) => {
+    h.hasVector = hasVector;
+    h.rows = [
+      { id: A, hash: 'hr1:Alpha', score: 0.9, model: 'other-model' },
+      { id: C, hash: 'hr1:Gamma', score: 0.5 },
+    ];
+    h.jsonRows = [
+      { id: A, hash: 'hr1:Alpha', embedding: [0.6, 0.8], model: 'other-model' },
+      { id: C, hash: 'hr1:Gamma', embedding: [1, 0] },
+    ];
+    scoreHouseRulesInBackground(
+      db,
+      INV,
+      TASK,
+      pendingStamp([
+        [A, 'Alpha'],
+        [C, 'Gamma'],
+      ]),
+    );
+    const record = await recordWritten();
+
+    const scores = record.scores as Array<{ id: string; score: number | null }>;
+    expect(scores.map((x) => [x.id, x.score === null])).toEqual([
+      [A, true],
+      [C, false],
+    ]);
   });
 
   it('records failed for a task with no text to compare, without embedding', async () => {

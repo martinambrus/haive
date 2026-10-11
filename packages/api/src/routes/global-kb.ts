@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
 import { isLockNotAvailable, schema } from '@haive/database';
 import {
@@ -26,9 +26,11 @@ import {
   refusedHouseRuleText,
   resolveGlobalKbConnection,
   resolveGlobalKbSettings,
+  readVectorColumnWidth,
   resolveHouseRulesEnabled,
   validateHouseRuleGlobs,
   withGlobalKb,
+  withGlobalKbSchemaLock,
   type EnforceSpec,
   type GlobalKbCategory,
   FACET_DIMENSIONS,
@@ -278,11 +280,75 @@ const configSchema = z
   })
   .strict();
 
+// The bounds of the api's other reads of the store (rag.ts search).
+const VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS = 3;
+const VECTOR_CHECK_DEADLINE_MS = 6_000;
+const VECTOR_CHECK_STATEMENT_TIMEOUT_MS = 3_000;
+
+/** Runs `apply` while holding the store's schema lock, once the `vector` column is known to be `width` wide or absent.
+ *  A schema ensure takes the same lock and reads the width afterwards, so it creates the column at what `apply` saved.
+ *  A bare connection: `withGlobalKb` would first ensure the schema, creating the column at the saved width. */
+async function withVectorWidthLock(
+  settings: Awaited<ReturnType<typeof resolveGlobalKbSettings>>,
+  width: number,
+  apply: () => Promise<void>,
+) {
+  const conn = await resolveGlobalKbConnection(settings, getDb(), {
+    connectTimeoutSeconds: VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
+    fetchTypes: false,
+  });
+  let applying = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      if (!applying)
+        reject(new Error('the global KB store did not answer the vector width check in time'));
+    }, VECTOR_CHECK_DEADLINE_MS);
+  });
+  const locked = withGlobalKbSchemaLock(
+    conn.pg,
+    async (tx) => {
+      const current = await readVectorColumnWidth(tx);
+      if (current !== null && current !== width) {
+        throw new HttpError(
+          409,
+          "the store's vector column has another width and cannot be resized here; the embedding dimensions must match it",
+          'embed_dimensions_locked',
+        );
+      }
+      applying = true;
+      await apply();
+    },
+    { timeoutMs: VECTOR_CHECK_STATEMENT_TIMEOUT_MS },
+  );
+  void locked.catch(() => {});
+  try {
+    await Promise.race([locked, deadline]);
+  } catch (err) {
+    void conn.pg.end({ timeout: 0 }).catch(() => {});
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    await conn.close().catch(() => {});
+  }
+}
+
 globalKbRoutes.get('/config', async (c) => {
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
 });
 
-globalKbRoutes.put('/config', async (c) => {
+// One save at a time, each reading the settings the previous one left: a store switch and a dims
+// change from two requests must not both validate against the same saved store.
+let configSaves: Promise<unknown> = Promise.resolve();
+function serializeConfigSave<T>(run: () => Promise<T>): Promise<T> {
+  const next = configSaves.then(run, run);
+  configSaves = next.catch(() => {});
+  return next;
+}
+
+globalKbRoutes.put('/config', (c) => serializeConfigSave(() => putConfig(c)));
+
+async function putConfig(c: Context<AppEnv>) {
   const parsed = configSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid global KB config', 'invalid_body');
   const d = parsed.data;
@@ -311,24 +377,43 @@ globalKbRoutes.put('/config', async (c) => {
       'connection_string_required',
     );
   }
-  if (isAdmin && d.enabled !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
-  if (d.digestEnabled !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
-  if (isAdmin && d.mode !== undefined) await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
-  if (isAdmin && d.namespace !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);
-  if (d.ollamaUrl !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl);
-  if (d.embedModel !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
-  if (d.embedDimensions !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
-  if (d.archiveRetentionDays !== undefined)
-    await configService.set(
-      CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
-      String(d.archiveRetentionDays),
+  const dimsChange =
+    d.embedDimensions !== undefined && d.embedDimensions !== saved.embeddingDimensions;
+  if (
+    dimsChange &&
+    ((d.mode !== undefined && d.mode !== saved.mode) ||
+      (given !== '' && given !== saved.connectionString))
+  ) {
+    // The width check reads the saved store, so it cannot vouch for one this save switches to.
+    throw new HttpError(
+      409,
+      'change the embedding dimensions and the store in separate saves',
+      'embed_dimensions_with_store_change',
     );
+  }
+  const write = async () => {
+    if (isAdmin && d.enabled !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
+    if (d.digestEnabled !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
+    if (isAdmin && d.mode !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
+    if (isAdmin && d.namespace !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);
+    if (d.ollamaUrl !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl);
+    if (d.embedModel !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
+    if (d.embedDimensions !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
+    if (d.archiveRetentionDays !== undefined)
+      await configService.set(
+        CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+        String(d.archiveRetentionDays),
+      );
+  };
+  if (dimsChange) await withVectorWidthLock(saved, d.embedDimensions!, write);
+  else await write();
   if (isAdmin && d.connectionString !== undefined && d.connectionString.trim().length > 0) {
     await secretsService.set(
       SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
@@ -337,7 +422,7 @@ globalKbRoutes.put('/config', async (c) => {
     );
   }
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
-});
+}
 
 // --- Connection tests (the UI "Test" buttons). Both exercise the exact paths
 // the worker sync/query use, so a green result means the real embed/store path

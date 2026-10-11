@@ -233,6 +233,8 @@ export interface RagFacetFilter {
    *  dimension iff it does not constrain that dimension OR its set overlaps the
    *  project's; an empty project array excludes chunks that constrain it. */
   facets: Record<string, string[]>;
+  /** The configured embedding model: the dense half ranks only vectors this model wrote. */
+  embedModel: string;
 }
 
 /** The dimensions the facet filter constrains. Exported so a consumer that
@@ -439,6 +441,30 @@ function identifierCteSql(
       ),`;
 }
 
+/** The global HNSW index holds every model row and `embed_model` filters after its scan, so old-model rows can exhaust `ef_search`. */
+const GLOBAL_DENSE_SCAN_SQL = 'SET LOCAL hnsw.iterative_scan = relaxed_order';
+
+/** A global dense read runs in a transaction with iterative scan on, the SET in a savepoint; a per-repo read is untouched. */
+async function denseRead(
+  conn: RagConnection,
+  filter: RagFacetFilter | undefined,
+  text: string,
+  params: unknown[],
+): Promise<RawRow[]> {
+  if (!filter) return (await conn.pg.unsafe(text, params as never)) as unknown as RawRow[];
+  const run = async (pg: RagConnection['pg']): Promise<RawRow[]> => {
+    try {
+      await (pg as unknown as TransactionSql).savepoint((sp) => sp.unsafe(GLOBAL_DENSE_SCAN_SQL));
+    } catch (err) {
+      const code = (err as { code?: unknown } | null)?.code;
+      log.warn({ code: typeof code === 'string' ? code : undefined }, 'iterative scan unavailable');
+    }
+    return (await pg.unsafe(text, params as never)) as unknown as RawRow[];
+  };
+  const inTransaction = typeof (conn.pg as Partial<TransactionSql>).savepoint === 'function';
+  return inTransaction ? run(conn.pg) : ((await conn.pg.begin(run as never)) as RawRow[]);
+}
+
 /** Hybrid dense + lexical retrieval over a project RAG database.
  *
  *  Ranking uses Reciprocal Rank Fusion of the dense (pgvector cosine) and
@@ -484,7 +510,10 @@ export async function ragHybridSearch(
     // the global KB passes the facet filter. They are mutually exclusive today but
     // combine cleanly (AND) if both are ever supplied.
     const conds = [fc?.core, repoCond, EXCLUDE_TASK_ROWS].filter(Boolean) as string[];
-    const denseConds = filter ? [...conds, `embed_kind = 'model'`] : conds;
+    const modelParam = (repositoryId ? repoParam : boostParam) + 1;
+    const denseConds = filter
+      ? [...conds, `embed_kind = 'model'`, `embed_model = $${modelParam}`]
+      : conds;
     const denseWhere = denseConds.length ? `WHERE ${denseConds.join('\n          AND ')}` : '';
     const lexExtra = conds.map((c) => `\n          AND ${c}`).join('');
     // The identifier ranker is a THIRD input to the fusion, appended after every
@@ -494,7 +523,7 @@ export async function ragHybridSearch(
     // whole risk story for queries that never mention code.
     const ident = await planIdentifierRanker(conn, queryText, cfg, filter, repositoryId);
     const useIdent = ident.use;
-    const identTermsParam = (repositoryId ? repoParam : boostParam) + 1;
+    const identTermsParam = (repositoryId ? repoParam : boostParam) + (filter ? 2 : 1);
     const identIdfsParam = identTermsParam + 1;
     const identQueryParam = identIdfsParam + 1;
     // pgvector's HNSW index (idx_rag_vector_hnsw) is built on the `vector::halfvec(dims)`
@@ -597,11 +626,12 @@ export async function ragHybridSearch(
       ...(fc?.params ?? []),
       cfg.runbookBoost,
       ...(repositoryId ? [repositoryId] : []),
+      ...(filter ? [filter.embedModel] : []),
       ...(useIdent
         ? [pgTextArrayLiteral(ident.terms), pgFloatArrayLiteral(ident.idfs), ident.query as string]
         : []),
     ];
-    rows = (await conn.pg.unsafe(sqlText, params)) as unknown as RawRow[];
+    rows = await denseRead(conn, filter, sqlText, params);
   } else {
     // No usable dense half — either a jsonb-fallback store with no vector column,
     // or `lexicalOnly` for a repo whose vectors cannot be trusted. Lexical ranking.
@@ -768,9 +798,10 @@ async function fetchKnowledgeCandidates(
   // Base params are $1..$4; facet params (if any) start at $5; repository_id last.
   const fc = filter ? buildFacetClause(filter, 5) : null;
   const repoParam = 5 + (fc?.params.length ?? 0);
+  const modelParam = repoParam + (repositoryId ? 1 : 0);
   const conds = [
     `source_type = ANY($2::text[])`,
-    ...(fc ? [fc.core, `embed_kind = 'model'`] : []),
+    ...(fc ? [fc.core, `embed_kind = 'model'`, `embed_model = $${modelParam}`] : []),
     ...(repositoryId ? [`repository_id = $${repoParam}`] : []),
   ];
   const params: (string | number)[] = [
@@ -780,9 +811,12 @@ async function fetchKnowledgeCandidates(
     denseFloor,
     ...(fc?.params ?? []),
     ...(repositoryId ? [repositoryId] : []),
+    ...(filter ? [filter.embedModel] : []),
   ];
 
-  return (await conn.pg.unsafe(
+  return denseRead(
+    conn,
+    filter,
     `
       WITH q AS (SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh)
       SELECT source_path, section_id, chunk_index, source_type, content, id,
@@ -795,5 +829,5 @@ async function fetchKnowledgeCandidates(
       LIMIT $3
       `,
     params,
-  )) as unknown as RawRow[];
+  );
 }

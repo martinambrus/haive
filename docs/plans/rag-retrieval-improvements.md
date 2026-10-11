@@ -319,7 +319,8 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   and sort at that size, iterative scan on or off. `search.ts` records why the default stays: on
   the modest table it was measured on, `ef_search` 100 flipped the planner to a 430 ms sequential
   scan against a 5 ms index scan, and iterative scan would need a `SET LOCAL` inside a
-  transaction. → P0, P3.
+  transaction. The GLOBAL store's dense reads now do exactly that (`denseRead`), because its
+  `embed_model` filter runs after the scan; per-repo reads are unchanged. → P0, P3.
 - **F15. Deleted vectors keep their index space.** The dev install's shared project store holds 0
   rows and a 0-byte heap, yet 312 MB, 275 MB of it the HNSW index; the vectors of the repositories
   deleted since stay allocated in it. A full re-embed churns the index the same way. → P1.

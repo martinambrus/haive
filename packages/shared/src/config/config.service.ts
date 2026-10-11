@@ -882,6 +882,14 @@ export class ConfigService {
     return value;
   }
 
+  /** Reads Redis past the local cache, for a value another process may have just written. */
+  async getFresh(key: string): Promise<string | null> {
+    this.ensureInitialized();
+    const value = await this.redis!.get(key);
+    this.localCache.set(key, { value, expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS });
+    return value;
+  }
+
   async getNumber(key: string, defaultValue = 0): Promise<number> {
     const value = await this.get(key);
     if (value === null) return defaultValue;

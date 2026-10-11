@@ -4,13 +4,60 @@ const h = vi.hoisted(() => ({
   role: 'admin',
   flags: new Map<string, boolean>(),
   settings: {} as Record<string, unknown>,
-  set: vi.fn(async (_key: string, _value: string) => {}),
+  events: [] as string[],
+  lockFails: false,
+  readFails: false,
+  settingsReads: 0,
+  gate: null as Promise<void> | null,
+  set: vi.fn(async (key: string, _value: string) => {
+    h.events.push(`set:${key}`);
+  }),
   setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
+  vectorType: null as string | null,
+  checks: [] as unknown[],
   connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
-    pg: async () => [],
-    close: async () => {},
+    pg: Object.assign(async () => [], {
+      begin: async (run: (tx: unknown) => Promise<unknown>) => {
+        if (h.gate) await h.gate;
+        h.events.push('begin');
+        const tx = Object.assign(
+          async (strings: TemplateStringsArray) => {
+            if (strings.join('').includes('pg_advisory_xact_lock')) {
+              if (h.lockFails) throw new Error('lock wait timed out');
+              h.events.push('lock');
+            }
+            return [];
+          },
+          {
+            unsafe: async (text: string) => {
+              if (text.startsWith('SET')) return [];
+              h.events.push('read');
+              if (h.readFails) throw new Error('statement timeout');
+              return rows(text);
+            },
+          },
+        );
+        try {
+          const result = await run(tx);
+          h.events.push('commit');
+          return result;
+        } catch (err) {
+          h.events.push('rollback');
+          throw err;
+        }
+      },
+      end: async () => {},
+    }),
+    close: async () => {
+      h.events.push('close');
+    },
   })),
 }));
+
+const rows = (text: string) => {
+  if (!text.includes('format_type')) return [];
+  return h.vectorType === null ? [] : [{ type: h.vectorType }];
+};
 
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
 vi.mock('../src/queues.js', () => ({ getGlobalKbSyncQueue: vi.fn(), getTaskQueue: vi.fn() }));
@@ -36,8 +83,17 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
-  resolveGlobalKbSettings: async () => h.settings,
-  resolveGlobalKbConnection: (settings: unknown, db: unknown) => h.connect(settings, db),
+  resolveGlobalKbSettings: async () => {
+    h.settingsReads += 1;
+    return h.settings;
+  },
+  resolveGlobalKbConnection: (settings: unknown, db: unknown, opts?: unknown) => {
+    if (opts !== undefined) h.checks.push(opts);
+    return h.connect(settings, db);
+  },
+  withGlobalKb: async () => {
+    throw new Error('the dims check must not ensure the schema');
+  },
 }));
 
 import { Hono } from 'hono';
@@ -90,6 +146,11 @@ beforeEach(() => {
   h.set.mockClear();
   h.setSecret.mockClear();
   h.connect.mockClear();
+  h.vectorType = null;
+  h.events = [];
+  h.lockFails = false;
+  h.readFails = false;
+  h.checks = [];
   h.role = 'admin';
   h.flags = new Map();
   h.settings = { ...SAVED };
@@ -283,6 +344,159 @@ describe('PUT /global-kb/config by an admin', () => {
 
       expect((await put({ mode: 'external' })).status).toBe(403);
     });
+  });
+});
+
+describe('PUT /global-kb/config with a different embedding width', () => {
+  const widen = { ...PAGE, embedDimensions: 1024 };
+
+  it('is refused with 409 while the store has a vector column of another width, rows or not, and writes nothing', async () => {
+    h.vectorType = 'vector(2560)';
+    const res = await put(widen);
+
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe('embed_dimensions_locked');
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.setSecret).not.toHaveBeenCalled();
+  });
+
+  it('is refused for a regular user too, before any other field of the save is written', async () => {
+    h.vectorType = 'vector(2560)';
+    h.role = 'user';
+
+    expect((await put({ ...widen, digestEnabled: false })).status).toBe(409);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('reads the store under a connect timeout and a deadline', async () => {
+    h.vectorType = 'vector(2560)';
+    await put(widen);
+
+    expect(h.checks).toEqual([
+      expect.objectContaining({ connectTimeoutSeconds: expect.any(Number), fetchTypes: false }),
+    ]);
+  });
+
+  it('is accepted when the store has no vector column or no table yet', async () => {
+    const res = await put(widen);
+
+    expect(res.status).toBe(200);
+    expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '1024']);
+  });
+
+  it('is accepted when the column already has the new width', async () => {
+    h.vectorType = 'vector(1024)';
+    const res = await put(widen);
+
+    expect(res.status).toBe(200);
+    expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '1024']);
+  });
+
+  it('is refused when the column carries no width, which no new width can match', async () => {
+    h.vectorType = 'vector';
+
+    expect((await put(widen)).status).toBe(409);
+  });
+
+  it('is refused together with a store switch, whose vectors it cannot read', async () => {
+    const res = await put({ ...widen, mode: 'external', connectionString: 'postgres://u:p@db/kb' });
+
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'embed_dimensions_with_store_change',
+    );
+    expect(h.checks).toEqual([]);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('writes the save inside the schema lock, after the width is read, and commits last', async () => {
+    const res = await put({ ...widen, namespace: 'other', embedModel: 'model-z' });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual([
+      'begin',
+      'lock',
+      'read',
+      `set:${CONFIG_KEYS.GLOBAL_KB_ENABLED}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_MODE}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_NAMESPACE}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS}`,
+      'commit',
+      'close',
+    ]);
+  });
+
+  it('writes nothing and rolls back on a width mismatch', async () => {
+    h.vectorType = 'vector(2560)';
+    const res = await put(widen);
+
+    expect(res.status).toBe(409);
+    expect(h.events).toEqual(['begin', 'lock', 'read', 'rollback', 'close']);
+  });
+
+  it('fails the request, writing nothing, when the lock cannot be taken', async () => {
+    h.lockFails = true;
+    const res = await put(widen);
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.events).not.toContain('commit');
+  });
+
+  it('fails the request, writing nothing, when the width cannot be read', async () => {
+    h.readFails = true;
+    const res = await put(widen);
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.setSecret).not.toHaveBeenCalled();
+    expect(h.events).not.toContain('commit');
+  });
+
+  it('fails the request, writing nothing, when the store cannot be reached', async () => {
+    h.connect.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    const res = await put(widen);
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('lets a second save read the settings only after the first one is done', async () => {
+    let release!: () => void;
+    h.gate = new Promise<void>((resolve) => (release = resolve));
+    const first = put(widen);
+    await vi.waitFor(() => expect(h.connect).toHaveBeenCalled());
+    const readsBefore = h.settingsReads;
+    const second = put({ ...PAGE, namespace: 'other' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.settingsReads).toBe(readsBefore);
+
+    release();
+    h.gate = null;
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(200);
+    expect(h.settingsReads).toBeGreaterThan(readsBefore);
+  });
+
+  it('is not checked, and accepted, when the width is unchanged', async () => {
+    h.vectorType = 'vector(2560)';
+    const res = await put(PAGE);
+
+    expect(res.status).toBe(200);
+    expect(h.checks).toEqual([]);
+    expect(h.connect).not.toHaveBeenCalled();
+    expect(h.events).toEqual(expect.not.arrayContaining(['begin']));
+  });
+
+  it('opens no connection for a save that leaves the width alone', async () => {
+    expect((await put({ digestEnabled: false })).status).toBe(200);
+
+    expect(h.connect).not.toHaveBeenCalled();
+    expect(h.set).toHaveBeenCalledTimes(1);
   });
 });
 

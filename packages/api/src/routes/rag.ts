@@ -435,7 +435,7 @@ export async function executeRagSearch(
               gvec ?? [],
               query,
               { lexicalOnly: gvec === null, identifierSearch, ...(topK ? { topK } : {}) },
-              { namespace: settings.namespace, facets },
+              { namespace: settings.namespace, facets, embedModel: embedSettings.embedModel ?? '' },
             );
             const scoped = dedupeGlobalByEntry(
               raw.map((h) => ({ ...h, scope: 'global' as const })),

@@ -6,6 +6,8 @@ import {
   type GlobalKbConnection,
   type GlobalKbSettings,
 } from './connection.js';
+import { configService, CONFIG_KEYS } from '../config/config.service.js';
+import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
 import { backfillGlobalIdentifierTsv, ensureGlobalKbSchema } from './ensure-schema.js';
 import { GlobalKbDeadlineError } from './errors.js';
 import { createGlobalKbDb, type GlobalKbDb } from './schema.js';
@@ -63,12 +65,35 @@ async function openAndRun<T>(
   onOpen?.(conn);
   try {
     const key = storeKey(settings);
+    // Fresh, not cached: the api may have saved a new width a moment ago in another process. It
+    // applies only while the configured store is still the one this call opened.
+    const configuredStore = async () => {
+      const [mode, connectionString] = await Promise.all([
+        configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE),
+        secretsService.getFresh(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
+      ]);
+      return storeKey({
+        ...settings,
+        mode: mode === 'external' ? 'external' : 'internal',
+        connectionString: connectionString || null,
+      });
+    };
+    const resolveDims = async () => {
+      // Store read before AND after the width, so a switch landing between them is seen.
+      if ((await configuredStore()) !== key) return settings.embeddingDimensions;
+      const raw = Number.parseInt(
+        (await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS)) ?? '',
+        10,
+      );
+      if ((await configuredStore()) !== key) return settings.embeddingDimensions;
+      return Number.isNaN(raw) ? settings.embeddingDimensions : raw;
+    };
     // A call with a deadline never starts the shared ensure: its deadline kills the pool under it.
     const shared = schemaReady.get(key);
     if (shared) {
       await shared;
     } else if (opts.deadlineMs === undefined) {
-      const ready = ensureGlobalKbSchema(conn).then(
+      const ready = ensureGlobalKbSchema(conn, { resolveDims }).then(
         (r) => noteIdentifierBackfill(key, r.identifierBackfillDone),
         (err: unknown) => {
           schemaReady.delete(key);
@@ -78,7 +103,7 @@ async function openAndRun<T>(
       schemaReady.set(key, ready);
       await ready;
     } else {
-      const r = await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs });
+      const r = await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs, resolveDims });
       noteIdentifierBackfill(key, r.identifierBackfillDone);
       if (!schemaReady.has(key)) schemaReady.set(key, Promise.resolve());
     }

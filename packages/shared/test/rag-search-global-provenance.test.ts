@@ -4,11 +4,12 @@ import type { RagConnection } from '../src/rag/connection.js';
 
 function capturingConn(): { conn: RagConnection; statements: string[] } {
   const statements: string[] = [];
-  const pg = {
+  const pg: Record<string, unknown> = {
     unsafe: async (q: string) => {
       statements.push(q);
       return q.includes('information_schema.columns') ? [{ column_name: 'vector' }] : [];
     },
+    savepoint: async (run: (sp: unknown) => unknown) => run(pg),
   };
   return {
     conn: {
@@ -21,7 +22,7 @@ function capturingConn(): { conn: RagConnection; statements: string[] } {
   };
 }
 
-const FILTER: RagFacetFilter = { namespace: 'house', facets: {} };
+const FILTER: RagFacetFilter = { namespace: 'house', facets: {}, embedModel: 'model-a' };
 const QV = [0.1, 0.2, 0.3, 0.4];
 const denseCte = (sql: string): string =>
   sql.slice(sql.indexOf('dense_c AS'), sql.indexOf('dense AS'));
@@ -33,6 +34,31 @@ describe('ragHybridSearch ranks only model vectors in the global dense half', ()
 
     const search = statements.find((s) => s.includes('dense_c'))!;
     expect(denseCte(search)).toContain("embed_kind = 'model'");
+  });
+
+  it('requires the configured embed_model in dense_c, bound as a parameter that the statement numbers', async () => {
+    for (const repo of ['repo-1', undefined]) {
+      const calls: Array<{ q: string; params: unknown[] }> = [];
+      const pg: Record<string, unknown> = {
+        unsafe: async (q: string, params: unknown[] = []) => {
+          calls.push({ q, params });
+          return q.includes('information_schema.columns') ? [{ column_name: 'vector' }] : [];
+        },
+        savepoint: async (run: (sp: unknown) => unknown) => run(pg),
+      };
+      const conn = {
+        mode: 'internal',
+        pg,
+        embeddingDimensions: 4,
+        close: async () => {},
+      } as unknown as RagConnection;
+      await ragHybridSearch(conn, QV, 'anything', {}, FILTER, repo);
+
+      const search = calls.find((c) => c.q.includes('dense_c'))!;
+      const at = /embed_model = \$(\d+)/.exec(denseCte(search.q));
+      expect(at).not.toBeNull();
+      expect(search.params[Number(at![1]) - 1]).toBe('model-a');
+    }
   });
 
   it('leaves the lexical candidates alone, so a hashed row stays findable by words', async () => {
@@ -50,6 +76,7 @@ describe('ragHybridSearch ranks only model vectors in the global dense half', ()
       await ragHybridSearch(conn, QV, 'anything', {}, undefined, repo);
       const search = statements.find((s) => s.includes('dense_c'))!;
       expect(search).not.toContain('embed_kind');
+      expect(search).not.toContain('embed_model');
       expect(search).toContain(
         'COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q))) AS dense_sim',
       );
@@ -69,12 +96,14 @@ describe('ragHybridSearch ranks only model vectors in the global dense half', ()
 });
 
 describe('fetchKnowledgeCandidates on the global path', () => {
-  it('requires embed_kind = model, and the local candidate query does not', async () => {
+  const bound: unknown[][] = [];
+  it('requires embed_kind = model and the configured embed_model, and the local candidate query does not', async () => {
     const run = async (filter: RagFacetFilter | undefined, repo: string | undefined) => {
       const statements: string[] = [];
-      const pg = {
-        unsafe: async (q: string) => {
+      const pg: Record<string, unknown> = {
+        unsafe: async (q: string, params: unknown[] = []) => {
           statements.push(q);
+          if (q.includes('source_type = ANY')) bound.push(params);
           if (q.includes('information_schema.columns')) return [{ column_name: 'vector' }];
           if (q.includes('dense_c')) {
             return [
@@ -94,6 +123,7 @@ describe('fetchKnowledgeCandidates on the global path', () => {
           }
           return [];
         },
+        savepoint: async (run: (sp: unknown) => unknown) => run(pg),
       };
       const conn = {
         mode: 'internal',
@@ -105,7 +135,13 @@ describe('fetchKnowledgeCandidates on the global path', () => {
       return statements.find((s) => s.includes('source_type = ANY'))!;
     };
 
-    expect(await run(FILTER, undefined)).toContain("embed_kind = 'model'");
-    expect(await run(undefined, 'repo-1')).not.toContain('embed_kind');
+    const global = await run(FILTER, undefined);
+    expect(global).toContain("embed_kind = 'model'");
+    const at = /embed_model = \$(\d+)/.exec(global);
+    expect(at).not.toBeNull();
+    expect(bound[0]![Number(at![1]) - 1]).toBe('model-a');
+    const local = await run(undefined, 'repo-1');
+    expect(local).not.toContain('embed_kind');
+    expect(local).not.toContain('embed_model');
   });
 });

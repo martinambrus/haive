@@ -45,6 +45,34 @@ const RETIRED_FACET_INDEX_DIMENSIONS = [
 // the backend that holds the lock, and short, so a table lock is held no longer than its own step.
 const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';
 
+/** Runs `run` in a transaction holding the schema lock, released at commit or rollback. With
+ *  `timeoutMs` a wait for the lock, and any statement, is cut off after it. */
+export function withGlobalKbSchemaLock<T>(
+  pg: postgres.Sql,
+  run: (tx: postgres.TransactionSql) => Promise<T>,
+  opts: { timeoutMs?: number } = {},
+): Promise<T> {
+  const timeoutMs =
+    opts.timeoutMs === undefined ? undefined : Math.max(1, Math.floor(opts.timeoutMs));
+  return pg.begin(async (tx) => {
+    if (timeoutMs !== undefined) {
+      await tx.unsafe(`SET LOCAL lock_timeout = ${timeoutMs}`);
+      await tx.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    }
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${SCHEMA_LOCK_KEY}))`;
+    return run(tx) as Promise<T>;
+  }) as Promise<T>;
+}
+
+/** The fixed width of the vector table's `vector` column: null when there is none, NaN when it has no fixed width. */
+export async function readVectorColumnWidth(tx: postgres.TransactionSql): Promise<number | null> {
+  const columns = (await tx.unsafe(
+    `SELECT format_type(a.atttypid, a.atttypmod) AS type FROM pg_attribute a
+      WHERE a.attrelid = to_regclass('${VECTORS_TABLE}') AND a.attname = 'vector' AND NOT a.attisdropped`,
+  )) as unknown as Array<{ type: string }>;
+  return columns.length > 0 ? Number(/\((\d+)\)/.exec(columns[0]!.type)?.[1]) : null;
+}
+
 const IDENTIFIER_BACKFILL_BATCH = 2_000;
 
 /** Idempotent schema creation for the global KB store (both the source-of-truth
@@ -54,19 +82,10 @@ const IDENTIFIER_BACKFILL_BATCH = 2_000;
  *  the JSONB facet indexes. Never touches the main DB or the per-project schema. */
 export async function ensureGlobalKbSchema(
   conn: Pick<GlobalKbConnection, 'pg' | 'embeddingDimensions'>,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; resolveDims?: () => Promise<number> } = {},
 ): Promise<{ usedPgvector: boolean; identifierBackfillDone: boolean }> {
-  const timeoutMs =
-    opts.timeoutMs === undefined ? undefined : Math.max(1, Math.floor(opts.timeoutMs));
   const step = <T>(run: (tx: postgres.TransactionSql) => Promise<T>) =>
-    conn.pg.begin(async (tx) => {
-      if (timeoutMs !== undefined) {
-        await tx.unsafe(`SET LOCAL lock_timeout = ${timeoutMs}`);
-        await tx.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
-      }
-      await tx`SELECT pg_advisory_xact_lock(hashtext(${SCHEMA_LOCK_KEY}))`;
-      return run(tx);
-    });
+    withGlobalKbSchemaLock(conn.pg, run, { timeoutMs: opts.timeoutMs });
   const exec = (statement: string) => step((tx) => tx.unsafe(statement));
 
   let usedPgvector = true;
@@ -78,7 +97,7 @@ export async function ensureGlobalKbSchema(
     usedPgvector = false;
   }
 
-  const dims = conn.embeddingDimensions;
+  let dims = conn.embeddingDimensions;
 
   // 1. Source-of-truth entries table. Enum-like fields use TEXT CHECK rather than
   //    PG enum types so there are no main-DB enum migrations to coordinate.
@@ -171,7 +190,10 @@ export async function ensureGlobalKbSchema(
   // 2. Global vector table — the per-project ai_rag_embeddings shape PLUS
   //    namespace/user_id/entry_id/facets. pgvector primary, jsonb fallback.
   if (usedPgvector) {
-    await exec(`
+    // The width is read under the lock, so a save that changed it and holds the lock is seen.
+    await step(async (tx) => {
+      const wanted = opts.resolveDims ? await opts.resolveDims() : dims;
+      await tx.unsafe(`
       CREATE TABLE IF NOT EXISTS ${VECTORS_TABLE} (
         id SERIAL PRIMARY KEY,
         namespace TEXT NOT NULL,
@@ -184,11 +206,16 @@ export async function ensureGlobalKbSchema(
         chunk_hash TEXT,
         facets jsonb NOT NULL DEFAULT '{}'::jsonb,
         content TEXT NOT NULL,
-        vector vector(${dims}) NOT NULL,
+        vector vector(${wanted}) NOT NULL,
         content_tsv tsvector,
         created_at TIMESTAMP DEFAULT NOW()
       )
-    `);
+      `);
+      if (opts.resolveDims) {
+        const actual = await readVectorColumnWidth(tx);
+        dims = actual !== null && Number.isFinite(actual) ? actual : wanted;
+      }
+    });
   } else {
     await exec(`
       CREATE TABLE IF NOT EXISTS ${VECTORS_TABLE} (
