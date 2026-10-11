@@ -17,7 +17,13 @@ import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 const HOST_EXEC_DISABLED =
   'Host execution is disabled: Haive runs a project only inside a container. Build an environment template for this repository so the app can run in its app-runner.';
 
+const DOCKER_COMPOSE_NOT_BOOTABLE =
+  'Docker Compose projects cannot be booted: Haive runs a project only inside its app-runner (one process) or DDEV.';
+
 type ContainerTool = 'ddev' | 'docker-compose' | 'none';
+
+const hostExecReason = (containerTool: ContainerTool): string =>
+  containerTool === 'docker-compose' ? DOCKER_COMPOSE_NOT_BOOTABLE : HOST_EXEC_DISABLED;
 type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun' | 'none';
 
 /** Framework entrypoints we can map to a deterministic run command without an
@@ -273,7 +279,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
       envImageTag,
       repoSubpath,
       skip,
-      skipReason: skip ? HOST_EXEC_DISABLED : null,
+      skipReason: skip ? hostExecReason(containerTool) : null,
     };
   },
 
@@ -528,7 +534,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
       bootCommand,
       appUrl: null,
       healthCheckPassed: false,
-      output: HOST_EXEC_DISABLED,
+      output: hostExecReason(detected.containerTool),
     };
   },
 };
