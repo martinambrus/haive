@@ -44,6 +44,7 @@ import {
   loadPlanSkeletons,
   type SequenceProgress,
   loadPlanTouchedTasks,
+  lockPlanMerge,
   renderImpactMermaid,
   toEdgeViews,
   toNodeViews,
@@ -388,8 +389,11 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
   });
 });
 
-async function findOpenPlanMerge(repositoryId: string) {
-  return getDb().query.tasks.findFirst({
+async function findOpenPlanMerge(
+  repositoryId: string,
+  db: Pick<ReturnType<typeof getDb>, 'query'> = getDb(),
+) {
+  return db.query.tasks.findFirst({
     where: and(
       eq(schema.tasks.repositoryId, repositoryId),
       eq(schema.tasks.type, 'plan_merge'),
@@ -1252,26 +1256,32 @@ planRoutes.post('/:id/plan/merge', async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = planMergeStartRequestSchema.parse(await c.req.json().catch(() => ({})));
-  const existing = await findOpenPlanMerge(repositoryId);
-  // One live merge worktree per repository. A second conversation would build its
-  // own on top of the first one's and neither could land.
-  if (existing) {
-    throw new HttpError(
-      409,
-      'A merge conversation is already open for this repository',
-      'plan_merge_open',
-    );
-  }
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
-  const taskId = await spawnPlanTask({
-    userId,
-    repositoryId,
-    type: 'plan_merge',
-    title: `Resolve plan merge: ${repo.name}`,
-    metadata: {},
-    cliProviderId,
-    ignoreSavedStepClis: Boolean(body.cliProviderId),
+  // Under the lock a Save/Pull integration and a cancel's discard take around the scratch worktree.
+  const taskId = await getDb().transaction(async (tx) => {
+    await lockPlanMerge(tx, repositoryId);
+    // One live merge worktree per repository. A second conversation would build its
+    // own on top of the first one's and neither could land.
+    if (await findOpenPlanMerge(repositoryId, tx)) {
+      throw new HttpError(
+        409,
+        'A merge conversation is already open for this repository',
+        'plan_merge_open',
+      );
+    }
+    return spawnPlanTask({
+      db: tx,
+      enqueue: false,
+      userId,
+      repositoryId,
+      type: 'plan_merge',
+      title: `Resolve plan merge: ${repo.name}`,
+      metadata: {},
+      cliProviderId,
+      ignoreSavedStepClis: Boolean(body.cliProviderId),
+    });
   });
+  await enqueuePlanTask(taskId, userId);
   return c.json({ taskId }, 201);
 });
 

@@ -54,7 +54,7 @@ type Event = { taskId: string; taskStepId: string; eventType: string; payload: u
 
 function fakeDb() {
   const events: Event[] = [];
-  const flags = { lookupFails: false };
+  const flags = { lookupFails: false, liveConversation: false, locked: [] as unknown[] };
   const db = {
     select: () => ({
       from: (table: unknown) => ({
@@ -87,6 +87,18 @@ function fakeDb() {
         if (table === schema.taskEvents) events.push(v);
       },
     }),
+    // The conversation these tests leave open is abandoned, so no live one is found under the lock.
+    transaction: async <T>(fn: (tx: unknown) => Promise<T>) =>
+      fn({
+        execute: async (q: unknown) => void flags.locked.push(q),
+        select: () => ({
+          from: () => ({
+            where: () => ({
+              limit: async () => (flags.liveConversation ? [{ id: 't9' }] : []),
+            }),
+          }),
+        }),
+      }),
   };
   return { db, events, flags };
 }
@@ -130,6 +142,20 @@ describe('plan snapshot save and pull: a merge a conversation left open', () => 
     expect(await readFile(path.join(local, folder, 'files', 'docs', 'notes.txt'), 'utf8')).toBe(
       'scratch\n',
     );
+  });
+
+  it('refuses, under the lock, a save that finds a live conversation, and leaves its worktree', async () => {
+    const local = await unrelatedPair();
+    const { db, flags } = fakeDb();
+    h.db = db;
+    const detected = await planMergeStep.detect!(contextFor(local, db));
+    const work = path.join(detected.worktreePath, 'notes.txt');
+    await writeFile(work, 'in progress\n', 'utf8');
+    flags.liveConversation = true;
+
+    await expect(integrate(local)).rejects.toThrow('A merge conversation is open');
+    expect(flags.locked).toHaveLength(1);
+    expect(await readFile(work, 'utf8')).toBe('in progress\n');
   });
 
   it('fails the save and keeps the worktree when they cannot be moved aside', async () => {
