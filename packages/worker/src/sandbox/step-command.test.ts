@@ -1,0 +1,183 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { StepContext } from '../step-engine/step-definition.js';
+
+const runInSandbox = vi.fn();
+const release = vi.fn(async () => undefined);
+const acquireAgentLease = vi.fn();
+
+vi.mock('./sandbox-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./sandbox-runner.js')>()),
+  runInSandbox: (...args: unknown[]) => runInSandbox(...args),
+}));
+vi.mock('../queues/cli-exec/agent-lease.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../queues/cli-exec/agent-lease.js')>()),
+  acquireAgentLease: (...args: unknown[]) => acquireAgentLease(...args),
+}));
+vi.mock('../queues/cli-exec/handlers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../queues/cli-exec/handlers.js')>()),
+  currentAgentCap: async () => 3,
+}));
+vi.mock('../queues/cli-exec-queue.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../queues/cli-exec-queue.js')>()),
+  resolveAuthMounts: async () => [
+    { source: 'auth-vol', target: '/home/node/.claude', kind: 'auth' },
+  ],
+  resolveSandboxImageTag: async () => 'haive-img:test',
+  resolveInvocationRepoMount: async () => ({
+    repoMount: { source: 'haive_repos', target: '/haive/workdir', subpath: 'u/r/wt' },
+    hasWorktree: true,
+    hasRepo: true,
+  }),
+}));
+vi.mock('../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../queues/cli-exec/secret-mask.js')>()),
+  resolveSecretMasks: async () => [{ containerPath: '/haive/workdir/.env', content: '' }],
+}));
+vi.mock('../queues/cli-exec/gitfile-mask.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../queues/cli-exec/gitfile-mask.js')>()),
+  repoGitDataBoundary: async () => ({
+    mounts: [{ source: '/tmp/gitdata', target: '/haive/workdir/.git', readOnly: true }],
+    masks: [{ containerPath: '/haive/workdir/.git/config', content: '' }],
+  }),
+}));
+
+const { runStepCommandInSandbox, BINARY_MISSING_EXIT } = await import('./step-command.js');
+const { AgentLeaseTimeoutError } = await import('../queues/cli-exec/agent-lease.js');
+
+function ctx(over: Partial<StepContext> = {}): StepContext {
+  return {
+    db: {
+      query: {
+        cliProviders: {
+          findFirst: async () => ({
+            id: 'p1',
+            name: 'claude-code',
+            envVars: { ANTHROPIC_API_KEY: 'sk-secret' },
+            networkPolicy: { mode: 'none' },
+            wrapperContent: '#!/bin/sh',
+          }),
+        },
+      },
+    },
+    taskId: 'task-1',
+    cliProviderId: 'p1',
+    signal: new AbortController().signal,
+    ...over,
+  } as unknown as StepContext;
+}
+
+function ran(exitCode: number | null, stdout = '', stderr = '') {
+  runInSandbox.mockResolvedValue({ exitCode, stdout, stderr, durationMs: 1, timedOut: false });
+}
+
+beforeEach(() => {
+  runInSandbox.mockReset();
+  release.mockClear();
+  acquireAgentLease.mockReset();
+  acquireAgentLease.mockResolvedValue({ id: 'lease-1', release });
+});
+
+describe('runStepCommandInSandbox', () => {
+  it('reports not run when the task has no CLI provider, and takes no lease', async () => {
+    const res = await runStepCommandInSandbox(ctx({ cliProviderId: null }), {
+      argv: ['pnpm', 'test'],
+      timeoutMs: 1000,
+    });
+    expect(res).toEqual({ ran: false, note: 'not run: no CLI provider, so no sandbox image' });
+    expect(acquireAgentLease).not.toHaveBeenCalled();
+    expect(runInSandbox).not.toHaveBeenCalled();
+  });
+
+  it('maps the Haive sentinel to not run, naming the binary', async () => {
+    ran(BINARY_MISSING_EXIT);
+    const res = await runStepCommandInSandbox(ctx(), {
+      argv: ['vendor/bin/phpunit'],
+      timeoutMs: 1,
+    });
+    expect(res).toEqual({
+      ran: false,
+      note: 'not run: vendor/bin/phpunit is not in the sandbox image',
+    });
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the command's own exit 127 as a run", async () => {
+    ran(127, 'sh: foo: not found\n');
+    const res = await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
+    expect(res).toEqual({ ran: true, exitCode: 127, output: 'sh: foo: not found\n' });
+  });
+
+  it('returns the exit code and both streams', async () => {
+    ran(1, 'out', 'err');
+    expect(await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 })).toEqual({
+      ran: true,
+      exitCode: 1,
+      output: 'outerr',
+    });
+  });
+
+  it('passes the argv as separate words behind the preamble', async () => {
+    ran(0);
+    await runStepCommandInSandbox(ctx(), {
+      argv: ['npx', 'vitest', 'run', 'a b; rm -rf /'],
+      timeoutMs: 1,
+    });
+    const spec = runInSandbox.mock.calls[0]![0];
+    expect(spec.command).toBe('sh');
+    expect(spec.args.slice(0, 2)).toEqual([
+      '-c',
+      expect.stringContaining(`exit ${BINARY_MISSING_EXIT}`),
+    ]);
+    expect(spec.args.slice(2)).toEqual(['sh', 'npx', 'vitest', 'run', 'a b; rm -rf /']);
+    expect(spec.args[1]).not.toContain('vitest');
+  });
+
+  it('carries no auth mount and no provider env, but the task and lease labels', async () => {
+    ran(0);
+    await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], cwdRel: 'web', timeoutMs: 1 });
+    const [spec, options] = runInSandbox.mock.calls[0]!;
+    expect(spec.env).toBeUndefined();
+    expect(spec.wrapperContent).toBeUndefined();
+    expect(options.extraMounts.some((m: { kind?: string }) => m.kind === 'auth')).toBe(false);
+    expect(options.extraMounts.map((m: { target: string }) => m.target)).toEqual([
+      '/haive/workdir/.git',
+      '/haive/workdir',
+    ]);
+    expect(spec.extraFiles).toHaveLength(2);
+    expect(options.taskId).toBe('task-1');
+    expect(options.invocationId).toBe('lease:lease-1');
+    expect(options.workdir).toBe('/haive/workdir/web');
+    expect(options.image).toBe('haive-img:test');
+    expect(options.networkPolicy).toEqual({ mode: 'none' });
+  });
+
+  it('refuses a cwdRel that leaves the worktree', async () => {
+    await expect(
+      runStepCommandInSandbox(ctx(), { argv: ['pnpm'], cwdRel: '../x', timeoutMs: 1 }),
+    ).rejects.toThrow('leaves the worktree');
+    expect(acquireAgentLease).not.toHaveBeenCalled();
+  });
+
+  it('releases the lease after a thrown docker error', async () => {
+    runInSandbox.mockRejectedValue(new Error('docker daemon gone'));
+    await expect(
+      runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 }),
+    ).rejects.toThrow('docker daemon gone');
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports not run when no agent slot frees in time', async () => {
+    acquireAgentLease.mockRejectedValue(new AgentLeaseTimeoutError(600_000));
+    const res = await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
+    expect(res).toEqual({ ran: false, note: 'not run: no agent slot became free within 600s' });
+    expect(runInSandbox).not.toHaveBeenCalled();
+  });
+
+  it('hands the wait callback and the abort signal to the lease', async () => {
+    ran(0);
+    const onWait = vi.fn();
+    const signal = new AbortController().signal;
+    await runStepCommandInSandbox(ctx({ signal }), { argv: ['pnpm'], timeoutMs: 1, onWait });
+    expect(acquireAgentLease.mock.calls[0]![1]).toEqual({ signal, onWait });
+  });
+});
