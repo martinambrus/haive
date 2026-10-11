@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import {
   isRootClaimLive,
@@ -23,17 +24,24 @@ import {
   rtkSettingsNeeded,
   sha256Hex,
   skillEntrySchema,
+  type CliProviderName,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
 } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
+  agentTargetSchema,
+  bundleItemRenders,
   historyOrigin,
   isRenderContextSnapshot,
+  originAgentTargets,
   readRenderContextColumn,
   renderContextOrigin,
   renderContextProviderNames,
+  rendersAt,
   rtkLeftoversToRemove,
+  skillTargetDirs,
+  type AgentRenderTarget,
   type RenderContextOrigin,
   type SnapshotRowFacts,
 } from '@haive/shared/project-state';
@@ -140,17 +148,18 @@ function rtkProviderNames(
     : null;
 }
 
-/** Whether 01's render context follows the repository's RTK switch, which it does only when the
- *  context it renders from recorded a choice: the column's stored flag, else the newest live
- *  snapshot, else the 07 detect output of the last completed onboarding, else, for a blank
- *  repository, the scaffold's own. */
-async function rtkChoiceFollowsLive(
+/** What the last completed onboarding's step 07 recorded, which 01 renders from when the column and
+ *  every snapshot are gone. Null when no onboarding completed. */
+interface HistoryDetect {
+  detected: boolean;
+  rtkRecorded: boolean;
+  agentTargets: unknown;
+}
+
+async function loadHistoryDetect(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
-  origin: RenderContextOrigin<SnapshotRowFacts>,
-  source: string,
-): Promise<boolean> {
-  if (origin.from !== 'history') return origin.rtkRecorded;
+): Promise<HistoryDetect | null> {
   const [onboarding] = await db
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -163,10 +172,11 @@ async function rtkChoiceFollowsLive(
     )
     .orderBy(desc(schema.tasks.completedAt))
     .limit(1);
-  if (!onboarding) return historyOrigin({ onboarding: null, source }).kind === 'blank';
+  if (!onboarding) return null;
   const [generate] = await db
     .select({
       recorded: sql<boolean | null>`(${schema.taskSteps.detectOutput} -> 'rtkEnabled') is not null`,
+      agentTargets: sql<unknown>`${schema.taskSteps.detectOutput} -> 'agentTargets'`,
     })
     .from(schema.taskSteps)
     .where(
@@ -176,11 +186,74 @@ async function rtkChoiceFollowsLive(
       ),
     )
     .limit(1);
-  const history = historyOrigin({
-    onboarding: { detected: generate !== undefined, rtkRecorded: generate?.recorded === true },
-    source,
-  });
-  return history.kind === 'onboarding' && history.rtkRecorded;
+  return {
+    detected: generate !== undefined,
+    rtkRecorded: generate?.recorded === true,
+    agentTargets: generate?.agentTargets ?? null,
+  };
+}
+
+/** Whether 01's render context follows the repository's RTK switch, which it does only when the
+ *  context it renders from recorded a choice: the column's stored flag, else the newest live
+ *  snapshot, else the 07 detect output of the last completed onboarding, else, for a blank
+ *  repository, the scaffold's own. */
+function rtkChoiceFollowsLive(
+  origin: RenderContextOrigin<SnapshotRowFacts>,
+  history: HistoryDetect | null,
+  source: string,
+): boolean {
+  if (origin.from !== 'history') return origin.rtkRecorded;
+  const verdict = historyOrigin({ onboarding: history, source });
+  return verdict.kind === 'blank' || (verdict.kind === 'onboarding' && verdict.rtkRecorded);
+}
+
+const AGENT_TARGET_KINDS: ReadonlySet<string> = new Set(['agent', 'custom-agent', 'agents-index']);
+
+const storedAgentTargetsSchema = z.array(z.object(agentTargetSchema.shape));
+
+/** The agent targets 01 renders with from the context it resolves, or null when it resolves none. */
+function renderedAgentTargets(
+  origin: RenderContextOrigin<
+    SnapshotRowFacts & { snapshotAgentTargets: unknown; snapshotLspLanguages: unknown }
+  >,
+  history: HistoryDetect | null,
+  source: string,
+  providerRows: ReadonlyArray<{ name: CliProviderName; enabled: boolean }>,
+): AgentRenderTarget[] | null {
+  const stored = (value: unknown) => {
+    const parsed = storedAgentTargetsSchema.safeParse(value);
+    return parsed.success ? parsed.data : undefined;
+  };
+  if (origin.from === 'column') {
+    return originAgentTargets(
+      {
+        from: 'column',
+        agentTargets: origin.column.agentTargets,
+        lspLanguages: origin.column.lspLanguages,
+      },
+      providerRows,
+    );
+  }
+  if (origin.from === 'snapshot') {
+    const languages = z.array(z.string()).safeParse(origin.row.snapshotLspLanguages);
+    return originAgentTargets(
+      {
+        from: 'snapshot',
+        agentTargets: stored(origin.row.snapshotAgentTargets),
+        lspLanguages: languages.success ? languages.data : [],
+      },
+      providerRows,
+    );
+  }
+  const verdict = historyOrigin({ onboarding: history, source });
+  if (verdict.kind === 'blank') return originAgentTargets({ from: 'blank' }, providerRows);
+  if (verdict.kind === 'onboarding') {
+    return originAgentTargets(
+      { from: 'onboarding', agentTargets: stored(history?.agentTargets) },
+      providerRows,
+    );
+  }
+  return null;
 }
 
 /** The RTK settings files no live row records that still hold RTK's render or hook, which 01 offers
@@ -254,18 +327,23 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
     .where(eq(schema.customBundles.repositoryId, repositoryId));
   // 01 skips an item whose spec fails the schema its loader parses it with, so no rendering is current.
-  const customCurrent = bundleItems
-    .filter(
-      (b) =>
-        (b.kind === 'agent' ? agentSpecSchema : skillEntrySchema).safeParse(b.normalizedSpec)
-          .success,
-    )
-    .map((b) => ({
-      templateId: `custom.${b.bundleId}.${b.itemId}`,
-      schemaVersion: b.schemaVersion,
-      // The hash the worker records on an agent's artifact rows (expandCustomBundlesFor).
-      contentHash: b.kind === 'agent' ? bundleAgentTemplateHash(b.contentHash) : b.contentHash,
-    }));
+  const customSpecs = new Map<string, { kind: string; specId: string }>();
+  const customCurrent = bundleItems.flatMap((b) => {
+    const parsed = (b.kind === 'agent' ? agentSpecSchema : skillEntrySchema).safeParse(
+      b.normalizedSpec,
+    );
+    if (!parsed.success) return [];
+    const templateId = `custom.${b.bundleId}.${b.itemId}`;
+    customSpecs.set(templateId, { kind: b.kind, specId: parsed.data.id });
+    return [
+      {
+        templateId,
+        schemaVersion: b.schemaVersion,
+        // The hash the worker records on an agent's artifact rows (expandCustomBundlesFor).
+        contentHash: b.kind === 'agent' ? bundleAgentTemplateHash(b.contentHash) : b.contentHash,
+      },
+    ];
+  });
 
   // The AGENTS.md cli-rules region is per-repo content (the repo owner's merged
   // provider rules), so it is not in the global manifest cache. Recompute its
@@ -294,6 +372,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       id: schema.onboardingArtifacts.id,
       diskPath: schema.onboardingArtifacts.diskPath,
       templateId: schema.onboardingArtifacts.templateId,
+      templateKind: schema.onboardingArtifacts.templateKind,
       templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
       templateContentHash: schema.onboardingArtifacts.templateContentHash,
       writtenHash: schema.onboardingArtifacts.writtenHash,
@@ -307,6 +386,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
         boolean | null
       >`jsonb_typeof(${schema.onboardingArtifacts.formValuesSnapshot} -> 'rtkEnabled') = 'boolean'`,
       snapshotProviders: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'enabledCliProviders'`,
+      snapshotAgentTargets: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'agentTargets'`,
+      snapshotLspLanguages: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'lspLanguages'`,
     })
     .from(schema.onboardingArtifacts)
     .where(
@@ -420,6 +501,26 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     ),
   });
   const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
+  const history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
+  const agentTargets = renderedAgentTargets(origin, history, repo.source, ruleProviderRows);
+  const skillDirs = skillTargetDirs(enabledNames);
+  // An item 01 skips renders to no file: an agent with no agent target, a skill with no skills directory.
+  const rendersNothing = new Set(
+    customCurrent
+      .filter((c) => {
+        const kind = customSpecs.get(c.templateId)?.kind === 'agent' ? 'agent' : 'skill';
+        if (kind === 'agent' && agentTargets === null) return false;
+        return !bundleItemRenders(kind, { agentTargets: agentTargets ?? [], skillDirs });
+      })
+      .map((c) => c.templateId),
+  );
+  const nonCurrentCustom = new Set(
+    bundleItems
+      .map((b) => `custom.${b.bundleId}.${b.itemId}`)
+      .filter((id) => !customSpecs.has(id) || rendersNothing.has(id)),
+  );
+  const claimed = (id: string) =>
+    applicableSet.has(id) || (isPerRepoTemplateId(id) && !nonCurrentCustom.has(id));
   // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
   // apply again wherever the providers of the render context the upgrade uses read them.
   const rtkProviders = repo.rtkEnabled ? rtkProviderNames(origin, enabledNames) : null;
@@ -454,7 +555,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // items surface as drift even before the next onboarding/upgrade has had a
   // chance to refresh the snapshot.
   for (const c of customCurrent) {
-    currentByTemplate.set(c.templateId, c);
+    if (!rendersNothing.has(c.templateId)) currentByTemplate.set(c.templateId, c);
   }
   if (cliRulesCurrent) {
     currentByTemplate.set(cliRulesCurrent.templateId, cliRulesCurrent);
@@ -465,13 +566,13 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   if (root) {
     for (const a of liveArtifacts) {
       const id = a.templateId;
-      if (applicableSet.has(id) || isPerRepoTemplateId(id) || outsideRemovable.has(id)) continue;
+      if (claimed(id) || outsideRemovable.has(id)) continue;
       if (removableClaim(await readUpgradeFile(root, a.diskPath), a)) outsideRemovable.add(id);
     }
   }
   const filteredInstalled = new Map(
     Array.from(distinctInstalled.entries()).filter(
-      ([id]) => applicableSet.has(id) || isPerRepoTemplateId(id) || outsideRemovable.has(id),
+      ([id]) => claimed(id) || outsideRemovable.has(id),
     ),
   );
   // One row stands for every rendering of a template, so a rendering that is not current (a
@@ -488,6 +589,28 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
         schemaVersion: a.templateSchemaVersion,
         contentHash: a.templateContentHash,
       });
+    }
+  }
+
+  // A row at a path its template no longer renders to (the directory of a CLI since disabled) is
+  // offered for removal by 01 whatever the hashes say, so its template reads as changed while 02 could
+  // remove it. The agent kinds are left out where no render context resolves.
+  const strandedTemplateIds = new Set<string>();
+  const strandedObsolete = new Set<string>();
+  if (root) {
+    for (const a of liveArtifacts) {
+      const id = a.templateId;
+      if (!currentByTemplate.has(id) || !filteredInstalled.has(id)) continue;
+      if (agentTargets === null && AGENT_TARGET_KINDS.has(a.templateKind)) continue;
+      const rendered = rendersAt(
+        { ...a, specId: customSpecs.get(id)?.specId },
+        { agentTargets: agentTargets ?? [], skillDirs },
+      );
+      if (rendered) continue;
+      const read = await readUpgradeFile(root, a.diskPath);
+      if (!removableClaim(read, a)) continue;
+      strandedTemplateIds.add(id);
+      if (deletableClaim(read, a)) strandedObsolete.add(id);
     }
   }
 
@@ -538,6 +661,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     if (!filteredInstalled.has(id) && !changedTemplateIds.includes(id)) {
       changedTemplateIds.push(id);
     }
+  }
+  for (const id of strandedTemplateIds) {
+    if (!changedTemplateIds.includes(id)) changedTemplateIds.push(id);
+    if (strandedObsolete.has(id) && !obsoleteTemplateIds.includes(id)) obsoleteTemplateIds.push(id);
   }
 
   const admission = await upgradeAdmission(db, userId, repo);
@@ -596,10 +723,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
   const rtkRemoval =
     root !== null &&
-    rtkLeftoversToRemove(
-      await rtkChoiceFollowsLive(db, repositoryId, origin, repo.source),
-      repo.rtkEnabled,
-    );
+    rtkLeftoversToRemove(rtkChoiceFollowsLive(origin, history, repo.source), repo.rtkEnabled);
   const rtkBlockLeftovers = root && rtkRemoval ? await rtkBlockFiles(root) : [];
   // No row records the RTK settings files a blank scaffold seeds, so no template comparison sees them.
   const rtkSettingsLeft =
@@ -610,6 +734,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const hasUpgradeAvailable =
     firstUpgradeOnThisInstall ||
     (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
+    strandedTemplateIds.size > 0 ||
     missingRulesImports.length > 0 ||
     rtkBlockLeftovers.length > 0 ||
     rtkSettingsLeft.length > 0;
