@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api-client';
 import { Button, Card, FormError, Label } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { usePageTitle } from '@/lib/use-page-title';
 
 interface LspOption {
@@ -572,7 +573,9 @@ export default function RepoToolingPage() {
                   {ragEmbedBusy === 'rebuild_index' ? 'Working...' : 'Rebuild index'}
                 </Button>
               </div>
-              {ragEmbedNote && <p className="mt-2 text-xs text-emerald-400">{ragEmbedNote}</p>}
+              {ragEmbedNote && (
+                <InlineMarkdown body={ragEmbedNote} className="mt-2 text-xs text-emerald-400" />
+              )}
             </Card>
           )}
 
