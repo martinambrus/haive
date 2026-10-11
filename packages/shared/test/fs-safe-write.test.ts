@@ -844,7 +844,7 @@ describe('fs-safe write primitives', () => {
           const stale = path.join(
             root,
             'src',
-            `.a.txt.haive-tmp-${i}-00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+            `.a.txt.haive-tmp-${i + 1}-00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
           );
           await writeFile(stale, 'orphan', 'utf8');
           await ageBy(stale, HOURS_2);
@@ -859,7 +859,7 @@ describe('fs-safe write primitives', () => {
             path.join(
               root,
               'src',
-              `.a.txt.haive-tmp-${i}-00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+              `.a.txt.haive-tmp-${i + 1}-00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
             ),
             'live',
             'utf8',
@@ -875,6 +875,19 @@ describe('fs-safe write primitives', () => {
         await writeFileNoFollow(root, 'src/a.txt', 'next');
         expect(await readdir(path.join(root, 'src'))).not.toContain(path.basename(stale));
         expect((await readdir(path.join(root, 'src'))).length).toBe(41);
+      });
+
+      it.each([
+        '.a.txt.haive-tmp-0-00000000-0000-4000-8000-000000000001',
+        '.a.txt.haive-tmp-01-00000000-0000-4000-8000-000000000001',
+        '.a.txt.haive-tmp-1-00000000-0000-1000-8000-000000000001',
+        '.a.txt.haive-tmp-1-00000000-0000-4000-0000-000000000001',
+      ])('keeps a stale %s, a name no write could have made', async (name) => {
+        const file = path.join(root, 'src', name);
+        await writeFile(file, 'keep', 'utf8');
+        await ageBy(file, HOURS_2);
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect(await readdir(path.join(root, 'src'))).toContain(name);
       });
 
       it('keeps a stale file whose name only starts like a temp', async () => {

@@ -761,7 +761,8 @@ const APPLY_TREE_CONCURRENCY = 32;
 
 const STALE_TEMP_MS = 60 * 60 * 1000;
 const SWEEP_MAX_TEMPS = 32;
-const TEMP_SUFFIX = /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TEMP_SUFFIX =
+  /^[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function wantedOwner(stats: Stats, opts: ApplyTreeOptions): Owner | null {
   if (!opts.owner) return null;
