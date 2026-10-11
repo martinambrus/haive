@@ -332,11 +332,21 @@ globalKbRoutes.put('/config', async (c) => {
       'connection_string_required',
     );
   }
+  const dimsChange =
+    d.embedDimensions !== undefined && d.embedDimensions !== saved.embeddingDimensions;
   if (
-    d.embedDimensions !== undefined &&
-    d.embedDimensions !== saved.embeddingDimensions &&
-    (await storeHoldsVectors(saved))
+    dimsChange &&
+    ((d.mode !== undefined && d.mode !== saved.mode) ||
+      (given !== '' && given !== saved.connectionString))
   ) {
+    // The vector check below reads the saved store, so it cannot vouch for one this save switches to.
+    throw new HttpError(
+      409,
+      'change the embedding dimensions and the store in separate saves',
+      'embed_dimensions_with_store_change',
+    );
+  }
+  if (dimsChange && (await storeHoldsVectors(saved))) {
     throw new HttpError(
       409,
       'the store holds vectors of the current width; clear them and re-embed before changing the embedding dimensions',

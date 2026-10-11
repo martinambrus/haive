@@ -432,7 +432,7 @@ type SyncCandidate = { id: string; namespace: string };
 /** Active entries to re-embed: owning a vector that is not a current-model vector (a hash fallback,
  *  one written before provenance — NULL model — or by another model), or stamped `failed`. The rows
  *  and the stamp are the record, so the sweep writes no status and a crash mid re-embed is picked up
- *  again by the next one. */
+ *  again by the next one. Random order: entries that fail every time cannot hold the cap forever. */
 async function findReembedCandidates(embedModel: string): Promise<SyncCandidate[]> {
   return withGlobalKb(
     getDb(),
@@ -448,7 +448,7 @@ async function findReembedCandidates(embedModel: string): Promise<SyncCandidate[
                    AND (r.embed_kind IS DISTINCT FROM 'model' OR r.embed_model IS DISTINCT FROM $1)
               )
             )
-          ORDER BY e.id`,
+          ORDER BY random()`,
         [embedModel],
       ) as unknown as Promise<SyncCandidate[]>,
   );

@@ -341,6 +341,17 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '1024']);
   });
 
+  it('is refused together with a store switch, whose vectors it cannot read', async () => {
+    const res = await put({ ...widen, mode: 'external', connectionString: 'postgres://u:p@db/kb' });
+
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'embed_dimensions_with_store_change',
+    );
+    expect(h.checks).toEqual([]);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
   it('is not checked, and accepted, when the width is unchanged', async () => {
     h.holdsVectors = true;
     const res = await put(PAGE);
