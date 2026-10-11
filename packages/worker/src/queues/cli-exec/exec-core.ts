@@ -624,6 +624,22 @@ function makeSteerableClearer(db: Database, invocationId: string): () => Promise
   };
 }
 
+/** A wrapper's own key stored as a secret, aliased onto the claude binary's token: the adapter's
+ *  alias runs before secrets merge. Ollama fills only a missing or placeholder token; Z.AI wins. */
+export function aliasSecretTokens(
+  env: Record<string, string>,
+  secrets: Record<string, string>,
+): void {
+  if (env.OLLAMA_API_KEY && (!env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_AUTH_TOKEN === 'ollama')) {
+    env.ANTHROPIC_AUTH_TOKEN = env.OLLAMA_API_KEY;
+    env.ANTHROPIC_API_KEY = env.OLLAMA_API_KEY;
+  }
+  if (secrets.Z_AI_API_KEY) {
+    env.ANTHROPIC_AUTH_TOKEN = secrets.Z_AI_API_KEY;
+    env.ANTHROPIC_API_KEY = secrets.Z_AI_API_KEY;
+  }
+}
+
 export async function executeCliSpec(
   spec: CliCommandSpec,
   deps: CliExecDeps,
@@ -657,18 +673,7 @@ export async function executeCliSpec(
     args: mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args,
     env: { ...spec.env, ...secrets },
   };
-  // Ollama's key is intuitively named OLLAMA_API_KEY, but the claude binary
-  // authenticates with ANTHROPIC_AUTH_TOKEN. A key stored as a secret merges in
-  // above (post-build, so the adapter couldn't see it); map it onto the token
-  // here unless an explicit Anthropic token was set (the adapter's 'ollama'
-  // placeholder counts as unset). Harmless for non-Ollama providers.
-  if (
-    mergedSpec.env.OLLAMA_API_KEY &&
-    (!mergedSpec.env.ANTHROPIC_AUTH_TOKEN || mergedSpec.env.ANTHROPIC_AUTH_TOKEN === 'ollama')
-  ) {
-    mergedSpec.env.ANTHROPIC_AUTH_TOKEN = mergedSpec.env.OLLAMA_API_KEY;
-    mergedSpec.env.ANTHROPIC_API_KEY = mergedSpec.env.OLLAMA_API_KEY;
-  }
+  aliasSecretTokens(mergedSpec.env, secrets);
   // Global opt-in: when prompt-caching-1h is ON, ask the claude binary to use the
   // 1-hour cache TTL (default 5-min on API-key/Bedrock; subscription is already 1h).
   // Gated on the claude-family stream-json output so codex/gemini are untouched;
