@@ -728,11 +728,17 @@ taskRoutes.post('/', async (c) => {
       return { task: row, queued: await settle(tx, row) };
     }));
   } else {
-    ({ task, queued } = await db.transaction(async (tx) => {
+    const create = async (tx: DbTx) => {
       const row = firstRow(await insertTask(tx));
       await pinDatabase(tx, row);
       return { task: row, queued: await settle(tx, row) };
-    }));
+    };
+    // A workflow writes into the repository root, so it is created under the same lock a reset
+    // claims the root with: a live claim refuses it, and a later claim finds it among the writers.
+    ({ task, queued } =
+      body.type === 'workflow' && body.repositoryId
+        ? await withRepositoryTaskLock(db, body.repositoryId, create)
+        : await db.transaction(create));
   }
 
   // `implements` ONLY. Taskable means "one task could implement this", which is
