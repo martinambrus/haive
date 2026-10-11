@@ -305,6 +305,27 @@ describe('restart shell', () => {
     ]);
   });
 
+  it('does not tell a shell attached in the same millisecond as the restart', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    try {
+      const h = harness(ROOT);
+      const first = await h.openTask();
+      if (!first.ok) throw new Error('open failed');
+      await h.sendCtl(first.sessionId, { type: 'restart_shell', userId: 'user-1' });
+      h.attaches[0]!.end();
+      const later = await h.openTask();
+      if (!later.ok) throw new Error('open failed');
+      h.attaches[1]!.end();
+      await new Promise((r) => setImmediate(r));
+      expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toEqual([
+        JSON.stringify({ type: 'exit', reason: 'restart' }),
+        JSON.stringify({ type: 'exit' }),
+      ]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('does not blame a later exit on a restart whose kill failed', async () => {
     const h = harness(ROOT, 1);
     const reply = await h.openTask();

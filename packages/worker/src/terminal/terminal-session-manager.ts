@@ -53,7 +53,7 @@ interface SessionState {
   inChannel: string;
   ctlChannel: string;
   outChannel: string;
-  /** When this session's attach began, before its exec, to tell whether a restart ended it. */
+  /** The turn sequence at this session's attach, before its exec, to tell whether a restart ended it. */
   attachedAt: number;
 }
 
@@ -84,9 +84,11 @@ export class TerminalSessionManager {
     gates: { hasRepo: boolean },
   ) => Promise<McpServerSpec[]>;
   private readonly sessions = new Map<string, SessionState>();
-  /** When a restart last killed the tmux session of each container. Set before the kill, since a
-   *  client can end before the kill returns, so any session attached until then is counted. */
+  /** The turn sequence at which a restart last killed each container's tmux session. Set before the
+   *  kill, since a client can end before the kill returns, so any session attached until then is counted. */
   private readonly restartedAt = new Map<string, number>();
+  /** Orders restarts and attaches causally; a millisecond clock ties when one follows the other. */
+  private turnSeq = 0;
   /** One open probe-and-attach or one restart per container at a time, so a restart never lands
    *  between an open's probe and its attach, and two restarts never undo each other's mark. */
   private readonly containerTurns = new Map<string, Promise<void>>();
@@ -187,7 +189,7 @@ export class TerminalSessionManager {
         const container = session.containerName;
         const endTurn = await this.containerTurn(container);
         const before = this.restartedAt.get(container);
-        this.restartedAt.set(container, Date.now());
+        this.restartedAt.set(container, ++this.turnSeq);
         const killed = await this.runInContainer(container, [
           'tmux',
           'kill-session',
@@ -418,7 +420,7 @@ export class TerminalSessionManager {
         scope === 'task'
           ? await this.probeWorkdirMismatch(ensured.containerName, ptyWorkingDir)
           : undefined;
-      attachedAt = Date.now();
+      attachedAt = ++this.turnSeq;
       ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
         Cmd: tmuxCommand,
         AttachStdin: true,
@@ -464,7 +466,7 @@ export class TerminalSessionManager {
       void this.redis.publish(outChannel, chunk.toString('utf8'));
     });
     ptyStream.on('end', () => {
-      const restarted = (this.restartedAt.get(session.containerName) ?? -1) >= session.attachedAt;
+      const restarted = (this.restartedAt.get(session.containerName) ?? -1) > session.attachedAt;
       const exit = restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' };
       void this.redis.publish(outChannel, JSON.stringify(exit)).catch(() => undefined);
       void this.teardownSession(session, 'pty-end').catch(() => undefined);
