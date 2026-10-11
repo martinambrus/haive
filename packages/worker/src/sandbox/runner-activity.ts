@@ -65,30 +65,33 @@ export async function runnerExecLive(
   docker: Docker = new Docker(),
   timeoutMs = 8_000,
 ): Promise<boolean> {
-  // Runs inside a reap fence, so a daemon that never answers must not hold the runner's execs.
-  let timer: NodeJS.Timeout | undefined;
-  const busyAtDeadline = new Promise<boolean>((resolve) => {
-    timer = setTimeout(() => resolve(true), timeoutMs);
-  });
+  // Runs inside a reap fence, so a daemon that never answers must not hold the runner's execs; the
+  // aborted request rejects, which reads as busy.
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), timeoutMs);
   try {
-    return await Promise.race([attachedExecRunning(taskId, docker), busyAtDeadline]);
+    return await attachedExecRunning(taskId, docker, deadline.signal);
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function attachedExecRunning(taskId: string, docker: Docker): Promise<boolean> {
+async function attachedExecRunning(
+  taskId: string,
+  docker: Docker,
+  abortSignal: AbortSignal,
+): Promise<boolean> {
   for (const name of runnerNames(taskId)) {
     let execIds: string[];
     try {
-      execIds = (await docker.getContainer(name).inspect()).ExecIDs ?? [];
+      execIds = (await docker.getContainer(name).inspect({ abortSignal })).ExecIDs ?? [];
     } catch (err) {
       if ((err as { statusCode?: number }).statusCode === 404) continue;
       return true;
     }
     for (const id of execIds) {
       try {
-        const info = await docker.getExec(id).inspect();
+        const info = await docker.getExec(id).inspect({ abortSignal });
         if (info.Running && info.OpenStdout) return true;
       } catch (err) {
         if ((err as { statusCode?: number }).statusCode !== 404) return true;

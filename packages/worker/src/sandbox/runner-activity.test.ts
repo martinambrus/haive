@@ -91,11 +91,21 @@ describe('an exec Docker still runs in the runner', () => {
     expect(await runnerSettled({} as never, TASK)).toBe(true);
   });
 
-  it('counts as busy when Docker does not answer in time', async () => {
+  it('aborts a Docker request that does not answer in time, and counts as busy', async () => {
     const { default: Docker } = await import('dockerode');
     const hung = new Docker();
-    hung.getContainer = (() => ({ inspect: () => new Promise(() => {}) })) as never;
+    let aborted = false;
+    hung.getContainer = (() => ({
+      inspect: ({ abortSignal }: { abortSignal: AbortSignal }) =>
+        new Promise((_resolve, reject) =>
+          abortSignal.addEventListener('abort', () => {
+            aborted = true;
+            reject(new Error('aborted'));
+          }),
+        ),
+    })) as never;
     expect(await runnerExecLive(TASK, hung, 20)).toBe(true);
+    expect(aborted).toBe(true);
   });
 
   it('counts as busy when Docker cannot say, and not when the runner is gone', async () => {
