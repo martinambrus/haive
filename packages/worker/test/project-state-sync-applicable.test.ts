@@ -775,6 +775,19 @@ describe('D2e: 02 refuses a plan whose column moved after it was planned', () =>
     expect(await applied).toBeInstanceOf(Error);
     expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
   });
+
+  it('lets a retry through once its own record write filled the per-install fields', async () => {
+    const synced = { ...BASE, rtkChoiceRecorded: false };
+    const s = await setup({ column: synced, base: BASE, set: P, claims: BASE_CLAIMS });
+    const detected = await s.plan();
+    await s.applyPlan(detected);
+    const written = s.rowOf().renderContext;
+    expect(written).not.toEqual(json(jsonb(synced)));
+
+    await s.applyPlan(detected);
+
+    expect(s.rowOf().renderContext).toEqual(written);
+  });
 });
 
 describe('D3: the context the set derives from is the one 01 renders', () => {

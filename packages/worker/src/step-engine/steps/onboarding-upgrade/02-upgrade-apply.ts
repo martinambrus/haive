@@ -26,7 +26,7 @@ import {
   upsertRegion,
   type FormSchema,
 } from '@haive/shared';
-import { rtkLeftoversToRemove } from '@haive/shared/project-state';
+import { rtkLeftoversToRemove, sameValue } from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandCustomBundlesFor,
@@ -41,6 +41,7 @@ import {
   failIfColumnStale,
   lockProjectState,
   ProjectStateWriteError,
+  renderContextColumnFor,
   writeProjectStateRecord,
 } from '../../../project-state/write.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
@@ -91,6 +92,17 @@ export interface ApplySelections {
  *  row whose source bundle item is gone AND no other entry in the plan rewrites the
  *  same diskPath; that combination signals the file is now user-owned and should
  *  drop out of drift tracking on the next upgrade. */
+function ownRecordColumn(plan: UpgradePlanOutput): unknown {
+  try {
+    return renderContextColumnFor(
+      plan.renderCtxSnapshot as unknown as TemplateRenderContext,
+      plan.rtkFollowsLive === true,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 export function classifyApplyAction(
   entry: UpgradePlanEntry,
   allEntries: ReadonlyArray<UpgradePlanEntry>,
@@ -746,7 +758,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         await lockProjectState(tx, plan.repositoryId);
         return readRenderContextColumnRaw(tx, plan.repositoryId);
       });
-      if (now !== null && JSON.stringify(now) !== JSON.stringify(plan.renderContextColumn)) {
+      // A retry after this plan's own record write committed finds the column it wrote.
+      if (
+        now !== null &&
+        !sameValue(now, plan.renderContextColumn) &&
+        !sameValue(now, ownRecordColumn(plan))
+      ) {
         throw new Error(
           "The repository's project settings changed after this upgrade was planned, so its plan " +
             'no longer holds. Retry the plan step to plan the upgrade again.',
