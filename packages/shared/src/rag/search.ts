@@ -335,6 +335,8 @@ function buildFacetClause(
  *
  *  Scoped by the same facet/repository predicates as the search itself, so df is
  *  relative to the corpus actually being searched rather than the whole store. */
+const IDENTIFIER_IDF_FLOOR = 1e-6;
+
 async function identifierIdfs(
   conn: RagConnection,
   terms: string[],
@@ -344,12 +346,14 @@ async function identifierIdfs(
   // Own numbering: $1 is the term array, facet params follow, repository_id last.
   const fc = facetFilter ? buildFacetClause(facetFilter, 2) : null;
   const repoParam = 2 + (fc?.params.length ?? 0);
+  // Task rows are never searched, so they must not count toward df or the total either.
   const conds = [
     ...(fc ? [fc.core] : []),
     ...(repositoryId ? [`repository_id = $${repoParam}`] : []),
+    EXCLUDE_TASK_ROWS,
   ];
-  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-  const scoped = conds.length ? `${conds.join(' AND ')} AND ` : '';
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const scoped = `${conds.join(' AND ')} AND `;
   const statistics = (pg: Pick<RagConnection['pg'], 'unsafe'>) =>
     pg.unsafe(
       `
@@ -378,7 +382,8 @@ async function identifierIdfs(
       // df 0 means the store has never seen the identifier — contribute nothing
       // rather than an infinite weight.
       if (!stat || stat.df <= 0 || stat.total <= 0) return 0;
-      return Math.log(stat.total / stat.df);
+      // A term in every row has ln(1) = 0 but is still known; the floor keeps it a match.
+      return Math.max(Math.log(stat.total / stat.df), IDENTIFIER_IDF_FLOOR);
     });
   } catch (err) {
     const code = (err as { code?: unknown } | null)?.code;
@@ -388,6 +393,47 @@ async function identifierIdfs(
     // than failing a search that would otherwise work.
     return terms.map(() => 0);
   }
+}
+
+/** What the identifier ranker needs for one query: the terms, their IDF weights and the
+ *  tsquery, with `use` false when the query holds no identifier the store has ever seen. */
+async function planIdentifierRanker(
+  conn: RagConnection,
+  queryText: string,
+  cfg: RagSearchConfig,
+  filter: RagFacetFilter | undefined,
+  repositoryId: string | undefined,
+): Promise<{ terms: string[]; idfs: number[]; query: string | null; use: boolean }> {
+  const terms =
+    cfg.identifierSearch && cfg.identifierCandidates > 0 ? extractIdentifiers(queryText) : [];
+  const query = identifierTsQuery(terms);
+  const idfs = query ? await identifierIdfs(conn, terms, filter, repositoryId) : [];
+  return { terms, idfs, query, use: query !== null && idfs.some((v: number) => v > 0) };
+}
+
+/** The `ident` CTE both branches fuse in: `extra` is the branch's own filter predicates and
+ *  the three params are the placeholders its statement binds the terms, weights and tsquery to. */
+function identifierCteSql(
+  cfg: RagSearchConfig,
+  extra: string,
+  termsParam: number,
+  idfsParam: number,
+  queryParam: number,
+): string {
+  return `ident AS (
+        SELECT id, row_number() OVER (ORDER BY idf_score DESC, id) AS i_rank
+        FROM (
+          SELECT e.id,
+                 (SELECT COALESCE(sum(u.idf), 0)
+                    FROM unnest($${termsParam}::text[], $${idfsParam}::float8[]) AS u(term, idf)
+                   WHERE e.content_tsv @@ ('''' || u.term || '''')::tsquery) AS idf_score
+          FROM ${RAG_TABLE} e
+          WHERE e.content_tsv @@ $${queryParam}::tsquery${extra}
+        ) s
+        WHERE idf_score > 0
+        ORDER BY idf_score DESC
+        LIMIT ${Math.max(0, cfg.identifierCandidates)}
+      ),`;
 }
 
 /** Hybrid dense + lexical retrieval over a project RAG database.
@@ -443,13 +489,8 @@ export async function ragHybridSearch(
     // no identifiers its CTE is omitted entirely and the statement is
     // byte-identical to the one that shipped before it existed — which is the
     // whole risk story for queries that never mention code.
-    const identTerms =
-      cfg.identifierSearch && cfg.identifierCandidates > 0 ? extractIdentifiers(queryText) : [];
-    const identQuery = identifierTsQuery(identTerms);
-    const identIdfs = identQuery
-      ? await identifierIdfs(conn, identTerms, filter, repositoryId)
-      : [];
-    const useIdent = identQuery !== null && identIdfs.some((v: number) => v > 0);
+    const ident = await planIdentifierRanker(conn, queryText, cfg, filter, repositoryId);
+    const useIdent = ident.use;
     const identTermsParam = (repositoryId ? repoParam : boostParam) + 1;
     const identIdfsParam = identTermsParam + 1;
     const identQueryParam = identIdfsParam + 1;
@@ -503,20 +544,7 @@ export async function ragHybridSearch(
       ),
       ${
         useIdent
-          ? `ident AS (
-        SELECT id, row_number() OVER (ORDER BY idf_score DESC, id) AS i_rank
-        FROM (
-          SELECT e.id,
-                 (SELECT COALESCE(sum(u.idf), 0)
-                    FROM unnest($${identTermsParam}::text[], $${identIdfsParam}::float8[]) AS u(term, idf)
-                   WHERE e.content_tsv @@ ('''' || u.term || '''')::tsquery) AS idf_score
-          FROM ${RAG_TABLE} e
-          WHERE e.content_tsv @@ $${identQueryParam}::tsquery${lexExtra}
-        ) s
-        WHERE idf_score > 0
-        ORDER BY idf_score DESC
-        LIMIT ${Math.max(0, cfg.identifierCandidates)}
-      ),`
+          ? identifierCteSql(cfg, lexExtra, identTermsParam, identIdfsParam, identQueryParam)
           : ''
       }
       cand AS (
@@ -567,7 +595,7 @@ export async function ragHybridSearch(
       cfg.runbookBoost,
       ...(repositoryId ? [repositoryId] : []),
       ...(useIdent
-        ? [pgTextArrayLiteral(identTerms), pgFloatArrayLiteral(identIdfs), identQuery as string]
+        ? [pgTextArrayLiteral(ident.terms), pgFloatArrayLiteral(ident.idfs), ident.query as string]
         : []),
     ];
     rows = (await conn.pg.unsafe(sqlText, params)) as unknown as RawRow[];
@@ -585,8 +613,71 @@ export async function ragHybridSearch(
       EXCLUDE_TASK_ROWS,
     ].filter(Boolean) as string[];
     const lexExtra = conds.map((c) => ` AND ${c}`).join('');
-    rows = (await conn.pg.unsafe(
-      `
+    const baseParams = [
+      queryText,
+      cfg.rrfK,
+      cfg.topK,
+      ...(fc?.params ?? []),
+      cfg.runbookBoost,
+      ...(repositoryId ? [repositoryId] : []),
+    ];
+    // A query with no identifier the store knows keeps the single-statement search below
+    // unchanged; only one that has gets the fused statement.
+    const ident = await planIdentifierRanker(conn, queryText, cfg, filter, repositoryId);
+    if (ident.use) {
+      const identTermsParam = baseParams.length + 1;
+      const identIdfsParam = identTermsParam + 1;
+      const identQueryParam = identIdfsParam + 1;
+      const poolParam = identQueryParam + 1;
+      rows = (await conn.pg.unsafe(
+        `
+      WITH q AS (SELECT plainto_tsquery('english', $1) AS qq),
+      lex AS (
+        SELECT id,
+               row_number() OVER (
+                 ORDER BY ts_rank_cd(content_tsv, (SELECT qq FROM q)) DESC
+               ) AS l_rank,
+               ts_rank_cd(content_tsv, (SELECT qq FROM q)) AS ts
+        FROM ${RAG_TABLE}
+        WHERE content_tsv @@ (SELECT qq FROM q)${lexExtra}
+        ORDER BY ts DESC
+        LIMIT $${poolParam}
+      ),
+      ${identifierCteSql(cfg, lexExtra, identTermsParam, identIdfsParam, identQueryParam)}
+      cand AS (
+        SELECT id FROM lex
+        UNION
+        SELECT id FROM ident
+      )
+      SELECT
+        e.source_path, e.section_id, e.chunk_index, e.source_type, e.content, e.id,
+        0 AS dense_sim,
+        (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1)) AS ts_norm,
+        (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1)) AS hybrid,
+        (
+          (
+            CASE WHEN l.l_rank IS NOT NULL THEN 1.0 / ($2 + l.l_rank) ELSE 0 END
+            + CASE WHEN i.i_rank IS NOT NULL THEN 1.0 / ($2 + i.i_rank) ELSE 0 END
+          ) * (CASE WHEN e.source_type = 'runbook' THEN $${boostParamJ}::double precision ELSE 1 END)
+        ) AS rrf
+      FROM cand c
+      JOIN ${RAG_TABLE} e ON e.id = c.id
+      LEFT JOIN lex l ON l.id = c.id
+      LEFT JOIN ident i ON i.id = c.id
+      ORDER BY rrf DESC
+      LIMIT $3
+      `,
+        [
+          ...baseParams,
+          pgTextArrayLiteral(ident.terms),
+          pgFloatArrayLiteral(ident.idfs),
+          ident.query as string,
+          cfg.candidatePool,
+        ],
+      )) as unknown as RawRow[];
+    } else {
+      rows = (await conn.pg.unsafe(
+        `
       WITH q AS (SELECT plainto_tsquery('english', $1) AS qq)
       SELECT
         source_path, section_id, chunk_index, source_type, content, id,
@@ -603,15 +694,9 @@ export async function ragHybridSearch(
       ORDER BY rrf DESC
       LIMIT $3
       `,
-      [
-        queryText,
-        cfg.rrfK,
-        cfg.topK,
-        ...(fc?.params ?? []),
-        cfg.runbookBoost,
-        ...(repositoryId ? [repositoryId] : []),
-      ],
-    )) as unknown as RawRow[];
+        baseParams,
+      )) as unknown as RawRow[];
+    }
   }
 
   const hits = rows.map(toHit);
