@@ -841,8 +841,21 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const preimageIds: string[] = [];
     // A pre-image a retried Keep answered is deleted in its own statement as soon as the held file
     // is settled, so a later failure of the apply cannot leave it for another retry to restore.
-    const spendPreimage = (id: string) =>
-      ctx.db.delete(schema.onboardingArtifacts).where(eq(schema.onboardingArtifacts.id, id));
+    // Every one of this task's records for the path goes, not only the newest: an older one would be
+    // the newest the next retry finds.
+    const spendPreimages = (entry: { templateId: string; diskPath: string }) =>
+      ctx.db
+        .delete(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.taskId, ctx.taskId),
+            eq(schema.onboardingArtifacts.sourceStepId, '02-upgrade-apply'),
+            eq(schema.onboardingArtifacts.source, 'backfill'),
+            isNotNull(schema.onboardingArtifacts.supersededAt),
+            eq(schema.onboardingArtifacts.templateId, entry.templateId),
+            eq(schema.onboardingArtifacts.diskPath, entry.diskPath),
+          ),
+        );
     // An attempt that failed part-way leaves its records, and a path it rewrote no longer shows
     // what stood there, so a retry takes the newest record of each path from them.
     const earlierRecords = new Map<
@@ -1110,7 +1123,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         if (kept === null) {
           // The failed attempt's write is gone from the path, so nothing may restore over it later.
           const gone = earlierRecords.get(key);
-          if (gone?.lastObservedDiskHash) await spendPreimage(gone.id);
+          if (gone?.lastObservedDiskHash) await spendPreimages(entry);
           continue;
         }
         if (!entry.currentTemplateContentHash || !entry.newContentHash) continue;
@@ -1168,7 +1181,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             const msg = err instanceof Error ? err.message : String(err);
             // The render was moved off the path and something else took it: that write is gone too.
             if (err instanceof ParkedFileError) {
-              await spendPreimage(earlier.id);
+              await spendPreimages(entry);
               warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
               continue;
             }
@@ -1177,7 +1190,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             );
           }
           // Either way the failed attempt's write no longer stands, so its pre-image is spent.
-          await spendPreimage(earlier.id);
+          await spendPreimages(entry);
           if (!restored && !seen) {
             warnings.push(`did not record keeping ${entry.diskPath}: it changed while it was read`);
             continue;

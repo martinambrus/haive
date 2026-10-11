@@ -498,6 +498,24 @@ describe('an upgrade apply retried after it failed part-way', () => {
     expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW.replace(/\n/g, '\r\n'));
   });
 
+  it('spends every pre-image of the path, not only the newest, once a Keep settles it', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await writeFile(join(s.root, EDITED), 'SECOND EDIT\n', 'utf8');
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+
+    await s.apply();
+
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .filter((r) => r.diskPath === EDITED && r.taskId === TASK && r.source === 'backfill'),
+    ).toEqual([]);
+  });
+
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
     const s = await setup();
     failOneCommit(s);
