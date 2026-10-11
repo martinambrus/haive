@@ -801,3 +801,66 @@ describe('07c-ddev-reconcile: a config Haive cannot read faithfully', () => {
     });
   });
 });
+
+describe('07c-ddev-reconcile: the baseline a reconcile last applied', () => {
+  const B1: DdevBaseline = {
+    phpVersion: '8.1',
+    dbType: 'mariadb',
+    dbVersion: '10.4',
+    configHash: 'h1',
+  };
+  const BOOT: DdevBaseline = { ...B1, configHash: 'h0' };
+  const NOOP_OUTPUT = { action: 'none', reconciled: false, output: 'DDEV config unchanged' };
+  const DECLINED_OUTPUT = { action: 'none', reconciled: false, from: 'a', to: 'b', output: 'x' };
+
+  let workspace = '';
+  let rows: Array<{ output: unknown }> = [];
+  beforeAll(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'haive-reconcile-applied-'));
+    await mkdir(path.join(workspace, '.ddev'));
+  });
+  afterAll(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/tmp/r',
+    db: {
+      select: () => ({
+        from: () => ({
+          where: () => ({ orderBy: () => ({ limit: async (n: number) => rows.slice(0, n) }) }),
+        }),
+      }),
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    throwIfCancelled() {},
+  } as never;
+  const writeConfig = (body: string) => writeFile(path.join(workspace, '.ddev/config.yaml'), body);
+  const READABLE = 'name: app\nphp_version: "8.1"\ndatabase:\n  type: mariadb\n  version: "10.4"\n';
+
+  beforeEach(async () => {
+    rows = [];
+    await writeConfig(READABLE);
+    m.resolveDdevWorkspace.mockResolvedValue({ repoSubpath: 'u/r', workspace });
+    m.loadPreviousStepOutput.mockResolvedValue({ output: { started: true, baseline: BOOT } });
+    m.hashDdevInputs.mockResolvedValue('h1');
+  });
+
+  it('a no-drift round after an applied one does not hide the applied baseline', async () => {
+    rows = [{ output: NOOP_OUTPUT }, { output: { action: 'restart', appliedBaseline: B1 } }];
+    const detected = await ddevReconcileStep.detect!(ctx);
+    expect(detected.baseline).toEqual(B1);
+    expect(detected.driftKind).toBe('none');
+  });
+
+  it('a declined migration after an applied round does not hide the applied baseline', async () => {
+    rows = [{ output: DECLINED_OUTPUT }, { output: { action: 'restart', appliedBaseline: B1 } }];
+    expect((await ddevReconcileStep.detect!(ctx)).baseline).toEqual(B1);
+  });
+
+  it('falls back to the 01c boot baseline when no round applied anything', async () => {
+    rows = [{ output: NOOP_OUTPUT }];
+    expect((await ddevReconcileStep.detect!(ctx)).baseline).toEqual(BOOT);
+  });
+});
