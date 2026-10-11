@@ -1656,26 +1656,38 @@ export async function writeFileNoFollow(
 // Age, not pid: a restarted container reuses pids, and a live writer's temp is fresh.
 async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string): Promise<void> {
   const prefix = `.${leaf}.haive-tmp-`;
-  const dirRel = dirSegs.join('/');
-  const stale: { rel: string; identity: FileIdentity }[] = [];
+  // Each candidate stays open until its removal, so its inode cannot be reused by a replacement.
+  const stale: { rel: string; identity: FileIdentity; fh: FileHandle }[] = [];
   try {
-    const dir = await walkDir(anchor, toSafeRel(dirRel), [...dirSegs]);
+    const dir = await walkDir(anchor, toSafeRel(dirSegs.join('/')), [...dirSegs]);
     try {
       for (const name of await readdir(fdPath(dir.fh.fd))) {
         if (!name.startsWith(prefix) || !TEMP_SUFFIX.test(name.slice(prefix.length))) continue;
-        const st = await lstat(at(dir.fh.fd, name), { bigint: true }).catch(() => null);
-        if (st === null || !st.isFile()) continue;
-        if (Date.now() - Number(st.mtimeMs) <= STALE_TEMP_MS) continue;
-        stale.push({ rel: [...dirSegs, name].join('/'), identity: { dev: st.dev, ino: st.ino } });
+        const fh = await open(at(dir.fh.fd, name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK).catch(
+          () => null,
+        );
+        if (fh === null) continue;
+        const st = await fh.stat({ bigint: true }).catch(() => null);
+        if (st === null || !st.isFile() || Date.now() - Number(st.mtimeMs) <= STALE_TEMP_MS) {
+          await closeQuietly(fh);
+          continue;
+        }
+        stale.push({
+          rel: [...dirSegs, name].join('/'),
+          identity: { dev: st.dev, ino: st.ino },
+          fh,
+        });
       }
     } finally {
       await closeQuietly(dir.fh);
     }
+    for (const { rel, identity } of stale) {
+      await removeFileIfIdentityNoFollow(anchor, rel, identity).catch(() => undefined);
+    }
   } catch {
-    return;
-  }
-  for (const { rel, identity } of stale) {
-    await removeFileIfIdentityNoFollow(anchor, rel, identity).catch(() => undefined);
+    // best effort: a sweep never fails the write it follows
+  } finally {
+    await Promise.all(stale.map(({ fh }) => closeQuietly(fh)));
   }
 }
 
