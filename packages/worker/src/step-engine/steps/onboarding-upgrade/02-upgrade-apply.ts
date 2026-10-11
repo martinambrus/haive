@@ -838,6 +838,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const removalRecords: string[] = [];
     // What stood at each written path, recorded before the write.
     const preimageIds: string[] = [];
+    // Pre-images a retried Keep wrote back: once its decision commits, no later retry may restore one.
+    const consumedPreimageIds: string[] = [];
     // An attempt that failed part-way leaves its records, and a path it rewrote no longer shows
     // what stood there, so a retry takes the newest record of each path from them.
     const earlierRecords = new Map<
@@ -1136,6 +1138,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             continue;
           }
           if (restored) {
+            consumedPreimageIds.push(earlier.id);
             writtenPaths.push(rel);
             kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
           }
@@ -1567,6 +1570,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       insertPaths.length > 0 ||
       baselineRows.length > 0 ||
       keptInPlace.length > 0 ||
+      consumedPreimageIds.length > 0 ||
       removalRecords.length > 0 ||
       adoptions.length > 0
     ) {
@@ -1635,6 +1639,11 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             .update(schema.onboardingArtifacts)
             .set({ supersededAt: now, updatedAt: now })
             .where(inArray(schema.onboardingArtifacts.id, markers));
+        }
+        if (consumedPreimageIds.length > 0) {
+          await tx
+            .delete(schema.onboardingArtifacts)
+            .where(inArray(schema.onboardingArtifacts.id, consumedPreimageIds));
         }
         for (const k of keptInPlace) {
           const updated = await tx

@@ -374,7 +374,9 @@ Overwrite can be answered with Keep: while the path still holds that attempt's r
 writes back the bytes the attempt recorded before writing (the whole file, or the rules region),
 so the version kept is the person's and not the render. The check and the write run on one held
 file (`rewriteFileIfNoFollow`), so a save landing meanwhile stays. When that attempt had committed,
-its own row is retired and the row the plan saw comes back carrying the decision. Skip records
+its own row is retired and the row the plan saw comes back carrying the decision. The pre-image
+is deleted in the transaction that records the Keep, so a later retry cannot write it back over a
+save that happens to match the render. Skip records
 nothing, so the path is offered again. An obsolete Haive file
 has no newer version to decline, so it is kept by "Keep these files, and stop tracking them": its row
 is superseded and the file left, and neither the plan nor the banner offers it again until a rollback

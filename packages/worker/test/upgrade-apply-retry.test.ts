@@ -331,6 +331,21 @@ describe('an upgrade apply retried after it failed part-way', () => {
     expect(live[0]).toMatchObject({ id: s.editedRow, lastObservedDiskHash: hashOf(MINE) });
   });
 
+  it('restores a pre-image once: a later retry after the Keep committed leaves a save alone', async () => {
+    const s = await setup();
+    await symlink(s.outside, join(s.root, '.haive'));
+    await expect(s.apply()).rejects.toThrow();
+    s.answerConflicts('keep_ours');
+    await expect(s.apply()).rejects.toThrow();
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
+    await rm(join(s.root, '.haive'));
+    await writeFile(join(s.root, EDITED), NEW, 'utf8');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+  });
+
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
     const s = await setup();
     failOneCommit(s);
