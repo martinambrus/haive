@@ -7,7 +7,11 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
-import { redriveStalledTasks, type FailedStep } from '../src/queues/stalled-redrive.js';
+import {
+  redriveCancelledTasks,
+  redriveStalledTasks,
+  type FailedStep,
+} from '../src/queues/stalled-redrive.js';
 
 const log = logger.child({ module: 'stalled-redrive-smoke' });
 
@@ -397,6 +401,130 @@ async function main(): Promise<void> {
         advancesFor(lostRunTaskId).length === 1 &&
         advancesFor(miningTaskId).length === 1,
       { starts, advances },
+    );
+    const cancelled = async (
+      title: string,
+      events: {
+        type: 'task.cancelled' | 'task.cancel_finished' | 'task.cancel_redriven';
+        at: Date;
+      }[],
+      status: 'cancelled' | 'running' = 'cancelled',
+    ) => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          type: 'workflow',
+          title,
+          status,
+          currentStepId: 'smoke-step',
+          currentRound: 0,
+          orchestrationEpoch: 3,
+          createdAt: longAgo,
+          updatedAt: longAgo,
+        })
+        .returning({ id: schema.tasks.id });
+      for (const e of events) {
+        await db
+          .insert(schema.taskEvents)
+          .values({ taskId: task!.id, eventType: e.type, createdAt: e.at });
+      }
+      return task!.id;
+    };
+    const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
+    const lostCancelId = await cancelled('lost-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(10) },
+    ]);
+    const finishedCancelId = await cancelled('finished-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(10) },
+      { type: 'task.cancel_finished', at: minutesAgo(9) },
+    ]);
+    const freshCancelId = await cancelled('fresh-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(1) },
+    ]);
+    const queuedCancelId = await cancelled('queued-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(10) },
+    ]);
+    const crashedCancelId = await cancelled('crashed-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(30) },
+      { type: 'task.cancelled', at: minutesAgo(29) },
+    ]);
+    const rerunningCancelId = await cancelled('rerunning-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(10) },
+      { type: 'task.cancelled', at: minutesAgo(1) },
+    ]);
+    const ancientCancelId = await cancelled('ancient-cancel', [
+      { type: 'task.cancelled', at: new Date(Date.now() - 8 * 24 * 60 * 60_000) },
+    ]);
+    const exhaustedCancelId = await cancelled('exhausted-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(10) },
+      { type: 'task.cancel_redriven', at: minutesAgo(8) },
+      { type: 'task.cancel_redriven', at: minutesAgo(6) },
+      { type: 'task.cancel_redriven', at: minutesAgo(4) },
+    ]);
+    const notCancelledId = await cancelled(
+      'not-cancelled',
+      [{ type: 'task.cancelled', at: minutesAgo(10) }],
+      'running',
+    );
+    const cancels: { taskId: string; userId: string }[] = [];
+    const mine = new Set([
+      lostCancelId,
+      finishedCancelId,
+      freshCancelId,
+      queuedCancelId,
+      crashedCancelId,
+      rerunningCancelId,
+      ancientCancelId,
+      exhaustedCancelId,
+      notCancelledId,
+    ]);
+    const cancelDeps = {
+      enqueueCancel: async (taskId: string, cancelUserId: string) => {
+        cancels.push({ taskId, userId: cancelUserId });
+      },
+      // A CANCEL completed in history is not listed, so the crashed teardown above is re-driven.
+      queuedCancelTaskIds: async () => new Set([queuedCancelId]),
+    };
+    await redriveCancelledTasks(db, cancelDeps, { staleMs: STALE_MS });
+    const cancelsFor = (id: string) => cancels.filter((c) => c.taskId === id);
+    check(
+      'a cancelled task with no cancel_finished gets one CANCEL, carrying its owner',
+      cancelsFor(lostCancelId).length === 1 && cancelsFor(lostCancelId)[0]?.userId === userId,
+      cancels,
+    );
+    check(
+      'a cancelled task whose first teardown crashed, its job gone from the waiting states, gets one',
+      cancelsFor(crashedCancelId).length === 1,
+      cancels,
+    );
+    check(
+      'finished, fresh, still-queued, re-running, ancient and not-cancelled tasks get none',
+      [
+        finishedCancelId,
+        freshCancelId,
+        queuedCancelId,
+        rerunningCancelId,
+        ancientCancelId,
+        exhaustedCancelId,
+        notCancelledId,
+      ].every((id) => cancelsFor(id).length === 0),
+      cancels.filter((c) => mine.has(c.taskId)),
+    );
+    const redrivenEvents = await db
+      .select({ taskId: schema.taskEvents.taskId, payload: schema.taskEvents.payload })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, lostCancelId),
+          eq(schema.taskEvents.eventType, 'task.cancel_redriven'),
+        ),
+      );
+    check(
+      'a re-drive is recorded, so a teardown that keeps failing stops after the cap',
+      redrivenEvents.length === 1 &&
+        (redrivenEvents[0]?.payload as { attempt?: number } | null)?.attempt === 1,
+      redrivenEvents,
     );
   } finally {
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));

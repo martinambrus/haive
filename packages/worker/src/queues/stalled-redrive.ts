@@ -1,7 +1,10 @@
 import {
   and,
+  asc,
   eq,
   exists,
+  gt,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -15,6 +18,7 @@ import { schema, type Database } from '@haive/database';
 import { logger, TASK_JOB_NAMES } from '@haive/shared';
 import {
   enqueueAdvance,
+  enqueueCancel,
   enqueueStart,
   finishFailedStep,
   getTaskQueue,
@@ -28,7 +32,7 @@ import {
  * Catches what reconcileOrphanedSteps cannot: a step its own re-drive enqueue failed to queue,
  * or any hand-off lost between boots, left `pending`/missing, finished with nothing after it, or
  * failed with the task still running; a task queued to start whose START was lost; and a step
- * parked on a run whose cli-exec job was.
+ * parked on a run whose cli-exec job was; and a cancelled task whose teardown never finished.
  */
 
 const log = logger.child({ module: 'stalled-redrive' });
@@ -374,6 +378,118 @@ export async function redriveStalledTasks(
   return redriven;
 }
 
+export interface CancelRedriveDeps {
+  enqueueCancel: (taskId: string, userId: string) => Promise<void>;
+  /** Tasks a CANCEL is still queued for, or null when the queue could not be read. */
+  queuedCancelTaskIds: () => Promise<Set<string> | null>;
+}
+
+/** Not completed or failed jobs: a CANCEL that died before `task.cancel_finished` must be re-driven. */
+export async function readQueuedCancelTaskIds(): Promise<Set<string> | null> {
+  try {
+    const jobs = await getTaskQueue().getJobs([
+      'active',
+      'waiting',
+      'waiting-children',
+      'delayed',
+      'prioritized',
+    ]);
+    const ids = new Set<string>();
+    for (const job of jobs) {
+      const id = (job?.data as { taskId?: unknown } | undefined)?.taskId;
+      if (job?.name === TASK_JOB_NAMES.CANCEL && typeof id === 'string') ids.add(id);
+    }
+    return ids;
+  } catch (err) {
+    log.warn({ err }, 'task queue unreadable; leaving cancelled tasks alone this pass');
+    return null;
+  }
+}
+
+export const defaultCancelDeps: CancelRedriveDeps = {
+  enqueueCancel,
+  queuedCancelTaskIds: readQueuedCancelTaskIds,
+};
+
+export const CANCEL_REDRIVE_BATCH = 20;
+/** A teardown that fails every time is re-driven this often, then left for a person. */
+export const CANCEL_REDRIVE_MAX = 3;
+const CANCEL_REDRIVEN_EVENT = 'task.cancel_redriven';
+/** Older cancellations are left alone: many predate the finish record. */
+export const CANCEL_REDRIVE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Queues a CANCEL for a task cancelled before the cutoff with no `task.cancel_finished`: the api commits the cancel before queueing. */
+export async function redriveCancelledTasks(
+  db: Database,
+  deps: CancelRedriveDeps = defaultCancelDeps,
+  opts: { staleMs: number },
+): Promise<number> {
+  const now = Date.now();
+  const cutoff = new Date(now - opts.staleMs);
+  const since = new Date(now - CANCEL_REDRIVE_LOOKBACK_MS);
+  const event = (type: string, ...more: ReturnType<typeof eq>[]) =>
+    db
+      .select({ one: sql`1` })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, schema.tasks.id),
+          eq(schema.taskEvents.eventType, type),
+          ...more,
+        ),
+      );
+  const candidates = await db
+    .select({
+      taskId: schema.tasks.id,
+      userId: schema.tasks.userId,
+      attempts: sql<number>`(select count(*)::int from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = ${CANCEL_REDRIVEN_EVENT})`,
+    })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.status, 'cancelled'),
+        exists(event('task.cancelled', gt(schema.taskEvents.createdAt, since))),
+        not(exists(event('task.cancelled', gte(schema.taskEvents.createdAt, cutoff)))),
+        not(exists(event('task.cancel_finished'))),
+        sql`(select count(*) from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = ${CANCEL_REDRIVEN_EVENT}) < ${CANCEL_REDRIVE_MAX}`,
+      ),
+    )
+    .orderBy(asc(schema.tasks.updatedAt))
+    .limit(CANCEL_REDRIVE_BATCH);
+  if (candidates.length === 0) return 0;
+
+  const queued = await deps.queuedCancelTaskIds();
+  if (queued === null) return 0;
+
+  let redriven = 0;
+  for (const t of candidates) {
+    if (queued.has(t.taskId)) continue;
+    try {
+      // Counted before the job exists: a lost count would let a failing teardown escape the cap.
+      const attempt = Number(t.attempts ?? 0) + 1;
+      await db
+        .insert(schema.taskEvents)
+        .values({ taskId: t.taskId, eventType: CANCEL_REDRIVEN_EVENT, payload: { attempt } });
+      await deps.enqueueCancel(t.taskId, t.userId);
+      redriven++;
+      if (attempt >= CANCEL_REDRIVE_MAX) {
+        log.warn(
+          { taskId: t.taskId, attempt },
+          'last re-drive of a cancelled task whose teardown keeps failing; it is left for a person',
+        );
+      } else {
+        log.info(
+          { taskId: t.taskId, attempt },
+          'queued a CANCEL for a cancelled task whose teardown never ran',
+        );
+      }
+    } catch (err) {
+      log.error({ err, taskId: t.taskId }, 'cancelled task teardown could not be queued');
+    }
+  }
+  return redriven;
+}
+
 export interface StalledTaskSweeperOptions {
   db: Database;
   intervalMs?: number;
@@ -422,7 +538,8 @@ export class StalledTaskSweeper {
 
   /** Exposed for deterministic tests. */
   async sweep(): Promise<{ redriven: number }> {
-    const redriven = await redriveStalledTasks(this.db, defaultDeps, { staleMs: this.staleMs });
+    let redriven = await redriveStalledTasks(this.db, defaultDeps, { staleMs: this.staleMs });
+    redriven += await redriveCancelledTasks(this.db, defaultCancelDeps, { staleMs: this.staleMs });
     return { redriven };
   }
 }
