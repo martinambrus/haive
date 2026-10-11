@@ -75,6 +75,12 @@ removing its old tag raced a sibling switching to that tag the same way. A remov
 be queued leaves the image, as every delete did before, and never fails the delete that already
 happened.
 
+A build and a removal of one tag never interleave: the builder runs `docker build` and makes its claim
+inside one `withImageTagLock` turn, so a removal cannot fall between a cached build finishing and its
+claim. At boot `reapOrphanedSandboxImages` (`sandbox/sandbox-image-reaper.ts`) removes the per-provider
+images (`<repo>:<name>-<16 hex>`, never `:latest` or a composed image) that no provider names, through
+the same check and turn and without `--force`, so docker refuses one a container uses and the refusal is only logged.
+
 `cli_providers.sandbox_image_build_status` is reconciled against the real images on every
 boot (`clearPrunedSandboxImageState`, `data-migrations.ts`). Not cosmetic: a stale `ready`
 clears `createSandboxLoginContainer`'s gate and turns "not built" into `No such image`,
