@@ -74,6 +74,8 @@ ended, since a live worker may be starting younger ones. A step whose old runs a
 (a pause, the per-task cap and the runtime reserve all hold jobs `delayed`) is left to them. The
 lost run never started, so its re-dispatch charges no orphan budget.
 
+A `cancelled` task with a `task.cancelled` event five minutes old and no `task.cancel_finished` (the api commits the cancel before it queues the teardown) gets a CANCEL from the same sweep (`redriveCancelledTasks`), unless one is waiting, active or delayed; a finished or failed one in history does not count, since the finish record is what says the teardown ran, and the teardown is idempotent. Each re-drive is a `task.cancel_redriven` event, and a task stops being re-driven after three (`CANCEL_REDRIVE_MAX`), so a teardown that fails every time is left for a person rather than retried every minute; cancellations older than seven days are left alone, since many predate the finish record.
+
 **START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
 `running`, pointed at its first step, in one statement fenced on the epoch START read. A START that
 finds the task anywhere else — redelivered after the task ran on, a second START a task Retry

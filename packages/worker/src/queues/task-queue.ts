@@ -1132,6 +1132,15 @@ export async function enqueueStart(taskId: string, userId: string): Promise<void
   );
 }
 
+/** Queue a CANCEL as the api's cancel routes do; the teardown is idempotent. */
+export async function enqueueCancel(taskId: string, userId: string): Promise<void> {
+  await getTaskQueue().add(
+    TASK_JOB_NAMES.CANCEL,
+    { taskId, userId },
+    { removeOnComplete: 50, removeOnFail: 50 },
+  );
+}
+
 async function loadProviders(db: Database, userId: string): Promise<CliProviderRecord[]> {
   const rows = await db
     .select()
