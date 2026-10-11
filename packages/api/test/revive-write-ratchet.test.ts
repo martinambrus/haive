@@ -873,9 +873,9 @@ const TASK_TABLE = String.raw`(only\s+)?("?\w+"?\s*\.\s*)?"?tasks"?`;
 const TASK_MUTATION = new RegExp(
   [
     String.raw`\bupdate\s+${TASK_TABLE}(\s+(as\s+)?\w+)?\s+set\b`,
-    String.raw`\binsert\s+into\s+${TASK_TABLE}\s*(\(|values\b|select\b|default\b|overriding\b)`,
+    String.raw`\binsert\s+into\s+${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\bdelete\s+from\s+${TASK_TABLE}([^\w$-]|$)`,
-    String.raw`\bmerge\s+into\s+${TASK_TABLE}\b[\s\S]*\busing\b`,
+    String.raw`\bmerge\s+into\s+${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\btruncate\s+(table\s+)?${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\bcopy\s+${TASK_TABLE}\s*(\(|from\b)`,
   ].join('|'),
@@ -995,6 +995,11 @@ describe('a live-status write on a task row', () => {
     ).toBe(1);
     expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
     expect(found("throw new HttpError(409, 'Update tasks before retrying');")).toBe(0);
+    expect(
+      found(
+        "sql`INSERT INTO tasks AS current (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET status = 'running'`",
+      ),
+    ).toBe(1);
     expect(found(`let q; q = "UPDATE tasks SET status = 'running'"; await tx.unsafe(q);`)).toBe(1);
     expect(
       found("import * as orm from 'drizzle-orm'; orm.sql`UPDATE ${table} SET status = 1`;"),
