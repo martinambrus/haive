@@ -7,7 +7,12 @@ import type { FormSchema } from '@haive/shared';
 import { AdvisedStepError, type StepContext, type StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
+import {
+  ddevConfigUnreadable,
+  matchYamlField,
+  parseDdevConfig,
+  type DdevConfigFields,
+} from '../_ddev-config.js';
 import { hashDdevInputs } from '../_ddev-inputs-hash.js';
 import type { DdevBaseline, DdevEnvApply } from './01c-ddev-env.js';
 import {
@@ -109,10 +114,20 @@ export function classifyDrift(
   baseline: DdevBaseline,
   target: DdevConfigFields,
   targetHash: string,
+  unreadable: string | null = null,
 ): { kind: DriftKind; migrateTarget: string | null; unsupportedReason: string | null } {
   // An unchanged .ddev/ tree has no drift, whatever an older parser stored for the baseline.
   if (targetHash === baseline.configHash) {
     return { kind: 'none', migrateTarget: null, unsupportedReason: null };
+  }
+  if (unreadable) {
+    return {
+      kind: 'unsupported',
+      migrateTarget: null,
+      unsupportedReason:
+        `.ddev/config.yaml uses YAML Haive does not read (${unreadable}); ` +
+        `revert that part or apply the change by hand.`,
+    };
   }
   const targetBlock = yamlDatabase(target.dbType, target.dbVersion);
   const baseType = baseline.dbType ? yamlScalar(baseline.dbType) : null;
@@ -217,11 +232,13 @@ async function loadReconcileState(ctx: StepContext): Promise<{
 
   let target: DdevConfigFields | null = null;
   let targetHash: string | null = null;
+  let unreadable: string | null = null;
   if (workspace) {
     const cfg = ddevConfigRef(workspace);
     const text = await readTextNoFollow(cfg.anchor, cfg.rel);
     if (text !== null) {
       target = parseDdevConfig(text);
+      unreadable = ddevConfigUnreadable(text);
       // Hash the whole authored `.ddev/` tree (php ini, web-build Dockerfile, extra
       // compose/config, …), not just config.yaml — so an input edit outside config.yaml
       // still drives a restart. Fall back to config.yaml only on a non-git workspace.
@@ -232,7 +249,7 @@ async function loadReconcileState(ctx: StepContext): Promise<{
 
   const drift =
     baseline && target && targetHash !== null
-      ? classifyDrift(baseline, target, targetHash)
+      ? classifyDrift(baseline, target, targetHash, unreadable)
       : { kind: 'none' as DriftKind, migrateTarget: null, unsupportedReason: null };
 
   return { repoSubpath: ws?.repoSubpath ?? null, workspace, baseline, target, targetHash, drift };
