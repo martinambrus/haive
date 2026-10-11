@@ -51,6 +51,7 @@ import {
   loadRagEmbedHealth,
   ragEmbedWarning,
   ragStoreAwaitsReembed,
+  startBannerAwaitsReembed,
   recordRagEmbedDegraded,
   requireRagEmbedDegraded,
   resolveEmbedBatchSize,
@@ -568,10 +569,14 @@ export async function runRagIndexSync(
     // amber banner on the step (set once; a per-file progress line would otherwise
     // bury it). Clears to null on a healthy/unknown run so a stale warning from a
     // prior pass does not linger. Re-written after the loop with this run's result.
+    const awaitingReembed = await startBannerAwaitsReembed(conn, health, repositoryId, ctx.logger);
     await ctx.db
       .update(schema.taskSteps)
       .set({
-        warningMessage: composeRagWarning(embedDeviceWarning(embedDevice), ragEmbedWarning(health)),
+        warningMessage: composeRagWarning(
+          embedDeviceWarning(embedDevice),
+          ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
+        ),
       })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));
 

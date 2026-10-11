@@ -4,8 +4,7 @@ import {
   hashEmbed,
   ollamaEmbed,
   resolveEmbedBudget,
-  RAG_TABLE,
-  TASK_SOURCE_TYPE,
+  ragRowsAwaitReembed,
   type RagConnection,
 } from '@haive/shared/rag';
 import { logger } from '@haive/shared';
@@ -190,9 +189,8 @@ export async function requireRagEmbedDegraded(
   }
 }
 
-/** Whether the repo's store still holds a row awaiting re-embed (NULL `chunk_hash`).
- *  Task rows are excluded: `indexTaskEmbedding` never writes a hash for them. A failed
- *  read answers true, so the caller keeps the flag rather than clearing it blind. */
+/** Whether the repo's store still holds a row awaiting re-embed. A failed read answers
+ *  true, so the caller keeps the flag rather than clearing it blind. */
 export async function ragStoreAwaitsReembed(
   conn: RagConnection,
   repositoryId: string | null,
@@ -200,15 +198,27 @@ export async function ragStoreAwaitsReembed(
 ): Promise<boolean> {
   if (!repositoryId) return false;
   try {
-    const found = await conn.pg.unsafe(
-      `SELECT 1 FROM ${RAG_TABLE}
-        WHERE repository_id = $1 AND source_type <> $2 AND chunk_hash IS NULL LIMIT 1`,
-      [repositoryId, TASK_SOURCE_TYPE],
-    );
-    return found.length > 0;
+    return await ragRowsAwaitReembed(conn.pg, repositoryId);
   } catch (err) {
     log.error({ err, repositoryId }, 'failed to check for rows awaiting re-embed; keeping flag');
     return true;
+  }
+}
+
+/** For the first banner of a run: one read, and only for a degraded repo that is not
+ *  lexical-only. A failed read answers false, since the banner then must not claim rows. */
+export async function startBannerAwaitsReembed(
+  conn: RagConnection,
+  health: RagEmbedHealth,
+  repositoryId: string | null,
+  log: Logger,
+): Promise<boolean> {
+  if (!repositoryId || !health.degradedAt || health.lexicalOnly) return false;
+  try {
+    return await ragRowsAwaitReembed(conn.pg, repositoryId);
+  } catch (err) {
+    log.warn({ err, repositoryId }, 'failed to check for rows awaiting re-embed for the banner');
+    return false;
   }
 }
 
@@ -241,7 +251,9 @@ export async function clearRagEmbedDegraded(
  *  display copy that outlives the state it describes. */
 export function ragEmbedWarning(
   health: RagEmbedHealth,
-  thisRun: { skippedChunks: number; hashedChunks?: number } = { skippedChunks: 0 },
+  thisRun: { skippedChunks: number; hashedChunks?: number; awaitingReembed?: boolean } = {
+    skippedChunks: 0,
+  },
 ): string | null {
   if (health.lexicalOnly) {
     return (
@@ -260,7 +272,9 @@ export function ragEmbedWarning(
         'not searchable yet.'
       : hashed > 0
         ? ''
-        : ' Chunks left unindexed by the failure are not searchable yet.';
+        : thisRun.awaitingReembed
+          ? ' Chunks indexed with fallback vectors will be re-embedded on the next sync; they are searchable by words, and semantic search is off until then.'
+          : ' Chunks left unindexed by the failure are not searchable yet.';
   const fallback =
     hashed > 0
       ? ` ${hashed} chunk${hashed === 1 ? ' was' : 's were'} indexed with fallback vectors and ` +

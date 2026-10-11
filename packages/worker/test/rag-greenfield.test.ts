@@ -715,6 +715,47 @@ describe('greenfield RAG initialization at 11c', () => {
     },
   );
 
+  describe('the first banner of a sync on a degraded repository', () => {
+    const sync = async () =>
+      ragReindexStep.apply(ctx, {
+        detected: await ragReindexStep.detect!(ctx),
+        formValues: { runReindex: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+
+    it('words rows awaiting re-embed as searchable by words, not as unsearchable', async () => {
+      repo.ragEmbedDegradedAt = new Date(0);
+      repo.ragEmbedDegradedReason = 'Ollama is unreachable';
+      leftoverNullHash = true;
+      await sync();
+      expect(warnings[0]).toContain('fallback vectors');
+      expect(warnings[0]).toContain('re-embedded on the next sync');
+      expect(warnings[0]).not.toContain('not searchable');
+    });
+
+    it('keeps the unindexed wording when no row awaits re-embed', async () => {
+      repo.ragEmbedDegradedAt = new Date(0);
+      repo.ragEmbedDegradedReason = 'Ollama is unreachable';
+      await sync();
+      expect(warnings[0]).toContain('not searchable yet');
+      expect(warnings[0]).not.toContain('fallback vectors');
+    });
+
+    it('keeps the unindexed wording when the read fails', async () => {
+      repo.ragEmbedDegradedAt = new Date(0);
+      nullHashProbeFails = true;
+      await sync();
+      expect(warnings[0]).toContain('not searchable yet');
+    });
+
+    it('reads the store for the banner only when the repository is degraded', async () => {
+      await sync();
+      expect(nullHashProbes).toEqual([]);
+      expect(warnings[0]).toBeNull();
+    });
+  });
+
   it('does not initialize when the user declines', async () => {
     const detected = await ragReindexStep.detect!(ctx);
     expect(
@@ -1422,7 +1463,10 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
     leftoverNullHash = true;
     await sync();
     expect(hashes().every(([, hash]) => hash !== null)).toBe(true);
-    expect(nullHashProbes).toEqual([['repo-1', 'task']]);
+    expect(nullHashProbes).toEqual([
+      ['repo-1', 'task'],
+      ['repo-1', 'task'],
+    ]);
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
@@ -1439,7 +1483,7 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
     repo.ragEmbedDegradedReason = 'earlier outage';
     nullHashProbeFails = true;
     await sync();
-    expect(nullHashProbes).toHaveLength(1);
+    expect(nullHashProbes).toHaveLength(2);
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 

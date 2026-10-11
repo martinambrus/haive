@@ -238,7 +238,10 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     leftoverNullHash = true;
     await populate(detected({ ollamaReachable: true }));
     expect(storedHashes().every((h) => typeof h === 'string')).toBe(true);
-    expect(nullHashProbes).toEqual([['repo-1', 'task']]);
+    expect(nullHashProbes).toEqual([
+      ['repo-1', 'task'],
+      ['repo-1', 'task'],
+    ]);
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
@@ -258,7 +261,7 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     repo.ragEmbedDegradedAt = new Date(0);
     nullHashProbeFails = true;
     await populate(detected({ ollamaReachable: true }));
-    expect(nullHashProbes).toHaveLength(1);
+    expect(nullHashProbes).toHaveLength(2);
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
@@ -270,6 +273,44 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(warning).toContain('fallback vectors');
     expect(warning).toContain('re-embedded on the next sync');
     expect(warning).not.toContain('not searchable');
+  });
+
+  describe('the first banner of a run on a degraded repository', () => {
+    it('words rows awaiting re-embed as searchable by words, not as unsearchable', async () => {
+      repo.ragEmbedDegradedAt = new Date(0);
+      repo.ragEmbedDegradedReason = 'Ollama is unreachable';
+      leftoverNullHash = true;
+      await populate(detected({ ollamaReachable: true }));
+      expect(warnings[0]).toContain('fallback vectors');
+      expect(warnings[0]).toContain('re-embedded on the next sync');
+      expect(warnings[0]).not.toContain('not searchable');
+    });
+
+    it('keeps the unindexed wording when no row awaits re-embed', async () => {
+      repo.ragEmbedDegradedAt = new Date(0);
+      repo.ragEmbedDegradedReason = 'Ollama is unreachable';
+      await populate(detected({ ollamaReachable: true }));
+      expect(warnings[0]).toContain('not searchable yet');
+      expect(warnings[0]).not.toContain('fallback vectors');
+    });
+
+    it('keeps the unindexed wording when the read fails', async () => {
+      repo.ragEmbedDegradedAt = new Date(0);
+      nullHashProbeFails = true;
+      await populate(detected({ ollamaReachable: true }));
+      expect(warnings[0]).toContain('not searchable yet');
+    });
+
+    it('reads the store once for the first banner, besides the read that ends the run', async () => {
+      repo.ragEmbedDegradedAt = new Date(0);
+      await populate(detected({ ollamaReachable: true }));
+      expect(nullHashProbes).toHaveLength(2);
+    });
+
+    it('never reads the store for a healthy repository', async () => {
+      await populate(detected({ ollamaReachable: true }));
+      expect(nullHashProbes).toEqual([]);
+    });
   });
 
   it('keeps the strict-failure wording when the step fails', async () => {

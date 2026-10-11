@@ -33,6 +33,7 @@ import {
   loadRagEmbedHealth,
   ragEmbedWarning,
   ragStoreAwaitsReembed,
+  startBannerAwaitsReembed,
   recordRagEmbedDegraded,
   requireRagEmbedDegraded,
   resolveEmbedBatchSize,
@@ -763,12 +764,18 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       // bury it). Clears to null on a healthy/unknown run so a stale warning from a
       // prior pass does not linger.
       const health = await loadRagEmbedHealth(ctx.db, repositoryId ?? null);
+      const awaitingReembed = await startBannerAwaitsReembed(
+        conn,
+        health,
+        repositoryId ?? null,
+        ctx.logger,
+      );
       await ctx.db
         .update(schema.taskSteps)
         .set({
           warningMessage: composeRagWarning(
             embedDeviceWarning(embedDevice),
-            ragEmbedWarning(health),
+            ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
           ),
         })
         .where(eq(schema.taskSteps.id, ctx.taskStepId));
