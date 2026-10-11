@@ -485,9 +485,10 @@ exactly as before.*
   `DELETE FROM ai_rag_embeddings` runs against the global KB store: a separate database, outside any
   core-DB transaction and outside the Phase 2 snapshot. Running it before the gate is precisely the
   case that makes a Phase 4 rollback restore old images onto data the new version already destroyed.
-  `dropCopiedSecretLikeProviderEnv` removes a provider's plain `envVars` copy of a secret-looking key
-  once the boot half (`copySecretLikeProviderEnv`) holds it as an encrypted secret; the release
-  before reads only `envVars`, so a rollback must still find it there.
+  `dropCopiedSecretLikeProviderEnv` stores any secret-looking `envVars` key the boot half
+  (`copySecretLikeProviderEnv`) has not yet encrypted, then removes the plain copy, failing the commit
+  if a provider cannot be done; the release before reads only `envVars`, so a rollback must still
+  find it there.
 - Verify: the end-to-end matrix below, plus — a rollback at Phase 4 leaves the destructive set
   UNRUN, and a successful upgrade runs it exactly once.
 
