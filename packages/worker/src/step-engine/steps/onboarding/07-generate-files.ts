@@ -5,6 +5,7 @@ import {
   isNotUtf8Error,
   isPathContainmentError,
   lstatNoFollow,
+  readFileNoFollow,
   readdirNoFollow,
   renameNoFollow,
   updateFileNoFollow,
@@ -742,13 +743,21 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       wroteFileHashes[rel] = sha256Hex(normalizeContent(contents));
     };
 
+    const holdsRender = async (rel: string, contents: string): Promise<boolean> => {
+      const cap = Buffer.byteLength(contents, 'utf8') + 1;
+      const read = await readFileNoFollow(ctx.repoPath, rel, { maxBytes: cap }).catch(() => null);
+      if (read === null || read.data.length >= cap) return false;
+      return normalizeContent(read.data.toString('utf8')) === normalizeContent(contents);
+    };
+
     const writeIfAllowed = async (rel: string, contents: string): Promise<void> => {
       // `lstatNoFollow` rather than the old `stat` probe: `stat` follows a link, and reports a
       // DANGLING one as absent — so the exists check could pass and the write then land on whatever
       // the link names. replace-atomic (the default) because every file here is machine-parsed.
       if ((await lstatNoFollow(ctx.repoPath, rel)) !== null && !overwrite) {
         skippedFiles.push(rel);
-        leftAsIs.push(rel);
+        // A file already holding this render is not the person's (an interrupted earlier apply).
+        if (!(await holdsRender(rel, contents))) leftAsIs.push(rel);
         return;
       }
       await writeFileNoFollow(ctx.repoPath, rel, contents, { createParents: true });

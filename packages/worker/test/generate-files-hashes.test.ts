@@ -151,6 +151,23 @@ describe('generateFilesStep.apply — recorded write hashes', () => {
     expect(await readFile(path.join(repo, CONFIG), 'utf8')).toBe('{"mine":true}');
   });
 
+  it('reports a skipped file as left as is only when it does not already hold the render', async () => {
+    const run = () =>
+      generateFilesStep.apply(ctx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected: detect(),
+        formValues: {},
+      });
+    await run();
+    const rerun = await run();
+    expect(rerun.skippedFiles).toContain(CONFIG);
+    expect(rerun.leftAsIs ?? []).not.toContain(CONFIG);
+
+    await writeFile(path.join(repo, CONFIG), '{"mine":true}', 'utf8');
+    expect((await run()).leftAsIs).toContain(CONFIG);
+  });
+
   it('writes the RTK settings files for the enabled CLIs, and records their hashes', async () => {
     const out = await generateFilesStep.apply(ctx(), {
       iteration: 0,
