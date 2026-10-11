@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   backfill: vi.fn<(step: unknown) => Promise<boolean>>(),
   freshDims: null as string | null,
   freshMode: 'internal' as string | null,
+  modeSeq: [] as string[],
   freshConnection: null as string | null,
 }));
 
@@ -46,7 +47,12 @@ vi.mock('../src/global-kb/ensure-schema.js', () => ({
 vi.mock('../src/config/config.service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/config/config.service.js')>()),
   configService: {
-    getFresh: async (key: string) => (key.endsWith(':mode') ? h.freshMode : h.freshDims),
+    getFresh: async (key: string) =>
+      key.endsWith(':mode')
+        ? h.modeSeq.length > 0
+          ? h.modeSeq.shift()!
+          : h.freshMode
+        : h.freshDims,
   },
 }));
 vi.mock('../src/config/secrets.service.js', async (importOriginal) => ({
@@ -67,6 +73,7 @@ beforeEach(() => {
   h.ensure.mockReset();
   h.backfill.mockReset();
   h.freshMode = 'internal';
+  h.modeSeq = [];
   h.freshConnection = null;
   h.settings = { mode: 'internal', connectionString: null };
   h.connectOpts = [];
@@ -95,6 +102,21 @@ describe('withGlobalKb', () => {
     const asked: number[] = [];
     h.ensure.mockImplementation(async (_conn, opts) => {
       h.freshMode = 'external';
+      h.freshConnection = 'postgres://kb.example/b';
+      h.freshDims = '16';
+      asked.push(await (opts as { resolveDims: () => Promise<number> }).resolveDims());
+    });
+    h.settings = { ...h.settings, embeddingDimensions: 8 };
+    const withGlobalKb = await load();
+
+    await withGlobalKb(haiveDb, async () => {});
+    expect(asked).toEqual([8]);
+  });
+
+  it('keeps the opened width when the store switches while the width is read', async () => {
+    const asked: number[] = [];
+    h.ensure.mockImplementation(async (_conn, opts) => {
+      h.modeSeq = ['internal', 'external'];
       h.freshConnection = 'postgres://kb.example/b';
       h.freshDims = '16';
       asked.push(await (opts as { resolveDims: () => Promise<number> }).resolveDims());

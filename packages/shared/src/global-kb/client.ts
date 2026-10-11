@@ -67,19 +67,26 @@ async function openAndRun<T>(
     const key = storeKey(settings);
     // Fresh, not cached: the api may have saved a new width a moment ago in another process. It
     // applies only while the configured store is still the one this call opened.
-    const resolveDims = async () => {
-      const [mode, connectionString, dims] = await Promise.all([
+    const configuredStore = async () => {
+      const [mode, connectionString] = await Promise.all([
         configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE),
         secretsService.getFresh(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
-        configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS),
       ]);
-      const current = storeKey({
+      return storeKey({
         ...settings,
         mode: mode === 'external' ? 'external' : 'internal',
         connectionString: connectionString || null,
       });
-      const raw = Number.parseInt(dims ?? '', 10);
-      return current !== key || Number.isNaN(raw) ? settings.embeddingDimensions : raw;
+    };
+    const resolveDims = async () => {
+      // Store read before AND after the width, so a switch landing between them is seen.
+      if ((await configuredStore()) !== key) return settings.embeddingDimensions;
+      const raw = Number.parseInt(
+        (await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS)) ?? '',
+        10,
+      );
+      if ((await configuredStore()) !== key) return settings.embeddingDimensions;
+      return Number.isNaN(raw) ? settings.embeddingDimensions : raw;
     };
     // A call with a deadline never starts the shared ensure: its deadline kills the pool under it.
     const shared = schemaReady.get(key);
