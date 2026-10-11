@@ -355,14 +355,30 @@ function guarded(sf: ts.SourceFile, node: ts.Node, depth = 0): boolean {
 }
 
 /** Every live-status write on a task row in one source, with whether it is covered. */
-/** A `.update(schema.tasks)` not chained straight into `.set(...)`: whatever later sets its status
- *  is out of sight, so the builder itself is the write. */
+/** A `.update(schema.tasks)` not chained straight into `.set(...)`, or an `.insert(schema.tasks)`
+ *  chain kept in a variable: whatever later sets its status, or adds a conflict update, is out of
+ *  sight, so the builder itself is the write. */
 function detachedTaskBuilder(call: ts.CallExpression): boolean {
+  if (!ts.isPropertyAccessExpression(call.expression) || !isTasksTable(call.arguments[0])) {
+    return false;
+  }
+  if (call.expression.name.text === 'update') {
+    return !(ts.isPropertyAccessExpression(call.parent) && call.parent.name.text === 'set');
+  }
+  if (call.expression.name.text !== 'insert') return false;
+  let top: ts.Node = call;
+  while (
+    (ts.isPropertyAccessExpression(top.parent) || ts.isCallExpression(top.parent)) &&
+    top.parent.expression === top
+  ) {
+    top = top.parent;
+  }
+  const p = top.parent;
   return (
-    ts.isPropertyAccessExpression(call.expression) &&
-    call.expression.name.text === 'update' &&
-    isTasksTable(call.arguments[0]) &&
-    !(ts.isPropertyAccessExpression(call.parent) && call.parent.name.text === 'set')
+    (ts.isVariableDeclaration(p) && p.initializer === top) ||
+    (ts.isBinaryExpression(p) &&
+      p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      p.right === top)
   );
 }
 
@@ -399,6 +415,7 @@ function tasksAliases(file: string, text: string): string[] {
       tasksTableEscapes(n) ||
       (ts.isImportDeclaration(n) && importRenamesTasks(n)) ||
       (ts.isExportDeclaration(n) && reexportsTasks(n)) ||
+      importsDatabaseDynamically(n) ||
       schemaEscapes(n)
     ) {
       out.push(`${file}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`);
@@ -475,6 +492,13 @@ function importRenamesTasks(decl: ts.ImportDeclaration): boolean {
     const imported = (e.propertyName ?? e.name).text;
     return imported === 'tasks' || (imported === 'schema' && e.name.text !== 'schema');
   });
+}
+
+/** `import('@haive/database…')`: what it resolves to reaches the tasks table under any name. */
+function importsDatabaseDynamically(n: ts.Node): boolean {
+  if (!ts.isCallExpression(n) || n.expression.kind !== ts.SyntaxKind.ImportKeyword) return false;
+  const from = n.arguments[0];
+  return !from || !ts.isStringLiteralLike(from) || from.text.startsWith('@haive/database');
 }
 
 /** A re-export from the database package that hands the tasks table to another module, whose
@@ -579,6 +603,9 @@ describe('a live-status write on a task row', () => {
     expect(found(`export * as db from '@haive/database';`)).toBe(1);
     expect(found(`export { schema };`)).toBe(1);
     expect(found(`export { users } from '@haive/database/schema';`)).toBe(0);
+    expect(found(`const { tasks } = await import('@haive/database/schema');`)).toBe(1);
+    expect(found(`const m = await import(name);`)).toBe(1);
+    expect(found(`const z = await import('zod');`)).toBe(0);
   });
 
   it('reads the tasks table through a comment or spacing inside schema.tasks', () => {
@@ -746,6 +773,16 @@ describe('a live-status write on a task row', () => {
     expect(count(`.onConflictDoUpdate({ target: schema.tasks.id, set: s })`)).toBe(1);
     expect(count(`.onConflictDoUpdate({ target: schema.tasks.id, set: { title: 't' } })`)).toBe(0);
     expect(count(`.onConflictDoNothing()`)).toBe(0);
+  });
+
+  it('counts a task insert kept in a variable, whose conflict update is out of sight', () => {
+    const count = (body: string) => liveWrites('x.ts', `async function f(v) { ${body} }`).length;
+    expect(
+      count(
+        `const q = db.insert(schema.tasks).values(v); await q.onConflictDoUpdate({ target: schema.tasks.id, set: { status: 'queued' } });`,
+      ),
+    ).toBe(1);
+    expect(count(`const rows = await db.insert(schema.tasks).values(v).returning();`)).toBe(0);
   });
 
   it('counts a local patch that is replaced or assigned into', () => {
