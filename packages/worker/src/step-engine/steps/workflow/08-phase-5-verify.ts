@@ -191,6 +191,17 @@ function markedPmGuard(marker: string): string {
   );
 }
 
+/** A package-script slot a detect from before DDEV routing persisted as `host` is re-resolved, so
+ *  a replayed row never runs the script on the worker. */
+export function ddevSlot(cmd: SlotCommand | null, ddevMode: boolean): SlotCommand | null {
+  if (!cmd || !ddevMode || cmd.kind !== 'host') return cmd;
+  const [pm, verb, script] = cmd.argv;
+  if ((pm === 'pnpm' || pm === 'npm' || pm === 'yarn') && verb === 'run' && script) {
+    return buildVerifyCommand({ runner: 'pm', pm, script }, true);
+  }
+  return cmd;
+}
+
 /**
  * Build the command for a verify slot from the detected runner. Pure (no IO) so
  * it is unit-testable. Every runner goes through DDEV when `ddevMode`, else
@@ -377,7 +388,7 @@ async function execSlot(
     // stuck task. Same live status every long DDEV op already uses: latest line + an elapsed
     // counter that ticks through silent phases.
     const guardAt = cmd.argv.indexOf(DDEV_PM_GUARD);
-    const marker = `haive-pm-missing-${randomBytes(8).toString('hex')}`;
+    const marker = `pm-missing-${randomBytes(8).toString('hex')}`;
     const argv = cmd.argv.map((word, i) => (i === guardAt ? markedPmGuard(marker) : word));
     const res = await withDdevProgress(
       ctx,
@@ -789,14 +800,10 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       runLint?: boolean;
       runTypecheck?: boolean;
     };
-    const {
-      workspacePath,
-      ddevMode,
-      testFramework,
-      test: testCmd,
-      lint: lintCmd,
-      typecheck: typeCmd,
-    } = args.detected;
+    const { workspacePath, ddevMode, testFramework } = args.detected;
+    const testCmd = ddevSlot(args.detected.test, ddevMode);
+    const lintCmd = ddevSlot(args.detected.lint, ddevMode);
+    const typeCmd = ddevSlot(args.detected.typecheck, ddevMode);
 
     // A runner gone since 01c reads as a failing check and spends a fix round on "No such
     // container", so DDEV mode ensures it first, with the boot-failure routing the smoke has.

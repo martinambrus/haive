@@ -55,6 +55,7 @@ import {
   buildUnverifiedNote,
   buildVerifyDegradedNote,
   buildVerifyCommand,
+  ddevSlot,
   parseRuntimeSmokeOutput,
   phase5VerifyStep,
   runRuntimeSmoke,
@@ -646,6 +647,18 @@ describe('phase5VerifyStep.apply', () => {
       ).not.toHaveBeenCalled();
     });
 
+    it('re-resolves a persisted host package-script slot on DDEV instead of running it on the worker', () => {
+      const persisted = {
+        kind: 'host' as const,
+        label: 'pnpm run test',
+        argv: ['pnpm', 'run', 'test'],
+      };
+      expect(ddevSlot(persisted, true)).toEqual(
+        buildVerifyCommand({ runner: 'pm', pm: 'pnpm', script: 'test' }, true),
+      );
+      expect(ddevSlot(persisted, false)).toBe(persisted);
+    });
+
     describe('a pnpm or yarn script on DDEV', () => {
       const pmSlot = (pm: 'pnpm' | 'yarn' | 'npm') =>
         buildVerifyCommand({ runner: 'pm', pm, script: 'test' }, true)!;
@@ -656,7 +669,7 @@ describe('phase5VerifyStep.apply', () => {
           ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
             args.includes('curl')
               ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
-              : { exitCode: 199, output: `${/haive-pm-missing-[0-9a-f]+/.exec(args)?.[0]}\n` },
+              : { exitCode: 199, output: `${/pm-missing-[0-9a-f]+/.exec(args)?.[0]}\n` },
           );
 
           const out = await runApply({ test: pmSlot(pm) }, { runTest: true });
@@ -667,7 +680,7 @@ describe('phase5VerifyStep.apply', () => {
             note: `${pm} is not available in the DDEV web container (set corepack_enable: true in .ddev/config.yaml)`,
           });
           expect(slotExecs()[0]![1]).toMatch(
-            /^exec sh -c '.*haive-pm-missing-[0-9a-f]{16}.*exit 199.*' sh \w+ run test$/,
+            /^exec sh -c '.*pm-missing-[0-9a-f]{16}.*exit 199.*' sh \w+ run test$/,
           );
           expect(slotExecs()[0]![1]).toContain(` sh ${pm} run test`);
         },
