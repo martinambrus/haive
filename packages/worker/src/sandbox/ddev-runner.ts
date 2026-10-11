@@ -532,7 +532,9 @@ export async function startDdevRunner(params: {
   for (let i = 0; i < 60; i++) {
     params.bootScope?.throwIfAborted();
     try {
-      await exec('docker', ['exec', name, 'docker', 'info'], { timeout: 10_000 });
+      await whileRunnerBusy(name, () =>
+        exec('docker', ['exec', name, 'docker', 'info'], { timeout: 10_000 }),
+      );
       up = true;
       break;
     } catch {
@@ -573,18 +575,20 @@ export async function startDdevRunner(params: {
     directAccess && chosenMailpitPorts
       ? ` --mailpit-https-port=${chosenMailpitPorts.https} --mailpit-http-port=${chosenMailpitPorts.http}`
       : '';
-  await exec(
-    'docker',
-    [
-      'exec',
-      '-u',
-      'ddev',
-      name,
-      'bash',
-      '-lc',
-      `ddev config global --router-bind-all-interfaces=true${routerPortFlags}${mailpitPortFlags}`,
-    ],
-    { timeout: 30_000 },
+  await whileRunnerBusy(name, () =>
+    exec(
+      'docker',
+      [
+        'exec',
+        '-u',
+        'ddev',
+        name,
+        'bash',
+        '-lc',
+        `ddev config global --router-bind-all-interfaces=true${routerPortFlags}${mailpitPortFlags}`,
+      ],
+      { timeout: 30_000 },
+    ),
   ).catch((err) => {
     log.warn(
       { name, err: err instanceof Error ? err.message : String(err) },
@@ -1499,10 +1503,11 @@ export async function ddevContainerFailureLogs(handle: DdevRunnerHandle): Promis
   try {
     // Root inside the runner (no `-u ddev`), mirroring runnerDockerdUp: the nested docker
     // socket belongs to root.
-    const { stdout, stderr } = await exec(
-      'docker',
-      ['exec', handle.container, 'sh', '-c', script],
-      { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+    const { stdout, stderr } = await whileRunnerBusy(handle.container, () =>
+      exec('docker', ['exec', handle.container, 'sh', '-c', script], {
+        timeout: 30_000,
+        maxBuffer: 4 * 1024 * 1024,
+      }),
     );
     return budgetContainerLogs(`${stdout}${stderr}`, CONTAINER_LOG_MAX_CHARS);
   } catch {
@@ -2056,7 +2061,9 @@ export function decideDdevRecovery(s: {
  *  instead of falling through to a cold rebuild). */
 async function runnerDockerdUp(name: string): Promise<boolean> {
   try {
-    await exec('docker', ['exec', name, 'docker', 'info'], { timeout: 10_000 });
+    await whileRunnerBusy(name, () =>
+      exec('docker', ['exec', name, 'docker', 'info'], { timeout: 10_000 }),
+    );
     return true;
   } catch {
     return false;
@@ -2783,12 +2790,10 @@ export async function stopBrowserDesktop(taskId: string): Promise<void> {
   await markBrowserDesktopDown(container);
   if (!(await containerRunning(container))) return;
   try {
-    await exec(
-      'docker',
-      ['exec', '-u', 'ddev', container, 'bash', '-lc', BROWSER_DESKTOP_STOP_CMD],
-      {
+    await whileRunnerBusy(container, () =>
+      exec('docker', ['exec', '-u', 'ddev', container, 'bash', '-lc', BROWSER_DESKTOP_STOP_CMD], {
         timeout: 20_000,
-      },
+      }),
     );
   } catch (err) {
     logger.debug({ err, taskId }, 'stopBrowserDesktop (ddev) best-effort failed');
@@ -3055,18 +3060,20 @@ async function ensureDdevNodeForward(handle: DdevRunnerHandle): Promise<void> {
   // pkill runs as its own exec (process is `pkill`, which excludes its own pid) so it
   // never matches itself. After it, port 9229 is free, so startRunnerForward's port
   // guard proceeds to start the fresh forwarder to the current IP.
-  await exec(
-    'docker',
-    [
-      'exec',
-      '-u',
-      'ddev',
-      handle.container,
-      'pkill',
-      '-f',
-      `socat.*TCP-LISTEN:${XDEBUG_NODE_PORT}`,
-    ],
-    { timeout: 10_000 },
+  await whileRunnerBusy(handle.container, () =>
+    exec(
+      'docker',
+      [
+        'exec',
+        '-u',
+        'ddev',
+        handle.container,
+        'pkill',
+        '-f',
+        `socat.*TCP-LISTEN:${XDEBUG_NODE_PORT}`,
+      ],
+      { timeout: 10_000 },
+    ),
   ).catch(() => {});
   await startRunnerForward(handle.container, XDEBUG_NODE_PORT, `${webIp}:${XDEBUG_NODE_PORT}`);
 }
@@ -3102,10 +3109,12 @@ export async function ensureDdevDbForward(
   // pkill runs as its own exec (process `pkill`, excludes its own pid) so it never matches
   // itself; after it port `dbPort` is free, so startRunnerForward's port guard starts the
   // fresh forwarder to the current IP.
-  await exec(
-    'docker',
-    ['exec', '-u', 'ddev', handle.container, 'pkill', '-f', `socat.*TCP-LISTEN:${dbPort}`],
-    { timeout: 10_000 },
+  await whileRunnerBusy(handle.container, () =>
+    exec(
+      'docker',
+      ['exec', '-u', 'ddev', handle.container, 'pkill', '-f', `socat.*TCP-LISTEN:${dbPort}`],
+      { timeout: 10_000 },
+    ),
   ).catch(() => {});
   await startRunnerForward(handle.container, dbPort, `${dbIp}:${internalPort}`);
   log.info(

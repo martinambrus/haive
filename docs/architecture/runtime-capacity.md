@@ -13,3 +13,5 @@ because an exec outlives the worker or client that started it. MEASURED: an exec
 `socat` port forwarder, has no attached stdout and never ends, so it does not count. The final
 re-check and the removal run inside `withRunnersFenced`. A runner exec that starts during the
 decision waits for it, and a decision that sees the exec does not remove the runner.
+`runner-exec-fence-guard.test.ts` fails any attached `docker exec` in the runner modules that does
+not run inside `whileRunnerBusy`, or in a function only ever called there.

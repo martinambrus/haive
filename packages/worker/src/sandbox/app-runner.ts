@@ -100,7 +100,9 @@ async function isRunning(name: string): Promise<boolean> {
  *  app running but without the browser desktop. */
 async function injectBrowserAssets(container: string): Promise<void> {
   const dir = browserAssetsDir();
-  await exec('docker', ['exec', container, 'mkdir', '-p', '/opt/browser'], { timeout: 15_000 });
+  await whileRunnerBusy(container, () =>
+    exec('docker', ['exec', container, 'mkdir', '-p', '/opt/browser'], { timeout: 15_000 }),
+  );
   for (const f of [
     'browser-check.js',
     'browser-probe-connect.js',
@@ -122,12 +124,10 @@ async function injectBrowserAssets(container: string): Promise<void> {
     ],
     { timeout: 30_000 },
   );
-  await exec(
-    'docker',
-    ['exec', container, 'chmod', '+x', '/usr/local/bin/start-browser-desktop.sh'],
-    {
+  await whileRunnerBusy(container, () =>
+    exec('docker', ['exec', container, 'chmod', '+x', '/usr/local/bin/start-browser-desktop.sh'], {
       timeout: 15_000,
-    },
+    }),
   );
 }
 
@@ -481,9 +481,11 @@ export async function stopBrowserDesktop(taskId: string): Promise<void> {
   await markBrowserDesktopDown(container);
   if (!(await isRunning(container))) return;
   try {
-    await exec('docker', ['exec', container, 'bash', '-lc', BROWSER_DESKTOP_STOP_CMD], {
-      timeout: 20_000,
-    });
+    await whileRunnerBusy(container, () =>
+      exec('docker', ['exec', container, 'bash', '-lc', BROWSER_DESKTOP_STOP_CMD], {
+        timeout: 20_000,
+      }),
+    );
   } catch (err) {
     logger.debug({ err, taskId }, 'stopBrowserDesktop (app-runner) best-effort failed');
   }
