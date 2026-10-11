@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 const {
@@ -12,6 +14,7 @@ const {
   killStalePlaywrightRuns,
   recordLedgerEntry,
   collectChangedLineMap,
+  runStepCommandInSandbox,
 } = vi.hoisted(() => ({
   ensureAppServing: vi.fn(),
   withDdevProgress: vi.fn(
@@ -23,6 +26,7 @@ const {
   killStalePlaywrightRuns: vi.fn(),
   recordLedgerEntry: vi.fn(),
   collectChangedLineMap: vi.fn(),
+  runStepCommandInSandbox: vi.fn(),
 }));
 
 // withDdevProgress must be a real passthrough, not a stub: runSlot wraps every check in it,
@@ -42,6 +46,7 @@ vi.mock('../../task-ledger.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../task-ledger.js')>()),
   recordLedgerEntry,
 }));
+vi.mock('../../../sandbox/step-command.js', () => ({ runStepCommandInSandbox }));
 vi.mock('./_impl-changes.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_impl-changes.js')>()),
   collectChangedLineMap,
@@ -49,6 +54,7 @@ vi.mock('./_impl-changes.js', async (importOriginal) => ({
 
 import type { ChangedFileLines, ChangedLineMap } from './_impl-changes.js';
 import { AdvisedStepError, TaskCancelledError } from '../../step-definition.js';
+import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import { ddevGuardFailure } from '../../../sandbox/ddev-build-guard.js';
 import { DDEV_CONFIG_YAML_PREFIX } from '../../../sandbox/ddev-config-yaml-guard.js';
 import {
@@ -526,7 +532,37 @@ describe('phase5VerifyStep.apply', () => {
   } as never;
   const route = (msg: string) => (phase5VerifyStep.fixLoopOnError as (m: string) => boolean)(msg);
 
+  const execFileP = promisify(execFile);
+  /** The host directory the sandbox's workdir stands for in these tests. */
+  let sandboxRoot = '';
+  /** Runs the argv on this machine, in place of the sandbox: the workdir maps to `sandboxRoot`. */
+  async function localSandbox(
+    _ctx: unknown,
+    o: { argv: string[]; cwdRel?: string; timeoutMs: number },
+  ) {
+    const [bin, ...rest] = o.argv.map((a) => a.split(SANDBOX_WORKDIR).join(sandboxRoot));
+    try {
+      const { stdout, stderr } = await execFileP(bin!, rest, {
+        cwd: path.join(sandboxRoot, o.cwdRel ?? ''),
+        timeout: o.timeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      return { ran: true as const, exitCode: 0, output: `${stdout}${stderr}` };
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string; code?: unknown };
+      if (e.code === 'ENOENT') {
+        return { ran: false as const, note: `not run: ${bin} is not in the sandbox image` };
+      }
+      return {
+        ran: true as const,
+        exitCode: typeof e.code === 'number' ? e.code : 1,
+        output: `${e.stdout ?? ''}${e.stderr ?? ''}`,
+      };
+    }
+  }
+
   function runApply(detected: Record<string, unknown>, formValues: Record<string, boolean>) {
+    sandboxRoot = (detected.workspacePath as string | undefined) ?? '/repos/u/r';
     return phase5VerifyStep.apply(applyCtx, {
       detected: {
         workspacePath: '/repos/u/r',
@@ -546,6 +582,7 @@ describe('phase5VerifyStep.apply', () => {
   const slotExecs = () => ddevExec.mock.calls.filter((c) => !String(c[1]).includes('curl'));
 
   beforeEach(() => {
+    runStepCommandInSandbox.mockReset().mockImplementation(localSandbox);
     runnerHandleForTask.mockReset().mockReturnValue(RAW);
     ensureAppServing.mockReset().mockResolvedValue(DDEV_RUNTIME);
     ddevExec
@@ -948,6 +985,59 @@ describe('phase5VerifyStep.apply', () => {
       expect(err.message).toBe(
         'DDEV environment could not start for runtime verification: task cancelled',
       );
+    });
+  });
+
+  describe('a host check runs in the task sandbox, never on the worker', () => {
+    const NO_SUCH_BIN = {
+      kind: 'host' as const,
+      label: 'no-such-bin run',
+      argv: ['no-such-bin-haive', 'run', 'test'],
+    };
+    beforeEach(() => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+    });
+
+    it('hands the argv to the sandbox helper, so a binary the worker lacks still runs', async () => {
+      runStepCommandInSandbox.mockResolvedValue({ ran: true, exitCode: 0, output: 'ok' });
+
+      const out = await runApply(
+        { ddevMode: false, workspacePath: tmpdir(), test: NO_SUCH_BIN },
+        { runTest: true },
+      );
+
+      expect(runStepCommandInSandbox).toHaveBeenCalledTimes(1);
+      expect(runStepCommandInSandbox.mock.calls[0]![1]).toMatchObject({
+        argv: ['no-such-bin-haive', 'run', 'test'],
+        timeoutMs: 600_000,
+      });
+      expect(out.test).toMatchObject({ ran: true, passed: true, output: 'ok' });
+    });
+
+    it('reports a command the sandbox did not run as not run, with its note', async () => {
+      const note = 'not run: pnpm is not in the sandbox image';
+      runStepCommandInSandbox.mockResolvedValue({ ran: false, note });
+
+      const out = await runApply(
+        { ddevMode: false, workspacePath: tmpdir(), test: NO_SUCH_BIN },
+        { runTest: true },
+      );
+
+      expect(out.test).toMatchObject({ ran: false, passed: false, note });
+    });
+
+    it('takes a failing exit code and an excerpt of the output from the sandbox run', async () => {
+      const long = `FIRST\n${'noise line\n'.repeat(950)}Tests: 3 failed`;
+      runStepCommandInSandbox.mockResolvedValue({ ran: true, exitCode: 1, output: long });
+
+      const out = await runApply(
+        { ddevMode: false, workspacePath: tmpdir(), test: NO_SUCH_BIN },
+        { runTest: true },
+      );
+
+      expect(out.test.passed).toBe(false);
+      expect(out.test.output.length).toBeLessThanOrEqual(4000);
+      expect(out.test.output.endsWith('Tests: 3 failed')).toBe(true);
     });
   });
 
@@ -1454,7 +1544,7 @@ process.exitCode = run.exit;
       it('does not block, and says the lint did not run, when vendor/bin/phpcs is missing', async () => {
         const out = await lintApply(rangesIn('src/a.php', [10, 12]));
 
-        const note = 'vendor/bin/phpcs not found — lint not run';
+        const note = 'not run: vendor/bin/phpcs is not in the sandbox image';
         expect(out.lint).toEqual({
           ran: false,
           passed: false,
@@ -1525,7 +1615,7 @@ process.exitCode = run.exit;
         );
       });
 
-      it('falls back to the unscoped verdict for a workspace path a shell command cannot carry', async () => {
+      it('scopes a workspace whose host path has a space, since the sandbox sees a fixed path', async () => {
         const spaced = path.join(workspace, 'with space');
         await mkdir(spaced);
         await installPhpcs(
@@ -1535,15 +1625,12 @@ process.exitCode = run.exit;
 
         const out = await lintApply(rangesIn('src/a.php', [10, 12]), PHPCS_HOST, spaced);
 
-        expect(await calls(spaced)).toEqual([[]]);
-        expect(out.lint.note).toBe(
-          'lint verdict unscoped: the report directory could not be prepared',
-        );
+        expect(out.lint.scope).toEqual({ blocking: 1, preExisting: 0 });
       });
 
       // Root writes into a 0555 directory, so there is no unwritable directory to observe as root.
       it.skipIf(process.getuid?.() === 0)(
-        'does not repair a report directory the worker cannot write, which is the unscoped fallback',
+        'makes the report directory writable for the sandbox user before phpcs writes into it',
         async () => {
           await installPhpcs({
             flagged: { exit: 2, report: reportJson({ 'src/a.php': [11] }) },
@@ -1555,16 +1642,46 @@ process.exitCode = run.exit;
           try {
             const out = await lintApply(rangesIn('src/a.php', [10, 12]));
 
-            expect(out.lint).toMatchObject({
-              passed: false,
-              output: 'raw report',
-              note: 'lint verdict unscoped: phpcs wrote no report',
-            });
+            expect(out.lint.scope).toEqual({ blocking: 1, preExisting: 0 });
           } finally {
             await chmod(dir, 0o755);
           }
         },
       );
+
+      it('asks for the report at the sandbox workdir, which the worker reads back from the worktree', async () => {
+        await installPhpcs({
+          flagged: { exit: 2, report: reportJson({ 'src/a.php': [11] }) },
+        });
+
+        await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        const sent = runStepCommandInSandbox.mock.calls[0]![1].argv as string[];
+        expect(sent[0]).toBe('vendor/bin/phpcs');
+        expect(sent[2]).toMatch(
+          new RegExp(
+            `^${REPORT_FLAG}${SANDBOX_WORKDIR}/\\.haive/verify/phpcs-[0-9a-f]{16}\\.json$`,
+          ),
+        );
+        expect(sent[3]).toBe(`--basepath=${SANDBOX_WORKDIR}`);
+      });
+
+      it('does not block, and says why, when the sandbox cannot run phpcs', async () => {
+        runStepCommandInSandbox.mockResolvedValue({
+          ran: false,
+          note: 'not run: no CLI provider, so no sandbox image',
+        });
+
+        const out = await lintApply(rangesIn('src/a.php', [10, 12]));
+
+        expect(out.lint).toMatchObject({
+          ran: false,
+          passed: false,
+          note: 'not run: no CLI provider, so no sandbox image',
+        });
+        expect(out.passed).toBe(true);
+        expect(runStepCommandInSandbox).toHaveBeenCalledTimes(1);
+      });
     });
 
     describe('in DDEV mode', () => {

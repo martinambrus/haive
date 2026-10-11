@@ -1,10 +1,7 @@
-import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import path from 'node:path';
 import { ensureDirNoFollow, readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
-import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import {
   AdvisedStepError,
@@ -23,6 +20,8 @@ import {
 } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
 import { shellQuote } from '../../../sandbox/shell-quote.js';
+import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
+import { runStepCommandInSandbox } from '../../../sandbox/step-command.js';
 import { ensureAppServing, withDdevProgress, type ServingRuntime } from './_app-runtime.js';
 import {
   ensureDdevPlaywrightBrowsers,
@@ -48,13 +47,11 @@ import {
 // package.json script, a composer.json script, or a framework binary
 // (phpunit/pytest for test, phpcs for lint, phpstan for typecheck). PHP/Python
 // commands run inside the per-task DDEV runner when the project uses DDEV
-// (where the toolchain lives), else host-side. The 3-checkbox form is unchanged.
-
-const exec = promisify(execFile);
+// (where the toolchain lives), else in the task's sandbox. The 3-checkbox form is unchanged.
 
 type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'none';
 
-/** A resolved command for one verify slot. `host` runs via execFile in the
+/** A resolved command for one verify slot. `host` runs in the task's sandbox, in the
  *  workspace; `ddev` runs via ddevExec inside the runner (argv is the ddev
  *  subcommand, without the leading `ddev`). null = nothing detected for the slot. */
 export interface SlotCommand {
@@ -360,11 +357,13 @@ interface SlotRun {
   note?: string;
   exitCode: number;
   output: string;
+  /** Why a host command did not run. */
+  note?: string;
   /** The whole output, for a classifier; never stored. */
   raw: string;
 }
 
-/** A shell reports a missing command as 127; a host binary that cannot start reads the same. */
+/** A shell reports a missing command as 127. */
 const NOT_FOUND_EXIT = 127;
 
 const SLOT_TIMEOUT_MS = 600_000;
@@ -372,7 +371,6 @@ const SLOT_TIMEOUT_MS = 600_000;
 async function execSlot(
   cmd: SlotCommand,
   ctx: StepContext,
-  workspace: string,
   handle: DdevRunnerHandle | null,
   extraArgs: string[] = [],
 ): Promise<SlotRun> {
@@ -411,35 +409,33 @@ async function execSlot(
       raw: res.output,
     };
   }
-  try {
-    const [bin, ...rest] = cmd.argv;
-    // execFile buffers, so there is no line to stream — the elapsed counter is the half that
-    // matters here, and withDdevProgress ticks it for an op with no output of its own.
-    const { stdout, stderr } = await withDdevProgress(ctx, `Running ${cmd.label}`, () =>
-      exec(bin!, [...rest, ...extraArgs], {
-        cwd: workspace,
-        timeout: SLOT_TIMEOUT_MS,
-        maxBuffer: 10 * 1024 * 1024,
+  const res = await withDdevProgress(
+    ctx,
+    `Running ${cmd.label}`,
+    (onLine) =>
+      runStepCommandInSandbox(ctx, {
+        argv: [...cmd.argv, ...extraArgs],
+        timeoutMs: SLOT_TIMEOUT_MS,
+        onWait: (busy, cap) => onLine(`waiting for an agent slot (${busy} of ${cap} busy)`),
       }),
-    );
-    const raw = `${stdout}${stderr}`;
-    return { ran: true, exitCode: 0, output: checkOutputExcerpt(raw), raw };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: unknown };
-    const exitCode = typeof e.code === 'number' ? e.code : e.code === 'ENOENT' ? NOT_FOUND_EXIT : 1;
-    const raw = `${e.stdout ?? ''}${e.stderr ?? ''}`;
-    return { ran: true, exitCode, output: checkOutputExcerpt(raw), raw };
-  }
+    { initialLine: cmd.argv.join(' ') },
+  );
+  if (!res.ran) return { ran: false, exitCode: 1, output: res.note, raw: res.note, note: res.note };
+  return {
+    ran: true,
+    exitCode: res.exitCode,
+    output: checkOutputExcerpt(res.output),
+    raw: res.output,
+  };
 }
 
 async function runSlotRaw(
   slot: 'test' | 'lint' | 'typecheck',
   cmd: SlotCommand,
   ctx: StepContext,
-  workspace: string,
   handle: DdevRunnerHandle | null,
 ): Promise<{ check: CheckResult; raw: string }> {
-  const run = await execSlot(cmd, ctx, workspace, handle);
+  const run = await execSlot(cmd, ctx, handle);
   const check = {
     ran: run.ran,
     passed: run.ran && run.exitCode === 0,
@@ -454,10 +450,9 @@ async function runSlot(
   slot: 'test' | 'lint' | 'typecheck',
   cmd: SlotCommand,
   ctx: StepContext,
-  workspace: string,
   handle: DdevRunnerHandle | null,
 ): Promise<CheckResult> {
-  return (await runSlotRaw(slot, cmd, ctx, workspace, handle)).check;
+  return (await runSlotRaw(slot, cmd, ctx, handle)).check;
 }
 
 const REPORT_DIR = '.haive/verify';
@@ -503,30 +498,25 @@ async function runScopedPhpcs(
   const name = `phpcs-${randomBytes(8).toString('hex')}.json`;
   const reportRel = `${dirRel}/${name}`;
   const ddev = cmd.kind === 'ddev';
-  const root = ddev ? DDEV_PROJECT_MOUNT : path.resolve(workspace);
+  const root = ddev ? DDEV_PROJECT_MOUNT : SANDBOX_WORKDIR;
   let flags: string[];
   try {
     flags = phpcsReportFlags(`${root}/${REPORT_DIR}/${name}`, root);
     await ensureDirNoFollow(anchor, dirRel);
-    // Only the DDEV user is a different uid from this worker, which writes the host report itself.
-    if (ddev) await ensureSandboxWritableTree(anchor, dirRel);
+    await ensureSandboxWritableTree(anchor, dirRel);
   } catch (err) {
     ctx.logger.warn({ err }, 'phpcs report directory could not be prepared');
     return { reason: 'the report directory could not be prepared' };
   }
   try {
     const startedAt = performance.now();
-    const run = await execSlot(cmd, ctx, workspace, handle, flags);
+    const run = await execSlot(cmd, ctx, handle, flags);
     const elapsedMs = performance.now() - startedAt;
-    if (run.exitCode === NOT_FOUND_EXIT) {
-      const check = {
-        ran: false,
-        passed: false,
-        command: cmd.label,
-        output: PHPCS_NOT_FOUND,
-        note: PHPCS_NOT_FOUND,
+    if (!run.ran || run.exitCode === NOT_FOUND_EXIT) {
+      const why = run.note ?? PHPCS_NOT_FOUND;
+      return {
+        check: { ran: false, passed: false, command: cmd.label, output: why, note: why },
       };
-      return { check };
     }
     // ignore_errors_on_exit and ignore_warnings_on_exit hide violations from the exit code.
     const text = await readTextNoFollow(anchor, reportRel, { maxBytes: MAX_REPORT_BYTES });
@@ -560,16 +550,16 @@ async function runLint(
   handle: DdevRunnerHandle | null,
 ): Promise<CheckResult> {
   if (!isDirectPhpcs(cmd)) {
-    return unscoped(await runSlot('lint', cmd, ctx, workspace, handle), 'project script');
+    return unscoped(await runSlot('lint', cmd, ctx, handle), 'project script');
   }
-  if (cmd.kind === 'ddev' && !handle) return runSlot('lint', cmd, ctx, workspace, handle);
+  if (cmd.kind === 'ddev' && !handle) return runSlot('lint', cmd, ctx, handle);
   const changed = await collectChangedLineMap(ctx, workspace);
   const scoped = changed
     ? await runScopedPhpcs(cmd, ctx, workspace, handle, changed)
     : { reason: 'the change could not be measured' };
   return 'check' in scoped
     ? scoped.check
-    : unscoped(await runSlot('lint', cmd, ctx, workspace, handle), scoped.reason);
+    : unscoped(await runSlot('lint', cmd, ctx, handle), scoped.reason);
 }
 
 const skippedResult = (): CheckResult => ({
@@ -833,7 +823,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     }
     const testRun =
       values.runTest && testCmd
-        ? await runSlotRaw('test', testCmd, ctx, workspacePath, ddevHandle)
+        ? await runSlotRaw('test', testCmd, ctx, ddevHandle)
         : { check: skippedResult(), raw: '' };
     let test = testRun.check;
     // An environment that cannot run a browser is not a failing test, and this step's fixLoop
@@ -856,7 +846,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         : skippedResult();
     const typecheck =
       values.runTypecheck && typeCmd
-        ? await runSlot('typecheck', typeCmd, ctx, workspacePath, ddevHandle)
+        ? await runSlot('typecheck', typeCmd, ctx, ddevHandle)
         : skippedResult();
 
     const passed =
