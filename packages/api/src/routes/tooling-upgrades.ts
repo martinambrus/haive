@@ -761,12 +761,18 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   // that merely failed under strict mode has no hash rows — those chunks were left
   // unindexed — so its next incremental sync picks them up as ordinary inserts and
   // re-embedding the whole repository would be wasted work.
+  let retryCleared: { ragEmbedDegradedAt: Date; ragEmbedDegradedReason: string | null } | null =
+    null;
   let reembedQueued = false;
   let degradationKept = false;
   if (body.ragEmbedAction) {
     const current = await db.query.repositories.findFirst({
       where: eq(schema.repositories.id, repositoryId),
-      columns: { ragEmbedLexicalOnly: true, ragEmbedDegradedAt: true },
+      columns: {
+        ragEmbedLexicalOnly: true,
+        ragEmbedDegradedAt: true,
+        ragEmbedDegradedReason: true,
+      },
     });
     if (!current) throw new HttpError(404, 'Repository not found');
     if (body.ragEmbedAction === 'accept_lexical_only') {
@@ -784,6 +790,12 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       if (!degradationKept) {
         updates.ragEmbedDegradedAt = null;
         updates.ragEmbedDegradedReason = null;
+        if (body.ragEmbedAction === 'retry' && current.ragEmbedDegradedAt) {
+          retryCleared = {
+            ragEmbedDegradedAt: current.ragEmbedDegradedAt,
+            ragEmbedDegradedReason: current.ragEmbedDegradedReason,
+          };
+        }
       }
       if (body.ragEmbedAction === 'rebuild_index' || current.ragEmbedLexicalOnly) {
         const pending = {
@@ -802,5 +814,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   }
 
   await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));
+  // A sync can write fallback rows between the probe and the clear; look once more after it.
+  if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
+    await db
+      .update(schema.repositories)
+      .set(retryCleared)
+      .where(eq(schema.repositories.id, repositoryId));
+    degradationKept = true;
+  }
   return c.json({ repositoryId, ok: true, reembedQueued, degradationKept });
 });

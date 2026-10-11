@@ -10,6 +10,7 @@ const h = vi.hoisted(() => ({
   hang: false,
   ended: 0,
   awaiting: false,
+  awaitingSeq: [] as boolean[],
   probeError: false,
   existingOpened: [] as string[],
   internalExists: false,
@@ -55,7 +56,8 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
             h.statements.push({ statement, params });
             if (statement.startsWith('SELECT')) {
               if (h.probeError) throw new Error('store read failed');
-              return h.awaiting ? [{ found: 1 }] : [];
+              const awaiting = h.awaitingSeq.length > 0 ? h.awaitingSeq.shift() : h.awaiting;
+              return awaiting ? [{ found: 1 }] : [];
             }
             if (!statement.startsWith('UPDATE')) return [];
             if (h.hang) return new Promise(() => {});
@@ -126,6 +128,7 @@ function setup(
   h.hang = false;
   h.ended = 0;
   h.awaiting = false;
+  h.awaitingSeq = [];
   h.probeError = false;
   return fake;
 }
@@ -308,7 +311,7 @@ describe('retrying the embedding of a degraded repository', () => {
 
     const res = await retry();
 
-    expect(h.existingOpened).toHaveLength(1);
+    expect(h.existingOpened).toHaveLength(2);
     expect(h.openOptions).toEqual([]);
     expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt ?? null).toBeNull();
     expect(await res.json()).toMatchObject({ degradationKept: false });
@@ -335,6 +338,18 @@ describe('retrying the embedding of a degraded repository', () => {
     expect(row!.ragEmbedDegradedAt).toBeInstanceOf(Date);
     expect(row!.ragEmbedDegradedReason).toBe('Ollama is unreachable');
     expect(await res.json()).toMatchObject({ degradationKept: true, reembedQueued: false });
+  });
+
+  it('restores the degradation when rows appear between the probe and the clear', async () => {
+    const fake = setup(STORE, true, true);
+    h.awaitingSeq = [false, true];
+
+    const res = await retry();
+
+    const [row] = fake.rows(schema.repositories);
+    expect(row!.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(row!.ragEmbedDegradedReason).toBe('Ollama is unreachable');
+    expect(await res.json()).toMatchObject({ degradationKept: true });
   });
 
   it('keeps the degradation when the probe fails', async () => {
@@ -381,13 +396,16 @@ describe('retrying the embedding of a degraded repository', () => {
     expect(h.statements).toEqual([]);
   });
 
-  it('probes one bounded, repository-scoped read that skips task rows', async () => {
+  it('probes with a bounded, repository-scoped read that skips task rows, again after it clears', async () => {
     setup(STORE, true, true);
 
     await retry();
 
-    expect(h.openOptions).toEqual([{ connectTimeoutSeconds: 3, fetchTypes: false }]);
+    const bounds = { connectTimeoutSeconds: 3, fetchTypes: false };
+    expect(h.openOptions).toEqual([bounds, bounds]);
     expect(h.statements.map((s) => s.statement.split(/\s+/).slice(0, 2).join(' '))).toEqual([
+      'SET LOCAL',
+      'SELECT 1',
       'SET LOCAL',
       'SELECT 1',
     ]);
