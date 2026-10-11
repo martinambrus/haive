@@ -1,12 +1,24 @@
 import { GLOBAL_KB_JOB_NAMES } from '@haive/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-type Entry = { id: string; namespace: string; status: string; superseded: boolean };
+type Entry = {
+  id: string;
+  namespace: string;
+  status: string;
+  superseded: boolean;
+  embedStatus: string;
+};
 type Row = { entryId: string; kind: string | null; model: string | null };
 
 const h = vi.hoisted(() => ({
   model: 'model-b',
-  entries: [] as Array<{ id: string; namespace: string; status: string; superseded: boolean }>,
+  entries: [] as Array<{
+    id: string;
+    namespace: string;
+    status: string;
+    superseded: boolean;
+    embedStatus: string;
+  }>,
   rows: [] as Array<{ entryId: string; kind: string | null; model: string | null }>,
   pending: [] as Array<{ id: string; namespace: string }>,
   live: [] as Array<{ name: string; data: unknown }>,
@@ -70,10 +82,13 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
             if (text.includes('IS DISTINCT FROM')) {
               return h.entries
                 .filter((e: Entry) => e.status === 'active' && !e.superseded)
-                .filter((e: Entry) =>
-                  h.rows.some(
-                    (r: Row) => r.entryId === e.id && (r.kind !== 'model' || r.model !== params[0]),
-                  ),
+                .filter(
+                  (e: Entry) =>
+                    e.embedStatus === 'failed' ||
+                    h.rows.some(
+                      (r: Row) =>
+                        r.entryId === e.id && (r.kind !== 'model' || r.model !== params[0]),
+                    ),
                 )
                 .sort((a: Entry, b: Entry) => (a.id < b.id ? -1 : 1))
                 .map((e: Entry) => ({ id: e.id, namespace: e.namespace }));
@@ -92,6 +107,7 @@ const entry = (id: string, over: Partial<Entry> = {}): Entry => ({
   namespace: 'house',
   status: 'active',
   superseded: false,
+  embedStatus: 'embedded',
   ...over,
 });
 const rowOf = (entryId: string, model: string | null, kind: string | null = 'model'): Row => ({
@@ -220,6 +236,33 @@ describe('the reconcile sweep re-embeds entries whose vectors drifted', () => {
     const ids = Array.from({ length: 50 }, (_, i) => `e${String(i).padStart(2, '0')}`);
     h.entries = ids.map((id) => entry(id));
     h.rows = ids.map((id) => rowOf(id, 'model-a'));
+
+    const first = await sweep();
+
+    expect(first.length).toBeGreaterThan(0);
+    expect(first.length).toBeLessThanOrEqual(20);
+    expect(first).toEqual(ids.slice(0, first.length));
+  });
+
+  it('queues a failed entry under the same gate, whatever its rows', async () => {
+    h.entries = [entry('failed', { embedStatus: 'failed' }), entry('fine')];
+    h.rows = [rowOf('failed', 'model-b'), rowOf('fine', 'model-b')];
+
+    expect(await sweep()).toEqual(['failed']);
+    h.ollamaUp = false;
+    expect(await sweep()).toEqual([]);
+    h.ollamaUp = true;
+    h.probeWidth = 3;
+    expect(await sweep()).toEqual([]);
+  });
+
+  it('counts failed entries in the per-sweep cap, and leaves archived and superseded ones', async () => {
+    const ids = Array.from({ length: 50 }, (_, i) => `f${String(i).padStart(2, '0')}`);
+    h.entries = [
+      ...ids.map((id) => entry(id, { embedStatus: 'failed' })),
+      entry('archived', { status: 'archived', embedStatus: 'failed' }),
+      entry('superseded', { superseded: true, embedStatus: 'failed' }),
+    ];
 
     const first = await sweep();
 

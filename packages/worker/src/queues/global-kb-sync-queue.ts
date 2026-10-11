@@ -425,24 +425,28 @@ export function pickLostSyncs<T extends { id: string }>(
 }
 
 // Entries re-embedded per sweep: a CPU batch measured 50-69 s, and the worker runs 2 syncs at once.
-const DRIFT_REEMBED_PER_SWEEP = 20;
+const REEMBED_PER_SWEEP = 20;
 
 type SyncCandidate = { id: string; namespace: string };
 
-/** Active entries owning a vector that is not a current-model vector: a hash fallback, one written
- *  before provenance (NULL model) or by another model. The rows are the record, so no status is
- *  written and a crash mid re-embed is picked up again by the next sweep. */
-async function findDriftedEntries(embedModel: string): Promise<SyncCandidate[]> {
+/** Active entries to re-embed: owning a vector that is not a current-model vector (a hash fallback,
+ *  one written before provenance — NULL model — or by another model), or stamped `failed`. The rows
+ *  and the stamp are the record, so the sweep writes no status and a crash mid re-embed is picked up
+ *  again by the next one. */
+async function findReembedCandidates(embedModel: string): Promise<SyncCandidate[]> {
   return withGlobalKb(
     getDb(),
     (ctx) =>
       ctx.conn.pg.unsafe(
         `SELECT e.id, e.namespace FROM global_kb_entries e
           WHERE e.status = 'active' AND e.superseded_at IS NULL
-            AND EXISTS (
-              SELECT 1 FROM ai_rag_embeddings r
-               WHERE r.entry_id = e.id AND r.namespace = e.namespace
-                 AND (r.embed_kind IS DISTINCT FROM 'model' OR r.embed_model IS DISTINCT FROM $1)
+            AND (
+              e.embed_status = 'failed'
+              OR EXISTS (
+                SELECT 1 FROM ai_rag_embeddings r
+                 WHERE r.entry_id = e.id AND r.namespace = e.namespace
+                   AND (r.embed_kind IS DISTINCT FROM 'model' OR r.embed_model IS DISTINCT FROM $1)
+              )
             )
           ORDER BY e.id`,
         [embedModel],
@@ -517,18 +521,18 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
         ),
       ),
   );
-  const drifted = settings.embedModel ? await findDriftedEntries(settings.embedModel) : [];
-  if (pending.length === 0 && drifted.length === 0) return;
+  const candidates = settings.embedModel ? await findReembedCandidates(settings.embedModel) : [];
+  if (pending.length === 0 && candidates.length === 0) return;
   const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
   try {
     const liveJobs = await queue.getJobs(['active', 'waiting', 'delayed', 'prioritized']);
-    const unqueued = pickLostSyncs(drifted, liveJobs);
-    const drift =
+    const unqueued = pickLostSyncs(candidates, liveJobs);
+    const reembed =
       unqueued.length > 0 && (await embedderMatchesStore(settings))
-        ? unqueued.slice(0, DRIFT_REEMBED_PER_SWEEP)
+        ? unqueued.slice(0, REEMBED_PER_SWEEP)
         : [];
     const owed = new Map<string, SyncCandidate>();
-    for (const e of [...pending, ...drift]) owed.set(e.id, e);
+    for (const e of [...pending, ...reembed]) owed.set(e.id, e);
     const lost = pickLostSyncs([...owed.values()], liveJobs);
     for (const e of lost) {
       await queue.add(
@@ -543,7 +547,7 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
     }
     if (lost.length > 0) {
       log.info(
-        { requeued: lost.length, pending: pending.length, drifted: drift.length },
+        { requeued: lost.length, pending: pending.length, reembedded: reembed.length },
         'requeued global KB syncs that were never queued',
       );
     }
