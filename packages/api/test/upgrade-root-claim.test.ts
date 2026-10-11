@@ -84,14 +84,22 @@ const startUpgrade = () =>
 const startOnboarding = () =>
   post('/tasks', { type: 'onboarding', title: 'Onboarding', repositoryId: REPO });
 const rollback = () => post(`/repositories/${REPO}/rollback-upgrade`);
+const startWorkflow = () =>
+  post('/tasks', {
+    type: 'workflow',
+    title: 'Workflow',
+    description: 'Change the thing.',
+    repositoryId: REPO,
+  });
 
 const claimed = () => ({ rootClaimedAt: new Date(), rootClaimKind: 'reset', rootClaimOwner: 'x' });
 
-describe('creating an onboarding, an upgrade or a rollback beside a reset', () => {
+describe('creating an onboarding, an upgrade, a rollback or a workflow beside a reset', () => {
   it.each([
     ['an upgrade', startUpgrade],
     ['a rollback', rollback],
     ['an onboarding', startOnboarding],
+    ['a workflow', startWorkflow],
   ])('refuses %s while the reset holds the root claim', async (_name, start) => {
     const { created } = world(claimed());
     const res = await start();

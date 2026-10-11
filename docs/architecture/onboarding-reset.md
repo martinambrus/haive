@@ -263,6 +263,10 @@ delete during a clone used to let the resource cleanup it queues run before the 
 writing, which left the checkout on disk with no row to find it by. A writer that claims after the
 lock waits for the delete's commit and then finds no row, so it writes nothing.
 
+Creating a task that writes the root (an onboarding, an upgrade or rollback, a workflow) locks the
+same row and refuses under a live claim (`withRepositoryTaskLock`), so a reset that claims later
+waits for that commit and finds the new task among the live writers it refuses for.
+
 **It is a LEASE, not a deadline on the work.** `acquireRootClaim` renews while its caller works
 (`ROOT_CLAIM_RENEW_MS`, a third of the window, on an `unref`ed timer so a held claim never keeps a
 process alive). A fixed expiry cannot tell a dead holder from a slow one, and both exist here —
