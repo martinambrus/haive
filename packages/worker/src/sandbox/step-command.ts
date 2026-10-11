@@ -15,7 +15,8 @@ import {
 import { currentAgentCap } from '../queues/cli-exec/handlers.js';
 import { resolveAppReach } from '../queues/cli-exec/app-reach.js';
 import type { DockerVolumeMount } from './docker-runner.js';
-import { NPM_CACHE_ENV, npmCacheMount } from './npm-cache.js';
+import { SANDBOX_CORE_IMAGE } from './image-composer.js';
+import { NPM_CACHE_ENV, ensureNpmCacheVolume, npmCacheMount } from './npm-cache.js';
 import { runInSandbox, SANDBOX_WORKDIR } from './sandbox-runner.js';
 
 /** Exit status of the Haive-owned preamble when the command's binary is not on the image's PATH,
@@ -93,6 +94,7 @@ export async function runStepCommandInSandbox(
   const { marker, preamble } = missingBinaryGuard();
   try {
     const appReach = await resolveAppReach(ctx.db, ctx.taskId);
+    await ensureNpmCacheVolume(sandboxImage ?? SANDBOX_CORE_IMAGE);
     const runnerOptions: Parameters<typeof runInSandbox>[1] = {
       workdir,
       taskId: ctx.taskId,

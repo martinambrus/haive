@@ -6,6 +6,10 @@ const release = vi.fn(async () => undefined);
 const acquireAgentLease = vi.fn();
 const resolveAppReach = vi.fn();
 
+vi.mock('./npm-cache.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./npm-cache.js')>()),
+  ensureNpmCacheVolume: vi.fn(async () => {}),
+}));
 vi.mock('./sandbox-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./sandbox-runner.js')>()),
   runInSandbox: (...args: unknown[]) => runInSandbox(...args),
