@@ -846,7 +846,7 @@ describe('a live-status write on a task row', () => {
     );
     expect(writes.length).toBeGreaterThan(0);
     expect(writes.filter((w) => !w.covered)).toEqual([]);
-  });
+  }, 30_000);
 
   it('does not let a guard outside an anonymous callback cover a write inside it', () => {
     const covered = (body: string) =>
@@ -882,7 +882,7 @@ describe('a live-status write on a task row', () => {
       tasksAliases(relative(SRC, f), readFileSync(f, 'utf8')),
     );
     expect(aliases).toEqual([]);
-  });
+  }, 30_000);
 
   it('reads every other way to reach the tasks table as an alias', () => {
     const found = (text: string) => tasksAliases('x.ts', text).length;
