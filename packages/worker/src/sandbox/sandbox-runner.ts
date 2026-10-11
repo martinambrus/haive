@@ -133,6 +133,8 @@ export interface SandboxRunSpec {
   args: string[];
   env?: Record<string, string>;
   wrapperContent?: string | null;
+  /** Shell run first in an outer `sh`, which then execs the command (or the wrapper) unchanged. */
+  prelude?: string;
   /** Files to inject into the container via bind-mount from the wrappers volume. */
   extraFiles?: SandboxExtraFile[];
   timeoutMs?: number;
@@ -338,7 +340,9 @@ export async function runInSandbox(
     }
     const result = await runner.run({
       image,
-      cmd: [resolvedCommand, ...spec.args],
+      cmd: spec.prelude
+        ? ['sh', '-c', `${spec.prelude}exec "$@"`, 'sh', resolvedCommand, ...spec.args]
+        : [resolvedCommand, ...spec.args],
       env,
       mounts,
       workdir,

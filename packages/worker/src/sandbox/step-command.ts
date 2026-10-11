@@ -16,6 +16,7 @@ import { currentAgentCap } from '../queues/cli-exec/handlers.js';
 import { resolveAppReach } from '../queues/cli-exec/app-reach.js';
 import type { DockerVolumeMount } from './docker-runner.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
+import { loopbackForwardSetup } from './loopback-forward.js';
 import { NPM_CACHE_ENV, ensureNpmCacheVolume, npmCacheMount } from './npm-cache.js';
 import { runInSandbox, SANDBOX_WORKDIR } from './sandbox-runner.js';
 
@@ -112,7 +113,13 @@ export async function runStepCommandInSandbox(
       timeoutMs: options.timeoutMs,
       signal: ctx.signal,
     };
-    if (maskFiles.length > 0) runSpec.extraFiles = maskFiles;
+    const extraFiles = [...maskFiles];
+    if (appReach.loopbackForward) {
+      const forward = loopbackForwardSetup(appReach.loopbackForward);
+      extraFiles.push(forward.file);
+      runSpec.args = ['-c', `${forward.prefix}${preamble}`, 'sh', ...options.argv];
+    }
+    if (extraFiles.length > 0) runSpec.extraFiles = extraFiles;
     const result = await runInSandbox(runSpec, runnerOptions);
     if (ctx.signal?.aborted) throw new TaskCancelledError();
     if (result.exitCode === BINARY_MISSING_EXIT && result.stdout.includes(marker)) {
