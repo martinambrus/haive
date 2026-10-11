@@ -210,6 +210,12 @@ export async function ensureGlobalKbSchema(
     `);
   }
 
+  // How each vector was made; NULL = unknown (written before this existed). Dense ranking reads `model` only.
+  await exec(
+    `ALTER TABLE ${VECTORS_TABLE} ADD COLUMN IF NOT EXISTS embed_kind TEXT CHECK (embed_kind IN ('model','hashed'))`,
+  );
+  await exec(`ALTER TABLE ${VECTORS_TABLE} ADD COLUMN IF NOT EXISTS embed_model TEXT`);
+
   // Upsert key + lookup/scope indexes (both variants).
   await exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_global_rag_ns_entry_section_chunk ON ${VECTORS_TABLE} (namespace, entry_id, section_id, chunk_index)`,

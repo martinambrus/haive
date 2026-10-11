@@ -140,6 +140,37 @@ describe('ensureGlobalKbSchema', () => {
     expect(mentioning).toEqual([statement]);
   });
 
+  // NULL means unknown (a row written before provenance existed), so neither column has a default.
+  it.each([
+    ['pgvector', {}],
+    ['jsonb', { vectorThrows: '0A000' }],
+  ])(
+    'adds the provenance columns in a locked step each, on the %s variant',
+    async (_label, opts) => {
+      const { conn, transactions } = fakeConn(opts);
+      await ensureGlobalKbSchema(conn);
+      const kind =
+        "ALTER TABLE ai_rag_embeddings ADD COLUMN IF NOT EXISTS embed_kind TEXT CHECK (embed_kind IN ('model','hashed'))";
+      const model = 'ALTER TABLE ai_rag_embeddings ADD COLUMN IF NOT EXISTS embed_model TEXT';
+
+      for (const statement of [kind, model]) {
+        const steps = transactions().filter((tx) => tx.includes(statement));
+        expect(steps).toHaveLength(1);
+        expect(steps[0]).toHaveLength(2);
+        expect(steps[0]![0]).toContain('pg_advisory_xact_lock');
+      }
+    },
+  );
+
+  it('emits the same guarded statements on a second run', async () => {
+    const first = fakeConn();
+    await ensureGlobalKbSchema(first.conn);
+    const second = fakeConn();
+    await ensureGlobalKbSchema(second.conn);
+
+    expect(second.queries()).toBe(first.queries());
+  });
+
   it('never lets the facet backfill store a JSON null', async () => {
     const { conn, queries } = fakeConn();
     await ensureGlobalKbSchema(conn);
