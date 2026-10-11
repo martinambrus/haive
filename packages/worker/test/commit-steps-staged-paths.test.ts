@@ -98,6 +98,21 @@ describe('commit steps report the staged paths by their real names', () => {
     expect(await run({ wroteFiles: [], skippedFiles: [] })).toContain('CLAUDE.md');
   });
 
+  it('12-post-onboarding leaves such a file out even when its directory is staged', async () => {
+    const repo = await repoWithAgents();
+    const out = await postOnboardingStep.apply(
+      mkCtx(repo, { wroteFiles: [], skippedFiles: [], leftAsIs: ['.claude/agents/é.md'] }),
+      {
+        detected: { hasGit: true, currentBranch: 'main' } as never,
+        formValues: { commit: true, commitMessage: 'chore: onboard' },
+        iteration: 0,
+        previousIterations: [],
+      },
+    );
+    expect(out.stagedPaths).toContain('.claude/agents/q"uote.md');
+    expect(out.stagedPaths).not.toContain('.claude/agents/é.md');
+  });
+
   it('03-upgrade-commit', async () => {
     const repo = await repoWithAgents();
     const out = await upgradeCommitStep.apply(mkCtx(repo), {

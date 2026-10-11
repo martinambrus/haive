@@ -755,7 +755,8 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
       // staged but uncommitted). Every path here is a curated deliverable, so force it.
       if (keep.length > 0) {
-        await gitExec(['add', '-f', '--', ...keep], {
+        const excluded = [...leftAsIs].map((rel) => `:(exclude,literal)${rel}`);
+        await gitExec(['add', '-f', '--', ...keep, ...excluded], {
           cwd: ctx.repoPath,
           maxBuffer: GIT_MAX_BUFFER,
         });
