@@ -46,6 +46,7 @@ let root: string;
 let rows: Map<string, { hash: string | null; params: unknown[] }>;
 let order: string[];
 let failInsertAt: number | null;
+let failDegradedWrite: boolean;
 let warnings: Array<string | null>;
 let repo: Record<string, unknown>;
 let conn: unknown;
@@ -85,6 +86,7 @@ beforeEach(async () => {
   rows = new Map();
   order = [];
   failInsertAt = null;
+  failDegradedWrite = false;
   warnings = [];
   repo = { ragEmbedDegradedAt: null, ragEmbedDegradedReason: null, ragEmbedLexicalOnly: false };
   conn = {
@@ -122,6 +124,8 @@ beforeEach(async () => {
           where: async () => {
             if (table === schema.taskSteps && 'warningMessage' in values)
               warnings.push(values.warningMessage as string | null);
+            if (failDegradedWrite && table === schema.repositories && values.ragEmbedDegradedAt)
+              throw new Error('database is down');
             if (table === schema.repositories && 'ragEmbedDegradedAt' in values)
               order.push('degraded');
             if (table === schema.repositories) Object.assign(repo, values);
@@ -205,6 +209,16 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(order.slice(0, 2)).toEqual(['degraded', 'insert']);
     expect(order.filter((event) => event === 'degraded')).toHaveLength(1);
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('writes no hashed row when the degradation could not be stored', async () => {
+    mocks.strict = false;
+    mocks.embedFails = true;
+    failDegradedWrite = true;
+    await expect(populate(detected({ ollamaReachable: true }))).rejects.toThrow('database is down');
+    expect(order).not.toContain('insert');
+    expect(rows.size).toBe(0);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
   });
 
   it('words a fallback-only run as fallback vectors, not as unsearchable chunks', async () => {

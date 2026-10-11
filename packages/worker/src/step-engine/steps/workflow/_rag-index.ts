@@ -51,6 +51,7 @@ import {
   loadRagEmbedHealth,
   ragEmbedWarning,
   recordRagEmbedDegraded,
+  requireRagEmbedDegraded,
   resolveEmbedBatchSize,
 } from '../_rag-embed-health.js';
 import { indexTaskEmbedding, TASK_EMBED_SOURCE_TYPE } from './_task-embedding.js';
@@ -751,12 +752,7 @@ export async function runRagIndexSync(
         if (hashedHere) {
           // Recorded before the first hashed upsert, so an aborted run still leaves the repo degraded.
           if (hashedChunks === 0) {
-            await recordRagEmbedDegraded(
-              ctx.db,
-              repositoryId,
-              HASH_WITH_ENDPOINT_REASON,
-              ctx.logger,
-            );
+            await requireRagEmbedDegraded(ctx.db, repositoryId, HASH_WITH_ENDPOINT_REASON);
             health.degradedAt ??= new Date();
             health.degradedReason = HASH_WITH_ENDPOINT_REASON;
           }

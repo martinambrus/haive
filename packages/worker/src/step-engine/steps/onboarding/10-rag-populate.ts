@@ -33,6 +33,7 @@ import {
   loadRagEmbedHealth,
   ragEmbedWarning,
   recordRagEmbedDegraded,
+  requireRagEmbedDegraded,
   resolveEmbedBatchSize,
   RagEmbedFailureError,
 } from '../_rag-embed-health.js';
@@ -443,12 +444,7 @@ async function embedAndStore(opts: {
     if (hashedHere) {
       // Recorded before the first hashed upsert, so an aborted run still leaves the repo degraded.
       if (opts.hashed.chunks === 0) {
-        await recordRagEmbedDegraded(
-          opts.ctx.db,
-          opts.repositoryId,
-          HASH_WITH_ENDPOINT_REASON,
-          opts.ctx.logger,
-        );
+        await requireRagEmbedDegraded(opts.ctx.db, opts.repositoryId, HASH_WITH_ENDPOINT_REASON);
       }
       opts.hashed.chunks += batch.length;
     }

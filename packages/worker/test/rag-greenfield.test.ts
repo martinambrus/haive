@@ -71,6 +71,7 @@ let indexedChunks: Map<
   string,
   { section_id: string; chunk_index: number; chunk_hash: string | null; content: string }[]
 >;
+let failDegradedWrite: boolean;
 let ctx: StepContext;
 let executionPath: 'full_workflow' | 'quick_bugfix';
 let priorSteps: Map<string, { output?: unknown; detectOutput?: unknown }>;
@@ -112,6 +113,7 @@ beforeEach(async () => {
   stalePaths = [];
   deletedPaths = [];
   indexedChunks = new Map();
+  failDegradedWrite = false;
   mocks.connect.mockImplementation(async () => ({
     close: mocks.close,
     pg: {
@@ -219,6 +221,7 @@ beforeEach(async () => {
             warnings.push(values.warningMessage as string | null);
           if (table !== schema.repositories) return [];
           if ('scopeExcludeGlobs' in values || 'ragEmbedDegradedAt' in values) {
+            if (failDegradedWrite && values.ragEmbedDegradedAt) throw new Error('database is down');
             if ('ragEmbedDegradedAt' in values) order.push('degraded');
             writes.push(values);
             Object.assign(repo, values);
@@ -252,7 +255,7 @@ beforeEach(async () => {
     workspacePath: root,
     emitProgress: async () => {},
     throwIfCancelled: () => {},
-    logger: { info: () => {}, warn: () => {} },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
   } as unknown as StepContext;
 });
 
@@ -1388,6 +1391,15 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
     expect(hashes().every(([, hash]) => hash !== null)).toBe(true);
     expect(repo.ragEmbedDegradedAt).toBeNull();
     expect(warnings.at(-1)).toBeNull();
+  });
+
+  it('writes no hashed row when the degradation could not be stored', async () => {
+    mocks.embed.mockImplementation(async ({ texts }) => hashedOnce(texts));
+    failDegradedWrite = true;
+    await expect(sync()).rejects.toThrow('database is down');
+    expect(order).not.toContain('insert');
+    expect(hashes()).toEqual([]);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
   });
 
   it('keeps the real hash and records nothing when no endpoint is configured', async () => {

@@ -129,6 +129,21 @@ export async function loadRagEmbedHealth(
   };
 }
 
+async function storeRagEmbedDegraded(
+  db: Database,
+  repositoryId: string,
+  reason: string,
+): Promise<void> {
+  const current = await loadRagEmbedHealth(db, repositoryId);
+  await db
+    .update(schema.repositories)
+    .set({
+      ragEmbedDegradedAt: current.degradedAt ?? new Date(),
+      ragEmbedDegradedReason: reason,
+    })
+    .where(eq(schema.repositories.id, repositoryId));
+}
+
 /** Remember that this repo's embeddings broke, so the condition outlives the step
  *  row (a manual retry nulls `task_steps.output`) and every later RAG step can say
  *  so. Best-effort with an error log rather than a throw: the caller is already
@@ -143,16 +158,28 @@ export async function recordRagEmbedDegraded(
 ): Promise<void> {
   if (!repositoryId) return;
   try {
-    const current = await loadRagEmbedHealth(db, repositoryId);
-    await db
-      .update(schema.repositories)
-      .set({
-        ragEmbedDegradedAt: current.degradedAt ?? new Date(),
-        ragEmbedDegradedReason: reason,
-      })
-      .where(eq(schema.repositories.id, repositoryId));
+    await storeRagEmbedDegraded(db, repositoryId, reason);
   } catch (err) {
     log.error({ err, repositoryId }, 'failed to record rag embed degradation');
+  }
+}
+
+/** Same write, but a failure throws: the caller must not write fallback vectors
+ *  while the flag that keeps dense search off over them is unstored. */
+export async function requireRagEmbedDegraded(
+  db: Database,
+  repositoryId: string | null,
+  reason: string,
+): Promise<void> {
+  if (!repositoryId) return;
+  try {
+    await storeRagEmbedDegraded(db, repositoryId, reason);
+  } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `could not record the RAG embedding degradation, so no fallback vectors were written: ${cause}`,
+      { cause: err },
+    );
   }
 }
 
