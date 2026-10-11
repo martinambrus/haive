@@ -57,7 +57,21 @@ export async function withRunnersFenced<T>(
 export async function runnerExecLive(
   taskId: string,
   docker: Docker = new Docker(),
+  timeoutMs = 8_000,
 ): Promise<boolean> {
+  // Runs inside a reap fence, so a daemon that never answers must not hold the runner's execs.
+  let timer: NodeJS.Timeout | undefined;
+  const busyAtDeadline = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(true), timeoutMs);
+  });
+  try {
+    return await Promise.race([attachedExecRunning(taskId, docker), busyAtDeadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function attachedExecRunning(taskId: string, docker: Docker): Promise<boolean> {
   for (const name of runnerNames(taskId)) {
     let execIds: string[];
     try {

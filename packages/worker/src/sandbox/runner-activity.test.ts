@@ -81,6 +81,13 @@ describe('an exec Docker still runs in the runner', () => {
     expect(await runnerSettled({} as never, TASK)).toBe(true);
   });
 
+  it('counts as busy when Docker does not answer in time', async () => {
+    const { default: Docker } = await import('dockerode');
+    const hung = new Docker();
+    hung.getContainer = (() => ({ inspect: () => new Promise(() => {}) })) as never;
+    expect(await runnerExecLive(TASK, hung, 20)).toBe(true);
+  });
+
   it('counts as busy when Docker cannot say, and not when the runner is gone', async () => {
     expect(await runnerExecLive(TASK)).toBe(false);
     m.containers.set(appRunnerName(TASK), new Error('daemon unreachable'));
