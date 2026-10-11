@@ -385,7 +385,7 @@ const FRAMEWORK_CONFIGS: Record<TestFramework, string[]> = {
 
 /** Directories a subdirectory search never descends into: installed dependencies and build
  *  output both carry other projects' configs. */
-const ROOT_SEARCH_SKIP = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage']);
+const ROOT_SEARCH_SKIP = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage', 'core']);
 
 /**
  * Repo-relative directory holding this framework's config: `''` when it is at the workspace

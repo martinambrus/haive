@@ -341,6 +341,17 @@ describe('scanTestInfra', () => {
     expect(infra.roots).toEqual({ playwright: null });
   });
 
+  it('does not root a framework at Drupal core', async () => {
+    const dir = await tree({
+      cypress: '',
+      'core/cypress.config.js': '',
+      'core/phpunit.xml.dist': '',
+    });
+    const infra = await scanTestInfra(dir);
+    expect(infra.frameworks).not.toContain('phpunit');
+    expect(infra.roots.cypress).toBeNull();
+  });
+
   it('does not root a framework inside installed dependencies', async () => {
     const dir = await tree({
       cypress: '',
