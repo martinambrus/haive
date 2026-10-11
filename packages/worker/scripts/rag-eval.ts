@@ -43,38 +43,10 @@ import {
   type RagSearchHit,
   type RagToolingPrefs,
 } from '@haive/shared/rag';
-import { rankOfExpected, summarizeRanks } from './rag-eval-metrics.js';
-
-interface SetQuery {
-  query: string;
-  expected: string;
-  kind: string;
-}
+import { fmtSummary, parseQuerySet, rankOfExpected, type SetQuery } from './rag-eval-metrics.js';
 
 function loadQuerySet(path: string): SetQuery[] {
-  const raw: unknown = JSON.parse(readFileSync(path, 'utf8'));
-  if (!Array.isArray(raw) || raw.length === 0) {
-    throw new Error(`${path}: expected a non-empty JSON array`);
-  }
-  return raw.map((q: unknown, i: number) => {
-    const e = q as { query?: unknown; expected?: unknown; kind?: unknown };
-    if (typeof e?.query !== 'string' || typeof e?.expected !== 'string') {
-      throw new Error(`${path}[${i}]: "query" and "expected" must be strings`);
-    }
-    return {
-      query: e.query,
-      expected: e.expected,
-      kind: typeof e.kind === 'string' ? e.kind : 'all',
-    };
-  });
-}
-
-function fmtSummary(label: string, ranks: (number | null)[], k: number): string {
-  const s = summarizeRanks(ranks, k);
-  return (
-    `${label.padEnd(16)} n=${s.n} MRR@${k}=${s.mrr.toFixed(3)} ` +
-    `hit@1=${s.hit1}/${s.n} hit@5=${s.hit5}/${s.n} hit@${k}=${s.hitK}/${s.n}`
-  );
+  return parseQuerySet(JSON.parse(readFileSync(path, 'utf8')), path);
 }
 
 async function main(): Promise<void> {

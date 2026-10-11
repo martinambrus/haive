@@ -7,6 +7,7 @@ export interface RankSummary {
 }
 
 export function rankOfExpected(hits: { sourcePath: string }[], expected: string): number | null {
+  if (expected === '') return null;
   const i = hits.findIndex((h) => h.sourcePath.includes(expected));
   return i >= 0 ? i + 1 : null;
 }
@@ -22,4 +23,41 @@ export function summarizeRanks(ranks: (number | null)[], k: number): RankSummary
     hit5: ranks.filter((r) => within(r, 5)).length,
     hitK: ranks.filter((r) => within(r, k)).length,
   };
+}
+
+export interface SetQuery {
+  query: string;
+  expected: string;
+  kind: string;
+}
+
+export function parseQuerySet(raw: unknown, path: string): SetQuery[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`${path}: expected a non-empty JSON array`);
+  }
+  return raw.map((q: unknown, i: number) => {
+    const e = q as { query?: unknown; expected?: unknown; kind?: unknown };
+    if (typeof e?.query !== 'string' || typeof e?.expected !== 'string') {
+      throw new Error(`${path}[${i}]: "query" and "expected" must be strings`);
+    }
+    if (e.expected === '') {
+      throw new Error(`${path}[${i}]: "expected" must not be empty`);
+    }
+    return {
+      query: e.query,
+      expected: e.expected,
+      kind: typeof e.kind === 'string' ? e.kind : 'all',
+    };
+  });
+}
+
+export function fmtSummary(label: string, ranks: (number | null)[], k: number): string {
+  const s = summarizeRanks(ranks, k);
+  // A cutoff deeper than the page searched would count unretrieved ranks as misses.
+  const hits = [
+    `hit@1=${s.hit1}/${s.n}`,
+    ...(k >= 5 ? [`hit@5=${s.hit5}/${s.n}`] : []),
+    ...(k !== 1 && k !== 5 ? [`hit@${k}=${s.hitK}/${s.n}`] : []),
+  ];
+  return `${label.padEnd(16)} n=${s.n} MRR@${k}=${s.mrr.toFixed(3)} ${hits.join(' ')}`;
 }
