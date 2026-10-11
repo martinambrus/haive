@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 const m = vi.hoisted(() => ({
   ddevExec: vi.fn(),
   ddevRunnerRunning: vi.fn(),
+  ddevProjectServing: vi.fn(),
   runStepCommandInSandbox: vi.fn(),
   exec: vi.fn(),
 }));
@@ -29,6 +30,7 @@ vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../sandbox/ddev-runner.js')>()),
   ddevExec: m.ddevExec,
   ddevRunnerRunning: m.ddevRunnerRunning,
+  ddevProjectServing: m.ddevProjectServing,
 }));
 
 import { schema } from '@haive/database';
@@ -47,6 +49,7 @@ describe('08b: the directory the pre-flight probe moves the runner into', () => 
   beforeEach(() => {
     m.ddevExec.mockReset().mockResolvedValue({ exitCode: 0, output: 'listed' });
     m.ddevRunnerRunning.mockReset().mockResolvedValue(true);
+    m.ddevProjectServing.mockReset().mockResolvedValue(true);
     m.exec.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
     m.runStepCommandInSandbox.mockReset().mockResolvedValue({ ran: true, exitCode: 1, output: '' });
   });
@@ -116,6 +119,13 @@ describe('08b: the directory the pre-flight probe moves the runner into', () => 
     await detect(false);
     expect(m.runStepCommandInSandbox).not.toHaveBeenCalled();
     expect(m.exec).not.toHaveBeenCalled();
+    expect(m.ddevExec).not.toHaveBeenCalled();
+  });
+
+  // `ddev exec` against a stopped project starts it, which detect() must never wait on.
+  it('does not probe a runner whose DDEV project is not serving', async () => {
+    m.ddevProjectServing.mockResolvedValue(false);
+    await detect();
     expect(m.ddevExec).not.toHaveBeenCalled();
   });
 });

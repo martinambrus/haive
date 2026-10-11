@@ -21,6 +21,7 @@ import { ensureAppServing, withDdevProgress } from './_app-runtime.js';
 import {
   runnerHandleForTask,
   ddevExec,
+  ddevProjectServing,
   ddevRunnerRunning,
   DDEV_PROJECT_MOUNT,
 } from '../../../sandbox/ddev-runner.js';
@@ -635,7 +636,8 @@ async function runTestPreflight(
   if (collect.kind === 'host') return null;
   if (collect.kind === 'ddev') {
     if (!d.repoSubpath) return null;
-    if (!(await ddevRunnerRunning(runnerHandleForTask(ctx.taskId, d.repoSubpath)))) return null;
+    const runner = runnerHandleForTask(ctx.taskId, d.repoSubpath);
+    if (!(await ddevRunnerRunning(runner)) || !(await ddevProjectServing(runner))) return null;
   }
 
   const listed = await runTestCommand(ctx, d, collect, COLLECT_TIMEOUT_MS).catch(() => null);
