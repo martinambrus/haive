@@ -154,3 +154,23 @@ describe('cloning a provider saved before the split', () => {
     expect(cloneSecrets).toEqual(['ANTHROPIC_API_KEY']);
   });
 });
+
+describe('POST /:providerId/secrets', () => {
+  it('answers 201 for a new secret and 200 when it overwrites one, never echoing the value', async () => {
+    const fake = setup(true);
+    const first = await send('POST', `/${PROVIDER}/secrets`, {
+      secretName: 'API_KEY',
+      value: 'old-value',
+    });
+    expect(first.status).toBe(201);
+    const second = await send('POST', `/${PROVIDER}/secrets`, {
+      secretName: 'API_KEY',
+      value: SECRET_VALUE,
+    });
+    expect(second.status).toBe(200);
+    const body = await second.json();
+    expect(JSON.stringify(body)).not.toContain(SECRET_VALUE);
+    expect(body.secret).toMatchObject({ secretName: 'API_KEY' });
+    expect(secretValues(fake)).toEqual({ API_KEY: SECRET_VALUE });
+  });
+});

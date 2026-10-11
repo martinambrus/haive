@@ -10,14 +10,13 @@ import {
   AUTH_URL_PREFIXES,
   CLI_EXEC_JOB_NAMES,
   TOKEN_PASTE_PROVIDERS,
-  computeKeyFingerprint,
   detectAuthResult,
-  envelopeEncrypt,
   extractDeviceCode,
   extractWrappedUrl,
   logger,
   secretsService,
   stripAnsi,
+  upsertProviderSecret,
   type CliLoginCreateJobPayload,
   type CliLoginCreateResult,
   type CliProbeJobPayload,
@@ -927,7 +926,13 @@ function stopCaptureWatchdog(session: BannerSession): void {
  *  auth state. The probe spec already forwards provider.envVars to claude. */
 async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string): Promise<void> {
   try {
-    await upsertProviderSecret(session.providerId, 'CLAUDE_CODE_OAUTH_TOKEN', oauthToken);
+    await upsertProviderSecret(getDb(), {
+      providerId: session.providerId,
+      name: 'CLAUDE_CODE_OAUTH_TOKEN',
+      value: oauthToken,
+      masterKek: await secretsService.getMasterKek(),
+      onExisting: 'overwrite',
+    });
     // If a stale copy was ever written to envVars (pre-secrets migration),
     // scrub it so it doesn't shadow the canonical encrypted secret.
     const db = getDb();
@@ -1010,43 +1015,6 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
     session.probePending = false;
     void cleanupSession(session);
   }
-}
-
-async function upsertProviderSecret(
-  providerId: string,
-  secretName: string,
-  value: string,
-): Promise<void> {
-  const db = getDb();
-  const masterKek = await secretsService.getMasterKek();
-  const envelope = envelopeEncrypt(value, masterKek);
-  const fingerprint = computeKeyFingerprint(value);
-  const existing = await db.query.cliProviderSecrets.findFirst({
-    where: and(
-      eq(schema.cliProviderSecrets.providerId, providerId),
-      eq(schema.cliProviderSecrets.secretName, secretName),
-    ),
-    columns: { id: true },
-  });
-  if (existing) {
-    await db
-      .update(schema.cliProviderSecrets)
-      .set({
-        encryptedValue: envelope.encryptedValue,
-        encryptedDek: envelope.encryptedDek,
-        fingerprint,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviderSecrets.id, existing.id));
-    return;
-  }
-  await db.insert(schema.cliProviderSecrets).values({
-    providerId,
-    secretName,
-    encryptedValue: envelope.encryptedValue,
-    encryptedDek: envelope.encryptedDek,
-    fingerprint,
-  });
 }
 
 /** Await a cli-exec job with no deadline, telling the dialog what it is waiting for and giving
