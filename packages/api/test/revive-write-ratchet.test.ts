@@ -404,12 +404,12 @@ function tasksTableEscapes(n: ts.Node): boolean {
   );
 }
 
-/** `schema` used as a value other than `schema.<table>`: an alias, a destructure, a computed key or
- *  an argument can each reach the tasks table under a name the scan does not read. */
+/** `schema` used other than as plain `schema.<table>` (no `?.`, `!` or parentheses): an alias, a
+ *  destructure, a computed key or an argument can each reach the tasks table unread. */
 function schemaEscapes(n: ts.Node): boolean {
   if (!ts.isIdentifier(n) || n.text !== 'schema') return false;
   const p = n.parent;
-  if (ts.isPropertyAccessExpression(p)) return false;
+  if (ts.isPropertyAccessExpression(p)) return p.questionDotToken !== undefined;
   if (ts.isImportSpecifier(p) || ts.isTypeQueryNode(p) || ts.isQualifiedName(p)) return false;
   if ((ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p)) && p.name === n) return false;
   return true;
@@ -486,6 +486,9 @@ describe('a live-status write on a task row', () => {
     expect(found(`write({ schema });`)).toBe(1);
     expect(found(`revive(schema.tasks);`)).toBe(1);
     expect(found(`return schema.tasks;`)).toBe(1);
+    expect(found(`db.update(schema?.tasks).set({ status: 'running' });`)).toBe(1);
+    expect(found(`db.update(schema!.tasks).set({ status: 'running' });`)).toBe(1);
+    expect(found(`db.update((schema).tasks).set({ status: 'running' });`)).toBe(1);
     expect(found('db.execute(sql`update ${schema.tasks} set status = 1`);')).toBe(1);
     expect(found('const from = sql`from ${schema.tasks} t`;')).toBe(0);
     expect(found(`db.select().from(schema.tasks).where(eq(schema.tasks.id, id));`)).toBe(0);
