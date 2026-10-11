@@ -191,6 +191,29 @@ describe('task shell start directory', () => {
     ]);
   });
 
+  it('answers a later probe with the workspace the task has moved to since the open', async () => {
+    vi.mocked(resolveTaskSandboxWorkdir).mockResolvedValue(WORKTREE);
+    const h = harness(WORKTREE);
+    const reply = await h.openTask();
+    if (!reply.ok) throw new Error('open failed');
+    expect(reply.workdirMismatch).toBeUndefined();
+
+    vi.mocked(resolveTaskSandboxWorkdir).mockResolvedValue(ROOT);
+    await h.sendCtl(reply.sessionId, { type: 'probe_workdir' });
+
+    expect(h.published()).toContain(
+      JSON.stringify({ workdirMismatch: { sessionPath: WORKTREE, expected: ROOT } }),
+    );
+  });
+
+  it('answers no probe for a repo shell', async () => {
+    const h = harness(WORKTREE);
+    const reply = await h.openRepo();
+    if (!reply.ok) throw new Error('open failed');
+    await h.sendCtl(reply.sessionId, { type: 'probe_workdir' });
+    expect(h.published().filter((m) => m.includes('workdirMismatch'))).toEqual([]);
+  });
+
   it('never probes a repo shell', async () => {
     const h = harness(WORKTREE);
     const reply = await h.openRepo();

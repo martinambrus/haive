@@ -4,6 +4,7 @@ import type { Redis } from 'ioredis';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
+  TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
   TERMINAL_SESSION_PREFIX,
@@ -491,6 +492,32 @@ describe('shell start directory and restart', () => {
     publisherFake.duplicates[0]!.emitOutput(`${TERMINAL_OUT_CHANNEL_PREFIX}sess-1`, raw);
     await new Promise((r) => setImmediate(r));
     expect(ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'exit')).toEqual(frame);
+  });
+
+  it('forwards a workdir probe and relays the answer as a workdir frame', async () => {
+    const ws = await connect('task');
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'probe_workdir' })));
+    await new Promise((r) => setImmediate(r));
+    expect(ctlPublishes().map((c) => JSON.parse(c.data))).toEqual([{ type: 'probe_workdir' }]);
+
+    const mismatch = { sessionPath: '/old', expected: '/new' };
+    publisherFake.duplicates[0]!.emitOutput(
+      `${TERMINAL_WORKDIR_CHANNEL_PREFIX}sess-1`,
+      JSON.stringify({ workdirMismatch: mismatch }),
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'workdir')).toEqual({
+      type: 'workdir',
+      workdirMismatch: mismatch,
+    });
+    expect(ws.sent.some((f) => JSON.parse(f).type === 'output')).toBe(false);
+  });
+
+  it('sends no workdir probe for a repo shell', async () => {
+    const ws = await connect('repo');
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'probe_workdir' })));
+    await new Promise((r) => setImmediate(r));
+    expect(ctlPublishes()).toEqual([]);
   });
 
   it('refuses a restart on a repo shell', async () => {

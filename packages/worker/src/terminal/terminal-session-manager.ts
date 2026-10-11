@@ -5,6 +5,7 @@ import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
@@ -181,6 +182,16 @@ export class TerminalSessionManager {
         await session.ptyHandle
           .resize({ h: frame.rows, w: frame.cols })
           .catch((err) => log.warn({ err, sid }, 'pty resize failed'));
+      } else if (frame.type === 'probe_workdir') {
+        if (session.scope !== 'task') return;
+        const expected = await resolveTaskSandboxWorkdir(this.db, session.scopeId);
+        const mismatch = await this.probeWorkdirMismatch(session.containerName, expected);
+        await this.redis
+          .publish(
+            `${TERMINAL_WORKDIR_CHANNEL_PREFIX}${sid}`,
+            JSON.stringify({ workdirMismatch: mismatch ?? null }),
+          )
+          .catch((err) => log.warn({ err, sid }, 'workdir probe reply failed'));
       } else if (frame.type === 'restart_shell') {
         if (session.scope !== 'task' || session.userId !== frame.userId) {
           log.warn({ sid, scope: session.scope }, 'restart_shell refused');
@@ -602,6 +613,7 @@ function parseRequest(raw: string): TerminalRequest | null {
 function parseControlFrame(raw: string): TerminalControlFrame | null {
   try {
     const obj = JSON.parse(raw) as Partial<TerminalControlFrame>;
+    if (obj.type === 'probe_workdir') return { type: 'probe_workdir' };
     if (obj.type === 'restart_shell' && typeof (obj as { userId?: unknown }).userId === 'string') {
       return obj as TerminalControlFrame;
     }

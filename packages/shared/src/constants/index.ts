@@ -574,6 +574,8 @@ export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
 export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';
 export const TERMINAL_OUT_CHANNEL_PREFIX = 'terminal:out:';
 export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
+/** The worker's answers to a task shell's workdir probe, apart from the raw PTY bytes. */
+export const TERMINAL_WORKDIR_CHANNEL_PREFIX = 'terminal:workdir:';
 /** Pub/sub channel the api publishes a user's mid-run steering message to, keyed
  *  by cli invocation id. The worker's cli-exec forwarder subscribes for the life
  *  of a steerable invocation and writes each message to the running CLI's stdin
@@ -936,7 +938,13 @@ export interface TerminalRestartShellFrame {
   userId: string;
 }
 
-export type TerminalControlFrame = TerminalResizeFrame | TerminalRestartShellFrame;
+/** Asks the worker whether the task shell's session still starts in the task's current workdir. */
+export interface TerminalProbeWorkdirFrame {
+  type: 'probe_workdir';
+}
+
+export type TerminalControlFrame =
+  TerminalResizeFrame | TerminalRestartShellFrame | TerminalProbeWorkdirFrame;
 
 export const FRAMEWORK_PATTERNS = {
   wordpress: {

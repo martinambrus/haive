@@ -31,6 +31,7 @@ interface InteractiveShellProps {
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
+const WORKDIR_PROBE_INTERVAL_MS = 15_000;
 
 interface WorkdirMismatch {
   sessionPath: string;
@@ -221,6 +222,9 @@ export function InteractiveShell(props: InteractiveShellProps) {
             `\r\n\x1b[31m[error: ${typeof parsed.message === 'string' ? parsed.message : 'unknown'}]\x1b[0m`,
           );
           break;
+        case 'workdir':
+          setWorkdirMismatch(parseWorkdirMismatch(parsed.workdirMismatch));
+          break;
         case 'pong':
           break;
       }
@@ -246,6 +250,13 @@ export function InteractiveShell(props: InteractiveShellProps) {
     const keepalive = setInterval(() => {
       sendFrame({ type: 'ping' });
     }, KEEPALIVE_INTERVAL_MS);
+    // A Retry elsewhere can move the task's workspace while this shell stays open.
+    const workdirProbe =
+      scope === 'task'
+        ? setInterval(() => {
+            if (document.visibilityState === 'visible') sendFrame({ type: 'probe_workdir' });
+          }, WORKDIR_PROBE_INTERVAL_MS)
+        : null;
 
     return () => {
       disposed = true;
@@ -253,6 +264,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
       cancelAnimationFrame(fitRaf1);
       cancelAnimationFrame(fitRaf2);
       clearInterval(keepalive);
+      if (workdirProbe) clearInterval(workdirProbe);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       inputDisposable.dispose();
