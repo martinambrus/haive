@@ -643,13 +643,33 @@ describe('D11: a set an earlier sync left behind its column is recomputed at boo
     expect(s.setOf()).toEqual(D1_SET);
   });
 
-  it('leaves the set of a repository with no claim to 01', async () => {
+  it('leaves the set of a repository with no claim to 01, without locking it', async () => {
     const s = await setup({ column: column(TEAM), base: TEAM, set: P, claims: [] });
+    let locks = 0;
+    s.fake.hooks.beforeLock = () => {
+      locks += 1;
+    };
 
     await recomputeSyncedApplicableSets(s.fake.db as unknown as Database);
 
     expect(s.setOf()).toEqual(P);
+    expect(locks).toBe(0);
   });
+
+  // A release adds a template while a repository from before the column waits for its next write.
+  it.each([
+    ['a stale set', P.filter((id) => id !== 'agents-index')],
+    ['no set', null],
+  ])(
+    'writes the set 01 computes from the snapshot of a repository with no column and %s',
+    async (_n, set) => {
+      const s = await setup({ set, claims: BASE_CLAIMS });
+
+      await recomputeSyncedApplicableSets(s.fake.db as unknown as Database);
+
+      expect(s.setOf()).toEqual(P);
+    },
+  );
 });
 
 describe('D2: 01 writes the set the sync wrote', () => {

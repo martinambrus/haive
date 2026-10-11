@@ -1,5 +1,5 @@
 import { isUtf8 } from 'node:buffer';
-import { and, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
@@ -176,12 +176,17 @@ function keptRender(
  *  repository's claims against. A repository with no claim keeps its set until 01's first plan. */
 async function writeApplicableTemplateIds(
   tx: Tx,
-  { repositoryId, userId }: { repositoryId: string; userId: string },
+  {
+    repositoryId,
+    userId,
+    requireResolved = true,
+  }: { repositoryId: string; userId: string; requireResolved?: boolean },
 ): Promise<void> {
   const liveRows = await loadLiveArtifacts(tx, repositoryId);
   if (liveRows.length === 0) return;
   const resolved = await resolveRenderContext(tx, { repositoryId, userId, liveRows, logger });
   if (resolved === null) {
+    if (!requireResolved) return;
     throw new Error('the render context column just written did not resolve');
   }
   const expanded = await unionExpandedFor(tx, {
@@ -193,18 +198,33 @@ async function writeApplicableTemplateIds(
   await updateApplicableTemplateIds(tx, repositoryId, expanded);
 }
 
-/** A sync from before the set followed the column moved the column alone, and no later sync of the
- *  same files repairs the set it left. Run at boot; where a writer wrote both, it writes the same set. */
+/** A sync from before the set followed the column moved the column alone, and a release adds templates
+ *  no stored set holds, so the set is recomputed at boot for every repository with a claim. One with no
+ *  column resolves from its snapshots, as 01 does, and keeps its set when none resolves. */
 export async function recomputeSyncedApplicableSets(db: Database): Promise<void> {
+  const claimed = await db
+    .select({ id: schema.onboardingArtifacts.repositoryId })
+    .from(schema.onboardingArtifacts)
+    .where(isNull(schema.onboardingArtifacts.supersededAt));
+  const ids = [...new Set(claimed.map((c) => c.id))].filter((id): id is string => id !== null);
+  if (ids.length === 0) return;
   const repos = await db
-    .select({ id: schema.repositories.id, userId: schema.repositories.userId })
+    .select({
+      id: schema.repositories.id,
+      userId: schema.repositories.userId,
+      renderContext: schema.repositories.renderContext,
+    })
     .from(schema.repositories)
-    .where(isNotNull(schema.repositories.renderContext));
+    .where(inArray(schema.repositories.id, ids));
   for (const repo of repos) {
     try {
       await db.transaction(async (tx) => {
         await lockProjectState(tx, repo.id);
-        await writeApplicableTemplateIds(tx, { repositoryId: repo.id, userId: repo.userId });
+        await writeApplicableTemplateIds(tx, {
+          repositoryId: repo.id,
+          userId: repo.userId,
+          requireResolved: repo.renderContext !== null,
+        });
       });
     } catch (err) {
       logger.warn({ err, repositoryId: repo.id }, 'applicable template ids not recomputed');
