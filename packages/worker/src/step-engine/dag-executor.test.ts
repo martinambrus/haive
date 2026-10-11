@@ -2133,6 +2133,40 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
   );
 });
 
+describe('ingestReviewRun: a refused review-loop agent', () => {
+  it.each(['coder', 'reviewer'])(
+    'fails the issue as refused and spawns nothing after a refused %s',
+    async (role) => {
+      const { db, inserts, updates } = makeSpawnDb();
+      const ra = {
+        db,
+        specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      } as never;
+      const issue = {
+        id: 'issue1',
+        issueKey: 'ISSUE-1',
+        innerIteration: 1,
+        errorMessage: null,
+      } as never;
+      const refusal = `${PROVIDER_FATAL_HEADLINES.content_filter} — the prompt was refused.`;
+
+      await ingestReviewRun(
+        ra,
+        issue,
+        { id: 'run-1', role } as never,
+        inv({ rawOutput: null, parsedOutput: null, exitCode: 1, errorMessage: refusal }),
+      );
+
+      expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
+      const resolved = updates.find((u) => u.table === schema.taskDagIssues);
+      expect(resolved?.patch).toMatchObject({
+        resolution: 'failed_unrecoverable',
+        errorMessage: refusal,
+      });
+    },
+  );
+});
+
 describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
   const truncatedReviewer = (prompt: string | null, truncationRetry = false) =>
     inv({

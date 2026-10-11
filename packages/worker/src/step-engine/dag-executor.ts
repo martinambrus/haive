@@ -1365,6 +1365,13 @@ export async function ingestReviewRun(
   };
   const fixed = parseCoderResult(inv);
 
+  // The same prompt is refused again, so a refused fix coder or reviewer fails the issue as refused.
+  if (inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter)) {
+    await consume();
+    await setResolution(ra.db, issue, 'failed_unrecoverable', inv.errorMessage);
+    return;
+  }
+
   // A crash here must leave a fresh coder as `latest`, not a consumed run with nothing
   // after it — so the replacement is named (claim) before the old run is marked done.
   // A fix coder cut at the output limit is re-run once, smaller, before anything reviews its edits;
