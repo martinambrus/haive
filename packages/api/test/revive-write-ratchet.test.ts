@@ -390,6 +390,13 @@ function tasksAliases(file: string, text: string): string[] {
 }
 
 const QUERY_BUILDERS = new Set(['update', 'from', 'insert', 'delete', 'innerJoin', 'leftJoin']);
+// The names the database handle goes by in the sources; a builder on anything else is a helper.
+const DB_HANDLES = new Set(['db', 'tx', 'getDb', 'handle']);
+
+function chainRoot(n: ts.Expression): ts.Expression {
+  while (ts.isCallExpression(n) || ts.isPropertyAccessExpression(n)) n = n.expression;
+  return n;
+}
 
 /** `schema.tasks` read off the AST, so comments or spacing inside it do not hide it. */
 function isTasksTable(n: ts.Node | undefined): n is ts.PropertyAccessExpression {
@@ -413,12 +420,16 @@ function tasksTableEscapes(n: ts.Node): boolean {
     const tagged = p.parent.parent;
     return tagged.tag.getText() !== 'sql' || /\bupdate\b/i.test(tagged.template.getText());
   }
-  return !(
-    ts.isCallExpression(p) &&
-    p.arguments[0] === n &&
-    ts.isPropertyAccessExpression(p.expression) &&
-    QUERY_BUILDERS.has(p.expression.name.text)
-  );
+  if (
+    !ts.isCallExpression(p) ||
+    p.arguments[0] !== n ||
+    !ts.isPropertyAccessExpression(p.expression) ||
+    !QUERY_BUILDERS.has(p.expression.name.text)
+  ) {
+    return true;
+  }
+  const root = chainRoot(p.expression.expression);
+  return !(ts.isIdentifier(root) && DB_HANDLES.has(root.text));
 }
 
 /** `schema` used other than as plain `schema.<table>` (no `?.`, `!` or parentheses): an alias, a
@@ -514,6 +525,10 @@ describe('a live-status write on a task row', () => {
     expect(found(`write({ schema });`)).toBe(1);
     expect(found(`revive(schema.tasks);`)).toBe(1);
     expect(found(`return schema.tasks;`)).toBe(1);
+    expect(found(`const t = helper.from(schema.tasks); db.update(t).set({ status: 'x' });`)).toBe(
+      1,
+    );
+    expect(found(`await getDb().select().from(schema.tasks).innerJoin(schema.tasks, x);`)).toBe(0);
     expect(found(`db.update(schema?.tasks).set({ status: 'running' });`)).toBe(1);
     expect(found(`db.update(schema!.tasks).set({ status: 'running' });`)).toBe(1);
     expect(found(`db.update((schema).tasks).set({ status: 'running' });`)).toBe(1);
