@@ -161,6 +161,9 @@ Do not read that as "Haive never issues DDL against a user-owned store" — it d
 `ensureRagSchema` never reads `conn.mode`, and `ddev` is routed through `resolveExternal`, so
 the full path (`CREATE EXTENSION vector`, `CREATE TABLE`, the indexes, `CREATE OR REPLACE
 FUNCTION update_content_tsv`, the dedupe `DELETE`) runs against `external` and `ddev` stores
-exactly as against `internal`, on every sync. The mode-aware protection is on the DESTRUCTIVE
+exactly as against `internal`, on every sync. Each of those statements runs in its own short
+transaction behind `pg_advisory_xact_lock(hashtext('haive:rag-schema'))`, so two first ensures on
+one store (two onboardings sharing an external store, two workflow tasks of one repository) take
+turns instead of the loser failing on a duplicate catalog key. The mode-aware protection is on the DESTRUCTIVE
 side only: `cleanupRagForRepository` drops databases and is kept off external/ddev by its
 CALLER filtering `projectNames`, not by the function itself.

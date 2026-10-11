@@ -30,12 +30,27 @@ const log = logger.child({ module: 'rag-connection' });
 /* Schema creation                                                     */
 /* ------------------------------------------------------------------ */
 
+/** Two first ensures on one store (two onboardings sharing an external store, or two workflow tasks of
+ *  one repository) raced CREATE EXTENSION / TABLE / INDEX, and the loser failed its step. */
+const RAG_SCHEMA_LOCK_KEY = 'haive:rag-schema';
+type RagTx = Parameters<Parameters<RagConnection['pg']['begin']>[1]>[0];
+
+function lockedStep<T>(conn: RagConnection, run: (tx: RagTx) => Promise<T>) {
+  return conn.pg.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${RAG_SCHEMA_LOCK_KEY}))`;
+    return run(tx);
+  });
+}
+
 export async function ensureRagSchema(
   conn: RagConnection,
 ): Promise<{ usedPgvector: boolean; tableName: string }> {
+  const step = <T>(run: (tx: RagTx) => Promise<T>) => lockedStep(conn, run);
+  const exec = (statement: string) => step((tx) => tx.unsafe(statement));
+
   let usedPgvector = true;
   try {
-    await conn.pg`CREATE EXTENSION IF NOT EXISTS vector`;
+    await step((tx) => tx`CREATE EXTENSION IF NOT EXISTS vector`);
   } catch (err) {
     if (!isPgvectorUnavailable(err)) throw err;
     log.warn({ err }, 'pgvector extension unavailable; falling back to jsonb embeddings');
@@ -45,7 +60,7 @@ export async function ensureRagSchema(
   const dims = conn.embeddingDimensions;
 
   if (usedPgvector) {
-    await conn.pg.unsafe(`
+    await exec(`
       CREATE TABLE IF NOT EXISTS ${RAG_TABLE} (
         id SERIAL PRIMARY KEY,
         task_id uuid,
@@ -65,15 +80,16 @@ export async function ensureRagSchema(
     // HNSW index with halfvec cast (supports >2000 dims). The only index that is
     // specific to this variant — everything else is created for both, below.
     try {
-      await conn.pg.unsafe(
+      await exec(
         `CREATE INDEX IF NOT EXISTS idx_rag_vector_hnsw ON ${RAG_TABLE} USING hnsw ((vector::halfvec(${dims})) halfvec_cosine_ops)`,
       );
     } catch (err) {
       log.warn({ err }, 'HNSW index creation failed; vector search will use sequential scan');
     }
   } else {
-    await conn.pg`
-      CREATE TABLE IF NOT EXISTS ${conn.pg(RAG_TABLE)} (
+    await step(
+      (tx) => tx`
+      CREATE TABLE IF NOT EXISTS ${tx(RAG_TABLE)} (
         id SERIAL PRIMARY KEY,
         task_id uuid,
         repository_id uuid,
@@ -87,7 +103,8 @@ export async function ensureRagSchema(
         content_tsv tsvector,
         created_at TIMESTAMP DEFAULT NOW()
       )
-    `;
+    `,
+    );
   }
 
   // Lookup/scope indexes and the GIN that backs the lexical half — for BOTH
@@ -97,17 +114,13 @@ export async function ensureRagSchema(
   // lexical-only ranking, so its every query sequential-scanned the table it was
   // supposed to search by index. Declared once here so the two cannot disagree
   // again, mirroring `ensureGlobalKbSchema`.
-  await conn.pg.unsafe(`CREATE INDEX IF NOT EXISTS idx_rag_task_id ON ${RAG_TABLE} (task_id)`);
-  await conn.pg.unsafe(
-    `CREATE INDEX IF NOT EXISTS idx_rag_repository_id ON ${RAG_TABLE} (repository_id)`,
-  );
-  await conn.pg.unsafe(
+  await exec(`CREATE INDEX IF NOT EXISTS idx_rag_task_id ON ${RAG_TABLE} (task_id)`);
+  await exec(`CREATE INDEX IF NOT EXISTS idx_rag_repository_id ON ${RAG_TABLE} (repository_id)`);
+  await exec(
     `CREATE INDEX IF NOT EXISTS idx_rag_source_section ON ${RAG_TABLE} (source_path, section_id, chunk_index)`,
   );
-  await conn.pg.unsafe(
-    `CREATE INDEX IF NOT EXISTS idx_rag_source_type ON ${RAG_TABLE} (source_type)`,
-  );
-  await conn.pg.unsafe(
+  await exec(`CREATE INDEX IF NOT EXISTS idx_rag_source_type ON ${RAG_TABLE} (source_type)`);
+  await exec(
     `CREATE INDEX IF NOT EXISTS idx_rag_content_tsv ON ${RAG_TABLE} USING GIN (content_tsv)`,
   );
 
@@ -124,7 +137,7 @@ export async function ensureRagSchema(
   // CREATE OR REPLACE, and ensureRagSchema runs at the start of every workflow
   // task (02-pre-rag-sync), so a change here upgrades every reachable store on
   // its own — no version marker, no migration.
-  await conn.pg.unsafe(`
+  await exec(`
     CREATE OR REPLACE FUNCTION update_content_tsv() RETURNS trigger AS $$
     BEGIN
       NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''))
@@ -137,7 +150,7 @@ export async function ensureRagSchema(
 
   // On a content write only (a hash-only UPDATE must not recompute the tsvector); a trigger
   // created without `OF content` is replaced in the same transaction.
-  await conn.pg.begin(async (tx) => {
+  await step(async (tx) => {
     const existing = (await tx.unsafe(
       `SELECT tgattr::text = '' AS stale FROM pg_trigger
         WHERE tgname = 'trg_content_tsv' AND tgrelid = '${RAG_TABLE}'::regclass`,
@@ -239,10 +252,12 @@ async function dedupeAndEnforceRepoUniqueness(conn: RagConnection): Promise<void
   }
 
   try {
-    await conn.pg.unsafe(
-      `CREATE UNIQUE INDEX IF NOT EXISTS uq_rag_repo_source_section_chunk
-         ON ${RAG_TABLE} (repository_id, source_path, section_id, chunk_index)
-         WHERE repository_id IS NOT NULL`,
+    await lockedStep(conn, (tx) =>
+      tx.unsafe(
+        `CREATE UNIQUE INDEX IF NOT EXISTS uq_rag_repo_source_section_chunk
+           ON ${RAG_TABLE} (repository_id, source_path, section_id, chunk_index)
+           WHERE repository_id IS NOT NULL`,
+      ),
     );
   } catch (err) {
     log.warn({ err }, 'rag unique index creation failed — duplicate rows may still slip through');

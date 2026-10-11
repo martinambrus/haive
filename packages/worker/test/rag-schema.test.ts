@@ -17,6 +17,7 @@ function fakeConn(
 ): {
   conn: RagConnection;
   queries: () => string;
+  statements: () => string[];
 } {
   const captured: string[] = [];
   const pg = ((strings: TemplateStringsArray | string) => {
@@ -51,10 +52,25 @@ function fakeConn(
     embeddingDimensions: 2560,
     close: async () => {},
   } as unknown as RagConnection;
-  return { conn, queries: () => captured.join('\n') };
+  return { conn, queries: () => captured.join('\n'), statements: () => captured };
 }
 
 describe('ensureRagSchema', () => {
+  it('runs every CREATE in its own transaction behind the schema lock, so two first ensures do not race', async () => {
+    const { conn, statements } = fakeConn();
+    await ensureRagSchema(conn);
+    const all = statements();
+    const creates = all.map((q, i) => ({ q, i })).filter(({ q }) => /^\s*CREATE\b/.test(q));
+    expect(creates.length).toBeGreaterThan(0);
+    for (const { q, i } of creates) {
+      const begin = all.lastIndexOf('BEGIN', i);
+      const tx = all.slice(begin, i);
+      expect(begin, q).toBeGreaterThanOrEqual(0);
+      expect(tx, q).not.toContain('COMMIT');
+      expect(tx[1], q).toContain('pg_advisory_xact_lock');
+    }
+  });
+
   it('creates the vector table, the HNSW index and the shared indexes (pgvector path)', async () => {
     const { conn, queries } = fakeConn();
     const res = await ensureRagSchema(conn);
@@ -118,7 +134,7 @@ describe('ensureRagSchema', () => {
     const sql = queries();
 
     expect(sql).toMatch(
-      /BEGIN\nSELECT tgattr::text = '' AS stale[^]*?CREATE TRIGGER trg_content_tsv\s+BEFORE INSERT OR UPDATE OF content ON ai_rag_embeddings[^]*?COMMIT/,
+      /BEGIN\nSELECT pg_advisory_xact_lock[^\n]*\nSELECT tgattr::text = '' AS stale[^]*?CREATE TRIGGER trg_content_tsv\s+BEFORE INSERT OR UPDATE OF content ON ai_rag_embeddings[^]*?COMMIT/,
     );
     expect(sql).not.toMatch(/BEFORE INSERT OR UPDATE ON/);
   });
