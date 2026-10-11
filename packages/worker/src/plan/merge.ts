@@ -1,6 +1,6 @@
 import { HAIVE_DATA_FILES } from '@haive/shared';
 import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js';
-import { lstatNoFollow, relUnder, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, relUnder, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 import { abortMerge as abortGitMerge, openMerge, utf8Name } from '../step-engine/git-merge.js';
@@ -297,16 +297,19 @@ export async function reopenResolvedMerge(args: {
     return attempt;
   }
   for (const name of attempt.conflicts) {
+    const rel = `${WORKTREE_SUBDIR}/${PLAN_MERGE_DIR}/${name}`;
+    // The previous answer deleted it: start from that, not from the markers the merge wrote.
+    if ((await gitRun(worktreePath, ['cat-file', '-e', `${prior}:${name}`])).code !== 0) {
+      await removeNoFollow(repoPath, rel).catch(() => undefined);
+      continue;
+    }
     const blob = await gitRun(worktreePath, ['cat-file', 'blob', `${prior}:${name}`], undefined, {
       encoding: 'latin1',
     });
     if (blob.code !== 0) continue;
-    await writeFileNoFollow(
-      repoPath,
-      `${WORKTREE_SUBDIR}/${PLAN_MERGE_DIR}/${name}`,
-      Buffer.from(blob.stdout, 'latin1'),
-      { mode: 'overwrite-in-place' },
-    ).catch(() => undefined);
+    await writeFileNoFollow(repoPath, rel, Buffer.from(blob.stdout, 'latin1'), {
+      mode: 'overwrite-in-place',
+    }).catch(() => undefined);
   }
   return attempt;
 }

@@ -338,12 +338,13 @@ describe('plan merge: a fixer that did not finish', () => {
 async function resolved(
   local: string,
   db: unknown,
-  body = '# vareska\n\nboth sides\n',
+  body: string | null = '# vareska\n\nboth sides\n',
 ): Promise<{ ctx: StepContext; wt: string }> {
   const ctx = contextFor(local, db);
   const detected = await planMergeStep.detect!(ctx);
   const wt = detected.worktreePath;
-  await writeFile(path.join(wt, 'README.md'), body, 'utf8');
+  if (body === null) await rm(path.join(wt, 'README.md'));
+  else await writeFile(path.join(wt, 'README.md'), body, 'utf8');
   const out = await planMergeStep.apply(ctx, {
     detected,
     formValues: {},
@@ -369,6 +370,20 @@ const revise = (
   });
 
 describe('plan merge: asking for a change after the merge was resolved', () => {
+  it('reopens a path the previous answer deleted as deleted, not as conflict markers', async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    const { ctx, wt } = await resolved(local, db, null);
+    const collect = await planMergeStep.detect!(ctx);
+    expect((await revise(ctx, collect)).continueRequested).toBe(true);
+
+    const next = await planMergeStep.detect!(ctx);
+    expect(next.conflicts).toEqual(['README.md']);
+    await expect(readFile(path.join(wt, 'README.md'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('reopens the conflicts with the previous answer in the files, under the new guidance', async () => {
     const local = await unrelatedPair();
     const { db } = fakeDb();
