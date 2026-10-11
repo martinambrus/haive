@@ -391,7 +391,7 @@ describe('an upgrade apply retried after it failed part-way', () => {
     });
   });
 
-  it('records no Keep and keeps the pre-image when the held rewrite finds no file to read', async () => {
+  it('records no Keep, and spends the pre-image, when the held rewrite finds no file to read', async () => {
     const s = await setup();
     failOneCommit(s);
     await expect(s.apply()).rejects.toThrow('commit refused');
@@ -402,6 +402,11 @@ describe('an upgrade apply retried after it failed part-way', () => {
 
     expect(out.warnings).toContainEqual(expect.stringContaining('did not record keeping'));
     expect(s.byId([s.editedRow])[0]?.lastObservedDiskHash).not.toBe(hashOf(NEW));
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
+    ).toBe(false);
     beforeRewrite.run = null;
   });
 

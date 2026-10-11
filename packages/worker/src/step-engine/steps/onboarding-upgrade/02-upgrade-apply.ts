@@ -1145,11 +1145,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
             continue;
           }
+          // Either way the failed attempt's write no longer stands, so its pre-image is spent.
+          consumedPreimageIds.push(earlier.id);
           if (!restored && !seen) {
             warnings.push(`did not record keeping ${entry.diskPath}: it changed while it was read`);
             continue;
           }
-          consumedPreimageIds.push(earlier.id);
           if (restored) {
             writtenPaths.push(rel);
             kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
