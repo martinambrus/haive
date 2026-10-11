@@ -219,8 +219,12 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
   if (
     !init ||
     !ts.isObjectLiteralExpression(init) ||
+    // Only plain values: a spread, an accessor or a method can each set status when touched.
     init.properties.some(
-      (p) => ts.isSpreadAssignment(p) || keyOf(p.name) === null || keyOf(p.name) === 'status',
+      (p) =>
+        !(ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) ||
+        keyOf(p.name) === null ||
+        keyOf(p.name) === 'status',
     )
   ) {
     return true;
@@ -711,6 +715,12 @@ describe('a live-status write on a task row', () => {
     expect(count(`const patch = { title: 't' }; delete patch.status;`)).toBe(1);
     expect(count(`const patch = { title: 't', revive() {} }; patch.revive();`)).toBe(1);
     expect(count(`const patch = { title: 't' }; patch['go']();`)).toBe(1);
+    expect(
+      count(`const patch = { title: 't', get p() { this.status = 'running'; } }; patch.p;`),
+    ).toBe(1);
+    expect(count(`const patch = { title: 't', set p(v) { this.status = v; } }; patch.p = 1;`)).toBe(
+      1,
+    );
     expect(count(`const patch = { title: 't' }; const x = { a: patch.status };`)).toBe(0);
     expect(count(`const patch = { title: 't' };`)).toBe(0);
   });
