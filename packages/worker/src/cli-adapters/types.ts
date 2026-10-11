@@ -230,4 +230,6 @@ export interface PluginInstallCommand {
   description: string;
   command: string;
   args: string[];
+  /** Hosts the command itself fetches from, allowed on top of the CLI's own under an allowlist. */
+  egressDomains?: string[];
 }

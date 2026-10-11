@@ -1,12 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import {
-  computeKeyFingerprint,
-  envelopeEncrypt,
-  logger,
-  secretsService,
-  splitSecretLikeEnv,
-} from '@haive/shared';
+import { logger, secretsService, splitSecretLikeEnv, upsertProviderSecret } from '@haive/shared';
 
 const log = logger.child({ module: 'move-secret-env' });
 
@@ -50,18 +44,7 @@ async function copyKeys(
   masterKek: string,
 ): Promise<void> {
   for (const [name, value] of Object.entries(keys)) {
-    await tx
-      .insert(schema.cliProviderSecrets)
-      .values({
-        providerId,
-        secretName: name,
-        ...envelopeEncrypt(value, masterKek),
-        fingerprint: computeKeyFingerprint(value),
-      })
-      .onConflictDoUpdate({
-        target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
-        set: { secretName: name },
-      });
+    await upsertProviderSecret(tx, { providerId, name, value, masterKek, onExisting: 'keep' });
   }
 }
 

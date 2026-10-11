@@ -113,6 +113,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
         description: `Add ${CLAUDE_LSP_MARKETPLACE_REF} marketplace`,
         command: exec,
         args: ['plugin', 'marketplace', 'add', CLAUDE_LSP_MARKETPLACE_REF],
+        egressDomains: ['github.com'],
       });
       for (const name of uniqueLsp) {
         cmds.push({

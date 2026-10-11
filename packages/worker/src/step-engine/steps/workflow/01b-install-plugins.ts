@@ -11,8 +11,8 @@ import { loadConfiguredLspLanguages } from '../../../lsp/configured-lsp.js';
 import { runInSandbox, SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { DockerVolumeMount } from '../../../sandbox/docker-runner.js';
 import {
+  loadProviderRuntimeConfig,
   resolveAuthMounts,
-  resolveSandboxImageTag,
   resolveInvocationRepoMount,
 } from '../../../queues/cli-exec-queue.js';
 import { resolveSecretMasks } from '../../../queues/cli-exec/secret-mask.js';
@@ -227,7 +227,8 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     if (!provider) {
       throw new Error(`CLI provider ${ctx.cliProviderId} not found`);
     }
-    const sandboxImage = await resolveSandboxImageTag(ctx.db, ctx.taskId, provider);
+    const runtime = await loadProviderRuntimeConfig(ctx.db, provider.id, ctx.taskId);
+    const sandboxImage = runtime.sandboxImage;
     // Per-invocation isolation: mount only the feature worktree at the workdir root.
     const { repoMount, hasWorktree, hasRepo } = await resolveInvocationRepoMount(
       ctx.db,
@@ -262,7 +263,10 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       };
       if (sandboxImage) runnerOptions.image = sandboxImage;
       if (mounts.length > 0) runnerOptions.extraMounts = mounts;
-      if (provider.networkPolicy) runnerOptions.networkPolicy = provider.networkPolicy;
+      if (runtime.networkPolicy) runnerOptions.networkPolicy = runtime.networkPolicy;
+      runnerOptions.egressDomains = [
+        ...new Set([...runtime.egressDomains, ...(cmd.egressDomains ?? [])]),
+      ];
       const wrapperContent = provider.wrapperContent ?? undefined;
       const runSpec: Parameters<typeof runInSandbox>[0] = {
         command: cmd.command,

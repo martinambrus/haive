@@ -7,10 +7,8 @@ import {
   CLI_PROVIDER_CATALOG,
   CLI_PROVIDER_LIST,
   cliProviderNameSchema,
-  computeKeyFingerprint,
   createCliProviderRequestSchema,
   DEFAULT_AGENT_RULES,
-  envelopeEncrypt,
   inheritsDefaultRules,
   isOllamaCloudModel,
   isRunnableCliVersion,
@@ -20,6 +18,7 @@ import {
   setCliProviderSecretRequestSchema,
   splitSecretLikeEnv,
   updateCliProviderRequestSchema,
+  upsertProviderSecret,
   type CliPackageVersionsEntry,
   type CliProbeJobPayload,
   type CliProbeResult,
@@ -427,7 +426,13 @@ cliProviderRoutes.post('/', async (c) => {
       })
       .returning();
     for (const [name, value] of Object.entries(split?.secrets ?? {})) {
-      await upsertProviderSecretValue(tx, rows[0]!.id, name, value);
+      await upsertProviderSecret(tx, {
+        providerId: rows[0]!.id,
+        name,
+        value,
+        masterKek: await secretsService.getMasterKek(),
+        onExisting: 'overwrite',
+      });
     }
     return rows;
   });
@@ -536,7 +541,13 @@ cliProviderRoutes.patch('/:id', async (c) => {
       .where(eq(schema.cliProviders.id, id))
       .returning();
     for (const [name, value] of Object.entries(split?.secrets ?? {})) {
-      await upsertProviderSecretValue(tx, id, name, value);
+      await upsertProviderSecret(tx, {
+        providerId: id,
+        name,
+        value,
+        masterKek: await secretsService.getMasterKek(),
+        onExisting: 'overwrite',
+      });
     }
     return rows;
   });
@@ -776,7 +787,15 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
     }
     const copied = new Set(sourceSecrets.map((s) => s.secretName));
     for (const [name, value] of Object.entries(split.secrets)) {
-      if (!copied.has(name)) await upsertProviderSecretValue(tx, row.id, name, value);
+      if (!copied.has(name)) {
+        await upsertProviderSecret(tx, {
+          providerId: row.id,
+          name,
+          value,
+          masterKek: await secretsService.getMasterKek(),
+          onExisting: 'overwrite',
+        });
+      }
     }
     return row;
   });
@@ -825,10 +844,6 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
   const db = getDb();
   await loadOwnedProvider(db, userId, providerId);
 
-  const masterKek = await secretsService.getMasterKek();
-  const envelope = envelopeEncrypt(body.value, masterKek);
-  const fingerprint = computeKeyFingerprint(body.value);
-
   const existing = await db.query.cliProviderSecrets.findFirst({
     where: and(
       eq(schema.cliProviderSecrets.providerId, providerId),
@@ -836,44 +851,14 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
     ),
     columns: { id: true },
   });
-
-  if (existing) {
-    const updated = await db
-      .update(schema.cliProviderSecrets)
-      .set({
-        encryptedValue: envelope.encryptedValue,
-        encryptedDek: envelope.encryptedDek,
-        fingerprint,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviderSecrets.id, existing.id))
-      .returning({
-        id: schema.cliProviderSecrets.id,
-        secretName: schema.cliProviderSecrets.secretName,
-        fingerprint: schema.cliProviderSecrets.fingerprint,
-        createdAt: schema.cliProviderSecrets.createdAt,
-        updatedAt: schema.cliProviderSecrets.updatedAt,
-      });
-    return c.json({ secret: updated[0]! });
-  }
-
-  const inserted = await db
-    .insert(schema.cliProviderSecrets)
-    .values({
-      providerId,
-      secretName: body.secretName,
-      encryptedValue: envelope.encryptedValue,
-      encryptedDek: envelope.encryptedDek,
-      fingerprint,
-    })
-    .returning({
-      id: schema.cliProviderSecrets.id,
-      secretName: schema.cliProviderSecrets.secretName,
-      fingerprint: schema.cliProviderSecrets.fingerprint,
-      createdAt: schema.cliProviderSecrets.createdAt,
-      updatedAt: schema.cliProviderSecrets.updatedAt,
-    });
-  return c.json({ secret: inserted[0]! }, 201);
+  const secret = await upsertProviderSecret(db, {
+    providerId,
+    name: body.secretName,
+    value: body.value,
+    masterKek: await secretsService.getMasterKek(),
+    onExisting: 'overwrite',
+  });
+  return existing ? c.json({ secret }) : c.json({ secret }, 201);
 });
 
 // ---- Claude usage-tracking OAuth (PKCE) ----
@@ -887,35 +872,6 @@ const usageAuthCompleteSchema = z.object({ code: z.string().min(1) });
 
 function usageAuthStateKey(userId: string, providerId: string): string {
   return `usage-auth:claude:${userId}:${providerId}`;
-}
-
-async function upsertProviderSecretValue(
-  db: Pick<Database, 'insert'>,
-  providerId: string,
-  secretName: string,
-  value: string,
-): Promise<void> {
-  const masterKek = await secretsService.getMasterKek();
-  const envelope = envelopeEncrypt(value, masterKek);
-  const fingerprint = computeKeyFingerprint(value);
-  await db
-    .insert(schema.cliProviderSecrets)
-    .values({
-      providerId,
-      secretName,
-      encryptedValue: envelope.encryptedValue,
-      encryptedDek: envelope.encryptedDek,
-      fingerprint,
-    })
-    .onConflictDoUpdate({
-      target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
-      set: {
-        encryptedValue: envelope.encryptedValue,
-        encryptedDek: envelope.encryptedDek,
-        fingerprint,
-        updatedAt: new Date(),
-      },
-    });
 }
 
 cliProviderRoutes.post('/:providerId/usage-auth/start', async (c) => {
@@ -973,12 +929,13 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
     );
   }
   await redis.del(stashKey);
-  await upsertProviderSecretValue(
-    db,
+  await upsertProviderSecret(db, {
     providerId,
-    CLAUDE_USAGE_OAUTH_SECRET,
-    JSON.stringify(tokens),
-  );
+    name: CLAUDE_USAGE_OAUTH_SECRET,
+    value: JSON.stringify(tokens),
+    masterKek: await secretsService.getMasterKek(),
+    onExisting: 'overwrite',
+  });
   // Kick an immediate usage poll so the header meter refreshes within seconds instead of
   // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
   // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.

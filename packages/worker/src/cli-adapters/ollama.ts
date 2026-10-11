@@ -203,6 +203,7 @@ export class OllamaAdapter extends BaseCliAdapter {
         description: `Add ${OLLAMA_LSP_MARKETPLACE_REF} marketplace`,
         command: exec,
         args: ['plugin', 'marketplace', 'add', OLLAMA_LSP_MARKETPLACE_REF],
+        egressDomains: ['github.com'],
       });
       for (const name of uniqueLsp) {
         cmds.push({
