@@ -219,10 +219,20 @@ function escapes(use: ts.Identifier): boolean {
     p.expression === use
   ) {
     // A member invoked through the patch, however (call, tag, new), may set status through `this`.
-    const at = p.parent;
+    let callee: ts.Expression = p;
+    while (
+      ts.isParenthesizedExpression(callee.parent) ||
+      ts.isNonNullExpression(callee.parent) ||
+      ts.isAsExpression(callee.parent) ||
+      ts.isTypeAssertionExpression(callee.parent) ||
+      ts.isSatisfiesExpression(callee.parent)
+    ) {
+      callee = callee.parent;
+    }
+    const at = callee.parent;
     return (
-      ((ts.isCallExpression(at) || ts.isNewExpression(at)) && at.expression === p) ||
-      (ts.isTaggedTemplateExpression(at) && at.tag === p)
+      ((ts.isCallExpression(at) || ts.isNewExpression(at)) && at.expression === callee) ||
+      (ts.isTaggedTemplateExpression(at) && at.tag === callee)
     );
   }
   if (ts.isSpreadAssignment(p) || ts.isSpreadElement(p)) return false;
@@ -806,6 +816,8 @@ describe('a live-status write on a task row', () => {
     expect(count(`const patch = { title: 't' }; delete patch.status;`)).toBe(1);
     expect(count(`const patch = { title: 't', revive() {} }; patch.revive();`)).toBe(1);
     expect(count(`const patch = { title: 't' }; patch['go']();`)).toBe(1);
+    expect(count(`const patch = { title: 't', revive }; patch.revive!();`)).toBe(1);
+    expect(count(`const patch = { title: 't', revive }; (patch.revive as any)();`)).toBe(1);
     expect(
       count(`function tag() { this.status = 'running'; } const patch = { tag }; patch.tag\`\`;`),
     ).toBe(1);
