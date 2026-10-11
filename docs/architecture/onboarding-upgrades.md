@@ -248,8 +248,9 @@ creation and revival of an onboarding, upgrade or rollback takes (advisory key, 
 answered form and the allowance auto-resume run `checkRevive`, and for an upgrade or rollback
 `upgradeAdmission` (`@haive/shared/onboarding-admission`, which the api re-exports), on the locked
 repository row in the transaction that revives. A worker refusal leaves the task failed and records
-`upgrade.revive_refused` with its reason; a refused auto-resume drops the allowance watch rather
-than retrying each tick. Both
+`upgrade.revive_refused` with its reason. A refused auto-resume does not retry each tick. It takes
+the poller's notify path instead: it stamps `allowance_replenished_at` and keeps the provider, so the
+person gets the "allowance is back" notice and decides whether to Retry. Both
 create routes write the task, its event and its move to `queued` in one transaction, since no sweep
 starts or ends a `created` task, and one left by a failure part-way would block every later upgrade
 and rollback. The migration fails the ones an older release left that way before it builds the

@@ -369,8 +369,9 @@ export async function autoResumeFailedStep(
   return flipped;
 }
 
-/** A refused auto-resume leaves the task failed, records why, and drops the allowance watch so the
- *  poller does not try it again every tick; the attempt counter was never bumped. */
+/** A refused auto-resume leaves the task failed and records why. It then falls back to the
+ *  poller's notify path: the recovery stamp tells the person the allowance is back, and takes the
+ *  task out of the armed set so the poller does not try again every tick. */
 async function refuseAutoResume(
   db: Database,
   taskId: string,
@@ -385,12 +386,6 @@ async function refuseAutoResume(
   });
   await db
     .update(schema.tasks)
-    .set({
-      awaitingAllowanceProviderId: null,
-      awaitingProviderReason: null,
-      awaitingProviderSince: null,
-      allowanceResetAt: null,
-      updatedAt: new Date(),
-    })
+    .set({ allowanceReplenishedAt: new Date(), updatedAt: new Date() })
     .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
 }

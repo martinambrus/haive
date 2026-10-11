@@ -210,7 +210,7 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
     expect(t.events()[0]).toMatchObject({ payload: { reason: 'live-upgrade-index' } });
   });
 
-  it('drops the watch on a refusal, so the poller does not retry it every tick', async () => {
+  it('tells the person the allowance is back instead, and leaves the poller nothing to retry', async () => {
     const t = setup({
       ...admitted(),
       type: 'onboarding',
@@ -219,9 +219,11 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
     });
     expect(await t.resume()).toBe(false);
     expect(t.task()).toMatchObject({
-      awaitingAllowanceProviderId: null,
-      awaitingProviderReason: null,
+      status: 'failed',
+      awaitingAllowanceProviderId: PROVIDER,
+      awaitingProviderReason: 'rate_limit',
     });
+    expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
   });
 
   it.each(['onboarding', 'onboarding_upgrade'] as const)(
