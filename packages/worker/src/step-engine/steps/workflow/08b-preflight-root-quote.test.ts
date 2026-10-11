@@ -7,6 +7,18 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 const m = vi.hoisted(() => ({
   ddevExec: vi.fn(),
   ddevRunnerRunning: vi.fn(),
+  runStepCommandInSandbox: vi.fn(),
+  exec: vi.fn(),
+}));
+
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  const { promisify } = await import('node:util');
+  return { ...actual, execFile: Object.assign(vi.fn(), { [promisify.custom]: m.exec }) };
+});
+
+vi.mock('../../../sandbox/step-command.js', () => ({
+  runStepCommandInSandbox: m.runStepCommandInSandbox,
 }));
 
 vi.mock('./_impl-changes.js', async (importOriginal) => ({
@@ -35,22 +47,26 @@ describe('08b: the directory the pre-flight probe moves the runner into', () => 
   beforeEach(() => {
     m.ddevExec.mockReset().mockResolvedValue({ exitCode: 0, output: 'listed' });
     m.ddevRunnerRunning.mockReset().mockResolvedValue(true);
+    m.exec.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
+    m.runStepCommandInSandbox.mockReset().mockResolvedValue({ ran: true, exitCode: 1, output: '' });
   });
   afterEach(async () => {
     vi.restoreAllMocks();
     await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
   });
 
-  /** The step's own detect() for a ddev repository whose playwright project sits in `ROOT`. */
-  async function detect(): Promise<void> {
+  /** The step's own detect() for a repository whose playwright project sits in `ROOT`. */
+  async function detect(ddev = true): Promise<void> {
     vi.spyOn(configService, 'getBoolean').mockImplementation(
       async (key: string) => key === CONFIG_KEYS.TEST_PREFLIGHT_ENABLED,
     );
     const dir = await mkdtemp(path.join(tmpdir(), 'haive-08b-preflight-'));
     dirs.push(dir);
-    await mkdir(path.join(dir, '.ddev'));
     await mkdir(path.join(dir, 'test-playwright'));
-    await writeFile(path.join(dir, '.ddev', 'config.yaml'), '');
+    if (ddev) {
+      await mkdir(path.join(dir, '.ddev'));
+      await writeFile(path.join(dir, '.ddev', 'config.yaml'), '');
+    }
     await mkdir(path.join(dir, ROOT, 'tests'), { recursive: true });
     await writeFile(path.join(dir, ROOT, 'playwright.config.ts'), '');
     await writeFile(path.join(dir, ROOT, '.env.sample'), '');
@@ -94,5 +110,12 @@ describe('08b: the directory the pre-flight probe moves the runner into', () => 
       'test',
       '--list',
     ]);
+  });
+
+  it('starts no sandbox and waits for no slot when the probe would run on the host side', async () => {
+    await detect(false);
+    expect(m.runStepCommandInSandbox).not.toHaveBeenCalled();
+    expect(m.exec).not.toHaveBeenCalled();
+    expect(m.ddevExec).not.toHaveBeenCalled();
   });
 });

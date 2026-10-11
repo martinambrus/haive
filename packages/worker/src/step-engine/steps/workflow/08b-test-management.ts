@@ -1,8 +1,6 @@
-import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { readTextNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
@@ -31,6 +29,7 @@ import {
   killStalePlaywrightRuns,
 } from '../../../sandbox/ddev-playwright.js';
 import { shellQuote } from '../../../sandbox/shell-quote.js';
+import { runStepCommandInSandbox } from '../../../sandbox/step-command.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import {
@@ -52,8 +51,6 @@ import { ROOT_CAUSE_LINES, cutHead } from './_fix-loop.js';
 // when the repo uses DDEV — looping a fix agent on failures (legacy cap: 5
 // attempts, then fixLoop back to implementation). No detectable infrastructure →
 // the step is skipped.
-
-const exec = promisify(execFile);
 
 export type TestFramework =
   | 'playwright'
@@ -175,7 +172,7 @@ export interface TestCommand {
   args: string[];
   /** Repo-relative directory the command must run in — the framework's own project root,
    *  `''` for the workspace root. Already baked into `args` as `exec -d` on the ddev path
-   *  (which needs an absolute container path); the host path applies it as a cwd. */
+   *  (which needs an absolute container path); the host path runs the command there. */
   cwd: string;
 }
 
@@ -218,7 +215,7 @@ export function repairInvocation(d: TestManagementDetect, repair: string): strin
 /**
  * The selective run command for ONLY the given test files (never the full
  * suite). `kind: 'ddev'` runs via ddevExec in the per-task runner ('ddev' is
- * prepended by the runner); `kind: 'host'` runs via execFile in the worktree.
+ * prepended by the runner); `kind: 'host'` runs in the task's sandbox.
  *
  * Runs from the framework's OWN project root (`opts.root`), not from the repo root. A repo
  * whose test project is a subdirectory — config and node_modules under `test-playwright/`,
@@ -564,7 +561,7 @@ async function runTestCommand(
   cmd: TestCommand,
   timeoutMs: number,
   onLine?: (line: string) => void,
-): Promise<{ exitCode: number; command: string; output: string }> {
+): Promise<{ exitCode: number; command: string; output: string; notRun?: string }> {
   const joined = cmd.args.join(' ');
   if (cmd.kind === 'ddev') {
     // Quoted for the runner's bash -lc; filterTestFiles keeps paths plain for ddev exec's re-read.
@@ -575,25 +572,19 @@ async function runTestCommand(
     const res = await ddevExec(handle, quoted, { timeoutMs, ...(onLine ? { onLine } : {}) });
     return { exitCode: res.exitCode, command: `ddev ${quoted}`, output: res.output.slice(-4000) };
   }
-  const [bin, ...rest] = cmd.args;
-  try {
-    const { stdout, stderr } = await exec(bin!, rest, {
-      cwd: path.join(d.workspacePath, cmd.cwd),
-      timeout: timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    return { exitCode: 0, command: joined, output: `${stdout}${stderr}`.slice(-4000) };
-  } catch (err) {
-    // execFile reports a spawn failure as a STRING code (ENOENT, ETIMEDOUT) and a non-zero exit
-    // as a number, so anything non-numeric becomes a plain 1 rather than leaking into a field
-    // every caller compares against 0.
-    const e = err as { stdout?: string; stderr?: string; code?: unknown };
-    return {
-      exitCode: typeof e.code === 'number' ? e.code : 1,
-      command: joined,
-      output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-4000),
-    };
-  }
+  const res = await runStepCommandInSandbox(ctx, {
+    argv: cmd.args,
+    cwdRel: path.relative(d.workspacePath, path.join(d.workspacePath, cmd.cwd)),
+    timeoutMs,
+    ...(onLine
+      ? {
+          onWait: (busy: number, cap: number) =>
+            onLine(`waiting for an agent slot (${busy} of ${cap} busy)`),
+        }
+      : {}),
+  });
+  if (!res.ran) return { exitCode: 1, command: joined, output: res.note, notRun: res.note };
+  return { exitCode: res.exitCode, command: joined, output: res.output.slice(-4000) };
 }
 
 /** Enumerating is cheap by construction — it loads the config and the spec files and stops —
@@ -640,6 +631,8 @@ async function runTestPreflight(
     root,
   });
   if (!collect) return null;
+  // A sandbox run waits for an agent slot, which detect() must never do.
+  if (collect.kind === 'host') return null;
   if (collect.kind === 'ddev') {
     if (!d.repoSubpath) return null;
     if (!(await ddevRunnerRunning(runnerHandleForTask(ctx.taskId, d.repoSubpath)))) return null;
@@ -1097,22 +1090,26 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         // task. withDdevProgress is the same live status every long DDEV op already uses: the
         // runner's latest line plus an elapsed counter that ticks through silent phases. Its
         // name says ddev but its contract is just `emitProgress`, so the host branch gets the
-        // counter too — execFile buffers and has no line to give, and "looks frozen" is the
-        // half that matters there.
+        // counter too, and the wait for an agent slot is the line it gives.
         const run = await withDdevProgress(
           ctx,
           cmd.kind === 'ddev' ? 'Running related tests in DDEV' : 'Running related tests',
-          (onLine) =>
-            runTestCommand(ctx, d, cmd, 600_000, cmd.kind === 'ddev' ? onLine : undefined),
+          (onLine) => runTestCommand(ctx, d, cmd, 600_000, onLine),
           { initialLine: cmd.args.join(' ') },
         );
+        const notRun = run.notRun !== undefined;
         testRun = {
-          ran: true,
-          passed: run.exitCode === 0,
+          ran: !notRun,
+          passed: !notRun && run.exitCode === 0,
           command: run.command,
           output: run.output,
         };
-        testsPassed = testRun.passed;
+        testsPassed = notRun ? null : testRun.passed;
+        if (notRun) {
+          degradedNote =
+            `The related tests could not be run (${run.notRun}). They were written but never ` +
+            `executed, and the suite is NOT known to be green.`;
+        }
 
         // An environment that cannot run a browser is not a test defect, and no fix pass can
         // repair it from inside the sandbox — the CLI is given ddev_status/logs/restart and no
@@ -1120,7 +1117,8 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         // see this class at all: `--list` skips globalSetup, so a container with no browser
         // binaries lists every test and exits 0. Applies from pass 0, unlike that guard — a
         // browser missing from the container is never something the tester's own pass caused.
-        const blocked = testRun.passed ? null : classifyTestEnvFailure(d.primary, run.output);
+        const blocked =
+          notRun || testRun.passed ? null : classifyTestEnvFailure(d.primary, run.output);
         if (blocked) {
           testRun = { ...testRun, ran: false };
           testsPassed = null;
@@ -1145,12 +1143,12 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         // — the observed task spent 5 passes and a whole round back through implementation on a
         // playwright install its command never reached.
         const collect =
-          blocked || testRun.passed || args.iteration === 0
+          blocked || notRun || testRun.passed || args.iteration === 0
             ? null
             : buildCollectCommand(d.primary, targets, buildOpts);
         if (collect) {
           const listed = await runTestCommand(ctx, d, collect, COLLECT_TIMEOUT_MS);
-          if (listed.exitCode !== 0) {
+          if (listed.notRun === undefined && listed.exitCode !== 0) {
             testRun = { ...testRun, ran: false };
             testsPassed = null;
             degradedNote =
