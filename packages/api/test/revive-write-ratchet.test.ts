@@ -601,7 +601,13 @@ function detachedTaskBuilder(call: ts.CallExpression): boolean {
     return false;
   }
   if (call.expression.name.text === 'update') {
-    return !(ts.isPropertyAccessExpression(call.parent) && call.parent.name.text === 'set');
+    const set = call.parent;
+    return !(
+      ts.isPropertyAccessExpression(set) &&
+      set.name.text === 'set' &&
+      ts.isCallExpression(set.parent) &&
+      set.parent.expression === set
+    );
   }
   if (call.expression.name.text !== 'insert') return false;
   let top: ts.Node = call;
@@ -716,11 +722,34 @@ function schemaEscapes(n: ts.Node): boolean {
   return true;
 }
 
+// Table-name constants a raw mutation may target, none of them tasks: `@haive/shared/rag`'s `ai_rag_embeddings`.
+const NON_TASK_TABLES = new Set(['RAG_TABLE']);
+
+/** The expression substituted right after a template fragment, if there is one. */
+function nextSubstitution(n: ts.Node): ts.Expression | null {
+  const owner = ts.isTemplateHead(n) ? n.parent : ts.isTemplateMiddle(n) ? n.parent.parent : null;
+  if (!owner || !ts.isTemplateExpression(owner)) return null;
+  const at = ts.isTemplateHead(n) ? 0 : owner.templateSpans.findIndex((sp) => sp.literal === n) + 1;
+  return owner.templateSpans[at]?.expression ?? null;
+}
+
 /** Query text whose mutating statement targets the tasks table, such as a raw `sql` UPDATE: no
  *  builder is there to read, so any such text is reported rather than parsed. Comments are dropped. */
 function writesTasksAsText(n: ts.Node): boolean {
   if (!ts.isStringLiteralLike(n) && !ts.isTemplateLiteralToken(n)) return false;
   const text = n.text.replace(/\/\*[\s\S]*?\*\/|--[^\n]*/g, ' ');
+  // A fragment ending at a mutation's target names it elsewhere (a concatenation, a raw chunk).
+  if (
+    /\b(update|insert\s+into|merge\s+into|delete\s+from|truncate(\s+table)?)\s+(only\s+)?("?\w+"?\s*\.\s*)?$/i.test(
+      text,
+    )
+  ) {
+    const target = nextSubstitution(n);
+    return !(
+      target &&
+      (isTasksTable(target) || (ts.isIdentifier(target) && NON_TASK_TABLES.has(target.text)))
+    );
+  }
   return /\b(update|insert\s+into|merge\s+into|delete\s+from|truncate(\s+table)?|copy)\s+(only\s+)?("?\w+"?\s*\.\s*)?"?tasks"?([^\w$-]|$)/i.test(
     text,
   );
@@ -819,6 +848,8 @@ describe('a live-status write on a task row', () => {
       ),
     ).toBe(1);
     expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
+    expect(found("sql.raw('UPDATE ' + 'tasks SET status = 1')")).toBe(1);
+    expect(found("sql`UPDATE ${sql.raw('tasks')} SET status = 'running'`")).toBe(1);
     expect(found(`let t; t = schema.tasks;`)).toBe(1);
     expect(found(`const { tasks } = schema;`)).toBe(1);
     expect(
@@ -992,6 +1023,13 @@ describe('a live-status write on a task row', () => {
         await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
       }`;
     expect(liveWrites('routes/tasks/x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('reads a task update whose set is invoked through a wrapper as a write', () => {
+    const covered = (body: string) =>
+      liveWrites('x.ts', `async function f(db, id) { ${body} }`).map((w) => w.covered);
+    expect(covered(`await db.update(schema.tasks).set!({ status: 'running' });`)).toEqual([false]);
+    expect(covered(`await (db.update(schema.tasks).set)({ status: 'running' });`)).toEqual([false]);
   });
 
   it('does not cover a named write helper that escapes under another name', () => {
