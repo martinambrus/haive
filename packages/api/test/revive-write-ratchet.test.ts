@@ -786,7 +786,7 @@ function nextSubstitution(n: ts.Node): ts.Expression | null {
 const RAW_SQL_CALLS = new Set(['raw', 'execute', 'unsafe', 'query']);
 
 /** Text that reaches a query: a `sql` template, or an argument of a raw-SQL call, through
- *  concatenation, parentheses and template substitutions. Error and UI copy is never read. */
+ *  concatenation, parentheses, template substitutions and a variable it is stored in. */
 function inSqlContext(n: ts.Node): boolean {
   let at: ts.Node = n;
   for (;;) {
@@ -800,6 +800,9 @@ function inSqlContext(n: ts.Node): boolean {
         RAW_SQL_CALLS.has(p.expression.name.text)
       );
     }
+    if (ts.isVariableDeclaration(p) && p.initializer === at && ts.isIdentifier(p.name)) {
+      return usedInSql(at.getSourceFile(), p.name);
+    }
     const passes =
       (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
       ts.isParenthesizedExpression(p) ||
@@ -808,6 +811,17 @@ function inSqlContext(n: ts.Node): boolean {
     if (!passes) return false;
     at = p;
   }
+}
+
+/** Whether a variable holding text is used as query text anywhere in its file. */
+function usedInSql(sf: ts.SourceFile, name: ts.Identifier): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (ts.isIdentifier(n) && n !== name && n.text === name.text && inSqlContext(n)) found = true;
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return found;
 }
 
 /** Query text whose mutating statement targets the tasks table, such as a raw `sql` UPDATE: no
@@ -929,6 +943,8 @@ describe('a live-status write on a task row', () => {
     ).toBe(1);
     expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
     expect(found("throw new HttpError(409, 'Update tasks before retrying');")).toBe(0);
+    expect(found(`const q = "UPDATE tasks SET status = 'running'"; await tx.unsafe(q);`)).toBe(1);
+    expect(found(`const q = 'Update tasks before retrying'; throw new HttpError(409, q);`)).toBe(0);
     expect(found("await tx.unsafe(`UPDATE tasks SET status = 'running'`);")).toBe(1);
     expect(found("sql.raw('UPDATE ' + 'tasks SET status = 1')")).toBe(1);
     expect(found("sql`UPDATE ${sql.raw('tasks')} SET status = 'running'`")).toBe(1);
