@@ -10,6 +10,7 @@ import {
 } from '@haive/database';
 import { CLI_PROVIDER_LIST } from './cli-providers/index.js';
 import { lstatNoFollow } from './fs-safe.js';
+import { lockPlanMerge } from './plan/merge-lock.js';
 import { KB_DIR } from './knowledge-paths.js';
 import { readRenderContextColumn } from './project-state/index.js';
 
@@ -431,6 +432,15 @@ export async function reviveRefusal(
   | { task: ReviveTask; admission: Exclude<UpgradeAdmission, { admitted: true }> }
   | null
 > {
+  // A revived merge conversation takes its scratch worktree back, so it waits for Save, Pull or a discard.
+  const [revived] = await tx
+    .select({ type: schema.tasks.type, repositoryId: schema.tasks.repositoryId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  if (revived?.type === 'plan_merge' && revived.repositoryId) {
+    await lockPlanMerge(tx, revived.repositoryId);
+  }
   const check = await checkRevive(tx, taskId);
   if (!check) return null;
   if (check.refusal) return { task: check.task, refusal: check.refusal };
