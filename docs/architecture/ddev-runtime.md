@@ -55,6 +55,12 @@ acquisition cannot launch a command with only seconds remaining before its clien
 A warm recovery whose lock wait expires fails without rebuilding or deleting the existing
 runner: the earlier operation may still be restoring its live database. Snapshot locking
 also prevents a re-driven access change from reusing a slot while an orphaned snapshot writes it.
+An `exec` command carries its own deadline into the web container (`withWebContainerDeadline`,
+ten seconds under the host's, then KILL five later), because killing the runner's ddev client
+leaves the command running there. A non-raw exec runs as `ddev exec <flags> --raw -- timeout …
+bash -c "$*"`, its words joined in the runner: ddev double-quotes a non-raw word that holds a
+space (MEASURED on v1.25.2: `timeout 50s 'php -v'` ran a command named `php -v`, exit 127), so a
+wrapper in front of the words breaks assignments, pipelines and multi-word commands.
 Selection, stale cleanup, creation and promotion run in one non-root runner process under
 that lock. A provisional `haive-access-pending-<task>` snapshot is promoted to the selected
 slot only after creation succeeds; interrupted partial copies never count as recovery points.
@@ -123,8 +129,8 @@ downloads all three — so a suite driving firefox or webkit reports the gap thr
 
 Anything else that reaches that `bash -lc` from a repository or an agent goes through ONE quoting
 helper (`sandbox/shell-quote.ts`): the playwright root, 07c's database target, and 08b's selective
-test command. Quoting covers only the runner's shell: `ddev exec` without `--raw` re-reads its words
-in the web container's `bash -c` (MEASURED: `tests/$(id)Test.php` ran `id` there after runner-side
+test command. Quoting covers only the runner's shell: a non-raw `ddev exec` runs its joined words in
+the web container's `bash -c` (MEASURED: `tests/$(id)Test.php` ran `id` there after runner-side
 quoting). So for a DDEV run 08b drops a reported test path holding any character outside
 `[A-Za-z0-9._/@+-]`; on every run it drops absolute paths, `..`, control characters and a segment
 starting with `-` (an option to the runner), and notes how many written tests did not run. 07c
