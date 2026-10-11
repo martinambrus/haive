@@ -55,6 +55,7 @@ import {
   isFreeRedispatch,
   isCliTimeoutFailure,
   isProviderOutage,
+  isProviderRefusal,
   isOutputTruncationMessage,
   isTransientCliFailure,
   withoutPreemptions,
@@ -3931,6 +3932,8 @@ async function retryMiningAgents(
       userAsked(r) ||
       ((r.attempts < maxAttempts || runsFree(r)) &&
         !truncatedAgain(r) &&
+        // An apply re-roll would send a refused prompt again; only a person asking may.
+        !isProviderRefusal(r.errorMessage) &&
         !repeatsCapabilityRequest(
           r.errorMessage?.trim() ?? '',
           params.providers,

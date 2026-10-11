@@ -525,3 +525,8 @@ export function isProviderOutage(message: string | null | undefined): boolean {
   const cls = fatalClassFromMessage(message);
   return cls !== null && PROVIDER_OUTAGE_CLASS[cls];
 }
+
+/** True when the provider refused this prompt; sending the same prompt again is refused again. */
+export function isProviderRefusal(message: string | null | undefined): boolean {
+  return fatalClassFromMessage(message) === 'content_filter';
+}

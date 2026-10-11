@@ -991,6 +991,28 @@ describe('advanceStep agentMining retry', () => {
     expect(supersedes).toHaveLength(1);
   });
 
+  it('never re-rolls an agent the provider refused, though apply asks and budget remains', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        rawOutput: null,
+        errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`,
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(
+      makeMockDb(state),
+      miningStep(['peer-reviewer'], applyCalls),
+      enqueued,
+    );
+
+    expect(enqueued).toHaveLength(0);
+    expect(result.status).toBe('done');
+    expect(applyCalls.at(-1)!.isFinalMiningAttempt).toBe(true);
+  });
+
   it('degrades instead of failing when the named agent is spent but another has budget', async () => {
     // The mixed-budget case: peer already re-rolled (attempts 2 of 2), security is on its
     // first (attempts 1). miningAgentsWithBudget sees security's spare budget, so
