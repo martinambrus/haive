@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
 import {
   decideDdevRecovery,
@@ -48,15 +49,14 @@ describe('DDEV lifecycle commands across worker restarts', () => {
 
   it('stops an exec command inside the web container at the deadline, after any exec flags', () => {
     const shell = (args: string, ms = 60_000) => buildDdevCommand('/repos/x', args, ms).shell;
+    const join = /&& \{ (.*); \} &&/.exec(shell('exec a b'))?.[1];
     const wrap = (head: string, rest: string, secs = 50) =>
-      `cd /repos/x && set -- ${rest} && ddev ${head} --raw -- timeout --kill-after=5s ${secs}s bash -c "$*"`;
+      `cd /repos/x && set -- ${rest} && { ${join}; } && ddev ${head} --raw -- timeout --kill-after=5s ${secs}s bash -c "$c"`;
     expect(shell('exec vendor/bin/phpunit')).toBe(wrap('exec', 'vendor/bin/phpunit'));
     expect(shell("exec 'APP_ENV=prod php artisan migrate'")).toBe(
       wrap('exec', "'APP_ENV=prod php artisan migrate'"),
     );
-    expect(shell("exec 'echo a | wc -c'")).toContain(
-      `set -- 'echo a | wc -c' && ddev exec --raw -- timeout`,
-    );
+    expect(shell("exec 'echo a | wc -c'")).toBe(wrap('exec', "'echo a | wc -c'"));
     expect(shell('exec -s db mysql')).toBe(wrap('exec -s db', 'mysql'));
     expect(shell("'exec' '-d' '/v/a'\\''b' 'pytest'")).toBe(
       wrap("'exec' '-d' '/v/a'\\''b'", "'pytest'"),
@@ -70,6 +70,46 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     expect(shell('exec php -v', 5_000)).toBe(wrap('exec', 'php -v', 1));
     expect(shell('exec')).toBe('cd /repos/x && ddev exec');
     expect(buildDdevCommand('/repos/x', 'exec php -v', 60_000).hostTimeoutMs).toBe(60_000);
+  });
+
+  it('hands the inner bash the command string ddev itself would have built', () => {
+    const argv = (args: string) => {
+      const shell = buildDdevCommand('/repos/x', args, 60_000).shell.replace(
+        /^cd \/repos\/x && /,
+        '',
+      );
+      const out = execFileSync('bash', ['-c', `ddev() { printf '%s\\0' "$@"; }; ${shell}`]);
+      return out.toString().split('\0').slice(0, -1);
+    };
+    expect(argv(`exec bash -c "echo AAA | base64 -d | bash"`)).toEqual([
+      'exec',
+      '--raw',
+      '--',
+      'timeout',
+      '--kill-after=5s',
+      '50s',
+      'bash',
+      '-c',
+      'bash -c "echo AAA | base64 -d | bash"',
+    ]);
+    expect(argv("exec 'echo a | wc -c'").at(-1)).toBe('echo a | wc -c');
+    expect(argv('exec \'APP_ENV=prod php -r "echo 1;"\'').at(-1)).toBe(
+      'APP_ENV=prod php -r "echo 1;"',
+    );
+    expect(argv('exec php -v').at(-1)).toBe('php -v');
+    expect(argv(`exec -s db -- mysql -e 'select 1 #x' "a\\"b" ''`)).toEqual([
+      'exec',
+      '-s',
+      'db',
+      '--raw',
+      '--',
+      'timeout',
+      '--kill-after=5s',
+      '50s',
+      'bash',
+      '-c',
+      'mysql -e "select 1 #x" "a\\"b" ',
+    ]);
   });
 
   it('keeps the direct deadline for a raw exec, wherever the flag sits in the head', () => {

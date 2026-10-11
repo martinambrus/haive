@@ -1198,9 +1198,13 @@ const DDEV_EXEC_HEAD = new RegExp(
 
 const DDEV_EXEC_RAW = /(?:^|\s)['"]?--raw['"]?(?=\s|$)/;
 
+// ddev's quoteArgs (cmd/ddev/cmd/exec.go): from two words up, one holding `" \t\r\n#` is double-quoted.
+const DDEV_QUOTE_ARGS =
+  'c=; unset f; if [ $# -lt 2 ]; then c="$*"; else for a; do case $a in *[\\"\\ \\#$\'\\t\\r\\n\']*) a="\\"${a//\\"/\\\\\\"}\\"";; esac; c="$c${f+ }$a"; f=1; done; fi';
+
 /** Killing the runner's ddev client leaves the command running in the web container, so an
  *  `exec` command carries its own deadline, just under the host's. Other verbs pass through.
- *  ddev quotes a non-raw word that holds a space, so the words run raw under one `bash -c`. */
+ *  A non-raw exec's words are joined the way ddev joins them and run raw under one `bash -c`. */
 function withWebContainerDeadline(ddevArgs: string, timeoutMs: number): string {
   const head = DDEV_EXEC_HEAD.exec(ddevArgs)?.[0];
   if (head === undefined || ddevArgs.slice(head.length).trim() === '') return `ddev ${ddevArgs}`;
@@ -1208,7 +1212,7 @@ function withWebContainerDeadline(ddevArgs: string, timeoutMs: number): string {
   const deadline = `timeout --kill-after=5s ${Math.max(1, Math.ceil(timeoutMs / 1000) - 10)}s`;
   if (DDEV_EXEC_RAW.test(head)) return `ddev ${head} ${deadline}${rest}`;
   const flags = head.replace(/\s+['"]?--['"]?$/, '');
-  return `set --${rest} && ddev ${flags} --raw -- ${deadline} bash -c "$*"`;
+  return `set --${rest} && { ${DDEV_QUOTE_ARGS}; } && ddev ${flags} --raw -- ${deadline} bash -c "$c"`;
 }
 
 function buildDdevLockedCommand(
