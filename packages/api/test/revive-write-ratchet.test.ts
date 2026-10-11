@@ -332,6 +332,15 @@ function scopeOf(node: ts.Node): ts.FunctionLikeDeclaration | null {
   return enclosingFunction(node);
 }
 
+function isDeclarationName(n: ts.Identifier): boolean {
+  const p = n.parent;
+  return (
+    ((ts.isFunctionDeclaration(p) || ts.isVariableDeclaration(p)) && p.name === n) ||
+    (ts.isPropertyAccessExpression(p) && p.name === n) ||
+    ((ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p)) && p.name === n)
+  );
+}
+
 function nameOf(fn: ts.FunctionLikeDeclaration): string | null {
   if (ts.isFunctionDeclaration(fn) && fn.name) return fn.name.text;
   const parent = fn.parent;
@@ -392,12 +401,19 @@ function guarded(
     return passed && ts.isIdentifier(passed) ? passed.text : null;
   };
   const calls: ts.CallExpression[] = [];
+  let escaped = false;
+  // Every reference must be a direct call: an alias or an argument calls it where no site is read.
   const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n) && n.expression.getText() === name) calls.push(n);
+    if (ts.isIdentifier(n) && n.text === name) {
+      const p = n.parent;
+      if (ts.isCallExpression(p) && p.expression === n) calls.push(p);
+      else if (!isDeclarationName(n)) escaped = true;
+    }
     ts.forEachChild(n, visit);
   };
   visit(sf);
   return (
+    !escaped &&
     calls.length > 0 &&
     calls.every((c) => guarded(sf, c, follow(tx, c), follow(task, c), depth + 1))
   );
@@ -455,6 +471,8 @@ function shadowsName(sf: ts.SourceFile, name: string): boolean {
       !(
         ts.isFunctionDeclaration(n) &&
         ts.isSourceFile(n.parent) &&
+        name === GUARD &&
+        sf.fileName === 'routes/upgrades.ts' &&
         n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
       )
     ) {
@@ -698,10 +716,14 @@ function schemaEscapes(n: ts.Node): boolean {
   return true;
 }
 
-/** Query text that writes the tasks table by name, such as a raw `sql` UPDATE: no builder is there to read. */
+/** Query text whose mutating statement targets the tasks table, such as a raw `sql` UPDATE: no
+ *  builder is there to read, so any such text is reported rather than parsed. Comments are dropped. */
 function writesTasksAsText(n: ts.Node): boolean {
   if (!ts.isStringLiteralLike(n) && !ts.isTemplateLiteralToken(n)) return false;
-  return /\b(update|insert\s+into)\s+(only\s+)?("?\w+"?\.)?"?tasks"?(\s|$|;|\))/i.test(n.text);
+  const text = n.text.replace(/\/\*[\s\S]*?\*\/|--[^\n]*/g, ' ');
+  return /\b(update|insert\s+into|merge\s+into|delete\s+from|truncate(\s+table)?|copy)\s+(only\s+)?("?\w+"?\s*\.\s*)?"?tasks"?([^\w$-]|$)/i.test(
+    text,
+  );
 }
 
 /** An import from the database package that reaches the tasks table under another name: `tasks`
@@ -790,6 +812,13 @@ describe('a live-status write on a task row', () => {
     expect(found('await db.execute(sql.raw(\'update "public"."tasks" set status = 1\'));')).toBe(1);
     expect(found('await db.execute(sql`INSERT INTO tasks (id) VALUES (${id})`);')).toBe(1);
     expect(found("await db.execute(sql`UPDATE task_steps SET status = 'done'`);")).toBe(0);
+    expect(found("sql`UPDATE /* retry */ tasks SET status = 'running'`")).toBe(1);
+    expect(
+      found(
+        "sql`MERGE INTO public.tasks t USING x ON true WHEN MATCHED THEN UPDATE SET status = 'running'`",
+      ),
+    ).toBe(1);
+    expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
     expect(found(`let t; t = schema.tasks;`)).toBe(1);
     expect(found(`const { tasks } = schema;`)).toBe(1);
     expect(
@@ -954,6 +983,28 @@ describe('a live-status write on a task row', () => {
     expect(
       covered(`import { ${GUARD} } from '../upgrades.js'; import { eq } from './eq.js';`),
     ).toEqual([false]);
+  });
+
+  it('counts an exported guard only as the real definition in routes/upgrades.ts', () => {
+    const src = `export async function ${GUARD}() {}
+      async function f(tx, id) {
+        await ${GUARD}(tx, id);
+        await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      }`;
+    expect(liveWrites('routes/tasks/x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('does not cover a named write helper that escapes under another name', () => {
+    const src = `async function revive(tx, id) {
+        await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      }
+      async function route(tx, id) {
+        const alias = revive;
+        await ${GUARD}(tx, id);
+        await revive(tx, id);
+        await alias(tx, id);
+      }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
   });
 
   it('does not count a guard in a sibling transaction', () => {
