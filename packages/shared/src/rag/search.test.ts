@@ -181,7 +181,7 @@ describe('applyKnowledgeReserve', () => {
 });
 
 /** Keeps every statement with its parameters, and answers the identifier statistics so the ranker runs. */
-function recordingConn(): {
+function recordingConn(df = 1): {
   conn: RagConnection;
   calls: Array<{ statement: string; params: unknown[] }>;
 } {
@@ -190,7 +190,7 @@ function recordingConn(): {
     unsafe: async (statement: string, params: unknown[] = []) => {
       calls.push({ statement, params });
       if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
-      if (statement.includes('AS t(term)')) return [{ term: 'getuserbyid', df: 1, total: 10 }];
+      if (statement.includes('AS t(term)')) return [{ term: 'getuserbyid', df, total: 10 }];
       return [];
     },
   };
@@ -417,5 +417,91 @@ describe('ragHybridSearch identifier statistics', () => {
     await ragHybridSearch(conn, VEC, QUERY);
 
     expect(h.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('ragHybridSearch lexical-only identifier ranker', () => {
+  const VEC = [0.1, 0.2, 0.3, 0.4];
+  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] } };
+  const lexicalOnly = { lexicalOnly: true };
+  const mainCall = (calls: Array<{ statement: string; params: unknown[] }>) =>
+    calls.find((c) => c.statement.includes('ts_rank_cd'))!;
+
+  it('lets a chunk matched only by an identifier into the lexical-only search', async () => {
+    const { conn, calls } = recordingConn();
+
+    await ragHybridSearch(conn, VEC, 'getUserById validation', lexicalOnly);
+
+    const { statement, params } = mainCall(calls);
+    expect(statement).toContain('lex AS (');
+    expect(statement).toContain('ident AS (');
+    expect(statement).toMatch(/SELECT id FROM lex\s+UNION\s+SELECT id FROM ident/);
+    expect(statement).toContain('LEFT JOIN ident i ON i.id = c.id');
+    expect(params.slice(-4)).toEqual([
+      '{"getuserbyid"}',
+      `{${Math.log(10)}}`,
+      "'getuserbyid'",
+      DEFAULT_RAG_SEARCH_CONFIG.candidatePool,
+    ]);
+    expect(params.filter(Array.isArray)).toEqual([]);
+  });
+
+  it('fuses the two rankers and keeps the run-book boost on the sum', async () => {
+    const { conn, calls } = recordingConn();
+
+    await ragHybridSearch(conn, VEC, 'getUserById validation', {
+      ...lexicalOnly,
+      runbookBoost: 1.5,
+    });
+
+    const { statement, params } = mainCall(calls);
+    expect(statement).toMatch(
+      /1\.0 \/ \(\$2 \+ l\.l_rank\)[\s\S]*1\.0 \/ \(\$2 \+ i\.i_rank\)[\s\S]*source_type = 'runbook' THEN \$4::double precision/,
+    );
+    expect(params.slice(0, 4)).toEqual(['getUserById validation', 60, 8, 1.5]);
+  });
+
+  it("sends today's statement unchanged for a prose query", async () => {
+    const { conn, calls } = recordingConn();
+
+    await ragHybridSearch(
+      conn,
+      VEC,
+      'how do we validate the form',
+      lexicalOnly,
+      undefined,
+      'repo-1',
+    );
+
+    const { statement, params } = mainCall(calls);
+    expect(statement).not.toContain('ident AS (');
+    expect(statement).not.toContain('lex AS (');
+    expect(params).toEqual(['how do we validate the form', 60, 8, 1, 'repo-1']);
+  });
+
+  it("sends today's statement unchanged for an identifier the store has never seen", async () => {
+    const { conn, calls } = recordingConn(0);
+
+    await ragHybridSearch(conn, VEC, 'getUserById validation', lexicalOnly);
+
+    const { statement, params } = mainCall(calls);
+    expect(statement).not.toContain('ident AS (');
+    expect(params).toEqual(['getUserById validation', 60, 8, 1]);
+  });
+
+  it('applies the facet and repository filters inside the identifier CTE', async () => {
+    const { conn, calls } = recordingConn();
+
+    await ragHybridSearch(conn, VEC, 'getUserById validation', lexicalOnly, FILTER, 'repo-1');
+
+    const { statement } = mainCall(calls);
+    const ident = statement.slice(statement.indexOf('ident AS ('), statement.indexOf('cand AS ('));
+    const lex = statement.slice(statement.indexOf('lex AS ('), statement.indexOf('ident AS ('));
+    for (const section of [ident, lex]) {
+      expect(section).toContain('repository_id = $');
+      expect(section).toContain("source_type <> 'task'");
+      expect(section).toMatch(/namespace|facets/);
+    }
+    expect(statement.match(/repository_id = \$(\d+)/g)!.length).toBe(2);
   });
 });
