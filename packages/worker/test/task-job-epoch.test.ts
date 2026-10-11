@@ -133,6 +133,8 @@ const h = vi.hoisted(() => {
     snapshotReadFails: false,
     /** What the skip-first step's shouldRun answers. */
     shouldRun: (async () => true) as () => Promise<boolean>,
+    /** What classifyRuntime reports for an if-serving step. */
+    runtimeMode: 'none' as string,
   };
   return { state };
 });
@@ -292,6 +294,10 @@ vi.mock('../src/sandbox/runtime-admission.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/runtime-admission.js')>()),
   runtimeAdmission: vi.fn(async () => h.state.admission),
 }));
+vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/step-engine/steps/workflow/_app-runtime.js')>()),
+  classifyRuntime: vi.fn(async () => ({ mode: h.state.runtimeMode })),
+}));
 vi.mock('../src/queues/_step-reset.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/queues/_step-reset.js')>()),
   resetStepAndDownstream: vi.fn(async () => ({ newEpoch: 7 })),
@@ -317,6 +323,8 @@ vi.mock('../src/sandbox/ide-runner.js', async (importOriginal) => ({
 }));
 
 // 07 is the fix loop's fixed re-entry target.
+stepRegistry.register(gate2VerifyApprovalStep as unknown as StepDefinition);
+
 for (const id of ['epoch-job-step', 'epoch-job-target', '07-phase-2-implement']) {
   stepRegistry.register({
     metadata: {
@@ -409,6 +417,7 @@ afterEach(() => {
   h.state.hintWriteFails = false;
   h.state.snapshotReadFails = false;
   h.state.shouldRun = async () => true;
+  h.state.runtimeMode = 'none';
   vi.restoreAllMocks();
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
@@ -1404,6 +1413,40 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       };
       await processTaskJob(job('epoch-skip-runtime', { formValues: { answer: 'yes' } }), 'tok');
       expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('on the runtime pool, for the verification gate', () => {
+    const full = {
+      decision: 'park',
+      position: 1,
+      waiting: 1,
+      busyMb: 1,
+      budgetMb: 1,
+      myWeightMb: 1,
+    };
+    afterEach(() => {
+      vi.mocked(runtimeAdmission).mockClear();
+    });
+    const gateJob = () => job('09-gate-2-verify-approval');
+
+    it('takes no slot for a task with no runtime to serve', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      await processTaskJob(gateJob(), 'tok');
+      expect(vi.mocked(runtimeAdmission)).not.toHaveBeenCalled();
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+    });
+
+    it('still parks for a task serving a ddev runtime', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      h.state.runtimeMode = 'ddev';
+      await processTaskJob(gateJob(), 'tok');
+      expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledWith('task-1', 'ddev');
+      parkQueued(15_000);
     });
   });
 

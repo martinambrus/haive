@@ -566,7 +566,8 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  runner — over-declaring is only safe for a task that HAS a runner; a task that will never
    *  have one would otherwise park behind a pool it does not use. A step that creates the
    *  runtime for the FIRST time cannot use this: 01a-app-boot classifies as `'none'` right up
-   *  until it writes its own boot row. */
+   *  until it writes its own boot row. 09-gate-2 uses it: it spawns only where classifyRuntime
+   *  reports a ddev or app runner. */
   readonly needsRuntime?: 'ddev' | 'app' | 'if-serving';
   shouldRun?(ctx: StepContext): Promise<boolean> | boolean;
   detect?(ctx: StepContext): Promise<TDetect>;
