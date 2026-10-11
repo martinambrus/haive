@@ -20,6 +20,7 @@ import {
   type GlobalKbContext,
 } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
+import { classifyGlobalKbVectorProvenance } from '../global-kb-vector-provenance.js';
 import { getBullRedis } from '../redis.js';
 import {
   capChunks,
@@ -434,6 +435,8 @@ export function pickLostSyncs<T extends { id: string }>(
 export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
   const settings = await resolveGlobalKbSettings();
   if (!settings.enabled) return;
+  // A store enabled or reachable only after boot still gets its pre-provenance vectors classified.
+  await classifyGlobalKbVectorProvenance(getDb());
   const cutoff = new Date(Date.now() - RECONCILE_GRACE_MS);
   const pending = await withGlobalKb(getDb(), (ctx) =>
     ctx.db
