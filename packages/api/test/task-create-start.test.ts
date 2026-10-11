@@ -157,14 +157,14 @@ describe('POST /tasks', () => {
     expect(t.task().status).toBe('queued');
   });
 
-  it('leaves the task created and queues nothing when a write before the start fails', async () => {
+  it('creates no task and queues nothing when a write before the start fails', async () => {
     const t = setup();
     t.fake.hooks.beforeInsert = (table) => {
       if (table === schema.taskEvents) throw new Error('db unavailable');
     };
     const res = await create();
     expect(res.status).toBe(500);
-    expect(t.task().status).toBe('created');
+    expect(t.fake.rows(schema.tasks)).toHaveLength(0);
     expect(h.add).not.toHaveBeenCalled();
   });
 });

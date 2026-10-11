@@ -728,12 +728,11 @@ taskRoutes.post('/', async (c) => {
       return { task: row, queued: await settle(tx, row) };
     }));
   } else {
-    task = await db.transaction(async (tx) => {
+    ({ task, queued } = await db.transaction(async (tx) => {
       const row = firstRow(await insertTask(tx));
       await pinDatabase(tx, row);
-      return row;
-    });
-    queued = await settle(db, task);
+      return { task: row, queued: await settle(tx, row) };
+    }));
   }
 
   // `implements` ONLY. Taskable means "one task could implement this", which is
