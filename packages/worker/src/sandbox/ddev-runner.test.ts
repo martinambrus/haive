@@ -51,7 +51,7 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     const shell = (args: string, ms = 60_000) => buildDdevCommand('/repos/x', args, ms).shell;
     const join = /&& \{ (.*); \} &&/.exec(shell('exec a b'))?.[1];
     const wrap = (head: string, rest: string, secs = 50) =>
-      `cd /repos/x && set -- ${rest} && { ${join}; } && ddev ${head} --raw -- timeout --kill-after=5s ${secs}s bash -c "$c"`;
+      `cd /repos/x && { set -- ${rest}\n} && { ${join}; } && ddev ${head} --raw -- timeout --kill-after=5s ${secs}s bash -c "$c"`;
     expect(shell('exec vendor/bin/phpunit')).toBe(wrap('exec', 'vendor/bin/phpunit'));
     expect(shell("exec 'APP_ENV=prod php artisan migrate'")).toBe(
       wrap('exec', "'APP_ENV=prod php artisan migrate'"),
@@ -92,6 +92,18 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     }
   });
 
+  it('runs nothing when the cd before a wrapped exec fails', () => {
+    const shell = buildDdevCommand('/nonexistent-haive-dir', 'exec php -v # c', 60_000).shell;
+    const run = () =>
+      execFileSync('bash', ['-c', `ddev() { echo CALLED; }; ${shell}`], { stdio: 'pipe' });
+    expect(run).toThrow();
+    try {
+      run();
+    } catch (err) {
+      expect(String((err as { stdout: Buffer }).stdout)).not.toContain('CALLED');
+    }
+  });
+
   it('hands the inner bash the command string ddev itself would have built', () => {
     const argv = (args: string) => {
       const shell = buildDdevCommand('/repos/x', args, 60_000).shell.replace(
@@ -117,6 +129,7 @@ describe('DDEV lifecycle commands across worker restarts', () => {
       'APP_ENV=prod php -r "echo 1;"',
     );
     expect(argv('exec php -v').at(-1)).toBe('php -v');
+    expect(argv('exec php artisan migrate # production').at(-1)).toBe('php artisan migrate');
     expect(argv(`exec -s web -- mysql -e 'select 1 #x' "a\\"b" ''`)).toEqual([
       'exec',
       '-s',

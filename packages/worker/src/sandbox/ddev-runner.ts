@@ -1302,7 +1302,8 @@ function withWebContainerDeadline(ddevArgs: string, timeoutMs: number): string {
   if (head === null || rest.trim() === '' || head.service !== 'web') return `ddev ${ddevArgs}`;
   const deadline = `timeout --kill-after=5s ${Math.max(1, Math.ceil(timeoutMs / 1000) - 10)}s`;
   if (head.raw) return `ddev ${ddevArgs.slice(0, head.end)} ${deadline}${rest}`;
-  return `set --${rest} && { ${DDEV_QUOTE_ARGS}; } && ddev ${ddevArgs.slice(0, head.flagsEnd)} --raw -- ${deadline} bash -c "$c"`;
+  // The newline ends any `#` comment in the words before the wrapper, which a comment would swallow.
+  return `{ set --${rest}\n} && { ${DDEV_QUOTE_ARGS}; } && ddev ${ddevArgs.slice(0, head.flagsEnd)} --raw -- ${deadline} bash -c "$c"`;
 }
 
 function buildDdevLockedCommand(
