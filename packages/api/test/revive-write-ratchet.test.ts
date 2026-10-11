@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 const SRC = join(import.meta.dirname, '../src');
 const ENDED = new Set(['failed', 'cancelled', 'completed']);
 const GUARD = 'refuseReviveBesideLive';
+const ONLY_CREATED = "eq(schema.tasks.status, 'created')";
 
 function sources(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -40,53 +41,155 @@ function writtenStatus(call: ts.CallExpression): string | null {
       }
       return null;
     }
-    inner = ts.isCallExpression(inner) ? inner.expression : inner.expression;
+    inner = inner.expression;
   }
   return null;
 }
 
-function outermostFunction(node: ts.Node): ts.Node | null {
-  let found: ts.Node | null = null;
+/** Whether the `.where(...)` after this `.set(...)` holds only a created task: the created equality
+ *  is the predicate itself, or a direct conjunct of `and(...)`. */
+function movesOnlyCreated(set: ts.CallExpression): boolean {
+  const access = set.parent;
+  if (!ts.isPropertyAccessExpression(access) || access.name.text !== 'where') return false;
+  const where = access.parent;
+  if (!ts.isCallExpression(where)) return false;
+  const pred = where.arguments[0];
+  if (!pred) return false;
+  if (pred.getText() === ONLY_CREATED) return true;
+  return (
+    ts.isCallExpression(pred) &&
+    pred.expression.getText() === 'and' &&
+    pred.arguments.some((a) => a.getText() === ONLY_CREATED)
+  );
+}
+
+function enclosingFunction(node: ts.Node): ts.FunctionLikeDeclaration | null {
   for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
-    if (ts.isFunctionLike(n)) found = n;
+    if (ts.isFunctionLike(n)) return n as ts.FunctionLikeDeclaration;
   }
+  return null;
+}
+
+/** The innermost transaction callback holding the node, else its innermost function. */
+function scopeOf(node: ts.Node): ts.FunctionLikeDeclaration | null {
+  for (let fn = enclosingFunction(node); fn; fn = enclosingFunction(fn)) {
+    const call = fn.parent;
+    if (
+      ts.isCallExpression(call) &&
+      ts.isPropertyAccessExpression(call.expression) &&
+      call.expression.name.text === 'transaction'
+    ) {
+      return fn;
+    }
+  }
+  return enclosingFunction(node);
+}
+
+function nameOf(fn: ts.FunctionLikeDeclaration): string | null {
+  if (ts.isFunctionDeclaration(fn) && fn.name) return fn.name.text;
+  const parent = fn.parent;
+  if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) return parent.name.text;
+  return null;
+}
+
+function callsGuard(scope: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && n.expression.getText() === GUARD) found = true;
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(scope);
   return found;
 }
 
-/** Every live-status write on a task row, with whether it is covered. */
-function liveWrites(): { site: string; status: string; covered: boolean }[] {
+/** Guarded on its own path: its scope calls the guard, or its scope is a named function every
+ *  caller of which is guarded in turn. */
+function guarded(sf: ts.SourceFile, node: ts.Node, depth = 0): boolean {
+  const scope = scopeOf(node);
+  if (!scope) return false;
+  if (callsGuard(scope)) return true;
+  const name = nameOf(scope);
+  if (!name || depth > 3) return false;
+  const calls: ts.Node[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && n.expression.getText() === name) calls.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return calls.length > 0 && calls.every((c) => guarded(sf, c, depth + 1));
+}
+
+/** Every live-status write on a task row in one source, with whether it is covered. */
+function liveWrites(
+  file: string,
+  text: string,
+): { site: string; status: string; covered: boolean }[] {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const out: { site: string; status: string; covered: boolean }[] = [];
-  for (const file of sources(SRC)) {
-    const sf = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node)) {
-        const status = writtenStatus(node);
-        if (status !== null && !ENDED.has(status)) {
-          const chain = node.parent?.parent?.getText() ?? '';
-          const fromCreated = chain.includes("eq(schema.tasks.status, 'created')");
-          const fn = outermostFunction(node);
-          const guarded = fn !== null && fn.getText().includes(`${GUARD}(`);
-          const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
-          out.push({
-            site: `${relative(SRC, file)}:${line}`,
-            status,
-            covered: fromCreated || guarded,
-          });
-        }
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const status = writtenStatus(node);
+      if (status !== null && !ENDED.has(status)) {
+        const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+        out.push({
+          site: `${file}:${line}`,
+          status,
+          covered: movesOnlyCreated(node) || guarded(sf, node),
+        });
       }
-      ts.forEachChild(node, visit);
-    };
-    visit(sf);
-  }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
   return out;
 }
 
 // A write that puts a task row back to a live status revives it, so it must run the revival's
-// exclusion in the same function, unless it only starts a task that was never live.
+// exclusion on its own path, unless it only starts a task that was never live.
 describe('a live-status write on a task row', () => {
-  it(`calls ${GUARD} in its function, or moves only a created task`, () => {
-    const writes = liveWrites();
+  it(`calls ${GUARD} on its own path, or moves only a created task`, () => {
+    const writes = sources(SRC).flatMap((f) =>
+      liveWrites(relative(SRC, f), readFileSync(f, 'utf8')),
+    );
     expect(writes.length).toBeGreaterThan(0);
     expect(writes.filter((w) => !w.covered)).toEqual([]);
+  });
+
+  it('does not count a guard in a sibling transaction', () => {
+    const src = `async function route() {
+      await db.transaction(async (tx) => { await ${GUARD}(tx, id); });
+      await db.transaction(async (tx) => {
+        await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      });
+    }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('follows a closure to the transactions that call it', () => {
+    const write = `tx.update(schema.tasks).set({ status: 'queued' }).where(eq(schema.tasks.id, id))`;
+    const covered = (body: string) =>
+      liveWrites('x.ts', `async function route() { const requeue = (tx) => ${write}; ${body} }`)[0]
+        ?.covered;
+    expect(
+      covered(
+        `await db.transaction(async (tx) => { await ${GUARD}(tx, id); await requeue(tx); });`,
+      ),
+    ).toBe(true);
+    expect(covered(`await db.transaction(async (tx) => { await requeue(tx); });`)).toBe(false);
+  });
+
+  it('exempts only a predicate that holds a created task alone', () => {
+    const covered = (where: string) =>
+      liveWrites(
+        'x.ts',
+        `function f() { return db.update(schema.tasks).set({ status: 'queued' }).where(${where}); }`,
+      )[0]?.covered;
+    expect(covered(`and(eq(schema.tasks.id, id), ${ONLY_CREATED})`)).toBe(true);
+    expect(covered(`or(${ONLY_CREATED}, eq(schema.tasks.status, 'failed'))`)).toBe(false);
+    expect(
+      covered(
+        `and(eq(schema.tasks.id, id), or(${ONLY_CREATED}, eq(schema.tasks.status, 'failed')))`,
+      ),
+    ).toBe(false);
   });
 });
