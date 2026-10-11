@@ -2,6 +2,9 @@ import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Redis } from 'ioredis';
 import {
+  TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_OUT_CHANNEL_PREFIX,
+  TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
   TERMINAL_SESSION_PREFIX,
@@ -191,7 +194,8 @@ vi.mock('../src/redis.js', () => ({
   closeRedis: async () => undefined,
 }));
 
-const { runShellSession, resetStaleRefcounts } = await import('../src/routes/terminal-shell.js');
+const { runShellSession, runScopedShellSession, resetStaleRefcounts } =
+  await import('../src/routes/terminal-shell.js');
 
 beforeEach(() => {
   publisherFake = new FakeRedis();
@@ -428,5 +432,99 @@ describe('runShellSession refcount lifecycle', () => {
     } finally {
       process.off('unhandledRejection', onUnhandled);
     }
+  });
+});
+
+describe('shell start directory and restart', () => {
+  async function connect(
+    scope: 'task' | 'repo',
+    reply: Record<string, unknown> = {},
+  ): Promise<FakeWs> {
+    const ws = new FakeWs();
+    const done = runScopedShellSession(ws as never, 'u1', scope, 't1', 'p1');
+    let sub: FakeRedis | undefined;
+    for (let i = 0; i < 50 && !(sub = publisherFake.duplicates[0])?.subscribeCalls.length; i += 1) {
+      await new Promise((r) => setImmediate(r));
+    }
+    const open = publisherFake.publishCalls.find((c) => c.channel === TERMINAL_REQUEST_CHANNEL);
+    const { correlationId } = JSON.parse(open!.data) as { correlationId: string };
+    sub!.emitReply(`${TERMINAL_REPLY_CHANNEL_PREFIX}${correlationId}`, {
+      ok: true,
+      sessionId: 'sess-1',
+      containerName: 'haive-shell-1',
+      shell: 'bash',
+      ...reply,
+    });
+    await done;
+    return ws;
+  }
+
+  const ctlPublishes = () =>
+    publisherFake.publishCalls.filter((c) => c.channel === `${TERMINAL_CTL_CHANNEL_PREFIX}sess-1`);
+
+  it('passes the worker mismatch on in the connected frame', async () => {
+    const mismatch = { sessionPath: '/old', expected: '/new' };
+    const ws = await connect('task', { workdirMismatch: mismatch });
+    const connected = ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'connected');
+    expect(connected.workdirMismatch).toEqual(mismatch);
+  });
+
+  it('sends no mismatch when the worker reports none', async () => {
+    const ws = await connect('task');
+    const connected = ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'connected');
+    expect(connected).not.toHaveProperty('workdirMismatch');
+  });
+
+  it('forwards a restart to the worker with the requesting user', async () => {
+    const ws = await connect('task');
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'restart_shell' })));
+    await new Promise((r) => setImmediate(r));
+    expect(ctlPublishes().map((c) => JSON.parse(c.data))).toEqual([
+      { type: 'restart_shell', userId: 'u1' },
+    ]);
+  });
+
+  it.each([
+    [JSON.stringify({ type: 'exit', reason: 'restart' }), { type: 'exit', reason: 'restart' }],
+    [JSON.stringify({ type: 'exit' }), { type: 'exit' }],
+  ])('relays the end of the shell as %s', async (raw, frame) => {
+    const ws = await connect('task');
+    publisherFake.duplicates[0]!.emitOutput(`${TERMINAL_OUT_CHANNEL_PREFIX}sess-1`, raw);
+    await new Promise((r) => setImmediate(r));
+    expect(ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'exit')).toEqual(frame);
+  });
+
+  it('forwards a workdir probe and relays the answer as a workdir frame', async () => {
+    const ws = await connect('task');
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'probe_workdir' })));
+    await new Promise((r) => setImmediate(r));
+    expect(ctlPublishes().map((c) => JSON.parse(c.data))).toEqual([{ type: 'probe_workdir' }]);
+
+    const mismatch = { sessionPath: '/old', expected: '/new' };
+    publisherFake.duplicates[0]!.emitOutput(
+      `${TERMINAL_WORKDIR_CHANNEL_PREFIX}sess-1`,
+      JSON.stringify({ workdirMismatch: mismatch }),
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'workdir')).toEqual({
+      type: 'workdir',
+      workdirMismatch: mismatch,
+    });
+    expect(ws.sent.some((f) => JSON.parse(f).type === 'output')).toBe(false);
+  });
+
+  it('sends no workdir probe for a repo shell', async () => {
+    const ws = await connect('repo');
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'probe_workdir' })));
+    await new Promise((r) => setImmediate(r));
+    expect(ctlPublishes()).toEqual([]);
+  });
+
+  it('refuses a restart on a repo shell', async () => {
+    const ws = await connect('repo');
+    ws.emit('message', Buffer.from(JSON.stringify({ type: 'restart_shell' })));
+    await new Promise((r) => setImmediate(r));
+    expect(ctlPublishes()).toEqual([]);
+    expect(ws.sent.some((f) => JSON.parse(f).type === 'error')).toBe(true);
   });
 });

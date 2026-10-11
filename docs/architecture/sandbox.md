@@ -148,6 +148,16 @@ on the main checkout. The invocation mount, the Terminal, the prompt boundary an
 alone, because a runner teardown after 12 must not throw. An explicit `worktreeRel` (DAG issue, merge
 fix) names its own tree and skips all of this.
 
+The task Terminal attaches to one long-lived tmux session per container, and a tmux session keeps the
+directory it was created in. So when the decision moves (a Retry then Skip of 01), a shell that was
+already open still sits in the abandoned worktree. The worker reads the session's `session_path` at
+every open, and again whenever the open page asks (`probe_workdir`, every 15 seconds while the tab is
+visible; the answer travels on `terminal:workdir:<sid>`, apart from the PTY bytes). When the path
+differs from the current decision, the page shows both paths and offers "Restart shell here". That
+kills the tmux session (`restart_shell`), and every attached tab reconnects into a new session at the
+current workspace. A restart and an attach are ordered by one per-container counter, so a shell that
+attached after the kill is never told its later exit was the restart.
+
 ## Values in runner shell commands
 
 `runnerExec` and `appRunnerExec` run their command through a shell, so every value spliced into one

@@ -5,6 +5,7 @@ import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
@@ -15,10 +16,11 @@ import {
   type TerminalOpenRequest,
   type TerminalOpenResult,
   type TerminalRequest,
+  type TerminalWorkdirMismatch,
 } from '@haive/shared';
 import type { Redis } from 'ioredis';
 import { createRedisConnection } from '@haive/shared';
-import { ensureShellContainer } from './terminal-container.js';
+import { ensureShellContainer, seedShellTrust } from './terminal-container.js';
 import {
   resolveRepoMount,
   resolveTaskRepoMount,
@@ -35,6 +37,8 @@ import { resolveGitEnv, type GitEnvScope } from '../secrets/user-git-identity.js
 
 const log = logger.child({ module: 'terminal-session-manager' });
 
+const TMUX_SESSION = 'haive-task';
+
 interface SessionState {
   sessionId: string;
   userId: string;
@@ -50,6 +54,8 @@ interface SessionState {
   inChannel: string;
   ctlChannel: string;
   outChannel: string;
+  /** The turn sequence at this session's attach, before its exec, to tell whether a restart ended it. */
+  attachedAt: number;
 }
 
 export interface TerminalSessionManagerOptions {
@@ -79,6 +85,14 @@ export class TerminalSessionManager {
     gates: { hasRepo: boolean },
   ) => Promise<McpServerSpec[]>;
   private readonly sessions = new Map<string, SessionState>();
+  /** The turn sequence at which a restart last killed each container's tmux session. Set before the
+   *  kill, since a client can end before the kill returns, so any session attached until then is counted. */
+  private readonly restartedAt = new Map<string, number>();
+  /** Orders restarts and attaches causally; a millisecond clock ties when one follows the other. */
+  private turnSeq = 0;
+  /** One open probe-and-attach or one restart per container at a time, so a restart never lands
+   *  between an open's probe and its attach, and two restarts never undo each other's mark. */
+  private readonly containerTurns = new Map<string, Promise<void>>();
   /** Per-(user,task,provider) in-flight ensureShellContainer call. Two
    *  near-simultaneous opens (React StrictMode double-mount, or two browser
    *  tabs racing) would otherwise both call createContainer and one would
@@ -168,6 +182,45 @@ export class TerminalSessionManager {
         await session.ptyHandle
           .resize({ h: frame.rows, w: frame.cols })
           .catch((err) => log.warn({ err, sid }, 'pty resize failed'));
+      } else if (frame.type === 'probe_workdir') {
+        if (session.scope !== 'task') return;
+        const expected = await resolveTaskSandboxWorkdir(this.db, session.scopeId);
+        const mismatch = await this.probeWorkdirMismatch(session.containerName, expected);
+        await this.redis
+          .publish(
+            `${TERMINAL_WORKDIR_CHANNEL_PREFIX}${sid}`,
+            JSON.stringify({ workdirMismatch: mismatch ?? null }),
+          )
+          .catch((err) => log.warn({ err, sid }, 'workdir probe reply failed'));
+      } else if (frame.type === 'restart_shell') {
+        if (session.scope !== 'task' || session.userId !== frame.userId) {
+          log.warn({ sid, scope: session.scope }, 'restart_shell refused');
+          return;
+        }
+        const container = session.containerName;
+        const endTurn = await this.containerTurn(container);
+        const before = this.restartedAt.get(container);
+        this.restartedAt.set(container, ++this.turnSeq);
+        const killed = await this.runInContainer(container, [
+          'tmux',
+          'kill-session',
+          '-t',
+          TMUX_SESSION,
+        ])
+          .then((r) => {
+            if (r.exitCode !== 0)
+              log.warn({ sid, exitCode: r.exitCode }, 'tmux kill-session failed');
+            return r.exitCode === 0;
+          })
+          .catch((err) => {
+            log.warn({ err, sid }, 'tmux kill-session failed');
+            return false;
+          });
+        if (!killed) {
+          if (before === undefined) this.restartedAt.delete(container);
+          else this.restartedAt.set(container, before);
+        }
+        endTurn();
       }
     }
   }
@@ -349,7 +402,7 @@ export class TerminalSessionManager {
     // `ptyHandle.resize`; tmux picks up the new size through SIGWINCH.
     // Hard-coding -x/-y instead leaves the pane stuck at that size and the
     // rest of the xterm renders the empty background pattern.
-    const tmuxCommand = ['tmux', 'new-session', '-A', '-s', 'haive-task', ensured.shell, '-l'];
+    const tmuxCommand = ['tmux', 'new-session', '-A', '-s', TMUX_SESSION, ensured.shell, '-l'];
     // tmux server inherits env from the docker-exec that starts it. On
     // first attach this list seeds the server; later reconnects attach to
     // the existing server and inherit its original env (so provider env
@@ -368,20 +421,44 @@ export class TerminalSessionManager {
     // absolute host path under the repos volume that exists in no container, so git there fails
     // whatever is mounted. Falls back to the repo root when there's no worktree (skipped
     // 01-worktree-setup). Repo-scope shells stay at the repo root.
-    const ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
-      Cmd: tmuxCommand,
-      AttachStdin: true,
-      AttachStdout: true,
-      AttachStderr: true,
-      Tty: true,
-      WorkingDir: ptyWorkingDir,
-      Env: execEnv,
-    });
-    const ptyStream = (await ptyHandle.start({
-      hijack: true,
-      stdin: true,
-      Tty: true,
-    })) as Duplex;
+    const endTurn = await this.containerTurn(ensured.containerName);
+    let workdirMismatch: TerminalWorkdirMismatch | undefined;
+    let attachedAt: number;
+    let ptyHandle: Docker.Exec;
+    let ptyStream: Duplex;
+    try {
+      // Read again inside the turn: the container ensure above can take minutes, and a Retry may
+      // move the task's workspace meanwhile.
+      const workdir =
+        scope === 'task' ? await resolveTaskSandboxWorkdir(this.db, scopeId) : ptyWorkingDir;
+      // A reused container, or one seeded for another dir, has never trusted this one.
+      if (ensured.cliName && (!ensured.created || workdir !== ptyWorkingDir)) {
+        await seedShellTrust(this.docker, ensured.containerName, ensured.cliName, [workdir]).catch(
+          (err) => log.warn({ err, workdir }, 'shell trust seed failed'),
+        );
+      }
+      workdirMismatch =
+        scope === 'task'
+          ? await this.probeWorkdirMismatch(ensured.containerName, workdir)
+          : undefined;
+      attachedAt = ++this.turnSeq;
+      ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
+        Cmd: tmuxCommand,
+        AttachStdin: true,
+        AttachStdout: true,
+        AttachStderr: true,
+        Tty: true,
+        WorkingDir: workdir,
+        Env: execEnv,
+      });
+      ptyStream = (await ptyHandle.start({
+        hijack: true,
+        stdin: true,
+        Tty: true,
+      })) as Duplex;
+    } finally {
+      endTurn();
+    }
 
     const inChannel = `${TERMINAL_IN_CHANNEL_PREFIX}${sessionId}`;
     const ctlChannel = `${TERMINAL_CTL_CHANNEL_PREFIX}${sessionId}`;
@@ -395,6 +472,7 @@ export class TerminalSessionManager {
       providerId,
       containerName: ensured.containerName,
       shell: ensured.shell,
+      attachedAt,
       ptyHandle,
       ptyStream,
       inChannel,
@@ -409,7 +487,9 @@ export class TerminalSessionManager {
       void this.redis.publish(outChannel, chunk.toString('utf8'));
     });
     ptyStream.on('end', () => {
-      void this.redis.publish(outChannel, JSON.stringify({ type: 'exit' })).catch(() => undefined);
+      const restarted = (this.restartedAt.get(session.containerName) ?? -1) > session.attachedAt;
+      const exit = restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' };
+      void this.redis.publish(outChannel, JSON.stringify(exit)).catch(() => undefined);
       void this.teardownSession(session, 'pty-end').catch(() => undefined);
     });
     ptyStream.on('error', (err) => {
@@ -439,7 +519,67 @@ export class TerminalSessionManager {
       sessionId,
       containerName: ensured.containerName,
       shell: ensured.shell,
+      ...(workdirMismatch ? { workdirMismatch } : {}),
     };
+  }
+
+  /** Waits for this container's turn and returns the call that ends it. */
+  private async containerTurn(container: string): Promise<() => void> {
+    const previous = this.containerTurns.get(container) ?? Promise.resolve();
+    let end!: () => void;
+    const turn = previous.then(() => new Promise<void>((resolve) => (end = resolve)));
+    this.containerTurns.set(container, turn);
+    await previous;
+    await Promise.resolve();
+    return () => {
+      end();
+      if (this.containerTurns.get(container) === turn) this.containerTurns.delete(container);
+    };
+  }
+
+  /** The tmux session outlives a reconnect, so it keeps the directory it started in. A missing
+   *  session or a failed probe is no mismatch: there is nothing live to be stale. */
+  private async probeWorkdirMismatch(
+    containerName: string,
+    expected: string,
+  ): Promise<TerminalWorkdirMismatch | undefined> {
+    const probe = await this.runInContainer(containerName, [
+      'tmux',
+      'display-message',
+      '-p',
+      '-t',
+      TMUX_SESSION,
+      '#{session_path}',
+    ]).catch((err) => {
+      log.warn({ err, containerName }, 'session path probe failed');
+      return null;
+    });
+    if (!probe || probe.exitCode !== 0) return undefined;
+    const sessionPath = probe.output.trim();
+    return sessionPath !== '' && sessionPath !== expected ? { sessionPath, expected } : undefined;
+  }
+
+  private async runInContainer(
+    containerName: string,
+    cmd: string[],
+  ): Promise<{ exitCode: number; output: string }> {
+    const exec = await this.docker.getContainer(containerName).exec({
+      Cmd: cmd,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: true,
+    });
+    const stream = (await exec.start({ hijack: true, stdin: false, Tty: true })) as Duplex;
+    let output = '';
+    stream.on('data', (chunk: Buffer) => {
+      output += chunk.toString('utf8');
+    });
+    await new Promise<void>((resolve, reject) => {
+      stream.on('end', () => resolve());
+      stream.on('error', (err) => reject(err));
+    });
+    const info = await exec.inspect();
+    return { exitCode: info.ExitCode ?? -1, output };
   }
 
   private async teardownSession(session: SessionState, reason: string): Promise<void> {
@@ -483,6 +623,10 @@ function parseRequest(raw: string): TerminalRequest | null {
 function parseControlFrame(raw: string): TerminalControlFrame | null {
   try {
     const obj = JSON.parse(raw) as Partial<TerminalControlFrame>;
+    if (obj.type === 'probe_workdir') return { type: 'probe_workdir' };
+    if (obj.type === 'restart_shell' && typeof (obj as { userId?: unknown }).userId === 'string') {
+      return obj as TerminalControlFrame;
+    }
     if (
       obj.type === 'resize' &&
       typeof (obj as { cols?: unknown }).cols === 'number' &&

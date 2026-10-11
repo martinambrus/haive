@@ -15,6 +15,14 @@ export const pingFrameSchema = z.object({
   type: z.literal('ping'),
 });
 
+export const restartShellFrameSchema = z.object({
+  type: z.literal('restart_shell'),
+});
+
+export const probeWorkdirFrameSchema = z.object({
+  type: z.literal('probe_workdir'),
+});
+
 export const setControlPassthroughFrameSchema = z.object({
   type: z.literal('set_control_passthrough'),
   allow: z.boolean(),
@@ -24,6 +32,8 @@ export const terminalClientFrameSchema = z.discriminatedUnion('type', [
   inputFrameSchema,
   resizeFrameSchema,
   pingFrameSchema,
+  restartShellFrameSchema,
+  probeWorkdirFrameSchema,
   setControlPassthroughFrameSchema,
 ]);
 

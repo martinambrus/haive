@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
@@ -295,16 +296,27 @@ export async function runScopedShellSession(
     return;
   }
 
-  await subscriber.subscribe(outChannel);
+  const workdirChannel = `${TERMINAL_WORKDIR_CHANNEL_PREFIX}${sessionId}`;
+  await subscriber.subscribe(outChannel, workdirChannel);
   if (cleanupRan) return;
 
   subscriber.on('message', (channel, raw) => {
-    if (channel !== outChannel) return;
     if (ws.readyState !== WebSocket.OPEN) return;
+    if (channel === workdirChannel) {
+      try {
+        const { workdirMismatch } = JSON.parse(raw) as { workdirMismatch?: unknown };
+        sendJson(ws, { type: 'workdir', workdirMismatch: workdirMismatch ?? null });
+      } catch {
+        // a malformed probe reply changes nothing on the page
+      }
+      return;
+    }
+    if (channel !== outChannel) return;
     // Worker publishes raw PTY bytes (utf8 string). One special JSON message:
     // {"type":"exit"} signals the PTY ended (process exit / container gone).
     if (raw.startsWith('{"type":"exit"')) {
-      sendJson(ws, { type: 'exit' });
+      const restarted = raw === JSON.stringify({ type: 'exit', reason: 'restart' });
+      sendJson(ws, restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' });
       try {
         ws.close(1000, 'pty_ended');
       } catch {
@@ -315,7 +327,13 @@ export async function runScopedShellSession(
     sendJson(ws, { type: 'output', data: raw });
   });
 
-  sendJson(ws, { type: 'connected', sessionId, containerName, shell });
+  sendJson(ws, {
+    type: 'connected',
+    sessionId,
+    containerName,
+    shell,
+    ...(reply.workdirMismatch ? { workdirMismatch: reply.workdirMismatch } : {}),
+  });
 
   keepalive = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -352,6 +370,23 @@ export async function runScopedShellSession(
         .publish(ctlChannel, JSON.stringify({ type: 'resize', cols: frame.cols, rows: frame.rows }))
         .catch((err) => {
           log.warn({ err, sessionId }, 'publish resize failed');
+        });
+    } else if (frame.type === 'restart_shell') {
+      if (scope !== 'task') {
+        sendJson(ws, { type: 'error', message: 'restart is only available for a task shell' });
+        return;
+      }
+      await publisher
+        .publish(ctlChannel, JSON.stringify({ type: 'restart_shell', userId }))
+        .catch((err) => {
+          log.warn({ err, sessionId }, 'publish restart failed');
+        });
+    } else if (frame.type === 'probe_workdir') {
+      if (scope !== 'task') return;
+      await publisher
+        .publish(ctlChannel, JSON.stringify({ type: 'probe_workdir' }))
+        .catch((err) => {
+          log.warn({ err, sessionId }, 'publish workdir probe failed');
         });
     } else if (frame.type === 'ping') {
       sendJson(ws, { type: 'pong' });

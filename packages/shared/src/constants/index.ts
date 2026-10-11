@@ -578,6 +578,8 @@ export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
 export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';
 export const TERMINAL_OUT_CHANNEL_PREFIX = 'terminal:out:';
 export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
+/** The worker's answers to a task shell's workdir probe, apart from the raw PTY bytes. */
+export const TERMINAL_WORKDIR_CHANNEL_PREFIX = 'terminal:workdir:';
 /** Pub/sub channel the api publishes a user's mid-run steering message to, keyed
  *  by cli invocation id. The worker's cli-exec forwarder subscribes for the life
  *  of a steerable invocation and writes each message to the running CLI's stdin
@@ -908,6 +910,13 @@ export interface TerminalOpenReply {
   sessionId: string;
   containerName: string;
   shell: 'bash' | 'sh';
+  /** Task scope only: the live tmux session started in `sessionPath`, not in `expected`. */
+  workdirMismatch?: TerminalWorkdirMismatch;
+}
+
+export interface TerminalWorkdirMismatch {
+  sessionPath: string;
+  expected: string;
 }
 
 export interface TerminalOpenError {
@@ -927,7 +936,19 @@ export interface TerminalResizeFrame {
   rows: number;
 }
 
-export type TerminalControlFrame = TerminalResizeFrame;
+/** Kills the task shell's tmux session so the next attach starts at the current workdir. */
+export interface TerminalRestartShellFrame {
+  type: 'restart_shell';
+  userId: string;
+}
+
+/** Asks the worker whether the task shell's session still starts in the task's current workdir. */
+export interface TerminalProbeWorkdirFrame {
+  type: 'probe_workdir';
+}
+
+export type TerminalControlFrame =
+  TerminalResizeFrame | TerminalRestartShellFrame | TerminalProbeWorkdirFrame;
 
 export const FRAMEWORK_PATTERNS = {
   wordpress: {

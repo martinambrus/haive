@@ -150,6 +150,7 @@ export interface EnsureShellContainerResult {
   created: boolean;
   shell: 'bash' | 'sh';
   imageTag: string;
+  cliName: CliProviderRecord['name'];
 }
 
 /** Ensure the per-(user, task, provider) shell container exists and is
@@ -207,7 +208,7 @@ export async function ensureShellContainer(
         log.warn({ err, containerName }, 'tmux settings not applied to reused container');
       });
       log.info({ containerName, scope, scopeId, providerId }, 'reusing existing shell container');
-      return { containerName, created: false, shell, imageTag };
+      return { containerName, created: false, shell, imageTag, cliName: provider.name };
     }
     // Container exists but isn't running (likely killed by reaper between
     // inspect and now, or a crash). Remove it and recreate cleanly.
@@ -349,7 +350,7 @@ export async function ensureShellContainer(
           { containerName, scope, scopeId, providerId },
           'reusing concurrently-created shell container',
         );
-        return { containerName, created: false, shell, imageTag };
+        return { containerName, created: false, shell, imageTag, cliName: provider.name };
       }
     }
     throw err;
@@ -426,7 +427,7 @@ export async function ensureShellContainer(
     { containerName, scope, scopeId, providerId, imageTag, shell },
     'spawned shell container',
   );
-  return { containerName, created: true, shell, imageTag };
+  return { containerName, created: true, shell, imageTag, cliName: provider.name };
 }
 
 /** Force-remove the container if it exists. Safe to call concurrently with
@@ -549,6 +550,15 @@ async function chownWorkdir(
  * A MERGE, never a write: the stock base ships the file and the CLI keeps real
  * state in it. Only ever fills in what is missing.
  */
+/** Marks `dirs` trusted for claude in a running shell container, which skips its folder-trust
+ *  prompt there; a no-op for any other CLI. */
+export const seedShellTrust = (
+  docker: Docker,
+  containerName: string,
+  cliName: CliProviderRecord['name'],
+  dirs: string[],
+): Promise<void> => seedClaudeInteractiveState(docker, containerName, cliName, dirs);
+
 async function seedClaudeInteractiveState(
   docker: Docker,
   containerName: string,

@@ -13,6 +13,8 @@ import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { useTerminalCopy } from '@/lib/use-terminal-copy';
 import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
+import { Button } from '@/components/ui';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 
@@ -29,6 +31,20 @@ interface InteractiveShellProps {
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
+const WORKDIR_PROBE_INTERVAL_MS = 15_000;
+
+interface WorkdirMismatch {
+  sessionPath: string;
+  expected: string;
+}
+
+function parseWorkdirMismatch(value: unknown): WorkdirMismatch | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { sessionPath, expected } = value as Record<string, unknown>;
+  return typeof sessionPath === 'string' && typeof expected === 'string'
+    ? { sessionPath, expected }
+    : null;
+}
 
 export function InteractiveShell(props: InteractiveShellProps) {
   const { cliProviderId, fill = false } = props;
@@ -38,6 +54,11 @@ export function InteractiveShell(props: InteractiveShellProps) {
   const [state, setState] = useState<ConnectionState>('connecting');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [containerLabel, setContainerLabel] = useState<string | null>(null);
+  const [workdirMismatch, setWorkdirMismatch] = useState<WorkdirMismatch | null>(null);
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  const [connectNonce, setConnectNonce] = useState(0);
+  const sendFrameRef = useRef<((frame: unknown) => void) | null>(null);
+  const restartingRef = useRef(false);
   const { attach: attachCopy, copy, hasSelection, copied } = useTerminalCopy();
   const {
     provider: cliClipboard,
@@ -119,11 +140,27 @@ export function InteractiveShell(props: InteractiveShellProps) {
     const wsUrl = apiWebSocketUrl(wsPath);
     const ws = new WebSocket(wsUrl);
     setState('connecting');
+    setWorkdirMismatch(null);
+    setConfirmRestart(false);
+
+    // A restart offered for a mismatch that is gone would restart a shell already in place.
+    const applyWorkdirMismatch = (value: unknown) => {
+      const mismatch = parseWorkdirMismatch(value);
+      setWorkdirMismatch(mismatch);
+      if (!mismatch) setConfirmRestart(false);
+    };
 
     const sendFrame = (frame: unknown) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(frame));
       }
+    };
+    sendFrameRef.current = sendFrame;
+
+    const reconnectIfRestarting = () => {
+      if (!restartingRef.current) return;
+      restartingRef.current = false;
+      setConnectNonce((n) => n + 1);
     };
 
     const sendResize = () => {
@@ -171,6 +208,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
           setState('connected');
           setErrorMsg(null);
           if (typeof parsed.containerName === 'string') setContainerLabel(parsed.containerName);
+          applyWorkdirMismatch(parsed.workdirMismatch);
           handleResize();
           term.focus();
           setTimeout(() => handleResize(), 250);
@@ -182,6 +220,8 @@ export function InteractiveShell(props: InteractiveShellProps) {
         case 'exit':
           setState('closed');
           term.writeln('\r\n\x1b[36m[shell exited]\x1b[0m');
+          if (parsed.reason === 'restart') restartingRef.current = true;
+          reconnectIfRestarting();
           break;
         case 'error':
           setState('error');
@@ -189,6 +229,9 @@ export function InteractiveShell(props: InteractiveShellProps) {
           term.writeln(
             `\r\n\x1b[31m[error: ${typeof parsed.message === 'string' ? parsed.message : 'unknown'}]\x1b[0m`,
           );
+          break;
+        case 'workdir':
+          applyWorkdirMismatch(parsed.workdirMismatch);
           break;
         case 'pong':
           break;
@@ -204,6 +247,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
     ws.onclose = (ev) => {
       if (disposed) return;
       setState((prev) => (prev === 'error' ? prev : 'closed'));
+      reconnectIfRestarting();
       if (ev.code !== 1000) {
         term.writeln(
           `\r\n\x1b[31m[socket closed: ${ev.code}${ev.reason ? ` ${ev.reason}` : ''}]\x1b[0m`,
@@ -214,12 +258,21 @@ export function InteractiveShell(props: InteractiveShellProps) {
     const keepalive = setInterval(() => {
       sendFrame({ type: 'ping' });
     }, KEEPALIVE_INTERVAL_MS);
+    // A Retry elsewhere can move the task's workspace while this shell stays open.
+    const workdirProbe =
+      scope === 'task'
+        ? setInterval(() => {
+            if (document.visibilityState === 'visible') sendFrame({ type: 'probe_workdir' });
+          }, WORKDIR_PROBE_INTERVAL_MS)
+        : null;
 
     return () => {
       disposed = true;
+      sendFrameRef.current = null;
       cancelAnimationFrame(fitRaf1);
       cancelAnimationFrame(fitRaf2);
       clearInterval(keepalive);
+      if (workdirProbe) clearInterval(workdirProbe);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       inputDisposable.dispose();
@@ -232,7 +285,12 @@ export function InteractiveShell(props: InteractiveShellProps) {
       }
       term.dispose();
     };
-  }, [scope, scopeId, cliProviderId, attachCopy, cliClipboard]);
+  }, [scope, scopeId, cliProviderId, attachCopy, cliClipboard, connectNonce]);
+
+  function restartShell() {
+    setConfirmRestart(false);
+    sendFrameRef.current?.({ type: 'restart_shell' });
+  }
 
   return (
     <div className={`flex flex-col gap-2 ${fill ? 'h-full min-h-0' : ''}`}>
@@ -273,6 +331,45 @@ export function InteractiveShell(props: InteractiveShellProps) {
           </span>
         </div>
       </div>
+      {workdirMismatch && (
+        <div
+          role="status"
+          className="flex flex-col gap-2 rounded border border-amber-600/50 bg-amber-950/30 p-3 text-xs text-amber-100 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <p className="min-w-0 [overflow-wrap:anywhere]">
+            This shell started in{' '}
+            <code className="text-amber-200">{workdirMismatch.sessionPath}</code>; the task&apos;s
+            workspace is now <code className="text-amber-200">{workdirMismatch.expected}</code>.
+          </p>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="shrink-0 self-start sm:self-auto"
+            onClick={() => setConfirmRestart(true)}
+          >
+            Restart shell here
+          </Button>
+        </div>
+      )}
+      <Dialog open={confirmRestart} onOpenChange={setConfirmRestart}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Restart this shell?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-neutral-300">
+            The running shell will be closed, along with anything running in it. A new shell then
+            opens in the task&apos;s current workspace.
+          </p>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setConfirmRestart(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" variant="destructive" onClick={restartShell}>
+              Restart shell
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
       <div
         ref={mountRef}
         className={`w-full rounded border border-neutral-800 bg-[#0a0a0a] p-2 ${fill ? 'min-h-0 flex-1' : 'h-[600px]'}`}
