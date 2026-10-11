@@ -368,36 +368,47 @@ globalKbRoutes.put('/config', async (c) => {
       );
     }
   }
+  // Each write remembers what it replaced, so a late width conflict can undo the whole save.
+  const written: Array<[string, string]> = [];
+  const write = async (key: string, value: string, previous: unknown) => {
+    await configService.set(key, value);
+    written.push([key, String(previous)]);
+  };
   if (isAdmin && d.enabled !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
+    await write(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled), saved.enabled);
   if (d.digestEnabled !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
-  if (isAdmin && d.mode !== undefined) await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
+    await write(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled), saved.digestEnabled);
+  if (isAdmin && d.mode !== undefined) await write(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode, saved.mode);
   if (isAdmin && d.namespace !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);
+    await write(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace, saved.namespace);
   if (d.ollamaUrl !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl);
+    await write(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl, saved.ollamaUrl);
   if (d.embedModel !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
+    await write(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel, saved.embedModel);
   if (d.embedDimensions !== undefined)
-    await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
+    await write(
+      CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS,
+      String(d.embedDimensions),
+      saved.embeddingDimensions,
+    );
+  if (d.archiveRetentionDays !== undefined)
+    await write(
+      CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+      String(d.archiveRetentionDays),
+      saved.archiveRetentionDays,
+    );
   // A first use racing this save can create the column at the old width; read it again and undo.
   if (dimsChange) {
     const width = await storeVectorWidth(saved).catch(() => null);
     if (width !== null && width !== d.embedDimensions) {
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(saved.embeddingDimensions));
+      for (const [key, previous] of written.reverse()) await configService.set(key, previous);
       throw new HttpError(
         409,
-        "the store's vector column was created at another width while saving; the embedding dimensions must match it",
+        "the store's vector column was created at another width while saving; nothing was saved, and the embedding dimensions must match it",
         'embed_dimensions_locked',
       );
     }
   }
-  if (d.archiveRetentionDays !== undefined)
-    await configService.set(
-      CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
-      String(d.archiveRetentionDays),
-    );
   if (isAdmin && d.connectionString !== undefined && d.connectionString.trim().length > 0) {
     await secretsService.set(
       SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,

@@ -372,9 +372,23 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     expect(h.set).not.toHaveBeenCalled();
   });
 
-  it('is undone with 409 when a first use created the column at the old width meanwhile', async () => {
+  it('undoes the whole save with 409 when a first use created the column at the old width meanwhile', async () => {
     h.vectorTypes = [null, 'vector(2560)'];
-    const res = await put(widen);
+    const res = await put({ ...widen, namespace: 'other', embedModel: 'model-z' });
+    const last = (key: string) =>
+      written()
+        .filter(([k]) => k === key)
+        .at(-1);
+
+    expect(res.status).toBe(409);
+    expect(last(CONFIG_KEYS.GLOBAL_KB_NAMESPACE)).toEqual([
+      CONFIG_KEYS.GLOBAL_KB_NAMESPACE,
+      'default',
+    ]);
+    expect(last(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL)).toEqual([
+      CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL,
+      'qwen3-embedding:4b',
+    ]);
 
     expect(res.status).toBe(409);
     expect(written()).toEqual(
