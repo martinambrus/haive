@@ -308,7 +308,8 @@ function movesOnlyCreated(set: ts.CallExpression): boolean {
   const where = access.parent;
   if (!ts.isCallExpression(where)) return false;
   const pred = where.arguments[0];
-  if (!pred) return false;
+  const sf = set.getSourceFile();
+  if (!pred || shadowsName(sf, 'eq') || shadowsName(sf, 'and')) return false;
   if (pred.getText() === ONLY_CREATED) return true;
   return (
     ts.isCallExpression(pred) &&
@@ -340,23 +341,26 @@ function nameOf(fn: ts.FunctionLikeDeclaration): string | null {
 
 /** A guard statement taking the lock in transaction `tx`: the lock must be held by the very
  *  transaction that writes, or the write runs outside it. */
-function isGuardStatement(st: ts.Statement, tx: string): boolean {
+function isGuardStatement(st: ts.Statement, tx: string, task: string): boolean {
   if (!ts.isExpressionStatement(st) || !ts.isAwaitExpression(st.expression)) return false;
   const call = st.expression.expression;
   return (
     ts.isCallExpression(call) &&
     call.expression.getText() === GUARD &&
-    call.arguments[0]?.getText() === tx
+    call.arguments[0]?.getText() === tx &&
+    call.arguments[1]?.getText() === task
   );
 }
 
 /** Whether a guard call in `tx` runs on every path to the node: it is a statement earlier in one
  *  of the blocks that hold the node, within the node's scope. */
-function dominated(node: ts.Node, scope: ts.Node, tx: string): boolean {
+function dominated(node: ts.Node, scope: ts.Node, tx: string, task: string): boolean {
   for (let child: ts.Node = node, n = node.parent; n && child !== scope; child = n, n = n.parent) {
     if (ts.isBlock(n) || ts.isSourceFile(n)) {
       const i = n.statements.indexOf(child as ts.Statement);
-      if (i > 0 && n.statements.slice(0, i).some((st) => isGuardStatement(st, tx))) return true;
+      if (i > 0 && n.statements.slice(0, i).some((st) => isGuardStatement(st, tx, task))) {
+        return true;
+      }
     }
   }
   return false;
@@ -365,14 +369,28 @@ function dominated(node: ts.Node, scope: ts.Node, tx: string): boolean {
 /** Guarded on its own path, in the write's own transaction `tx`: the guard dominates it within its
  *  scope, or its scope is a named function every call of which is guarded in turn, with `tx`
  *  followed to the argument a call passes for it when it is a parameter. */
-function guarded(sf: ts.SourceFile, node: ts.Node, tx: string | null, depth = 0): boolean {
-  if (tx === null) return false;
+function guarded(
+  sf: ts.SourceFile,
+  node: ts.Node,
+  tx: string | null,
+  task: string | null,
+  depth = 0,
+): boolean {
+  if (tx === null || task === null) return false;
   const scope = scopeOf(node);
   if (!scope || reassigns(scope, tx) || redeclares(scope, tx)) return false;
-  if (dominated(node, scope, tx)) return true;
+  if (reassigns(scope, task) || redeclares(scope, task)) return false;
+  if (dominated(node, scope, tx, task)) return true;
   const name = nameOf(scope);
   if (!name || depth > 3) return false;
-  const param = scope.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === tx);
+  const indexOf = (n: string) =>
+    scope.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === n);
+  const follow = (n: string, c: ts.CallExpression): string | null => {
+    const at = indexOf(n);
+    if (at < 0) return n;
+    const passed = c.arguments[at];
+    return passed && ts.isIdentifier(passed) ? passed.text : null;
+  };
   const calls: ts.CallExpression[] = [];
   const visit = (n: ts.Node): void => {
     if (ts.isCallExpression(n) && n.expression.getText() === name) calls.push(n);
@@ -381,16 +399,7 @@ function guarded(sf: ts.SourceFile, node: ts.Node, tx: string | null, depth = 0)
   visit(sf);
   return (
     calls.length > 0 &&
-    calls.every((c) => {
-      const passed = param < 0 ? tx : c.arguments[param];
-      const next =
-        typeof passed === 'string'
-          ? passed
-          : passed && ts.isIdentifier(passed)
-            ? passed.text
-            : null;
-      return guarded(sf, c, next, depth + 1);
-    })
+    calls.every((c) => guarded(sf, c, follow(tx, c), follow(task, c), depth + 1))
   );
 }
 
@@ -427,16 +436,17 @@ function redeclares(scope: ts.FunctionLikeDeclaration, name: string): boolean {
   return found;
 }
 
-/** Whether the guard's name is bound in this file by anything but its import or its own exported
- *  definition, which would let an unrelated function pass for it. */
-function shadowsGuard(sf: ts.SourceFile): boolean {
+/** Whether `name` (the guard, or a Drizzle helper the scan reads by name) is bound in this file by
+ *  anything but its import or its own exported definition, which would let another function pass for
+ *  it. */
+function shadowsName(sf: ts.SourceFile, name: string): boolean {
   let found = false;
   const visit = (n: ts.Node): void => {
     const named = (n as { name?: ts.Node }).name;
     if (
       named &&
       ts.isIdentifier(named) &&
-      named.text === GUARD &&
+      named.text === name &&
       (ts.isVariableDeclaration(n) ||
         ts.isFunctionDeclaration(n) ||
         ts.isParameter(n) ||
@@ -454,6 +464,61 @@ function shadowsGuard(sf: ts.SourceFile): boolean {
   };
   visit(sf);
   return found;
+}
+
+/** The task a write revives: the identifier `X` of `eq(schema.tasks.id, X)` in the `.where(...)`
+ *  after its `.set(...)`. Read through `and(...)`, a conditional whose branches agree, and a helper
+ *  in the same file that returns such a predicate for one of its parameters. */
+function writeTask(set: ts.CallExpression): string | null {
+  const access = set.parent;
+  if (!ts.isPropertyAccessExpression(access) || access.name.text !== 'where') return null;
+  const where = access.parent;
+  if (!ts.isCallExpression(where)) return null;
+  const sf = set.getSourceFile();
+  if (!where.arguments[0] || shadowsName(sf, 'eq') || shadowsName(sf, 'and')) return null;
+  return taskOfPredicate(sf, where.arguments[0], 0);
+}
+
+function taskOfPredicate(sf: ts.SourceFile, e: ts.Expression, depth: number): string | null {
+  if (ts.isParenthesizedExpression(e)) return taskOfPredicate(sf, e.expression, depth);
+  if (ts.isConditionalExpression(e)) {
+    const a = taskOfPredicate(sf, e.whenTrue, depth);
+    return a !== null && a === taskOfPredicate(sf, e.whenFalse, depth) ? a : null;
+  }
+  if (!ts.isCallExpression(e) || !ts.isIdentifier(e.expression)) return null;
+  const callee = e.expression.text;
+  if (callee === 'eq') {
+    const id = e.arguments[1];
+    return isTasksIdColumn(e.arguments[0]) && id && ts.isIdentifier(id) ? id.text : null;
+  }
+  if (callee === 'and') {
+    for (const a of e.arguments) {
+      const hit = taskOfPredicate(sf, a, depth);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (depth > 2) return null;
+  const helper = sf.statements.find(
+    (st): st is ts.FunctionDeclaration => ts.isFunctionDeclaration(st) && st.name?.text === callee,
+  );
+  const body = helper?.body?.statements;
+  if (!helper || body?.length !== 1 || !ts.isReturnStatement(body[0]!) || !body[0].expression) {
+    return null;
+  }
+  const inner = taskOfPredicate(sf, body[0].expression, depth + 1);
+  const at = helper.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === inner);
+  const passed = at < 0 ? undefined : e.arguments[at];
+  return passed && ts.isIdentifier(passed) ? passed.text : null;
+}
+
+function isTasksIdColumn(n: ts.Node | undefined): boolean {
+  return (
+    n !== undefined &&
+    ts.isPropertyAccessExpression(n) &&
+    isTasksTable(n.expression) &&
+    n.name.text === 'id'
+  );
 }
 
 /** The transaction a write runs in: the identifier its builder chain starts at, if it is one. */
@@ -499,7 +564,8 @@ function liveWrites(
           site: `${file}:${line}`,
           status,
           covered:
-            movesOnlyCreated(node) || (!shadowsGuard(sf) && guarded(sf, node, writeTx(node))),
+            movesOnlyCreated(node) ||
+            (!shadowsName(sf, GUARD) && guarded(sf, node, writeTx(node), writeTask(node))),
         });
       }
     }
@@ -638,7 +704,7 @@ describe('a live-status write on a task row', () => {
     ).toEqual([false]);
     expect(
       covered(
-        `queueMicrotask(async () => { await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }); });`,
+        `queueMicrotask(async () => { await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id)); });`,
       ),
     ).toEqual([true]);
   });
@@ -647,7 +713,7 @@ describe('a live-status write on a task row', () => {
     const covered = (body: string) =>
       liveWrites(
         'x.ts',
-        `async function route() { await db.transaction(async (tx) => { ${body} function run() { return tx.update(schema.tasks).set({ status: 'running' }); } }); }`,
+        `async function route() { await db.transaction(async (tx) => { ${body} function run() { return tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id)); } }); }`,
       ).map((w) => w.covered);
     expect(covered(`await run(); await ${GUARD}(tx, id);`)).toEqual([false]);
     expect(covered(`await ${GUARD}(tx, id); await run();`)).toEqual([true]);
@@ -666,7 +732,11 @@ describe('a live-status write on a task row', () => {
     expect(found(`const t = schema.tasks;`)).toBe(1);
     expect(found(`let t; t = schema.tasks;`)).toBe(1);
     expect(found(`const { tasks } = schema;`)).toBe(1);
-    expect(found(`db.update(schema['tasks']).set({ status: 'running' });`)).toBe(1);
+    expect(
+      found(
+        `db.update(schema['tasks']).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
+      ),
+    ).toBe(1);
     expect(found(`const tables = schema; db.update(tables.tasks).set({ status: 'x' });`)).toBe(1);
     expect(found(`let tables; tables = schema;`)).toBe(1);
     expect(found(`write({ schema });`)).toBe(1);
@@ -676,14 +746,22 @@ describe('a live-status write on a task row', () => {
       1,
     );
     expect(found(`await getDb().select().from(schema.tasks).innerJoin(schema.tasks, x);`)).toBe(0);
-    expect(found(`db.update(schema?.tasks).set({ status: 'running' });`)).toBe(1);
-    expect(found(`db.update(schema!.tasks).set({ status: 'running' });`)).toBe(1);
-    expect(found(`db.update((schema).tasks).set({ status: 'running' });`)).toBe(1);
+    expect(
+      found(`db.update(schema?.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`),
+    ).toBe(1);
+    expect(
+      found(`db.update(schema!.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`),
+    ).toBe(1);
+    expect(
+      found(`db.update((schema).tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`),
+    ).toBe(1);
     expect(found('db.execute(sql`update ${schema.tasks} set status = 1`);')).toBe(1);
     expect(found('const from = sql`from ${schema.tasks} t`;')).toBe(0);
     expect(found(`db.select().from(schema.tasks).where(eq(schema.tasks.id, id));`)).toBe(0);
     expect(found(`type T = typeof schema; const x = { schema: 1 };`)).toBe(0);
-    expect(found(`db.update(schema.tasks).set({ status: 'running' });`)).toBe(0);
+    expect(
+      found(`db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`),
+    ).toBe(0);
   });
 
   it('reads an import that renames the tasks table as an alias', () => {
@@ -715,7 +793,7 @@ describe('a live-status write on a task row', () => {
     for (const table of ['schema /* row */.tasks', 'schema\n  .tasks']) {
       const src = `async function route() {
         await db.transaction(async (tx) => {
-          await tx.update(${table}).set({ status: 'running' });
+          await tx.update(${table}).set({ status: 'running' }).where(eq(schema.tasks.id, id));
         });
       }`;
       expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
@@ -728,37 +806,64 @@ describe('a live-status write on a task row', () => {
       liveWrites('x.ts', `async function f(tx, lockTx, id) { ${body} }`).map((w) => w.covered);
     expect(
       covered(
-        `await ${GUARD}(lockTx, id); await tx.update(schema.tasks).set({ status: 'running' });`,
+        `await ${GUARD}(lockTx, id); await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
       ),
     ).toEqual([false]);
     expect(
-      covered(`await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' });`),
+      covered(
+        `await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
+      ),
     ).toEqual([true]);
     expect(
       covered(
-        `let h = lockTx; await ${GUARD}(h, id); h = tx; await h.update(schema.tasks).set({ status: 'running' });`,
+        `let h = lockTx; await ${GUARD}(h, id); h = tx; await h.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
       ),
     ).toEqual([false]);
     expect(
       covered(
-        `await ${GUARD}(tx, id); { const tx = lockTx; await tx.update(schema.tasks).set({ status: 'running' }); }`,
+        `await ${GUARD}(tx, id); { const tx = lockTx; await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id)); }`,
       ),
     ).toEqual([false]);
     expect(
       covered(
-        `await ${GUARD}(tx, id); [tx] = [lockTx]; await tx.update(schema.tasks).set({ status: 'running' });`,
+        `await ${GUARD}(tx, id); [tx] = [lockTx]; await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
       ),
     ).toEqual([false]);
     expect(
       covered(
-        `await ${GUARD}(tx, id); for (tx of [lockTx]) await tx.update(schema.tasks).set({ status: 'running' });`,
+        `await ${GUARD}(tx, id); for (tx of [lockTx]) await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
       ),
     ).toEqual([false]);
     expect(
       liveWrites(
         'x.ts',
-        `async function f(tx, id) { const ${GUARD} = async () => {}; await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }); }`,
+        `async function f(tx, id) { const ${GUARD} = async () => {}; await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id)); }`,
       ).map((w) => w.covered),
+    ).toEqual([false]);
+  });
+
+  it('does not count a guard for another task than the one the write revives', () => {
+    const covered = (body: string) =>
+      liveWrites('x.ts', `async function f(tx, id, otherId) { ${body} }`).map((w) => w.covered);
+    expect(
+      covered(
+        `await ${GUARD}(tx, otherId); await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
+      ),
+    ).toEqual([false]);
+    expect(
+      covered(
+        `await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
+      ),
+    ).toEqual([true]);
+  });
+
+  it('exempts no created-only predicate when eq or and is shadowed', () => {
+    const covered = (body: string) =>
+      liveWrites('x.ts', `async function f(tx, id, eq) { ${body} }`).map((w) => w.covered);
+    expect(
+      covered(
+        `await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.status, 'created'));`,
+      ),
     ).toEqual([false]);
   });
 
@@ -894,13 +999,16 @@ describe('a live-status write on a task row', () => {
     const writes = (body: string) =>
       liveWrites('x.ts', `async function f(tx) { ${body} }`).map((w) => w.covered);
     expect(
-      writes(`const update = tx.update(schema.tasks); await update.set({ status: 'running' });`),
+      writes(
+        `const update = tx.update(schema.tasks); await update.set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
+      ),
     ).toEqual([false]);
     expect(
       writes(
-        `await ${GUARD}(tx, id); const update = tx.update(schema.tasks); await update.set({ status: 'running' });`,
+        `await ${GUARD}(tx, id); const update = tx.update(schema.tasks); await update.set({ status: 'running' }).where(eq(schema.tasks.id, id));`,
       ),
-    ).toEqual([true]);
+      // Which row a detached builder revives is out of sight, so no guard can be matched to it.
+    ).toEqual([false]);
   });
 
   it('counts an upsert that sets a live status on the row it collides with', () => {
