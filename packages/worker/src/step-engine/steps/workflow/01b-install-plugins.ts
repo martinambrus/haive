@@ -13,7 +13,6 @@ import type { DockerVolumeMount } from '../../../sandbox/docker-runner.js';
 import {
   loadProviderRuntimeConfig,
   resolveAuthMounts,
-  resolveSandboxImageTag,
   resolveInvocationRepoMount,
 } from '../../../queues/cli-exec-queue.js';
 import { resolveSecretMasks } from '../../../queues/cli-exec/secret-mask.js';
@@ -228,7 +227,8 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     if (!provider) {
       throw new Error(`CLI provider ${ctx.cliProviderId} not found`);
     }
-    const sandboxImage = await resolveSandboxImageTag(ctx.db, ctx.taskId, provider);
+    const runtime = await loadProviderRuntimeConfig(ctx.db, provider.id, ctx.taskId);
+    const sandboxImage = runtime.sandboxImage;
     // Per-invocation isolation: mount only the feature worktree at the workdir root.
     const { repoMount, hasWorktree, hasRepo } = await resolveInvocationRepoMount(
       ctx.db,
@@ -248,8 +248,6 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       ...(await resolveSecretMasks(ctx.db, ctx.taskId, repoMount)),
       ...gitData.masks,
     ];
-
-    const runtime = await loadProviderRuntimeConfig(ctx.db, provider.id, ctx.taskId);
 
     const executed: InstallPluginsApply['executed'] = [];
     for (const cmd of detected.commands) {
