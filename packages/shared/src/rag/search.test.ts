@@ -426,6 +426,16 @@ describe('ragHybridSearch identifier statistics', () => {
     expect(stats).toContain("WHERE repository_id = $2 AND source_type <> 'task' AND e.content_tsv");
   });
 
+  it('keeps an identifier found in every scoped row, whose ln(N/df) is 0', async () => {
+    const { conn, calls } = recordingConn(10);
+
+    await ragHybridSearch(conn, [], QUERY, { lexicalOnly: true }, undefined, 'repo-1');
+
+    const fused = calls.find((c) => c.statement.includes('ident AS ('));
+    expect(fused).toBeDefined();
+    expect(fused!.params).toContain('{0.000001}');
+  });
+
   it('logs nothing when the statistics read succeeds', async () => {
     const { conn } = fakeStore({ transaction: false, statisticsFail: false });
 

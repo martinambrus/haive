@@ -335,6 +335,8 @@ function buildFacetClause(
  *
  *  Scoped by the same facet/repository predicates as the search itself, so df is
  *  relative to the corpus actually being searched rather than the whole store. */
+const IDENTIFIER_IDF_FLOOR = 1e-6;
+
 async function identifierIdfs(
   conn: RagConnection,
   terms: string[],
@@ -380,7 +382,8 @@ async function identifierIdfs(
       // df 0 means the store has never seen the identifier — contribute nothing
       // rather than an infinite weight.
       if (!stat || stat.df <= 0 || stat.total <= 0) return 0;
-      return Math.log(stat.total / stat.df);
+      // A term in every row has ln(1) = 0 but is still known; the floor keeps it a match.
+      return Math.max(Math.log(stat.total / stat.df), IDENTIFIER_IDF_FLOOR);
     });
   } catch (err) {
     const code = (err as { code?: unknown } | null)?.code;
