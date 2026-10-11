@@ -16,6 +16,10 @@ vi.mock('../../../queues/cli-exec-queue.js', async (importOriginal) => ({
   resolveSandboxImageTag: async () => null,
   resolveInvocationRepoMount: async () => ({ repoMount: null, hasWorktree: false, hasRepo: false }),
 }));
+vi.mock('../../../queues/cli-exec/images.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../queues/cli-exec/images.js')>()),
+  resolveSandboxImageTag: async () => null,
+}));
 vi.mock('../../../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../queues/cli-exec/secret-mask.js')>()),
   resolveSecretMasks: async () => [],
@@ -208,5 +212,90 @@ describe('01b-install-plugins apply: what the step records', () => {
     const out = await installPluginsStep.apply(ctx(), detectedWith(null));
 
     expect(out).toMatchObject({ skipped: false, missingDrupalLsp: null });
+  });
+});
+
+describe('01b-install-plugins apply: the network a CLI run gets', () => {
+  const PROVIDER_POLICY = { mode: 'allowlist', domains: ['provider.example'], ips: [] };
+  const TASK_POLICY = { mode: 'allowlist', domains: ['task.example'], ips: [] };
+
+  function allowlistCtx(taskEgress: unknown): Ctx {
+    return {
+      ...ctx(),
+      db: {
+        query: {
+          cliProviders: {
+            findFirst: async () => ({
+              id: 'provider-1',
+              name: 'claude-code',
+              wrapperPath: null,
+              executablePath: null,
+              networkPolicy: PROVIDER_POLICY,
+              egressDomains: ['extra.example'],
+            }),
+          },
+          tasks: {
+            findFirst: async () => ({ metadata: taskEgress ? { egress: taskEgress } : {} }),
+          },
+        },
+      },
+    } as unknown as Ctx;
+  }
+
+  async function runApply(taskEgress: unknown) {
+    loadConfiguredLspLanguages.mockResolvedValue(['typescript', 'php-extended']);
+    hasWorkspaceEntry.mockResolvedValue(true);
+    runInSandbox.mockReset();
+    runInSandbox.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+    const c = allowlistCtx(taskEgress);
+    const detected = await installPluginsStep.detect!(c);
+    await installPluginsStep.apply(c, { detected } as unknown as Parameters<
+      typeof installPluginsStep.apply
+    >[1]);
+    return detected.commands;
+  }
+
+  it("runs every command under the task's network override, as an agent run does", async () => {
+    const commands = await runApply(TASK_POLICY);
+
+    expect(runInSandbox).toHaveBeenCalledTimes(commands.length);
+    for (const call of runInSandbox.mock.calls) {
+      expect(call[1]).toMatchObject({ networkPolicy: TASK_POLICY });
+    }
+  });
+
+  it('falls back to the provider policy when the task carries no override', async () => {
+    await runApply(null);
+
+    for (const call of runInSandbox.mock.calls) {
+      expect(call[1]).toMatchObject({ networkPolicy: PROVIDER_POLICY });
+    }
+  });
+
+  it("allows the CLI's own hosts plus each command's own hosts", async () => {
+    const commands = await runApply(TASK_POLICY);
+
+    expect(commands.length).toBeGreaterThan(0);
+    commands.forEach((cmd, i) => {
+      const egress = (runInSandbox.mock.calls[i]![1] as { egressDomains?: string[] }).egressDomains;
+      expect(egress).toEqual(expect.arrayContaining(['api.anthropic.com', 'extra.example']));
+      expect(egress).toEqual(expect.arrayContaining(cmd.egressDomains ?? []));
+    });
+    const marketplace = commands.findIndex((c) => c.args.includes('Piebald-AI/claude-code-lsps'));
+    expect(marketplace).toBeGreaterThanOrEqual(0);
+    const marketplaceEgress = (
+      runInSandbox.mock.calls[marketplace]![1] as { egressDomains?: string[] }
+    ).egressDomains;
+    expect(marketplaceEgress).toContain('github.com');
+  });
+
+  it('adds nothing to a local-path marketplace command beyond the CLI hosts', async () => {
+    const commands = await runApply(TASK_POLICY);
+
+    const local = commands.findIndex((c) => c.description.includes('local drupal-lsp'));
+    expect(local).toBeGreaterThanOrEqual(0);
+    const egress = (runInSandbox.mock.calls[local]![1] as { egressDomains?: string[] })
+      .egressDomains;
+    expect(egress).not.toContain('github.com');
   });
 });

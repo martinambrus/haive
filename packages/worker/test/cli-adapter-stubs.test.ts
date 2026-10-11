@@ -337,3 +337,24 @@ describe('LSP plugin install (php uses local intelephense, not marketplace phpac
     expect(flat).toContain('drupal-php-lsp@renamed-lsp-dir');
   });
 });
+
+describe('plugin install commands declare the hosts they fetch from', () => {
+  const MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
+  for (const name of ['claude-code', 'zai', 'ollama', 'muse', 'openrouter', 'grok'] as const) {
+    it(`${name}: the GitHub marketplace add declares hosts, the other commands none`, () => {
+      const cmds = cliAdapterRegistry.get(name).buildPluginInstallCommands!(
+        makeProvider({ id: `p-${name}`, name }),
+        {
+          repoRoot: '/work/repo',
+          lspLanguages: ['typescript'],
+          drupalLspPath: '/work/repo/.claude/plugins/drupal-php-lsp',
+        },
+      );
+      const add = cmds.find((c) => c.args.includes(MARKETPLACE_REF));
+      expect(add?.egressDomains).toContain('github.com');
+      for (const c of cmds.filter((x) => x !== add)) {
+        expect(c.egressDomains ?? []).toEqual([]);
+      }
+    });
+  }
+});

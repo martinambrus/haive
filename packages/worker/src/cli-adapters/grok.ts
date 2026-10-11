@@ -180,6 +180,7 @@ export class GrokAdapter extends BaseCliAdapter {
         description: `Add ${GROK_LSP_MARKETPLACE_REF} marketplace`,
         command: exec,
         args: ['plugin', 'marketplace', 'add', GROK_LSP_MARKETPLACE_REF],
+        egressDomains: ['github.com'],
       });
       for (const name of uniqueLsp) {
         cmds.push({

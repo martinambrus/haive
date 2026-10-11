@@ -145,6 +145,7 @@ export class ZaiAdapter extends BaseCliAdapter {
         description: `Add ${ZAI_LSP_MARKETPLACE_REF} marketplace`,
         command: exec,
         args: ['plugin', 'marketplace', 'add', ZAI_LSP_MARKETPLACE_REF],
+        egressDomains: ['github.com'],
       });
       for (const name of uniqueLsp) {
         cmds.push({

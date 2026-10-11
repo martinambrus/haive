@@ -173,6 +173,7 @@ export class OpenRouterAdapter extends BaseCliAdapter {
         description: `Add ${OPENROUTER_LSP_MARKETPLACE_REF} marketplace`,
         command: exec,
         args: ['plugin', 'marketplace', 'add', OPENROUTER_LSP_MARKETPLACE_REF],
+        egressDomains: ['github.com'],
       });
       for (const name of uniqueLsp) {
         cmds.push({

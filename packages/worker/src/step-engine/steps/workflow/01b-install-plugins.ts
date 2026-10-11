@@ -11,6 +11,7 @@ import { loadConfiguredLspLanguages } from '../../../lsp/configured-lsp.js';
 import { runInSandbox, SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { DockerVolumeMount } from '../../../sandbox/docker-runner.js';
 import {
+  loadProviderRuntimeConfig,
   resolveAuthMounts,
   resolveSandboxImageTag,
   resolveInvocationRepoMount,
@@ -248,6 +249,8 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       ...gitData.masks,
     ];
 
+    const runtime = await loadProviderRuntimeConfig(ctx.db, provider.id, ctx.taskId);
+
     const executed: InstallPluginsApply['executed'] = [];
     for (const cmd of detected.commands) {
       await ctx.emitProgress(cmd.description);
@@ -262,7 +265,10 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       };
       if (sandboxImage) runnerOptions.image = sandboxImage;
       if (mounts.length > 0) runnerOptions.extraMounts = mounts;
-      if (provider.networkPolicy) runnerOptions.networkPolicy = provider.networkPolicy;
+      if (runtime.networkPolicy) runnerOptions.networkPolicy = runtime.networkPolicy;
+      runnerOptions.egressDomains = [
+        ...new Set([...runtime.egressDomains, ...(cmd.egressDomains ?? [])]),
+      ];
       const wrapperContent = provider.wrapperContent ?? undefined;
       const runSpec: Parameters<typeof runInSandbox>[0] = {
         command: cmd.command,
