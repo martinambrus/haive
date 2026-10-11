@@ -141,6 +141,14 @@ export function InteractiveShell(props: InteractiveShellProps) {
     const ws = new WebSocket(wsUrl);
     setState('connecting');
     setWorkdirMismatch(null);
+    setConfirmRestart(false);
+
+    // A restart offered for a mismatch that is gone would restart a shell already in place.
+    const applyWorkdirMismatch = (value: unknown) => {
+      const mismatch = parseWorkdirMismatch(value);
+      setWorkdirMismatch(mismatch);
+      if (!mismatch) setConfirmRestart(false);
+    };
 
     const sendFrame = (frame: unknown) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -200,7 +208,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
           setState('connected');
           setErrorMsg(null);
           if (typeof parsed.containerName === 'string') setContainerLabel(parsed.containerName);
-          setWorkdirMismatch(parseWorkdirMismatch(parsed.workdirMismatch));
+          applyWorkdirMismatch(parsed.workdirMismatch);
           handleResize();
           term.focus();
           setTimeout(() => handleResize(), 250);
@@ -223,7 +231,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
           );
           break;
         case 'workdir':
-          setWorkdirMismatch(parseWorkdirMismatch(parsed.workdirMismatch));
+          applyWorkdirMismatch(parsed.workdirMismatch);
           break;
         case 'pong':
           break;

@@ -427,9 +427,13 @@ export class TerminalSessionManager {
     let ptyHandle: Docker.Exec;
     let ptyStream: Duplex;
     try {
+      // Read again inside the turn: the container ensure above can take minutes, and a Retry may
+      // move the task's workspace meanwhile.
+      const workdir =
+        scope === 'task' ? await resolveTaskSandboxWorkdir(this.db, scopeId) : ptyWorkingDir;
       workdirMismatch =
         scope === 'task'
-          ? await this.probeWorkdirMismatch(ensured.containerName, ptyWorkingDir)
+          ? await this.probeWorkdirMismatch(ensured.containerName, workdir)
           : undefined;
       attachedAt = ++this.turnSeq;
       ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
@@ -438,7 +442,7 @@ export class TerminalSessionManager {
         AttachStdout: true,
         AttachStderr: true,
         Tty: true,
-        WorkingDir: ptyWorkingDir,
+        WorkingDir: workdir,
         Env: execEnv,
       });
       ptyStream = (await ptyHandle.start({

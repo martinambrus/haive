@@ -206,6 +206,13 @@ describe('task shell start directory', () => {
     );
   });
 
+  it('attaches at the workspace current when its turn comes, not when the open began', async () => {
+    vi.mocked(resolveTaskSandboxWorkdir).mockResolvedValueOnce(WORKTREE).mockResolvedValue(ROOT);
+    const h = harness(null);
+    await h.openTask();
+    expect(h.execs.find((e) => e.cmd[1] === 'new-session')?.workingDir).toBe(ROOT);
+  });
+
   it('answers no probe for a repo shell', async () => {
     const h = harness(WORKTREE);
     const reply = await h.openRepo();
