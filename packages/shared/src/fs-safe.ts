@@ -760,6 +760,7 @@ export interface ApplyTreeResult {
 const APPLY_TREE_CONCURRENCY = 32;
 
 const STALE_TEMP_MS = 60 * 60 * 1000;
+const TEMP_SUFFIX = /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function wantedOwner(stats: Stats, opts: ApplyTreeOptions): Owner | null {
   if (!opts.owner) return null;
@@ -1659,6 +1660,7 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
     const entries = await readdirNoFollow(anchor, dirSegs.join('/'));
     for (const entry of entries ?? []) {
       if (!entry.name.startsWith(prefix) || !entry.isFile()) continue;
+      if (!TEMP_SUFFIX.test(entry.name.slice(prefix.length))) continue;
       const rel = [...dirSegs, entry.name].join('/');
       try {
         const info = await lstatNoFollow(anchor, rel);
