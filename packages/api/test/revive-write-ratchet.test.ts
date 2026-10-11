@@ -68,12 +68,102 @@ function writtenStatus(call: ts.CallExpression): string | null {
   return null;
 }
 
-/** Whether the object a name holds may carry a `status`: it gains one in the function around the
- *  write or in its module, or it is declared in neither (a parameter, an import). */
+/** The declaration `name` resolves to at `at`, read lexically: the innermost scope that binds it.
+ *  `'opaque'` for a binding whose value this file cannot see (a parameter, an import, a catch or
+ *  loop variable), null when nothing in the file binds it. */
+function bindingOf(at: ts.Node, name: string): ts.VariableDeclaration | 'opaque' | null {
+  const named = (b: ts.BindingName): boolean =>
+    ts.isIdentifier(b)
+      ? b.text === name
+      : b.elements.some((e) => !ts.isOmittedExpression(e) && named(e.name));
+  const varIn = (scope: ts.Node, blockScoped: boolean): ts.VariableDeclaration | null => {
+    let hit: ts.VariableDeclaration | null = null;
+    const visit = (n: ts.Node): void => {
+      if (hit || (n !== scope && ts.isFunctionLike(n))) return;
+      if (ts.isVariableDeclarationList(n)) {
+        const isVar = (n.flags & ts.NodeFlags.BlockScoped) === 0;
+        if (isVar !== blockScoped) {
+          hit = n.declarations.find((d) => named(d.name)) ?? null;
+        }
+      }
+      if (blockScoped && n !== scope && (ts.isBlock(n) || ts.isIterationStatement(n, false)))
+        return;
+      ts.forEachChild(n, visit);
+    };
+    if (
+      blockScoped &&
+      (ts.isBlock(scope) ||
+        ts.isSourceFile(scope) ||
+        ts.isModuleBlock(scope) ||
+        ts.isCaseClause(scope) ||
+        ts.isDefaultClause(scope))
+    ) {
+      for (const st of scope.statements) {
+        if (ts.isVariableStatement(st)) visit(st.declarationList);
+      }
+    } else if (!blockScoped) {
+      ts.forEachChild(scope, visit);
+    }
+    return hit;
+  };
+  for (let n: ts.Node | undefined = at; n; n = n.parent) {
+    const lexical = varIn(n, true);
+    if (lexical) return ts.isIdentifier(lexical.name) ? lexical : 'opaque';
+    if (
+      (ts.isForStatement(n) || ts.isForOfStatement(n) || ts.isForInStatement(n)) &&
+      n.initializer
+    ) {
+      if (ts.isVariableDeclarationList(n.initializer)) {
+        if (n.initializer.declarations.some((d) => named(d.name))) return 'opaque';
+      }
+    }
+    if (ts.isCatchClause(n) && n.variableDeclaration && named(n.variableDeclaration.name)) {
+      return 'opaque';
+    }
+    if (ts.isFunctionLike(n)) {
+      if (n.parameters.some((p) => named(p.name))) return 'opaque';
+      const hoisted = varIn(n, false);
+      if (hoisted) return ts.isIdentifier(hoisted.name) ? hoisted : 'opaque';
+    }
+    if (ts.isSourceFile(n)) {
+      const hoisted = varIn(n, false);
+      if (hoisted) return ts.isIdentifier(hoisted.name) ? hoisted : 'opaque';
+      const imported = n.statements.some((st) => {
+        const clause = ts.isImportDeclaration(st) ? st.importClause : undefined;
+        if (!clause) return false;
+        if (clause.name?.text === name) return true;
+        const nb = clause.namedBindings;
+        if (!nb) return false;
+        return ts.isNamespaceImport(nb)
+          ? nb.name.text === name
+          : nb.elements.some((e) => e.name.text === name);
+      });
+      if (imported) return 'opaque';
+    }
+  }
+  return null;
+}
+
+/** Whether the object a name holds may carry a `status`: its own declaration's initializer may, or
+ *  the scope that declares it assigns into it or replaces it; a binding this file cannot see may. */
 function objectMayCarryStatus(at: ts.Node, name: string): boolean {
-  const fn = enclosingFunction(at);
-  if (!fn) return true;
-  let declared = false;
+  const decl = bindingOf(at, name);
+  if (decl === null || decl === 'opaque') return true;
+  const init = decl.initializer;
+  if (
+    !init ||
+    !ts.isObjectLiteralExpression(init) ||
+    init.properties.some(
+      (p) => ts.isSpreadAssignment(p) || keyOf(p.name) === null || keyOf(p.name) === 'status',
+    )
+  ) {
+    return true;
+  }
+  const list = decl.parent;
+  const scope =
+    (list.flags & ts.NodeFlags.BlockScoped) !== 0
+      ? list.parent.parent
+      : (enclosingFunction(decl) ?? decl.getSourceFile());
   let found = false;
   const visit = (n: ts.Node): void => {
     const assignedKey = ts.isPropertyAccessExpression(n)
@@ -106,24 +196,10 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
     ) {
       found = true;
     }
-    if (ts.isVariableDeclaration(n) && n.name.getText() === name) declared = true;
-    if (
-      ts.isVariableDeclaration(n) &&
-      n.name.getText() === name &&
-      n.initializer &&
-      (!ts.isObjectLiteralExpression(n.initializer) ||
-        n.initializer.properties.some(
-          (p) => ts.isSpreadAssignment(p) || keyOf(p.name) === null || keyOf(p.name) === 'status',
-        ))
-    ) {
-      found = true;
-    }
     if (!found) ts.forEachChild(n, visit);
   };
-  visit(fn);
-  // Not declared in the function: a module-level constant is read from the file the same way.
-  if (!declared && !found) visit(at.getSourceFile());
-  return found || !declared;
+  visit(scope);
+  return found;
 }
 
 /** Whether the `.where(...)` after this `.set(...)` holds only a created task: the created equality
@@ -345,6 +421,30 @@ describe('a live-status write on a task row', () => {
       ).map((w) => w.status);
     expect(status(`{ status: 'failed', ...patch }`)).toEqual(['<computed>']);
     expect(status(`{ ...patch, status: 'failed' }`)).toEqual([]);
+  });
+
+  it('reads the patch binding visible at the write, not a namesake elsewhere', () => {
+    const count = (src: string) => liveWrites('x.ts', src).length;
+    expect(
+      count(
+        `async function f(patch) { if (x) { const patch = {}; } await db.update(schema.tasks).set(patch); }`,
+      ),
+    ).toBe(1);
+    expect(
+      count(
+        `const patch = { title: 't' }; async function f() { { const patch = { status: 'running' }; } await db.update(schema.tasks).set(patch); }`,
+      ),
+    ).toBe(0);
+    expect(
+      count(
+        `import { patch } from './p.js'; async function f() { await db.update(schema.tasks).set(patch); }`,
+      ),
+    ).toBe(1);
+    expect(
+      count(
+        `import { patchy } from './p.js'; const patch = { title: 't' }; async function f() { await db.update(schema.tasks).set(patch); }`,
+      ),
+    ).toBe(0);
   });
 
   it('counts a local patch that is replaced or assigned into', () => {
