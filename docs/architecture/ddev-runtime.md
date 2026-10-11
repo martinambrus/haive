@@ -60,6 +60,10 @@ acquisition cannot launch a command with only seconds remaining before its clien
 A warm recovery whose lock wait expires fails without rebuilding or deleting the existing
 runner: the earlier operation may still be restoring its live database. Snapshot locking
 also prevents a re-driven access change from reusing a slot while an orphaned snapshot writes it.
+An `exec` in the web container carries its own deadline there (`withWebContainerDeadline`,
+ten seconds under the host's, then KILL five later), because killing the runner's ddev client
+leaves the command running there. An exec naming another service (`-s db`, an add-on) passes
+through unwrapped, since its image need not carry GNU `timeout`. A non-raw exec runs as `ddev exec <flags> --raw -- timeout … bash -c '<line>'`, where Haive builds `<line>` exactly as ddev's own `quoteArgs` would (`cmd/ddev/cmd/exec.go`: one word passes as is; from two up, a word holding `" \t\r\n#` is double-quoted with `"` escaped). A wrapper in front of the words instead breaks them, because ddev then quotes each one (MEASURED on v1.25.2: `timeout 50s 'php -v'` ran a command named `php -v`, exit 127). The exec is read as bash words and pflag's rules (`ddevExecHead`), and only a plain word list is wrapped: a command holding anything the runner's shell must resolve first (a pipe, `&&`, a redirection, a comment, a newline, an expansion, a glob) runs unwrapped as it always did, since capturing those words in the runner changed what ran (a `| tee` captured nothing and the migration it hid was recorded as done).
 Selection, stale cleanup, creation and promotion run in one non-root runner process under
 that lock. A provisional `haive-access-pending-<task>` snapshot is promoted to the selected
 slot only after creation succeeds; interrupted partial copies never count as recovery points.
@@ -128,8 +132,8 @@ downloads all three — so a suite driving firefox or webkit reports the gap thr
 
 Anything else that reaches that `bash -lc` from a repository or an agent goes through ONE quoting
 helper (`sandbox/shell-quote.ts`): the playwright root, 07c's database target, and 08b's selective
-test command. Quoting covers only the runner's shell: `ddev exec` without `--raw` re-reads its words
-in the web container's `bash -c` (MEASURED: `tests/$(id)Test.php` ran `id` there after runner-side
+test command. Quoting covers only the runner's shell: a non-raw `ddev exec` runs its joined words in
+the web container's `bash -c` (MEASURED: `tests/$(id)Test.php` ran `id` there after runner-side
 quoting). So for a DDEV run 08b drops a reported test path holding any character outside
 `[A-Za-z0-9._/@+-]`; on every run it drops absolute paths, `..`, control characters and a segment
 starting with `-` (an option to the runner), and notes how many written tests did not run. 07c
