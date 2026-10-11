@@ -243,9 +243,8 @@ export async function ensureGlobalKbSchema(
     await exec(`DROP INDEX IF EXISTS idx_global_rag_facets_${dim.toLowerCase()}`);
   }
 
-  // tsvector auto-update trigger (mirror ensureRagSchema; distinct trigger name since this is a
-  // different database). The identifier lexemes and sentinel are why snake_case names match whole;
-  // see docs/architecture/identifier-search.md.
+  // Mirrors ensureRagSchema's trigger: identifier lexemes make snake_case names match whole, the
+  // sentinel marks a row built by this body (docs/architecture/identifier-search.md).
   await exec(`
     CREATE OR REPLACE FUNCTION update_content_tsv() RETURNS trigger AS $$
     BEGIN
@@ -271,9 +270,8 @@ export async function ensureGlobalKbSchema(
     `);
   });
 
-  // Rows stamped before the function emitted identifier lexemes lack the sentinel; `SET content =
-  // content` fires the trigger, which stamps it. A stale lexical index is a degraded search, so a
-  // failure warns and never fails the first use of the global KB.
+  // `SET content = content` re-fires the trigger on rows without the sentinel; a failure only warns,
+  // since a stale lexical index degrades search while a throw would fail the global KB's first use.
   try {
     let total = 0;
     while (total < IDENTIFIER_BACKFILL_MAX_ROWS) {
