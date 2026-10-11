@@ -729,48 +729,57 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
 
   const newLabel = await nextAvailableCloneLabel(db, userId, source.label);
 
-  const inserted = await db
-    .insert(schema.cliProviders)
-    .values({
-      userId: source.userId,
-      name: source.name,
-      label: newLabel,
-      executablePath: source.executablePath,
-      wrapperPath: source.wrapperPath,
-      wrapperContent: source.wrapperContent,
-      envVars: source.envVars,
-      cliArgs: source.cliArgs,
-      supportsSubagents: source.supportsSubagents,
-      networkPolicy: source.networkPolicy,
-      egressDomains: source.egressDomains,
-      authMode: source.authMode,
-      cliVersion: source.cliVersion,
-      effortLevel: source.effortLevel,
-      model: source.model,
-      modelfile: source.modelfile,
-      sandboxDockerfileExtra: source.sandboxDockerfileExtra,
-      enabled: source.enabled,
-      isolateAuth: source.isolateAuth,
-      disableThinking: source.disableThinking,
-      rulesContent: source.rulesContent,
-    })
-    .returning();
-  const created = inserted[0]!;
+  // A source saved before the split still holds secret-looking keys in envVars; the clone does not.
+  const split = splitSecretLikeEnv(source.envVars ?? {});
+  const created = await db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(schema.cliProviders)
+      .values({
+        userId: source.userId,
+        name: source.name,
+        label: newLabel,
+        executablePath: source.executablePath,
+        wrapperPath: source.wrapperPath,
+        wrapperContent: source.wrapperContent,
+        envVars: source.envVars ? split.envVars : null,
+        cliArgs: source.cliArgs,
+        supportsSubagents: source.supportsSubagents,
+        networkPolicy: source.networkPolicy,
+        egressDomains: source.egressDomains,
+        authMode: source.authMode,
+        cliVersion: source.cliVersion,
+        effortLevel: source.effortLevel,
+        model: source.model,
+        modelfile: source.modelfile,
+        sandboxDockerfileExtra: source.sandboxDockerfileExtra,
+        enabled: source.enabled,
+        isolateAuth: source.isolateAuth,
+        disableThinking: source.disableThinking,
+        rulesContent: source.rulesContent,
+      })
+      .returning();
+    const row = inserted[0]!;
 
-  const sourceSecrets = await db.query.cliProviderSecrets.findMany({
-    where: eq(schema.cliProviderSecrets.providerId, source.id),
+    const sourceSecrets = await tx.query.cliProviderSecrets.findMany({
+      where: eq(schema.cliProviderSecrets.providerId, source.id),
+    });
+    if (sourceSecrets.length > 0) {
+      await tx.insert(schema.cliProviderSecrets).values(
+        sourceSecrets.map((s) => ({
+          providerId: row.id,
+          secretName: s.secretName,
+          encryptedValue: s.encryptedValue,
+          encryptedDek: s.encryptedDek,
+          fingerprint: s.fingerprint,
+        })),
+      );
+    }
+    const copied = new Set(sourceSecrets.map((s) => s.secretName));
+    for (const [name, value] of Object.entries(split.secrets)) {
+      if (!copied.has(name)) await upsertProviderSecretValue(tx, row.id, name, value);
+    }
+    return row;
   });
-  if (sourceSecrets.length > 0) {
-    await db.insert(schema.cliProviderSecrets).values(
-      sourceSecrets.map((s) => ({
-        providerId: created.id,
-        secretName: s.secretName,
-        encryptedValue: s.encryptedValue,
-        encryptedDek: s.encryptedDek,
-        fingerprint: s.fingerprint,
-      })),
-    );
-  }
 
   await enqueueBuildForProvider(created.id, userId);
   const provisioningModel = shouldProvisionOllamaModel(created);

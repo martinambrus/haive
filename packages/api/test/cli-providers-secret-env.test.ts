@@ -130,3 +130,27 @@ describe('a provider saved through the API with a secret-looking env key', () =>
     expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
   });
 });
+
+describe('cloning a provider saved before the split', () => {
+  it('gives the clone the legacy key as a secret, never in envVars', async () => {
+    const fake = setup();
+    fake.insert(schema.cliProviders, {
+      id: PROVIDER,
+      userId: USER,
+      name: 'claude-code',
+      label: 'p',
+      rulesContent: DEFAULT_AGENT_RULES,
+      envVars: ENV,
+    });
+    const res = await send('POST', `/${PROVIDER}/clone`, {});
+    expect(res.status).toBe(201);
+    expect(JSON.stringify(await res.json())).not.toContain(SECRET_VALUE);
+    const clone = fake.rows(schema.cliProviders).find((r) => r.id !== PROVIDER)!;
+    expect(clone.envVars).toEqual({ ANTHROPIC_BASE_URL: 'https://api.example' });
+    const cloneSecrets = fake
+      .rows(schema.cliProviderSecrets)
+      .filter((r) => r.providerId === clone.id)
+      .map((r) => r.secretName);
+    expect(cloneSecrets).toEqual(['ANTHROPIC_API_KEY']);
+  });
+});
