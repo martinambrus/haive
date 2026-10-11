@@ -6,7 +6,7 @@ import { appRunnerName, ddevRunnerName } from '@haive/shared';
 const inFlight = new Map<string, number>();
 /** Runners a reap decision is being made for. A new exec waits for it, so it never starts under
  *  a removal the reaper decided before seeing it. */
-const fences = new Map<string, Promise<void>>();
+const fences = new Map<string, Set<Promise<void>>>();
 
 const runnerNames = (taskId: string): string[] => [ddevRunnerName(taskId), appRunnerName(taskId)];
 
@@ -14,7 +14,9 @@ const runnerNames = (taskId: string): string[] => [ddevRunnerName(taskId), appRu
 export async function whileRunnerBusy<T>(container: string, run: () => Promise<T>): Promise<T> {
   inFlight.set(container, (inFlight.get(container) ?? 0) + 1);
   try {
-    for (let fence = fences.get(container); fence; fence = fences.get(container)) await fence;
+    for (let held = fences.get(container); held?.size; held = fences.get(container)) {
+      await Promise.all(held);
+    }
     return await run();
   } finally {
     const left = (inFlight.get(container) ?? 1) - 1;
@@ -37,11 +39,15 @@ export async function withRunnersFenced<T>(
   let release!: () => void;
   const fence = new Promise<void>((resolve) => (release = resolve));
   const names = runnerNames(taskId);
-  for (const name of names) fences.set(name, fence);
+  for (const name of names) fences.set(name, (fences.get(name) ?? new Set()).add(fence));
   try {
     return await decide(() => !taskRunnerBusy(taskId));
   } finally {
-    for (const name of names) if (fences.get(name) === fence) fences.delete(name);
+    for (const name of names) {
+      const held = fences.get(name);
+      held?.delete(fence);
+      if (held?.size === 0) fences.delete(name);
+    }
     release();
   }
 }

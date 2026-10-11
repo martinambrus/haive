@@ -107,6 +107,22 @@ describe('a reap decision in progress', () => {
     expect(await exec).toBe('ran');
   });
 
+  it('holds an exec until every overlapping decision on the runner has ended', async () => {
+    let endFirst!: () => void;
+    let endSecond!: () => void;
+    const first = withRunnersFenced(TASK, () => new Promise<void>((r) => (endFirst = r)));
+    const second = withRunnersFenced(TASK, () => new Promise<void>((r) => (endSecond = r)));
+    endSecond();
+    await second;
+    const ran = vi.fn(async () => 'ran');
+    const exec = whileRunnerBusy(ddevRunnerName(TASK), ran);
+    await new Promise((r) => setImmediate(r));
+    expect(ran).not.toHaveBeenCalled();
+    endFirst();
+    await first;
+    expect(await exec).toBe('ran');
+  });
+
   it('reads idle when no exec arrived', async () => {
     expect(await withRunnersFenced(TASK, async (idle) => idle())).toBe(true);
   });
