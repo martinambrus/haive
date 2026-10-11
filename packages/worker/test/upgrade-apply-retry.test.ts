@@ -468,7 +468,7 @@ describe('an upgrade apply retried after it failed part-way', () => {
 
   // An unreadable read cannot tell a link or a directory from a transient I/O error, which proves
   // nothing about the bytes, so the person's only copy of their edits stays.
-  it("keeps the pre-image when the Keep's first read cannot read the path", async () => {
+  it("fails, keeping the pre-image, when the Keep's first read cannot read the path", async () => {
     const s = await setup();
     failOneCommit(s);
     await expect(s.apply()).rejects.toThrow('commit refused');
@@ -476,7 +476,7 @@ describe('an upgrade apply retried after it failed part-way', () => {
     await mkdir(join(s.root, EDITED));
     s.answerConflicts('keep_ours');
 
-    await s.apply();
+    await expect(s.apply()).rejects.toThrow('could not read');
 
     expect(
       s.fake

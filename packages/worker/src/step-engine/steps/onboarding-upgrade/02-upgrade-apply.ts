@@ -1098,6 +1098,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           kept = rel === null ? null : await pathContent(ctx.repoPath, rel, entry.templateKind);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          // The person's edits live only in this task's pre-image: failing keeps them for a Retry.
+          if (earlierRecords.get(key)?.lastObservedDiskHash) {
+            throw new Error(
+              `could not read ${entry.diskPath} to put back the edits kept there (${msg}); retry once it can be read`,
+            );
+          }
           warnings.push(`did not record keeping ${entry.diskPath}: ${msg}`);
           continue;
         }
@@ -1152,11 +1158,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               { maxBytes: RULES_FILE_READ_CAP },
             );
           } catch (err) {
-            // The render was moved off the path and something else took it: that write is gone too.
-            if (err instanceof ParkedFileError) await spendPreimage(earlier.id);
             const msg = err instanceof Error ? err.message : String(err);
-            warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
-            continue;
+            // The render was moved off the path and something else took it: that write is gone too.
+            if (err instanceof ParkedFileError) {
+              await spendPreimage(earlier.id);
+              warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
+              continue;
+            }
+            throw new Error(
+              `could not put back the edits kept at ${entry.diskPath} (${msg}); retry to try again`,
+            );
           }
           // Either way the failed attempt's write no longer stands, so its pre-image is spent.
           await spendPreimage(earlier.id);
