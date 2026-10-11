@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
@@ -83,5 +83,78 @@ describe('phase5VerifyStep.detect lint runners', () => {
     const out = await detect();
 
     expect(out.phpLint ?? null).toBeNull();
+  });
+
+  // The Drupal recommended-project shape: the only tooling is core's, and it targets core.
+  it('declines a sailorix-shaped core/ and lists it, running nothing', async () => {
+    await put('.eslintrc.json', '{"extends":"./core/.eslintrc.json"}');
+    await put('composer.json', JSON.stringify({ require: {} }));
+    await mkdir(path.join(workspace, 'core'));
+    await put('core/package.json', JSON.stringify({ scripts: { 'lint:core-js': 'eslint .' } }));
+    await put('core/phpcs.xml.dist', '<ruleset/>');
+    await put('core/phpstan.neon.dist', '');
+    await put('core/phpunit.xml.dist', '<phpunit/>');
+    await mkdir(path.join(workspace, 'core/lib'));
+    await put('core/lib/Drupal.php', '<?php');
+
+    const out = await detect();
+
+    expect([out.test, out.lint, out.typecheck]).toEqual([null, null, null]);
+    expect(JSON.stringify([out.test, out.lint, out.typecheck, out.phpLint])).not.toContain('core');
+    expect(out.declinedConfigs).toEqual([
+      'core/package.json (Drupal core)',
+      'core/phpcs.xml.dist (Drupal core)',
+      'core/phpstan.neon.dist (Drupal core)',
+      'core/phpunit.xml.dist (Drupal core)',
+    ]);
+  });
+
+  it('labels each declined directory by what it is', async () => {
+    for (const d of ['vendor', 'contrib', 'app']) await mkdir(path.join(workspace, d));
+    await put('vendor/phpunit.xml', '<phpunit/>');
+    await put('contrib/phpcs.xml', '<ruleset/>');
+    await put('app/composer.json', JSON.stringify({ scripts: { test: 'phpunit' } }));
+    await put('app/jest.config.js', '');
+
+    const out = await detect();
+
+    expect(out.declinedConfigs).toEqual([
+      'app/composer.json (below the repository root)',
+      'app/jest.config.js (below the repository root)',
+      "contrib/phpcs.xml (not the project's)",
+      'vendor/phpunit.xml (vendor)',
+    ]);
+  });
+
+  it('labels a core/ without Drupal core as below the root, and declines every root config name', async () => {
+    for (const d of ['core', 'py']) await mkdir(path.join(workspace, d));
+    await put('core/phpunit.xml', '<phpunit/>');
+    await put('py/pytest.ini', '');
+    await put('py/.phpcs.xml', '<ruleset/>');
+    await put('py/phpstan.dist.neon', '');
+
+    expect((await detect()).declinedConfigs).toEqual([
+      'core/phpunit.xml (below the repository root)',
+      'py/.phpcs.xml (below the repository root)',
+      'py/phpstan.dist.neon (below the repository root)',
+      'py/pytest.ini (below the repository root)',
+    ]);
+  });
+
+  it('declines nothing for a manifest without scripts, and omits the key', async () => {
+    await mkdir(path.join(workspace, 'sub'));
+    await put('sub/package.json', JSON.stringify({ name: 'x' }));
+    await put('package.json', JSON.stringify({ scripts: { lint: 'eslint .' } }));
+
+    const out = await detect();
+
+    expect(out.lint?.argv).toEqual(['npm', 'run', 'lint']);
+    expect('declinedConfigs' in out).toBe(false);
+  });
+
+  it('omits declinedConfigs when the repository has no deeper tooling', async () => {
+    await put('phpcs.xml', '<ruleset/>');
+
+    expect('declinedConfigs' in (await detect())).toBe(false);
   });
 });

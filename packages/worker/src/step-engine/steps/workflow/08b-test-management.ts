@@ -387,6 +387,9 @@ const FRAMEWORK_CONFIGS: Record<TestFramework, string[]> = {
  *  output both carry other projects' configs. */
 const ROOT_SEARCH_SKIP = new Set(['node_modules', 'vendor', 'dist', 'build', 'coverage']);
 
+/** A `core/` holding this file is Drupal core, whose test configs test core, not the project. */
+export const DRUPAL_CORE_MARKER = 'core/lib/Drupal.php';
+
 /**
  * Repo-relative directory holding this framework's config: `''` when it is at the workspace
  * root, the subdirectory name when it is one level down, `null` when there is none.
@@ -402,9 +405,11 @@ async function resolveFrameworkRoot(workspace: string, configs: string[]): Promi
   if (await anyExists(workspace, '', configs)) return '';
   const { anchor, prefix } = workspaceAnchor(workspace);
   const entries = (await readdirNoFollow(anchor, prefix === '' ? '' : prefix.slice(0, -1))) ?? [];
+  const drupalCore = await hasWorkspaceEntry(workspace, DRUPAL_CORE_MARKER);
   const dirs = entries
     .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !ROOT_SEARCH_SKIP.has(e.name))
     .map((e) => e.name)
+    .filter((name) => !(drupalCore && name === 'core'))
     .sort();
   for (const dir of dirs) {
     if (await anyExists(workspace, dir, configs)) return dir;

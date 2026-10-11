@@ -355,6 +355,51 @@ describe('gate-2 status summary', () => {
     expect(r?.body).toContain('subdirectory');
   });
 
+  it("keeps today's exact NOT RUN body when no config was declined", () => {
+    const r = row(baseDetect({ verify: allSkipped }), 'Tests / lint / typecheck');
+    expect(r?.body).toBe(
+      '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Nothing here says the code is correct.',
+    );
+    expect(r?.detail).toBe('no check was executed — this is not a passing verification');
+  });
+
+  it('names what was searched and the configs it declined in the NOT RUN row', () => {
+    const d = baseDetect({
+      verify: allSkipped,
+      declinedConfigs: ['core/phpcs.xml.dist (Drupal core)', 'core/package.json (Drupal core)'],
+    });
+    const r = row(d, 'Tests / lint / typecheck');
+    expect(r?.body).toContain('the repository root');
+    expect(r?.body).toContain('core/phpcs.xml.dist (Drupal core), core/package.json (Drupal core)');
+    expect(r?.body).toContain("only the project's own root tooling");
+  });
+
+  describe('configs declined below the root, when some check ran', () => {
+    const declinedConfigs = ['sub/phpunit.xml'];
+    const lintRan = { ...allSkipped, lint: { ran: true, passed: true, output: '' } };
+
+    it('adds a warn row naming them when a slot had no runner', () => {
+      const d = baseDetect({ verify: lintRan, declinedConfigs, slotWithoutRunner: true });
+      const r = row(d, 'Tooling below the root');
+      expect(r?.status).toBe('warn');
+      expect(r?.body).toContain('sub/phpunit.xml');
+      expect(r?.body).toContain('the repository root');
+      expect(row(d, 'Tests / lint / typecheck')).toBeUndefined();
+      expect(decisionDefault(d)).toBe('approve');
+    });
+
+    it('adds no row when every slot had a runner', () => {
+      const d = baseDetect({ verify: lintRan, declinedConfigs });
+      expect(row(d, 'Tooling below the root')).toBeUndefined();
+    });
+
+    it('renders the rows exactly as before when no config was declined', () => {
+      const plain = baseDetect({ verify: lintRan });
+      expect(rows(baseDetect({ verify: lintRan, slotWithoutRunner: true }))).toEqual(rows(plain));
+      expect(rows(plain).map((r) => r.label)).toEqual(['Lint']);
+    });
+  });
+
   it('does not default to approve when nothing was verified', () => {
     expect(decisionDefault(baseDetect({ verify: allSkipped }))).toBe('reject');
     // Absent slots entirely — an 08 payload that recorded no verify block at all.
@@ -1489,6 +1534,26 @@ describe('gate-2 verification results read from 08', () => {
     m.loadUnactedInsights.mockReset().mockResolvedValue({ insights: [], omitted: 0 });
     m.loadGateHouseRules.mockReset().mockResolvedValue(null);
     m.changeFingerprint.mockReset().mockResolvedValue(null);
+  });
+
+  it('flags a slot 08 found no runner for only when configs were declined', async () => {
+    const withDetect = (detect: Record<string, unknown>) =>
+      m.loadPreviousStepOutput.mockImplementation(
+        async (_db: unknown, _task: unknown, id: string) =>
+          id === '08-phase-5-verify'
+            ? { detect, output: { lint: passedRun, passed: true, runtimeSmoke: null } }
+            : null,
+      );
+    const slots = { test: { label: 't' }, lint: { label: 'l' }, typecheck: { label: 'c' } };
+    const declinedConfigs = ['sub/phpunit.xml'];
+    withDetect({ ...slots, test: null, declinedConfigs });
+    const flagged = await gate2VerifyApprovalStep.detect!(ctx);
+    expect(flagged.slotWithoutRunner).toBe(true);
+    expect(flagged.declinedConfigs).toEqual(declinedConfigs);
+    withDetect({ ...slots, declinedConfigs });
+    expect((await gate2VerifyApprovalStep.detect!(ctx)).slotWithoutRunner).toBeUndefined();
+    withDetect({ ...slots, test: null });
+    expect((await gate2VerifyApprovalStep.detect!(ctx)).slotWithoutRunner).toBeUndefined();
   });
 
   it('reads the house rules of the task into the payload, and nothing when it has none', async () => {

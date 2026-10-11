@@ -15,6 +15,7 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { isOutOfScope } from '../_scope-fence.js';
 import { loadFindingRecurrence, recurrenceKey } from './_review-findings.js';
 import { checkOutputExcerpt, excerptDiagnosis } from './_fix-loop.js';
+import { declinedConfigsSentence } from './08-phase-5-verify.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -116,6 +117,11 @@ interface VerifyGateDetect {
     typecheck: LiteCheck | null;
   };
   allPassed: boolean;
+  /** Tooling configs 08 saw one level below the root and did not use; absent on a payload that
+   *  predates the field. */
+  declinedConfigs?: string[];
+  /** Set when 08 found no runner for at least one of test, lint and typecheck. */
+  slotWithoutRunner?: boolean;
   /** Phase 4 pre-test validation result (null when the step didn't run). */
   validation: {
     verdict: string;
@@ -604,6 +610,13 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
   async detect(ctx: StepContext): Promise<VerifyGateDetect> {
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08-phase-5-verify');
     const output = (prev?.output as VerifyOutput | null) ?? {};
+    const declinedRaw = (prev?.detect as { declinedConfigs?: unknown } | null)?.declinedConfigs;
+    const declinedConfigs = Array.isArray(declinedRaw)
+      ? declinedRaw.filter((c): c is string => typeof c === 'string')
+      : [];
+    const prevDetect = (prev?.detect ?? null) as Record<string, unknown> | null;
+    const slotWithoutRunner =
+      prevDetect?.test === null || prevDetect?.lint === null || prevDetect?.typecheck === null;
 
     // Phase 4 pre-test validation: surface the verdict (the legacy "escalate to
     // user" lands here — exhausted budget / open issues / unparseable output).
@@ -899,6 +912,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         typecheck: liteCheck(output.typecheck),
       },
       allPassed: output.passed === true,
+      ...(declinedConfigs.length > 0 ? { declinedConfigs } : {}),
+      ...(declinedConfigs.length > 0 && slotWithoutRunner ? { slotWithoutRunner } : {}),
       validation,
       testManagement,
       browser,
@@ -1038,7 +1053,19 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         status: 'warn',
         statusLabel: 'NOT RUN',
         detail: 'no check was executed — this is not a passing verification',
-        body: '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Nothing here says the code is correct.',
+        body: [
+          '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Nothing here says the code is correct.',
+          declinedConfigsSentence(detected.declinedConfigs),
+        ]
+          .filter(Boolean)
+          .join(' '),
+        defaultOpen: true,
+      });
+    } else if (detected.slotWithoutRunner && detected.declinedConfigs?.length) {
+      rows.push({
+        label: 'Tooling below the root',
+        status: 'warn',
+        body: declinedConfigsSentence(detected.declinedConfigs),
         defaultOpen: true,
       });
     }

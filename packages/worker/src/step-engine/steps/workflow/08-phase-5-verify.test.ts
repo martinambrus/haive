@@ -425,6 +425,38 @@ describe('buildUnverifiedNote', () => {
     expect(note).toContain('Detected but not selected for this pass: test');
   });
 
+  // detect_output is persisted and replayed: a payload with no declinedConfigs must keep
+  // rendering exactly what it rendered before the field existed.
+  it("renders today's exact text when no config was declined", () => {
+    const note = buildUnverifiedNote(
+      { test: cmd, lint: null, typecheck: null },
+      { test: skipped, lint: skipped, typecheck: skipped },
+    );
+    expect(note).toBe(
+      'No verification check ran this pass, so this step passing means nothing was checked — not that everything passed.\n\n' +
+        'No runner was detected in this workspace for: lint, typecheck. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.\n\n' +
+        'Detected but not selected for this pass: test.',
+    );
+    expect(
+      buildUnverifiedNote(
+        { test: cmd, lint: null, typecheck: null },
+        { test: skipped, lint: skipped, typecheck: skipped },
+        [],
+      ),
+    ).toBe(note);
+  });
+
+  it('names what was searched and the configs it declined', () => {
+    const note = buildUnverifiedNote(
+      { test: null, lint: null, typecheck: null },
+      { test: skipped, lint: skipped, typecheck: skipped },
+      ['core/package.json (Drupal core)', 'core/phpunit.xml.dist (Drupal core)'],
+    );
+    expect(note).toContain('the repository root');
+    expect(note).toContain('core/package.json (Drupal core), core/phpunit.xml.dist (Drupal core)');
+    expect(note).toContain("only the project's own root tooling");
+  });
+
   it('says nothing once any check actually ran', () => {
     expect(
       buildUnverifiedNote(
@@ -1105,6 +1137,53 @@ describe('phase5VerifyStep.apply', () => {
       expect(out.test.passed).toBe(false);
       expect(out.test.output.length).toBeLessThanOrEqual(4000);
       expect(out.test.output.endsWith('Tests: 3 failed')).toBe(true);
+    });
+  });
+
+  describe('configs declined below the root, when only some checks ran', () => {
+    const LINT = { kind: 'host' as const, label: 'pnpm run lint', argv: ['pnpm', 'run', 'lint'] };
+    const TEST = { kind: 'host' as const, label: 'pnpm run test', argv: ['pnpm', 'run', 'test'] };
+    const TYPE = { kind: 'host' as const, label: 'pnpm run tsc', argv: ['pnpm', 'run', 'tsc'] };
+    const declinedConfigs = ['sub/phpunit.xml'];
+    beforeEach(() => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      runStepCommandInSandbox.mockResolvedValue({ ran: true, exitCode: 0, output: 'ok' });
+    });
+
+    it('names them in the slot notes when lint ran and test had no runner', async () => {
+      const out = await runApply(
+        { ddevMode: false, workspacePath: tmpdir(), lint: LINT, declinedConfigs },
+        { runLint: true },
+      );
+      expect(out.lint.ran).toBe(true);
+      expect(out.degradedNote).toContain('sub/phpunit.xml');
+      expect(out.degradedNote).toContain('the repository root');
+      expect(out.degradedNote).not.toContain('No verification check ran');
+    });
+
+    it('says nothing when every slot has a runner', async () => {
+      const out = await runApply(
+        {
+          ddevMode: false,
+          workspacePath: tmpdir(),
+          test: TEST,
+          lint: LINT,
+          typecheck: TYPE,
+          declinedConfigs,
+        },
+        { runTest: true, runLint: true, runTypecheck: true },
+      );
+      expect(out.test.ran).toBe(true);
+      expect(out.degradedNote).toBeUndefined();
+    });
+
+    it('adds nothing when no config was declined', async () => {
+      const out = await runApply(
+        { ddevMode: false, workspacePath: tmpdir(), lint: LINT },
+        { runLint: true },
+      );
+      expect(out.lint.ran).toBe(true);
+      expect(out.degradedNote).toBeUndefined();
     });
   });
 

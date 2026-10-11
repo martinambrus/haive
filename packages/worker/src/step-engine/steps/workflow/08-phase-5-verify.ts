@@ -1,5 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { ensureDirNoFollow, readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  ensureDirNoFollow,
+  readdirNoFollow,
+  readTextNoFollow,
+  removeNoFollow,
+} from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import type { FormSchema } from '@haive/shared';
@@ -32,7 +37,7 @@ import {
 import { checkOutputExcerpt } from './_fix-loop.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
-import type { TestFramework } from './08b-test-management.js';
+import { DRUPAL_CORE_MARKER, type TestFramework } from './08b-test-management.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { collectChangedLineMap, type ChangedLineMap } from './_impl-changes.js';
 import {
@@ -78,6 +83,9 @@ interface VerifyDetect {
   /** The PHP lint runner beside a root JS lint script; absent when `lint` is the only runner. */
   phpLint?: SlotCommand | null;
   typecheck: SlotCommand | null;
+  /** Tooling configs one level below the root that were seen and not used, each with its reason.
+   *  Optional because detect_output is persisted and replayed; absent when nothing was declined. */
+  declinedConfigs?: string[];
 }
 
 interface CheckResult {
@@ -166,6 +174,7 @@ export function buildUnverifiedNote(
     typecheck: CheckResult;
     phpLint?: CheckResult;
   },
+  declinedConfigs?: string[],
 ): string {
   if (results.test.ran || results.lint.ran || results.typecheck.ran || results.phpLint?.ran) {
     return '';
@@ -184,11 +193,19 @@ export function buildUnverifiedNote(
     parts.push(
       `No runner was detected in this workspace for: ${undetected.join(', ')}. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.`,
     );
+    const declined = declinedConfigsSentence(declinedConfigs);
+    if (declined) parts.push(declined);
   }
   if (unticked.length > 0) {
     parts.push(`Detected but not selected for this pass: ${unticked.join(', ')}.`);
   }
   return parts.join('\n\n');
+}
+
+/** What gate 2 and the unverified note say about the configs one level down that were not used. */
+export function declinedConfigsSentence(declined: string[] | undefined): string {
+  if (!declined || declined.length === 0) return '';
+  return `Searched: the repository root. Found one level below it and not used: ${declined.join(', ')}. Verify runs only the project's own root tooling.`;
 }
 
 /** Exit of the guard below; DDEV ships npm but pnpm and yarn only with `corepack_enable: true`. */
@@ -318,6 +335,11 @@ function pick(scripts: Record<string, string>, names: string[]): string | null {
   return null;
 }
 
+const PHPUNIT_CONFIGS = ['phpunit.xml', 'phpunit.xml.dist'];
+const PYTEST_CONFIGS = ['pytest.ini', 'pyproject.toml', 'tox.ini'];
+const PHPCS_CONFIGS = ['phpcs.xml', 'phpcs.xml.dist', '.phpcs.xml'];
+const PHPSTAN_CONFIGS = ['phpstan.neon', 'phpstan.neon.dist', 'phpstan.dist.neon'];
+
 /** Resolve the three verify-slot commands across JS / composer / PHP / Python.
  *  Precedence per slot: JS package script → composer script → framework binary. */
 async function resolveSlots(
@@ -336,10 +358,10 @@ async function resolveSlots(
     for (const n of names) if (await hasWorkspaceEntry(workspace, n)) return true;
     return false;
   };
-  const hasPhpunit = await has('phpunit.xml', 'phpunit.xml.dist');
-  const hasPytest = await has('pytest.ini', 'pyproject.toml', 'tox.ini');
-  const hasPhpcs = await has('phpcs.xml', 'phpcs.xml.dist', '.phpcs.xml');
-  const hasPhpstan = await has('phpstan.neon', 'phpstan.neon.dist', 'phpstan.dist.neon');
+  const hasPhpunit = await has(...PHPUNIT_CONFIGS);
+  const hasPytest = await has(...PYTEST_CONFIGS);
+  const hasPhpcs = await has(...PHPCS_CONFIGS);
+  const hasPhpstan = await has(...PHPSTAN_CONFIGS);
 
   const testJs = pick(pmScripts, ['test', 'test:unit', 'test:ci']);
   const test = testJs
@@ -381,6 +403,56 @@ async function resolveSlots(
         : null;
 
   return { test, lint, ...(phpLint ? { phpLint } : {}), typecheck };
+}
+
+const DECLINED_CONFIG_FILES = [
+  ...PHPUNIT_CONFIGS,
+  ...PYTEST_CONFIGS,
+  ...PHPCS_CONFIGS,
+  ...PHPSTAN_CONFIGS,
+  'jest.config.js',
+  'jest.config.ts',
+  'jest.config.mjs',
+  'jest.config.cjs',
+  'vitest.config.ts',
+  'vitest.config.js',
+  'vitest.config.mts',
+];
+
+const THIRD_PARTY_DIRS = new Set([
+  'contrib',
+  'libraries',
+  'third_party',
+  'third-party',
+  'thirdparty',
+]);
+
+function declinedReason(dir: string, drupalCore: boolean): string {
+  if (dir === 'core' && drupalCore) return 'Drupal core';
+  if (dir === 'vendor' || dir === 'node_modules') return 'vendor';
+  if (THIRD_PARTY_DIRS.has(dir)) return "not the project's";
+  return 'below the repository root';
+}
+
+/** Tooling configs exactly one level below the root: seen, never used. Sorted; empty when none. */
+async function findDeclinedConfigs(workspace: string): Promise<string[]> {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const entries = (await readdirNoFollow(anchor, prefix === '' ? '' : prefix.slice(0, -1))) ?? [];
+  const found: string[] = [];
+  const drupalCore = await hasWorkspaceEntry(workspace, DRUPAL_CORE_MARKER);
+  for (const dir of entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'))) {
+    const hits: string[] = [];
+    for (const name of ['package.json', 'composer.json']) {
+      const scripts = await readJsonScripts(workspace, `${dir.name}/${name}`);
+      if (Object.keys(scripts).length > 0) hits.push(name);
+    }
+    for (const name of DECLINED_CONFIG_FILES) {
+      if (await hasWorkspaceEntry(workspace, `${dir.name}/${name}`)) hits.push(name);
+    }
+    for (const name of hits)
+      found.push(`${dir.name}/${name} (${declinedReason(dir.name, drupalCore)})`);
+  }
+  return found.sort();
 }
 
 interface SlotRun {
@@ -798,7 +870,14 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const testFramework =
       ((infra?.detect ?? null) as { primary?: TestFramework | null } | null)?.primary ?? null;
     const slots = await resolveSlots(workspace, ddevMode);
-    return { workspacePath: workspace, ddevMode, testFramework, ...slots };
+    const declinedConfigs = await findDeclinedConfigs(workspace);
+    return {
+      workspacePath: workspace,
+      ddevMode,
+      testFramework,
+      ...slots,
+      ...(declinedConfigs.length > 0 ? { declinedConfigs } : {}),
+    };
   },
 
   form(_ctx, detected): FormSchema {
@@ -966,8 +1045,20 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         ...(phpLintCmd ? { phpLint: phpLintCmd } : {}),
       },
       { test, lint, typecheck, ...(phpLint ? { phpLint } : {}) },
+      args.detected.declinedConfigs,
     );
-    const slotNotes = [test.note, lint.note, phpLint?.note, typecheck.note]
+    const anyRan = test.ran || lint.ran || typecheck.ran || phpLint?.ran === true;
+    const slotUndetected =
+      args.detected.test === null ||
+      args.detected.lint === null ||
+      args.detected.typecheck === null;
+    const slotNotes = [
+      test.note,
+      lint.note,
+      phpLint?.note,
+      typecheck.note,
+      anyRan && slotUndetected ? declinedConfigsSentence(args.detected.declinedConfigs) : '',
+    ]
       .filter(Boolean)
       .join('\n');
     const degradedNote = buildVerifyDegradedNote(testEnvBlocker, unverified, slotNotes);
