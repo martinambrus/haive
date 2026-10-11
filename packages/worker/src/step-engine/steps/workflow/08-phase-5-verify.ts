@@ -184,6 +184,13 @@ const DDEV_PM_GUARD = shellQuote(
   `command -v "\\$1" >/dev/null 2>&1 || exit ${PM_MISSING_EXIT}; exec "\\$@"`,
 );
 
+/** The guard run in its place: it prints `marker` before its exit, so a script's own 199 never reads as a missing tool. */
+function markedPmGuard(marker: string): string {
+  return shellQuote(
+    `command -v "\\$1" >/dev/null 2>&1 || { echo ${marker}; exit ${PM_MISSING_EXIT}; }; exec "\\$@"`,
+  );
+}
+
 /**
  * Build the command for a verify slot from the detected runner. Pure (no IO) so
  * it is unit-testable. Every runner goes through DDEV when `ddevMode`, else
@@ -369,18 +376,20 @@ async function execSlot(
     // A full suite is minutes of silence, and a fixed status line is indistinguishable from a
     // stuck task. Same live status every long DDEV op already uses: latest line + an elapsed
     // counter that ticks through silent phases.
+    const guardAt = cmd.argv.indexOf(DDEV_PM_GUARD);
+    const marker = `haive-pm-missing-${randomBytes(8).toString('hex')}`;
+    const argv = cmd.argv.map((word, i) => (i === guardAt ? markedPmGuard(marker) : word));
     const res = await withDdevProgress(
       ctx,
       `Running ${cmd.label}`,
       (onLine) =>
-        ddevExec(handle, [...cmd.argv, ...extraArgs].join(' '), {
+        ddevExec(handle, [...argv, ...extraArgs].join(' '), {
           timeoutMs: SLOT_TIMEOUT_MS,
           onLine,
         }),
       { initialLine: cmd.argv.join(' ') },
     );
-    const guardAt = cmd.argv.indexOf(DDEV_PM_GUARD);
-    if (guardAt >= 0 && res.exitCode === PM_MISSING_EXIT) {
+    if (guardAt >= 0 && res.exitCode === PM_MISSING_EXIT && res.output.includes(marker)) {
       const note = `${cmd.argv[guardAt + 2]} is not available in the DDEV web container (set corepack_enable: true in .ddev/config.yaml)`;
       return { ran: false, note, exitCode: res.exitCode, output: note, raw: res.output };
     }

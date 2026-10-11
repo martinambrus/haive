@@ -656,7 +656,7 @@ describe('phase5VerifyStep.apply', () => {
           ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
             args.includes('curl')
               ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
-              : { exitCode: 199, output: '' },
+              : { exitCode: 199, output: `${/haive-pm-missing-[0-9a-f]+/.exec(args)?.[0]}\n` },
           );
 
           const out = await runApply({ test: pmSlot(pm) }, { runTest: true });
@@ -666,10 +666,24 @@ describe('phase5VerifyStep.apply', () => {
             passed: false,
             note: `${pm} is not available in the DDEV web container (set corepack_enable: true in .ddev/config.yaml)`,
           });
-          expect(slotExecs()[0]![1]).toMatch(/^exec sh -c '.*exit 199.*' sh \w+ run test$/);
+          expect(slotExecs()[0]![1]).toMatch(
+            /^exec sh -c '.*haive-pm-missing-[0-9a-f]{16}.*exit 199.*' sh \w+ run test$/,
+          );
           expect(slotExecs()[0]![1]).toContain(` sh ${pm} run test`);
         },
       );
+
+      it("reads a script's own exit 199 as a failure, not a missing tool", async () => {
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+          args.includes('curl')
+            ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+            : { exitCode: 199, output: 'the suite exited 199' },
+        );
+
+        const out = await runApply({ test: pmSlot('pnpm') }, { runTest: true });
+
+        expect(out.test).toMatchObject({ ran: true, passed: false });
+      });
 
       it('leaves npm unguarded and a real failure a failure', async () => {
         expect(pmSlot('npm').argv).toEqual(['exec', 'npm', 'run', 'test']);
