@@ -315,7 +315,13 @@ export async function runScopedShellSession(
     sendJson(ws, { type: 'output', data: raw });
   });
 
-  sendJson(ws, { type: 'connected', sessionId, containerName, shell });
+  sendJson(ws, {
+    type: 'connected',
+    sessionId,
+    containerName,
+    shell,
+    ...(reply.workdirMismatch ? { workdirMismatch: reply.workdirMismatch } : {}),
+  });
 
   keepalive = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -352,6 +358,16 @@ export async function runScopedShellSession(
         .publish(ctlChannel, JSON.stringify({ type: 'resize', cols: frame.cols, rows: frame.rows }))
         .catch((err) => {
           log.warn({ err, sessionId }, 'publish resize failed');
+        });
+    } else if (frame.type === 'restart_shell') {
+      if (scope !== 'task') {
+        sendJson(ws, { type: 'error', message: 'restart is only available for a task shell' });
+        return;
+      }
+      await publisher
+        .publish(ctlChannel, JSON.stringify({ type: 'restart_shell', userId }))
+        .catch((err) => {
+          log.warn({ err, sessionId }, 'publish restart failed');
         });
     } else if (frame.type === 'ping') {
       sendJson(ws, { type: 'pong' });

@@ -904,6 +904,13 @@ export interface TerminalOpenReply {
   sessionId: string;
   containerName: string;
   shell: 'bash' | 'sh';
+  /** Task scope only: the live tmux session started in `sessionPath`, not in `expected`. */
+  workdirMismatch?: TerminalWorkdirMismatch;
+}
+
+export interface TerminalWorkdirMismatch {
+  sessionPath: string;
+  expected: string;
 }
 
 export interface TerminalOpenError {
@@ -923,7 +930,13 @@ export interface TerminalResizeFrame {
   rows: number;
 }
 
-export type TerminalControlFrame = TerminalResizeFrame;
+/** Kills the task shell's tmux session so the next attach starts at the current workdir. */
+export interface TerminalRestartShellFrame {
+  type: 'restart_shell';
+  userId: string;
+}
+
+export type TerminalControlFrame = TerminalResizeFrame | TerminalRestartShellFrame;
 
 export const FRAMEWORK_PATTERNS = {
   wordpress: {
