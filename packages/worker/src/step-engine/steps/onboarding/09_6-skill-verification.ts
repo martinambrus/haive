@@ -264,10 +264,10 @@ export async function checkSkill(
   };
 }
 
-/** Provider the fix should run on, or null for "no change / not applicable". Pure so the
- *  gate → target-step routing is unit-tested without a DB. Only a repair/regenerate whose
- *  chosen provider is enabled AND differs from the current model records a choice;
- *  anything else leaves the target step as it already resolves. */
+/** Provider the fix should run on, or null when there is no fix to run. Pure so the
+ *  gate → target-step routing is unit-tested without a DB. A repair/regenerate records the
+ *  provider the form showed, the default included, since the target step would otherwise
+ *  resolve its own (a CLIs-tab pick or a saved preference) and run on something else. */
 export interface GateCliChoice {
   targetStepId: string;
   cliProviderId: string;
@@ -276,12 +276,11 @@ export interface GateCliChoice {
 export function resolveGateCliChoice(args: {
   decision: SkillVerificationApply['decision'];
   repairCli: string | undefined;
-  currentCliId: string | null;
   enabledIds: string[];
 }): GateCliChoice | null {
-  const { decision, repairCli, currentCliId, enabledIds } = args;
+  const { decision, repairCli, enabledIds } = args;
   if (decision !== 'repair' && decision !== 'regenerate') return null;
-  if (!repairCli || repairCli === currentCliId) return null;
+  if (!repairCli) return null;
   if (!enabledIds.includes(repairCli)) return null;
   return {
     targetStepId: decision === 'repair' ? SKILL_REPAIR_STEP_ID : SKILL_GENERATION_STEP_ID,
@@ -473,7 +472,6 @@ export const skillVerificationStep: StepDefinition<
     const cliChoice = resolveGateCliChoice({
       decision,
       repairCli: typeof values.repairCli === 'string' ? values.repairCli : undefined,
-      currentCliId: detected.currentCliId,
       enabledIds: detected.cliOptions.map((o) => o.id),
     });
     if (cliChoice) {

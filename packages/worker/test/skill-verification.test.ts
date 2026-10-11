@@ -251,7 +251,6 @@ describe('resolveGateCliChoice', () => {
       resolveGateCliChoice({
         decision: 'accept',
         repairCli: 'p2',
-        currentCliId: 'p1',
         enabledIds: enabled,
       }),
     ).toBeNull();
@@ -259,7 +258,6 @@ describe('resolveGateCliChoice', () => {
       resolveGateCliChoice({
         decision: 'none',
         repairCli: 'p2',
-        currentCliId: 'p1',
         enabledIds: enabled,
       }),
     ).toBeNull();
@@ -270,7 +268,6 @@ describe('resolveGateCliChoice', () => {
       resolveGateCliChoice({
         decision: 'repair',
         repairCli: 'p2',
-        currentCliId: 'p1',
         enabledIds: enabled,
       }),
     ).toEqual({ targetStepId: '09_5b-skill-repair', cliProviderId: 'p2' });
@@ -278,26 +275,26 @@ describe('resolveGateCliChoice', () => {
       resolveGateCliChoice({
         decision: 'regenerate',
         repairCli: 'p2',
-        currentCliId: 'p1',
         enabledIds: enabled,
       }),
     ).toEqual({ targetStepId: '09_5-skill-generation', cliProviderId: 'p2' });
   });
 
-  it('returns null when the pick equals the current model, is unknown/disabled, or absent', () => {
+  it('records the pick even when it equals the current model, so the fix runs on what was shown', () => {
     expect(
       resolveGateCliChoice({
         decision: 'repair',
         repairCli: 'p1',
-        currentCliId: 'p1',
         enabledIds: enabled,
       }),
-    ).toBeNull();
+    ).toEqual({ targetStepId: '09_5b-skill-repair', cliProviderId: 'p1' });
+  });
+
+  it('returns null when the pick is unknown/disabled, or absent', () => {
     expect(
       resolveGateCliChoice({
         decision: 'repair',
         repairCli: 'pX',
-        currentCliId: 'p1',
         enabledIds: enabled,
       }),
     ).toBeNull();
@@ -305,7 +302,6 @@ describe('resolveGateCliChoice', () => {
       resolveGateCliChoice({
         decision: 'repair',
         repairCli: undefined,
-        currentCliId: 'p1',
         enabledIds: enabled,
       }),
     ).toBeNull();
@@ -417,7 +413,7 @@ describe('skillVerificationStep.apply CLI write', () => {
     expect(await resolve(LATER_TASK)).toEqual({ cliProviderId: CURRENT, effortLevel: null });
   });
 
-  it('writes nothing when the pick equals the current model', async () => {
+  it('records the pick even when it equals the current model, so the fix runs on what was shown', async () => {
     const inserts: Record<string, unknown>[] = [];
     const ctx = {
       userId: 'u1',
@@ -431,6 +427,8 @@ describe('skillVerificationStep.apply CLI write', () => {
       iteration: 0,
       previousIterations: [],
     });
-    expect(inserts).toEqual([]);
+    expect(inserts).toEqual([
+      expect.objectContaining({ stepId: '09_5b-skill-repair', cliProviderId: 'p1' }),
+    ]);
   });
 });
