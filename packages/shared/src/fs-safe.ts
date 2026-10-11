@@ -759,6 +759,8 @@ export interface ApplyTreeResult {
 
 const APPLY_TREE_CONCURRENCY = 32;
 
+const STALE_TEMP_MS = 60 * 60 * 1000;
+
 function wantedOwner(stats: Stats, opts: ApplyTreeOptions): Owner | null {
   if (!opts.owner) return null;
   return stats.uid === opts.owner.uid && stats.gid === opts.owner.gid ? null : opts.owner;
@@ -1570,6 +1572,7 @@ export interface WriteFileOptions {
  * Three modes, because the right one depends on who else is reading the file:
  * - `replace-atomic` (default) — write a temp beside it and rename over. A concurrent reader sees
  *   the old bytes or the new ones, never a half-written file. For anything parsed by a machine.
+ *   A write also removes that name's temps a dead process left, once they are an hour old.
  * - `overwrite-in-place` — keeps the inode, owner and mode, for a file something holds open or
  *   whose identity matters.
  * - `create-exclusive` — refuses to replace anything at all. A write that fails while the process
@@ -1645,7 +1648,30 @@ export async function writeFileNoFollow(
     await closeQuietly(fh);
     if (!renamed) await removeNoFollow(anchor, tmpRel).catch(() => undefined);
   }
+  await sweepStaleTemps(anchor, segs, leaf);
   return found === null ? 'created' : 'overwritten';
+}
+
+// Age, not pid: a restarted container reuses pids, and a live writer's temp is fresh.
+async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string): Promise<void> {
+  const prefix = `.${leaf}.haive-tmp-`;
+  try {
+    const entries = await readdirNoFollow(anchor, dirSegs.join('/'));
+    for (const entry of entries ?? []) {
+      if (!entry.name.startsWith(prefix) || !entry.isFile()) continue;
+      const rel = [...dirSegs, entry.name].join('/');
+      try {
+        const info = await lstatNoFollow(anchor, rel);
+        if (
+          info !== null &&
+          info.kind === 'file' &&
+          Date.now() - info.stats.mtimeMs > STALE_TEMP_MS
+        ) {
+          await removeNoFollow(anchor, rel);
+        }
+      } catch {}
+    }
+  } catch {}
 }
 
 export interface UpdateFileOptions {
