@@ -42,24 +42,17 @@ vi.mock('../src/sandbox/runner-browser-cdp.js', async (importOriginal) => ({
   ...browserCdp,
 }));
 
-// The enforced rules a dispatch is shown; null leaves the real store read, as every other test here has it.
-const kb = vi.hoisted(() => ({ rules: null as unknown[] | null }));
-vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => {
-  const original =
-    await importOriginal<typeof import('../src/orchestrator/global-kb-context.js')>();
-  return {
-    ...original,
-    resolveGlobalKbContext: (...args: Parameters<typeof original.resolveGlobalKbContext>) =>
-      kb.rules === null
-        ? original.resolveGlobalKbContext(...args)
-        : Promise.resolve({
-            digest: { entries: [], omitted: 0, scanSaturated: false },
-            rules: kb.rules,
-            refused: [],
-            status: 'ok' as const,
-          }),
-  };
-});
+// The enforced rules a dispatch is shown; the default is an empty, readable store, since no test here initializes ConfigService.
+const kb = vi.hoisted(() => ({ rules: [] as unknown[] }));
+vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveGlobalKbContext: async () => ({
+    digest: { entries: [], omitted: 0, scanSaturated: false },
+    rules: kb.rules,
+    refused: [],
+    status: 'ok' as const,
+  }),
+}));
 
 interface MiningRow {
   id: string;
@@ -3295,7 +3288,7 @@ describe('the 08c fan-out and the house rules', () => {
   };
 
   afterEach(() => {
-    kb.rules = null;
+    kb.rules = [];
   });
 
   /** What the real 08c selects and the real runner sends, by seat: the stamp the job carries and the prompt. */
