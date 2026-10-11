@@ -182,13 +182,6 @@ export async function ensureGlobalKbSchema(
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
-    try {
-      await exec(
-        `CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw ON ${VECTORS_TABLE} USING hnsw ((vector::halfvec(${dims})) halfvec_cosine_ops)`,
-      );
-    } catch (err) {
-      log.warn({ err }, 'global KB HNSW index creation failed; vector search uses sequential scan');
-    }
   } else {
     await exec(`
       CREATE TABLE IF NOT EXISTS ${VECTORS_TABLE} (
@@ -208,6 +201,23 @@ export async function ensureGlobalKbSchema(
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
+  }
+
+  // How each vector was made; NULL = unknown (written before this existed). Dense ranking reads `model` only.
+  await exec(
+    `ALTER TABLE ${VECTORS_TABLE} ADD COLUMN IF NOT EXISTS embed_kind TEXT CHECK (embed_kind IN ('model','hashed'))`,
+  );
+  await exec(`ALTER TABLE ${VECTORS_TABLE} ADD COLUMN IF NOT EXISTS embed_model TEXT`);
+  if (usedPgvector) {
+    // Model rows only: pgvector filters after the HNSW scan, so hash rows in the index would crowd model candidates out.
+    try {
+      await exec(
+        `CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw_model ON ${VECTORS_TABLE} USING hnsw ((vector::halfvec(${dims})) halfvec_cosine_ops) WHERE embed_kind = 'model'`,
+      );
+      await exec(`DROP INDEX IF EXISTS idx_global_rag_vector_hnsw`);
+    } catch (err) {
+      log.warn({ err }, 'global KB HNSW index creation failed; vector search uses sequential scan');
+    }
   }
 
   // Upsert key + lookup/scope indexes (both variants).

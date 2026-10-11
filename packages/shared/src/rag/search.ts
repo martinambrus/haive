@@ -435,7 +435,8 @@ export async function ragHybridSearch(
     // the global KB passes the facet filter. They are mutually exclusive today but
     // combine cleanly (AND) if both are ever supplied.
     const conds = [fc?.core, repoCond, EXCLUDE_TASK_ROWS].filter(Boolean) as string[];
-    const denseWhere = conds.length ? `WHERE ${conds.join('\n          AND ')}` : '';
+    const denseConds = filter ? [...conds, `embed_kind = 'model'`] : conds;
+    const denseWhere = denseConds.length ? `WHERE ${denseConds.join('\n          AND ')}` : '';
     const lexExtra = conds.map((c) => `\n          AND ${c}`).join('');
     // The identifier ranker is a THIRD input to the fusion, appended after every
     // existing param so none of the numbering above shifts. When the query holds
@@ -466,6 +467,10 @@ export async function ragHybridSearch(
     // repo/facet filter is served by a bitmap index scan + exact sort (the planner's
     // own choice) — fast and exact — so no iterative_scan GUC (and thus no
     // transaction wrapper) is needed.
+    // A global row reached only by words reports no dense similarity: its vector was never ranked.
+    const denseSimFallback = 'COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))';
+    const denseSimSel = filter ? 'd.dense_sim' : denseSimFallback;
+    const hybridSim = filter ? 'COALESCE(d.dense_sim, 0)' : denseSimFallback;
     const sqlText = `
       WITH q AS (
         SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh,
@@ -522,10 +527,10 @@ export async function ragHybridSearch(
       )
       SELECT
         e.source_path, e.section_id, e.chunk_index, e.source_type, e.content, e.id,
-        COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q))) AS dense_sim,
+        ${denseSimSel} AS dense_sim,
         (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1)) AS ts_norm,
         (
-          $6 * COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))
+          $6 * ${hybridSim}
           + $7 * (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1))
         ) AS hybrid,
         (
@@ -677,7 +682,7 @@ async function fetchKnowledgeCandidates(
   const repoParam = 5 + (fc?.params.length ?? 0);
   const conds = [
     `source_type = ANY($2::text[])`,
-    ...(fc ? [fc.core] : []),
+    ...(fc ? [fc.core, `embed_kind = 'model'`] : []),
     ...(repositoryId ? [`repository_id = $${repoParam}`] : []),
   ];
   const params: (string | number)[] = [

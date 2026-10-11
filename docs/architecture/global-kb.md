@@ -225,8 +225,14 @@ over its vectors in the global store, and amends the row by compare-and-set on `
 cold embed measured 4.6-42.8 s, with the ingest budget (`RAG_EMBED_TIMEOUT_MS`, 240 s, admin-tunable), not
 a query's. It reads `vector` or, on a store without pgvector, `embedding_json`, and scores a rule only
 while its enforced hash still equals the stamped one; a rule edited since gets `score: null, stale: true`.
-Nothing marks a hash-fallback vector apart from a model one, so with
-`RAG_EMBED_STRICT_ENABLED` off the scorer records `failed`/`unknown_provenance` rather than score noise. The
+Every global vector row records its provenance: `embed_kind` (`model` or `hashed`) and, for a model row,
+`embed_model`, written by the sync from `embedBatch`'s kind (ensure DDL, nullable, NULL = unknown). The
+scorer and the global dense half of `ragHybridSearch` read only `embed_kind = 'model'` rows, so a
+hash-fallback vector written with `RAG_EMBED_STRICT_ENABLED` off is never ranked as a model one; it is
+still found by words. Rows written before the column existed are classified at boot and on every 5-minute reconcile sweep, so a KB enabled or reachable only after boot is covered
+(`classifyGlobalKbVectorProvenance`, convergent): a hash vector is a pure function of its chunk text, so
+a stored vector matching `hashEmbed(content, dims)` (cosine ≥ 0.9999) is `hashed` and anything else
+`model`, with no re-embed. The global HNSW index is partial (`WHERE embed_kind = 'model'`, replacing the full one): pgvector filters after its candidate scan, so hash rows in the index would crowd model candidates out of the dense half (MEASURED with EXPLAIN: the filtered query scans the partial index). `unknown_provenance` stays in the enum only so stored records parse. The
 cli-exec job waits for its scorer before it completes (the CLI itself is never delayed), so a worker
 restart cannot strand a `pending` record; one still pending past the embed budget plus 15 s is
 `failed`/`abandoned`. `config:globalKb:houseRulesSimilarity`: `off` scores nothing; anything

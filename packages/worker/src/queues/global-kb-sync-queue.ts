@@ -20,6 +20,7 @@ import {
   type GlobalKbContext,
 } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
+import { classifyGlobalKbVectorProvenance } from '../global-kb-vector-provenance.js';
 import { getBullRedis } from '../redis.js';
 import {
   capChunks,
@@ -96,6 +97,7 @@ async function writeSyncResults(
     content: string;
   }>,
   embeddings: ReadonlyArray<number[]>,
+  kinds: ReadonlyArray<'model' | 'hashed'>,
 ): Promise<SyncWriteOutcome> {
   const usedPgvector = chunks.length > 0 ? await hasVectorColumn(ctx) : false;
   const facetsJson = JSON.stringify(entry.facets ?? {});
@@ -132,17 +134,19 @@ async function writeSyncResults(
         facetsJson,
         chunk.content,
       ];
+      const kind = kinds[i]!;
+      const provenance = [kind, kind === 'model' ? ctx.conn.embedModel : null];
       if (usedPgvector) {
         await tx.unsafe(
-          `INSERT INTO ai_rag_embeddings (namespace, user_id, entry_id, source_type, source_path, section_id, chunk_index, chunk_hash, facets, content, vector)
-           VALUES ($1, $2, $3, 'kb', $4, $5, $6, $7, $8::jsonb, $9, $10::vector)`,
-          [...common, vectorLiteral(embeddings[i]!)],
+          `INSERT INTO ai_rag_embeddings (namespace, user_id, entry_id, source_type, source_path, section_id, chunk_index, chunk_hash, facets, content, vector, embed_kind, embed_model)
+           VALUES ($1, $2, $3, 'kb', $4, $5, $6, $7, $8::jsonb, $9, $10::vector, $11, $12)`,
+          [...common, vectorLiteral(embeddings[i]!), ...provenance],
         );
       } else {
         await tx.unsafe(
-          `INSERT INTO ai_rag_embeddings (namespace, user_id, entry_id, source_type, source_path, section_id, chunk_index, chunk_hash, facets, content, embedding_json)
-           VALUES ($1, $2, $3, 'kb', $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb)`,
-          [...common, JSON.stringify(embeddings[i]!)],
+          `INSERT INTO ai_rag_embeddings (namespace, user_id, entry_id, source_type, source_path, section_id, chunk_index, chunk_hash, facets, content, embedding_json, embed_kind, embed_model)
+           VALUES ($1, $2, $3, 'kb', $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb, $11, $12)`,
+          [...common, JSON.stringify(embeddings[i]!), ...provenance],
         );
       }
     }
@@ -262,6 +266,7 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
         // timeout-prone embed call in the codebase.
         const batchSize = await resolveEmbedBatchSize();
         const embeddings: number[][] = [];
+        const kinds: Array<'model' | 'hashed'> = [];
         for (let start = 0; start < texts.length; start += batchSize) {
           const outcome = await embedBatch({
             ollamaUrl: ctx.conn.ollamaUrl,
@@ -277,12 +282,14 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
             throw new RagEmbedFailureError(outcome.reason);
           }
           embeddings.push(...outcome.embeddings);
+          const kind = outcome.kind === 'embedded' ? 'model' : 'hashed';
+          kinds.push(...outcome.embeddings.map(() => kind));
         }
 
-        outcome = await writeSyncResults(ctx, entry, sourcePath, chunks, embeddings);
+        outcome = await writeSyncResults(ctx, entry, sourcePath, chunks, embeddings, kinds);
       } else {
         // No extractable content (e.g. an empty body): the same guarded write clears stale chunks.
-        outcome = await writeSyncResults(ctx, entry, sourcePath, [], []);
+        outcome = await writeSyncResults(ctx, entry, sourcePath, [], [], []);
       }
       if (outcome === 'retired') {
         log.info(
@@ -428,6 +435,8 @@ export function pickLostSyncs<T extends { id: string }>(
 export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
   const settings = await resolveGlobalKbSettings();
   if (!settings.enabled) return;
+  // A store enabled or reachable only after boot still gets its pre-provenance vectors classified.
+  await classifyGlobalKbVectorProvenance(getDb());
   const cutoff = new Date(Date.now() - RECONCILE_GRACE_MS);
   const pending = await withGlobalKb(getDb(), (ctx) =>
     ctx.db

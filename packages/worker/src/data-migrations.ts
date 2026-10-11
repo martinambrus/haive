@@ -19,6 +19,7 @@ import {
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { TOOLING_ID_PATTERN } from './cli-executor/tool-usage.js';
+import { classifyGlobalKbVectorProvenance } from './global-kb-vector-provenance.js';
 import { getBullRedis } from './redis.js';
 import { getCliExecQueue } from './queues/cli-exec/_shared.js';
 import { backfillToolUsageAtBoot } from './queues/cli-exec/tool-usage-backfill.js';
@@ -112,6 +113,12 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'backfillToolUsage', kind: 'convergent', run: backfillToolUsageAtBoot },
   { id: 'recomputeSyncedApplicableSets', kind: 'convergent', run: recomputeSyncedApplicableSets },
   { id: 'copySecretLikeProviderEnv', kind: 'convergent', run: copySecretLikeProviderEnv },
+  // After the schema ensure that adds `embed_kind`, which `withGlobalKb` runs at first use.
+  {
+    id: 'classifyGlobalKbVectorProvenance',
+    kind: 'convergent',
+    run: classifyGlobalKbVectorProvenance,
+  },
   // It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
   // Nothing can undo it.

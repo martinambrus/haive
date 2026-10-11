@@ -29,15 +29,7 @@ type Candidates = NonNullable<HouseRulesSimilarity['scores']>;
 
 type SimilarityErrorClass = NonNullable<HouseRulesSimilarity['errorClass']>;
 
-/** A failure that already knows its class. */
-class SimilarityFailure extends Error {
-  constructor(readonly errorClass: SimilarityErrorClass) {
-    super(errorClass);
-  }
-}
-
 function failureClass(err: unknown): SimilarityErrorClass {
-  if (err instanceof SimilarityFailure) return err.errorClass;
   if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
     return 'timeout';
   }
@@ -86,8 +78,6 @@ async function measure(
   const settings = await resolveGlobalKbSettings();
   const { ollamaUrl, embedModel, embeddingDimensions } = settings;
   if (!ollamaUrl || !embedModel) throw new Error('no embedder is configured');
-  // Nothing stored tells a hash row from a model row, and with strict mode off a failed sync keeps its hash vectors as `embedded`.
-  if (!(await resolveEmbedBudget()).strict) throw new SimilarityFailure('unknown_provenance');
   // Default = ingest budget (RAG_EMBED_TIMEOUT_MS): a cold load measured 42.8 s and an abort cancels it.
   const [vector] = await ollamaEmbed(ollamaUrl, embedModel, [query]);
   if (vector?.length !== embeddingDimensions) {
@@ -110,6 +100,7 @@ async function measure(
             where r.namespace = ${settings.namespace}
               and r.entry_id = any(${ids}::uuid[])
               and e.embed_status = 'embedded'
+              and r.embed_kind = 'model'
             group by r.entry_id, e.enforced_hash`);
           return read as unknown as Array<{
             id: string;
@@ -123,7 +114,8 @@ async function measure(
           join global_kb_entries e on e.id = r.entry_id
           where r.namespace = ${settings.namespace}
             and r.entry_id = any(${ids}::uuid[])
-            and e.embed_status = 'embedded'`);
+            and e.embed_status = 'embedded'
+            and r.embed_kind = 'model'`);
         return bestCosines(
           read as unknown as Array<{ id: string; hash: string | null; embedding: unknown }>,
           vector,

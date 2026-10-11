@@ -140,6 +140,37 @@ describe('ensureGlobalKbSchema', () => {
     expect(mentioning).toEqual([statement]);
   });
 
+  // NULL means unknown (a row written before provenance existed), so neither column has a default.
+  it.each([
+    ['pgvector', {}],
+    ['jsonb', { vectorThrows: '0A000' }],
+  ])(
+    'adds the provenance columns in a locked step each, on the %s variant',
+    async (_label, opts) => {
+      const { conn, transactions } = fakeConn(opts);
+      await ensureGlobalKbSchema(conn);
+      const kind =
+        "ALTER TABLE ai_rag_embeddings ADD COLUMN IF NOT EXISTS embed_kind TEXT CHECK (embed_kind IN ('model','hashed'))";
+      const model = 'ALTER TABLE ai_rag_embeddings ADD COLUMN IF NOT EXISTS embed_model TEXT';
+
+      for (const statement of [kind, model]) {
+        const steps = transactions().filter((tx) => tx.includes(statement));
+        expect(steps).toHaveLength(1);
+        expect(steps[0]).toHaveLength(2);
+        expect(steps[0]![0]).toContain('pg_advisory_xact_lock');
+      }
+    },
+  );
+
+  it('emits the same guarded statements on a second run', async () => {
+    const first = fakeConn();
+    await ensureGlobalKbSchema(first.conn);
+    const second = fakeConn();
+    await ensureGlobalKbSchema(second.conn);
+
+    expect(second.queries()).toBe(first.queries());
+  });
+
   it('never lets the facet backfill store a JSON null', async () => {
     const { conn, queries } = fakeConn();
     await ensureGlobalKbSchema(conn);
@@ -363,7 +394,25 @@ describe('ensureGlobalKbSchema', () => {
     const sql = queries();
 
     expect(res.usedPgvector).toBe(true);
-    expect(sql).toMatch(/CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw [^\n]*\nROLLBACK/);
+    expect(sql).toMatch(
+      /CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw_model [^\n]*\nROLLBACK/,
+    );
     expect(sql.split('ROLLBACK')[1]).toContain('uq_global_rag_ns_entry_section_chunk');
+    // A refused model index keeps the old full one rather than leaving no index at all.
+    expect(sql).not.toContain('DROP INDEX IF EXISTS idx_global_rag_vector_hnsw\n');
+  });
+
+  it('indexes model vectors only, replacing the full HNSW index, so hash rows cannot crowd the scan', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const sql = queries();
+    expect(sql).toMatch(
+      /CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw_model ON [^\n]* USING hnsw [^\n]*WHERE embed_kind = 'model'/,
+    );
+    expect(sql).not.toMatch(/CREATE INDEX IF NOT EXISTS idx_global_rag_vector_hnsw ON/);
+    expect(sql).toContain('DROP INDEX IF EXISTS idx_global_rag_vector_hnsw');
+    expect(sql.indexOf('ADD COLUMN IF NOT EXISTS embed_kind')).toBeLessThan(
+      sql.indexOf('idx_global_rag_vector_hnsw_model'),
+    );
   });
 });
