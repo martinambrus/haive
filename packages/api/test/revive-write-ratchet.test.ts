@@ -144,6 +144,39 @@ function bindingOf(at: ts.Node, name: string): ts.VariableDeclaration | 'opaque'
   return null;
 }
 
+/** Whether a use of the patch could change it: anything but reading one of its properties or
+ *  handing it to a `.set(...)`, since a helper, an alias or a replacement may give it a status. */
+function escapes(use: ts.Identifier): boolean {
+  const p = use.parent;
+  const named = p as { name?: ts.Node };
+  if (
+    named.name === use &&
+    (ts.isVariableDeclaration(p) ||
+      ts.isParameter(p) ||
+      ts.isBindingElement(p) ||
+      ts.isPropertyAccessExpression(p) ||
+      ts.isPropertyAssignment(p) ||
+      ts.isFunctionDeclaration(p) ||
+      ts.isMethodDeclaration(p) ||
+      ts.isPropertyDeclaration(p))
+  ) {
+    return false;
+  }
+  if (
+    (ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) &&
+    p.expression === use
+  ) {
+    return false;
+  }
+  if (ts.isSpreadAssignment(p) || ts.isSpreadElement(p)) return false;
+  return !(
+    ts.isCallExpression(p) &&
+    ts.isPropertyAccessExpression(p.expression) &&
+    p.expression.name.text === 'set' &&
+    p.arguments.includes(use)
+  );
+}
+
 /** Whether the object a name holds may carry a `status`: its own declaration's initializer may, or
  *  the scope that declares it assigns into it or replaces it; a binding this file cannot see may. */
 function objectMayCarryStatus(at: ts.Node, name: string): boolean {
@@ -183,17 +216,7 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
     ) {
       found = true;
     }
-    if (
-      ts.isIdentifier(n) &&
-      n.text === name &&
-      ((ts.isBinaryExpression(n.parent) &&
-        n.parent.left === n &&
-        n.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-        n.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
-        (ts.isCallExpression(n.parent) &&
-          n.parent.expression.getText() === 'Object.assign' &&
-          n.parent.arguments[0] === n))
-    ) {
+    if (ts.isIdentifier(n) && n.text === name && n !== decl.name && escapes(n)) {
       found = true;
     }
     if (!found) ts.forEachChild(n, visit);
@@ -467,6 +490,9 @@ describe('a live-status write on a task row', () => {
       ).length;
     expect(count(`let patch = {}; patch = { status: 'running' };`)).toBe(1);
     expect(count(`const patch = {}; Object.assign(patch, o);`)).toBe(1);
+    expect(count(`const patch = {}; fillTaskPatch(patch);`)).toBe(1);
+    expect(count(`const patch = {}; const alias = patch; alias.status = o;`)).toBe(1);
+    expect(count(`const patch = { title: 't' }; log(patch.title);`)).toBe(0);
     expect(count(`const patch = { title: 't' };`)).toBe(0);
   });
 
