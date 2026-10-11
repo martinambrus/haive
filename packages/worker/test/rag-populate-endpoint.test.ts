@@ -207,6 +207,26 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
+  it('words a fallback-only run as fallback vectors, not as unsearchable chunks', async () => {
+    mocks.strict = false;
+    mocks.embedFails = true;
+    await populate(detected({ ollamaReachable: true }));
+    const warning = warnings.at(-1)!;
+    expect(warning).toContain('fallback vectors');
+    expect(warning).toContain('re-embedded on the next sync');
+    expect(warning).not.toContain('not searchable');
+  });
+
+  it('keeps the strict-failure wording when the step fails', async () => {
+    mocks.embedFails = true;
+    await expect(populate(detected({ ollamaReachable: false }))).rejects.toBeInstanceOf(
+      RagEmbedFailureError,
+    );
+    const warning = warnings.at(-1)!;
+    expect(warning).toContain('Chunks left unindexed by the failure are not searchable yet');
+    expect(warning).not.toContain('fallback vectors');
+  });
+
   it('keeps a degradation recorded earlier when this run wrote hash vectors', async () => {
     mocks.strict = false;
     mocks.embedFails = true;

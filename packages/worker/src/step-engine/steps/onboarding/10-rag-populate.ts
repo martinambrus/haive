@@ -951,11 +951,14 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           .set({
             warningMessage: composeRagWarning(
               embedDeviceWarning(embedDevice),
-              ragEmbedWarning({
-                degradedAt: health.degradedAt ?? new Date(),
-                degradedReason: HASH_WITH_ENDPOINT_REASON,
-                lexicalOnly: false,
-              }),
+              ragEmbedWarning(
+                {
+                  degradedAt: health.degradedAt ?? new Date(),
+                  degradedReason: HASH_WITH_ENDPOINT_REASON,
+                  lexicalOnly: false,
+                },
+                { skippedChunks: 0, hashedChunks: hashed.chunks },
+              ),
             ),
           })
           .where(eq(schema.taskSteps.id, ctx.taskStepId));

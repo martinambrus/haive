@@ -1341,6 +1341,34 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
     expect(order[0]).toBe('degraded');
   });
 
+  it('words a fallback-only run as fallback vectors that are still searchable lexically', async () => {
+    mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
+    await sync();
+    const warning = warnings.at(-1)!;
+    expect(warning).toContain('fallback vectors');
+    expect(warning).toContain('re-embedded on the next sync');
+    expect(warning).not.toContain('not searchable');
+    expect(warning).not.toContain('left unindexed');
+  });
+
+  it('keeps the strict-failure wording for chunks left unindexed', async () => {
+    mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+    await sync();
+    const warning = warnings.at(-1)!;
+    expect(warning).toContain('were left unindexed rather than stored with meaningless vectors');
+    expect(warning).toContain('not searchable yet');
+    expect(warning).not.toContain('fallback vectors');
+  });
+
+  it('shows both facts when a run skipped some chunks and hashed others', async () => {
+    mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
+    mocks.embed.mockResolvedValueOnce({ kind: 'failed', reason: 'Ollama is unreachable' });
+    await sync();
+    const warning = warnings.at(-1)!;
+    expect(warning).toContain('left unindexed');
+    expect(warning).toContain('fallback vectors');
+  });
+
   it('re-embeds those rows as updates on the next healthy sync and clears the flag', async () => {
     mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
     await sync();

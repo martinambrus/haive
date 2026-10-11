@@ -923,7 +923,10 @@ export async function runRagIndexSync(
       .set({
         warningMessage: composeRagWarning(
           embedDeviceWarning(embedDevice),
-          ragEmbedWarning(health, { skippedChunks: embedSkippedChunks }),
+          ragEmbedWarning(health, {
+            skippedChunks: embedSkippedChunks,
+            hashedChunks,
+          }),
         ),
       })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));

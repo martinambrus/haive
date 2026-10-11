@@ -185,7 +185,7 @@ export async function clearRagEmbedDegraded(
  *  display copy that outlives the state it describes. */
 export function ragEmbedWarning(
   health: RagEmbedHealth,
-  thisRun: { skippedChunks: number } = { skippedChunks: 0 },
+  thisRun: { skippedChunks: number; hashedChunks?: number } = { skippedChunks: 0 },
 ): string | null {
   if (health.lexicalOnly) {
     return (
@@ -196,15 +196,23 @@ export function ragEmbedWarning(
     );
   }
   if (!health.degradedAt) return null;
+  const hashed = thisRun.hashedChunks ?? 0;
   const skipped =
     thisRun.skippedChunks > 0
       ? ` ${thisRun.skippedChunks} chunk${thisRun.skippedChunks === 1 ? '' : 's'} from this run ` +
         'were left unindexed rather than stored with meaningless vectors, so they are ' +
         'not searchable yet.'
-      : ' Chunks left unindexed by the failure are not searchable yet.';
+      : hashed > 0
+        ? ''
+        : ' Chunks left unindexed by the failure are not searchable yet.';
+  const fallback =
+    hashed > 0
+      ? ` ${hashed} chunk${hashed === 1 ? ' was' : 's were'} indexed with fallback vectors and ` +
+        'will be re-embedded on the next sync; semantic search is off until then.'
+      : '';
   return (
-    `RAG embeddings are failing for this repository — ${health.degradedReason ?? 'reason unrecorded'}.` +
-    `${skipped} Retry or accept lexical-only search on the repository tooling page; ` +
+    `RAG embeddings are failing for this repository — ${(health.degradedReason ?? 'reason unrecorded').replace(/\.$/, '')}.` +
+    `${skipped}${fallback} Retry or accept lexical-only search on the repository tooling page; ` +
     'raising the embedding timeout or lowering the batch size in Admin usually fixes a ' +
     'slow host.'
   );
