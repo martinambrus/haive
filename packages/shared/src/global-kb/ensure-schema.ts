@@ -1,6 +1,11 @@
 import type postgres from 'postgres';
 import { logger } from '../logger/index.js';
 import { isPgvectorUnavailable } from '../rag/connection.js';
+import {
+  IDENTIFIER_TSV_SENTINEL,
+  identifierTsvSentinelQuery,
+  identifierTsvSql,
+} from '../rag/identifiers.js';
 import type { GlobalKbConnection } from './connection.js';
 import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
 
@@ -40,6 +45,8 @@ const RETIRED_FACET_INDEX_DIMENSIONS = [
 // the backend that holds the lock, and short, so a table lock is held no longer than its own step.
 const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';
 
+const IDENTIFIER_BACKFILL_BATCH = 2_000;
+
 /** Idempotent schema creation for the global KB store (both the source-of-truth
  *  `global_kb_entries` and the global `ai_rag_embeddings` vector table), run on
  *  the global connection at first use. Mirrors the per-project `ensureRagSchema`
@@ -48,7 +55,7 @@ const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';
 export async function ensureGlobalKbSchema(
   conn: Pick<GlobalKbConnection, 'pg' | 'embeddingDimensions'>,
   opts: { timeoutMs?: number } = {},
-): Promise<{ usedPgvector: boolean }> {
+): Promise<{ usedPgvector: boolean; identifierBackfillDone: boolean }> {
   const timeoutMs =
     opts.timeoutMs === undefined ? undefined : Math.max(1, Math.floor(opts.timeoutMs));
   const step = <T>(run: (tx: postgres.TransactionSql) => Promise<T>) =>
@@ -239,12 +246,14 @@ export async function ensureGlobalKbSchema(
     await exec(`DROP INDEX IF EXISTS idx_global_rag_facets_${dim.toLowerCase()}`);
   }
 
-  // tsvector auto-update trigger (mirror ensureRagSchema; distinct trigger name
-  // since this is a different database).
+  // Mirrors ensureRagSchema's trigger: identifier lexemes make snake_case names match whole, the
+  // sentinel marks a row built by this body (docs/architecture/identifier-search.md).
   await exec(`
     CREATE OR REPLACE FUNCTION update_content_tsv() RETURNS trigger AS $$
     BEGIN
-      NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''));
+      NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''))
+        || ${identifierTsvSql("COALESCE(NEW.content, '')")}
+        || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}']);
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql
@@ -263,6 +272,8 @@ export async function ensureGlobalKbSchema(
         FOR EACH ROW EXECUTE FUNCTION update_content_tsv()
     `);
   });
+
+  const identifierBackfillDone = await backfillGlobalIdentifierTsv(step);
 
   // Facet values are stored LOWERCASE, because retrieval compares them two ways and only one
   // can be lenient: `facetsMatchProject` lowercases in JS while `buildFacetClause` uses jsonb
@@ -360,5 +371,44 @@ export async function ensureGlobalKbSchema(
     `);
   }
 
-  return { usedPgvector };
+  return { usedPgvector, identifierBackfillDone };
+}
+
+/** Rewrites every global vector row whose `content_tsv` lacks the identifier stamp; warns, never
+ *  throws, and answers whether it finished. No row cap: the ensure runs it once per process. */
+export async function backfillGlobalIdentifierTsv(
+  step: (
+    run: (tx: postgres.TransactionSql) => Promise<postgres.RowList<postgres.Row[]>>,
+  ) => Promise<postgres.RowList<postgres.Row[]>>,
+): Promise<boolean> {
+  try {
+    const unstamped = `FROM ${VECTORS_TABLE} WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)`;
+    const counted = await step((tx) =>
+      tx.unsafe(`SELECT count(*)::int AS n ${unstamped}`, [identifierTsvSentinelQuery()]),
+    );
+    const pending = Number((counted[0] as { n?: number } | undefined)?.n ?? 0);
+    const maxPasses = Math.ceil(pending / IDENTIFIER_BACKFILL_BATCH) + 1;
+    let total = 0;
+    let finished = pending === 0;
+    for (let pass = 0; pending > 0 && pass < maxPasses; pass++) {
+      const result = await step((tx) =>
+        tx.unsafe(
+          `UPDATE ${VECTORS_TABLE} SET content = content
+             WHERE id IN (SELECT id ${unstamped} LIMIT $2)`,
+          [identifierTsvSentinelQuery(), IDENTIFIER_BACKFILL_BATCH],
+        ),
+      );
+      const rows = result.count ?? 0;
+      total += rows;
+      if (rows < IDENTIFIER_BACKFILL_BATCH) {
+        finished = true;
+        break;
+      }
+    }
+    if (total > 0) log.info({ rows: total }, 'backfilled identifier lexemes into content_tsv');
+    return finished;
+  } catch (err) {
+    log.warn({ err }, 'identifier tsv backfill failed; lexical identifier search may be stale');
+    return false;
+  }
 }

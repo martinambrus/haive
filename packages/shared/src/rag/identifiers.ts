@@ -26,13 +26,14 @@ export const IDENTIFIER_PATTERN = '[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)*';
 const MIN_IDENTIFIER_LENGTH = 3;
 const MAX_IDENTIFIER_LENGTH = 64;
 
-/** Marks a row whose `content_tsv` was built by the identifier-aware trigger, so
- *  the backfill can find the rows that still need it with an indexed predicate
- *  and converge to a no-op. Deliberately contains no `_`, `.` or camelCase
- *  boundary, so `extractIdentifiers` can NEVER emit it from a chunk's own text —
- *  otherwise indexing Haive's own source would stamp a row as upgraded when it
- *  was not, and a future version bump would skip exactly those rows. */
-export const IDENTIFIER_TSV_SENTINEL = 'haivetsvv2';
+/** Marks a row whose `content_tsv` was built by the identifier-aware trigger. It holds a space, so no
+ *  text-search parser emits it as one lexeme and a row's own prose can never stamp it. */
+export const IDENTIFIER_TSV_SENTINEL = 'haive tsv v3';
+
+/** The single-lexeme tsquery that matches `IDENTIFIER_TSV_SENTINEL` (quoted, so it is not split). */
+export function identifierTsvSentinelQuery(): string {
+  return `'${IDENTIFIER_TSV_SENTINEL.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+}
 
 /** A token is an identifier when it carries a word boundary that prose does not:
  *  an underscore, a dot, or a camelCase hump. Plain words are left to the

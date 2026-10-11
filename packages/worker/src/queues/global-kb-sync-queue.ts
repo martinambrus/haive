@@ -16,6 +16,7 @@ import {
 import {
   globalKbEntries,
   resolveGlobalKbSettings,
+  retryOwedGlobalIdentifierBackfill,
   withGlobalKb,
   type GlobalKbContext,
 } from '@haive/shared/global-kb';
@@ -437,6 +438,7 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
   if (!settings.enabled) return;
   // A store enabled or reachable only after boot still gets its pre-provenance vectors classified.
   await classifyGlobalKbVectorProvenance(getDb());
+  await retryOwedGlobalIdentifierBackfill(getDb());
   const cutoff = new Date(Date.now() - RECONCILE_GRACE_MS);
   const pending = await withGlobalKb(getDb(), (ctx) =>
     ctx.db

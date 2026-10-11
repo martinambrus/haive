@@ -1,5 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const logged = vi.hoisted(() => ({ warn: vi.fn(), info: vi.fn() }));
+vi.mock('../src/logger/index.js', () => {
+  const noop = () => {};
+  const child = { warn: logged.warn, info: logged.info, debug: noop, error: noop, trace: noop };
+  return { logger: { child: () => child } };
+});
+
 import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
+import {
+  IDENTIFIER_TSV_SENTINEL,
+  identifierTsvSentinelQuery,
+  identifierTsvSql,
+} from '../src/rag/identifiers.js';
 import { orphanFacetMajorSql, trimFacetValueSql } from '../src/global-kb/schema.js';
 
 type EnsureConn = Parameters<typeof ensureGlobalKbSchema>[0];
@@ -17,12 +30,18 @@ function fakeConn(
     lockThrowsOnce?: string;
     hnswThrows?: boolean;
     triggersExist?: 'current' | 'stale';
+    unstampedRows?: number;
+    stamping?: boolean;
+    backfillThrows?: boolean;
   } = {},
 ): {
   conn: EnsureConn;
   queries: () => string;
   transactions: () => string[][];
+  backfillParams: () => unknown[][];
 } {
+  let unstamped = opts.unstampedRows ?? 0;
+  const backfillParams: unknown[][] = [];
   const captured: string[] = [];
   let lockFailure = opts.lockThrowsOnce;
   const tag = (strings: TemplateStringsArray) => {
@@ -39,8 +58,18 @@ function fakeConn(
     return Promise.resolve([]);
   };
   const tx = Object.assign(tag, {
-    unsafe: (q: string) => {
+    unsafe: (q: string, params?: unknown[]) => {
       captured.push(q);
+      if (q.includes('SET content = content')) {
+        backfillParams.push(params ?? []);
+        if (opts.backfillThrows) return Promise.reject(new Error('statement timeout'));
+        const done = Math.min(unstamped, Number(params?.[1]));
+        if (opts.stamping !== false) unstamped -= done;
+        return Promise.resolve(Object.assign([], { count: done }));
+      }
+      if (q.includes('count(*)') && q.includes('content_tsv')) {
+        return Promise.resolve([{ n: unstamped }]);
+      }
       if (opts.hnswThrows && q.includes('USING hnsw')) {
         return Promise.reject(new Error('hnsw unavailable'));
       }
@@ -82,6 +111,7 @@ function fakeConn(
     conn: { pg, embeddingDimensions: 2560 },
     queries: () => captured.join('\n'),
     transactions,
+    backfillParams: () => backfillParams,
   };
 }
 
@@ -414,5 +444,104 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql.indexOf('ADD COLUMN IF NOT EXISTS embed_kind')).toBeLessThan(
       sql.indexOf('idx_global_rag_vector_hnsw_model'),
     );
+  });
+
+  it('stores identifiers whole: the trigger function adds the identifier lexemes and the sentinel', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureGlobalKbSchema(conn);
+    const fn = queries().match(
+      /CREATE OR REPLACE FUNCTION update_content_tsv\(\)[\s\S]*?LANGUAGE plpgsql/,
+    )![0];
+
+    expect(fn).toContain("to_tsvector('english', COALESCE(NEW.content, ''))");
+    expect(fn).toContain(identifierTsvSql("COALESCE(NEW.content, '')"));
+    expect(fn).toContain(`array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}'])`);
+  });
+
+  describe('the identifier backfill', () => {
+    const updateTxs = (txs: string[][]) => txs.filter((tx) => tx.some(isBackfill));
+    const isBackfill = (q: string) => q.includes('SET content = content');
+
+    beforeEach(() => {
+      logged.warn.mockClear();
+      logged.info.mockClear();
+    });
+
+    it('runs through the bounded step, after the trigger, selecting rows without the sentinel', async () => {
+      const { conn, transactions, backfillParams } = fakeConn({ unstampedRows: 5 });
+      await ensureGlobalKbSchema(conn, { timeoutMs: 1500 });
+      const txs = transactions();
+      const [update] = updateTxs(txs);
+
+      expect(update!.slice(0, 3)).toEqual([
+        'SET LOCAL lock_timeout = 1500',
+        'SET LOCAL statement_timeout = 1500',
+        'SELECT pg_advisory_xact_lock(hashtext())',
+      ]);
+      expect(update![3]).toContain('UPDATE ai_rag_embeddings SET content = content');
+      expect(update![3]).toContain('NOT (content_tsv @@ $1::tsquery)');
+      expect(backfillParams()).toEqual([[identifierTsvSentinelQuery(), 2_000]]);
+      expect(txs.indexOf(update!)).toBeGreaterThan(
+        txs.findIndex((tx) => tx.some((q) => q.includes('CREATE TRIGGER trg_global_content_tsv'))),
+      );
+    });
+
+    it('counts the unstamped rows first, through the bounded step, and writes nothing when there are none', async () => {
+      const none = fakeConn({ unstampedRows: 0 });
+      await ensureGlobalKbSchema(none.conn, { timeoutMs: 1500 });
+      const counts = none
+        .transactions()
+        .filter((tx) => tx.some((q) => q.includes('count(*)') && q.includes('content_tsv')));
+      expect(counts).toHaveLength(1);
+      expect(counts[0]!.slice(0, 2)).toEqual([
+        'SET LOCAL lock_timeout = 1500',
+        'SET LOCAL statement_timeout = 1500',
+      ]);
+      expect(updateTxs(none.transactions())).toHaveLength(0);
+    });
+
+    it('goes on while a batch comes back full and stops on a short one', async () => {
+      const full = fakeConn({ unstampedRows: 4_007 });
+      await ensureGlobalKbSchema(full.conn);
+      expect(updateTxs(full.transactions())).toHaveLength(3);
+      expect(logged.info).toHaveBeenCalledWith({ rows: 4_007 }, expect.any(String));
+
+      const partial = fakeConn({ unstampedRows: 1_999 });
+      await ensureGlobalKbSchema(partial.conn);
+      expect(updateTxs(partial.transactions())).toHaveLength(1);
+    });
+
+    it('rewrites every unstamped row of a store larger than the per-repo cap in one ensure', async () => {
+      const { conn, transactions } = fakeConn({ unstampedRows: 50_000 });
+      await ensureGlobalKbSchema(conn);
+      expect(updateTxs(transactions())).toHaveLength(26);
+      expect(logged.info).toHaveBeenCalledWith({ rows: 50_000 }, expect.any(String));
+    });
+
+    it('stops a trigger that does not stamp after ceil(count / batch) + 1 passes', async () => {
+      const endless = fakeConn({ unstampedRows: 5_000, stamping: false });
+      await ensureGlobalKbSchema(endless.conn);
+      expect(updateTxs(endless.transactions())).toHaveLength(4);
+    });
+
+    it('logs a failure and still resolves', async () => {
+      const { conn } = fakeConn({ unstampedRows: 1, backfillThrows: true });
+
+      await expect(ensureGlobalKbSchema(conn)).resolves.toEqual({
+        usedPgvector: true,
+        identifierBackfillDone: false,
+      });
+      expect(logged.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        expect.stringContaining('identifier'),
+      );
+    });
+
+    it('reports a finished pass', async () => {
+      await expect(ensureGlobalKbSchema(fakeConn({ unstampedRows: 1 }).conn)).resolves.toEqual({
+        usedPgvector: true,
+        identifierBackfillDone: true,
+      });
+    });
   });
 });

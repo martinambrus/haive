@@ -4,6 +4,7 @@ import { logger } from '@haive/shared';
 import {
   IDENTIFIER_TSV_SENTINEL,
   RAG_TABLE,
+  identifierTsvSentinelQuery,
   identifierTsvSql,
   isPgvectorUnavailable,
   openExistingRagDatabase,
@@ -201,7 +202,7 @@ async function backfillIdentifierTsv(conn: RagConnection): Promise<void> {
              WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)
              LIMIT $2
            )`,
-        [IDENTIFIER_TSV_SENTINEL, IDENTIFIER_BACKFILL_BATCH],
+        [identifierTsvSentinelQuery(), IDENTIFIER_BACKFILL_BATCH],
       );
       const rows = result.count ?? 0;
       total += rows;
