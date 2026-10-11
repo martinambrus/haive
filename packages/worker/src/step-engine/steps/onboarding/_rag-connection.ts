@@ -135,17 +135,21 @@ export async function ensureRagSchema(
     $$ LANGUAGE plpgsql
   `);
 
-  // Create trigger if not exists (check pg_trigger catalog)
-  const triggerExists = await conn.pg.unsafe(`
-    SELECT 1 FROM pg_trigger WHERE tgname = 'trg_content_tsv'
-  `);
-  if (triggerExists.length === 0) {
-    await conn.pg.unsafe(`
+  // On a content write only (a hash-only UPDATE must not recompute the tsvector); a trigger
+  // created without `OF content` is replaced in the same transaction.
+  await conn.pg.begin(async (tx) => {
+    const existing = (await tx.unsafe(
+      `SELECT tgattr::text = '' AS stale FROM pg_trigger
+        WHERE tgname = 'trg_content_tsv' AND tgrelid = '${RAG_TABLE}'::regclass`,
+    )) as unknown as Array<{ stale?: boolean }>;
+    if (existing.length > 0 && !existing[0]!.stale) return;
+    await tx.unsafe(`DROP TRIGGER IF EXISTS trg_content_tsv ON ${RAG_TABLE}`);
+    await tx.unsafe(`
       CREATE TRIGGER trg_content_tsv
-        BEFORE INSERT OR UPDATE ON ${RAG_TABLE}
+        BEFORE INSERT OR UPDATE OF content ON ${RAG_TABLE}
         FOR EACH ROW EXECUTE FUNCTION update_content_tsv()
     `);
-  }
+  });
 
   await backfillIdentifierTsv(conn);
 
