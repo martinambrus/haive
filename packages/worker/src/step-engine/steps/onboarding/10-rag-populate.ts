@@ -32,6 +32,7 @@ import {
   embedBatch,
   loadRagEmbedHealth,
   ragEmbedWarning,
+  ragStoreAwaitsReembed,
   recordRagEmbedDegraded,
   requireRagEmbedDegraded,
   resolveEmbedBatchSize,
@@ -958,7 +959,11 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
             ),
           })
           .where(eq(schema.taskSteps.id, ctx.taskStepId));
-      } else if (useOllama && health.degradedAt) {
+      } else if (
+        useOllama &&
+        health.degradedAt &&
+        !(await ragStoreAwaitsReembed(conn, repositoryId ?? null, ctx.logger))
+      ) {
         await clearRagEmbedDegraded(ctx.db, repositoryId ?? null, ctx.logger);
       }
       return {

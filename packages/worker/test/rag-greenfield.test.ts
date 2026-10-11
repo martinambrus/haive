@@ -72,6 +72,9 @@ let indexedChunks: Map<
   { section_id: string; chunk_index: number; chunk_hash: string | null; content: string }[]
 >;
 let failDegradedWrite: boolean;
+let leftoverNullHash: boolean;
+let nullHashProbeFails: boolean;
+let nullHashProbes: unknown[][];
 let ctx: StepContext;
 let executionPath: 'full_workflow' | 'quick_bugfix';
 let priorSteps: Map<string, { output?: unknown; detectOutput?: unknown }>;
@@ -114,6 +117,9 @@ beforeEach(async () => {
   deletedPaths = [];
   indexedChunks = new Map();
   failDegradedWrite = false;
+  leftoverNullHash = false;
+  nullHashProbeFails = false;
+  nullHashProbes = [];
   mocks.connect.mockImplementation(async () => ({
     close: mocks.close,
     pg: {
@@ -139,6 +145,14 @@ beforeEach(async () => {
         }
         if (query.includes('SELECT section_id, chunk_index, chunk_hash'))
           return indexedChunks.get(params[1] as string) ?? [];
+        if (query.includes('chunk_hash IS NULL') && query.startsWith('SELECT')) {
+          nullHashProbes.push(params);
+          if (nullHashProbeFails) throw new Error('store read failed');
+          const stored = [...indexedChunks.values()].some((rows) =>
+            rows.some((row) => row.chunk_hash === null),
+          );
+          return leftoverNullHash || stored ? [{ found: 1 }] : [];
+        }
         if (query.includes('UPDATE') && query.includes('SET chunk_hash = NULL')) {
           let count = 0;
           for (const rows of indexedChunks.values())
@@ -1400,6 +1414,33 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
     expect(order).not.toContain('insert');
     expect(hashes()).toEqual([]);
     expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('keeps the flag over a leftover NULL-hash row the run did not re-embed', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    leftoverNullHash = true;
+    await sync();
+    expect(hashes().every(([, hash]) => hash !== null)).toBe(true);
+    expect(nullHashProbes).toEqual([['repo-1', 'task']]);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('clears the flag when the store holds no NULL-hash row', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    await sync();
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+    expect(warnings.at(-1)).toBeNull();
+  });
+
+  it('keeps the flag when the NULL-hash read fails', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    nullHashProbeFails = true;
+    await sync();
+    expect(nullHashProbes).toHaveLength(1);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
   it('keeps the real hash and records nothing when no endpoint is configured', async () => {

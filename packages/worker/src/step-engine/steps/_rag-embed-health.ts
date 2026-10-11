@@ -1,6 +1,13 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { hashEmbed, ollamaEmbed, resolveEmbedBudget } from '@haive/shared/rag';
+import {
+  hashEmbed,
+  ollamaEmbed,
+  resolveEmbedBudget,
+  RAG_TABLE,
+  TASK_SOURCE_TYPE,
+  type RagConnection,
+} from '@haive/shared/rag';
 import { logger } from '@haive/shared';
 
 type Logger = ReturnType<typeof logger.child>;
@@ -180,6 +187,28 @@ export async function requireRagEmbedDegraded(
       `could not record the RAG embedding degradation, so no fallback vectors were written: ${cause}`,
       { cause: err },
     );
+  }
+}
+
+/** Whether the repo's store still holds a row awaiting re-embed (NULL `chunk_hash`).
+ *  Task rows are excluded: `indexTaskEmbedding` never writes a hash for them. A failed
+ *  read answers true, so the caller keeps the flag rather than clearing it blind. */
+export async function ragStoreAwaitsReembed(
+  conn: RagConnection,
+  repositoryId: string | null,
+  log: Logger,
+): Promise<boolean> {
+  if (!repositoryId) return false;
+  try {
+    const found = await conn.pg.unsafe(
+      `SELECT 1 FROM ${RAG_TABLE}
+        WHERE repository_id = $1 AND source_type <> $2 AND chunk_hash IS NULL LIMIT 1`,
+      [repositoryId, TASK_SOURCE_TYPE],
+    );
+    return found.length > 0;
+  } catch (err) {
+    log.error({ err, repositoryId }, 'failed to check for rows awaiting re-embed; keeping flag');
+    return true;
   }
 }
 

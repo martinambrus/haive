@@ -47,6 +47,9 @@ let rows: Map<string, { hash: string | null; params: unknown[] }>;
 let order: string[];
 let failInsertAt: number | null;
 let failDegradedWrite: boolean;
+let leftoverNullHash: boolean;
+let nullHashProbeFails: boolean;
+let nullHashProbes: unknown[][];
 let warnings: Array<string | null>;
 let repo: Record<string, unknown>;
 let conn: unknown;
@@ -87,6 +90,9 @@ beforeEach(async () => {
   order = [];
   failInsertAt = null;
   failDegradedWrite = false;
+  leftoverNullHash = false;
+  nullHashProbeFails = false;
+  nullHashProbes = [];
   warnings = [];
   repo = { ragEmbedDegradedAt: null, ragEmbedDegradedReason: null, ragEmbedLexicalOnly: false };
   conn = {
@@ -101,6 +107,12 @@ beforeEach(async () => {
             hash: params[6] as string | null,
             params,
           });
+        }
+        if (query.includes('chunk_hash IS NULL') && query.startsWith('SELECT')) {
+          nullHashProbes.push(params);
+          if (nullHashProbeFails) throw new Error('store read failed');
+          const stored = [...rows.values()].some((r) => r.hash === null);
+          return leftoverNullHash || stored ? [{ found: 1 }] : [];
         }
         if (query.includes('SELECT source_path, section_id, chunk_index, chunk_hash'))
           return [...rows.values()].map((r) => ({
@@ -219,6 +231,29 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(order).not.toContain('insert');
     expect(rows.size).toBe(0);
     expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('keeps the flag over a leftover NULL-hash row the run did not re-embed', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    leftoverNullHash = true;
+    await populate(detected({ ollamaReachable: true }));
+    expect(storedHashes().every((h) => typeof h === 'string')).toBe(true);
+    expect(nullHashProbes).toEqual([['repo-1', 'task']]);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('clears the flag when the store holds no NULL-hash row', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    await populate(detected({ ollamaReachable: true }));
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('keeps the flag when the NULL-hash read fails', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    nullHashProbeFails = true;
+    await populate(detected({ ollamaReachable: true }));
+    expect(nullHashProbes).toHaveLength(1);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
   it('words a fallback-only run as fallback vectors, not as unsearchable chunks', async () => {

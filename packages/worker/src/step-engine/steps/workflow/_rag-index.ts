@@ -50,6 +50,7 @@ import {
   embedBatch,
   loadRagEmbedHealth,
   ragEmbedWarning,
+  ragStoreAwaitsReembed,
   recordRagEmbedDegraded,
   requireRagEmbedDegraded,
   resolveEmbedBatchSize,
@@ -909,7 +910,12 @@ export async function runRagIndexSync(
       await recordRagEmbedDegraded(ctx.db, repositoryId, embedFailureReason, ctx.logger);
       health.degradedAt ??= new Date();
       health.degradedReason = embedFailureReason;
-    } else if (hashedChunks === 0 && realEmbeddingSucceeded && health.degradedAt) {
+    } else if (
+      hashedChunks === 0 &&
+      realEmbeddingSucceeded &&
+      health.degradedAt &&
+      !(await ragStoreAwaitsReembed(conn, repositoryId, ctx.logger))
+    ) {
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
       health.degradedAt = null;
       health.degradedReason = null;
