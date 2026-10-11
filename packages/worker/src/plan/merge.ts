@@ -1,6 +1,6 @@
 import { HAIVE_DATA_FILES } from '@haive/shared';
 import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js';
-import { lstatNoFollow, relUnder, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 import { abortMerge as abortGitMerge, openMerge, utf8Name } from '../step-engine/git-merge.js';
@@ -266,8 +266,10 @@ async function commitOf(worktreePath: string, spec: string): Promise<string | nu
   return res.code === 0 ? res.stdout.trim() : null;
 }
 
-/** Reopen an unlanded resolved merge at its conflicts, each path holding the previous resolution
- *  for the agent to edit; null when HEAD is not such a merge. Only the scratch worktree is written. */
+/** Reopen an unlanded resolved merge at its conflicts, as git opens them, for the agent to resolve
+ *  again under the new guidance; null when HEAD is not such a merge. Only the scratch worktree is
+ *  written. Nothing of the previous answer is copied back: its paths, modes and directory/file
+ *  choices are git's to restore, not a per-file copy's. */
 export async function reopenResolvedMerge(args: {
   repoPath: string;
   worktreePath: string;
@@ -277,8 +279,7 @@ export async function reopenResolvedMerge(args: {
 }): Promise<PlanMergeAttempt | null> {
   const { repoPath, worktreePath, branch } = args;
   const prior = await commitOf(worktreePath, 'HEAD');
-  const priorRemote = prior === null ? null : await commitOf(worktreePath, `${prior}^2`);
-  if (prior === null || priorRemote === null) return null;
+  if (prior === null || (await commitOf(worktreePath, `${prior}^2`)) === null) return null;
   const landed = await gitRun(repoPath, [
     'merge-base',
     '--is-ancestor',
@@ -291,27 +292,7 @@ export async function reopenResolvedMerge(args: {
   if (reset.code !== 0) {
     throw new Error(`git reset (plan merge) failed: ${reset.stderr || reset.stdout}`);
   }
-  const attempt = await mergeOriginInto(worktreePath, branch, args.unrelated, args.gitEnv);
-  // Only a resolution of the very remote commit now being merged is still an answer to it.
-  if (attempt.clean || priorRemote !== (await commitOf(worktreePath, `origin/${branch}`))) {
-    return attempt;
-  }
-  for (const name of attempt.conflicts) {
-    const rel = `${WORKTREE_SUBDIR}/${PLAN_MERGE_DIR}/${name}`;
-    // The previous answer deleted it: start from that, not from the markers the merge wrote.
-    if ((await gitRun(worktreePath, ['cat-file', '-e', `${prior}:${name}`])).code !== 0) {
-      await removeNoFollow(repoPath, rel).catch(() => undefined);
-      continue;
-    }
-    const blob = await gitRun(worktreePath, ['cat-file', 'blob', `${prior}:${name}`], undefined, {
-      encoding: 'latin1',
-    });
-    if (blob.code !== 0) continue;
-    await writeFileNoFollow(repoPath, rel, Buffer.from(blob.stdout, 'latin1'), {
-      mode: 'overwrite-in-place',
-    }).catch(() => undefined);
-  }
-  return attempt;
+  return mergeOriginInto(worktreePath, branch, args.unrelated, args.gitEnv);
 }
 
 /** Commit a merge whose conflicts are all resolved. Separate from

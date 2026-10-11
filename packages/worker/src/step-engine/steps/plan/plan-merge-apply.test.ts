@@ -370,21 +370,7 @@ const revise = (
   });
 
 describe('plan merge: asking for a change after the merge was resolved', () => {
-  it('reopens a path the previous answer deleted as deleted, not as conflict markers', async () => {
-    const local = await unrelatedPair();
-    const { db } = fakeDb();
-    const { ctx, wt } = await resolved(local, db, null);
-    const collect = await planMergeStep.detect!(ctx);
-    expect((await revise(ctx, collect)).continueRequested).toBe(true);
-
-    const next = await planMergeStep.detect!(ctx);
-    expect(next.conflicts).toEqual(['README.md']);
-    await expect(readFile(path.join(wt, 'README.md'), 'utf8')).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
-  });
-
-  it('reopens the conflicts with the previous answer in the files, under the new guidance', async () => {
+  it('reopens the conflicts as git opens them, under the new guidance', async () => {
     const local = await unrelatedPair();
     const { db } = fakeDb();
     const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
@@ -400,7 +386,7 @@ describe('plan merge: asking for a change after the merge was resolved', () => {
     expect(planMergeStep.llm!.skipIf!({ detected: next, formValues: {}, iteration: 0 })).toBe(
       false,
     );
-    expect(await readFile(path.join(wt, 'README.md'), 'utf8')).toBe('# vareska\n\nboth sides\n');
+    expect(await readFile(path.join(wt, 'README.md'), 'utf8')).toContain('<<<<<<<');
     expect(await git(local, ['rev-parse', 'HEAD'])).toBe(`${head}\n`);
 
     await writeFile(path.join(wt, 'README.md'), '# vareska\n\nboth sides, forge heading\n', 'utf8');
