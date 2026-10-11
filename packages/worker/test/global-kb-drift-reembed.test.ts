@@ -63,6 +63,7 @@ vi.mock('@haive/shared/rag', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
+  retryOwedGlobalIdentifierBackfill: async () => {},
   resolveGlobalKbSettings: async () => ({
     enabled: true,
     ollamaUrl: 'http://ollama.invalid:11434',
