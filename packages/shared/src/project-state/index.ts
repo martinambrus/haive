@@ -6,3 +6,4 @@ export * from './merge.js';
 export * from './ids.js';
 export * from './hash.js';
 export * from './render-context.js';
+export * from './render-targets.js';

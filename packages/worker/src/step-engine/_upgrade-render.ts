@@ -13,6 +13,7 @@ import {
 import {
   historyOrigin,
   isRenderContextSnapshot,
+  originAgentTargets,
   pickSnapshotRow,
   readRenderContextColumn,
   renderContextOrigin,
@@ -29,7 +30,7 @@ import {
   type BundleWithMeta,
   type LoaderLogger,
 } from './_custom-bundle-loader.js';
-import { FALLBACK_AGENT_TARGET, renderContextFromColumn } from './_render-targets.js';
+import { renderContextFromColumn } from './_render-targets.js';
 import { resolveSkillTargetDirs } from './steps/onboarding/_helpers.js';
 import type { GenerateFilesDetect } from './steps/onboarding/07-generate-files.js';
 import { buildBlankRenderContext } from '../repo/blank-scaffold.js';
@@ -158,23 +159,30 @@ async function resolveFromRepository(
     );
   }
   const origin = renderContextOrigin({ column, rows: liveRows.map(snapshotFacts) });
-  if (origin.from === 'column') {
-    const providerRows = await db
+  const loadProviderRows = () =>
+    db
       .select({ name: schema.cliProviders.name, enabled: schema.cliProviders.enabled })
       .from(schema.cliProviders)
       .where(eq(schema.cliProviders.userId, userId));
+  if (origin.from === 'column') {
     return withLiveRtk(
       repo,
-      renderContextFromColumn(origin.column, providerRows),
+      renderContextFromColumn(origin.column, await loadProviderRows()),
       origin.rtkRecorded,
     );
   }
   if (origin.from === 'snapshot') {
-    return withLiveRtk(
-      repo,
-      origin.row.formValuesSnapshot as unknown as TemplateRenderContext,
-      origin.rtkRecorded,
-    );
+    const snapshot = origin.row.formValuesSnapshot as unknown as TemplateRenderContext;
+    const recorded = snapshot.agentTargets
+      ? snapshot
+      : {
+          ...snapshot,
+          agentTargets: originAgentTargets(
+            { from: 'snapshot', lspLanguages: snapshot.lspLanguages ?? [] },
+            await loadProviderRows(),
+          ),
+        };
+    return withLiveRtk(repo, recorded, origin.rtkRecorded);
   }
 
   const priorOnboarding = await db
@@ -235,15 +243,14 @@ async function resolveFromRepository(
   // so expandManifestFor doesn't trip on undefined fan-out arrays during the
   // lazy-backfill path. The resulting context reflects best-effort recovery;
   // conflicts get surfaced to the user via the plan UI.
-  const fallbackAgentTargets: TemplateRenderContext['agentTargets'] = [
-    { ...FALLBACK_AGENT_TARGET },
-  ];
-
   const lspLanguages = detect.lspLanguages ?? [];
   const hasCapableProvider = (detect.cliProviders ?? []).some(
     (provider) => getCliProviderMetadata(provider.name).supportsLsp,
   );
-  const agentTargets = (detect.agentTargets ?? fallbackAgentTargets).map((target) => ({
+  const agentTargets = originAgentTargets(
+    { from: 'onboarding', agentTargets: detect.agentTargets },
+    [],
+  ).map((target) => ({
     ...target,
     supportsLsp:
       target.supportsLsp ??

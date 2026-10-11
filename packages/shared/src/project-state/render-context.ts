@@ -3,7 +3,7 @@ import { cliProviderNameSchema } from '../schemas/cli-providers.js';
 import { newestArtifactsFirst } from '../templates/manifest.js';
 import { renderSchema, type ProjectRender } from './record.js';
 
-const agentTargetSchema = z.strictObject({
+export const agentTargetSchema = z.strictObject({
   dir: z.string(),
   format: z.enum(['markdown', 'toml']),
   supportsLsp: z.boolean().optional(),

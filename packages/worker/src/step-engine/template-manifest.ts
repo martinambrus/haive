@@ -16,6 +16,7 @@ import {
   type TemplateManifest,
   type TemplateRendering,
 } from '@haive/shared';
+import { agentFilePath, bundleItemRenders } from '@haive/shared/project-state';
 import {
   type AgentSpec,
   type AgentRenderTarget,
@@ -144,9 +145,8 @@ function buildAgentTemplateItem(spec: AgentSpec): TemplateItem<TemplateRenderCon
       if (ctx.agentTargets.length === 0) return [];
       const out: TemplateRendering[] = [];
       for (const target of ctx.agentTargets) {
-        const ext = target.format === 'toml' ? 'toml' : 'md';
         const content = buildAgentFileForTarget(spec, target);
-        out.push({ diskPath: `${target.dir}/${spec.id}.${ext}`, content });
+        out.push({ diskPath: agentFilePath(target, spec.id), content });
       }
       return out;
     },
@@ -457,21 +457,21 @@ export function expandCustomBundlesFor(
   skillTargets: ReadonlyArray<string>,
 ): ExpandedRendering[] {
   const out: ExpandedRendering[] = [];
+  const targets = { agentTargets, skillDirs: skillTargets };
   for (const bundle of bundles) {
     for (const item of bundle.items) {
       const templateId = `custom.${bundle.id}.${item.id}`;
       if (item.kind === 'agent') {
-        if (agentTargets.length === 0) continue;
+        if (!bundleItemRenders('agent', targets)) continue;
         const rendererAwareContentHash = bundleAgentTemplateHash(item.contentHash);
         for (const target of agentTargets) {
-          const ext = target.format === 'toml' ? 'toml' : 'md';
           const content = buildAgentFileForTarget(item.spec, target);
           out.push({
             templateId,
             templateKind: 'custom-agent',
             templateSchemaVersion: item.schemaVersion,
             templateContentHash: rendererAwareContentHash,
-            diskPath: `${target.dir}/${item.spec.id}.${ext}`,
+            diskPath: agentFilePath(target, item.spec.id),
             content,
             writtenHash: sha256Hex(normalizeContent(content)),
           });
@@ -479,7 +479,7 @@ export function expandCustomBundlesFor(
         continue;
       }
       // skill
-      if (skillTargets.length === 0) continue;
+      if (!bundleItemRenders('skill', targets)) continue;
       const skillContent = skillToMarkdown(item.spec);
       // `sanitizeSubSkills`, not the raw list, because every actual WRITER uses it (09_5, 09_5b,
       // 11d, and `skillToMarkdown` itself) and a rendering is what becomes an

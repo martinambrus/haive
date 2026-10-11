@@ -5,10 +5,10 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import {
   CLI_PROVIDER_CATALOG,
-  getCliProviderMetadata,
   type CliProviderMetadata,
   type CliProviderName,
 } from '@haive/shared';
+import { skillTargetDirs } from '@haive/shared/project-state';
 
 /** When the run that produced this step's agent output started.
  *
@@ -78,13 +78,10 @@ export async function resolveSkillTargetDirs(
     where: eq(schema.cliProviders.userId, userId),
     columns: { name: true, enabled: true },
   });
-  const targets = new Set<string>();
-  for (const row of rows) {
-    if (!row.enabled) continue;
-    const dir = getCliProviderMetadata(row.name as CliProviderName).projectSkillsDir;
-    if (dir) targets.add(dir);
-  }
-  return targets.size > 0 ? Array.from(targets) : fallback;
+  return skillTargetDirs(
+    rows.filter((row) => row.enabled).map((row) => row.name as CliProviderName),
+    fallback,
+  );
 }
 
 export async function loadPreviousStepOutput(

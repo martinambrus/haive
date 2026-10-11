@@ -21,6 +21,7 @@ import {
   sha256Hex,
   unmanagedAgentsDir,
 } from '@haive/shared';
+import { agentFilePath } from '@haive/shared/project-state';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
 import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
@@ -618,13 +619,12 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const { enabledCliProviders, agentTargets } = renderTargetsFor(providerRows, lspLanguages, {
       agentsFallback: true,
     });
-    const agentExt = (format: 'markdown' | 'toml'): string => (format === 'toml' ? 'toml' : 'md');
 
     const candidates = [
       '.claude/workflow-config.json',
       ...agentTargets.flatMap((t) => [
         `${t.dir}/README.md`,
-        ...agents.map((a) => `${t.dir}/${a.id}.${agentExt(t.format)}`),
+        ...agents.map((a) => agentFilePath(t, a.id)),
       ]),
       ...(wantsLocalPhpLsp(lspLanguages) ? DRUPAL_LSP_FILES.map((f) => f.rel) : []),
       '.claude/mcp_settings.json',
@@ -846,9 +846,8 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     }
     for (const target of targets) {
       for (const agent of agents) {
-        const ext = target.format === 'toml' ? 'toml' : 'md';
         const content = buildAgentFileForTarget(agent, target);
-        await writeIfAllowed(`${target.dir}/${agent.id}.${ext}`, content);
+        await writeIfAllowed(agentFilePath(target, agent.id), content);
       }
       if (agents.length > 0 && shouldEmitAgentsReadme(target)) {
         const indexExt = target.format === 'toml' ? 'toml' : 'md';
