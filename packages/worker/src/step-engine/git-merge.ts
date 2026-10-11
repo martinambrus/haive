@@ -123,7 +123,7 @@ function utf8Name(name: string): string | null {
   return isUtf8(bytes) ? bytes.toString('utf8') : null;
 }
 
-/** Where git, run as root, writes as root over a tree the sandbox user owns, and who owns it. */
+/** Where git, run as root, writes as root over a tree the sandbox user (`owner`) must write. */
 interface HandBack {
   anchor: string;
   prefix: string;
@@ -139,18 +139,7 @@ async function handBackPlan(dir: string): Promise<HandBack | null> {
     () => null,
   );
   if (!tree) return null;
-  return { anchor, prefix, writer, owner: handBackOwner(tree.stats, writer) };
-}
-
-/** Who gets what git wrote: the tree's owner, or the sandbox identity when the tree is the writer's
- *  own, since a root-owned tree the sandbox reaches through its mode bits still gets root's 0644 files. */
-export function handBackOwner(
-  tree: { uid: number; gid: number },
-  writer: number,
-): { uid: number; gid: number } {
-  return tree.uid === writer
-    ? { uid: SANDBOX_UID, gid: SANDBOX_GID }
-    : { uid: tree.uid, gid: tree.gid };
+  return { anchor, prefix, writer, owner: { uid: SANDBOX_UID, gid: SANDBOX_GID } };
 }
 
 /** The paths the worktree holds differently from commit `ref`, as git listed them. */

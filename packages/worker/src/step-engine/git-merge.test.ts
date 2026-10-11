@@ -22,7 +22,6 @@ import {
   captureFixBaseline,
   completeMergeHostSide,
   fixerLeftoversWarning,
-  handBackOwner,
   mergeCommitted,
   openMerge,
   recordFixerLeftovers,
@@ -33,7 +32,6 @@ import {
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import { secretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
-import { SANDBOX_GID, SANDBOX_UID } from '../sandbox/sandbox-identity.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -1437,14 +1435,6 @@ describe.runIf(process.getuid?.() === 0)('a root merge in a tree the sandbox use
     } finally {
       await rm(dir, REMOVE);
     }
-  });
-});
-
-describe('handBackOwner', () => {
-  it("hands a root-owned tree's writes to the sandbox identity, and another owner's to that owner", () => {
-    expect(handBackOwner({ uid: 0, gid: 0 }, 0)).toEqual({ uid: SANDBOX_UID, gid: SANDBOX_GID });
-    expect(handBackOwner({ uid: 1000, gid: 1000 }, 0)).toEqual({ uid: 1000, gid: 1000 });
-    expect(handBackOwner({ uid: 5000, gid: 5001 }, 0)).toEqual({ uid: 5000, gid: 5001 });
   });
 });
 
