@@ -280,20 +280,10 @@ function enclosingFunction(node: ts.Node): ts.FunctionLikeDeclaration | null {
   return null;
 }
 
-/** The innermost function holding the node that is a transaction callback or has a name, whose
- *  call sites are then checked; else its innermost function. */
+/** The innermost function holding the node: a callback may run after the transaction around it has
+ *  ended, so no guard outside a function covers a write inside it. A named one is checked at its
+ *  call sites instead. */
 function scopeOf(node: ts.Node): ts.FunctionLikeDeclaration | null {
-  for (let fn = enclosingFunction(node); fn; fn = enclosingFunction(fn)) {
-    const call = fn.parent;
-    if (
-      (ts.isCallExpression(call) &&
-        ts.isPropertyAccessExpression(call.expression) &&
-        call.expression.name.text === 'transaction') ||
-      nameOf(fn) !== null
-    ) {
-      return fn;
-    }
-  }
   return enclosingFunction(node);
 }
 
@@ -384,6 +374,24 @@ describe('a live-status write on a task row', () => {
     );
     expect(writes.length).toBeGreaterThan(0);
     expect(writes.filter((w) => !w.covered)).toEqual([]);
+  });
+
+  it('does not let a guard outside an anonymous callback cover a write inside it', () => {
+    const covered = (body: string) =>
+      liveWrites(
+        'x.ts',
+        `async function route() { await db.transaction(async (tx) => { ${body} }); }`,
+      ).map((w) => w.covered);
+    expect(
+      covered(
+        `await ${GUARD}(tx, id); queueMicrotask(() => tx.update(schema.tasks).set({ status: 'running' }));`,
+      ),
+    ).toEqual([false]);
+    expect(
+      covered(
+        `queueMicrotask(async () => { await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }); });`,
+      ),
+    ).toEqual([true]);
   });
 
   it('checks a named function inside a transaction at its call sites', () => {
