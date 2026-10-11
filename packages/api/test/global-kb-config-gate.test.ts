@@ -6,11 +6,15 @@ const h = vi.hoisted(() => ({
   settings: {} as Record<string, unknown>,
   set: vi.fn(async (_key: string, _value: string) => {}),
   setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
+  holdsVectors: false,
+  checks: [] as unknown[],
   connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
     pg: async () => [],
     close: async () => {},
   })),
 }));
+
+const rows = () => (h.holdsVectors ? [{ '?column?': 1 }] : []);
 
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
 vi.mock('../src/queues.js', () => ({ getGlobalKbSyncQueue: vi.fn(), getTaskQueue: vi.fn() }));
@@ -38,6 +42,15 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
   resolveGlobalKbSettings: async () => h.settings,
   resolveGlobalKbConnection: (settings: unknown, db: unknown) => h.connect(settings, db),
+  withGlobalKb: async (
+    _db: unknown,
+    fn: (ctx: unknown) => Promise<unknown>,
+    opts: { deadlineMs?: number; connectTimeoutSeconds?: number },
+  ) => {
+    h.checks.push(opts);
+    const tx = { unsafe: async (text: string) => (text.startsWith('SET') ? [] : rows()) };
+    return fn({ conn: { pg: { begin: (run: (t: typeof tx) => unknown) => run(tx) } } });
+  },
 }));
 
 import { Hono } from 'hono';
@@ -90,6 +103,8 @@ beforeEach(() => {
   h.set.mockClear();
   h.setSecret.mockClear();
   h.connect.mockClear();
+  h.holdsVectors = false;
+  h.checks = [];
   h.role = 'admin';
   h.flags = new Map();
   h.settings = { ...SAVED };
@@ -283,6 +298,55 @@ describe('PUT /global-kb/config by an admin', () => {
 
       expect((await put({ mode: 'external' })).status).toBe(403);
     });
+  });
+});
+
+describe('PUT /global-kb/config with a different embedding width', () => {
+  const widen = { ...PAGE, embedDimensions: 1024 };
+
+  it('is refused with 409 while the store holds vectors, and writes nothing', async () => {
+    h.holdsVectors = true;
+    const res = await put(widen);
+
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe('embed_dimensions_locked');
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.setSecret).not.toHaveBeenCalled();
+  });
+
+  it('is refused for a regular user too, before any other field of the save is written', async () => {
+    h.holdsVectors = true;
+    h.role = 'user';
+
+    expect((await put({ ...widen, digestEnabled: false })).status).toBe(409);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('reads the store under a connect timeout and a deadline', async () => {
+    h.holdsVectors = true;
+    await put(widen);
+
+    expect(h.checks).toEqual([
+      expect.objectContaining({
+        connectTimeoutSeconds: expect.any(Number),
+        deadlineMs: expect.any(Number),
+      }),
+    ]);
+  });
+
+  it('is accepted on an empty store', async () => {
+    const res = await put(widen);
+
+    expect(res.status).toBe(200);
+    expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '1024']);
+  });
+
+  it('is not checked, and accepted, when the width is unchanged', async () => {
+    h.holdsVectors = true;
+    const res = await put(PAGE);
+
+    expect(res.status).toBe(200);
+    expect(h.checks).toEqual([]);
   });
 });
 

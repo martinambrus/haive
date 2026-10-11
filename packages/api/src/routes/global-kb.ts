@@ -278,6 +278,27 @@ const configSchema = z
   })
   .strict();
 
+// The bounds of the api's other reads of the store (rag.ts search).
+const VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS = 3;
+const VECTOR_CHECK_DEADLINE_MS = 6_000;
+const VECTOR_CHECK_STATEMENT_TIMEOUT_MS = 3_000;
+
+async function storeHoldsVectors(settings: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) {
+  return withGlobalKb(
+    getDb(),
+    ({ conn }) =>
+      conn.pg.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL statement_timeout = '${VECTOR_CHECK_STATEMENT_TIMEOUT_MS}ms'`);
+        return (await tx.unsafe(`SELECT 1 FROM ai_rag_embeddings LIMIT 1`)).length > 0;
+      }),
+    {
+      connectTimeoutSeconds: VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
+      deadlineMs: VECTOR_CHECK_DEADLINE_MS,
+      settings,
+    },
+  );
+}
+
 globalKbRoutes.get('/config', async (c) => {
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
 });
@@ -309,6 +330,17 @@ globalKbRoutes.put('/config', async (c) => {
       400,
       'external mode needs a connection string, stored already or sent with it',
       'connection_string_required',
+    );
+  }
+  if (
+    d.embedDimensions !== undefined &&
+    d.embedDimensions !== saved.embeddingDimensions &&
+    (await storeHoldsVectors(saved))
+  ) {
+    throw new HttpError(
+      409,
+      'the store holds vectors of the current width; clear them and re-embed before changing the embedding dimensions',
+      'embed_dimensions_locked',
     );
   }
   if (isAdmin && d.enabled !== undefined)
