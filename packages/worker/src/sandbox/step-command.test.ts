@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { StepContext } from '../step-engine/step-definition.js';
+import { TaskCancelledError, type StepContext } from '../step-engine/step-definition.js';
 
 const runInSandbox = vi.fn();
 const release = vi.fn(async () => undefined);
@@ -42,7 +42,8 @@ vi.mock('../queues/cli-exec/gitfile-mask.js', async (importOriginal) => ({
 }));
 
 const { runStepCommandInSandbox, BINARY_MISSING_EXIT } = await import('./step-command.js');
-const { AgentLeaseTimeoutError } = await import('../queues/cli-exec/agent-lease.js');
+const { AgentLeaseAbortedError, AgentLeaseTimeoutError } =
+  await import('../queues/cli-exec/agent-lease.js');
 
 function ctx(over: Partial<StepContext> = {}): StepContext {
   return {
@@ -170,6 +171,14 @@ describe('runStepCommandInSandbox', () => {
     acquireAgentLease.mockRejectedValue(new AgentLeaseTimeoutError(600_000));
     const res = await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
     expect(res).toEqual({ ran: false, note: 'not run: no agent slot became free within 600s' });
+    expect(runInSandbox).not.toHaveBeenCalled();
+  });
+
+  it('turns a Stop during the wait into a task cancellation', async () => {
+    acquireAgentLease.mockRejectedValue(new AgentLeaseAbortedError());
+    await expect(
+      runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 }),
+    ).rejects.toBeInstanceOf(TaskCancelledError);
     expect(runInSandbox).not.toHaveBeenCalled();
   });
 

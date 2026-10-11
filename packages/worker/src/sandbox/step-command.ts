@@ -1,11 +1,12 @@
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { StepContext } from '../step-engine/step-definition.js';
+import { TaskCancelledError, type StepContext } from '../step-engine/step-definition.js';
 import { resolveInvocationRepoMount, resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
 import { resolveSecretMasks } from '../queues/cli-exec/secret-mask.js';
 import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
 import {
+  AgentLeaseAbortedError,
   AgentLeaseTimeoutError,
   acquireAgentLease,
   type AgentLease,
@@ -76,6 +77,7 @@ export async function runStepCommandInSandbox(
     if (err instanceof AgentLeaseTimeoutError) {
       return { ran: false, note: `not run: ${err.message}` };
     }
+    if (err instanceof AgentLeaseAbortedError) throw new TaskCancelledError();
     throw err;
   }
   try {
