@@ -8,8 +8,11 @@ owns the immutable container ID returned by `docker run` until bring-up and wiri
 Aborting removes that runner and its anonymous Docker volume; killing the host's `docker exec`
 client alone cannot stop the nested process. Creation that finishes after the abort is removed
 too. `DdevBoots` keeps the old boot held until teardown settles, then a surviving caller boots
-with the current settings. Every coalesced caller's signal reaches the shared boot, including
-a step that joins a signal-less runtime-ensure job. The shared signal also cancels runner-image
+with the current settings. Only a caller for the same subpath joins a boot: one for another
+subpath (a Retry of `01-worktree-setup` moved the worktree mid-boot) waits it out, stoppable on
+its own signal, and then boots its own, where the boot-subpath label check recreates the runner.
+The app runner coalesces the same way. Every coalesced caller's signal reaches the shared boot,
+including a step that joins a signal-less runtime-ensure job. The shared signal also cancels runner-image
 inspection/build and stale-image pruning before a container exists. A completed runtime is
 no longer owned by that startup, so an
 ordinary Stop keeps its imported database as before.

@@ -116,4 +116,18 @@ describe('ensureAppRunnerStarted cancellation', () => {
     gate.admit();
     expect(await settled(joiner)).toEqual(new Error('docker unavailable'));
   });
+
+  it('boots its own runner for a caller asking for another subpath, once the first boot settles', async () => {
+    const gate = fullGate();
+    const first = ensureAppRunnerStarted(...args);
+    await vi.waitFor(() => expect(mock.acquire).toHaveBeenCalledTimes(1));
+    const other = ensureAppRunnerStarted(args[0], 'ws/other', args[2]);
+    expect(await settled(other)).toBe('pending');
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    gate.admit();
+    await settled(first);
+    await vi.waitFor(() => expect(mock.acquire).toHaveBeenCalledTimes(2));
+    gate.admit();
+    expect(await settled(other)).toEqual(new Error('docker unavailable'));
+  });
 });

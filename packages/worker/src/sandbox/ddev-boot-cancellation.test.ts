@@ -16,6 +16,46 @@ function deferred<T = void>() {
 }
 
 describe('DDEV cold-boot cancellation', () => {
+  it('makes a caller for another subpath wait out the boot and then boot its own', async () => {
+    const boots = new DdevBoots<string>();
+    const first = deferred<string>();
+    const a = boots.ensure('task', undefined, () => first.promise, 'ws/a');
+    const own = vi.fn(async () => 'b');
+    const b = boots.ensure('task', undefined, own, 'ws/b');
+    await Promise.resolve();
+    expect(own).not.toHaveBeenCalled();
+    first.resolve('a');
+    await expect(a).resolves.toBe('a');
+    await expect(b).resolves.toBe('b');
+    expect(own).toHaveBeenCalledOnce();
+  });
+
+  it('lets a caller waiting for another subpath stop on its own signal without stopping the boot', async () => {
+    const boots = new DdevBoots<string>();
+    const first = deferred<string>();
+    const bootSignal: AbortSignal[] = [];
+    const a = boots.ensure(
+      'task',
+      undefined,
+      (signal) => {
+        bootSignal.push(signal);
+        return first.promise;
+      },
+      'ws/a',
+    );
+    const stop = new AbortController();
+    const own = vi.fn(async () => 'b');
+    const b = boots.ensure('task', stop.signal, own, 'ws/b');
+    const bError = b.catch((err: unknown) => err);
+    await Promise.resolve();
+    stop.abort();
+    expect(await bError).toBeInstanceOf(DdevBootAbortedError);
+    expect(bootSignal[0]!.aborted).toBe(false);
+    first.resolve('a');
+    await expect(a).resolves.toBe('a');
+    expect(own).not.toHaveBeenCalled();
+  });
+
   it('removes the created runner during startup and holds Retry until teardown completes', async () => {
     const stop = new AbortController();
     const created = deferred();
