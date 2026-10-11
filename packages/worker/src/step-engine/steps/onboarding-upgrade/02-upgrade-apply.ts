@@ -839,8 +839,10 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const removalRecords: string[] = [];
     // What stood at each written path, recorded before the write.
     const preimageIds: string[] = [];
-    // Pre-images a retried Keep answered: once its decision commits, no later retry may restore one.
-    const consumedPreimageIds: string[] = [];
+    // A pre-image a retried Keep answered is deleted in its own statement as soon as the held file
+    // is settled, so a later failure of the apply cannot leave it for another retry to restore.
+    const spendPreimage = (id: string) =>
+      ctx.db.delete(schema.onboardingArtifacts).where(eq(schema.onboardingArtifacts.id, id));
     // An attempt that failed part-way leaves its records, and a path it rewrote no longer shows
     // what stood there, so a retry takes the newest record of each path from them.
     const earlierRecords = new Map<
@@ -1143,13 +1145,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             );
           } catch (err) {
             // The render was moved off the path and something else took it: that write is gone too.
-            if (err instanceof ParkedFileError) consumedPreimageIds.push(earlier.id);
+            if (err instanceof ParkedFileError) await spendPreimage(earlier.id);
             const msg = err instanceof Error ? err.message : String(err);
             warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
             continue;
           }
           // Either way the failed attempt's write no longer stands, so its pre-image is spent.
-          consumedPreimageIds.push(earlier.id);
+          await spendPreimage(earlier.id);
           if (!restored && !seen) {
             warnings.push(`did not record keeping ${entry.diskPath}: it changed while it was read`);
             continue;
@@ -1588,7 +1590,6 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       insertPaths.length > 0 ||
       baselineRows.length > 0 ||
       keptInPlace.length > 0 ||
-      consumedPreimageIds.length > 0 ||
       removalRecords.length > 0 ||
       adoptions.length > 0
     ) {
@@ -1657,11 +1658,6 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             .update(schema.onboardingArtifacts)
             .set({ supersededAt: now, updatedAt: now })
             .where(inArray(schema.onboardingArtifacts.id, markers));
-        }
-        if (consumedPreimageIds.length > 0) {
-          await tx
-            .delete(schema.onboardingArtifacts)
-            .where(inArray(schema.onboardingArtifacts.id, consumedPreimageIds));
         }
         for (const k of keptInPlace) {
           const updated = await tx

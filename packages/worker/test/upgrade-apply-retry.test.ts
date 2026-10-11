@@ -434,6 +434,21 @@ describe('an upgrade apply retried after it failed part-way', () => {
     ).toBe(false);
   });
 
+  it("spends the pre-image even when the Keep's own transaction then fails", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
+    await writeFile(join(s.root, EDITED), NEW, 'utf8');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+  });
+
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
     const s = await setup();
     failOneCommit(s);
