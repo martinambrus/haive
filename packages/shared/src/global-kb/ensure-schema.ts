@@ -47,9 +47,16 @@ const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';
  *  the JSONB facet indexes. Never touches the main DB or the per-project schema. */
 export async function ensureGlobalKbSchema(
   conn: Pick<GlobalKbConnection, 'pg' | 'embeddingDimensions'>,
+  opts: { timeoutMs?: number } = {},
 ): Promise<{ usedPgvector: boolean }> {
+  const timeoutMs =
+    opts.timeoutMs === undefined ? undefined : Math.max(1, Math.floor(opts.timeoutMs));
   const step = <T>(run: (tx: postgres.TransactionSql) => Promise<T>) =>
     conn.pg.begin(async (tx) => {
+      if (timeoutMs !== undefined) {
+        await tx.unsafe(`SET LOCAL lock_timeout = ${timeoutMs}`);
+        await tx.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+      }
       await tx`SELECT pg_advisory_xact_lock(hashtext(${SCHEMA_LOCK_KEY}))`;
       return run(tx);
     });

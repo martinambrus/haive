@@ -259,6 +259,21 @@ describe('ensureGlobalKbSchema', () => {
     ]);
   });
 
+  it('bounds every step with a lock and a statement timeout, ahead of the schema lock, when given one', async () => {
+    const { conn, transactions } = fakeConn();
+    await ensureGlobalKbSchema(conn, { timeoutMs: 1500.9 });
+    const txs = transactions();
+
+    expect(txs.length).toBeGreaterThan(20);
+    for (const tx of txs) {
+      expect(tx.slice(0, 3)).toEqual([
+        'SET LOCAL lock_timeout = 1500',
+        'SET LOCAL statement_timeout = 1500',
+        'SELECT pg_advisory_xact_lock(hashtext())',
+      ]);
+    }
+  });
+
   // Four columns or none, and no NOT NULL, DEFAULT or CHECK: an older build inserts rows without them.
   it('adds the four house-rules columns in one statement of their own, and constrains nothing', async () => {
     const { conn, transactions } = fakeConn();
