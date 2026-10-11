@@ -1,5 +1,13 @@
 import { and, desc, eq, inArray, isNull, max } from 'drizzle-orm';
-import { LIVE_TASK_STATUSES, schema, type Database, type DbTx } from '@haive/database';
+import {
+  checkRevive,
+  LIVE_TASK_STATUSES,
+  schema,
+  type Database,
+  type DbTx,
+  type ReviveRefusal,
+  type ReviveTask,
+} from '@haive/database';
 import { CLI_PROVIDER_LIST } from './cli-providers/index.js';
 import { lstatNoFollow } from './fs-safe.js';
 import { KB_DIR } from './knowledge-paths.js';
@@ -410,4 +418,23 @@ export async function upgradeAdmission(
     return { admitted: true };
   }
   return { admitted: false, reason: resetAt === null ? 'none' : 'reset' };
+}
+
+/** What stops a failed task from reviving, null when nothing does: the creation's checks under the
+ *  repository lock, then, for an upgrade or rollback, the reset admission on the locked row. Call it
+ *  first in the reviving transaction; the api and the worker each word the answer their own way. */
+export async function reviveRefusal(
+  tx: DbTx,
+  taskId: string,
+): Promise<
+  | { task: ReviveTask; refusal: ReviveRefusal }
+  | { task: ReviveTask; admission: Exclude<UpgradeAdmission, { admitted: true }> }
+  | null
+> {
+  const check = await checkRevive(tx, taskId);
+  if (!check) return null;
+  if (check.refusal) return { task: check.task, refusal: check.refusal };
+  if (check.task.type !== 'onboarding_upgrade') return null;
+  const admission = await upgradeAdmission(tx, check.task.userId, check.repo);
+  return admission.admitted ? null : { task: check.task, admission };
 }
