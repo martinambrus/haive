@@ -7,7 +7,10 @@ vi.mock('../src/logger/index.js', () => {
   return { logger: { child: () => child } };
 });
 
-import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
+import {
+  ensureGlobalKbSchema,
+  globalIdentifierBackfillOwed,
+} from '../src/global-kb/ensure-schema.js';
 import {
   IDENTIFIER_TSV_SENTINEL,
   identifierTsvSentinelQuery,
@@ -532,6 +535,13 @@ describe('ensureGlobalKbSchema', () => {
         expect.objectContaining({ err: expect.any(Error) }),
         expect.stringContaining('identifier'),
       );
+      expect(globalIdentifierBackfillOwed()).toBe(true);
+    });
+
+    it('owes no retry once a pass finished', async () => {
+      await ensureGlobalKbSchema(fakeConn({ unstampedRows: 1, backfillThrows: true }).conn);
+      await ensureGlobalKbSchema(fakeConn({ unstampedRows: 1 }).conn);
+      expect(globalIdentifierBackfillOwed()).toBe(false);
     });
   });
 });

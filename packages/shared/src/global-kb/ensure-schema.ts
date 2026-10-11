@@ -374,6 +374,13 @@ export async function ensureGlobalKbSchema(
   return { usedPgvector };
 }
 
+let identifierBackfillOwed = false;
+
+/** True after a backfill pass in this process failed or stopped early, so the sweep owes a retry. */
+export function globalIdentifierBackfillOwed(): boolean {
+  return identifierBackfillOwed;
+}
+
 /** Rewrites every global vector row whose `content_tsv` lacks the identifier stamp; warns, never
  *  throws. No row cap, since the ensure runs it once per process; the reconcile sweep re-runs it. */
 export async function backfillGlobalIdentifierTsv(
@@ -389,6 +396,7 @@ export async function backfillGlobalIdentifierTsv(
     const pending = Number((counted[0] as { n?: number } | undefined)?.n ?? 0);
     const maxPasses = Math.ceil(pending / IDENTIFIER_BACKFILL_BATCH) + 1;
     let total = 0;
+    let finished = pending === 0;
     for (let pass = 0; pending > 0 && pass < maxPasses; pass++) {
       const result = await step((tx) =>
         tx.unsafe(
@@ -399,10 +407,15 @@ export async function backfillGlobalIdentifierTsv(
       );
       const rows = result.count ?? 0;
       total += rows;
-      if (rows < IDENTIFIER_BACKFILL_BATCH) break;
+      if (rows < IDENTIFIER_BACKFILL_BATCH) {
+        finished = true;
+        break;
+      }
     }
+    identifierBackfillOwed = !finished;
     if (total > 0) log.info({ rows: total }, 'backfilled identifier lexemes into content_tsv');
   } catch (err) {
+    identifierBackfillOwed = true;
     log.warn({ err }, 'identifier tsv backfill failed; lexical identifier search may be stale');
   }
 }

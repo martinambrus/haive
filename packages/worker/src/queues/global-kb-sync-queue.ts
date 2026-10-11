@@ -15,6 +15,7 @@ import {
 } from '../step-engine/steps/_rag-embed-health.js';
 import {
   backfillGlobalIdentifierTsv,
+  globalIdentifierBackfillOwed,
   globalKbEntries,
   resolveGlobalKbSettings,
   withGlobalKb,
@@ -438,10 +439,12 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
   if (!settings.enabled) return;
   // A store enabled or reachable only after boot still gets its pre-provenance vectors classified.
   await classifyGlobalKbVectorProvenance(getDb());
-  // The ensure's own backfill runs once per process; a pass it lost to an error is retried here.
-  await withGlobalKb(getDb(), (ctx) =>
-    backfillGlobalIdentifierTsv((run) => ctx.conn.pg.begin(run)),
-  );
+  // The ensure's own backfill runs once per process; a pass it lost or left unfinished is retried here.
+  if (globalIdentifierBackfillOwed()) {
+    await withGlobalKb(getDb(), (ctx) =>
+      backfillGlobalIdentifierTsv((run) => ctx.conn.pg.begin(run)),
+    );
+  }
   const cutoff = new Date(Date.now() - RECONCILE_GRACE_MS);
   const pending = await withGlobalKb(getDb(), (ctx) =>
     ctx.db
