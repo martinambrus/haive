@@ -1142,6 +1142,30 @@ export async function enqueueCancel(taskId: string, userId: string): Promise<voi
   );
 }
 
+/** Queue a deleted repository's cleanup again, as the api's delete does; both handlers are idempotent. */
+export async function enqueueRepoCleanup(
+  kind: 'rag' | 'resources',
+  payload: RepoRagCleanupPayload | RepoResourceCleanupPayload,
+  jobId: string,
+): Promise<void> {
+  const queue = getTaskQueue() as unknown as Queue<
+    RepoRagCleanupPayload | RepoResourceCleanupPayload
+  >;
+  await queue.add(
+    kind === 'rag' ? TASK_JOB_NAMES.CLEANUP_REPO_RAG : TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES,
+    payload,
+    kind === 'rag'
+      ? {
+          jobId,
+          removeOnComplete: 50,
+          removeOnFail: 50,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 2000 },
+        }
+      : { jobId, removeOnComplete: 50, removeOnFail: 50 },
+  );
+}
+
 async function loadProviders(db: Database, userId: string): Promise<CliProviderRecord[]> {
   const rows = await db
     .select()
@@ -3360,6 +3384,12 @@ async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload
     },
     'repo rag cleanup complete',
   );
+  await dropRepoCleanupRow(db, payload.cleanupId);
+}
+
+async function dropRepoCleanupRow(db: Database, cleanupId: string | undefined): Promise<void> {
+  if (!cleanupId) return;
+  await db.delete(schema.repoCleanups).where(eq(schema.repoCleanups.id, cleanupId));
 }
 
 const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
@@ -3452,6 +3482,7 @@ async function handleCleanupRepoResources(
     },
     'repo resource cleanup complete',
   );
+  await dropRepoCleanupRow(db, payload.cleanupId);
 }
 
 type TaskWorkerPayload = TaskJobPayload | RepoRagCleanupPayload | RepoResourceCleanupPayload;
