@@ -77,10 +77,15 @@ an edge case — and the index it produced looked healthy.
 loops (`workflow/_rag-index.ts` for 02/11c, `onboarding/10-rag-populate.ts`,
 `queues/global-kb-sync-queue.ts` — which was also UNBATCHED, sending up to
 `MAX_CHUNKS_PER_FILE` 80 chunks in one call). It returns `embedded` / `hashed` / `failed`.
-`hashed` is reachable only two ways, and neither is a mid-run accident: the repo has no
-embedding endpoint at all (every chunk hashes, which is homogeneous and therefore honest),
-or `CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED` is off, which restores the old behaviour byte for
-byte and is the no-deploy rollback.
+`hashed` is reachable only two ways: the repo has no embedding endpoint at all (every chunk
+hashes, which is homogeneous and therefore honest), or `CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED`
+is off and an embed failed. In the second case, with an endpoint configured, the hash rows are
+written with a NULL `chunk_hash`, so the next sync re-embeds them as updates instead of
+skipping them as unchanged, and the repo is recorded embed-degraded (dense half off) until a
+run writes no hash batch. Onboarding embeds whenever an endpoint is configured (URL and model),
+whatever its reachability probe said: a probe-down endpoint used to make 10-rag-populate hash
+the WHOLE index, even under strict mode, and those rows were then never replaced. Rebuilding
+an index marks it degraded until the re-embed lands.
 
 In workflow syncs, an unreachable Ollama probe skips model warmup but never selects
 hash mode for a configured endpoint. Batches still try that endpoint through `embedBatch`:
