@@ -9,6 +9,8 @@ const h = vi.hoisted(() => ({
   batches: [0] as Array<number | { code: string }>,
   hang: false,
   ended: 0,
+  awaiting: false,
+  probeError: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -31,6 +33,10 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
         pg: (() => {
           const unsafe = async (statement: string, params?: unknown[]) => {
             h.statements.push({ statement, params });
+            if (statement.startsWith('SELECT')) {
+              if (h.probeError) throw new Error('store read failed');
+              return h.awaiting ? [{ found: 1 }] : [];
+            }
             if (!statement.startsWith('UPDATE')) return [];
             if (h.hang) return new Promise(() => {});
             const next = h.batches.shift() ?? 0;
@@ -66,13 +72,16 @@ const app = new Hono<AppEnv>();
 app.route('/', toolingUpgradeRoutes);
 app.onError(errorHandler);
 
-function setup(ragConnectionString: string, configured = true) {
+function setup(ragConnectionString: string, configured = true, degraded = false) {
   const fake = createFakeDb({ repositories: schema.repositories });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,
     name: 'r',
     source: 'local_path',
+    ...(degraded
+      ? { ragEmbedDegradedAt: new Date(0), ragEmbedDegradedReason: 'Ollama is unreachable' }
+      : {}),
     onboardingTooling: configured
       ? {
           schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
@@ -87,6 +96,8 @@ function setup(ragConnectionString: string, configured = true) {
   h.batches = [0];
   h.hang = false;
   h.ended = 0;
+  h.awaiting = false;
+  h.probeError = false;
   return fake;
 }
 
@@ -95,6 +106,13 @@ const rebuild = () =>
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ ragEmbedAction: 'rebuild_index' }),
+  });
+
+const retry = () =>
+  app.request(`/${REPO}/tooling`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ragEmbedAction: 'retry' }),
   });
 
 const stores: Array<() => Promise<void>> = [];
@@ -243,4 +261,87 @@ describe('forcing a re-embed of a repository', () => {
     expect(store.seen.connections).toBeGreaterThan(0);
     expect(elapsed).toBeLessThan(5_000);
   }, 40_000);
+});
+
+describe('retrying the embedding of a degraded repository', () => {
+  const STORE = 'postgres://rag:rag@127.0.0.1:1/rag';
+
+  it('keeps the degradation while the store holds rows awaiting re-embed', async () => {
+    const fake = setup(STORE, true, true);
+    h.awaiting = true;
+
+    const res = await retry();
+
+    expect(res.status).toBe(200);
+    const [row] = fake.rows(schema.repositories);
+    expect(row!.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(row!.ragEmbedDegradedReason).toBe('Ollama is unreachable');
+    expect(await res.json()).toMatchObject({ degradationKept: true, reembedQueued: false });
+  });
+
+  it('keeps the degradation when the probe fails', async () => {
+    const fake = setup(STORE, true, true);
+    h.probeError = true;
+
+    const res = await retry();
+
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(await res.json()).toMatchObject({ degradationKept: true });
+  });
+
+  it('keeps the degradation, within the connect timeout, when the store accepts the connection and never speaks', async () => {
+    const store = await mutePostgres();
+    const fake = setup(store.url, true, true);
+    h.realStore = true;
+
+    const started = Date.now();
+    const res = await retry();
+
+    expect(await res.json()).toMatchObject({ degradationKept: true });
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 40_000);
+
+  it('clears the degradation when the store holds no row awaiting re-embed', async () => {
+    const fake = setup(STORE, true, true);
+
+    const res = await retry();
+
+    expect(await res.json()).toMatchObject({ reembedQueued: false });
+    const [row] = fake.rows(schema.repositories);
+    expect(row!.ragEmbedDegradedAt ?? null).toBeNull();
+    expect(row!.ragEmbedDegradedReason ?? null).toBeNull();
+  });
+
+  it('clears the degradation when the repository has no RAG store configured', async () => {
+    const fake = setup(STORE, false, true);
+
+    const res = await retry();
+
+    expect(res.status).toBe(200);
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt ?? null).toBeNull();
+    expect(h.statements).toEqual([]);
+  });
+
+  it('probes one bounded, repository-scoped read that skips task rows', async () => {
+    setup(STORE, true, true);
+
+    await retry();
+
+    expect(h.openOptions).toEqual([{ connectTimeoutSeconds: 3, fetchTypes: false }]);
+    expect(h.statements.map((s) => s.statement.split(/\s+/).slice(0, 2).join(' '))).toEqual([
+      'SET LOCAL',
+      'SELECT 1',
+    ]);
+    expect(h.statements[1]!.statement).toContain('chunk_hash IS NULL');
+    expect(h.statements[1]!.params).toEqual([REPO, 'task']);
+  });
+
+  it('opens no store for a repository that is not degraded', async () => {
+    setup(STORE);
+
+    await retry();
+
+    expect(h.openOptions).toEqual([]);
+  });
 });

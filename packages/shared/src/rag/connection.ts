@@ -96,6 +96,20 @@ export interface RagConnection {
   close: () => Promise<void>;
 }
 
+/** Whether the repo's store holds a row awaiting re-embed (NULL `chunk_hash`). Task rows are
+ *  excluded: `indexTaskEmbedding` never writes a hash for them. Throws when the read fails. */
+export async function ragRowsAwaitReembed(
+  pg: Pick<postgres.Sql, 'unsafe'>,
+  repositoryId: string,
+): Promise<boolean> {
+  const found = await pg.unsafe(
+    `SELECT 1 FROM ${RAG_TABLE}
+      WHERE repository_id = $1 AND source_type <> $2 AND chunk_hash IS NULL LIMIT 1`,
+    [repositoryId, TASK_SOURCE_TYPE],
+  );
+  return found.length > 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Database name helpers                                               */
 /* ------------------------------------------------------------------ */

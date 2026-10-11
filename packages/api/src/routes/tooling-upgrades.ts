@@ -13,7 +13,13 @@ import {
   type OnboardingToolingMirror,
   type ToolName,
 } from '@haive/shared';
-import { RAG_TABLE, resolveRagConnection, type RagMode } from '@haive/shared/rag';
+import {
+  RAG_TABLE,
+  ragRowsAwaitReembed,
+  resolveRagConnection,
+  type RagConnection,
+  type RagMode,
+} from '@haive/shared/rag';
 import {
   ALL_REVIEW_DIMENSION_IDS,
   REVIEW_DIMENSIONS,
@@ -250,29 +256,18 @@ const RAG_REEMBED_CONNECT_TIMEOUT_SECONDS = 3;
 const RAG_REEMBED_BATCH_ROWS = 500;
 const RAG_REEMBED_STATEMENT_TIMEOUT_MS = 3_000;
 const RAG_REEMBED_DEADLINE_MS = 60_000;
+const RAG_PROBE_DEADLINE_MS = 10_000;
 const QUERY_CANCELED = '57014';
 
 class ReembedDeadline extends Error {}
 
-/** Force every chunk of a repository's RAG index to be re-embedded on the next
- *  sync, WITHOUT deleting anything: nulling `chunk_hash` makes the incremental
- *  differ (`_rag-index.ts`) see every chunk as changed, so the rows stay
- *  searchable in the meantime and are replaced one batch at a time.
- *
- *  Needed in exactly two cases, both of which leave hash vectors on disk that a
- *  content-hash comparison would otherwise keep forever: a repository leaving
- *  lexical-only mode, and one indexed before strict embedding existed (those carry
- *  no degradation record, so this is their only route back).
- *
- *  Resolves the RAG target from the repo's own onboarding mirrors rather than a
- *  task's step outputs, since this runs from a settings page with no task in hand.
- *  Returns false when the repo has no usable RAG config — nothing to re-embed.
- *  Resets in bounded batches, so a stopped run is not rolled back: running it again
- *  continues, since it only touches rows that still hold a hash. */
-async function forceRagReembed(
+/** Opens the repository's RAG store from its own onboarding mirrors rather than a
+ *  task's step outputs, since the callers run from a settings page with no task in hand.
+ *  Null when the repo has no usable RAG config. */
+async function openRagStore(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
-): Promise<boolean> {
+): Promise<RagConnection | null> {
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, repositoryId),
     columns: { onboardingTooling: true, onboardingEnvironment: true },
@@ -283,7 +278,7 @@ async function forceRagReembed(
     toolingMirror?.schemaVersion !== ONBOARDING_TOOLING_SCHEMA_VERSION ||
     !toolingMirror.tooling
   ) {
-    return false;
+    return null;
   }
   const t = toolingMirror.tooling as {
     ragMode?: string;
@@ -292,14 +287,14 @@ async function forceRagReembed(
     embeddingModel?: string | null;
     embeddingDimensions?: number;
   };
-  if (!t.ragMode || t.ragMode === 'none') return false;
+  if (!t.ragMode || t.ragMode === 'none') return null;
   const projectName =
     envMirror?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION
       ? ((envMirror.envDetectData as { project?: { name?: string } } | undefined)?.project?.name ??
         'default')
       : 'default';
 
-  const conn = await resolveRagConnection(
+  return resolveRagConnection(
     {
       ragMode: t.ragMode as RagMode,
       ragConnectionString: t.ragConnectionString || null,
@@ -311,6 +306,57 @@ async function forceRagReembed(
     projectName,
     { connectTimeoutSeconds: RAG_REEMBED_CONNECT_TIMEOUT_SECONDS, fetchTypes: false },
   );
+}
+
+/** Whether the repository's store holds rows awaiting re-embed. A store that is
+ *  configured but does not answer in time reads as true: the caller keeps its flag
+ *  rather than clearing it blind. No store configured reads as false. */
+async function ragStoreAwaitsReembedBounded(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+): Promise<boolean> {
+  const held: { conn: RagConnection | null } = { conn: null };
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ReembedDeadline()), RAG_PROBE_DEADLINE_MS);
+  });
+  const probe = async () => {
+    held.conn = await openRagStore(db, repositoryId);
+    if (!held.conn) return false;
+    return held.conn.pg.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_REEMBED_STATEMENT_TIMEOUT_MS}ms'`);
+      return ragRowsAwaitReembed(tx, repositoryId);
+    });
+  };
+  try {
+    return await Promise.race([probe(), deadline]);
+  } catch {
+    void held.conn?.pg.end({ timeout: 0 }).catch(() => {});
+    return true;
+  } finally {
+    clearTimeout(timer);
+    await held.conn?.close().catch(() => {});
+  }
+}
+
+/** Force every chunk of a repository's RAG index to be re-embedded on the next
+ *  sync, WITHOUT deleting anything: nulling `chunk_hash` makes the incremental
+ *  differ (`_rag-index.ts`) see every chunk as changed, so the rows stay
+ *  searchable in the meantime and are replaced one batch at a time.
+ *
+ *  Needed in exactly two cases, both of which leave hash vectors on disk that a
+ *  content-hash comparison would otherwise keep forever: a repository leaving
+ *  lexical-only mode, and one indexed before strict embedding existed (those carry
+ *  no degradation record, so this is their only route back).
+ *
+ *  Returns false when the repo has no usable RAG config — nothing to re-embed.
+ *  Resets in bounded batches, so a stopped run is not rolled back: running it again
+ *  continues, since it only touches rows that still hold a hash. */
+async function forceRagReembed(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+): Promise<boolean> {
+  const conn = await openRagStore(db, repositoryId);
   if (!conn) return false;
   const progress = { reset: 0 };
   let timer: NodeJS.Timeout | undefined;
@@ -701,10 +747,11 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   // unindexed — so its next incremental sync picks them up as ordinary inserts and
   // re-embedding the whole repository would be wasted work.
   let reembedQueued = false;
+  let degradationKept = false;
   if (body.ragEmbedAction) {
     const current = await db.query.repositories.findFirst({
       where: eq(schema.repositories.id, repositoryId),
-      columns: { ragEmbedLexicalOnly: true },
+      columns: { ragEmbedLexicalOnly: true, ragEmbedDegradedAt: true },
     });
     if (!current) throw new HttpError(404, 'Repository not found');
     if (body.ragEmbedAction === 'accept_lexical_only') {
@@ -713,8 +760,16 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       updates.ragEmbedDegradedReason = null;
     } else {
       updates.ragEmbedLexicalOnly = false;
-      updates.ragEmbedDegradedAt = null;
-      updates.ragEmbedDegradedReason = null;
+      // A retry re-embeds nothing, so rows a degraded run left awaiting re-embed keep the dense half off.
+      degradationKept =
+        body.ragEmbedAction !== 'rebuild_index' &&
+        !current.ragEmbedLexicalOnly &&
+        !!current.ragEmbedDegradedAt &&
+        (await ragStoreAwaitsReembedBounded(db, repositoryId));
+      if (!degradationKept) {
+        updates.ragEmbedDegradedAt = null;
+        updates.ragEmbedDegradedReason = null;
+      }
       if (body.ragEmbedAction === 'rebuild_index' || current.ragEmbedLexicalOnly) {
         const pending = {
           ragEmbedDegradedAt: new Date(),
@@ -732,5 +787,5 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   }
 
   await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));
-  return c.json({ repositoryId, ok: true, reembedQueued });
+  return c.json({ repositoryId, ok: true, reembedQueued, degradationKept });
 });
