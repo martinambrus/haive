@@ -1124,8 +1124,15 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           entry.newContent
         ) {
           const restore = earlier.writtenContent;
-          const render = entry.newContent;
           const rules = entry.templateKind === CLI_RULES_TEMPLATE_KIND;
+          // For a region, the bytes upsertRegion actually left between the markers.
+          const render = rules
+            ? (extractRegion(
+                upsertRegion('', entry.newContent, CLI_RULES_START, CLI_RULES_END),
+                CLI_RULES_START,
+                CLI_RULES_END,
+              ) ?? entry.newContent)
+            : entry.newContent;
           let restored = false;
           // What the held file showed when the callback declined: the bytes the Keep records.
           let seen: { content: string; hash: string } | null | undefined;

@@ -135,7 +135,8 @@ async function setup({
     diskPath: 'AGENTS.md',
     templateId: 'cli-rules',
     templateKind: CLI_RULES_TEMPLATE_KIND,
-    newContent: NEW_REGION,
+    // The plan's render ends in a newline that upsertRegion trims when it writes the region.
+    newContent: regionEdited ? `${NEW_REGION}\n` : NEW_REGION,
     newContentHash: hashOf(NEW_REGION),
     currentTemplateContentHash: hashOf(NEW_REGION),
   };
