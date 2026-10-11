@@ -58,9 +58,11 @@ also prevents a re-driven access change from reusing a slot while an orphaned sn
 An `exec` command carries its own deadline into the web container (`withWebContainerDeadline`,
 ten seconds under the host's, then KILL five later), because killing the runner's ddev client
 leaves the command running there. A non-raw exec runs as `ddev exec <flags> --raw -- timeout …
-bash -c "$*"`, its words joined in the runner: ddev double-quotes a non-raw word that holds a
-space (MEASURED on v1.25.2: `timeout 50s 'php -v'` ran a command named `php -v`, exit 127), so a
-wrapper in front of the words breaks assignments, pipelines and multi-word commands.
+bash -c "$c"`, where the runner first builds `$c` exactly as ddev's own `quoteArgs` would
+(`cmd/ddev/cmd/exec.go`: one word passes as is; from two up, a word holding `" \t\r\n#` is
+double-quoted with `"` escaped). A wrapper in front of the words instead breaks them, because ddev
+then quotes each one (MEASURED on v1.25.2: `timeout 50s 'php -v'` ran a command named `php -v`, exit
+127), and joining with `$*` loses the quoting of `exec bash -c "echo … | bash"`.
 Selection, stale cleanup, creation and promotion run in one non-root runner process under
 that lock. A provisional `haive-access-pending-<task>` snapshot is promoted to the selected
 slot only after creation succeeds; interrupted partial copies never count as recovery points.
