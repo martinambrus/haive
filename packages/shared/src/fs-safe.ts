@@ -1656,27 +1656,27 @@ export async function writeFileNoFollow(
 // Age, not pid: a restarted container reuses pids, and a live writer's temp is fresh.
 async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string): Promise<void> {
   const prefix = `.${leaf}.haive-tmp-`;
+  const dirRel = dirSegs.join('/');
+  const stale: { rel: string; identity: FileIdentity }[] = [];
   try {
-    const entries = await readdirNoFollow(anchor, dirSegs.join('/'));
-    for (const entry of entries ?? []) {
-      if (!entry.name.startsWith(prefix) || !entry.isFile()) continue;
-      if (!TEMP_SUFFIX.test(entry.name.slice(prefix.length))) continue;
-      const rel = [...dirSegs, entry.name].join('/');
-      try {
-        const info = await lstatNoFollow(anchor, rel);
-        if (
-          info !== null &&
-          info.kind === 'file' &&
-          Date.now() - info.stats.mtimeMs > STALE_TEMP_MS
-        ) {
-          await removeFileIfIdentityNoFollow(anchor, rel, {
-            dev: BigInt(info.stats.dev),
-            ino: BigInt(info.stats.ino),
-          });
-        }
-      } catch {}
+    const dir = await walkDir(anchor, toSafeRel(dirRel), [...dirSegs]);
+    try {
+      for (const name of await readdir(fdPath(dir.fh.fd))) {
+        if (!name.startsWith(prefix) || !TEMP_SUFFIX.test(name.slice(prefix.length))) continue;
+        const st = await lstat(at(dir.fh.fd, name), { bigint: true }).catch(() => null);
+        if (st === null || !st.isFile()) continue;
+        if (Date.now() - Number(st.mtimeMs) <= STALE_TEMP_MS) continue;
+        stale.push({ rel: [...dirSegs, name].join('/'), identity: { dev: st.dev, ino: st.ino } });
+      }
+    } finally {
+      await closeQuietly(dir.fh);
     }
-  } catch {}
+  } catch {
+    return;
+  }
+  for (const { rel, identity } of stale) {
+    await removeFileIfIdentityNoFollow(anchor, rel, identity).catch(() => undefined);
+  }
 }
 
 export interface UpdateFileOptions {
