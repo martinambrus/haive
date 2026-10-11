@@ -98,13 +98,14 @@ function setup(w: World = {}) {
       epoch: 3,
       reviveFailed: true,
     });
-  const resume = () =>
+  const resume = (polledSince?: Date) =>
     autoResumeFailedStep(fake.db as unknown as Database, {
       taskId: TASK,
       stepId: STEP,
       round: 0,
       providerId: null,
       via: 'test',
+      watchSince: polledSince ?? (task().awaitingProviderSince as Date | null | undefined) ?? null,
     });
   return { fake, task, events, revive, resume };
 }
@@ -210,7 +211,43 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
     expect(t.events()[0]).toMatchObject({ payload: { reason: 'live-upgrade-index' } });
   });
 
-  it('drops the watch on a refusal, so the poller does not retry it every tick', async () => {
+  it('tells the person the allowance is back instead, and leaves the poller nothing to retry', async () => {
+    const t = setup({
+      ...admitted(),
+      type: 'onboarding',
+      live: { type: 'onboarding_upgrade', status: 'running' },
+      task: {
+        awaitingAllowanceProviderId: PROVIDER,
+        awaitingProviderReason: 'rate_limit',
+        awaitingProviderSince: new Date(Date.now() - DAY),
+      },
+    });
+    expect(await t.resume()).toBe(false);
+    expect(t.task()).toMatchObject({
+      status: 'failed',
+      awaitingAllowanceProviderId: PROVIDER,
+      awaitingProviderReason: 'rate_limit',
+    });
+    expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
+  });
+
+  it('stamps nothing when the watch changed between the poll and the resume', async () => {
+    const polled = new Date(Date.now() - DAY);
+    const t = setup({
+      ...admitted(),
+      type: 'onboarding',
+      live: { type: 'onboarding_upgrade', status: 'running' },
+      task: {
+        awaitingAllowanceProviderId: PROVIDER,
+        awaitingProviderReason: 'rate_limit',
+        awaitingProviderSince: new Date(),
+      },
+    });
+    expect(await t.resume(polled)).toBe(false);
+    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
+  });
+
+  it('drops a watch from before its start was recorded, without a notice', async () => {
     const t = setup({
       ...admitted(),
       type: 'onboarding',
@@ -218,10 +255,33 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
       task: { awaitingAllowanceProviderId: PROVIDER, awaitingProviderReason: 'rate_limit' },
     });
     expect(await t.resume()).toBe(false);
-    expect(t.task()).toMatchObject({
-      awaitingAllowanceProviderId: null,
-      awaitingProviderReason: null,
+    expect(t.task()).toMatchObject({ status: 'failed', awaitingAllowanceProviderId: null });
+    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
+  });
+
+  it('leaves a newer watch alone when the task was retried and failed again meanwhile', async () => {
+    const first = new Date(Date.now() - DAY);
+    const t = setup({
+      ...admitted(),
+      type: 'onboarding',
+      live: { type: 'onboarding_upgrade', status: 'running' },
+      task: {
+        awaitingAllowanceProviderId: PROVIDER,
+        awaitingProviderReason: 'rate_limit',
+        awaitingProviderSince: first,
+      },
     });
+    const transaction = t.fake.db.transaction.bind(t.fake.db);
+    t.fake.db.transaction = (async (fn: never) => {
+      try {
+        return await transaction(fn);
+      } finally {
+        t.fake.patch(schema.tasks, TASK, { awaitingProviderSince: new Date() });
+      }
+    }) as typeof t.fake.db.transaction;
+
+    expect(await t.resume()).toBe(false);
+    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
   });
 
   it.each(['onboarding', 'onboarding_upgrade'] as const)(

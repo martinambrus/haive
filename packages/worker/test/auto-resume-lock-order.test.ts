@@ -62,6 +62,7 @@ function setup(taskStatus: 'failed' | 'running') {
       round: 0,
       providerId: null,
       via: 'test',
+      watchSince: null,
     });
   const one = (rows: Record<string, unknown>[], id: string) => rows.find((r) => r.id === id)!;
   return { fake, updated, resume, one };

@@ -572,6 +572,7 @@ async function checkProviderRecovery(db: Database): Promise<void> {
         round: task.currentRound ?? 0,
         providerId: task.providerId,
         via,
+        watchSince: task.since ?? null,
       });
       if (resumed) {
         await getTaskQueue().add(
