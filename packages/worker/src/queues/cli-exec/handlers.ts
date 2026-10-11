@@ -113,6 +113,7 @@ import {
   clearTaskAuthPreparationState,
   syncRefreshedAuthToUserVolumes,
 } from '../../sandbox/task-auth-volume.js';
+import { whileTaskRunnersBusy } from '../../sandbox/runner-activity.js';
 
 /** The auth volume a provider row owns. Both users here (the pre-login chown and sign-out)
  *  must agree with what a task actually mounts, so they resolve it through the same shared
@@ -215,7 +216,7 @@ export async function handleCliExecJob(
 ): Promise<void> {
   const house: { scoring?: Promise<void> } = {};
   try {
-    await runCliExecJob(db, payload, deps, house);
+    await whileTaskRunnersBusy(payload.taskId, () => runCliExecJob(db, payload, deps, house));
   } finally {
     await house.scoring;
   }

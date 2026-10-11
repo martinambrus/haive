@@ -29,7 +29,12 @@ vi.mock('dockerode', () => ({
 import { appRunnerName, ddevRunnerName } from '@haive/shared';
 import { appRunnerExec } from './app-runner.js';
 import { runnerExec } from './ddev-runner.js';
-import { runnerExecLive, whileRunnerBusy, withRunnersFenced } from './runner-activity.js';
+import {
+  runnerExecLive,
+  whileRunnerBusy,
+  whileTaskRunnersBusy,
+  withRunnersFenced,
+} from './runner-activity.js';
 import { runnerSettled } from './runtime-runner-reaper.js';
 
 const TASK = 'aaaaaaaa-0000-4000-8000-000000000001';
@@ -133,6 +138,23 @@ describe('a reap decision in progress', () => {
     endFirst();
     await first;
     expect(await exec).toBe('ran');
+  });
+
+  it('holds a CLI run that starts during a decision, and counts it as busy', async () => {
+    let decided!: () => void;
+    const decision = new Promise<void>((r) => (decided = r));
+    const started = vi.fn(async () => 'started');
+    let run!: Promise<string>;
+    const verdict = withRunnersFenced(TASK, async (idle) => {
+      run = whileTaskRunnersBusy(TASK, started);
+      await decision;
+      return idle();
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(started).not.toHaveBeenCalled();
+    decided();
+    expect(await verdict).toBe(false);
+    expect(await run).toBe('started');
   });
 
   it('reads idle when no exec arrived', async () => {

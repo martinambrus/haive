@@ -25,6 +25,12 @@ export async function whileRunnerBusy<T>(container: string, run: () => Promise<T
   }
 }
 
+/** Runs `run` while both of the task's runners count as busy: a CLI run drives them from its own
+ *  container, so a reap decision must neither start under it nor see it as settled. */
+export function whileTaskRunnersBusy<T>(taskId: string, run: () => Promise<T>): Promise<T> {
+  return whileRunnerBusy(ddevRunnerName(taskId), () => whileRunnerBusy(appRunnerName(taskId), run));
+}
+
 /** Whether either runtime runner of the task has an exec in flight in this process. */
 export function taskRunnerBusy(taskId: string): boolean {
   return runnerNames(taskId).some((name) => inFlight.has(name));
