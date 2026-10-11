@@ -441,6 +441,30 @@ function identifierCteSql(
       ),`;
 }
 
+/** The global HNSW index holds every model row and `embed_model` filters after its scan, so old-model rows can exhaust `ef_search`. */
+const GLOBAL_DENSE_SCAN_SQL = 'SET LOCAL hnsw.iterative_scan = relaxed_order';
+
+/** A global dense read runs in a transaction with iterative scan on, the SET in a savepoint; a per-repo read is untouched. */
+async function denseRead(
+  conn: RagConnection,
+  filter: RagFacetFilter | undefined,
+  text: string,
+  params: unknown[],
+): Promise<RawRow[]> {
+  if (!filter) return (await conn.pg.unsafe(text, params as never)) as unknown as RawRow[];
+  const run = async (pg: RagConnection['pg']): Promise<RawRow[]> => {
+    try {
+      await (pg as unknown as TransactionSql).savepoint((sp) => sp.unsafe(GLOBAL_DENSE_SCAN_SQL));
+    } catch (err) {
+      const code = (err as { code?: unknown } | null)?.code;
+      log.warn({ code: typeof code === 'string' ? code : undefined }, 'iterative scan unavailable');
+    }
+    return (await pg.unsafe(text, params as never)) as unknown as RawRow[];
+  };
+  const inTransaction = typeof (conn.pg as Partial<TransactionSql>).savepoint === 'function';
+  return inTransaction ? run(conn.pg) : ((await conn.pg.begin(run as never)) as RawRow[]);
+}
+
 /** Hybrid dense + lexical retrieval over a project RAG database.
  *
  *  Ranking uses Reciprocal Rank Fusion of the dense (pgvector cosine) and
@@ -607,7 +631,7 @@ export async function ragHybridSearch(
         ? [pgTextArrayLiteral(ident.terms), pgFloatArrayLiteral(ident.idfs), ident.query as string]
         : []),
     ];
-    rows = (await conn.pg.unsafe(sqlText, params)) as unknown as RawRow[];
+    rows = await denseRead(conn, filter, sqlText, params);
   } else {
     // No usable dense half — either a jsonb-fallback store with no vector column,
     // or `lexicalOnly` for a repo whose vectors cannot be trusted. Lexical ranking.
@@ -790,7 +814,9 @@ async function fetchKnowledgeCandidates(
     ...(filter ? [filter.embedModel] : []),
   ];
 
-  return (await conn.pg.unsafe(
+  return denseRead(
+    conn,
+    filter,
     `
       WITH q AS (SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh)
       SELECT source_path, section_id, chunk_index, source_type, content, id,
@@ -803,5 +829,5 @@ async function fetchKnowledgeCandidates(
       LIMIT $3
       `,
     params,
-  )) as unknown as RawRow[];
+  );
 }

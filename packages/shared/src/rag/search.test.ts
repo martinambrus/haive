@@ -186,13 +186,14 @@ function recordingConn(df = 1): {
   calls: Array<{ statement: string; params: unknown[] }>;
 } {
   const calls: Array<{ statement: string; params: unknown[] }> = [];
-  const pg = {
+  const pg: Record<string, unknown> = {
     unsafe: async (statement: string, params: unknown[] = []) => {
       calls.push({ statement, params });
       if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
       if (statement.includes('AS t(term)')) return [{ term: 'getuserbyid', df, total: 10 }];
       return [];
     },
+    savepoint: async (run: (sp: unknown) => unknown) => run(pg),
   };
   return {
     conn: { mode: 'external', pg, embeddingDimensions: 4, close: async () => {} } as never,
@@ -203,7 +204,7 @@ function recordingConn(df = 1): {
 describe('ragHybridSearch parameters', () => {
   const QUERY = 'getUserById validation';
   const VEC = [0.1, 0.2, 0.3, 0.4];
-  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] }, embedModel: 'model-a' };
+  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] } };
 
   it.each([
     ['a facet filter, the global KB', FILTER, undefined],
@@ -447,7 +448,7 @@ describe('ragHybridSearch identifier statistics', () => {
 
 describe('ragHybridSearch lexical-only identifier ranker', () => {
   const VEC = [0.1, 0.2, 0.3, 0.4];
-  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] }, embedModel: 'model-a' };
+  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] } };
   const lexicalOnly = { lexicalOnly: true };
   const mainCall = (calls: Array<{ statement: string; params: unknown[] }>) =>
     calls.find((c) => c.statement.includes('ts_rank_cd'))!;
@@ -585,5 +586,114 @@ describe('ragHybridSearch identifier ranker prefers a definition', () => {
         : expect.not.arrayContaining([expect.stringContaining('{')]),
     );
     expect(calls.some((c) => c.statement.includes('AS t(term)'))).toBe(false);
+  });
+});
+
+const ITERATIVE_SET = 'SET LOCAL hnsw.iterative_scan = relaxed_order';
+
+/** A store that notes where each statement ran: in a transaction, in a savepoint, and in what order. */
+function scanStore(opts: { pooled: boolean; setFails?: boolean }) {
+  const events: Array<{ statement: string; inTx: boolean; inSavepoint: boolean }> = [];
+  let inTx = !opts.pooled;
+  let inSavepoint = false;
+  const codeRow = {
+    source_path: 'src/auth.ts',
+    section_id: 's',
+    chunk_index: 0,
+    source_type: 'code',
+    content: 'getUserById',
+    dense_sim: 0.8,
+    ts_norm: 0,
+    hybrid: 0,
+    rrf: 0.01,
+    id: '1',
+  };
+  const tx: Record<string, unknown> = {
+    unsafe: async (statement: string) => {
+      events.push({ statement, inTx, inSavepoint });
+      if (statement === ITERATIVE_SET && opts.setFails) {
+        throw Object.assign(new Error('unrecognized configuration parameter'), { code: '42704' });
+      }
+      if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
+      if (statement.includes('dense_c') || statement.includes('ANY($2::text[])')) return [codeRow];
+      return [];
+    },
+    savepoint: async (run: (sp: unknown) => unknown) => {
+      inSavepoint = true;
+      try {
+        return await run(tx);
+      } finally {
+        inSavepoint = false;
+      }
+    },
+  };
+  const pg = opts.pooled
+    ? {
+        unsafe: tx.unsafe,
+        begin: async (run: (t: unknown) => unknown) => {
+          inTx = true;
+          try {
+            return await run(tx);
+          } finally {
+            inTx = false;
+          }
+        },
+      }
+    : tx;
+  return {
+    conn: { mode: 'external', pg, embeddingDimensions: 4, close: async () => {} } as never,
+    events,
+  };
+}
+
+describe('ragHybridSearch global dense reads widen the index scan', () => {
+  const VEC = [0.1, 0.2, 0.3, 0.4];
+  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] }, embedModel: 'model-a' };
+  const QUERY = 'where is the session cookie set';
+  const denseIndexes = (events: Array<{ statement: string }>) =>
+    events.flatMap((e, i) =>
+      e.statement.includes('dense_c') || e.statement.includes('ANY($2::text[])') ? [i] : [],
+    );
+
+  it.each([
+    ['inside a transaction', false],
+    ['outside one, where it opens its own', true],
+  ])(
+    'sets iterative scan in the transaction before each dense statement %s',
+    async (_w, pooled) => {
+      const { conn, events } = scanStore({ pooled });
+
+      await ragHybridSearch(conn, VEC, QUERY, {}, FILTER);
+
+      const dense = denseIndexes(events);
+      expect(dense).toHaveLength(2);
+      for (const at of dense) {
+        expect(events[at]!.inTx).toBe(true);
+        expect(events[at - 1]).toMatchObject({ statement: ITERATIVE_SET, inTx: true });
+        expect(events[at - 1]!.inSavepoint).toBe(true);
+      }
+    },
+  );
+
+  it('still searches when the server refuses the setting', async () => {
+    const { conn, events } = scanStore({ pooled: false, setFails: true });
+
+    const hits = await ragHybridSearch(conn, VEC, QUERY, {}, FILTER);
+
+    expect(hits.map((x) => x.sourcePath)).toEqual(['src/auth.ts']);
+    expect(denseIndexes(events)).toHaveLength(2);
+  });
+
+  it.each([
+    ['inside a transaction', false],
+    ['outside one', true],
+  ])('leaves a per-repo read as it was %s', async (_w, pooled) => {
+    const { conn, events } = scanStore({ pooled });
+
+    await ragHybridSearch(conn, VEC, QUERY, {}, undefined, 'repo-1');
+
+    expect(events.map((e) => e.statement)).not.toContain(ITERATIVE_SET);
+    expect(events.some((e) => e.inSavepoint)).toBe(false);
+    expect(events.every((e) => e.inTx === !pooled)).toBe(true);
   });
 });

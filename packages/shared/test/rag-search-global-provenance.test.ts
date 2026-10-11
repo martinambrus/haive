@@ -4,11 +4,12 @@ import type { RagConnection } from '../src/rag/connection.js';
 
 function capturingConn(): { conn: RagConnection; statements: string[] } {
   const statements: string[] = [];
-  const pg = {
+  const pg: Record<string, unknown> = {
     unsafe: async (q: string) => {
       statements.push(q);
       return q.includes('information_schema.columns') ? [{ column_name: 'vector' }] : [];
     },
+    savepoint: async (run: (sp: unknown) => unknown) => run(pg),
   };
   return {
     conn: {
@@ -38,14 +39,16 @@ describe('ragHybridSearch ranks only model vectors in the global dense half', ()
   it('requires the configured embed_model in dense_c, bound as a parameter that the statement numbers', async () => {
     for (const repo of ['repo-1', undefined]) {
       const calls: Array<{ q: string; params: unknown[] }> = [];
+      const pg: Record<string, unknown> = {
+        unsafe: async (q: string, params: unknown[] = []) => {
+          calls.push({ q, params });
+          return q.includes('information_schema.columns') ? [{ column_name: 'vector' }] : [];
+        },
+        savepoint: async (run: (sp: unknown) => unknown) => run(pg),
+      };
       const conn = {
         mode: 'internal',
-        pg: {
-          unsafe: async (q: string, params: unknown[] = []) => {
-            calls.push({ q, params });
-            return q.includes('information_schema.columns') ? [{ column_name: 'vector' }] : [];
-          },
-        },
+        pg,
         embeddingDimensions: 4,
         close: async () => {},
       } as unknown as RagConnection;
@@ -97,7 +100,7 @@ describe('fetchKnowledgeCandidates on the global path', () => {
   it('requires embed_kind = model and the configured embed_model, and the local candidate query does not', async () => {
     const run = async (filter: RagFacetFilter | undefined, repo: string | undefined) => {
       const statements: string[] = [];
-      const pg = {
+      const pg: Record<string, unknown> = {
         unsafe: async (q: string, params: unknown[] = []) => {
           statements.push(q);
           if (q.includes('source_type = ANY')) bound.push(params);
@@ -120,6 +123,7 @@ describe('fetchKnowledgeCandidates on the global path', () => {
           }
           return [];
         },
+        savepoint: async (run: (sp: unknown) => unknown) => run(pg),
       };
       const conn = {
         mode: 'internal',
