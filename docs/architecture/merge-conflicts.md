@@ -77,7 +77,15 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   fixer ran cannot be told from the fixer's and is moved with it. The index is refreshed after the
   restore, since git rewrites the files and `merge --abort` refuses their stale stat data. git
   writes what it puts back as the worker, so those paths, and the directories git created for them,
-  are handed back to the merge dir's owner; a directory that already stood keeps its own. `.haive/`,
+  are handed back to the merge dir's owner; a directory that already stood keeps its own. The merge and
+  the abort are handed back the same way (`openMerge`, `abortMerge`): run as root over a tree the
+  sandbox user owns, git writes a conflicted file and a directory it creates as root, which a fixer
+  cannot rewrite or add to (MEASURED). The paths that differ from the commit before the merge, or
+  from `HEAD` before the abort, and the directories above them that root owns, go to the sandbox
+  identity (whoever owns the tree, since a tree the sandbox reaches through its mode bits is accepted
+  as it stands), one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
+  `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
+  logged. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
   not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
   removed later takes the link with it. A name is judged by its bytes, since a valid one can hold

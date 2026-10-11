@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { schema, type Database } from '@haive/database';
+import { logger } from '@haive/shared/logger';
 import {
   chmodNoFollow,
   chownNoFollow,
@@ -23,6 +24,7 @@ import { ensureGitExcludeEntry } from '../repo/git-init.js';
 import { gitRun, type GitRunResult } from '../repo/git-push.js';
 import { HOST_REPO_ROOT } from '../repo/worktree-git-boundary.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
+import { SANDBOX_GID, SANDBOX_UID } from '../sandbox/sandbox-identity.js';
 import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted-repo.js';
 
 // Shared git-merge / conflict-resolution core. Extracted from dag-executor.ts so
@@ -87,10 +89,19 @@ export async function openMerge(
   flags: string[],
   env: Record<string, string>,
 ): Promise<MergeOpen> {
+  const handBack = await handBackPlan(dir);
+  const before = handBack ? await revParse(dir, 'HEAD') : null;
   const res = await gitRun(dir, ['merge', '--no-ff', ...flags, ref], env);
-  if (res.code === 0) return { kind: 'merged' };
-  if (await mergeOpenFor(dir, ref)) return { kind: 'conflict' };
-  return { kind: 'refused', detail: gitDetail(res) };
+  const opened: MergeOpen =
+    res.code === 0
+      ? { kind: 'merged' }
+      : (await mergeOpenFor(dir, ref))
+        ? { kind: 'conflict' }
+        : { kind: 'refused', detail: gitDetail(res) };
+  if (handBack && before && opened.kind !== 'refused') {
+    await handBackWritten(handBack, dir, await differingFrom(dir, before));
+  }
+  return opened;
 }
 
 export type MergeAbort = { ok: true } | { ok: false; blocking: string[]; detail: string };
@@ -110,6 +121,78 @@ function shown(name: string): string {
 function utf8Name(name: string): string | null {
   const bytes = Buffer.from(name, 'latin1');
   return isUtf8(bytes) ? bytes.toString('utf8') : null;
+}
+
+/** Where git, run as root, writes as root over a tree the sandbox user (`owner`) must write. */
+interface HandBack {
+  anchor: string;
+  prefix: string;
+  writer: number;
+  owner: { uid: number; gid: number };
+}
+
+async function handBackPlan(dir: string): Promise<HandBack | null> {
+  const writer = process.getuid?.();
+  if (writer !== 0 || isHostCheckout(dir)) return null;
+  const { anchor, prefix } = workspaceAnchor(dir);
+  const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true }).catch(
+    () => null,
+  );
+  if (!tree) return null;
+  return { anchor, prefix, writer, owner: { uid: SANDBOX_UID, gid: SANDBOX_GID } };
+}
+
+/** The paths the worktree holds differently from commit `ref`, as git listed them. */
+async function differingFrom(dir: string, ref: string): Promise<string[]> {
+  const res = await gitRun(
+    dir,
+    ['diff', '--name-only', '-z', '--no-renames', ref],
+    undefined,
+    LISTING,
+  );
+  return res.code === 0 ? nulPaths(res.stdout) : [];
+}
+
+/** A file the sandbox user must rewrite or a directory it must add to cannot stay root's: each of
+ *  `names` and the directories above it that root owns go to the tree's owner. What another user
+ *  owns, and every link, stays. A chown moves a file's ctime, which `merge --abort` reads as a
+ *  change, so the index is refreshed after. */
+async function handBackWritten(
+  plan: HandBack,
+  dir: string,
+  names: readonly string[],
+): Promise<void> {
+  const seen = new Set<string>();
+  const skipped: string[] = [];
+  let changed = false;
+  for (const raw of names) {
+    const name = utf8Name(raw);
+    if (name === null) {
+      skipped.push(shown(raw));
+      continue;
+    }
+    const parts = name.split('/');
+    for (let i = 1; i <= parts.length; i += 1) {
+      const rel = `${plan.prefix}${parts.slice(0, i).join('/')}`;
+      if (seen.has(rel)) continue;
+      seen.add(rel);
+      const entry = await lstatNoFollow(plan.anchor, rel).catch(() => null);
+      if (entry === null || entry.kind === 'symlink' || entry.stats.uid !== plan.writer) continue;
+      await chownNoFollow(plan.anchor, rel, plan.owner).then(
+        () => {
+          changed = true;
+        },
+        () => undefined,
+      );
+    }
+  }
+  if (changed) await gitRun(dir, ['update-index', '-q', '--refresh']);
+  if (skipped.length > 0) {
+    logger.warn(
+      { dir, names: skipped.slice(0, 20), count: skipped.length },
+      'names that are not UTF-8 stay owned by the worker after a merge',
+    );
+  }
 }
 
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
@@ -157,6 +240,14 @@ const PATHSPEC_CHUNK = 100;
  *  the paths are reported instead. */
 export async function abortMerge(dir: string): Promise<MergeAbort> {
   if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
+  const handBack = await handBackPlan(dir);
+  const differing = handBack ? await differingFrom(dir, 'HEAD') : [];
+  const aborted = await abortOpenMerge(dir);
+  if (handBack) await handBackWritten(handBack, dir, differing);
+  return aborted;
+}
+
+async function abortOpenMerge(dir: string): Promise<MergeAbort> {
   const first = await gitRun(dir, ['merge', '--abort']);
   if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
   const blocking = (await stagedThenEdited(dir)) ?? [];
