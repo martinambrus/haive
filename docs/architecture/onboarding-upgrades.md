@@ -257,7 +257,9 @@ repository row in the transaction that revives. A worker refusal leaves the task
 the poller's notify path instead: it stamps `allowance_replenished_at` and keeps the provider, so the
 person gets the "allowance is back" notice and decides whether to Retry. The stamp is fenced to the
 refused watch's `awaiting_provider_since`; a watch from before that column, which a later cleared
-one cannot be told from, is dropped without a notice. Both
+one cannot be told from, is dropped without a notice. In the api, `revive-write-ratchet.test.ts`
+fails any `.update(schema.tasks)` that may set a live status (a computed one included) unless an
+awaited `refuseReviveBesideLive` precedes it on its own path, or it moves only a `created` task. Both
 create routes write the task, its event and its move to `queued` in one transaction, since no sweep
 starts or ends a `created` task, and one left by a failure part-way would block every later upgrade
 and rollback. The migration fails the ones an older release left that way before it builds the
