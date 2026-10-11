@@ -269,7 +269,7 @@ describe('adapter outputFormat declarations', () => {
 // and installs from the same marketplace with the same `<name>@<marketplace-id>` syntax
 // (verified against grok 1.0.3), so the same PHP rule has to hold for it.
 describe('LSP plugin install (php uses local intelephense, not marketplace phpactor)', () => {
-  for (const name of ['claude-code', 'zai', 'ollama', 'muse', 'grok'] as const) {
+  for (const name of ['claude-code', 'zai', 'ollama', 'muse', 'grok', 'openrouter'] as const) {
     const adapter = cliAdapterRegistry.get(name);
     const provider = makeProvider({ id: `p-${name}`, name });
     const drupalLspPath = `/work/repo/.claude/plugins/drupal-php-lsp`;

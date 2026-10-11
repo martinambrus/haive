@@ -1,4 +1,5 @@
 import { isOllamaCloudModel, IN_STACK_OLLAMA_URL } from '@haive/shared';
+import { buildLspMarketplaceCommands } from './_lsp-marketplace.js';
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { CLAUDE_FAMILY_SKILLS_ENV, claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
@@ -49,21 +50,6 @@ const OLLAMA_EFFORT_SCALE: EffortScale = {
   values: ['low', 'medium', 'high', 'max'],
   max: 'high',
 };
-
-// LSP plugin install via the claude binary's plugin marketplace — identical to
-// the claude-code/zai adapters (same backend-agnostic `plugin` subcommands).
-// PHP intentionally absent — see the CLAUDE_LSP_PLUGINS note in claude-code.ts.
-// Haive installs no phpactor binary; PHP LSP is intelephense via the local
-// drupal-php-lsp plugin, so php must not map to the marketplace phpactor plugin.
-const OLLAMA_LSP_PLUGINS: Record<string, string> = {
-  typescript: 'vtsls',
-  python: 'pyright',
-  go: 'gopls',
-  rust: 'rust-analyzer',
-  java: 'jdtls',
-};
-const OLLAMA_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
-const OLLAMA_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 
 export class OllamaAdapter extends BaseCliAdapter {
   readonly providerName = 'ollama' as const;
@@ -192,39 +178,6 @@ export class OllamaAdapter extends BaseCliAdapter {
     provider: CliProviderRecord,
     opts: PluginInstallOpts,
   ): PluginInstallCommand[] {
-    const exec = this.resolveExecutable(provider);
-    const cmds: PluginInstallCommand[] = [];
-    const lspPlugins = opts.lspLanguages
-      .map((lang) => OLLAMA_LSP_PLUGINS[lang === 'php-extended' ? 'php' : lang])
-      .filter((v): v is string => !!v);
-    const uniqueLsp = [...new Set(lspPlugins)];
-    if (uniqueLsp.length > 0) {
-      cmds.push({
-        description: `Add ${OLLAMA_LSP_MARKETPLACE_REF} marketplace`,
-        command: exec,
-        args: ['plugin', 'marketplace', 'add', OLLAMA_LSP_MARKETPLACE_REF],
-        egressDomains: ['github.com'],
-      });
-      for (const name of uniqueLsp) {
-        cmds.push({
-          description: `Install LSP plugin ${name}`,
-          command: exec,
-          args: ['plugin', 'install', `${name}@${OLLAMA_LSP_MARKETPLACE_ID}`],
-        });
-      }
-    }
-    if (opts.drupalLspPath) {
-      cmds.push({
-        description: 'Add local drupal-lsp marketplace',
-        command: exec,
-        args: ['plugin', 'marketplace', 'add', opts.drupalLspPath],
-      });
-      cmds.push({
-        description: 'Install drupal-php-lsp plugin',
-        command: exec,
-        args: ['plugin', 'install', 'drupal-php-lsp@drupal-lsp-marketplace'],
-      });
-    }
-    return cmds;
+    return buildLspMarketplaceCommands({ exec: this.resolveExecutable(provider), opts });
   }
 }
