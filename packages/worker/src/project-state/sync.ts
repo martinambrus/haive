@@ -1,5 +1,5 @@
 import { isUtf8 } from 'node:buffer';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
@@ -202,13 +202,20 @@ async function writeApplicableTemplateIds(
  *  no stored set holds, so the set is recomputed at boot for every repository with a claim. One with no
  *  column resolves from its snapshots, as 01 does, and keeps its set when none resolves. */
 export async function recomputeSyncedApplicableSets(db: Database): Promise<void> {
+  const claimed = await db
+    .select({ id: schema.onboardingArtifacts.repositoryId })
+    .from(schema.onboardingArtifacts)
+    .where(isNull(schema.onboardingArtifacts.supersededAt));
+  const ids = [...new Set(claimed.map((c) => c.id))].filter((id): id is string => id !== null);
+  if (ids.length === 0) return;
   const repos = await db
     .select({
       id: schema.repositories.id,
       userId: schema.repositories.userId,
       renderContext: schema.repositories.renderContext,
     })
-    .from(schema.repositories);
+    .from(schema.repositories)
+    .where(inArray(schema.repositories.id, ids));
   for (const repo of repos) {
     try {
       await db.transaction(async (tx) => {
