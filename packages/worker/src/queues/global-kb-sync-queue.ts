@@ -433,25 +433,30 @@ type SyncCandidate = { id: string; namespace: string };
  *  one written before provenance — NULL model — or by another model), or stamped `failed`. The rows
  *  and the stamp are the record, so the sweep writes no status and a crash mid re-embed is picked up
  *  again by the next one. Random order: entries that fail every time cannot hold the cap forever. */
-async function findReembedCandidates(embedModel: string): Promise<SyncCandidate[]> {
-  return withGlobalKb(
-    getDb(),
-    (ctx) =>
-      ctx.conn.pg.unsafe(
-        `SELECT e.id, e.namespace FROM global_kb_entries e
-          WHERE e.status = 'active' AND e.superseded_at IS NULL
-            AND (
-              e.embed_status = 'failed'
-              OR EXISTS (
-                SELECT 1 FROM ai_rag_embeddings r
-                 WHERE r.entry_id = e.id AND r.namespace = e.namespace
-                   AND (r.embed_kind IS DISTINCT FROM 'model' OR r.embed_model IS DISTINCT FROM $1)
-              )
+async function findReembedCandidates(embedModel: string, dims: number): Promise<SyncCandidate[]> {
+  return withGlobalKb(getDb(), async (ctx) => {
+    // A jsonb store accepts a new width without a schema change, so its rows of the old width drift too.
+    const jsonb = !(await hasVectorColumn(ctx));
+    const widthDrift = jsonb
+      ? `OR (CASE WHEN jsonb_typeof(r.embedding_json) = 'array'
+                  THEN jsonb_array_length(r.embedding_json) END) IS DISTINCT FROM $2`
+      : '';
+    return (await ctx.conn.pg.unsafe(
+      `SELECT e.id, e.namespace FROM global_kb_entries e
+        WHERE e.status = 'active' AND e.superseded_at IS NULL
+          AND (
+            e.embed_status = 'failed'
+            OR EXISTS (
+              SELECT 1 FROM ai_rag_embeddings r
+               WHERE r.entry_id = e.id AND r.namespace = e.namespace
+                 AND (r.embed_kind IS DISTINCT FROM 'model' OR r.embed_model IS DISTINCT FROM $1
+                      ${widthDrift})
             )
-          ORDER BY random()`,
-        [embedModel],
-      ) as unknown as Promise<SyncCandidate[]>,
-  );
+          )
+        ORDER BY random()`,
+      jsonb ? [embedModel, dims] : [embedModel],
+    )) as unknown as SyncCandidate[];
+  });
 }
 
 /** Whether a re-embed would write current-model vectors the column can hold: the Ollama answers and
@@ -521,7 +526,9 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
         ),
       ),
   );
-  const candidates = settings.embedModel ? await findReembedCandidates(settings.embedModel) : [];
+  const candidates = settings.embedModel
+    ? await findReembedCandidates(settings.embedModel, settings.embeddingDimensions)
+    : [];
   if (pending.length === 0 && candidates.length === 0) return;
   const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
   try {

@@ -8,7 +8,7 @@ type Entry = {
   superseded: boolean;
   embedStatus: string;
 };
-type Row = { entryId: string; kind: string | null; model: string | null };
+type Row = { entryId: string; kind: string | null; model: string | null; width?: number };
 
 const h = vi.hoisted(() => ({
   model: 'model-b',
@@ -19,7 +19,7 @@ const h = vi.hoisted(() => ({
     superseded: boolean;
     embedStatus: string;
   }>,
-  rows: [] as Array<{ entryId: string; kind: string | null; model: string | null }>,
+  rows: [] as Array<{ entryId: string; kind: string | null; model: string | null; width?: number }>,
   pending: [] as Array<{ id: string; namespace: string }>,
   live: [] as Array<{ name: string; data: unknown }>,
   added: [] as Array<{ name: string; data: { entryId: string; reason: string } }>,
@@ -77,6 +77,9 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
         pg: {
           unsafe: async (text: string, params: unknown[] = []) => {
             h.statements.push(text);
+            if (text.includes('information_schema')) {
+              return h.columnWidth === null ? [] : [{ '?column?': 1 }];
+            }
             if (text.includes('pg_attribute')) {
               return h.columnWidth === null ? [] : [{ type: `vector(${h.columnWidth})` }];
             }
@@ -88,7 +91,10 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
                     e.embedStatus === 'failed' ||
                     h.rows.some(
                       (r: Row) =>
-                        r.entryId === e.id && (r.kind !== 'model' || r.model !== params[0]),
+                        r.entryId === e.id &&
+                        (r.kind !== 'model' ||
+                          r.model !== params[0] ||
+                          (params.length > 1 && (r.width ?? 4) !== params[1])),
                     ),
                 )
                 .sort((a: Entry, b: Entry) => (a.id < b.id ? -1 : 1))
@@ -278,5 +284,26 @@ describe('the reconcile sweep re-embeds entries whose vectors drifted', () => {
     await sweep();
 
     expect(h.statements.every((text) => /^\s*SELECT/i.test(text))).toBe(true);
+  });
+
+  it('on a jsonb store, queues an entry whose rows are of another width', async () => {
+    h.columnWidth = null;
+    h.entries = [entry('e1'), entry('e2')];
+    h.rows = [
+      { entryId: 'e1', kind: 'model', model: 'model-b', width: 3 },
+      { entryId: 'e2', kind: 'model', model: 'model-b', width: 4 },
+    ];
+
+    expect(await sweep()).toEqual(['e1']);
+    const drift = h.statements.find((t) => t.includes('IS DISTINCT FROM'))!;
+    expect(drift).toContain('jsonb_array_length(r.embedding_json)');
+  });
+
+  it('checks no row width on a pgvector store, whose column fixes it', async () => {
+    h.entries = [entry('e1')];
+    h.rows = [{ entryId: 'e1', kind: 'model', model: 'model-b', width: 3 }];
+
+    expect(await sweep()).toEqual([]);
+    expect(h.statements.find((t) => t.includes('IS DISTINCT FROM'))).not.toContain('jsonb');
   });
 });
