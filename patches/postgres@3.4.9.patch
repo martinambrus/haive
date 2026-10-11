@@ -1,8 +1,16 @@
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
-index 07f6716702ac888215c86ad6e0071aaf55ae519c..982344fe9edc6077d715040ea8ee49bbc9548e9c 100644
+index 07f6716702ac888215c86ad6e0071aaf55ae519c..52e22ef8102586716d56ab546d4574b73ca1f121 100644
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
-@@ -252,6 +252,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -90,6 +90,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , remaining = 0
+     , hostIndex = 0
+     , retries = 0
++    , startupCloses = 0
+     , length = 0
+     , delay = 0
+     , rows = 0
+@@ -252,6 +253,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function nextWrite(fn) {
@@ -19,11 +27,47 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..982344fe9edc6077d715040ea8ee49bb
      const x = socket.write(chunk, fn)
      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
      chunk = nextWriteTimer = null
+@@ -447,8 +458,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     socket.removeAllListeners()
+     socket = null
+ 
+-    if (initial)
+-      return reconnect()
++    if (initial) {
++      // Upstream reconnects at once, with no backoff or limit, while a connection keeps closing during startup.
++      if (++startupCloses < options.host.length * 3)
++        return reconnect()
++      startupCloses = 0
++      const err = Errors.connection('CONNECTION_CLOSED', options, socket)
++      errored(err)
++      while (sent.length)
++        queryError(sent.shift(), err)
++    }
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+     closedTime = performance.now()
+@@ -565,7 +584,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       }
+ 
+       initial && !initial.reserve && execute(initial)
+-      options.shared.retries = retries = 0
++      options.shared.retries = retries = startupCloses = 0
+       initial = null
+       return
+     }
 diff --git a/src/connection.js b/src/connection.js
-index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..40a4b481881d3d8da24d11b32ca9c4ef0978f0a4 100644
+index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..4c2f2bf1c7808ae3392a0d34fc001cedf8d19eb1 100644
 --- a/src/connection.js
 +++ b/src/connection.js
-@@ -252,6 +252,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -90,6 +90,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , remaining = 0
+     , hostIndex = 0
+     , retries = 0
++    , startupCloses = 0
+     , length = 0
+     , delay = 0
+     , rows = 0
+@@ -252,6 +253,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function nextWrite(fn) {
@@ -40,3 +84,31 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..40a4b481881d3d8da24d11b32ca9c4ef
      const x = socket.write(chunk, fn)
      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
      chunk = nextWriteTimer = null
+@@ -447,8 +458,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     socket.removeAllListeners()
+     socket = null
+ 
+-    if (initial)
+-      return reconnect()
++    if (initial) {
++      // Upstream reconnects at once, with no backoff or limit, while a connection keeps closing during startup.
++      if (++startupCloses < options.host.length * 3)
++        return reconnect()
++      startupCloses = 0
++      const err = Errors.connection('CONNECTION_CLOSED', options, socket)
++      errored(err)
++      while (sent.length)
++        queryError(sent.shift(), err)
++    }
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+     closedTime = performance.now()
+@@ -565,7 +584,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       }
+ 
+       initial && !initial.reserve && execute(initial)
+-      options.shared.retries = retries = 0
++      options.shared.retries = retries = startupCloses = 0
+       initial = null
+       return
+     }
