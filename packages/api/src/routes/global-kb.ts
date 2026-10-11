@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
 import { isLockNotAvailable, schema } from '@haive/database';
 import {
@@ -337,7 +337,18 @@ globalKbRoutes.get('/config', async (c) => {
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
 });
 
-globalKbRoutes.put('/config', async (c) => {
+// One save at a time, each reading the settings the previous one left: a store switch and a dims
+// change from two requests must not both validate against the same saved store.
+let configSaves: Promise<unknown> = Promise.resolve();
+function serializeConfigSave<T>(run: () => Promise<T>): Promise<T> {
+  const next = configSaves.then(run, run);
+  configSaves = next.catch(() => {});
+  return next;
+}
+
+globalKbRoutes.put('/config', (c) => serializeConfigSave(() => putConfig(c)));
+
+async function putConfig(c: Context<AppEnv>) {
   const parsed = configSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid global KB config', 'invalid_body');
   const d = parsed.data;
@@ -411,7 +422,7 @@ globalKbRoutes.put('/config', async (c) => {
     );
   }
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
-});
+}
 
 // --- Connection tests (the UI "Test" buttons). Both exercise the exact paths
 // the worker sync/query use, so a green result means the real embed/store path

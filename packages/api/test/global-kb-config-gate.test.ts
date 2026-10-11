@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   events: [] as string[],
   lockFails: false,
   readFails: false,
+  settingsReads: 0,
+  gate: null as Promise<void> | null,
   set: vi.fn(async (key: string, _value: string) => {
     h.events.push(`set:${key}`);
   }),
@@ -16,6 +18,7 @@ const h = vi.hoisted(() => ({
   connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
     pg: Object.assign(async () => [], {
       begin: async (run: (tx: unknown) => Promise<unknown>) => {
+        if (h.gate) await h.gate;
         h.events.push('begin');
         const tx = Object.assign(
           async (strings: TemplateStringsArray) => {
@@ -80,7 +83,10 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
-  resolveGlobalKbSettings: async () => h.settings,
+  resolveGlobalKbSettings: async () => {
+    h.settingsReads += 1;
+    return h.settings;
+  },
   resolveGlobalKbConnection: (settings: unknown, db: unknown, opts?: unknown) => {
     if (opts !== undefined) h.checks.push(opts);
     return h.connect(settings, db);
@@ -457,6 +463,23 @@ describe('PUT /global-kb/config with a different embedding width', () => {
 
     expect(res.status).toBeGreaterThanOrEqual(500);
     expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('lets a second save read the settings only after the first one is done', async () => {
+    let release!: () => void;
+    h.gate = new Promise<void>((resolve) => (release = resolve));
+    const first = put(widen);
+    await vi.waitFor(() => expect(h.connect).toHaveBeenCalled());
+    const readsBefore = h.settingsReads;
+    const second = put({ ...PAGE, namespace: 'other' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.settingsReads).toBe(readsBefore);
+
+    release();
+    h.gate = null;
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(200);
+    expect(h.settingsReads).toBeGreaterThan(readsBefore);
   });
 
   it('is not checked, and accepted, when the width is unchanged', async () => {
