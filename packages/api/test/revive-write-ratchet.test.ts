@@ -338,39 +338,66 @@ function nameOf(fn: ts.FunctionLikeDeclaration): string | null {
   return null;
 }
 
-function isGuardStatement(st: ts.Statement): boolean {
+/** A guard statement taking the lock in transaction `tx`: the lock must be held by the very
+ *  transaction that writes, or the write runs outside it. */
+function isGuardStatement(st: ts.Statement, tx: string): boolean {
   if (!ts.isExpressionStatement(st) || !ts.isAwaitExpression(st.expression)) return false;
   const call = st.expression.expression;
-  return ts.isCallExpression(call) && call.expression.getText() === GUARD;
+  return (
+    ts.isCallExpression(call) &&
+    call.expression.getText() === GUARD &&
+    call.arguments[0]?.getText() === tx
+  );
 }
 
-/** Whether a guard call runs on every path to the node: it is a statement earlier in one of the
- *  blocks that hold the node, within the node's scope. */
-function dominated(node: ts.Node, scope: ts.Node): boolean {
+/** Whether a guard call in `tx` runs on every path to the node: it is a statement earlier in one
+ *  of the blocks that hold the node, within the node's scope. */
+function dominated(node: ts.Node, scope: ts.Node, tx: string): boolean {
   for (let child: ts.Node = node, n = node.parent; n && child !== scope; child = n, n = n.parent) {
     if (ts.isBlock(n) || ts.isSourceFile(n)) {
       const i = n.statements.indexOf(child as ts.Statement);
-      if (i > 0 && n.statements.slice(0, i).some(isGuardStatement)) return true;
+      if (i > 0 && n.statements.slice(0, i).some((st) => isGuardStatement(st, tx))) return true;
     }
   }
   return false;
 }
 
-/** Guarded on its own path: the guard dominates it within its scope, or its scope is a named
- *  function every call of which is guarded in turn. */
-function guarded(sf: ts.SourceFile, node: ts.Node, depth = 0): boolean {
+/** Guarded on its own path, in the write's own transaction `tx`: the guard dominates it within its
+ *  scope, or its scope is a named function every call of which is guarded in turn, with `tx`
+ *  followed to the argument a call passes for it when it is a parameter. */
+function guarded(sf: ts.SourceFile, node: ts.Node, tx: string | null, depth = 0): boolean {
+  if (tx === null) return false;
   const scope = scopeOf(node);
   if (!scope) return false;
-  if (dominated(node, scope)) return true;
+  if (dominated(node, scope, tx)) return true;
   const name = nameOf(scope);
   if (!name || depth > 3) return false;
-  const calls: ts.Node[] = [];
+  const param = scope.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === tx);
+  const calls: ts.CallExpression[] = [];
   const visit = (n: ts.Node): void => {
     if (ts.isCallExpression(n) && n.expression.getText() === name) calls.push(n);
     ts.forEachChild(n, visit);
   };
   visit(sf);
-  return calls.length > 0 && calls.every((c) => guarded(sf, c, depth + 1));
+  return (
+    calls.length > 0 &&
+    calls.every((c) => {
+      const passed = param < 0 ? tx : c.arguments[param];
+      const next =
+        typeof passed === 'string'
+          ? passed
+          : passed && ts.isIdentifier(passed)
+            ? passed.text
+            : null;
+      return guarded(sf, c, next, depth + 1);
+    })
+  );
+}
+
+/** The transaction a write runs in: the identifier its builder chain starts at, if it is one. */
+function writeTx(call: ts.CallExpression): string | null {
+  const root = chainRoot(call.expression);
+  return ts.isIdentifier(root) ? root.text : null;
 }
 
 /** Every live-status write on a task row in one source, with whether it is covered. */
@@ -409,7 +436,7 @@ function liveWrites(
         out.push({
           site: `${file}:${line}`,
           status,
-          covered: movesOnlyCreated(node) || guarded(sf, node),
+          covered: movesOnlyCreated(node) || guarded(sf, node, writeTx(node)),
         });
       }
     }
@@ -631,6 +658,19 @@ describe('a live-status write on a task row', () => {
       expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
       expect(tasksAliases('x.ts', `revive(${table});`)).toHaveLength(1);
     }
+  });
+
+  it('does not count a guard taken in another transaction than the write', () => {
+    const covered = (body: string) =>
+      liveWrites('x.ts', `async function f(tx, lockTx, id) { ${body} }`).map((w) => w.covered);
+    expect(
+      covered(
+        `await ${GUARD}(lockTx, id); await tx.update(schema.tasks).set({ status: 'running' });`,
+      ),
+    ).toEqual([false]);
+    expect(
+      covered(`await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' });`),
+    ).toEqual([true]);
   });
 
   it('does not count a guard in a sibling transaction', () => {
