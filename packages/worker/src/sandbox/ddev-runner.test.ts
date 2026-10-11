@@ -69,6 +69,8 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     expect(shell('exec --project my-project ls')).toBe(wrap('exec --project my-project', 'ls'));
     expect(shell('exec -- ls -la')).toBe(wrap('exec', 'ls -la'));
     expect(shell('exec php -v', 5_000)).toBe(wrap('exec', 'php -v', 1));
+    expect(shell('exec -d /x echo $HOME')).toBe(wrap('exec -d /x', 'echo $HOME'));
+    expect(shell('exec -sweb ls')).toBe(wrap('exec -sweb', 'ls'));
     expect(shell('exec')).toBe('cd /repos/x && ddev exec');
     expect(buildDdevCommand('/repos/x', 'exec php -v', 60_000).hostTimeoutMs).toBe(60_000);
   });
@@ -82,6 +84,9 @@ describe('DDEV lifecycle commands across worker restarts', () => {
       'exec -sredis redis-cli ping',
       "exec '-s' 'redis' redis-cli ping",
       'exec -d /tmp --service solr -- ls',
+      "exec --service='redis' redis-cli ping",
+      'exec -qs redis redis-cli ping',
+      'exec -s "$SVC" ls',
     ]) {
       expect(shell(args)).toBe(`cd /repos/x && ddev ${args}`);
     }
@@ -129,6 +134,12 @@ describe('DDEV lifecycle commands across worker restarts', () => {
 
   it('keeps the direct deadline for a raw exec, wherever the flag sits in the head', () => {
     const shell = (args: string) => buildDdevCommand('/repos/x', args, 60_000).shell;
+    expect(shell('exec --raw=true -- ls $HOME')).toBe(
+      'cd /repos/x && ddev exec --raw=true -- timeout --kill-after=5s 50s ls $HOME',
+    );
+    expect(shell("exec '--raw=true' ls")).toBe(
+      "cd /repos/x && ddev exec '--raw=true' timeout --kill-after=5s 50s ls",
+    );
     expect(shell('exec --raw -- ls -la')).toBe(
       'cd /repos/x && ddev exec --raw -- timeout --kill-after=5s 50s ls -la',
     );

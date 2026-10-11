@@ -1190,33 +1190,119 @@ export function buildDdevCommand(
   return buildDdevLockedCommand(projectDir, `ddev ${ddevArgs}`, timeoutMs);
 }
 
-const DDEV_EXEC_WORD = String.raw`(?:\\.|'[^']*'|"(?:\\.|[^"\\])*"|[^\s'"\\])+`;
-// `exec`, then any flags (a value flag takes the next word), then an optional `--` separator.
-const DDEV_EXEC_HEAD = new RegExp(
-  String.raw`^['"]?exec['"]?(?:\s+(?:['"]?(?:-[dsup]|--dir|--service|--user|--project)['"]?\s+${DDEV_EXEC_WORD}|(?!['"]?--['"]?(?:\s|$))(?=['"]?-)${DDEV_EXEC_WORD}))*(?:\s+['"]?--['"]?)?(?=\s|$)`,
-);
+/** The bash word starting at or after `from`, quotes removed, with its source end; null at the end
+ *  of `text`; 'opaque' for anything only the shell can resolve (an expansion, an operator, an open
+ *  quote). */
+function nextShellWord(
+  text: string,
+  from: number,
+): { value: string; end: number } | null | 'opaque' {
+  let i = from;
+  while (i < text.length && /\s/.test(text[i]!)) i++;
+  if (i >= text.length) return null;
+  let value = '';
+  while (i < text.length && !/\s/.test(text[i]!)) {
+    const ch = text[i]!;
+    if (ch === "'") {
+      const close = text.indexOf("'", i + 1);
+      if (close < 0) return 'opaque';
+      value += text.slice(i + 1, close);
+      i = close + 1;
+    } else if (ch === '"') {
+      i++;
+      while (i < text.length && text[i] !== '"') {
+        if (text[i] === '$' || text[i] === '`') return 'opaque';
+        if (text[i] === '\\' && '$`"\\'.includes(text[i + 1] ?? '')) i++;
+        value += text[i];
+        i++;
+      }
+      if (i >= text.length) return 'opaque';
+      i++;
+    } else if (ch === '\\') {
+      if (i + 1 >= text.length) return 'opaque';
+      value += text[i + 1];
+      i += 2;
+    } else if ('$`;|&<>()'.includes(ch)) {
+      return 'opaque';
+    } else {
+      value += ch;
+      i++;
+    }
+  }
+  return { value, end: i };
+}
 
-const DDEV_EXEC_RAW = /(?:^|\s)['"]?--raw['"]?(?=\s|$)/;
-const DDEV_EXEC_SERVICE = /(?:^|\s)['"]?(?:-s|--service)(?:['"]?\s+['"]?|=|(?=[^\s'"=]))([^\s'"]+)/;
+/** ddev exec's value flags; the rest are boolean (`--raw` among them, set by any `--raw=` too,
+ *  since ddev reads whether the flag was given). */
+const DDEV_EXEC_VALUE_SHORT = 'sdup';
+const DDEV_EXEC_VALUE_LONG = ['--service', '--dir', '--user', '--project'];
+
+/** `exec`'s flags read the way pflag reads them: where they end (`end`, after a `--` separator;
+ *  `flagsEnd`, before it), whether `--raw` is set and which service runs the command. Null when
+ *  the args are not an exec, or its head holds something only the shell can resolve. */
+function ddevExecHead(
+  args: string,
+): { end: number; flagsEnd: number; raw: boolean; service: string } | null {
+  const first = nextShellWord(args, 0);
+  if (first === null || first === 'opaque' || first.value !== 'exec') return null;
+  let end = first.end;
+  let raw = false;
+  let service = 'web';
+  for (;;) {
+    const word = nextShellWord(args, end);
+    if (word === 'opaque') return null;
+    if (word === null || !word.value.startsWith('-') || word.value === '-') {
+      return { end, flagsEnd: end, raw, service };
+    }
+    if (word.value === '--') return { end: word.end, flagsEnd: end, raw, service };
+    let valueFlag: string | undefined;
+    let inline: string | undefined;
+    if (word.value.startsWith('--')) {
+      const eq = word.value.indexOf('=');
+      const name = eq < 0 ? word.value : word.value.slice(0, eq);
+      if (name === '--raw') raw = true;
+      if (DDEV_EXEC_VALUE_LONG.includes(name)) {
+        valueFlag = name;
+        if (eq >= 0) inline = word.value.slice(eq + 1);
+      }
+    } else {
+      for (let k = 1; k < word.value.length; k++) {
+        const c = word.value[k]!;
+        if (!DDEV_EXEC_VALUE_SHORT.includes(c)) continue;
+        valueFlag = `-${c}`;
+        const attached = word.value.slice(k + 1);
+        if (attached !== '') inline = attached.startsWith('=') ? attached.slice(1) : attached;
+        break;
+      }
+    }
+    end = word.end;
+    if (valueFlag === undefined) continue;
+    let value = inline;
+    if (value === undefined) {
+      const next = nextShellWord(args, end);
+      if (next === null || next === 'opaque') return null;
+      value = next.value;
+      end = next.end;
+    }
+    if (valueFlag === '-s' || valueFlag === '--service') service = value;
+  }
+}
 
 // ddev's quoteArgs (cmd/ddev/cmd/exec.go): from two words up, one holding `" \t\r\n#` is double-quoted.
 const DDEV_QUOTE_ARGS =
   'c=; unset f; if [ $# -lt 2 ]; then c="$*"; else for a; do case $a in *[\\"\\ \\#$\'\\t\\r\\n\']*) a="\\"${a//\\"/\\\\\\"}\\"";; esac; c="$c${f+ }$a"; f=1; done; fi';
 
-/** Killing the runner's ddev client leaves the command running in the web container, so an
+/** Killing the runner's ddev client leaves the command running in the web container, so a
  *  web-container `exec` carries its own deadline, just under the host's. Anything else passes through.
  *  A non-raw exec's words are joined the way ddev joins them and run raw under one `bash -c`. */
 function withWebContainerDeadline(ddevArgs: string, timeoutMs: number): string {
-  const head = DDEV_EXEC_HEAD.exec(ddevArgs)?.[0];
-  if (head === undefined || ddevArgs.slice(head.length).trim() === '') return `ddev ${ddevArgs}`;
+  const head = ddevExecHead(ddevArgs);
+  const rest = head === null ? '' : ddevArgs.slice(head.end);
   // Another service's image need not carry GNU timeout.
-  const service = DDEV_EXEC_SERVICE.exec(head)?.[1];
-  if (service !== undefined && service !== 'web') return `ddev ${ddevArgs}`;
-  const rest = ddevArgs.slice(head.length);
+  if (head === null || rest.trim() === '' || head.service !== 'web') return `ddev ${ddevArgs}`;
   const deadline = `timeout --kill-after=5s ${Math.max(1, Math.ceil(timeoutMs / 1000) - 10)}s`;
-  if (DDEV_EXEC_RAW.test(head)) return `ddev ${head} ${deadline}${rest}`;
-  const flags = head.replace(/\s+['"]?--['"]?$/, '');
-  return `set --${rest} && { ${DDEV_QUOTE_ARGS}; } && ddev ${flags} --raw -- ${deadline} bash -c "$c"`;
+  if (head.raw) return `ddev ${ddevArgs.slice(0, head.end)} ${deadline}${rest}`;
+  return `set --${rest} && { ${DDEV_QUOTE_ARGS}; } && ddev ${ddevArgs.slice(0, head.flagsEnd)} --raw -- ${deadline} bash -c "$c"`;
 }
 
 function buildDdevLockedCommand(
