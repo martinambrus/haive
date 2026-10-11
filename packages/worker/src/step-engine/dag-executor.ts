@@ -67,7 +67,8 @@ import {
 } from './steps/workflow/_spec-artifact.js';
 import { loadTaskMeta } from './steps/workflow/_task-meta.js';
 import {
-  isFatalProviderFailure,
+  isProviderOutage,
+  PROVIDER_FATAL_HEADLINES,
   isCliTimeoutFailure,
   isOutputTruncationMessage,
   cliTimeoutBudgetMinutes,
@@ -436,7 +437,18 @@ async function haltForDagEnvironmentFailures(
  *  AFTER the one that hit a provider wall (429/quota, bad auth, 5xx). Pure so the
  *  DAG fail-fast guard's decision is unit-testable without a DB. */
 export function pickFatalProviderError(rows: { errorMessage: string | null }[]): string | null {
-  return rows.find((r) => isFatalProviderFailure(r.errorMessage))?.errorMessage ?? null;
+  return rows.find((r) => isProviderOutage(r.errorMessage))?.errorMessage ?? null;
+}
+
+/** Stamped on a coder's concerns when the provider refused its prompt, so the escalation phase
+ *  fails that issue without sending its content to an advisor or retrying it. */
+export const DAG_REFUSED_MARKER = 'DAG_REFUSED';
+
+function issueRefused(issue: { concerns?: string | null; errorMessage?: string | null }): boolean {
+  return (
+    issue.concerns?.includes(DAG_REFUSED_MARKER) === true ||
+    issue.errorMessage?.includes(PROVIDER_FATAL_HEADLINES.content_filter) === true
+  );
 }
 
 /** Commit any uncommitted work in an issue worktree (belt-and-suspenders — the
@@ -2315,6 +2327,7 @@ export async function resolveEscalationPhase(
   let inFlight = false;
   let reloop = false;
   for (const issue of failed) {
+    if (issueRefused(issue)) continue;
     if (issue.lastAdvisorAction === 'ESCALATE_TO_REPLAN') continue;
     const runs = await ea.db
       .select()
@@ -2365,6 +2378,19 @@ export async function resolveEscalationPhase(
     return { status: 'waiting', row };
   }
   if (reloop) return { status: 'reloop', row: ea.current };
+
+  const refused = failed.filter(issueRefused);
+  if (refused.length > 0) {
+    const msg =
+      `DAG escalation aborted at level ${ea.level.level}: the provider refused ` +
+      `${refused.map((i) => i.issueKey).join(', ')}; its content is not re-sent to an advisor or replanner`;
+    const row = await setStepStatus(ea.db, ea.current.id, {
+      status: 'failed',
+      errorMessage: msg,
+      endedAt: new Date(),
+    });
+    return { status: 'aborted', row, error: msg };
+  }
 
   // Outer loop: replanner when failures are broad / escalated.
   const fresh = await reReadLevelIssues(ea);
@@ -2846,7 +2872,9 @@ export async function resolveDagPhase(
             );
             continue; // re-dispatched by step (B) on the next loop pass
           }
-          if (cls === 'transient') {
+          if (inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter)) {
+            result.concerns = `${DAG_REFUSED_MARKER}: ${issue.issueKey} coder was refused by the provider (${inv.errorMessage}). Not retrying: the same prompt is refused again.`;
+          } else if (cls === 'transient') {
             // Re-dispatch budget spent: a persistently-killed coder is an environment
             // problem (usually a runner OOM). Stamp the marker the ENVIRONMENT halt reads.
             result.concerns =

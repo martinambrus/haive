@@ -510,3 +510,18 @@ export function isTransientProviderApiError(message: string | null | undefined):
 export function isFatalProviderFailure(message: string | null | undefined): boolean {
   return fatalClassFromMessage(message) !== null;
 }
+
+const PROVIDER_OUTAGE_CLASS: Record<ProviderFatalClass, boolean> = {
+  rate_limit: true,
+  auth: true,
+  server_error: true,
+  content_filter: false,
+};
+
+/** True when the message is a fatal class that makes the provider unusable for everyone, as
+ *  opposed to content_filter, which refuses only that prompt. Fan-out and DAG fail-fast guards
+ *  key on this; a refusal is one agent's failure. */
+export function isProviderOutage(message: string | null | undefined): boolean {
+  const cls = fatalClassFromMessage(message);
+  return cls !== null && PROVIDER_OUTAGE_CLASS[cls];
+}

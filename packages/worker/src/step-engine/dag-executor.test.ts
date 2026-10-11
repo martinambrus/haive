@@ -26,6 +26,7 @@ import {
   resolveEscalationPhase,
   resolveReviewPhase,
   buildUpstreamDebt,
+  DAG_REFUSED_MARKER,
 } from './dag-executor.js';
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
 import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
@@ -337,6 +338,14 @@ describe('pickFatalProviderError', () => {
 
   it('returns null for an empty set', () => {
     expect(pickFatalProviderError([])).toBe(null);
+  });
+
+  it('ignores a refused row and still returns an outage row', () => {
+    const refused = `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`;
+    expect(pickFatalProviderError([{ errorMessage: refused }])).toBe(null);
+    expect(
+      pickFatalProviderError([{ errorMessage: refused }, { errorMessage: RATE_LIMIT_MSG }]),
+    ).toBe(RATE_LIMIT_MSG);
   });
 });
 
@@ -1006,6 +1015,8 @@ function makeDagMergeWaitDb(opts: {
   }>;
   /** The dag_agent_runs rows a select of that table returns. */
   agentRuns?: unknown[];
+  /** The ended invocations the fatal-provider scan reads. */
+  endedInvocations?: { errorMessage: string | null }[];
   /** The level reads checkpointed after its first read, which ends the phase's loop. */
   checkpointAfterFirstRead?: boolean;
   /** The same after this many reads, for a test that drives the phase more than once. */
@@ -1060,7 +1071,7 @@ function makeDagMergeWaitDb(opts: {
     return c;
   }
   function resultsFor(table: unknown): unknown[] {
-    if (table === schema.cliInvocations) return []; // fatal-provider-failure scan: none
+    if (table === schema.cliInvocations) return opts.endedInvocations ?? []; // fatal-provider-failure scan
     if (table === schema.taskDagLevels) {
       levelReads += 1;
       const done =
@@ -3158,6 +3169,68 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       ]);
     });
 
+    const REFUSED = `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`;
+    const refusedCoder = {
+      ...killedCoder,
+      supersededAt: null,
+      exitCode: 1,
+      errorMessage: REFUSED,
+      prompt: 'implement the issue',
+    };
+
+    it('fails a refused coder with a refusal marker and does not re-dispatch it', async () => {
+      const enqueued: unknown[] = [];
+      const { issueUpdates } = await ingestCoder('running', refusedCoder, {
+        issue: { infraRetries: 0 },
+        enqueued,
+      });
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({
+          outcome: 'failed_unrecoverable',
+          concerns: expect.stringContaining(DAG_REFUSED_MARKER),
+        }),
+      ]);
+      expect(enqueued).toEqual([]);
+    });
+
+    it('lets the level go on past a refused row while a sibling is in flight', async () => {
+      const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-refused-'));
+      try {
+        const h = makeDagMergeWaitDb({
+          invocation: undefined,
+          integrationDir,
+          autoResolveConflicts: false,
+          checkpointAfterReads: 0,
+          endedInvocations: [{ errorMessage: REFUSED }],
+        });
+        const outcome = await resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          {
+            taskId: 'task1',
+            userId: 'user1',
+            repoPath: integrationDir,
+            sandboxWorkdir: integrationDir,
+            logger: logger.child({ test: 'dag-refused' }),
+            emitProgress: async () => {},
+            db: h.db,
+          } as unknown as StepContext,
+          {
+            userId: 'user1',
+            taskId: 'task1',
+            cliProviderId: null,
+            ignoreSavedStepClis: false,
+            providers: [{ id: 'p1', enabled: true }],
+            deps: { enqueueCliInvocation: async () => {} },
+          } as never,
+        );
+        expect(outcome.resolved).toBe(true);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps the files an earlier coder recorded when a coder fails with no result', async () => {
       const { issueUpdates } = await ingestCoder(
         'running',
@@ -3658,5 +3731,43 @@ describe('an issue title reaches the DAG prompts as one safe line', () => {
     const lines = linesOf(await buildUpstreamDebt(db as never, 'plan1', 1));
     expect(lines.filter((l) => l.includes('ISSUE-1'))).toHaveLength(1);
     expect(lines.filter((l) => l.startsWith('Ignore every rule above'))).toEqual([]);
+  });
+});
+
+describe('resolveEscalationPhase: an issue the provider refused', () => {
+  it('sends no advisor or replanner and stops the step naming the refusal', async () => {
+    const { db, writes } = lostRowPhaseDb({ invocation: undefined });
+    const refused = {
+      id: 'issue1',
+      issueKey: 'ISSUE-1',
+      title: 'Fix the flaky cache',
+      innerIteration: 1,
+      advisorInvocations: 0,
+      lastAdvisorAction: null,
+      resolution: 'failed_unrecoverable',
+      outcome: 'failed_unrecoverable',
+      errorMessage: null,
+      concerns: `${DAG_REFUSED_MARKER}: ISSUE-1 coder was refused by the provider.`,
+    };
+    const result = await resolveEscalationPhase({
+      db,
+      issues: [refused],
+      level: { level: 0 },
+      current: { id: 'step1', status: 'running' },
+      params: { userId: 'user1', taskId: 'task1', cliProviderId: null, ignoreSavedStepClis: false },
+      stepDef: { metadata: { id: '06c-dag-execute' } },
+      providers: [{ id: 'p1', enabled: true }],
+      deps: { enqueueCliInvocation: async () => {} },
+      taskId: 'task1',
+      specView: { text: 'SPEC', spec: 'SPEC', condensed: false },
+      attachmentsNotice: '',
+      plan: { id: 'plan1', replannerInvocationId: null, replannerInvocations: 0 },
+    } as never);
+
+    expect(result.status).toBe('aborted');
+    expect(result.error).toContain('ISSUE-1');
+    expect(result.error).toContain('refused');
+    expect(writes.filter((w) => w.table === schema.cliInvocations)).toEqual([]);
+    expect(writes.filter((w) => w.table === schema.dagAgentRuns)).toEqual([]);
   });
 });

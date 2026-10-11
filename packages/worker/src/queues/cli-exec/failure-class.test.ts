@@ -14,6 +14,7 @@ import {
   isCliTimeoutFailure,
   isFatalProviderFailure,
   isFreeRedispatch,
+  isProviderOutage,
   isTransientCliFailure,
   withoutPreemptions,
   MODEL_CAPABILITY_HEADLINES,
@@ -245,6 +246,30 @@ describe('isFatalProviderFailure', () => {
     expect(isFatalProviderFailure('cli invocation failed: TypeError')).toBe(false);
     expect(isFatalProviderFailure(null)).toBe(false);
     expect(isFatalProviderFailure(undefined)).toBe(false);
+  });
+});
+
+describe('isProviderOutage', () => {
+  it('is true for the classes that make the provider unusable for everyone', () => {
+    for (const cls of ['rate_limit', 'auth', 'server_error'] as ProviderFatalClass[]) {
+      expect(isProviderOutage(`${PROVIDER_FATAL_HEADLINES[cls]} — detail (x)`)).toBe(true);
+    }
+  });
+
+  it('is false for a refusal, which only refuses that prompt', () => {
+    expect(isProviderOutage(`${PROVIDER_FATAL_HEADLINES.content_filter} — detail (x)`)).toBe(false);
+  });
+
+  it('decides every fatal class and is false for a non-headlined message and for null/undefined', () => {
+    expect(Object.keys(PROVIDER_FATAL_HEADLINES).sort()).toEqual([
+      'auth',
+      'content_filter',
+      'rate_limit',
+      'server_error',
+    ]);
+    expect(isProviderOutage('cli invocation failed: TypeError')).toBe(false);
+    expect(isProviderOutage(null)).toBe(false);
+    expect(isProviderOutage(undefined)).toBe(false);
   });
 });
 

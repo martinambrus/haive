@@ -84,6 +84,21 @@ describe('the allowance auto-resume', () => {
     expect(t.one(t.fake.rows(schema.taskSteps), ROW)).toMatchObject({ status: 'running' });
   });
 
+  it('re-dispatches only the agents the outage killed, never one the provider refused', async () => {
+    const t = setup('failed');
+    const REFUSED_AGENT = '00000000-0000-4000-8000-0000000000e2';
+    t.fake.insert(schema.taskStepAgentMinings, {
+      id: REFUSED_AGENT,
+      taskStepId: ROW,
+      status: 'failed',
+      errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`,
+    });
+    expect(await t.resume()).toBe(true);
+    const agents = t.fake.rows(schema.taskStepAgentMinings);
+    expect(t.one(agents, AGENT).userRetryRequestedAt).not.toBeNull();
+    expect(t.one(agents, REFUSED_AGENT).userRetryRequestedAt ?? null).toBeNull();
+  });
+
   it('changes nothing when the task is no longer failed', async () => {
     const t = setup('running');
     expect(await t.resume()).toBe(false);

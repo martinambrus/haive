@@ -48,3 +48,9 @@ to overwrite it; a failed step's release keeps the link, and a run that had alre
 otherwise set its row back to `running`. What follows that transaction (learning a
 model limit, the recap, `markCliParkBegin` and handing the step back) sits outside the `try` whose
 catch records a failed run, so a queue error there no longer rewrites a finished run as exit -1.
+
+**A refusal is one agent's failure, an outage is the step's.** The barrier's fail-fast and the
+DAG's sibling cancel key on `isProviderOutage` (`rate_limit`, `auth`, `server_error`), not on every
+fatal class: a `content_filter` refusal degrades that agent like any other failed agent, and a DAG
+coder it refuses fails its own issue (`DAG_REFUSED_MARKER`) with no advisor, replanner or retry, since the
+same prompt is refused again.

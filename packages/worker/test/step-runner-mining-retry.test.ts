@@ -29,6 +29,7 @@ import { shouldRetryMiningTerminalFailure } from '../src/step-engine/mining-fail
 import {
   MODEL_CAPABILITY_HEADLINES,
   OUTPUT_TRUNCATION_HEADLINE,
+  PROVIDER_FATAL_HEADLINES,
 } from '../src/queues/cli-exec/failure-class.js';
 
 // The barrier's tab sweep runs `docker exec` into the task's runner, four calls per fan-out that
@@ -1458,6 +1459,41 @@ describe('advanceStep agentMining fatal provider failure', () => {
 
     expect(result.status).toBe('done');
     expect(applyCalls).toHaveLength(1);
+  });
+
+  it('degrades a refused agent like any failed agent, without re-sending its prompt', async () => {
+    const REFUSED = `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`;
+    const state = freshState([
+      miningRow('peer-reviewer', 1),
+      miningRow('security-code-reviewer', 1, { status: 'failed', errorMessage: REFUSED }),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), sharedPredicateStep(applyCalls), enqueued);
+
+    expect(result.status).toBe('done');
+    expect(enqueued).toHaveLength(0);
+    expect(applyCalls).toHaveLength(1);
+    expect(
+      applyCalls[0]!.agentMiningResults?.find((r) => r.agentId === 'security-code-reviewer'),
+    ).toMatchObject({
+      status: 'failed',
+      errorMessage: REFUSED,
+    });
+  });
+
+  it('still fails fast on a rate limit beside a refused agent', async () => {
+    const REFUSED = `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`;
+    const state = freshState([
+      miningRow('peer-reviewer', 2, { status: 'failed', errorMessage: RATE_LIMIT_ERR }),
+      miningRow('security-code-reviewer', 1, { status: 'failed', errorMessage: REFUSED }),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const result = await run(makeMockDb(state), sharedPredicateStep(applyCalls), []);
+
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toBe(RATE_LIMIT_ERR);
+    expect(applyCalls).toHaveLength(0);
   });
 });
 
