@@ -288,7 +288,6 @@ export function InteractiveShell(props: InteractiveShellProps) {
   }, [scope, scopeId, cliProviderId, attachCopy, cliClipboard, connectNonce]);
 
   function restartShell() {
-    restartingRef.current = true;
     setConfirmRestart(false);
     sendFrameRef.current?.({ type: 'restart_shell' });
   }
