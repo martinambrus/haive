@@ -167,10 +167,19 @@ export async function runDataMigrations(db: Database): Promise<void> {
  * what invokes it at its Phase 5.
  */
 export async function runDestructiveDataMigrations(db: Database): Promise<void> {
+  const failed: string[] = [];
   for (const migration of DATA_MIGRATIONS.filter((m) => m.kind === 'destructive')) {
     log.info({ migration: migration.id }, 'running destructive data migration');
-    await runOne(db, migration);
+    try {
+      await migration.run(db);
+    } catch (err) {
+      failed.push(migration.id);
+      log.error({ err, migration: migration.id }, 'destructive data migration failed');
+    }
   }
+  // Boot never retries these, so a failure must reach the updater's commit phase.
+  if (failed.length > 0)
+    throw new Error(`destructive data migrations failed: ${failed.join(', ')}`);
 }
 
 /** Finalize step-summary invocations whose row exists but whose job never reached BullMQ.

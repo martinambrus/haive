@@ -118,4 +118,21 @@ describe('dropCopiedSecretLikeProviderEnv (committed upgrade)', () => {
     await dropCopiedSecretLikeProviderEnv(db);
     expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
   });
+
+  it('finishes the others, then fails, when one provider cannot be scrubbed', async () => {
+    const { fake, db } = setup();
+    addProvider(fake, P1, LEGACY);
+    addProvider(fake, P2, LEGACY);
+    await copySecretLikeProviderEnv(db);
+    const real = db.transaction.bind(db);
+    let calls = 0;
+    vi.spyOn(db, 'transaction').mockImplementation(((run: never) => {
+      calls += 1;
+      return calls === 1 ? Promise.reject(new Error('connection lost')) : real(run);
+    }) as typeof db.transaction);
+    await expect(dropCopiedSecretLikeProviderEnv(db)).rejects.toThrow('1 provider(s)');
+    const envs = fake.rows(schema.cliProviders).map((r) => r.envVars);
+    expect(envs).toContainEqual(LEGACY);
+    expect(envs).toContainEqual({ ANTHROPIC_BASE_URL: 'u' });
+  });
 });

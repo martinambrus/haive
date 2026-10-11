@@ -13,12 +13,13 @@ const log = logger.child({ module: 'move-secret-env' });
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /** Each provider whose envVars hold a secret-looking key, worked under its row lock in its own
- *  transaction; one that fails is logged and the rest still run. */
+ *  transaction; one that fails is logged and the rest still run. Returns how many failed. */
 async function forEachLegacyProvider(
   db: Database,
   phase: string,
   work: (tx: Tx, providerId: string, envVars: Record<string, string>) => Promise<void>,
-): Promise<void> {
+): Promise<number> {
+  let failed = 0;
   const providers = await db.query.cliProviders.findMany({
     columns: { id: true, envVars: true },
   });
@@ -34,9 +35,11 @@ async function forEachLegacyProvider(
         if (locked) await work(tx, provider.id, locked.envVars ?? {});
       });
     } catch (err) {
+      failed += 1;
       log.error({ err, providerId: provider.id, phase }, 'provider env secret migration failed');
     }
   }
+  return failed;
 }
 
 /** Boot half: copy secret-looking envVars keys into encrypted secrets, leaving envVars as they
@@ -65,7 +68,7 @@ export async function copySecretLikeProviderEnv(db: Database): Promise<void> {
 /** Committed-upgrade half: drop the envVars copy of each secret-looking key that now has a secret.
  *  A key whose copy into secrets never landed stays where it is. */
 export async function dropCopiedSecretLikeProviderEnv(db: Database): Promise<void> {
-  await forEachLegacyProvider(db, 'drop', async (tx, providerId, envVars) => {
+  const failed = await forEachLegacyProvider(db, 'drop', async (tx, providerId, envVars) => {
     const held = await tx.query.cliProviderSecrets.findMany({
       where: eq(schema.cliProviderSecrets.providerId, providerId),
       columns: { secretName: true },
@@ -81,4 +84,6 @@ export async function dropCopiedSecretLikeProviderEnv(db: Database): Promise<voi
       .set({ envVars: kept })
       .where(eq(schema.cliProviders.id, providerId));
   });
+  // Not retried at boot, so the updater must not commit while a copy remains.
+  if (failed > 0) throw new Error(`${failed} provider(s) still hold a secret in plain envVars`);
 }
