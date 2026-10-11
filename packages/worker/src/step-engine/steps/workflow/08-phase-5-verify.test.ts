@@ -436,6 +436,23 @@ describe('buildUnverifiedNote', () => {
 
   // A check that ran and FAILED is a failure, not an absence — it has its own route (fixLoop)
   // and must not also be reported as unverified.
+  it('counts a php lint that ran as a check that ran', () => {
+    expect(
+      buildUnverifiedNote(
+        { test: null, lint: cmd, typecheck: null, phpLint: cmd },
+        { test: skipped, lint: skipped, typecheck: skipped, phpLint: ran },
+      ),
+    ).toBe('');
+  });
+
+  it('names a php lint that was detected but not selected', () => {
+    const note = buildUnverifiedNote(
+      { test: null, lint: cmd, typecheck: null, phpLint: cmd },
+      { test: skipped, lint: skipped, typecheck: skipped, phpLint: skipped },
+    );
+    expect(note).toContain('Detected but not selected for this pass: lint, php lint');
+  });
+
   it('says nothing when a check ran and failed', () => {
     expect(
       buildUnverifiedNote(
@@ -1267,6 +1284,65 @@ process.exitCode = run.exit;
 
       beforeEach(() => {
         ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      });
+
+      describe('beside a JS lint script', () => {
+        const JS_LINT = HOST_CHECK;
+        const twoRunners = (map: ChangedLineMap | null) => {
+          collectChangedLineMap.mockResolvedValue(map);
+          return runApply(
+            { ddevMode: false, workspacePath: workspace, lint: JS_LINT, phpLint: PHPCS_HOST },
+            { runLint: true },
+          );
+        };
+
+        it('fails the step on a violation the change wrote, and names only the php lint section', async () => {
+          await installPhpcs({
+            flagged: { exit: 2, report: reportJson({ 'src/a.php': [11] }) },
+          });
+
+          const out = await twoRunners(rangesIn('src/a.php', [10, 12]));
+
+          expect(out.lint).toMatchObject({ ran: true, passed: true });
+          expect(out.phpLint).toMatchObject({
+            ran: true,
+            passed: false,
+            command: 'vendor/bin/phpcs',
+            scope: { blocking: 1, preExisting: 0 },
+          });
+          expect(out.passed).toBe(false);
+          const diagnosis = evaluate(out)?.diagnosis ?? '';
+          expect(diagnosis).toContain('### php lint failed (`vendor/bin/phpcs`)');
+          expect(diagnosis).not.toMatch(/^### lint failed/m);
+          expect(ledgerText()).toContain('php lint: `vendor/bin/phpcs` FAILS on lines');
+        });
+
+        it('passes when both runners pass, and skips both when lint is unticked', async () => {
+          await installPhpcs({ flagged: { exit: 0, report: reportJson({}) } });
+
+          const green = await twoRunners(rangesIn('src/a.php', [10, 12]));
+          expect(green.passed).toBe(true);
+          expect(green.phpLint).toMatchObject({ ran: true, passed: true });
+
+          collectChangedLineMap.mockResolvedValue(null);
+          const off = await runApply(
+            { ddevMode: false, workspacePath: workspace, lint: JS_LINT, phpLint: PHPCS_HOST },
+            { runLint: false },
+          );
+          expect(off.lint.ran).toBe(false);
+          expect(off.phpLint).toMatchObject({ ran: false });
+        });
+      });
+
+      it('runs one lint and writes no phpLint key for a detect stored without one', async () => {
+        const out = await runApply(
+          { ddevMode: false, workspacePath: workspace, lint: HOST_CHECK },
+          { runLint: true },
+        );
+
+        expect(out.lint).toMatchObject({ ran: true, passed: true });
+        expect('phpLint' in out).toBe(false);
+        expect(ledgerText()).not.toContain('php lint');
       });
 
       it('passes a failing phpcs whose every violation is on a line the change did not write', async () => {

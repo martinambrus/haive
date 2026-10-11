@@ -554,6 +554,39 @@ describe('gate-2 status summary', () => {
     });
   });
 
+  describe('a second lint runner', () => {
+    const phpLintRan = { ran: true, passed: true, output: '' };
+    const withPhpLint = (phpLint: Record<string, unknown>) =>
+      baseDetect({ verify: { test: ranClean, lint: ranClean, typecheck: ranClean, phpLint } });
+
+    it('adds nothing for an output stored without one', () => {
+      expect(rows(baseDetect({})).map((r) => r.label)).toEqual(['Tests', 'Lint', 'Typecheck']);
+    });
+
+    it('shows a PHP lint row, and a failure there fails the gate', () => {
+      const d = withPhpLint({ ran: true, passed: false, output: 'src/a.php:3' });
+
+      expect(rows(d).map((r) => r.label)).toEqual(['Tests', 'Lint', 'PHP lint', 'Typecheck']);
+      expect(row(d, 'PHP lint')?.status).toBe('fail');
+      expect(decisionDefault(withPhpLint(phpLintRan))).toBe('approve');
+    });
+
+    it('does not pre-select Approve when it was selected but could not run', () => {
+      const note = 'vendor/bin/phpcs not found — lint not run';
+      const d = withPhpLint({ ran: false, passed: false, output: note, note });
+
+      expect(row(d, 'PHP lint')).toMatchObject({ status: 'warn', statusLabel: 'NOT RUN' });
+      expect(decisionDefault(d)).toBe('reject');
+    });
+
+    it('counts as a check that ran', () => {
+      const d = baseDetect({ verify: { ...allSkipped, phpLint: phpLintRan } });
+
+      expect(row(d, 'Tests / lint / typecheck')).toBeUndefined();
+      expect(decisionDefault(d)).toBe('approve');
+    });
+  });
+
   it('a standalone smoke failure defaults the gate to reject', () => {
     const d = baseDetect({ runtimeSmoke: failSmoke(null) });
     expect(decisionDefault(d)).toBe('reject');

@@ -460,12 +460,15 @@ interface VerifyOutput {
   passed?: boolean;
   test?: VerifySlot;
   lint?: VerifySlot;
+  phpLint?: VerifySlot;
   typecheck?: VerifySlot;
 }
 
 /** 08 passes when nothing that ran failed, so a check it selected but could not run needs naming. */
 export function verifyNotRunNotes(v: VerifyOutput): string[] {
-  return [v.test, v.lint, v.typecheck].flatMap((c) => (c?.ran === false && c.note ? [c.note] : []));
+  return [v.test, v.lint, v.phpLint, v.typecheck].flatMap((c) =>
+    c?.ran === false && c.note ? [c.note] : [],
+  );
 }
 
 export function notRunSuffix(notes: string[] | undefined): string {

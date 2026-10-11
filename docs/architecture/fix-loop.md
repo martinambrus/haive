@@ -81,6 +81,13 @@ over violations. When the report cannot be written or read, the exit code decide
 output Haive does not control, is always unscoped, so those two settings decide its verdict. The trade-off: a change that makes an UNCHANGED line violate (an
 import it stopped using) counts as pre-existing and does not block.
 
+A root package.json lint script used to hide phpcs: lint was ONE slot, and the JS script won. When
+`lint` resolves to a package.json script, verify now also resolves `phpLint` (a composer lint/phpcs/cs
+script, else phpcs.xml) and runs it as a second lint with its own scoped verdict, its own `### php
+lint failed` section and its own gate-2 row. The one `runLint` checkbox covers both. A repo with a
+single lint runner gets no `phpLint` key, so its detect, output and gate rows are unchanged, and an
+old persisted payload reads as one lint.
+
 **Each fix pass is a fresh CLI process, so what earlier passes concluded has to be carried
 explicitly.** `priorPassNotes` (08b) does it inside one step's loop and `loadPriorFixContext`
 (`_fix-loop.ts`) does it across rounds; both dedupe with the ledger's `contentFingerprint` and

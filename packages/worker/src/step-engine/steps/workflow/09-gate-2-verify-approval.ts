@@ -112,6 +112,7 @@ interface VerifyGateDetect {
   verify: {
     test: LiteCheck | null;
     lint: LiteCheck | null;
+    phpLint?: LiteCheck | null;
     typecheck: LiteCheck | null;
   };
   allPassed: boolean;
@@ -460,6 +461,7 @@ interface StoredCheck {
 interface VerifyOutput {
   test?: StoredCheck;
   lint?: StoredCheck;
+  phpLint?: StoredCheck;
   typecheck?: StoredCheck;
   passed?: boolean;
   runtimeSmoke?: {
@@ -893,6 +895,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       verify: {
         test: liteCheck(output.test),
         lint: liteCheck(output.lint),
+        ...(output.phpLint ? { phpLint: liteCheck(output.phpLint) } : {}),
         typecheck: liteCheck(output.typecheck),
       },
       allPassed: output.passed === true,
@@ -975,7 +978,12 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // non-run check is not a failure), so there's no contradictory "FAIL / skipped"
     // row and no "all passed" line when nothing actually ran.
     const fenced = (s: string) => codeBlock(s || '(empty)');
-    const verifySlots = [detected.verify.test, detected.verify.lint, detected.verify.typecheck];
+    const verifySlots = [
+      detected.verify.test,
+      detected.verify.lint,
+      detected.verify.phpLint,
+      detected.verify.typecheck,
+    ];
     // Whether ANY of the three checks actually executed. Derived from the slots this gate
     // already reads rather than a new payload field, so it answers the same on a gate parked
     // before it existed. `allPassed` cannot stand in: 08 computes it as "nothing that ran
@@ -988,6 +996,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     for (const [label, c] of [
       ['Tests', detected.verify.test],
       ['Lint', detected.verify.lint],
+      ['PHP lint', detected.verify.phpLint],
       ['Typecheck', detected.verify.typecheck],
     ] as const) {
       if (!c || (!c.ran && !c.note)) continue;

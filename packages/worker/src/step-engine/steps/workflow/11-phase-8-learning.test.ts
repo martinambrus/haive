@@ -887,6 +887,13 @@ describe('a verification that passed without every selected check', () => {
     ).toEqual([missing]);
   });
 
+  it('lists a php lint that could not run, and ignores one stored without it', () => {
+    expect(verifyNotRunNotes({ passed: true, phpLint: { ran: false, note: missing } })).toEqual([
+      missing,
+    ]);
+    expect(verifyNotRunNotes({ passed: true, lint: { ran: true } })).toEqual([]);
+  });
+
   it('names them after the verdict', () => {
     expect(notRunSuffix([missing, 'DDEV runner unavailable — test not run'])).toBe(
       ` (not run: ${missing}; DDEV runner unavailable — test not run)`,
