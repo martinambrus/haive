@@ -131,6 +131,19 @@ back to the worktree is read by the worker from the worktree afterwards: the php
 `.haive/verify` at the sandbox path, in a directory made writable for the sandbox user first. A DDEV
 project's checks still run in the DDEV runner (`kind: 'ddev'`).
 
+When the task's app runs in an app-runner container, the URL Haive records is
+`http://localhost:<port>`, and inside a sandbox `localhost` is the sandbox. So both a step command
+and an agent run start a node forwarder (`sandbox/loopback-forward.ts`) ahead of the command,
+listening on `127.0.0.1` AND `::1` at that port and relaying to the runner by name. It must bind both,
+because `localhost` resolves to `::1` first, and an IPv4-only forwarder failed `curl -6` (MEASURED).
+It starts only when the app-runner reach probe succeeded (`loopbackForward` on the reach result).
+DDEV projects already reach their `*.ddev.site` name through `--add-host`. Node rather than socat or
+iptables: node is on every sandbox image, the others on none, and iptables would need a capability
+the sandbox does not have. With no node the command still runs and one line says so. The trade-off:
+a command that starts its own server on the app's port gets `EADDRINUSE`. Playwright's
+`reuseExistingServer` reuses the forwarded app instead. No base-URL env var is set, since one could
+override a value a project chose on purpose.
+
 ## The task's current worktree
 
 `tasks.worktree_branch` and `worktree_path` are written once, by 01-worktree-setup, and kept as an
