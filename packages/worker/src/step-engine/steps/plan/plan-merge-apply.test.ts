@@ -120,6 +120,8 @@ function fakeDb() {
         if (table === schema.taskEvents) events.push(v);
       },
     }),
+    transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> =>
+      fn({ ...db, execute: async () => undefined }),
   };
   return { db, events, flags };
 }

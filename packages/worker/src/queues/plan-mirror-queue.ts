@@ -10,6 +10,7 @@ import {
   type PlanMirrorJobPayload,
   type PlanMirrorJobResult,
 } from '@haive/shared';
+import { lockPlanMerge } from '@haive/shared/plan';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
@@ -25,6 +26,7 @@ import {
   commitMerge,
   divergence,
   ensurePlanMergeWorktree,
+  PLAN_MERGE_LIVE_STATUSES,
   fetchOrigin,
   landPlanMerge,
   mergeOriginInto,
@@ -148,6 +150,31 @@ export async function integrateOrigin(args: {
   const gap = await divergence(args.repoPath, args.branch);
   if (gap.behind === 0) return { landed: false, previousCommit };
 
+  return db.transaction(async (tx) => {
+    await lockPlanMerge(tx, args.repositoryId);
+    // The api refuses a save while a conversation is open, but one can open after that check.
+    const [open] = await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, args.repositoryId),
+          eq(schema.tasks.type, 'plan_merge'),
+          inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
+        ),
+      )
+      .limit(1);
+    if (open) throw new Error('A merge conversation is open for this repository');
+    return mergeInScratch(args, gap, previousCommit);
+  });
+}
+
+async function mergeInScratch(
+  args: Parameters<typeof integrateOrigin>[0],
+  gap: Awaited<ReturnType<typeof divergence>>,
+  previousCommit: string | null,
+): Promise<Awaited<ReturnType<typeof integrateOrigin>>> {
+  const db = getDb();
   const worktree = await ensurePlanMergeWorktree(args.repoPath);
   // An abandoned conversation's merge is discarded below, but not what its fixers left: a failure
   // to move that aside fails the save before anything removes the worktree.

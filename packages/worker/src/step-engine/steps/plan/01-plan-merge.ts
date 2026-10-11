@@ -7,6 +7,7 @@ import {
   configService,
   type FormSchema,
 } from '@haive/shared';
+import { lockPlanMerge } from '@haive/shared/plan';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import type { StepDefinition } from '../../step-definition.js';
@@ -28,6 +29,7 @@ import {
   conflictedPaths,
   divergence,
   ensurePlanMergeWorktree,
+  PLAN_MERGE_LIVE_STATUSES,
   fetchOrigin,
   landPlanMerge,
   mergeOriginInto,
@@ -606,9 +608,6 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
   },
 };
 
-/** The task states a conversation is live in: the ones `findOpenPlanMerge` (api) counts. */
-const LIVE_STATUSES = ['created', 'queued', 'running', 'paused', 'waiting_user'] as const;
-
 /** Discard a cancelled conversation's scratch worktree unless another conversation of the repository
  *  may hold it: a live one, or a failed one opened after this one, whose Retry resumes it. Never
  *  throws: a cancel must finish. */
@@ -630,47 +629,51 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
     });
     const repoPath = repo?.storagePath ?? repo?.localPath;
     if (!repoPath) return;
-    const [other] = await db.query.tasks.findMany({
-      where: and(
-        eq(schema.tasks.repositoryId, task.repositoryId),
-        eq(schema.tasks.type, 'plan_merge'),
-        ne(schema.tasks.id, taskId),
-        or(
-          inArray(schema.tasks.status, [...LIVE_STATUSES]),
-          and(eq(schema.tasks.status, 'failed'), gt(schema.tasks.createdAt, task.createdAt)),
+    const repositoryId = task.repositoryId;
+    await db.transaction(async (tx) => {
+      await lockPlanMerge(tx, repositoryId);
+      const [other] = await tx.query.tasks.findMany({
+        where: and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.type, 'plan_merge'),
+          ne(schema.tasks.id, taskId),
+          or(
+            inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
+            and(eq(schema.tasks.status, 'failed'), gt(schema.tasks.createdAt, task.createdAt)),
+          ),
         ),
-      ),
-      columns: { id: true },
-      limit: 1,
+        columns: { id: true },
+        limit: 1,
+      });
+      if (other) {
+        await note('plan_merge.discard_skipped', { otherTaskId: other.id });
+        return;
+      }
+      const worktreePath = planMergeWorktreePath(repoPath);
+      await moveAsideRecordedLeftovers(
+        db,
+        repositoryId,
+        worktreePath,
+        `origin/${await currentBranch(repoPath)}`,
+      );
+      const aborted = await abortGitMerge(worktreePath).catch((err: unknown) => ({
+        ok: false as const,
+        detail: err instanceof Error ? err.message : String(err),
+      }));
+      await removePlanMergeWorktree(repoPath);
+      // A forced removal takes an open merge with it, so the worktree being gone is what counts.
+      const listed = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
+      if (listed.code !== 0) {
+        throw new Error(
+          `the scratch worktree could not be confirmed gone: ${listed.stderr || listed.stdout}`,
+        );
+      }
+      if (listed.stdout.split('\0').includes(`worktree ${worktreePath}`)) {
+        throw new Error(
+          `the scratch worktree is still there${aborted.ok ? '' : `; the merge abort also failed: ${aborted.detail}`}`,
+        );
+      }
     });
-    if (other) {
-      await note('plan_merge.discard_skipped', { otherTaskId: other.id });
-      return;
-    }
-    const worktreePath = planMergeWorktreePath(repoPath);
-    await moveAsideRecordedLeftovers(
-      db,
-      task.repositoryId,
-      worktreePath,
-      `origin/${await currentBranch(repoPath)}`,
-    );
-    const aborted = await abortGitMerge(worktreePath).catch((err: unknown) => ({
-      ok: false as const,
-      detail: err instanceof Error ? err.message : String(err),
-    }));
-    await removePlanMergeWorktree(repoPath);
-    // A forced removal takes an open merge with it, so the worktree being gone is what counts.
-    const listed = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
-    if (listed.code !== 0) {
-      throw new Error(
-        `the scratch worktree could not be confirmed gone: ${listed.stderr || listed.stdout}`,
-      );
-    }
-    if (listed.stdout.split('\0').includes(`worktree ${worktreePath}`)) {
-      throw new Error(
-        `the scratch worktree is still there${aborted.ok ? '' : `; the merge abort also failed: ${aborted.detail}`}`,
-      );
-    }
   } catch (err) {
     logger.warn({ err, taskId }, 'discarding the cancelled plan merge failed');
     await note('plan_merge.discard_failed', {
