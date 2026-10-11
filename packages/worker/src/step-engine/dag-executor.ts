@@ -440,10 +440,6 @@ export function pickFatalProviderError(rows: { errorMessage: string | null }[]):
   return rows.find((r) => isProviderOutage(r.errorMessage))?.errorMessage ?? null;
 }
 
-/** Stamped on a coder's concerns when the provider refused its prompt, so the escalation phase
- *  fails that issue without sending its content to an advisor or retrying it. */
-export const DAG_REFUSED_MARKER = 'DAG_REFUSED';
-
 /** Why a level with review off failed, naming the issues the provider refused apart. */
 export function levelFailureMessage(
   level: number,
@@ -456,11 +452,10 @@ export function levelFailureMessage(
     : `${head}; the provider refused ${refused.join(', ')}, so it is not retried with the same prompt`;
 }
 
-function issueRefused(issue: { concerns?: string | null; errorMessage?: string | null }): boolean {
-  return (
-    issue.concerns?.includes(DAG_REFUSED_MARKER) === true ||
-    issue.errorMessage?.includes(PROVIDER_FATAL_HEADLINES.content_filter) === true
-  );
+/** Read only from the error Haive records off the classified invocation, never from the
+ *  agent-written concerns, which can name anything. */
+function issueRefused(issue: { errorMessage?: string | null }): boolean {
+  return issue.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
 }
 
 /** Commit any uncommitted work in an issue worktree (belt-and-suspenders — the
@@ -2892,7 +2887,7 @@ export async function resolveDagPhase(
             continue; // re-dispatched by step (B) on the next loop pass
           }
           if (inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter)) {
-            result.concerns = `${DAG_REFUSED_MARKER}: ${issue.issueKey} coder was refused by the provider (${inv.errorMessage}). Not retrying: the same prompt is refused again.`;
+            result.concerns = `${issue.issueKey} coder was refused by the provider. Not retrying: the same prompt is refused again.`;
           } else if (cls === 'transient') {
             // Re-dispatch budget spent: a persistently-killed coder is an environment
             // problem (usually a runner OOM). Stamp the marker the ENVIRONMENT halt reads.
@@ -2910,6 +2905,9 @@ export async function resolveDagPhase(
             filesModified: result.parsed ? result.filesModified : (issue.filesModified ?? []),
             debtItems: result.debtItems,
             concerns: result.concerns,
+            ...(inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter)
+              ? { errorMessage: inv.errorMessage }
+              : {}),
             similarSites: mergeSimilarSites(issue.similarSites, result.similarSites),
             rawOutput: inv.rawOutput ?? null,
             endedAt: new Date(),

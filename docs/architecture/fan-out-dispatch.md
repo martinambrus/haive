@@ -52,6 +52,6 @@ catch records a failed run, so a queue error there no longer rewrites a finished
 **A refusal is one agent's failure, an outage is the step's.** The barrier's fail-fast and the
 DAG's sibling cancel key on `isProviderOutage` (`rate_limit`, `auth`, `server_error`), not on every
 fatal class: a `content_filter` refusal degrades that agent like any other failed agent, and a DAG
-coder, review-loop fix coder or reviewer it refuses fails its own issue (`DAG_REFUSED_MARKER`, or the
-refusal kept as the issue's error) with no advisor, replanner or retry, since the
+coder, review-loop fix coder or reviewer it refuses fails its own issue, with the refusal kept as the issue's error (read only
+from there, never from the agent-written concerns) with no advisor, replanner or retry, since the
 same prompt is refused again.

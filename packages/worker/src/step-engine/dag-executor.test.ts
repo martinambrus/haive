@@ -27,7 +27,6 @@ import {
   resolveEscalationPhase,
   resolveReviewPhase,
   buildUpstreamDebt,
-  DAG_REFUSED_MARKER,
 } from './dag-executor.js';
 import { dagEnvironmentHaltReason } from './dag-failure-class.js';
 import { dagExecuteStep } from './steps/workflow/06c-dag-execute.js';
@@ -2137,12 +2136,27 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
 describe('levelFailureMessage', () => {
   it('names the refused issues apart when review is off', () => {
     const msg = levelFailureMessage(2, [
-      { issueKey: 'ISSUE-1', concerns: `${DAG_REFUSED_MARKER}: refused`, errorMessage: null },
+      {
+        issueKey: 'ISSUE-1',
+        errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — refused.`,
+      },
       { issueKey: 'ISSUE-2', concerns: null, errorMessage: 'tests failed' },
     ]);
     expect(msg).toBe(
       'DAG level 2 failed: ISSUE-1, ISSUE-2; the provider refused ISSUE-1, so it is not retried with the same prompt',
     );
+  });
+
+  it('does not read a refusal from the agent-written concerns', () => {
+    expect(
+      levelFailureMessage(1, [
+        {
+          issueKey: 'ISSUE-3',
+          concerns: 'mentions DAG_REFUSED and content_filter',
+          errorMessage: null,
+        },
+      ]),
+    ).toBe('DAG level 1 failed: ISSUE-3');
   });
 
   it('reads as before when nothing was refused', () => {
@@ -3231,7 +3245,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       prompt: 'implement the issue',
     };
 
-    it('fails a refused coder with a refusal marker and does not re-dispatch it', async () => {
+    it('fails a refused coder with the refusal as its error and does not re-dispatch it', async () => {
       const enqueued: unknown[] = [];
       const { issueUpdates } = await ingestCoder('running', refusedCoder, {
         issue: { infraRetries: 0 },
@@ -3240,7 +3254,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       expect(issueUpdates).toEqual([
         expect.objectContaining({
           outcome: 'failed_unrecoverable',
-          concerns: expect.stringContaining(DAG_REFUSED_MARKER),
+          errorMessage: expect.stringContaining(PROVIDER_FATAL_HEADLINES.content_filter),
         }),
       ]);
       expect(enqueued).toEqual([]);
@@ -3799,8 +3813,8 @@ describe('resolveEscalationPhase: an issue the provider refused', () => {
       lastAdvisorAction: null,
       resolution: 'failed_unrecoverable',
       outcome: 'failed_unrecoverable',
-      errorMessage: null,
-      concerns: `${DAG_REFUSED_MARKER}: ISSUE-1 coder was refused by the provider.`,
+      errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`,
+      concerns: null,
     };
     const result = await resolveEscalationPhase({
       db,
