@@ -112,11 +112,12 @@ describe('dropCopiedSecretLikeProviderEnv (committed upgrade)', () => {
     expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
   });
 
-  it('keeps a secret-looking key that never made it into secrets', async () => {
+  it('copies a key the boot half never copied before dropping it', async () => {
     const { fake, db } = setup();
     addProvider(fake, P1, LEGACY);
     await dropCopiedSecretLikeProviderEnv(db);
-    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
+    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual({ ANTHROPIC_BASE_URL: 'u' });
+    expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
   });
 
   it('finishes the others, then fails, when one provider cannot be scrubbed', async () => {

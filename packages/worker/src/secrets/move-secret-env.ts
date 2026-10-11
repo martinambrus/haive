@@ -42,46 +42,50 @@ async function forEachLegacyProvider(
   return failed;
 }
 
+/** Store each key as an encrypted secret; an existing secret of the same name wins. */
+async function copyKeys(
+  tx: Tx,
+  providerId: string,
+  keys: Record<string, string>,
+  masterKek: string,
+): Promise<void> {
+  for (const [name, value] of Object.entries(keys)) {
+    await tx
+      .insert(schema.cliProviderSecrets)
+      .values({
+        providerId,
+        secretName: name,
+        ...envelopeEncrypt(value, masterKek),
+        fingerprint: computeKeyFingerprint(value),
+      })
+      .onConflictDoUpdate({
+        target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
+        set: { secretName: name },
+      });
+  }
+}
+
 /** Boot half: copy secret-looking envVars keys into encrypted secrets, leaving envVars as they
- *  are, so the release before this one still finds them after a rollback. An existing secret wins. */
+ *  are, so the release before this one still finds them after a rollback. */
 export async function copySecretLikeProviderEnv(db: Database): Promise<void> {
   let masterKek: string | undefined;
   await forEachLegacyProvider(db, 'copy', async (tx, providerId, envVars) => {
     masterKek ??= await secretsService.getMasterKek();
-    for (const [name, value] of Object.entries(splitSecretLikeEnv(envVars).secrets)) {
-      await tx
-        .insert(schema.cliProviderSecrets)
-        .values({
-          providerId,
-          secretName: name,
-          ...envelopeEncrypt(value, masterKek),
-          fingerprint: computeKeyFingerprint(value),
-        })
-        .onConflictDoUpdate({
-          target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
-          set: { secretName: name },
-        });
-    }
+    await copyKeys(tx, providerId, splitSecretLikeEnv(envVars).secrets, masterKek);
   });
 }
 
-/** Committed-upgrade half: drop the envVars copy of each secret-looking key that now has a secret.
- *  A key whose copy into secrets never landed stays where it is. */
+/** Committed-upgrade half: copy whatever the boot half did not, then drop the envVars copies, in
+ *  one transaction per provider, so success means no secret is left in plain envVars. */
 export async function dropCopiedSecretLikeProviderEnv(db: Database): Promise<void> {
+  let masterKek: string | undefined;
   const failed = await forEachLegacyProvider(db, 'drop', async (tx, providerId, envVars) => {
-    const held = await tx.query.cliProviderSecrets.findMany({
-      where: eq(schema.cliProviderSecrets.providerId, providerId),
-      columns: { secretName: true },
-    });
-    const heldNames = new Set(held.map((row) => row.secretName));
-    const secretLike = splitSecretLikeEnv(envVars).secrets;
-    const kept = Object.fromEntries(
-      Object.entries(envVars).filter(([name]) => !(name in secretLike && heldNames.has(name))),
-    );
-    if (Object.keys(kept).length === Object.keys(envVars).length) return;
+    masterKek ??= await secretsService.getMasterKek();
+    const split = splitSecretLikeEnv(envVars);
+    await copyKeys(tx, providerId, split.secrets, masterKek);
     await tx
       .update(schema.cliProviders)
-      .set({ envVars: kept })
+      .set({ envVars: split.envVars })
       .where(eq(schema.cliProviders.id, providerId));
   });
   // Not retried at boot, so the updater must not commit while a copy remains.
