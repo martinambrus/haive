@@ -332,18 +332,15 @@ function scopeOf(node: ts.Node): ts.FunctionLikeDeclaration | null {
   return enclosingFunction(node);
 }
 
-/** A call whose result runs where it is made: awaited, a statement of its own, or returned from
- *  a function whose own call sites are followed. One kept for later can run after the guard's
+/** A call whose result runs where it is made: awaited, or returned from a function whose own call
+ *  sites are followed. One kept for later, or left unawaited, can run after the guard's
  *  transaction has ended. */
 function consumedInPlace(c: ts.CallExpression): boolean {
   let at: ts.Node = c;
   while (ts.isParenthesizedExpression(at.parent)) at = at.parent;
   const p = at.parent;
   return (
-    ts.isAwaitExpression(p) ||
-    ts.isExpressionStatement(p) ||
-    ts.isReturnStatement(p) ||
-    (ts.isArrowFunction(p) && p.body === at)
+    ts.isAwaitExpression(p) || ts.isReturnStatement(p) || (ts.isArrowFunction(p) && p.body === at)
   );
 }
 
@@ -1230,6 +1227,15 @@ describe('a live-status write on a task row', () => {
         await db.transaction(async (tx) => { await ${GUARD}(tx, id); later = make(tx, id); });
         await later;
       }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('does not cover a helper call left unawaited', () => {
+    const src = `async function revive(tx, id) {
+        await other();
+        await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      }
+      async function route(tx, id) { await ${GUARD}(tx, id); revive(tx, id); }`;
     expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
   });
 
