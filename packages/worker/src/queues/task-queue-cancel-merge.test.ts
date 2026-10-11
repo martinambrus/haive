@@ -205,6 +205,26 @@ describe('settleCancelledMerges', () => {
     expect(h.patches).toEqual([]);
   });
 
+  it('clears the baseline only once the merge is aborted, so a crash in between can settle again', async () => {
+    const dir = await openConflict();
+    const state = await stateFor(dir, true);
+    const h = makeDb([{ id: 'row1', state }], null);
+    const openWhenCleared: boolean[] = [];
+    const update = h.db as unknown as { update: () => unknown };
+    const real = update.update;
+    update.update = () => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: async () => {
+          openWhenCleared.push(await mergeOpen(dir));
+          h.patches.push(patch);
+        },
+      }),
+    });
+    await settleCancelledMerges(h.db, 'task-1');
+    update.update = real;
+    expect(openWhenCleared).toEqual([false]);
+  });
+
   it('finishes when the abort fails, and says so', async () => {
     const dir = await openConflict();
     const state = await stateFor(dir, true);

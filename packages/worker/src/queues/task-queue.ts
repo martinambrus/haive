@@ -3380,7 +3380,6 @@ async function settleCancelledMerge(
       branch: at.branch,
       baseline,
     });
-    await at.clear();
     const aborted = await abortMerge(dir);
     if (!aborted.ok) {
       await appendEvent(db, at.taskId, at.stepRowId, 'merge.abort_failed', {
@@ -3390,6 +3389,8 @@ async function settleCancelledMerge(
         detail: aborted.detail,
       });
     }
+    // Last: a cancel redelivered after a crash before this point settles the merge again.
+    await at.clear();
   } catch (err) {
     logger.warn(
       { err, taskId: at.taskId, stepRowId: at.stepRowId },
