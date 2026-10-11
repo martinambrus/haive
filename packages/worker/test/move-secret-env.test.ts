@@ -3,7 +3,10 @@ import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { envelopeDecrypt, envelopeEncrypt, secretsService } from '@haive/shared';
-import { moveSecretLikeProviderEnv } from '../src/secrets/move-secret-env.js';
+import {
+  copySecretLikeProviderEnv,
+  dropCopiedSecretLikeProviderEnv,
+} from '../src/secrets/move-secret-env.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const P1 = '00000000-0000-4000-8000-0000000000b1';
@@ -48,44 +51,71 @@ beforeEach(() => {
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
 });
 
-describe('moveSecretLikeProviderEnv', () => {
-  it('moves a legacy secret out of envVars into secrets only', async () => {
+const LEGACY = { ANTHROPIC_BASE_URL: 'u', CLAUDE_CODE_OAUTH_TOKEN: TOKEN };
+
+describe('copySecretLikeProviderEnv (boot)', () => {
+  it('copies a legacy secret into secrets and leaves envVars for a rollback', async () => {
     const { fake, db } = setup();
-    addProvider(fake, P1, { ANTHROPIC_BASE_URL: 'u', CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+    addProvider(fake, P1, LEGACY);
     addProvider(fake, P2, null);
-    await moveSecretLikeProviderEnv(db);
-    const row = fake.rows(schema.cliProviders).find((r) => r.id === P1)!;
-    expect(row.envVars).toEqual({ ANTHROPIC_BASE_URL: 'u' });
+    await copySecretLikeProviderEnv(db);
+    expect(fake.rows(schema.cliProviders).find((r) => r.id === P1)!.envVars).toEqual(LEGACY);
     expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
     expect(fake.rows(schema.cliProviders).find((r) => r.id === P2)!.envVars).toBeNull();
   });
 
   it('is a no-op on a second run', async () => {
     const { fake, db } = setup();
-    addProvider(fake, P1, { ANTHROPIC_BASE_URL: 'u', CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
-    await moveSecretLikeProviderEnv(db);
+    addProvider(fake, P1, LEGACY);
+    await copySecretLikeProviderEnv(db);
     const before = JSON.stringify([
       fake.rows(schema.cliProviders),
       fake.rows(schema.cliProviderSecrets),
     ]);
-    await moveSecretLikeProviderEnv(db);
+    await copySecretLikeProviderEnv(db);
     expect(
       JSON.stringify([fake.rows(schema.cliProviders), fake.rows(schema.cliProviderSecrets)]),
     ).toBe(before);
   });
 
-  it('keeps an existing secret and drops the envVars copy', async () => {
+  it('keeps an existing secret of the same name', async () => {
     const { fake, db } = setup();
     addProvider(fake, P1, { CLAUDE_CODE_OAUTH_TOKEN: 'stale-env-copy' });
-    const envelope = envelopeEncrypt(TOKEN, KEK);
     fake.insert(schema.cliProviderSecrets, {
       providerId: P1,
       secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
-      ...envelope,
+      ...envelopeEncrypt(TOKEN, KEK),
       fingerprint: 'fp',
     });
-    await moveSecretLikeProviderEnv(db);
-    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual({});
+    await copySecretLikeProviderEnv(db);
     expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(1);
+  });
+
+  it('never loads the master key when no provider needs a copy', async () => {
+    const { fake, db } = setup();
+    addProvider(fake, P1, { ANTHROPIC_BASE_URL: 'u' });
+    const kek = vi.spyOn(secretsService, 'getMasterKek');
+    kek.mockClear();
+    await copySecretLikeProviderEnv(db);
+    expect(kek).not.toHaveBeenCalled();
+  });
+});
+
+describe('dropCopiedSecretLikeProviderEnv (committed upgrade)', () => {
+  it('drops the envVars copy once a secret holds it, keeping config keys', async () => {
+    const { fake, db } = setup();
+    addProvider(fake, P1, LEGACY);
+    await copySecretLikeProviderEnv(db);
+    await dropCopiedSecretLikeProviderEnv(db);
+    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual({ ANTHROPIC_BASE_URL: 'u' });
+    expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+  });
+
+  it('keeps a secret-looking key that never made it into secrets', async () => {
+    const { fake, db } = setup();
+    addProvider(fake, P1, LEGACY);
+    await dropCopiedSecretLikeProviderEnv(db);
+    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
   });
 });
