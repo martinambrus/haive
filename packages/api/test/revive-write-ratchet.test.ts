@@ -643,23 +643,24 @@ function writeTx(call: ts.CallExpression): string | null {
 }
 
 /** Every live-status write on a task row in one source, with whether it is covered. */
-/** A `.update(schema.tasks)` not chained straight into `.set(...)`, or an `.insert(schema.tasks)`
- *  chain kept in a variable: whatever later sets its status, or adds a conflict update, is out of
- *  sight, so the builder itself is the write. */
+/** A `.update(schema.tasks)` not chained straight into `.set(...)`, or a task builder chain kept
+ *  in a variable: whatever later sets its status, or runs it outside the guarded transaction, is
+ *  out of sight, so the builder itself is the write. */
 function detachedTaskBuilder(call: ts.CallExpression): boolean {
   if (!ts.isPropertyAccessExpression(call.expression) || !isTasksTable(call.arguments[0])) {
     return false;
   }
   if (call.expression.name.text === 'update') {
     const set = call.parent;
-    return !(
+    if (!(
       ts.isPropertyAccessExpression(set) &&
       set.name.text === 'set' &&
       ts.isCallExpression(set.parent) &&
       set.parent.expression === set
-    );
-  }
-  if (call.expression.name.text !== 'insert') return false;
+    )) {
+      return true;
+    }
+  } else if (call.expression.name.text !== 'insert') return false;
   let top: ts.Node = call;
   while (
     (ts.isPropertyAccessExpression(top.parent) || ts.isCallExpression(top.parent)) &&
@@ -667,7 +668,13 @@ function detachedTaskBuilder(call: ts.CallExpression): boolean {
   ) {
     top = top.parent;
   }
-  return !ts.isAwaitExpression(top.parent) && !ts.isExpressionStatement(top.parent);
+  const at = top.parent;
+  if (ts.isAwaitExpression(at) || ts.isExpressionStatement(at)) return false;
+  // Returned from a function: its call sites are where it runs, and they are followed in turn.
+  if (call.expression.name.text === 'update') {
+    return !(ts.isReturnStatement(at) || (ts.isArrowFunction(at) && at.body === top));
+  }
+  return true;
 }
 
 function liveWrites(
@@ -1142,6 +1149,18 @@ describe('a live-status write on a task row', () => {
     const exported = `export async function revive(tx, id) { ${write} }
       async function route(tx, id) { await ${GUARD}(tx, id); await revive(tx, id); }`;
     expect(liveWrites('x.ts', exported).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('reads a task update chain stored for later as an unguarded write', () => {
+    const src = `async function route(id) {
+        let later;
+        await db.transaction(async (tx) => {
+          await ${GUARD}(tx, id);
+          later = tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+        });
+        await later;
+      }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toContain(false);
   });
 
   it('does not let a call site rebind what a helper captures', () => {
