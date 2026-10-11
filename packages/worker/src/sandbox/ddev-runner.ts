@@ -1942,26 +1942,30 @@ export async function ensureDdevStarted(
   // calls would then collide on the fixed container name (`docker run --name`
   // conflict) and fail the loser. The first call's in-flight promise serves both.
   let configured = false;
-  const handle = await ddevBoots.ensure(taskId, opts.signal, (signal) =>
-    withDdevBootCancellation(
-      signal,
-      async (id) => {
-        opts.onProgress?.('Removing the incomplete DDEV startup…');
-        await exec('docker', ['rm', '-f', '-v', id], { timeout: 90_000 });
-      },
-      async (scope) => {
-        const bootOpts = { ...opts, signal };
-        let handle = await ensureDdevStartedInner(taskId, repoSubpath, bootOpts, scope);
-        scope.throwIfAborted();
-        handle = await reconcileDdevAccess(taskId, repoSubpath, handle, bootOpts, scope);
-        scope.throwIfAborted();
-        // Keep cancellation armed through debugging/database wiring, including its restart.
-        await opts.onReady?.(handle);
-        configured = true;
-        scope.throwIfAborted();
-        return handle;
-      },
-    ),
+  const handle = await ddevBoots.ensure(
+    taskId,
+    opts.signal,
+    (signal) =>
+      withDdevBootCancellation(
+        signal,
+        async (id) => {
+          opts.onProgress?.('Removing the incomplete DDEV startup…');
+          await exec('docker', ['rm', '-f', '-v', id], { timeout: 90_000 });
+        },
+        async (scope) => {
+          const bootOpts = { ...opts, signal };
+          let handle = await ensureDdevStartedInner(taskId, repoSubpath, bootOpts, scope);
+          scope.throwIfAborted();
+          handle = await reconcileDdevAccess(taskId, repoSubpath, handle, bootOpts, scope);
+          scope.throwIfAborted();
+          // Keep cancellation armed through debugging/database wiring, including its restart.
+          await opts.onReady?.(handle);
+          configured = true;
+          scope.throwIfAborted();
+          return handle;
+        },
+      ),
+    repoSubpath,
   );
   // A successful coalesced caller still performs its own optional wiring.
   if (!configured) await opts.onReady?.(handle);

@@ -16,6 +16,72 @@ function deferred<T = void>() {
 }
 
 describe('DDEV cold-boot cancellation', () => {
+  it('makes a caller for another subpath wait out the boot and then boot its own', async () => {
+    const boots = new DdevBoots<string>();
+    const first = deferred<string>();
+    const a = boots.ensure('task', undefined, () => first.promise, 'ws/a');
+    const own = vi.fn(async () => 'b');
+    const b = boots.ensure('task', undefined, own, 'ws/b');
+    await Promise.resolve();
+    expect(own).not.toHaveBeenCalled();
+    first.resolve('a');
+    await expect(a).resolves.toBe('a');
+    await expect(b).resolves.toBe('b');
+    expect(own).toHaveBeenCalledOnce();
+  });
+
+  it('hands a caller for another subpath the boot failure instead of booting over it', async () => {
+    const boots = new DdevBoots<string>();
+    const first = deferred<string>();
+    const a = boots.ensure('task', undefined, () => first.promise, 'ws/a');
+    const aError = a.catch((err: unknown) => err);
+    const own = vi.fn(async () => 'b');
+    const b = boots.ensure('task', undefined, own, 'ws/b');
+    const failure = new Error('removing the incomplete runner failed');
+    first.reject(failure);
+    expect(await aError).toBe(failure);
+    await expect(b).rejects.toBe(failure);
+    expect(own).not.toHaveBeenCalled();
+  });
+
+  it('boots its own for a caller for another subpath once that boot was stopped', async () => {
+    const boots = new DdevBoots<string>();
+    const first = deferred<string>();
+    const a = boots.ensure('task', undefined, () => first.promise, 'ws/a');
+    const aError = a.catch((err: unknown) => err);
+    const own = vi.fn(async () => 'b');
+    const b = boots.ensure('task', undefined, own, 'ws/b');
+    first.reject(new DdevBootAbortedError());
+    expect(await aError).toBeInstanceOf(DdevBootAbortedError);
+    await expect(b).resolves.toBe('b');
+  });
+
+  it('lets a caller waiting for another subpath stop on its own signal without stopping the boot', async () => {
+    const boots = new DdevBoots<string>();
+    const first = deferred<string>();
+    const bootSignal: AbortSignal[] = [];
+    const a = boots.ensure(
+      'task',
+      undefined,
+      (signal) => {
+        bootSignal.push(signal);
+        return first.promise;
+      },
+      'ws/a',
+    );
+    const stop = new AbortController();
+    const own = vi.fn(async () => 'b');
+    const b = boots.ensure('task', stop.signal, own, 'ws/b');
+    const bError = b.catch((err: unknown) => err);
+    await Promise.resolve();
+    stop.abort();
+    expect(await bError).toBeInstanceOf(DdevBootAbortedError);
+    expect(bootSignal[0]!.aborted).toBe(false);
+    first.resolve('a');
+    await expect(a).resolves.toBe('a');
+    expect(own).not.toHaveBeenCalled();
+  });
+
   it('removes the created runner during startup and holds Retry until teardown completes', async () => {
     const stop = new AbortController();
     const created = deferred();

@@ -116,4 +116,30 @@ describe('ensureAppRunnerStarted cancellation', () => {
     gate.admit();
     expect(await settled(joiner)).toEqual(new Error('docker unavailable'));
   });
+
+  it('boots its own runner for a caller asking for another subpath, once the first boot was stopped', async () => {
+    const gate = fullGate();
+    const stop = new AbortController();
+    const first = ensureAppRunnerStarted(...args, undefined, { signal: stop.signal });
+    await vi.waitFor(() => expect(mock.acquire).toHaveBeenCalledTimes(1));
+    const other = ensureAppRunnerStarted(args[0], 'ws/other', args[2]);
+    expect(await settled(other)).toBe('pending');
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    stop.abort();
+    expect(await settled(first)).toBeInstanceOf(RuntimeSlotAbortedError);
+    await vi.waitFor(() => expect(mock.acquire).toHaveBeenCalledTimes(2));
+    gate.admit();
+    expect(await settled(other)).toEqual(new Error('docker unavailable'));
+  });
+
+  it('hands a caller for another subpath the first boot failure instead of booting over it', async () => {
+    const gate = fullGate();
+    const first = ensureAppRunnerStarted(...args);
+    await vi.waitFor(() => expect(mock.acquire).toHaveBeenCalledTimes(1));
+    const other = ensureAppRunnerStarted(args[0], 'ws/other', args[2]);
+    gate.admit();
+    expect(await settled(first)).toEqual(new Error('docker unavailable'));
+    expect(await settled(other)).toEqual(new Error('docker unavailable'));
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+  });
 });

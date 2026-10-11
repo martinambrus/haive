@@ -246,7 +246,10 @@ export async function startAppRunner(params: {
 /** Ensure the task's app-runner is up, launching it if not. Idempotent: returns
  *  the existing handle when the container is already running; a stopped/stale
  *  container is removed and recreated. */
-const inFlightAppRunnerBoots = new Map<string, Promise<AppRunnerHandle>>();
+const inFlightAppRunnerBoots = new Map<
+  string,
+  { subpath: string; boot: Promise<AppRunnerHandle> }
+>();
 
 export async function ensureAppRunnerStarted(
   taskId: string,
@@ -260,9 +263,21 @@ export async function ensureAppRunnerStarted(
   // Coalesce concurrent boots of the same task (08a apply + VNC runtime-ensure)
   // into one — two startAppRunner calls would collide on the container name.
   const inFlight = inFlightAppRunnerBoots.get(taskId);
+  if (inFlight && inFlight.subpath !== repoSubpath) {
+    // Another subpath's boot: wait it out, then boot this one (the boot-subpath check recreates).
+    // Only a stop releases the wait; any other failure is this caller's too, as for a joiner.
+    await rejectOnAbort(
+      inFlight.boot.catch((err: unknown) => {
+        if (!(err instanceof RuntimeSlotAbortedError)) throw err;
+      }),
+      signal,
+      taskId,
+    );
+    return ensureAppRunnerStarted(taskId, repoSubpath, imageTag, appPort, opts);
+  }
   if (inFlight) {
     try {
-      return await rejectOnAbort(inFlight, signal, taskId);
+      return await rejectOnAbort(inFlight.boot, signal, taskId);
     } catch (err) {
       // The boot's owner was stopped, not this caller: boot again rather than inherit its Stop.
       if (err instanceof RuntimeSlotAbortedError && !signal?.aborted) {
@@ -278,9 +293,9 @@ export async function ensureAppRunnerStarted(
     appPort,
     signal,
   ).finally(() => {
-    if (inFlightAppRunnerBoots.get(taskId) === boot) inFlightAppRunnerBoots.delete(taskId);
+    if (inFlightAppRunnerBoots.get(taskId)?.boot === boot) inFlightAppRunnerBoots.delete(taskId);
   });
-  inFlightAppRunnerBoots.set(taskId, boot);
+  inFlightAppRunnerBoots.set(taskId, { subpath: repoSubpath, boot });
   return boot;
 }
 

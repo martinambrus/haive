@@ -12,21 +12,26 @@ export interface DdevBootScope {
   created(containerId: string): void;
 }
 
-/** A caller at a newer epoch waits out the old boot's teardown and then gets its own boot.
+/** A caller at a newer epoch, or for another subpath, waits out the old boot and then gets its own.
  * Successful concurrent ensures still share one runner, as the runtime/VNC paths require. */
 export class DdevBoots<T> {
   private readonly inFlight = new Map<
     string,
-    { controller: AbortController; promise: Promise<T> }
+    { controller: AbortController; promise: Promise<T>; subpath: string | undefined }
   >();
 
   async ensure(
     taskId: string,
     signal: AbortSignal | undefined,
     boot: (signal: AbortSignal) => Promise<T>,
+    subpath?: string,
   ): Promise<T> {
     if (signal?.aborted) throw new DdevBootAbortedError();
     let entry = this.inFlight.get(taskId);
+    if (entry && entry.subpath !== subpath) {
+      await settledOrAborted(entry.promise, signal);
+      return this.ensure(taskId, signal, boot, subpath);
+    }
     const joined = entry !== undefined;
     if (!entry) {
       const controller = new AbortController();
@@ -37,7 +42,7 @@ export class DdevBoots<T> {
         .finally(() => {
           this.inFlight.delete(taskId);
         });
-      entry = { controller, promise };
+      entry = { controller, promise, subpath };
       this.inFlight.set(taskId, entry);
     }
     const held = entry;
@@ -49,11 +54,26 @@ export class DdevBoots<T> {
       return result;
     } catch (err) {
       if (!joined || !(err instanceof DdevBootAbortedError) || signal?.aborted) throw err;
-      return this.ensure(taskId, signal, boot);
+      return this.ensure(taskId, signal, boot, subpath);
     } finally {
       signal?.removeEventListener('abort', abort);
     }
   }
+}
+
+/** Waits out another subpath's boot: resolves once it succeeded or was stopped, and rejects with
+ *  any other failure, which may have left its runner half-removed, or when `signal` aborts. */
+function settledOrAborted(p: Promise<unknown>, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => reject(new DdevBootAbortedError());
+    signal?.addEventListener('abort', onAbort, { once: true });
+    void p
+      .then(
+        () => resolve(),
+        (err: unknown) => (err instanceof DdevBootAbortedError ? resolve() : reject(err)),
+      )
+      .finally(() => signal?.removeEventListener('abort', onAbort));
+  });
 }
 
 /** An interrupted cold boot owns its new runner until bring-up (including wiring) ends.
