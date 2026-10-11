@@ -48,11 +48,23 @@ function anchorResolver(doc: Document): Resolve {
   return (node) => (isAlias(node) ? targets.get(node) : node);
 }
 
-// yaml.v3's merge predicate: an untagged plain `<<`, or one tagged `!` or `!!merge`.
+// yaml.v3's merge predicate (untagged plain, `!` or `!!merge`); yaml parses a !!merge-tagged `<<` to a symbol rather than the string.
 const isMergeKey = (key: unknown): boolean =>
   isScalar(key) &&
-  key.value === '<<' &&
+  (key.value === '<<' || (typeof key.value === 'symbol' && key.value.description === '<<')) &&
   ((key.type === 'PLAIN' && !key.tag) || key.tag === '!' || key.tag === 'tag:yaml.org,2002:merge');
+
+/** The maps a map's `<<` keys merge in, in source order. */
+function mergeSources(map: YAMLMap, resolve: Resolve): YAMLMap[] {
+  const sources: YAMLMap[] = [];
+  for (const pair of map.items) {
+    if (!isMergeKey(pair.key)) continue;
+    const source = resolve(pair.value);
+    const listed = isSeq(source) ? source.items.map((item) => resolve(item)) : [source];
+    for (const from of listed) if (isMap(from)) sources.push(from);
+  }
+  return sources;
+}
 
 /** `key` in `map` as yaml.v3 reads it: the map's own entry first, then each `<<` source in order. */
 function lookup(map: YAMLMap, key: string, resolve: Resolve): unknown {
@@ -68,13 +80,7 @@ function lookup(map: YAMLMap, key: string, resolve: Resolve): unknown {
       return !isMergeKey(pair.key) && isScalar(name) && name.value === key;
     });
     if (own) return resolve(own.value);
-    const sources: YAMLMap[] = [];
-    for (const pair of current.items) {
-      if (!isMergeKey(pair.key)) continue;
-      const source = resolve(pair.value);
-      const listed = isSeq(source) ? source.items.map((item) => resolve(item)) : [source];
-      for (const from of listed) if (isMap(from)) sources.push(from);
-    }
+    const sources = mergeSources(current, resolve);
     for (let i = sources.length - 1; i >= 0; i -= 1) stack.push(sources[i]!);
   }
   return undefined;
@@ -84,18 +90,22 @@ function lookup(map: YAMLMap, key: string, resolve: Resolve): unknown {
 function firstDocument(text: string): {
   parsed: { resolve: Resolve; map: YAMLMap } | null;
   own: string;
+  unreadable: string | null;
 } {
   const docs = parseAllDocuments(text, { schema: 'failsafe' });
   const doc = Array.isArray(docs) ? docs[0] : undefined;
-  if (!doc) return { parsed: null, own: text };
+  if (!doc) return { parsed: null, own: text, unreadable: null };
   const own = text.slice(0, doc.range[2]);
-  return {
-    parsed:
-      doc.errors.length === 0 && isMap(doc.contents)
-        ? { resolve: anchorResolver(doc), map: doc.contents }
-        : null,
-    own,
-  };
+  if (doc.errors.length === 0 && isMap(doc.contents)) {
+    return { parsed: { resolve: anchorResolver(doc), map: doc.contents }, own, unreadable: null };
+  }
+  const unreadable =
+    doc.errors.length > 0
+      ? 'the first document has YAML errors'
+      : doc.contents === null
+        ? null
+        : 'the first document is not a map';
+  return { parsed: null, own, unreadable };
 }
 
 /** One parse of `text`; every read from it uses that parse, or the line readers when YAML refuses the document. */
@@ -110,6 +120,46 @@ function ddevReader(text: string) {
       return isMap(inner) ? scalarText(lookup(inner, key, parsed.resolve), text) : null;
     },
   };
+}
+
+const tagOf = (node: unknown): string | undefined => (node as { tag?: string } | null)?.tag;
+const shortTag = (tag: string): string => tag.replace(/^tag:yaml\.org,2002:/, '!!');
+const KEY_TAGS = new Set(['!', 'tag:yaml.org,2002:str']);
+const VALUE_TAGS = new Set(['!', 'tag:yaml.org,2002:str', 'tag:yaml.org,2002:null']);
+
+/** Why `text` cannot be read faithfully, or null. The reader models plain keys and values, the
+ *  anchors and merge keys of #498 and nulls; a key or a read value tagged otherwise (`!!binary`
+ *  decodes to another key in yaml.v3) or a first document `yaml` refuses is left to DDEV. */
+export function ddevConfigUnreadable(text: string): string | null {
+  const { parsed, unreadable } = firstDocument(text);
+  if (!parsed) return unreadable;
+  const { map, resolve } = parsed;
+  const database = lookup(map, 'database', resolve);
+  const roots = isMap(database) ? [map, database] : [map];
+  const seen = new Set<YAMLMap>();
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    for (const pair of current.items) {
+      if (isMergeKey(pair.key)) continue;
+      const tag = tagOf(resolve(pair.key));
+      if (tag && !KEY_TAGS.has(tag)) return `a key is tagged ${shortTag(tag)}`;
+    }
+    stack.push(...mergeSources(current, resolve));
+  }
+  const reads: [string, unknown][] = [['php_version', lookup(map, 'php_version', resolve)]];
+  if (isMap(database)) {
+    for (const key of ['type', 'version']) {
+      reads.push([`database.${key}`, lookup(database, key, resolve)]);
+    }
+  }
+  for (const [name, node] of reads) {
+    const tag = tagOf(node);
+    if (tag && !VALUE_TAGS.has(tag)) return `${name} is tagged ${shortTag(tag)}`;
+  }
+  return null;
 }
 
 /** Match a top-level `key: value` scalar as YAML reads it. */

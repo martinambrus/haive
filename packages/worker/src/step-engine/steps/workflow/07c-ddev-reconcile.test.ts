@@ -750,3 +750,54 @@ describe('07c-ddev-reconcile: a database version YAML reads as 10.11', () => {
     },
   );
 });
+
+describe('07c-ddev-reconcile: a config Haive cannot read faithfully', () => {
+  let workspace = '';
+  beforeAll(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'haive-reconcile-unreadable-'));
+    await mkdir(path.join(workspace, '.ddev'));
+  });
+  afterAll(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  const ctx = {
+    taskId: 'task-1',
+    repoPath: '/tmp/r',
+    db: {
+      select: () => ({
+        from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+      }),
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    throwIfCancelled() {},
+  } as never;
+  const BINARY_KEY = 'name: app\ndatabase: { !!binary dHlwZQ==: postgres, version: "16" }\n';
+
+  beforeEach(async () => {
+    await writeFile(path.join(workspace, '.ddev/config.yaml'), BINARY_KEY);
+    m.resolveDdevWorkspace.mockResolvedValue({ repoSubpath: 'u/r', workspace });
+    m.loadPreviousStepOutput.mockResolvedValue({
+      output: {
+        baseline: { phpVersion: '8.1', dbType: 'mariadb', dbVersion: '10.4', configHash: 'h0' },
+      },
+    });
+  });
+
+  it('refuses a changed config instead of planning a restart', async () => {
+    m.hashDdevInputs.mockResolvedValue('h1');
+    const detected = await ddevReconcileStep.detect!(ctx);
+    expect(detected).toMatchObject({ driftKind: 'unsupported', migrateTarget: null });
+    expect(detected.unsupportedReason).toMatch(
+      /^\.ddev\/config\.yaml uses YAML Haive does not read \(.+\); revert that part or apply the change by hand\.$/,
+    );
+  });
+
+  it('plans nothing when the hash is unchanged, whatever the file holds', async () => {
+    m.hashDdevInputs.mockResolvedValue('h0');
+    expect(await ddevReconcileStep.detect!(ctx)).toMatchObject({
+      driftKind: 'none',
+      unsupportedReason: null,
+    });
+  });
+});
