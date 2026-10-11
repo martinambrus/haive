@@ -70,7 +70,7 @@ async function openAndRun<T>(
     const resolveDims = async () => {
       const [mode, connectionString, dims] = await Promise.all([
         configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE),
-        secretsService.get(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
+        secretsService.getFresh(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
         configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS),
       ]);
       const current = storeKey({

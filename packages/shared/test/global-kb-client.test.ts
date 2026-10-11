@@ -51,7 +51,7 @@ vi.mock('../src/config/config.service.js', async (importOriginal) => ({
 }));
 vi.mock('../src/config/secrets.service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/config/secrets.service.js')>()),
-  secretsService: { get: async () => h.freshConnection },
+  secretsService: { getFresh: async () => h.freshConnection },
 }));
 vi.mock('../src/global-kb/schema.js', () => ({ createGlobalKbDb: () => ({}) }));
 

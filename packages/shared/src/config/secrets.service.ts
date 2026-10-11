@@ -55,6 +55,12 @@ export class SecretsService {
     }
   }
 
+  /** Reads the database past the process cache, for a secret another process may have just set. */
+  async getFresh(key: string): Promise<string | null> {
+    this.cache.delete(key);
+    return this.get(key);
+  }
+
   async set(key: string, value: string, description?: string): Promise<void> {
     this.ensureInitialized();
     const encryptedValue = encrypt(value, this.encryptionKey!);
