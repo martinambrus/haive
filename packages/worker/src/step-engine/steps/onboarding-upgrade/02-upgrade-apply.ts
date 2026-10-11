@@ -39,6 +39,7 @@ import {
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
 import {
   failIfColumnStale,
+  lockProjectState,
   ProjectStateWriteError,
   writeProjectStateRecord,
 } from '../../../project-state/write.js';
@@ -737,10 +738,14 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         );
       }
     }
-    // A sync that began before this upgrade existed can commit after 01 read the column; writing this
-    // plan's context back would undo it. A sync always writes one, so a cleared column is not a sync.
+    // A sync that began before this upgrade was live can commit after 01 read the column; writing
+    // this plan's context back would undo it. Read under the sync's lock: a sync in flight commits
+    // first, and one after it sees this live upgrade and defers. A sync never clears the column.
     if (plan.renderContextColumn !== undefined) {
-      const now = await readRenderContextColumnRaw(ctx.db, plan.repositoryId);
+      const now = await ctx.db.transaction(async (tx) => {
+        await lockProjectState(tx, plan.repositoryId);
+        return readRenderContextColumnRaw(tx, plan.repositoryId);
+      });
       if (now !== null && JSON.stringify(now) !== JSON.stringify(plan.renderContextColumn)) {
         throw new Error(
           "The repository's project settings changed after this upgrade was planned, so its plan " +

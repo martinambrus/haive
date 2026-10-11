@@ -117,7 +117,7 @@ export interface UpgradePlanDetect {
 
 /** The render context column exactly as stored, null when the repository holds none. */
 export async function readRenderContextColumnRaw(
-  db: StepContext['db'],
+  db: Pick<StepContext['db'], 'select'>,
   repositoryId: string,
 ): Promise<unknown> {
   const [repo] = await db

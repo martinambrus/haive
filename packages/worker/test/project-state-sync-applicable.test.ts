@@ -15,6 +15,7 @@ import {
   type ProjectRender,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
+import { lockProjectState } from '../src/project-state/write.js';
 import {
   recomputeSyncedApplicableSets,
   syncProjectStateFromCheckout,
@@ -748,6 +749,30 @@ describe('D2e: 02 refuses a plan whose column moved after it was planned', () =>
 
     await expect(s.applyPlan(detected)).rejects.toThrow(/changed after this upgrade was planned/);
 
+    expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
+  });
+
+  it('waits for a sync still holding the lock, and refuses the column it then commits', async () => {
+    const s = await setup({ column: column(BASE), base: BASE, set: P, claims: BASE_CLAIMS });
+    const detected = await s.plan();
+    let commit!: () => void;
+    let locked!: () => void;
+    const held = new Promise<void>((r) => (locked = r));
+    const sync = s.fake.db.transaction(async (tx) => {
+      await lockProjectState(tx as never, REPO);
+      locked();
+      await new Promise<void>((r) => (commit = r));
+      s.fake.patch(schema.repositories, REPO, { renderContext: jsonb(column(TEAM)) });
+    });
+    await held;
+    const applied = s.applyPlan(detected).then(
+      () => 'applied',
+      (err: unknown) => err,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    commit();
+    await sync;
+    expect(await applied).toBeInstanceOf(Error);
     expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
   });
 });
