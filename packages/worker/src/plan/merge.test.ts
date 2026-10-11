@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -225,7 +225,38 @@ describe('mergeOriginInto', () => {
       COMMIT_ENV,
     );
     expect(attempt.conflicts.sort()).toEqual(['README.md', name]);
-    expect((await conflictedPaths(wt)).sort()).toEqual(['README.md', name]);
+    expect((await conflictedPaths(wt)).paths.sort()).toEqual(['README.md', name]);
+  });
+
+  it('judges a conflicted name by its bytes: a valid U+FFFD is listed, an undecodable one is counted', async () => {
+    const { local, remote } = await unrelatedPair();
+    const valid = 'bad\uFFFD.md';
+    const raw = Buffer.concat([Buffer.from('b'), Buffer.from([0xff]), Buffer.from('.md')]);
+    for (const [dir, body] of [
+      [remote, 'remote\n'],
+      [local, 'local\n'],
+    ] as const) {
+      await write(dir, valid, body);
+      await writeFile(Buffer.concat([Buffer.from(`${dir}/`), raw]), body);
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'names']);
+    }
+    await git(local, ['fetch', 'origin', 'main']);
+
+    const wt = await ensurePlanMergeWorktree(local);
+    const attempt = await mergeOriginInto(
+      wt,
+      'main',
+      (await divergence(local, 'main')).unrelated,
+      COMMIT_ENV,
+    );
+    expect(attempt.conflicts.sort()).toEqual(['README.md', valid]);
+    expect(attempt.undecodable).toBe(1);
+    expect(attempt.clean).toBe(false);
+    const found = await conflictedPaths(wt);
+    expect(found.paths.sort()).toEqual(['README.md', valid]);
+    expect(found.undecodable).toBe(1);
+    expect(found.undecodableShown).toHaveLength(1);
   });
 
   it('is clean when only the plan files collide', async () => {
@@ -294,10 +325,50 @@ describe('abortMerge', () => {
     const wt = await ensurePlanMergeWorktree(local);
     const before = (await git(wt, ['rev-parse', 'HEAD'])).trim();
     await mergeOriginInto(wt, 'main', (await divergence(local, 'main')).unrelated, COMMIT_ENV);
-    expect((await conflictedPaths(wt)).length).toBeGreaterThan(0);
+    expect((await conflictedPaths(wt)).paths.length).toBeGreaterThan(0);
 
     await abortMerge(wt);
-    expect(await conflictedPaths(wt)).toEqual([]);
+    expect(await conflictedPaths(wt)).toEqual({ paths: [], undecodable: 0, undecodableShown: [] });
     expect((await git(wt, ['rev-parse', 'HEAD'])).trim()).toBe(before);
   });
 });
+
+const ownerOf = async (p: string): Promise<number> => (await lstat(p)).uid;
+
+// A merge git runs as root writes as root, where a fixer runs as the tree's owner.
+describe.runIf(process.getuid?.() === 0)(
+  'a root plan merge in a tree the sandbox user owns',
+  () => {
+    async function ownedPair(): Promise<{ local: string; wt: string }> {
+      const { local, remote } = await unrelatedPair();
+      await write(remote, 'docs/guide/a.md', 'a\n');
+      await git(remote, ['add', '-A']);
+      await git(remote, ['commit', '-m', 'docs']);
+      await git(local, ['fetch', 'origin', 'main']);
+      const wt = await ensurePlanMergeWorktree(local);
+      await exec('chown', ['-R', '1000:1000', local]);
+      return { local, wt };
+    }
+
+    it('hands what the merge wrote, and the directories it created, to the tree owner', async () => {
+      const { local, wt } = await ownedPair();
+      const attempt = await mergeOriginInto(
+        wt,
+        'main',
+        (await divergence(local, 'main')).unrelated,
+        COMMIT_ENV,
+      );
+      expect(attempt.conflicts).toEqual(['README.md']);
+      for (const rel of ['README.md', 'docs', 'docs/guide', 'docs/guide/a.md']) {
+        expect([rel, await ownerOf(path.join(wt, rel))]).toEqual([rel, 1000]);
+      }
+    });
+
+    it('hands back what an abort rewrote', async () => {
+      const { local, wt } = await ownedPair();
+      await mergeOriginInto(wt, 'main', (await divergence(local, 'main')).unrelated, COMMIT_ENV);
+      await abortMerge(wt);
+      expect(await ownerOf(path.join(wt, 'README.md'))).toBe(1000);
+    });
+  },
+);

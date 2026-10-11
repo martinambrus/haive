@@ -1311,8 +1311,8 @@ planRoutes.get('/:id/plan/merge', async (c) => {
   });
 });
 
-/** Abandon it. Cancels the task and removes the scratch worktree — the checkout has
- *  not moved, so there is nothing else to undo. */
+/** Abandon it. Cancels the task; the worker then removes the scratch worktree unless another
+ *  live conversation holds it — the checkout has not moved, so there is nothing else to undo. */
 planRoutes.delete('/:id/plan/merge', async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   const task = await findOpenPlanMerge(repositoryId);

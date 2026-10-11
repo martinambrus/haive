@@ -78,8 +78,8 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   restore, since git rewrites the files and `merge --abort` refuses their stale stat data. git
   writes what it puts back as the worker, so those paths, and the directories git created for them,
   are handed back to the merge dir's owner; a directory that already stood keeps its own. The merge and
-  the abort are handed back the same way (`openMerge`, `abortMerge`): run as root over a tree the
-  sandbox user owns, git writes a conflicted file and a directory it creates as root, which a fixer
+  the abort are handed back the same way (`openMerge`, `abortMerge`, which the plan merge's
+  `mergeOriginInto` and `abortMerge` go through too): run as root over a tree the sandbox user owns, git writes a conflicted file and a directory it creates as root, which a fixer
   cannot rewrite or add to (MEASURED). The paths that differ from the commit before the merge, or
   from `HEAD` before the abort, and the directories above them that root owns, go to the sandbox
   identity (whoever owns the tree, since a tree the sandbox reaches through its mode bits is accepted
@@ -88,8 +88,8 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   logged. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
   not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
-  removed later takes the link with it. A name is judged by its bytes, since a valid one can hold
-  U+FFFD, the character an undecodable byte reads as. A directory a fixer made where a file stood
+  removed later takes the link with it. A name is judged by its bytes (the plan merge's
+  `conflictedPaths` too), since a valid one can hold U+FFFD, the character an undecodable byte reads as. A directory a fixer made where a file stood
   gives way to the file only once everything in it has moved: git replaces such a directory whole
   and takes what is left in it along, so one still holding something is kept and named. The recorded
   tree is spent once used, and one whose merge a person finished or aborted meanwhile moves nothing:
@@ -104,7 +104,7 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   handled the same way, its note going into the conversation rather than a step warning, since the
   revise loop resets the row every turn. Its recorded tree is kept for the whole merge rather than
   spent, as a `plan_merge.fix_baseline` task event beside the transcript, since a Retry resets the
-  row and the next conversation resumes a merge a cancelled one left open. Nothing but its fixers
+  row and the next conversation resumes a merge a failed one left open. Nothing but its fixers
   writes in the scratch worktree, so what one that failed, was stopped or was re-dispatched left is
   moved aside before the next is sent in (`llm.prepareWorkspace`) and before Save or Pull removes
   the worktree, reported by the event alone; Save or Pull fails and keeps the worktree when that
@@ -115,8 +115,12 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   what that one's relocations never did. Nothing is recorded under `HOST_REPO_ROOT`: the sandbox
   mounts a local-path repository read-only, so no fixer can write there. A cancel runs no step
   code, so it moves nothing aside: a task's worktree is removed whole, a fixer's changes with the
-  rest of the task's work, a same-branch root is left as the fixer left it, merge still open, and a
-  plan merge's scratch worktree waits for the next pass or a Save or Pull, as above.
+  rest of the task's work, and a same-branch root is left as the fixer left it, merge still open.
+  A cancelled plan merge is the exception (`discardPlanMerge`, from `handleCancelTask`): the worker
+  moves aside what the recorded fixers left, aborts the merge and removes the scratch worktree,
+  unless another `plan_merge` task of the repository holds it, a live one or a failed one opened after it
+  (`plan_merge.discard_skipped`),
+  and a move that fails keeps the worktree (`plan_merge.discard_failed`).
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.

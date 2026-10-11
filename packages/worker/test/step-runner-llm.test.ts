@@ -468,9 +468,34 @@ describe('advanceStep LLM phase', () => {
     expect(enqueued[0]!.kind).toBe('cli');
     // Unset means the full MCP surface; exec-core must not narrow by accident.
     expect(enqueued[0]!.toolProfile).toBeUndefined();
+    expect(enqueued[0]!.worktreeRel).toBeUndefined();
     const invInsert = state.inserts.find((i) => i.table === 'cli_invocations');
     expect(invInsert).toBeDefined();
     expect(invInsert!.row.prompt).toContain('prompt with detected=');
+  });
+
+  it('carries the worktree a step names onto the cli-exec payload', async () => {
+    const state = freshState();
+    const enqueued: CliExecJobPayload[] = [];
+    const stepDef = baseStep();
+    stepDef.llm!.worktreeRel = ({ detected }) =>
+      `.haive/worktrees/${(detected as { foo: string }).foo}`;
+    await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    expect(enqueued[0]!.worktreeRel).toBe('.haive/worktrees/bar');
   });
 
   it("threads a step's toolProfile onto the cli-exec payload", async () => {

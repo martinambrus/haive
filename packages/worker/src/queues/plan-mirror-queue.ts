@@ -160,7 +160,7 @@ export async function integrateOrigin(args: {
         landed: false,
         previousCommit,
         conflict: {
-          paths: attempt.conflicts,
+          paths: [...attempt.conflicts, ...attempt.undecodableShown],
           unrelated: attempt.unrelated,
           autoResolved: attempt.autoResolved,
         },

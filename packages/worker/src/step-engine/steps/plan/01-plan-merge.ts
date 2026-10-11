@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, ne, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -8,8 +8,10 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import type { Database } from '@haive/database';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { logger } from '@haive/shared/logger';
+import type { StepDefinition } from '../../step-definition.js';
 import {
+  abortMerge as abortGitMerge,
   completeMergeHostSide,
   fixerIndexHeldNote,
   fixerLeftoversWarning,
@@ -22,6 +24,7 @@ import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
   commitMerge,
+  conflictCount,
   conflictedPaths,
   divergence,
   ensurePlanMergeWorktree,
@@ -30,13 +33,19 @@ import {
   mergeOriginInto,
   planMergeWorktreePath,
   removePlanMergeWorktree,
+  reopenResolvedMerge,
+  type ConflictedPaths,
 } from '../../../plan/merge.js';
 import {
   flushPlanMirrorForRepository,
   reconcilePlanMirror,
   writePlanMirror,
 } from '../../../plan/mirror.js';
-import { moveAsideFixerLeftovers, planMergeFixBaseline } from '../../../plan/merge-baseline.js';
+import {
+  moveAsideFixerLeftovers,
+  moveAsideRecordedLeftovers,
+  planMergeFixBaseline,
+} from '../../../plan/merge-baseline.js';
 import { commitPlanSnapshotFiles } from '../../../plan/snapshot-git.js';
 import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
 import { pushBranch, gitRun } from '../../../repo/git-push.js';
@@ -86,14 +95,15 @@ interface PlanMergeDetect {
   repositoryId: string | null;
   branch: string;
   worktreePath: string;
-  /** The merge worktree relative to the repo root — which is where the sandbox
-   *  actually runs, because a plan task has no worktree-setup step. */
+  /** The merge worktree relative to the repo root, which is the agent's working directory. */
   worktreeRelPath: string;
   /** Agent passes already spent on this conflict set. */
   attempts: number;
   /** Unmerged paths still awaiting a decision. Empty once the agent has resolved
    *  them, which is what turns the next pass into a collect pass. */
   conflicts: string[];
+  /** Further unmerged paths whose names are not UTF-8. Absent in a detect saved before it existed. */
+  undecodable?: number;
   unrelated: boolean;
   transcript: { role: string; body: string }[];
   /** The guidance this pass is acting on — the newest user message with nothing
@@ -165,37 +175,35 @@ async function mergeIsOpen(worktreePath: string): Promise<boolean> {
   return res.code === 0;
 }
 
-/**
- * The resolution prompt.
- *
- * Deliberately NOT `buildMergeFixPrompt`: that one opens with "Your working directory
- * is the integration worktree, MID-MERGE", which is true for the step-machine merge
- * (the sandbox IS the worktree) and false here. A plan task has no worktree-setup
- * step, so the sandbox runs at the REPO ROOT and the merge is one directory down.
- * MEASURED: pointed at the wrong directory the agent found nothing to edit and
- * reported success 12 times in a row while `git status` still said `AA README.md`.
- */
+const conflictTotal = (d: Pick<PlanMergeDetect, 'conflicts' | 'undecodable'>): number =>
+  d.conflicts.length + (d.undecodable ?? 0);
+
 /** Whether THIS pass runs the agent. The single source both `llm.skipIf` and `form`
  *  read, so they cannot disagree about which of the two passes this is. */
 function needsAgentPass(d: PlanMergeDetect): boolean {
-  return d.conflicts.length > 0 && d.attempts < MAX_AGENT_PASSES;
+  return conflictTotal(d) > 0 && d.attempts < MAX_AGENT_PASSES;
 }
 
-/** A name that would open a line of its own, or that git could not decode, stays off the prompt:
- *  a mangled name is worse than an absent one. */
+/** The names a message can show: those that fit a line, then how many more there are. */
+function conflictList(found: Pick<ConflictedPaths, 'paths' | 'undecodable'>): string {
+  const more = found.undecodable > 0 ? [`${found.undecodable} more whose names are not UTF-8`] : [];
+  return [...found.paths, ...more].join(', ');
+}
+
+/** A name that would open a line of its own stays off the prompt: the agent would read it as text. */
 function fitsPromptLine(path: string): boolean {
-  return isSingleLine(path) && survivesFence(path) && !path.includes('\uFFFD');
+  return isSingleLine(path) && survivesFence(path);
 }
 
+/** The resolution prompt. The agent's working directory is the merge worktree itself. */
 function buildPrompt(d: PlanMergeDetect): string {
   const listed = d.conflicts.filter(fitsPromptLine);
-  const unlisted = d.conflicts.length - listed.length;
+  const unlisted = conflictTotal(d) - listed.length;
   return [
     'A git merge conflict is live in this repository and you are resolving it.',
     '',
-    `The merge is in the worktree \`${d.worktreeRelPath}\`, RELATIVE TO YOUR WORKING`,
-    'DIRECTORY — not in the directory you start in. Every path below is relative to',
-    'your working directory and can be opened and edited directly.',
+    'Your working directory IS the merge. Every path below is relative to it and can be',
+    'opened and edited directly.',
     '',
     ...(d.pendingGuidance ? ['', `What the user asked for: ${d.pendingGuidance}`, ''] : []),
     d.unrelated
@@ -207,8 +215,8 @@ function buildPrompt(d: PlanMergeDetect): string {
       : 'These two histories diverged from a common ancestor, so each conflict is a real ' +
         "two-sided edit. Combine them; don't drop either side's work.",
     '',
-    `Conflicting files (${d.conflicts.length}):`,
-    ...listed.map((p) => `- ${d.worktreeRelPath}/${p}`),
+    `Conflicting files (${conflictTotal(d)}):`,
+    ...listed.map((p) => `- ${p}`),
     ...(unlisted > 0
       ? [
           `- and ${unlisted} more whose names cannot be shown on a line; find them by their conflict markers.`,
@@ -296,7 +304,18 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       const gap = await divergence(ctx.repoPath, branch);
       unrelated = gap.unrelated;
       if (gap.behind > 0) {
-        const attempt = await mergeOriginInto(worktreePath, branch, gap.unrelated, identity);
+        const reopened =
+          last?.role === 'user'
+            ? await reopenResolvedMerge({
+                repoPath: ctx.repoPath,
+                worktreePath,
+                branch,
+                unrelated: gap.unrelated,
+                gitEnv: identity,
+              })
+            : null;
+        const attempt =
+          reopened ?? (await mergeOriginInto(worktreePath, branch, gap.unrelated, identity));
         open = !attempt.clean;
         opened = open;
       }
@@ -304,19 +323,21 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       unrelated = (await divergence(ctx.repoPath, branch)).unrelated;
     }
 
+    const unmerged = await conflictedPaths(worktreePath);
     const found: PlanMergeDetect = {
       repositoryId,
       branch,
       worktreePath,
       worktreeRelPath,
       attempts,
-      conflicts: await conflictedPaths(worktreePath),
+      conflicts: unmerged.paths,
+      ...(unmerged.undecodable > 0 ? { undecodable: unmerged.undecodable } : {}),
       unrelated,
       transcript,
       pendingGuidance: last?.role === 'user' ? last.body : null,
       mergeOpen: open,
     };
-    if (!open || found.conflicts.length === 0) return found;
+    if (!open || conflictTotal(found) === 0) return found;
     const {
       baseline: fixBaseline,
       reused,
@@ -338,6 +359,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 20 * 60 * 1000,
+    worktreeRel: ({ detected }) => (detected as PlanMergeDetect).worktreeRelPath,
     // Nothing unresolved means nothing to ask an agent: the pass that follows a
     // confirm, or one re-entered with the conflicts already gone, finalizes without
     // spending an invocation. Mirrors 01-plan-chat's skipIf/form complement.
@@ -375,11 +397,11 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     // Exactly the complement of llm.skipIf, which is the invariant that keeps a turn
     // to two passes: a pass that will run the agent must not also park.
     if (needsAgentPass(detected)) return null;
-    const stuck = detected.conflicts.length > 0;
+    const stuck = conflictTotal(detected) > 0;
     return {
       title: stuck ? 'The agent could not finish this merge' : 'Merge the remote into this plan',
       description: stuck
-        ? `Still conflicted after ${detected.attempts} attempt(s): ${detected.conflicts.join(', ')}. ` +
+        ? `Still conflicted after ${detected.attempts} attempt(s): ${conflictList({ paths: detected.conflicts, undecodable: detected.undecodable ?? 0 })}. ` +
           'Say what to do differently and it will try again, or discard the merge — your ' +
           'checkout has not moved either way. Confirming now would commit the conflict ' +
           'markers, so it is not offered.'
@@ -441,10 +463,10 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       resolved: false,
       landed: false,
       pushed: false,
-      conflicts: d.conflicts.length,
+      conflicts: conflictTotal(d),
       summary: '',
       continueRequested: false,
-      pass: d.conflicts.length > 0 ? 'answer' : 'collect',
+      pass: conflictTotal(d) > 0 ? 'answer' : 'collect',
     };
     if (!d.repositoryId) {
       result.summary = 'This task has no repository, so there is nothing to merge.';
@@ -452,7 +474,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     }
 
     // --- Answer pass: the agent has just edited the conflicted files. ---
-    if (d.conflicts.length > 0) {
+    if (conflictTotal(d) > 0) {
       const identity = await resolveGitEnv(ctx.db, {
         userId: ctx.userId,
         repositoryId: d.repositoryId,
@@ -480,11 +502,11 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       if (leftovers?.indexHeld) throw new Error(fixerIndexHeldNote(leftovers.indexHeld));
       const committed = await completeMergeHostSide(d.worktreePath, identity, `origin/${d.branch}`);
       const left = await conflictedPaths(d.worktreePath);
-      result.resolved = committed && left.length === 0;
+      result.resolved = committed && conflictCount(left) === 0;
       result.summary = [
         result.resolved
-          ? said || `Resolved ${d.conflicts.length} file(s).`
-          : `Still unresolved: ${left.join(', ') || 'the merge did not commit'}.`,
+          ? said || `Resolved ${conflictTotal(d)} file(s).`
+          : `Still unresolved: ${conflictList(left) || 'the merge did not commit'}.`,
         leftovers ? fixerLeftoversWarning(ctx.taskId, leftovers) : '',
       ]
         .filter(Boolean)
@@ -526,13 +548,13 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     // Confirm on a still-conflicted merge would commit the markers. The form does not
     // offer it, but a stale tab or a direct submit reaches here regardless.
     const left = await conflictedPaths(d.worktreePath);
-    if (left.length > 0) {
+    if (conflictCount(left) > 0) {
       await recordMessage(
         ctx.db,
         ctx.taskId,
         ctx.taskStepId,
         'assistant',
-        `Cannot merge that in — still unresolved: ${left.join(', ')}.`,
+        `Cannot merge that in — still unresolved: ${conflictList(left)}.`,
       );
       result.summary = 'Refused: the merge still has unresolved conflicts.';
       result.continueRequested = true;
@@ -584,7 +606,75 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
   },
 };
 
-/** The scratch worktree a cancelled conversation leaves behind. */
-export async function discardPlanMerge(ctx: Pick<StepContext, 'repoPath'>): Promise<void> {
-  await removePlanMergeWorktree(ctx.repoPath);
+/** The task states a conversation is live in: the ones `findOpenPlanMerge` (api) counts. */
+const LIVE_STATUSES = ['created', 'queued', 'running', 'paused', 'waiting_user'] as const;
+
+/** Discard a cancelled conversation's scratch worktree unless another conversation of the repository
+ *  may hold it: a live one, or a failed one opened after this one, whose Retry resumes it. Never
+ *  throws: a cancel must finish. */
+export async function discardPlanMerge(db: Database, taskId: string): Promise<void> {
+  const note = (eventType: string, payload: Record<string, unknown>) =>
+    db
+      .insert(schema.taskEvents)
+      .values({ taskId, taskStepId: null, eventType, payload })
+      .catch(() => undefined);
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { type: true, repositoryId: true, createdAt: true },
+    });
+    if (task?.type !== 'plan_merge' || !task.repositoryId) return;
+    const repo = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, task.repositoryId),
+      columns: { storagePath: true, localPath: true },
+    });
+    const repoPath = repo?.storagePath ?? repo?.localPath;
+    if (!repoPath) return;
+    const [other] = await db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.repositoryId, task.repositoryId),
+        eq(schema.tasks.type, 'plan_merge'),
+        ne(schema.tasks.id, taskId),
+        or(
+          inArray(schema.tasks.status, [...LIVE_STATUSES]),
+          and(eq(schema.tasks.status, 'failed'), gt(schema.tasks.createdAt, task.createdAt)),
+        ),
+      ),
+      columns: { id: true },
+      limit: 1,
+    });
+    if (other) {
+      await note('plan_merge.discard_skipped', { otherTaskId: other.id });
+      return;
+    }
+    const worktreePath = planMergeWorktreePath(repoPath);
+    await moveAsideRecordedLeftovers(
+      db,
+      task.repositoryId,
+      worktreePath,
+      `origin/${await currentBranch(repoPath)}`,
+    );
+    const aborted = await abortGitMerge(worktreePath).catch((err: unknown) => ({
+      ok: false as const,
+      detail: err instanceof Error ? err.message : String(err),
+    }));
+    await removePlanMergeWorktree(repoPath);
+    // A forced removal takes an open merge with it, so the worktree being gone is what counts.
+    const listed = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
+    if (listed.code !== 0) {
+      throw new Error(
+        `the scratch worktree could not be confirmed gone: ${listed.stderr || listed.stdout}`,
+      );
+    }
+    if (listed.stdout.split('\0').includes(`worktree ${worktreePath}`)) {
+      throw new Error(
+        `the scratch worktree is still there${aborted.ok ? '' : `; the merge abort also failed: ${aborted.detail}`}`,
+      );
+    }
+  } catch (err) {
+    logger.warn({ err, taskId }, 'discarding the cancelled plan merge failed');
+    await note('plan_merge.discard_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
