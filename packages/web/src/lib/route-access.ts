@@ -1,7 +1,7 @@
 /**
  * What the middleware should do with a request, as a pure decision.
  *
- * Extracted from `middleware.ts` because the interesting case is a LOOP between two files, and a
+ * Extracted from `proxy.ts` because the interesting case is a LOOP between two files, and a
  * loop is exactly what neither file can be read to rule out on its own:
  *
  *   - the middleware sends a visitor holding an access cookie from `/login` to `/dashboard`
