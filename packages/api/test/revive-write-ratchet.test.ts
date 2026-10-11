@@ -872,7 +872,9 @@ function inSqlContext(n: ts.Node): boolean {
   }
 }
 
-const SQL_IDENT = String.raw`("(?:[^"]|"")+"|\w+)`;
+// Any quoted name, or an unquoted run up to the next separator: PostgreSQL allows `$` and
+// non-ASCII letters there, and a wider match costs nothing in a check that only flags.
+const SQL_IDENT = String.raw`("(?:[^"]|"")+"|[^\s".;()*,]+)`;
 const TASK_TABLE = String.raw`(only\s+)?(${SQL_IDENT}\s*\.\s*)?"?tasks"?`;
 // Shaped as a statement, not just named: "Update tasks before retrying" has no SET. Whatever
 // sits between an UPDATE's target and its SET (alias, `*`) is not parsed.
@@ -1006,6 +1008,7 @@ describe('a live-status write on a task row', () => {
     expect(found('sql`UPDATE tasks AS "current" SET status = 1`')).toBe(1);
     expect(found('sql`UPDATE "tenant-app".tasks SET status = 1`')).toBe(1);
     expect(found('sql`UPDATE tasks * SET status = 1`')).toBe(1);
+    expect(found('sql`UPDATE tenant$app.tasks SET status = 1`')).toBe(1);
     expect(found("const m = 'Update tasks before retrying; set a new base first.';")).toBe(0);
     expect(
       found(
