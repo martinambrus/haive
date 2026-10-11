@@ -191,6 +191,17 @@ describe('01b-install-plugins apply: what the step records', () => {
     expect(out).toMatchObject({ skipped: false, missingDrupalLsp: TREE_REL });
   });
 
+  it('labels each install container with the task, so Stop and the reaper find it', async () => {
+    runInSandbox.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+
+    await installPluginsStep.apply(ctx(), detectedWith(null));
+
+    expect(runInSandbox).toHaveBeenCalled();
+    for (const call of runInSandbox.mock.calls) {
+      expect(call[1]).toMatchObject({ taskId: ctx().taskId });
+    }
+  });
+
   it('records nothing missing after a full install', async () => {
     runInSandbox.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
 
