@@ -11,6 +11,7 @@ import type { Database } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import type { StepDefinition } from '../../step-definition.js';
 import {
+  abortMerge as abortGitMerge,
   completeMergeHostSide,
   fixerIndexHeldNote,
   fixerLeftoversWarning,
@@ -22,7 +23,6 @@ import {
 import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
-  abortMerge,
   commitMerge,
   conflictCount,
   conflictedPaths,
@@ -650,8 +650,18 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
       worktreePath,
       `origin/${await currentBranch(repoPath)}`,
     );
-    await abortMerge(worktreePath);
+    const aborted = await abortGitMerge(worktreePath).catch((err: unknown) => ({
+      ok: false as const,
+      detail: err instanceof Error ? err.message : String(err),
+    }));
     await removePlanMergeWorktree(repoPath);
+    // A forced removal takes an open merge with it, so the worktree being gone is what counts.
+    const listed = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
+    if (listed.stdout.split('\0').includes(`worktree ${worktreePath}`)) {
+      throw new Error(
+        `the scratch worktree is still there${aborted.ok ? '' : `; the merge abort also failed: ${aborted.detail}`}`,
+      );
+    }
   } catch (err) {
     logger.warn({ err, taskId }, 'discarding the cancelled plan merge failed');
     await note('plan_merge.discard_failed', {

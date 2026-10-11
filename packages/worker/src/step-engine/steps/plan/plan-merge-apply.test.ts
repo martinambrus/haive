@@ -476,6 +476,20 @@ describe("plan merge: discarding a cancelled conversation's merge", () => {
     expect(await readFile(path.join(wt, 'README.md'), 'utf8')).toContain('<<<<<<<');
   });
 
+  it('records a discard that could not remove the worktree, rather than calling it done', async () => {
+    const local = await unrelatedPair();
+    const { db, events, flags } = fakeDb();
+    flags.repoPath = local;
+    const { wt } = await open(local, db);
+    // A locked worktree refuses `worktree remove --force`, so the removal fails.
+    await git(local, ['worktree', 'lock', wt]);
+
+    await discardPlanMerge(db as never, 't1');
+    expect(await registered(local, wt)).toBe(true);
+    expect(events.some((e) => e.eventType === 'plan_merge.discard_failed')).toBe(true);
+    await git(local, ['worktree', 'unlock', wt]);
+  });
+
   it('moves aside what a fixer left in the open merge, and reports it', async () => {
     const local = await unrelatedPair();
     const { db, events, flags } = fakeDb();
