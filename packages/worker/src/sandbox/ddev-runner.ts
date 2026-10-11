@@ -859,6 +859,30 @@ export function buildRegistryDaemonJson(mirrorUrl: string): string {
   });
 }
 
+/** A runner's lifecycle as Docker reports it: absent, or running or stopped since `startedAt`.
+ *  null when Docker could not be asked, which says nothing about the runner. */
+export type RunnerLife = { state: 'gone' } | { state: 'up' | 'stopped'; startedAt: string } | null;
+
+export async function ddevRunnerLife(handle: DdevRunnerHandle): Promise<RunnerLife> {
+  try {
+    const { stdout: ids } = await exec(
+      'docker',
+      ['ps', '-aq', '--no-trunc', '--filter', `name=^/${handle.container}$`],
+      { timeout: 10_000 },
+    );
+    if (ids.trim() === '') return { state: 'gone' };
+    const { stdout } = await exec(
+      'docker',
+      ['inspect', '-f', '{{.State.Running}} {{.State.StartedAt}}', handle.container],
+      { timeout: 10_000 },
+    );
+    const [running, startedAt = ''] = stdout.trim().split(' ');
+    return { state: running === 'true' ? 'up' : 'stopped', startedAt };
+  } catch {
+    return null;
+  }
+}
+
 /** True when the named container exists AND is running. One cheap inspect (mirrors
  *  runnerDockerdUp's shape); false on any error (absent/created/exited). */
 async function containerRunning(name: string): Promise<boolean> {

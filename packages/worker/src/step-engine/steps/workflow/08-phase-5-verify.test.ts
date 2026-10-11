@@ -9,6 +9,7 @@ const {
   ensureAppServing,
   withDdevProgress,
   ddevExec,
+  ddevRunnerLife,
   runnerHandleForTask,
   ensureDdevPlaywrightBrowsers,
   killStalePlaywrightRuns,
@@ -21,6 +22,7 @@ const {
     <T>(_ctx: unknown, _label: string, run: (onLine: (l: string) => void) => T) => run(() => {}),
   ),
   ddevExec: vi.fn(),
+  ddevRunnerLife: vi.fn(async (): Promise<RunnerLife> => ({ state: 'up', startedAt: 'T0' })),
   runnerHandleForTask: vi.fn(),
   ensureDdevPlaywrightBrowsers: vi.fn(),
   killStalePlaywrightRuns: vi.fn(),
@@ -36,6 +38,7 @@ vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../sandbox/ddev-runner.js')>()),
   runnerHandleForTask,
   ddevExec,
+  ddevRunnerLife,
 }));
 vi.mock('../../../sandbox/ddev-playwright.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../sandbox/ddev-playwright.js')>()),
@@ -53,6 +56,7 @@ vi.mock('./_impl-changes.js', async (importOriginal) => ({
 }));
 
 import type { ChangedFileLines, ChangedLineMap } from './_impl-changes.js';
+import type { RunnerLife } from '../../../sandbox/ddev-runner.js';
 import { AdvisedStepError, TaskCancelledError } from '../../step-definition.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import { ddevGuardFailure } from '../../../sandbox/ddev-build-guard.js';
@@ -731,6 +735,52 @@ describe('phase5VerifyStep.apply', () => {
         );
 
         const out = await runApply({ test: pmSlot('pnpm') }, { runTest: true });
+
+        expect(out.test).toMatchObject({ ran: true, passed: false });
+      });
+
+      it('reports a slot whose runner vanished mid-run as not run', async () => {
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+          args.includes('curl')
+            ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+            : { exitCode: 137, output: 'killed' },
+        );
+        ddevRunnerLife.mockResolvedValueOnce({ state: 'up', startedAt: 'T0' });
+        ddevRunnerLife.mockResolvedValueOnce({ state: 'gone' });
+
+        const out = await runApply({ test: pmSlot('npm') }, { runTest: true });
+
+        expect(out.test).toMatchObject({
+          ran: false,
+          passed: false,
+          note: expect.stringContaining('the DDEV runner stopped during'),
+        });
+      });
+
+      it('reports a slot whose runner was restarted mid-run as not run', async () => {
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+          args.includes('curl')
+            ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+            : { exitCode: 137, output: 'killed' },
+        );
+        ddevRunnerLife.mockResolvedValueOnce({ state: 'up', startedAt: 'T0' });
+        ddevRunnerLife.mockResolvedValueOnce({ state: 'up', startedAt: 'T1' });
+
+        const out = await runApply({ test: pmSlot('npm') }, { runTest: true });
+
+        expect(out.test).toMatchObject({ ran: false, passed: false });
+      });
+
+      it('keeps the failure when Docker cannot say what became of the runner', async () => {
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+          args.includes('curl')
+            ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+            : { exitCode: 1, output: 'tests failed' },
+        );
+        ddevRunnerLife.mockResolvedValueOnce({ state: 'up', startedAt: 'T0' });
+        ddevRunnerLife.mockResolvedValueOnce(null);
+
+        const out = await runApply({ test: pmSlot('npm') }, { runTest: true });
 
         expect(out.test).toMatchObject({ ran: true, passed: false });
       });

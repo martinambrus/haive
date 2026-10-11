@@ -62,6 +62,11 @@ note, never as a failing check: no fix round can install a linter or speed one u
 shows such a check as a NOT RUN row with its note and does not pre-select Approve, and the learning
 step names it beside "passed": 08's own verdict counts only what ran. Only the clock tells a DDEV
 kill from an exit 1, so the step times the flagged run rather than reading its exit.
+Any DDEV slot that fails because its runner went away reads as NOT RUN the same way, since no agent
+can bring the runner back: `execSlot` reads the runner's lifecycle before the run and again after a
+non-zero exit (`ddevRunnerLife`), and a runner now gone or stopped, or one whose `StartedAt` moved (a
+`docker restart` kills the exec and is up again by the time anyone looks), counts as lost. A probe
+Docker could not answer says nothing, so the failure stands.
 And the verdict itself is scoped to the change: phpcs keeps its own file scope and also writes its
 JSON report (`--report=full` first, since the first `--report*` flag replaces the console report,
 then `--report-json` and `--basepath`) under `.haive/verify/`, which gate 3 never stages, and only
