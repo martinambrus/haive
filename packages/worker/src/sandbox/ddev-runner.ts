@@ -66,6 +66,7 @@ import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { accessSnapshotProgram, parseAccessSnapshotResult } from './ddev-access-snapshot.js';
 import { shellQuote } from './shell-quote.js';
+import { whileRunnerBusy } from './runner-activity.js';
 import {
   DdevBootAbortedError,
   DdevBoots,
@@ -1391,7 +1392,9 @@ export function ddevExec(
   ddevArgs: string,
   opts: { timeoutMs?: number; onLine?: (line: string) => void } = {},
 ): Promise<{ exitCode: number; output: string }> {
-  return withAptPinRepair(handle, () => ddevExecOnce(handle, ddevArgs, opts), opts.onLine);
+  return whileRunnerBusy(handle.container, () =>
+    withAptPinRepair(handle, () => ddevExecOnce(handle, ddevArgs, opts), opts.onLine),
+  );
 }
 
 /** How much of DDEV's own output a bring-up failure quotes. The TAIL: ddev's verdict lands
@@ -2641,6 +2644,19 @@ function runnerShellStreaming(
   stdin?: FileHandle,
   signal?: AbortSignal,
 ): Promise<{ exitCode: number; output: string }> {
+  return whileRunnerBusy(handle.container, () =>
+    runnerShellStreamingOnce(handle, cmd, onLine, timeoutMs, stdin, signal),
+  );
+}
+
+function runnerShellStreamingOnce(
+  handle: DdevRunnerHandle,
+  cmd: string,
+  onLine: ((line: string) => void) | undefined,
+  timeoutMs: number,
+  stdin: FileHandle | undefined,
+  signal: AbortSignal | undefined,
+): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolve) => {
     const child = spawn(
       'docker',
@@ -2712,6 +2728,15 @@ export async function runnerExec(
   opts: { timeoutMs?: number; env?: Record<string, string> } = {},
 ): Promise<{ exitCode: number; output: string }> {
   const envArgs = Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+  return whileRunnerBusy(handle.container, () => runnerExecOnce(handle, command, envArgs, opts));
+}
+
+async function runnerExecOnce(
+  handle: DdevRunnerHandle,
+  command: string,
+  envArgs: string[],
+  opts: { timeoutMs?: number },
+): Promise<{ exitCode: number; output: string }> {
   try {
     const { stdout, stderr } = await exec(
       'docker',

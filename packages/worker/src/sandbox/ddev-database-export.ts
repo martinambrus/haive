@@ -5,9 +5,22 @@ import { pipeline } from 'node:stream/promises';
 import { createGunzip } from 'node:zlib';
 import { openFileNoFollow, removeNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
 import { buildDdevCommand, type DdevRunnerHandle } from './ddev-runner.js';
+import { whileRunnerBusy } from './runner-activity.js';
 
 /** Binary stdout goes straight to a held descriptor, never through the text/tail progress buffer. */
-export async function exportDdevDatabase(
+export function exportDdevDatabase(
+  handle: DdevRunnerHandle,
+  anchor: string,
+  rel: string,
+  signal: AbortSignal,
+  openPartial?: () => Promise<Awaited<ReturnType<typeof openFileNoFollow>>>,
+): Promise<{ sizeBytes: number; sha256: string }> {
+  return whileRunnerBusy(handle.container, () =>
+    exportDdevDatabaseOnce(handle, anchor, rel, signal, openPartial),
+  );
+}
+
+async function exportDdevDatabaseOnce(
   handle: DdevRunnerHandle,
   anchor: string,
   rel: string,

@@ -34,6 +34,7 @@ import {
   markBrowserDesktopUp,
 } from './runtime-admission.js';
 import { shellQuote } from './shell-quote.js';
+import { whileRunnerBusy } from './runner-activity.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
 // env-replicate image. It runs a single-process non-DDEV app AND hosts the
@@ -392,17 +393,19 @@ export async function appRunnerExec(
   opts: { timeoutMs?: number; env?: Record<string, string> } = {},
 ): Promise<{ exitCode: number; output: string }> {
   const envArgs = Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-  try {
-    const { stdout, stderr } = await exec(
-      'docker',
-      ['exec', ...envArgs, handle.container, 'bash', '-lc', command],
-      { timeout: opts.timeoutMs ?? 120_000, maxBuffer: 10 * 1024 * 1024 },
-    );
-    return { exitCode: 0, output: `${stdout}${stderr}` };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
-  }
+  return whileRunnerBusy(handle.container, async () => {
+    try {
+      const { stdout, stderr } = await exec(
+        'docker',
+        ['exec', ...envArgs, handle.container, 'bash', '-lc', command],
+        { timeout: opts.timeoutMs ?? 120_000, maxBuffer: 10 * 1024 * 1024 },
+      );
+      return { exitCode: 0, output: `${stdout}${stderr}` };
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string; code?: number };
+      return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+    }
+  });
 }
 
 /** Poll the app's port from inside the app-runner until it answers (curl 2xx/3xx),

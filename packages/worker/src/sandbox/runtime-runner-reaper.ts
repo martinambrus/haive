@@ -4,6 +4,7 @@ import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { APP_RUNNER_LABEL, CONFIG_KEYS, configService, logger } from '@haive/shared';
 import { hasLiveCliInvocation } from '../orchestrator/pause.js';
+import { taskRunnerBusy } from './runner-activity.js';
 import { markPreempted } from '../queues/cli-exec/preempt-mark.js';
 
 const exec = promisify(execFile);
@@ -86,6 +87,15 @@ export function reapDecision(
   }
   // running / waiting_* / created / queued — in use, keep.
   return null;
+}
+
+/** No CLI run live and no exec in either runner: a migration, a lint slot or a Playwright run is
+ *  an exec with no CLI run behind it, and reaping the runner under it fails the step. */
+export async function runnerSettled(
+  db: Parameters<typeof hasLiveCliInvocation>[0],
+  taskId: string,
+): Promise<boolean> {
+  return !taskRunnerBusy(taskId) && !(await hasLiveCliInvocation(db, taskId));
 }
 
 export interface RunnerContainer {
@@ -368,9 +378,7 @@ export class RuntimeRunnerReaper {
           taskById.set(c.taskId, {
             ...t,
             settled:
-              t.pausedAt || couldBeScoreTier
-                ? !(await hasLiveCliInvocation(this.db, c.taskId))
-                : false,
+              t.pausedAt || couldBeScoreTier ? await runnerSettled(this.db, c.taskId) : false,
           });
         }
       } catch (err) {
@@ -410,7 +418,7 @@ export class RuntimeRunnerReaper {
           !!t &&
           scoreTier !== null &&
           t.voteScore < scoreTier &&
-          !(await hasLiveCliInvocation(this.db, pick.taskId));
+          (await runnerSettled(this.db, pick.taskId));
         if (t && !PREEMPTIBLE_TASK_STATUSES.has(t.status) && !t.pausedAt && !stillOutscored) {
           return false;
         }
@@ -457,7 +465,7 @@ export class RuntimeRunnerReaper {
       task = row
         ? {
             ...row,
-            settled: row.pausedAt ? !(await hasLiveCliInvocation(this.db, c.taskId)) : false,
+            settled: row.pausedAt ? await runnerSettled(this.db, c.taskId) : false,
           }
         : undefined;
     } catch (err) {
