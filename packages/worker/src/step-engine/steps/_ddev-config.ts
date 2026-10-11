@@ -48,10 +48,10 @@ function anchorResolver(doc: Document): Resolve {
   return (node) => (isAlias(node) ? targets.get(node) : node);
 }
 
-// yaml.v3's merge predicate: an untagged plain `<<`, or one tagged `!` or `!!merge`.
+// yaml.v3's merge predicate (untagged plain, `!` or `!!merge`); yaml parses a !!merge-tagged `<<` to a symbol rather than the string.
 const isMergeKey = (key: unknown): boolean =>
   isScalar(key) &&
-  key.value === '<<' &&
+  (key.value === '<<' || (typeof key.value === 'symbol' && key.value.description === '<<')) &&
   ((key.type === 'PLAIN' && !key.tag) || key.tag === '!' || key.tag === 'tag:yaml.org,2002:merge');
 
 /** The maps a map's `<<` keys merge in, in source order. */

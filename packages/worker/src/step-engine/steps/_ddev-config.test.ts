@@ -351,6 +351,11 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     expect(parseDdevConfig('php_version: "null"\n').phpVersion).toBe('null');
   });
 
+  it('reads a !!merge-tagged << as a merge, as yaml.v3 does', () => {
+    const cfg = 'x: &db {type: mariadb, version: "10.11"}\ndatabase:\n  !!merge <<: *db\n';
+    expect(parseDdevConfig(cfg)).toMatchObject({ dbType: 'mariadb', dbVersion: '10.11' });
+  });
+
   it('reads a merged top-level field', () => {
     expect(parseDdevConfig('x: &x {php_version: "8.2"}\n<<: *x\n').phpVersion).toBe('8.2');
   });
@@ -487,10 +492,6 @@ describe('ddevConfigUnreadable', () => {
     ['a tagged php_version value', 'php_version: !!float 8.1\n'],
     ['a tagged database type', 'database:\n  type: !!binary cG9zdGdyZXM=\n  version: "16"\n'],
     ['a tagged database version', 'database:\n  type: mariadb\n  version: !!float 10.11\n'],
-    [
-      'a !!merge-tagged merge key',
-      'database:\n  !!merge <<: {type: mariadb}\n  version: "10.11"\n',
-    ],
     ['a duplicate-key first document', 'php_version: "8.1"\nphp_version: "8.2"\n'],
     ['a first document that is not a map', '- a\n'],
   ])('gives a reason for %s', (_name, text) => {
@@ -501,6 +502,7 @@ describe('ddevConfigUnreadable', () => {
     ['a plain config', MARIADB_CONFIG],
     ['an aliased database', 'base: &b {type: mariadb, version: "10.11"}\ndatabase: *b\n'],
     ['a merged database', 'database:\n  ! <<: {type: mariadb}\n  version: "10.11"\n'],
+    ['a !!merge-tagged merge', 'database:\n  !!merge <<: {type: mariadb}\n  version: "10.11"\n'],
     [
       '!!str keys and values',
       '!!str php_version: !!str "8.1"\ndatabase:\n  !!str type: !!str mariadb\n',
