@@ -1347,11 +1347,17 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
   });
 
   describe('a fixer that ended, by autoResolve', () => {
-    const ended = (run: { exitCode: number; errorMessage: string | null; prompt?: string }) => ({
+    const ended = (run: {
+      exitCode: number;
+      errorMessage: string | null;
+      prompt?: string;
+      truncationRetry?: boolean;
+    }) => ({
       id: 'inv1',
       startedAt: new Date(),
       endedAt: new Date(),
       supersededAt: null,
+      truncationRetry: false,
       ...run,
     });
     const cut = {
@@ -1413,15 +1419,35 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
           expect((h.invocationInserts[0]!.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(
             true,
           );
+          expect(h.invocationInserts[0]!.truncationRetry).toBe(true);
         } finally {
           await rm(integrationDir, { recursive: true, force: true });
         }
       },
     );
 
+    it('a prompt that only quotes the notice is still retried once, smaller', async () => {
+      const { h, integrationDir, state } = await ingest(
+        ended({ ...cut, prompt: `a diff that quotes:\n${TRUNCATION_RETRY_NOTICE}\nand goes on` }),
+        true,
+        'half-resolved\n',
+      );
+      try {
+        expect(h.invocationInserts).toHaveLength(1);
+        expect(h.invocationInserts[0]!.truncationRetry).toBe(true);
+        expect(state.conflictRetries['ISSUE-1']).toBe(1);
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    });
+
     it('cut again after the notice, manual: handled as today, aborted and halted with no new fixer', async () => {
       const { h, integrationDir, result, state } = await ingest(
-        ended({ ...cut, prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}` }),
+        ended({
+          ...cut,
+          prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}`,
+          truncationRetry: true,
+        }),
         false,
         'half-resolved\n',
       );
@@ -1443,13 +1469,18 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
 
     it('cut again after the notice, auto-resolve: the attempt is charged and the next fixer keeps the notice', async () => {
       const { h, integrationDir, state } = await ingest(
-        ended({ ...cut, prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}` }),
+        ended({
+          ...cut,
+          prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}`,
+          truncationRetry: true,
+        }),
         true,
         'half-resolved\n',
       );
       try {
         expect(h.invocationInserts).toHaveLength(1);
         expect(h.invocationInserts[0]!.prompt as string).toContain(TRUNCATION_RETRY_NOTICE);
+        expect(h.invocationInserts[0]!.truncationRetry).toBe(true);
         expect(state.conflictRetries['ISSUE-1']).toBe(2);
       } finally {
         await rm(integrationDir, { recursive: true, force: true });
@@ -1480,6 +1511,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       try {
         expect(h.invocationInserts).toHaveLength(1);
         expect(h.invocationInserts[0]!.prompt as string).not.toContain(TRUNCATION_RETRY_NOTICE);
+        expect(h.invocationInserts[0]!.truncationRetry).toBe(false);
         expect(state.conflictRetries['ISSUE-1']).toBe(1);
       } finally {
         await rm(integrationDir, { recursive: true, force: true });
@@ -2091,13 +2123,14 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
 });
 
 describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
-  const truncatedReviewer = (prompt: string | null) =>
+  const truncatedReviewer = (prompt: string | null, truncationRetry = false) =>
     inv({
       rawOutput: null,
       parsedOutput: null,
       exitCode: 1,
       errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
       prompt,
+      truncationRetry,
     } as never);
 
   async function ingest(reviewer: InvLike, role: 'reviewer' | 'coder' = 'reviewer') {
@@ -2140,12 +2173,23 @@ describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
     const spawned = inserts.filter((i) => i.table === schema.cliInvocations);
     expect(spawned).toHaveLength(1);
     expect((spawned[0]!.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+    expect(spawned[0]!.values.truncationRetry).toBe(true);
     expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).toBe('coder');
+  });
+
+  it('re-spawns a fix coder whose prompt only quotes the notice', async () => {
+    const { inserts } = await ingest(
+      truncatedReviewer(`fix the diff that quotes:\n${TRUNCATION_RETRY_NOTICE}`),
+      'coder',
+    );
+    const spawned = inserts.filter((i) => i.table === schema.cliInvocations);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]!.values.truncationRetry).toBe(true);
   });
 
   it('fails the issue, without a re-review, when the fix coder truncated again after the notice', async () => {
     const { inserts, updates } = await ingest(
-      truncatedReviewer(`fix the issue\n\n${TRUNCATION_RETRY_NOTICE}`),
+      truncatedReviewer(`fix the issue\n\n${TRUNCATION_RETRY_NOTICE}`, true),
       'coder',
     );
     expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
@@ -2161,6 +2205,7 @@ describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
     const spawned = inserts.filter((i) => i.table === schema.cliInvocations);
     expect(spawned).toHaveLength(1);
     expect((spawned[0]!.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+    expect(spawned[0]!.values.truncationRetry).toBe(true);
     expect(inserts.find((i) => i.table === schema.dagAgentRuns)?.values.role).toBe('reviewer');
     expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
   });
@@ -2169,14 +2214,24 @@ describe('ingestReviewRun: a reviewer cut off at the output limit', () => {
     const { inserts } = await ingest(
       truncatedReviewer(
         `review the issue\n\n${TRUNCATION_RETRY_NOTICE}\n\n## Boundary added at dispatch`,
+        true,
       ),
     );
     expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
   });
 
+  it('re-spawns a reviewer whose prompt only quotes the notice', async () => {
+    const { inserts } = await ingest(
+      truncatedReviewer(`review a diff that quotes:\n${TRUNCATION_RETRY_NOTICE}\nand goes on`),
+    );
+    const spawned = inserts.filter((i) => i.table === schema.cliInvocations);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]!.values.truncationRetry).toBe(true);
+  });
+
   it('fails the issue when the reviewer prompt already carried the notice', async () => {
     const { inserts, updates } = await ingest(
-      truncatedReviewer(`review the issue\n\n${TRUNCATION_RETRY_NOTICE}`),
+      truncatedReviewer(`review the issue\n\n${TRUNCATION_RETRY_NOTICE}`, true),
     );
     expect(inserts.filter((i) => i.table === schema.cliInvocations)).toHaveLength(0);
     expect(updates.filter((u) => u.table === schema.taskDagIssues)).toEqual([
@@ -2679,7 +2734,7 @@ describe('ingestAdvisor: an advisor that never answered', () => {
 });
 
 describe('DAG escalation agents cut off at the output limit', () => {
-  const truncated = (prompt: string) =>
+  const truncated = (prompt: string, truncationRetry = false) =>
     inv({
       id: 'esc-inv-1',
       rawOutput: null,
@@ -2690,6 +2745,7 @@ describe('DAG escalation agents cut off at the output limit', () => {
       supersededAt: null,
       errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
       prompt,
+      truncationRetry,
     } as never);
   const escalationArgs = (db: unknown, plan: Record<string, unknown> = {}) =>
     ({
@@ -2731,6 +2787,22 @@ describe('DAG escalation agents cut off at the output limit', () => {
     expect(updates.filter((u) => u.table === schema.taskDagIssues)).toHaveLength(0);
     const spawned = inserts.find((i) => i.table === schema.cliInvocations);
     expect((spawned?.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+    expect(spawned?.values.truncationRetry).toBe(true);
+  });
+
+  it('re-dispatches a truncated advisor whose prompt only quotes the notice', async () => {
+    const { db, inserts } = makeSpawnDb();
+    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+    const result = await ingestAdvisor(
+      escalationArgs(db),
+      issue,
+      { id: 'run-1' } as never,
+      truncated(`advise on a diff that quotes:\n${TRUNCATION_RETRY_NOTICE}`),
+    );
+    expect(result).toBe('retry');
+    expect(inserts.find((i) => i.table === schema.cliInvocations)?.values.truncationRetry).toBe(
+      true,
+    );
   });
 
   it('reads a truncated advisor that already had the notice as today', async () => {
@@ -2739,37 +2811,47 @@ describe('DAG escalation agents cut off at the output limit', () => {
       escalationArgs(db),
       issue,
       { id: 'run-1' } as never,
-      truncated(`advise\n\n${TRUNCATION_RETRY_NOTICE}`),
+      truncated(`advise\n\n${TRUNCATION_RETRY_NOTICE}`, true),
     );
     expect(updates.filter((u) => u.table === schema.taskDagIssues).length).toBeGreaterThan(0);
   });
 
-  it('re-dispatches a truncated replanner once with the notice instead of aborting', async () => {
-    const { db, inserts, updates } = makeSpawnDb();
-    const fake = db as unknown as Record<string, unknown> & { query: Record<string, unknown> };
-    fake.query.cliInvocations = { findFirst: async () => truncated('replan') };
-    fake.select = () => ({
-      from: () => ({
-        where: () =>
-          Object.assign(Promise.resolve([]), {
-            for: async () => [{ id: 'step1' }],
-            orderBy: async () => [],
-          }),
-      }),
-    });
-    vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
-    const result = await resolveEscalationPhase(
-      escalationArgs(db, { replannerInvocationId: 'esc-inv-1', replannerInvocations: 1 }),
-    );
-    expect(result.status).not.toBe('aborted');
-    const spawned = inserts.find((i) => i.table === schema.cliInvocations);
-    expect((spawned?.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
-    expect(
-      updates
-        .filter((u) => u.table === schema.taskDagPlans)
-        .every((u) => !('replannerInvocations' in u.patch)),
-    ).toBe(true);
-  });
+  it.each([
+    ['plain prompt', 'replan'],
+    [
+      'prompt that only quotes the notice',
+      `replan a diff that quotes:\n${TRUNCATION_RETRY_NOTICE}`,
+    ],
+  ])(
+    're-dispatches a truncated replanner once with the notice instead of aborting (%s)',
+    async (_n, replanPrompt) => {
+      const { db, inserts, updates } = makeSpawnDb();
+      const fake = db as unknown as Record<string, unknown> & { query: Record<string, unknown> };
+      fake.query.cliInvocations = { findFirst: async () => truncated(replanPrompt) };
+      fake.select = () => ({
+        from: () => ({
+          where: () =>
+            Object.assign(Promise.resolve([]), {
+              for: async () => [{ id: 'step1' }],
+              orderBy: async () => [],
+            }),
+        }),
+      });
+      vi.mocked(resolveTaskDispatch).mockImplementationOnce(async () => workingDispatchPlan());
+      const result = await resolveEscalationPhase(
+        escalationArgs(db, { replannerInvocationId: 'esc-inv-1', replannerInvocations: 1 }),
+      );
+      expect(result.status).not.toBe('aborted');
+      const spawned = inserts.find((i) => i.table === schema.cliInvocations);
+      expect((spawned?.values.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+      expect(spawned?.values.truncationRetry).toBe(true);
+      expect(
+        updates
+          .filter((u) => u.table === schema.taskDagPlans)
+          .every((u) => !('replannerInvocations' in u.patch)),
+      ).toBe(true);
+    },
+  );
 });
 
 describe('resolveEscalationPhase: a replanner run that never answered', () => {
@@ -3051,12 +3133,13 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       ]);
     });
 
-    const truncatedCoder = (prompt: string | null) => ({
+    const truncatedCoder = (prompt: string | null, truncationRetry = false) => ({
       ...killedCoder,
       supersededAt: null,
       exitCode: 1,
       errorMessage: `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off`,
       prompt,
+      truncationRetry,
     });
 
     it('re-dispatches a coder cut off at the output limit once, without charging infraRetries', async () => {
@@ -3158,6 +3241,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
         });
         const prompt = h.invocationInserts[0]!.prompt as string;
         expect(prompt.endsWith(TRUNCATION_RETRY_NOTICE)).toBe(true);
+        expect(h.invocationInserts[0]!.truncationRetry).toBe(true);
         expect(prompt).toContain(RETRY_CONTEXT);
         expect(issueUpdates).toEqual([
           expect.objectContaining({
@@ -3211,9 +3295,19 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
     it('handles a cut-off coder whose prompt already carries the notice as a failure', async () => {
       const { issueUpdates } = await ingestCoder(
         'running',
-        truncatedCoder(`implement the issue\n\n${TRUNCATION_RETRY_NOTICE}`),
+        truncatedCoder(`implement the issue\n\n${TRUNCATION_RETRY_NOTICE}`, true),
       );
       expect(issueUpdates).toEqual([expect.objectContaining({ outcome: 'failed_unrecoverable' })]);
+    });
+
+    it('re-dispatches a cut-off coder whose prompt only quotes the notice', async () => {
+      const { issueUpdates } = await ingestCoder(
+        'running',
+        truncatedCoder(`implement a diff that quotes:\n${TRUNCATION_RETRY_NOTICE}`),
+      );
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({ outcome: 'pending', cliInvocationId: null }),
+      ]);
     });
   });
 
@@ -3268,6 +3362,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       expect((h.invocationInserts[0]!.prompt as string).endsWith(TRUNCATION_RETRY_NOTICE)).toBe(
         true,
       );
+      expect(h.invocationInserts[0]!.truncationRetry).toBe(true);
       expect(h.issueUpdates).toContainEqual(
         expect.objectContaining({ outcome: 'running', errorMessage: null }),
       );
@@ -3277,6 +3372,7 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       const h = await dispatchPending(null);
       expect(h.invocationInserts).toHaveLength(1);
       expect(h.invocationInserts[0]!.prompt as string).not.toContain(TRUNCATION_RETRY_NOTICE);
+      expect(h.invocationInserts[0]!.truncationRetry).toBe(false);
     });
   });
 });

@@ -1160,6 +1160,9 @@ export const cliInvocations = pgTable(
     /** Model time the CLI reported (claude family `duration_api_ms`, gemini `totalLatencyMs`); NULL when it reports
      *  none. Migration 0181. */
     apiDurationMs: integer('api_duration_ms'),
+    /** The prompt carries the output-truncation shrink notice, so a run cut off again is not retried
+     *  a second time. Migration 0184. */
+    truncationRetry: boolean('truncation_retry').notNull().default(false),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

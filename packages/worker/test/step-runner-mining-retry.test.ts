@@ -91,6 +91,7 @@ interface MockState {
   invocationRows?: {
     id: string;
     prompt: string;
+    truncationRetry?: boolean;
     errorMessage?: string | null;
     startedAt?: Date | null;
     createdAt?: Date;
@@ -1188,11 +1189,27 @@ describe('advanceStep agentMining output truncation and model capability', () =>
     const prompt = sentPrompt(state);
     expect(prompt).toContain('review');
     expect(prompt.split(TRUNCATION_NOTICE)).toHaveLength(2);
+    expect(state.inserts.find((i) => i.table === 'cli_invocations')!.row.truncationRetry).toBe(
+      true,
+    );
+  });
+
+  it('re-rolls a cut reply whose prompt only quotes the cut-off notice', async () => {
+    const state = failedAgentState(1, CUT);
+    state.invocationRows![0]!.prompt = `review a diff that quotes:\n${TRUNCATION_NOTICE}\nand goes on`;
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), sharedPredicateStep([]), enqueued);
+
+    expect(enqueued.map((e) => e.agentMiningId)).toEqual(['mining-peer-reviewer']);
+    expect(state.inserts.find((i) => i.table === 'cli_invocations')!.row.truncationRetry).toBe(
+      true,
+    );
   });
 
   it('does not re-roll a cut reply whose run already carried the cut-off notice', async () => {
     const state = failedAgentState(1, CUT);
     state.invocationRows![0]!.prompt = `review\n\n${TRUNCATION_NOTICE}`;
+    state.invocationRows![0]!.truncationRetry = true;
     const applyCalls: StepApplyArgs[] = [];
     const enqueued: CliExecJobPayload[] = [];
     const result = await run(makeMockDb(state), sharedPredicateStep(applyCalls), enqueued);
@@ -1205,6 +1222,7 @@ describe('advanceStep agentMining output truncation and model capability', () =>
   it('re-rolls a cut reply the person asked for even when its run carried the notice', async () => {
     const state = failedAgentState(1, CUT);
     state.invocationRows![0]!.prompt = `review\n\n${TRUNCATION_NOTICE}`;
+    state.invocationRows![0]!.truncationRetry = true;
     state.miningRows[0]!.userRetryRequestedAt = new Date();
     const enqueued: CliExecJobPayload[] = [];
     await run(makeMockDb(state), sharedPredicateStep([]), enqueued);
@@ -1219,6 +1237,9 @@ describe('advanceStep agentMining output truncation and model capability', () =>
 
     expect(enqueued).toHaveLength(1);
     expect(sentPrompt(state)).not.toContain(TRUNCATION_NOTICE);
+    expect(state.inserts.find((i) => i.table === 'cli_invocations')!.row.truncationRetry).toBe(
+      false,
+    );
   });
 
   describe('a model-capability failure the provider learned from', () => {
