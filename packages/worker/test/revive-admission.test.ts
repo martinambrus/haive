@@ -98,13 +98,14 @@ function setup(w: World = {}) {
       epoch: 3,
       reviveFailed: true,
     });
-  const resume = () =>
+  const resume = (polledSince?: Date) =>
     autoResumeFailedStep(fake.db as unknown as Database, {
       taskId: TASK,
       stepId: STEP,
       round: 0,
       providerId: null,
       via: 'test',
+      watchSince: polledSince ?? (task().awaitingProviderSince as Date | null | undefined) ?? null,
     });
   return { fake, task, events, revive, resume };
 }
@@ -228,6 +229,22 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
       awaitingProviderReason: 'rate_limit',
     });
     expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
+  });
+
+  it('stamps nothing when the watch changed between the poll and the resume', async () => {
+    const polled = new Date(Date.now() - DAY);
+    const t = setup({
+      ...admitted(),
+      type: 'onboarding',
+      live: { type: 'onboarding_upgrade', status: 'running' },
+      task: {
+        awaitingAllowanceProviderId: PROVIDER,
+        awaitingProviderReason: 'rate_limit',
+        awaitingProviderSince: new Date(),
+      },
+    });
+    expect(await t.resume(polled)).toBe(false);
+    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
   });
 
   it('drops a watch from before its start was recorded, without a notice', async () => {

@@ -206,9 +206,17 @@ export async function resetStepAndDownstream(
  *  returns true. */
 export async function autoResumeFailedStep(
   db: Database,
-  args: { taskId: string; stepId: string; round: number; providerId: string | null; via: string },
+  args: {
+    taskId: string;
+    stepId: string;
+    round: number;
+    providerId: string | null;
+    via: string;
+    /** The polled watch's `awaiting_provider_since`: the episode a refusal may stamp. */
+    watchSince: Date | null;
+  },
 ): Promise<boolean> {
-  const { taskId, stepId, round, providerId, via } = args;
+  const { taskId, stepId, round, providerId, via, watchSince } = args;
   const stepRows = await db
     .select({ id: schema.taskSteps.id })
     .from(schema.taskSteps)
@@ -222,12 +230,6 @@ export async function autoResumeFailedStep(
     .limit(1);
   const step = stepRows[0];
   if (!step) return false;
-  const [watch] = await db
-    .select({ since: schema.tasks.awaitingProviderSince })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, taskId))
-    .limit(1);
-
   let flipped = false;
   try {
     await db.transaction(async (tx) => {
@@ -369,7 +371,7 @@ export async function autoResumeFailedStep(
           ? { reason: 'live-upgrade-index' }
           : null;
     if (!refusal) throw err;
-    await refuseAutoResume(db, taskId, stepId, refusal, watch?.since ?? null);
+    await refuseAutoResume(db, taskId, stepId, refusal, watchSince);
   }
   return flipped;
 }

@@ -195,6 +195,7 @@ async function main(): Promise<void> {
     round: 0,
     providerId: null,
     via: 'smoke',
+    watchSince: null,
   });
   check('a failed task is auto-resumed', resumed === true, resumed);
 
@@ -270,6 +271,7 @@ async function main(): Promise<void> {
     round: 0,
     providerId: null,
     via: 'smoke',
+    watchSince: null,
   });
   const [taskAfter] = await db
     .select({ count: schema.tasks.allowanceAutoResumeCount })
@@ -303,6 +305,7 @@ async function main(): Promise<void> {
     round: 0,
     providerId: null,
     via: 'smoke',
+    watchSince: null,
   });
   check('the second task resumes too', resumedGood === true, resumedGood);
   const [goodInvocation] = await db
