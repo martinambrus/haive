@@ -425,6 +425,38 @@ describe('buildUnverifiedNote', () => {
     expect(note).toContain('Detected but not selected for this pass: test');
   });
 
+  // detect_output is persisted and replayed: a payload with no declinedConfigs must keep
+  // rendering exactly what it rendered before the field existed.
+  it("renders today's exact text when no config was declined", () => {
+    const note = buildUnverifiedNote(
+      { test: cmd, lint: null, typecheck: null },
+      { test: skipped, lint: skipped, typecheck: skipped },
+    );
+    expect(note).toBe(
+      'No verification check ran this pass, so this step passing means nothing was checked — not that everything passed.\n\n' +
+        'No runner was detected in this workspace for: lint, typecheck. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.\n\n' +
+        'Detected but not selected for this pass: test.',
+    );
+    expect(
+      buildUnverifiedNote(
+        { test: cmd, lint: null, typecheck: null },
+        { test: skipped, lint: skipped, typecheck: skipped },
+        [],
+      ),
+    ).toBe(note);
+  });
+
+  it('names what was searched and the configs it declined', () => {
+    const note = buildUnverifiedNote(
+      { test: null, lint: null, typecheck: null },
+      { test: skipped, lint: skipped, typecheck: skipped },
+      ['core/package.json (Drupal core)', 'core/phpunit.xml.dist (Drupal core)'],
+    );
+    expect(note).toContain('the repository root');
+    expect(note).toContain('core/package.json (Drupal core), core/phpunit.xml.dist (Drupal core)');
+    expect(note).toContain("only the project's own root tooling");
+  });
+
   it('says nothing once any check actually ran', () => {
     expect(
       buildUnverifiedNote(

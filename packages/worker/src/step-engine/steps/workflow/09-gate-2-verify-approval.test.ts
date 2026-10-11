@@ -355,6 +355,25 @@ describe('gate-2 status summary', () => {
     expect(r?.body).toContain('subdirectory');
   });
 
+  it("keeps today's exact NOT RUN body when no config was declined", () => {
+    const r = row(baseDetect({ verify: allSkipped }), 'Tests / lint / typecheck');
+    expect(r?.body).toBe(
+      '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Nothing here says the code is correct.',
+    );
+    expect(r?.detail).toBe('no check was executed — this is not a passing verification');
+  });
+
+  it('names what was searched and the configs it declined in the NOT RUN row', () => {
+    const d = baseDetect({
+      verify: allSkipped,
+      declinedConfigs: ['core/phpcs.xml.dist (Drupal core)', 'core/package.json (Drupal core)'],
+    });
+    const r = row(d, 'Tests / lint / typecheck');
+    expect(r?.body).toContain('the repository root');
+    expect(r?.body).toContain('core/phpcs.xml.dist (Drupal core), core/package.json (Drupal core)');
+    expect(r?.body).toContain("only the project's own root tooling");
+  });
+
   it('does not default to approve when nothing was verified', () => {
     expect(decisionDefault(baseDetect({ verify: allSkipped }))).toBe('reject');
     // Absent slots entirely — an 08 payload that recorded no verify block at all.
