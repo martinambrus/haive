@@ -538,34 +538,51 @@ export async function redriveRepoCleanups(
   let queued = 0;
   for (const row of rows) {
     try {
-      const unchanged = and(
-        eq(schema.repoCleanups.id, row.id),
-        eq(schema.repoCleanups.attempts, row.attempts),
-      );
       if (row.attempts >= REPO_CLEANUP_MAX_ATTEMPTS) {
-        await db.delete(schema.repoCleanups).where(unchanged);
+        await db
+          .delete(schema.repoCleanups)
+          .where(
+            and(eq(schema.repoCleanups.id, row.id), eq(schema.repoCleanups.attempts, row.attempts)),
+          );
         log.warn(
           { cleanupId: row.id, repositoryId: row.repositoryId, kind: row.kind },
           'repo cleanup dropped after repeated attempts; what it would have removed is left behind',
         );
         continue;
       }
-      const attempt = row.attempts + 1;
+      // Claimed on the stamp, so two sweeps never both queue it; the attempt is counted only once
+      // a queue has taken the job, so a refusing queue spends none of the budget.
+      const sameStamp = row.lastEnqueuedAt
+        ? eq(schema.repoCleanups.lastEnqueuedAt, row.lastEnqueuedAt)
+        : isNull(schema.repoCleanups.lastEnqueuedAt);
       const claimed = await db
         .update(schema.repoCleanups)
-        .set({ attempts: attempt, lastEnqueuedAt: new Date() })
-        .where(unchanged)
+        .set({ lastEnqueuedAt: new Date() })
+        .where(and(eq(schema.repoCleanups.id, row.id), sameStamp))
         .returning({ id: schema.repoCleanups.id });
       if (claimed.length === 0) continue;
+      const attempt = row.attempts + 1;
       const kind = row.kind === 'rag' ? 'rag' : 'resources';
-      await deps.enqueueRepoCleanup(
-        kind,
-        {
-          ...(row.payload as RepoRagCleanupPayload | RepoResourceCleanupPayload),
-          cleanupId: row.id,
-        },
-        `repo-cleanup-${row.id}-${attempt}`,
-      );
+      try {
+        await deps.enqueueRepoCleanup(
+          kind,
+          {
+            ...(row.payload as RepoRagCleanupPayload | RepoResourceCleanupPayload),
+            cleanupId: row.id,
+          },
+          `repo-cleanup-${row.id}-${attempt}`,
+        );
+      } catch (err) {
+        await db
+          .update(schema.repoCleanups)
+          .set({ lastEnqueuedAt: row.lastEnqueuedAt })
+          .where(eq(schema.repoCleanups.id, row.id));
+        throw err;
+      }
+      await db
+        .update(schema.repoCleanups)
+        .set({ attempts: attempt })
+        .where(eq(schema.repoCleanups.id, row.id));
       queued++;
       log.info({ cleanupId: row.id, kind, attempt }, 'queued the cleanup of a deleted repository');
     } catch (err) {

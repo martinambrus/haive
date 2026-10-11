@@ -138,6 +138,21 @@ describe('redriveRepoCleanups', () => {
     expect(await redriveRepoCleanups(db, refusing)).toBe(0);
     expect(fake.rows(schema.repoCleanups)).toHaveLength(1);
   });
+
+  it('spends no attempt on a refused enqueue, however often the queue refuses', async () => {
+    const { fake, db, add } = setup();
+    add(1);
+    const refusing: RepoCleanupDeps = {
+      enqueueRepoCleanup: async () => {
+        throw new Error('redis down');
+      },
+    };
+    for (let i = 0; i < REPO_CLEANUP_MAX_ATTEMPTS + 2; i += 1) {
+      await redriveRepoCleanups(db, refusing);
+    }
+    const [row] = fake.rows(schema.repoCleanups);
+    expect(row).toMatchObject({ attempts: 0, lastEnqueuedAt: null });
+  });
 });
 
 describe('the rag cleanup job', () => {
