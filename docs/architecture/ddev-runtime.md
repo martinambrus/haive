@@ -58,12 +58,7 @@ also prevents a re-driven access change from reusing a slot while an orphaned sn
 An `exec` in the web container carries its own deadline there (`withWebContainerDeadline`,
 ten seconds under the host's, then KILL five later), because killing the runner's ddev client
 leaves the command running there. An exec naming another service (`-s db`, an add-on) passes
-through unwrapped, since its image need not carry GNU `timeout`. A non-raw exec runs as `ddev exec <flags> --raw -- timeout …
-bash -c "$c"`, where the runner first builds `$c` exactly as ddev's own `quoteArgs` would
-(`cmd/ddev/cmd/exec.go`: one word passes as is; from two up, a word holding `" \t\r\n#` is
-double-quoted with `"` escaped). A wrapper in front of the words instead breaks them, because ddev
-then quotes each one (MEASURED on v1.25.2: `timeout 50s 'php -v'` ran a command named `php -v`, exit
-127), and joining with `$*` loses the quoting of `exec bash -c "echo … | bash"`.
+through unwrapped, since its image need not carry GNU `timeout`. A non-raw exec runs as `ddev exec <flags> --raw -- timeout … bash -c '<line>'`, where Haive builds `<line>` exactly as ddev's own `quoteArgs` would (`cmd/ddev/cmd/exec.go`: one word passes as is; from two up, a word holding `" \t\r\n#` is double-quoted with `"` escaped). A wrapper in front of the words instead breaks them, because ddev then quotes each one (MEASURED on v1.25.2: `timeout 50s 'php -v'` ran a command named `php -v`, exit 127). The exec is read as bash words and pflag's rules (`ddevExecHead`), and only a plain word list is wrapped: a command holding anything the runner's shell must resolve first (a pipe, `&&`, a redirection, a comment, a newline, an expansion, a glob) runs unwrapped as it always did, since capturing those words in the runner changed what ran (a `| tee` captured nothing and the migration it hid was recorded as done).
 Selection, stale cleanup, creation and promotion run in one non-root runner process under
 that lock. A provisional `haive-access-pending-<task>` snapshot is promoted to the selected
 slot only after creation succeeds; interrupted partial copies never count as recovery points.
