@@ -492,20 +492,20 @@ export async function readAgentsRulesRegion(
 }
 
 /** What a cli-rules artifact row records for the region on disk. It records the region's own
- *  bytes, and claims them as Haive's only when they are a render: this one, or one an earlier
- *  onboarding or upgrade of the repository wrote. Otherwise the row keeps the render's hash, so
- *  the upgrade plan offers the region as a conflict instead of overwriting it. */
+ *  bytes exactly as they stand (every hash is over their normalized form), and claims them as
+ *  Haive's only when they are a render: this one, or one an earlier onboarding or upgrade of the
+ *  repository wrote. Otherwise the row keeps the render's hash, so the upgrade plan offers the
+ *  region as a conflict instead of overwriting it. */
 export function cliRulesRegionRecord(
   region: string,
   render: string,
   earlierRenderHashes: ReadonlySet<string>,
 ): { content: string; templateContentHash: string; writtenHash: string; haiveWritten: boolean } {
-  const content = normalizeContent(region);
-  const regionHash = sha256Hex(content);
+  const regionHash = sha256Hex(normalizeContent(region));
   const renderHash = sha256Hex(normalizeContent(render));
   const haiveWritten = regionHash === renderHash || earlierRenderHashes.has(regionHash);
   return {
-    content,
+    content: region,
     templateContentHash: regionHash,
     writtenHash: haiveWritten ? regionHash : renderHash,
     haiveWritten,

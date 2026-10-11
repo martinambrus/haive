@@ -209,8 +209,7 @@ export async function pathContent(
   }
   const region = extractRegion(raw, CLI_RULES_START, CLI_RULES_END);
   if (region === null) return null;
-  const content = normalizeContent(region);
-  return { content, hash: sha256Hex(content) };
+  return { content: region, hash: sha256Hex(normalizeContent(region)) };
 }
 
 /** What "Keep my edits" writes over a live row: the version declined, under that version's identity,
@@ -1161,12 +1160,10 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
                 // The exact bytes written, not a normalized match: a save differing only in line
                 // endings or trailing space is the person's, and stays.
                 if (standing === null || standing !== render) {
-                  const content =
-                    standing === null ? null : rules ? normalizeContent(standing) : standing;
                   seen =
-                    content === null
+                    standing === null
                       ? null
-                      : { content, hash: sha256Hex(rules ? content : normalizeContent(content)) };
+                      : { content: standing, hash: sha256Hex(normalizeContent(standing)) };
                   return null;
                 }
                 restored = true;

@@ -86,11 +86,14 @@ since a worktree checks out tracked files only.
 
 **The cli-rules row records the region on disk, not the render.** 07 leaves an existing region
 alone unless its overwrite flag is on, so `12-post-onboarding` reads the region back and records
-it through `cliRulesRegionRecord` (`steps/onboarding/_rules-files.ts`): the region's bytes and their
-hash as `templateContentHash`, so a stale region shows as an upgrade and a rollback restores bytes
-that were really there. The row claims those bytes as Haive's (`writtenHash` equal to that hash)
-only when they are a render, this one or one an earlier `onboarding` or `upgrade` row of the
-repository recorded; a `backfill` or `rollback` row does not count, since its hash is whatever was
+it through `cliRulesRegionRecord` (`steps/onboarding/_rules-files.ts`): the region's bytes exactly
+as they stand on disk (CRLF, trailing whitespace and blank lines included) as the row's content, and
+the hash of their `normalizeContent` form as `templateContentHash`, so a stale region shows as an
+upgrade and a rollback, or a retried Keep, restores bytes that were really there. Every rules
+record is raw for the same reason (`pathContent` in 02 too) and every hash over one is taken of the
+normalized form; a row an earlier version wrote holds the normalized text and keeps restoring it.
+The row claims those bytes as Haive's (`writtenHash` equal to that hash) only when they are a
+render, this one or one an earlier `onboarding` or `upgrade` row of the repository recorded; a `backfill` or `rollback` row does not count, since its hash is whatever was
 on disk. Anything else keeps the render's hash, so the upgrade plan offers the region as a
 conflict, whose default is skip. No region on disk means no row, and a live one is retired, since
 it would read as the person's deletion. `01-upgrade-plan`'s backfill applies the same rule to the

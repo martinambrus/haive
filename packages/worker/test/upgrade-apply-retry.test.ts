@@ -18,6 +18,7 @@ import type {
   UpgradePlanOutput,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 
 const beforeRewrite = vi.hoisted(() => ({
@@ -58,6 +59,8 @@ const OLD_REGION = `${CLI_RULES_START}\nOLD RULES\n${CLI_RULES_END}`;
 const NEW_REGION = `${CLI_RULES_START}\nNEW RULES\n${CLI_RULES_END}`;
 const MY_REGION = `${CLI_RULES_START}\nMY OWN RULES\n${CLI_RULES_END}`;
 const hashOf = (text: string) => sha256Hex(normalizeContent(text));
+const RAW_REGION = `${CLI_RULES_START}\r\nMY OWN RULES  \r\n\t\r\n\r\n\r\nmore\t\r\n${CLI_RULES_END}`;
+const RAW_AGENTS = `# Notes\r\n\r\n${RAW_REGION}\r\n`;
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -226,7 +229,18 @@ async function setup({
   const answerConflicts = (choice: string) => {
     for (const f of conflictFields) formValues[f.id] = choice;
   };
-  return { root, outside, fake, apply, byId, reinstatedRow, editedRow, rulesRow, answerConflicts };
+  return {
+    root,
+    outside,
+    fake,
+    ctx,
+    apply,
+    byId,
+    reinstatedRow,
+    editedRow,
+    rulesRow,
+    answerConflicts,
+  };
 }
 
 type Setup = Awaited<ReturnType<typeof setup>>;
@@ -335,6 +349,75 @@ describe('an upgrade apply retried after it failed part-way', () => {
 
     expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toBe(`# Notes\n\n${MY_REGION}\n`);
     expect(s.byId([s.rulesRow!])[0]?.lastObservedDiskHash).toBe(hashOf(MY_REGION));
+  });
+
+  it("records the rules region's exact bytes as what stood before, hashed normalized", async () => {
+    const s = await setup({ regionEdited: true });
+    await writeFile(join(s.root, 'AGENTS.md'), RAW_AGENTS, 'utf8');
+    const out = await s.apply();
+    const record = s
+      .byId(out.retiredRowIds!)
+      .find((r) => r.diskPath === 'AGENTS.md' && r.taskId === TASK);
+    expect(record).toMatchObject({
+      writtenContent: RAW_REGION,
+      lastObservedDiskHash: hashOf(RAW_REGION),
+      templateContentHash: hashOf(RAW_REGION),
+    });
+  });
+
+  it('puts the rules region back byte for byte when a retry keeps what a failed attempt overwrote', async () => {
+    const s = await setup({ regionEdited: true });
+    await writeFile(join(s.root, 'AGENTS.md'), RAW_AGENTS, 'utf8');
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('NEW RULES');
+
+    s.answerConflicts('keep_ours');
+    await s.apply();
+
+    expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toBe(RAW_AGENTS);
+    expect(s.byId([s.rulesRow!])[0]).toMatchObject({
+      writtenContent: RAW_REGION,
+      lastObservedDiskHash: hashOf(RAW_REGION),
+    });
+  });
+
+  it('rolls an overwritten rules region back byte for byte', async () => {
+    const s = await setup({ regionEdited: true });
+    await writeFile(join(s.root, 'AGENTS.md'), RAW_AGENTS, 'utf8');
+    const out = await s.apply();
+    expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('NEW RULES');
+    const rows = s.fake.rows(schema.onboardingArtifacts);
+    const upgradeRow = rows.find(
+      (r) => r.diskPath === 'AGENTS.md' && r.taskId === TASK && r.source === 'upgrade',
+    )!;
+    const prior = s
+      .byId(out.retiredRowIds!)
+      .find((r) => r.diskPath === 'AGENTS.md' && r.taskId === TASK)!;
+    const detected = {
+      repositoryId: REPO,
+      rolledBackFromTaskId: TASK,
+      targets: [
+        {
+          diskPath: 'AGENTS.md',
+          templateId: 'cli-rules',
+          templateKind: CLI_RULES_TEMPLATE_KIND,
+          templateSchemaVersion: 1,
+          priorArtifactId: prior.id as string,
+          upgradeArtifactId: upgradeRow.id as string,
+          priorTemplateContentHash: prior.templateContentHash as string,
+          priorWrittenHash: prior.writtenHash as string,
+          priorWrittenContent: prior.writtenContent as string,
+          priorFormValuesSnapshot: REFERENCE_CONTEXT as unknown as Record<string, unknown>,
+        },
+      ],
+      newArtifactsToUndo: [],
+      warnings: [],
+    };
+
+    await upgradeRollbackStep.apply(s.ctx, { detected } as never);
+
+    expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toBe(RAW_AGENTS);
   });
 
   it("keeps the plan's row live with the person's bytes when the failed attempt had committed", async () => {
