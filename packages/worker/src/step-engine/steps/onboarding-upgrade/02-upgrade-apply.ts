@@ -58,6 +58,7 @@ import {
 import { buildRtkAwarenessBlock, withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
 import {
   backfillRecord,
+  readRenderContextColumnRaw,
   recordableContext,
   type UpgradePlanOutput,
   type UpgradePlanEntry,
@@ -733,6 +734,17 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         throw new Error(
           `RTK was switched ${repo.rtkEnabled ? 'on' : 'off'} after this upgrade was planned, so ` +
             'its plan no longer holds. Retry the plan step to plan the upgrade again.',
+        );
+      }
+    }
+    // A sync that began before this upgrade existed can commit after 01 read the column; writing this
+    // plan's context back would undo it. A sync always writes one, so a cleared column is not a sync.
+    if (plan.renderContextColumn !== undefined) {
+      const now = await readRenderContextColumnRaw(ctx.db, plan.repositoryId);
+      if (now !== null && JSON.stringify(now) !== JSON.stringify(plan.renderContextColumn)) {
+        throw new Error(
+          "The repository's project settings changed after this upgrade was planned, so its plan " +
+            'no longer holds. Retry the plan step to plan the upgrade again.',
         );
       }
     }

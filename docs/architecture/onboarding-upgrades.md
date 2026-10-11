@@ -290,7 +290,10 @@ recording it finds the file holding what the plan's bytes strip to, and records 
 plan's bytes as what it held. A plan whose RTK choice was the repository's live one
 (`rtkFollowsLive`) is refused at apply once RTK is switched again, since the form parks between the
 two, and retrying the plan step plans it afresh. The "off" synthesized for a context from before
-RTK was nobody's choice and is never compared. The RTK block is no manifest item, so 02 takes it
+RTK was nobody's choice and is never compared. A plan is refused the same way once the render
+context column holds another context than 01 read (`renderContextColumn`): a sync that began before
+the upgrade task existed reads no live upgrade, and can commit after 01 planned from the old column,
+which 02 would otherwise write back. A cleared column is no sync, which always writes one. The RTK block is no manifest item, so 02 takes it
 out of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
 plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to

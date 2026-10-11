@@ -739,6 +739,19 @@ describe('D2d: 02 writes what its plan renders and retains nothing', () => {
   });
 });
 
+// A sync that began before the upgrade task existed commits after 01 read the column.
+describe('D2e: 02 refuses a plan whose column moved after it was planned', () => {
+  it('writes nothing back and asks for the plan again', async () => {
+    const s = await setup({ column: column(BASE), base: BASE, set: P, claims: BASE_CLAIMS });
+    const detected = await s.plan();
+    s.fake.patch(schema.repositories, REPO, { renderContext: jsonb(column(TEAM)) });
+
+    await expect(s.applyPlan(detected)).rejects.toThrow(/changed after this upgrade was planned/);
+
+    expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
+  });
+});
+
 describe('D3: the context the set derives from is the one 01 renders', () => {
   it('completes a column holding no per-install field from the owner CLIs, and follows the live RTK switch', async () => {
     // A first import: claims from before the column, no column and no sync row.
