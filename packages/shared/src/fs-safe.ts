@@ -762,7 +762,7 @@ const APPLY_TREE_CONCURRENCY = 32;
 const STALE_TEMP_MS = 60 * 60 * 1000;
 const SWEEP_MAX_TEMPS = 32;
 const SWEEP_MAX_ENTRIES = 4096;
-/** Linux's PID_MAX_LIMIT: no process.pid is larger. */
+/** Linux's PID_MAX_LIMIT: pid_max wraps there, so every process.pid is below it. */
 const PID_MAX = 4_194_304;
 const TEMP_SUFFIX =
   /^[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -1672,7 +1672,7 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
         const name = entry.name;
         if (!name.startsWith(prefix)) continue;
         const suffix = name.slice(prefix.length);
-        if (!TEMP_SUFFIX.test(suffix) || Number(suffix.slice(0, suffix.indexOf('-'))) > PID_MAX) {
+        if (!TEMP_SUFFIX.test(suffix) || Number(suffix.slice(0, suffix.indexOf('-'))) >= PID_MAX) {
           continue;
         }
         // Held until its removal is done, so its inode cannot be reused by a replacement.
