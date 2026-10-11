@@ -372,7 +372,8 @@ render, so it claims nothing, and a rollback, which reads only `upgrade` rows, n
 for one it introduced. A Retry clears the form, so a conflict a failed attempt answered with
 Overwrite can be answered with Keep: while the path still holds that attempt's render, Keep first
 writes back the bytes the attempt recorded before writing (the whole file, or the rules region),
-so the version kept is the person's and not the render. The check and the write run on one held
+so the version kept is the person's and not the render. Those bytes are the person's own, so the
+restored path is not reported as written and the upgrade commit does not stage it. The check and the write run on one held
 file (`rewriteFileIfNoFollow`), so a save landing meanwhile stays. When that attempt had committed,
 its own row is retired and the row the plan saw comes back carrying the decision. The pre-image
 is deleted in its own statement as soon as the held file is settled, whether or not it was written

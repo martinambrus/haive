@@ -1097,6 +1097,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         try {
           kept = rel === null ? null : await pathContent(ctx.repoPath, rel, entry.templateKind);
         } catch (err) {
+          // Not a readable regular file any more, so not the failed attempt's write either.
+          const unread = earlierRecords.get(key);
+          if (unread?.lastObservedDiskHash) await spendPreimage(unread.id);
           const msg = err instanceof Error ? err.message : String(err);
           warnings.push(`did not record keeping ${entry.diskPath}: ${msg}`);
           continue;
@@ -1162,8 +1165,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             warnings.push(`did not record keeping ${entry.diskPath}: it changed while it was read`);
             continue;
           }
+          // The person's own bytes, not an upgrade's write, so not staged with the upgrade.
           if (restored) {
-            writtenPaths.push(rel);
             kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
           } else if (seen) {
             kept = seen;
