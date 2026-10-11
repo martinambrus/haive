@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -19,6 +19,20 @@ import type {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+
+const beforeRewrite = vi.hoisted(() => ({ run: null as null | (() => Promise<void>) }));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    rewriteFileIfNoFollow: async (...args: Parameters<typeof real.rewriteFileIfNoFollow>) => {
+      const run = beforeRewrite.run;
+      beforeRewrite.run = null;
+      if (run) await run();
+      return real.rewriteFileIfNoFollow(...args);
+    },
+  };
+});
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -359,6 +373,22 @@ describe('an upgrade apply retried after it failed part-way', () => {
     await s.apply();
 
     expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+  });
+
+  it("records the bytes a save left between the Keep's first read and its held rewrite", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+    beforeRewrite.run = () => writeFile(join(s.root, EDITED), 'SAVED MEANWHILE\n', 'utf8');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe('SAVED MEANWHILE\n');
+    expect(s.byId([s.editedRow])[0]).toMatchObject({
+      writtenContent: 'SAVED MEANWHILE\n',
+      lastObservedDiskHash: hashOf('SAVED MEANWHILE\n'),
+    });
   });
 
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {

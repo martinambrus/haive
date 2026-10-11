@@ -1112,6 +1112,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           const renderHash = sha256Hex(normalizeContent(entry.newContent));
           const rules = entry.templateKind === CLI_RULES_TEMPLATE_KIND;
           let restored = false;
+          // What the held file showed when the callback declined: the bytes the Keep records.
+          let seen: { content: string; hash: string } | null | undefined;
           try {
             // Checked and written on one held file, so a save landing meanwhile is kept.
             await rewriteFileIfNoFollow(
@@ -1122,6 +1124,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
                 if (!Buffer.from(text, 'utf8').equals(data)) return null;
                 const standing = rules ? extractRegion(text, CLI_RULES_START, CLI_RULES_END) : text;
                 if (standing === null || sha256Hex(normalizeContent(standing)) !== renderHash) {
+                  const content =
+                    standing === null ? null : rules ? normalizeContent(standing) : standing;
+                  seen =
+                    content === null
+                      ? null
+                      : { content, hash: sha256Hex(rules ? content : normalizeContent(content)) };
                   return null;
                 }
                 restored = true;
@@ -1137,10 +1145,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
             continue;
           }
+          if (seen === null) continue;
           consumedPreimageIds.push(earlier.id);
           if (restored) {
             writtenPaths.push(rel);
             kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
+          } else if (seen) {
+            kept = seen;
           }
         }
         if (entry.liveArtifactId) {
