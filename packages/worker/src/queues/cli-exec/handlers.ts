@@ -1242,6 +1242,13 @@ export async function currentAgentCap(): Promise<number> {
   return clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
 }
 
+let publishedAgentCap: number | undefined;
+
+/** The cap the INVOKE gate admits against, for the lease lane: the worker's last read, else a fresh one. */
+export async function agentPoolCap(): Promise<number> {
+  return publishedAgentCap ?? currentAgentCap();
+}
+
 /** Pull/build a provider's in-stack Ollama model after a create/edit so it is
  *  ready without a worker restart. Delegates to provisionOllamaProvider, which
  *  updates model_provision_status. No-op for non-ollama providers. */
@@ -1469,6 +1476,7 @@ export async function startCliExecWorker(
   let concurrency = STATIC_PARALLEL_AGENTS + LIGHT_JOB_LANE;
   try {
     agentCap = await currentAgentCap();
+    publishedAgentCap = agentCap;
     concurrency = agentCap + LIGHT_JOB_LANE;
   } catch {
     /* config not initialized — keep the default */
@@ -1566,6 +1574,7 @@ export async function startCliExecWorker(
       // The retune tracks the AGENT pool; the worker always runs LIGHT_JOB_LANE wider so a
       // sign-in or version refresh is never queued behind agents.
       agentCap = await currentAgentCap();
+      publishedAgentCap = agentCap;
       next = agentCap + LIGHT_JOB_LANE;
     } catch (err) {
       log.warn({ err }, 'cli-exec concurrency resolve failed; keeping the current value');
