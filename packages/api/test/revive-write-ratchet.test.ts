@@ -368,7 +368,7 @@ function dominated(node: ts.Node, scope: ts.Node, tx: string): boolean {
 function guarded(sf: ts.SourceFile, node: ts.Node, tx: string | null, depth = 0): boolean {
   if (tx === null) return false;
   const scope = scopeOf(node);
-  if (!scope) return false;
+  if (!scope || reassigns(scope, tx)) return false;
   if (dominated(node, scope, tx)) return true;
   const name = nameOf(scope);
   if (!name || depth > 3) return false;
@@ -392,6 +392,26 @@ function guarded(sf: ts.SourceFile, node: ts.Node, tx: string | null, depth = 0)
       return guarded(sf, c, next, depth + 1);
     })
   );
+}
+
+/** Whether `name` is assigned anywhere in `scope`: a reassigned handle can lock in one transaction
+ *  and write in another under the same name, so it never matches. */
+function reassigns(scope: ts.Node, name: string): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      n.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      ts.isIdentifier(n.left) &&
+      n.left.text === name
+    ) {
+      found = true;
+    }
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(scope);
+  return found;
 }
 
 /** The transaction a write runs in: the identifier its builder chain starts at, if it is one. */
@@ -671,6 +691,11 @@ describe('a live-status write on a task row', () => {
     expect(
       covered(`await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' });`),
     ).toEqual([true]);
+    expect(
+      covered(
+        `let h = lockTx; await ${GUARD}(h, id); h = tx; await h.update(schema.tasks).set({ status: 'running' });`,
+      ),
+    ).toEqual([false]);
   });
 
   it('does not count a guard in a sibling transaction', () => {
