@@ -16,6 +16,7 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import {
   DDEV_PROJECT_MOUNT,
   ddevExec,
+  ddevRunnerRunning,
   type DdevRunnerHandle,
 } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
@@ -397,6 +398,11 @@ async function execSlot(
         }),
       { initialLine: cmd.argv.join(' ') },
     );
+    // A runner lost mid-run (Docker restart, OOM, an external rm) is no failure an agent can fix.
+    if (res.exitCode !== 0 && !(await ddevRunnerRunning(handle).catch(() => true))) {
+      const note = `the DDEV runner stopped during ${cmd.label} — not run`;
+      return { ran: false, note, exitCode: res.exitCode, output: note, raw: res.output };
+    }
     if (guardAt >= 0 && res.exitCode === PM_MISSING_EXIT && res.output.includes(marker)) {
       const note = `${cmd.argv[guardAt + 2]} is not available in the DDEV web container (set corepack_enable: true in .ddev/config.yaml)`;
       return { ran: false, note, exitCode: res.exitCode, output: note, raw: res.output };

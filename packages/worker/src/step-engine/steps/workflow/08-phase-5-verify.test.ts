@@ -9,6 +9,7 @@ const {
   ensureAppServing,
   withDdevProgress,
   ddevExec,
+  ddevRunnerRunning,
   runnerHandleForTask,
   ensureDdevPlaywrightBrowsers,
   killStalePlaywrightRuns,
@@ -21,6 +22,7 @@ const {
     <T>(_ctx: unknown, _label: string, run: (onLine: (l: string) => void) => T) => run(() => {}),
   ),
   ddevExec: vi.fn(),
+  ddevRunnerRunning: vi.fn(async () => true),
   runnerHandleForTask: vi.fn(),
   ensureDdevPlaywrightBrowsers: vi.fn(),
   killStalePlaywrightRuns: vi.fn(),
@@ -36,6 +38,7 @@ vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../sandbox/ddev-runner.js')>()),
   runnerHandleForTask,
   ddevExec,
+  ddevRunnerRunning,
 }));
 vi.mock('../../../sandbox/ddev-playwright.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../sandbox/ddev-playwright.js')>()),
@@ -733,6 +736,23 @@ describe('phase5VerifyStep.apply', () => {
         const out = await runApply({ test: pmSlot('pnpm') }, { runTest: true });
 
         expect(out.test).toMatchObject({ ran: true, passed: false });
+      });
+
+      it('reports a slot whose runner vanished mid-run as not run', async () => {
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+          args.includes('curl')
+            ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+            : { exitCode: 137, output: 'killed' },
+        );
+        ddevRunnerRunning.mockResolvedValueOnce(false);
+
+        const out = await runApply({ test: pmSlot('npm') }, { runTest: true });
+
+        expect(out.test).toMatchObject({
+          ran: false,
+          passed: false,
+          note: expect.stringContaining('the DDEV runner stopped during'),
+        });
       });
 
       it('leaves npm unguarded and a real failure a failure', async () => {
