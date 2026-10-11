@@ -255,7 +255,11 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
         { command: cmd.command, args: cmd.args, description: cmd.description },
         'running plugin install command in sandbox',
       );
-      const runnerOptions: Parameters<typeof runInSandbox>[1] = { workdir: sandboxWorkdir };
+      // Labelled with the task so Stop and the boot reaper find the container.
+      const runnerOptions: Parameters<typeof runInSandbox>[1] = {
+        workdir: sandboxWorkdir,
+        taskId: ctx.taskId,
+      };
       if (sandboxImage) runnerOptions.image = sandboxImage;
       if (mounts.length > 0) runnerOptions.extraMounts = mounts;
       if (provider.networkPolicy) runnerOptions.networkPolicy = provider.networkPolicy;
