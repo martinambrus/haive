@@ -24,6 +24,7 @@ import { ensureGitExcludeEntry } from '../repo/git-init.js';
 import { gitRun, type GitRunResult } from '../repo/git-push.js';
 import { HOST_REPO_ROOT } from '../repo/worktree-git-boundary.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
+import { SANDBOX_GID, SANDBOX_UID } from '../sandbox/sandbox-identity.js';
 import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted-repo.js';
 
 // Shared git-merge / conflict-resolution core. Extracted from dag-executor.ts so
@@ -137,8 +138,19 @@ async function handBackPlan(dir: string): Promise<HandBack | null> {
   const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true }).catch(
     () => null,
   );
-  if (!tree || tree.stats.uid === writer) return null;
-  return { anchor, prefix, writer, owner: { uid: tree.stats.uid, gid: tree.stats.gid } };
+  if (!tree) return null;
+  return { anchor, prefix, writer, owner: handBackOwner(tree.stats, writer) };
+}
+
+/** Who gets what git wrote: the tree's owner, or the sandbox identity when the tree is the writer's
+ *  own, since a root-owned tree the sandbox reaches through its mode bits still gets root's 0644 files. */
+export function handBackOwner(
+  tree: { uid: number; gid: number },
+  writer: number,
+): { uid: number; gid: number } {
+  return tree.uid === writer
+    ? { uid: SANDBOX_UID, gid: SANDBOX_GID }
+    : { uid: tree.uid, gid: tree.gid };
 }
 
 /** The paths the worktree holds differently from commit `ref`, as git listed them. */
