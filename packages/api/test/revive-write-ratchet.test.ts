@@ -198,7 +198,8 @@ function escapes(use: ts.Identifier): boolean {
     (ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) &&
     p.expression === use
   ) {
-    return false;
+    // A method of the patch may set its status through `this`.
+    return ts.isCallExpression(p.parent) && p.parent.expression === p;
   }
   if (ts.isSpreadAssignment(p) || ts.isSpreadElement(p)) return false;
   return !(
@@ -559,6 +560,8 @@ describe('a live-status write on a task row', () => {
     expect(count(`const patch = { title: 't' }; ({ status: patch.status } = o);`)).toBe(1);
     expect(count(`const patch = { title: 't' }; [patch['status']] = o;`)).toBe(1);
     expect(count(`const patch = { title: 't' }; delete patch.status;`)).toBe(1);
+    expect(count(`const patch = { title: 't', revive() {} }; patch.revive();`)).toBe(1);
+    expect(count(`const patch = { title: 't' }; patch['go']();`)).toBe(1);
     expect(count(`const patch = { title: 't' }; const x = { a: patch.status };`)).toBe(0);
     expect(count(`const patch = { title: 't' };`)).toBe(0);
   });
