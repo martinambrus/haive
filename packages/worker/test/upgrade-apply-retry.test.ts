@@ -449,6 +449,22 @@ describe('an upgrade apply retried after it failed part-way', () => {
     expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
   });
 
+  it("spends the pre-image when the path is already gone at the Keep's first read", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await rm(join(s.root, EDITED));
+    s.answerConflicts('keep_ours');
+
+    await s.apply();
+
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
+    ).toBe(false);
+  });
+
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
     const s = await setup();
     failOneCommit(s);

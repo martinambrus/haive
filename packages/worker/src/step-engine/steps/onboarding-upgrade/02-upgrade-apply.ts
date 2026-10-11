@@ -1101,7 +1101,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           warnings.push(`did not record keeping ${entry.diskPath}: ${msg}`);
           continue;
         }
-        if (kept === null || !entry.currentTemplateContentHash || !entry.newContentHash) continue;
+        if (kept === null) {
+          // The failed attempt's write is gone from the path, so nothing may restore over it later.
+          const gone = earlierRecords.get(key);
+          if (gone?.lastObservedDiskHash) await spendPreimage(gone.id);
+          continue;
+        }
+        if (!entry.currentTemplateContentHash || !entry.newContentHash) continue;
         // A failed attempt answered Overwrite here and recorded what stood before writing: the
         // bytes this Keep means are those, so they go back while the path still holds that write.
         const earlier = earlierRecords.get(key);
