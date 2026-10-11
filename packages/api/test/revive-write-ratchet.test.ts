@@ -93,6 +93,19 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
     ) {
       found = true;
     }
+    if (
+      ts.isIdentifier(n) &&
+      n.text === name &&
+      ((ts.isBinaryExpression(n.parent) &&
+        n.parent.left === n &&
+        n.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        n.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+        (ts.isCallExpression(n.parent) &&
+          n.parent.expression.getText() === 'Object.assign' &&
+          n.parent.arguments[0] === n))
+    ) {
+      found = true;
+    }
     if (ts.isVariableDeclaration(n) && n.name.getText() === name) declared = true;
     if (
       ts.isVariableDeclaration(n) &&
@@ -332,6 +345,17 @@ describe('a live-status write on a task row', () => {
       ).map((w) => w.status);
     expect(status(`{ status: 'failed', ...patch }`)).toEqual(['<computed>']);
     expect(status(`{ ...patch, status: 'failed' }`)).toEqual([]);
+  });
+
+  it('counts a local patch that is replaced or assigned into', () => {
+    const count = (body: string) =>
+      liveWrites(
+        'x.ts',
+        `async function f(o) { ${body} await db.update(schema.tasks).set(patch); }`,
+      ).length;
+    expect(count(`let patch = {}; patch = { status: 'running' };`)).toBe(1);
+    expect(count(`const patch = {}; Object.assign(patch, o);`)).toBe(1);
+    expect(count(`const patch = { title: 't' };`)).toBe(0);
   });
 
   it('exempts only a predicate that holds a created task alone', () => {
