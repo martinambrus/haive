@@ -82,6 +82,9 @@ export interface LlmInvocationSpec {
   /** Sandbox timeout for the CLI invocation in milliseconds.
    *  Defaults to 2 minutes; tool_use steps that browse the repo need more. */
   timeoutMs?: number;
+  /** The worktree, relative to the repository root, this step's agent is mounted at instead of the
+   *  task's own tree. Carried on the dispatch and the job alike, so the prompt and the mount agree. */
+  worktreeRel?: (args: LlmBuildArgs) => string | undefined;
   /** Best-effort preference: run this LLM phase with NO built-in tools
    *  so the model answers from the prompt alone instead of browsing the repo. For
    *  enrichment/classification steps (e.g. 01-env-detect) whose full input is

@@ -819,10 +819,12 @@ async function resolveLlmPhase(
       params.ignoreSavedStepClis ?? false,
     );
   const steeringRequested = await resolveSteeringEnabled();
+  const worktreeRel = llmSpec.worktreeRel?.({ detected, formValues: formValues ?? {} });
   const plan = await resolveTaskDispatch(db, params.taskId, {
     providers: params.providers,
     preferredProviderId,
     steeringRequested,
+    worktreeRel,
     input: {
       kind: 'prompt',
       prompt,
@@ -956,6 +958,7 @@ async function resolveLlmPhase(
     effortLevel: preferredEffort ?? undefined,
     kind: payloadKind,
     toolProfile: llmSpec.toolProfile,
+    worktreeRel,
     spec: plan.invocation.spec,
     timeoutMs: budget.timeoutMs,
   });
