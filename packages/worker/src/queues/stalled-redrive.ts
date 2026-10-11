@@ -465,12 +465,13 @@ export async function redriveCancelledTasks(
   for (const t of candidates) {
     if (queued.has(t.taskId)) continue;
     try {
-      await deps.enqueueCancel(t.taskId, t.userId);
-      redriven++;
+      // Counted before the job exists: a lost count would let a failing teardown escape the cap.
       const attempt = Number(t.attempts ?? 0) + 1;
       await db
         .insert(schema.taskEvents)
         .values({ taskId: t.taskId, eventType: CANCEL_REDRIVEN_EVENT, payload: { attempt } });
+      await deps.enqueueCancel(t.taskId, t.userId);
+      redriven++;
       if (attempt >= CANCEL_REDRIVE_MAX) {
         log.warn(
           { taskId: t.taskId, attempt },

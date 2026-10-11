@@ -33,11 +33,14 @@ function rendered(cond: unknown): { sql: string; params: unknown[] } {
 
 /** The candidates SELECT is faked; its subqueries are built by a real drizzle builder, so the
  *  rendered condition can be read back. */
-function makeDb(rows: { taskId: string; userId: string }[]): {
+function makeDb(
+  rows: { taskId: string; userId: string }[],
+  opts: { insertFails?: boolean } = {},
+): {
   db: Database;
-  seen: { where?: unknown; limit?: number };
+  seen: { where?: unknown; limit?: number; inserted: unknown[] };
 } {
-  const seen: { where?: unknown; limit?: number } = {};
+  const seen: { where?: unknown; limit?: number; inserted: unknown[] } = { inserted: [] };
   const real = drizzle.mock();
   const outer = {
     from: () => ({
@@ -57,6 +60,12 @@ function makeDb(rows: { taskId: string; userId: string }[]): {
   const db = {
     select: (fields: Parameters<typeof real.select>[0] & object) =>
       'taskId' in fields ? outer : real.select(fields),
+    insert: () => ({
+      values: async (v: unknown) => {
+        if (opts.insertFails) throw new Error('db blinked');
+        seen.inserted.push(v);
+      },
+    }),
   };
   return { db: db as unknown as Database, seen };
 }
@@ -77,6 +86,23 @@ function deps(
 }
 
 describe('redriveCancelledTasks', () => {
+  it('counts the attempt before the CANCEL exists, so a count it cannot record queues nothing', async () => {
+    const { db } = makeDb([{ taskId: 'task-1', userId: 'u1' }], { insertFails: true });
+    const enqueued: string[] = [];
+    expect(await redriveCancelledTasks(db, deps(enqueued), { staleMs: 300_000 })).toBe(0);
+    expect(enqueued).toEqual([]);
+  });
+
+  it('records the re-drive with its attempt number', async () => {
+    const { db, seen } = makeDb([{ taskId: 'task-1', userId: 'u1' }]);
+    const enqueued: string[] = [];
+    await redriveCancelledTasks(db, deps(enqueued), { staleMs: 300_000 });
+    expect(enqueued).toEqual(['task-1']);
+    expect(seen.inserted).toEqual([
+      { taskId: 'task-1', eventType: 'task.cancel_redriven', payload: { attempt: 1 } },
+    ]);
+  });
+
   it('queues one CANCEL for a cancelled task whose teardown never finished', async () => {
     const { db } = makeDb([{ taskId: 'task-1', userId: 'user-1' }]);
     const enqueued: string[] = [];
