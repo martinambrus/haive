@@ -112,13 +112,19 @@ export async function runStepCommandInSandbox(
     };
     if (maskFiles.length > 0) runSpec.extraFiles = maskFiles;
     const result = await runInSandbox(runSpec, runnerOptions);
+    if (ctx.signal?.aborted) throw new TaskCancelledError();
     if (result.exitCode === BINARY_MISSING_EXIT && result.stdout.includes(marker)) {
       return { ran: false, note: `not run: ${bin} is not in the sandbox image` };
     }
+    const output = `${result.stdout}${result.stderr}`;
+    if (result.exitCode !== null) return { ran: true, exitCode: result.exitCode, output };
+    const why = result.timedOut
+      ? `timed out after ${Math.round(options.timeoutMs / 1000)}s`
+      : (result.error ?? 'the sandbox run failed');
     return {
       ran: true,
-      exitCode: result.exitCode ?? 1,
-      output: `${result.stdout}${result.stderr}`,
+      exitCode: 1,
+      output: `${output}\n[sandbox run ended without an exit status: ${why}]\n`,
     };
   } finally {
     await lease.release();

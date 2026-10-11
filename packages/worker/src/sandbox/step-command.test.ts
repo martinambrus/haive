@@ -267,4 +267,48 @@ describe('runStepCommandInSandbox', () => {
       NODE_EXTRA_CA_CERTS: '/etc/ssl/certs/ca.pem',
     });
   });
+
+  it('turns a Stop during the run into a task cancellation, whatever the exit status', async () => {
+    const controller = new AbortController();
+    runInSandbox.mockImplementation(async () => {
+      controller.abort();
+      return { exitCode: null, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+    });
+    await expect(
+      runStepCommandInSandbox(ctx({ signal: controller.signal }), {
+        argv: ['pnpm', 'test'],
+        timeoutMs: 1,
+      }),
+    ).rejects.toBeInstanceOf(TaskCancelledError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a null exit without a Stop as a failed run, with a note', async () => {
+    runInSandbox.mockResolvedValue({
+      exitCode: null,
+      stdout: 'partial\n',
+      stderr: '',
+      durationMs: 1,
+      timedOut: false,
+      error: 'spawn docker ENOENT',
+    });
+    const res = await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
+    expect(res).toMatchObject({ ran: true, exitCode: 1 });
+    expect(res.ran && res.output).toContain('partial');
+    expect(res.ran && res.output).toContain('ended without an exit status');
+    expect(res.ran && res.output).toContain('spawn docker ENOENT');
+  });
+
+  it('keeps a timeout as a failed run, noting the timeout', async () => {
+    runInSandbox.mockResolvedValue({
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      durationMs: 5000,
+      timedOut: true,
+    });
+    const res = await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 5000 });
+    expect(res).toMatchObject({ ran: true, exitCode: 1 });
+    expect(res.ran && res.output).toContain('timed out after 5s');
+  });
 });
