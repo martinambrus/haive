@@ -4,6 +4,7 @@ import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
   emptyProjectState,
+  sameValue,
   normalizeProjectState,
   portableRender,
   renderContextColumnSchema,
@@ -26,6 +27,17 @@ export interface ProjectStateRecordInput {
   context: TemplateRenderContext;
   /** Whether `context.rtkEnabled` is a choice somebody made, rather than a default. */
   rtkChoiceRecorded: boolean;
+  /** The columns the writer planned against; a column found holding anything else (null aside)
+   *  refuses the write before a file changes. Omitted: written whatever the column holds. */
+  expectedColumns?: unknown[];
+}
+
+/** The column moved past what the writer planned against, so its record would undo a newer one. */
+export class ProjectStateMovedError extends Error {
+  constructor() {
+    super("The repository's project settings changed while this write was pending");
+    this.name = 'ProjectStateMovedError';
+  }
 }
 
 /** A write that failed once it had begun. `written` names the repository-relative record files standing
@@ -58,13 +70,20 @@ export function renderContextColumnFor(context: TemplateRenderContext, rtkChoice
  *  and the sync base to it in one transaction. Returns the repository-relative paths written. */
 export async function writeProjectStateRecord(
   db: Database,
-  { repositoryId, repoPath, context, rtkChoiceRecorded }: ProjectStateRecordInput,
+  { repositoryId, repoPath, context, rtkChoiceRecorded, expectedColumns }: ProjectStateRecordInput,
 ): Promise<string[]> {
   const written: string[] = [];
   try {
     // Refused before anything is written, so the column only ever holds what reads back.
     const column = renderContextColumnFor(context, rtkChoiceRecorded);
     const record = { ...emptyProjectState(), render: portableRender(column) };
+    // Checked before the files, so a refused write leaves the newer record on disk untouched.
+    if (expectedColumns) {
+      await db.transaction(async (tx) => {
+        await lockProjectState(tx, repositoryId);
+        await refuseMoved(tx, repositoryId, expectedColumns);
+      });
+    }
     for (const [rel, text] of renderProjectState(record)) {
       const path = `${PROJECT_STATE_DIR}/${rel}`;
       await writeFileNoFollow(repoPath, path, text, { createParents: true });
@@ -78,6 +97,7 @@ export async function writeProjectStateRecord(
     };
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
+      if (expectedColumns) await refuseMoved(tx, repositoryId, expectedColumns);
       await tx
         .update(schema.repositories)
         .set({ renderContext: column })
@@ -88,10 +108,21 @@ export async function writeProjectStateRecord(
         .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
     });
   } catch (err) {
+    if (err instanceof ProjectStateMovedError) throw err;
     const cleared = await clearRenderContext(db, repositoryId);
     throw new ProjectStateWriteError(err, written, !cleared);
   }
   return written;
+}
+
+async function refuseMoved(tx: Tx, repositoryId: string, expected: unknown[]): Promise<void> {
+  const [repo] = await tx
+    .select({ renderContext: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  const now = repo?.renderContext ?? null;
+  if (now !== null && !expected.some((c) => sameValue(now, c))) throw new ProjectStateMovedError();
 }
 
 /** A column this write could not move would read as newer than the rows its writer just wrote, so it

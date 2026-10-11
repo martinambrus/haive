@@ -106,6 +106,7 @@ async function setup(rtkFollowsLive: boolean | undefined) {
     repoPath: root,
     taskId: TASK,
     userId: USER,
+    throwIfCancelled: () => {},
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
   const apply = () =>

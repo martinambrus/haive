@@ -56,6 +56,7 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
       repoPath: root,
       taskId,
       userId: USER,
+      throwIfCancelled: () => {},
       logger: { info: noop, warn: noop, error: noop, debug: noop },
     }) as unknown as StepContext;
   const plan = {

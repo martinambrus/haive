@@ -303,7 +303,11 @@ context column holds another context than 01 read (`renderContextColumn`): a syn
 the upgrade task existed reads no live upgrade, and can commit after 01 planned from the old column,
 which 02 would otherwise write back. 02 reads the column under the sync's own lock
 (`lockProjectState`): a sync still in flight commits first, and one that starts later sees the live
-upgrade and defers. A cleared column is no sync, which always writes one. The RTK block is no manifest item, so 02 takes it
+upgrade and defers. A cleared column is no sync, which always writes one. The same check runs again
+at 02's record write, under the lock before the files and once more inside its update
+(`expectedColumns`): a Cancel releases the checkout while 02 is still applying, so a refresh can sync
+in that window, and a write that finds the column moved refuses with the same message and leaves
+the newer column and record as they are. 02 also stops at a Cancel before that write. The RTK block is no manifest item, so 02 takes it
 out of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
 plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to

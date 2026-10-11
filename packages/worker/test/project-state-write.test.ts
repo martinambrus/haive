@@ -12,7 +12,7 @@ import {
   normalizeProjectState,
   renderProjectState,
 } from '@haive/shared/project-state';
-import { writeProjectStateRecord } from '../src/project-state/write.js';
+import { ProjectStateMovedError, writeProjectStateRecord } from '../src/project-state/write.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -226,13 +226,14 @@ async function setup() {
   const write = (
     c: Context,
     rtkChoiceRecorded: boolean,
-    over: { repositoryId?: string; repoPath?: string } = {},
+    over: { repositoryId?: string; repoPath?: string; expectedColumns?: unknown[] } = {},
   ): Promise<readonly string[]> =>
     writeProjectStateRecord(db, {
       repositoryId: over.repositoryId ?? REPO,
       repoPath: over.repoPath ?? root,
       context: c as never,
       rtkChoiceRecorded,
+      ...(over.expectedColumns ? { expectedColumns: over.expectedColumns } : {}),
     });
   const syncSeed = (values: Record<string, unknown>) =>
     fake.insert(sync, {
@@ -259,6 +260,33 @@ async function setup() {
 }
 
 const isWrite = (event: string) => /^(update|insert|delete) /.test(event);
+
+describe('writeProjectStateRecord: a column that moved past the writer', () => {
+  it('refuses before any file is written and leaves the newer column as it is', async () => {
+    const s = await setup();
+    await s.write(context(), true);
+    const newer = s.columnOf(REPO);
+    const filesBefore = s.onDisk();
+    const other = {
+      ...context(),
+      projectInfo: { ...(context().projectInfo as object), name: 'z' },
+    };
+
+    await expect(
+      s.write(other, true, { expectedColumns: [{ planned: 'elsewhere' }] }),
+    ).rejects.toBeInstanceOf(ProjectStateMovedError);
+    expect(s.columnOf(REPO)).toEqual(newer);
+    expect(s.onDisk()).toEqual(filesBefore);
+  });
+
+  it('writes when the column is one the writer expected, or none', async () => {
+    const s = await setup();
+    await s.write(context(), true, { expectedColumns: [{ planned: 'elsewhere' }] });
+    const first = s.columnOf(REPO);
+    await s.write(context(), false, { expectedColumns: [first] });
+    expect(s.columnOf(REPO)).not.toEqual(first);
+  });
+});
 
 describe('writeProjectStateRecord: the files', () => {
   it('writes the record files under the repository, as the codec renders them, and nothing else', async () => {
