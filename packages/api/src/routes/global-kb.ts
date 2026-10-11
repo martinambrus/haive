@@ -381,6 +381,18 @@ globalKbRoutes.put('/config', async (c) => {
     await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
   if (d.embedDimensions !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
+  // A first use racing this save can create the column at the old width; read it again and undo.
+  if (dimsChange) {
+    const width = await storeVectorWidth(saved).catch(() => null);
+    if (width !== null && width !== d.embedDimensions) {
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(saved.embeddingDimensions));
+      throw new HttpError(
+        409,
+        "the store's vector column was created at another width while saving; the embedding dimensions must match it",
+        'embed_dimensions_locked',
+      );
+    }
+  }
   if (d.archiveRetentionDays !== undefined)
     await configService.set(
       CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,

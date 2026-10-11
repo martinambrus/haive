@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   set: vi.fn(async (_key: string, _value: string) => {}),
   setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
   vectorType: null as string | null,
+  vectorTypes: [] as Array<string | null>,
   checks: [] as unknown[],
   connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
     pg: Object.assign(async () => [], {
@@ -20,8 +21,11 @@ const h = vi.hoisted(() => ({
   })),
 }));
 
-const rows = (text: string) =>
-  text.includes('format_type') && h.vectorType !== null ? [{ type: h.vectorType }] : [];
+const rows = (text: string) => {
+  if (!text.includes('format_type')) return [];
+  const type = h.vectorTypes.length > 0 ? h.vectorTypes.shift()! : h.vectorType;
+  return type === null ? [] : [{ type }];
+};
 
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
 vi.mock('../src/queues.js', () => ({ getGlobalKbSyncQueue: vi.fn(), getTaskQueue: vi.fn() }));
@@ -108,6 +112,7 @@ beforeEach(() => {
   h.setSecret.mockClear();
   h.connect.mockClear();
   h.vectorType = null;
+  h.vectorTypes = [];
   h.checks = [];
   h.role = 'admin';
   h.flags = new Map();
@@ -365,6 +370,24 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     );
     expect(h.checks).toEqual([]);
     expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('is undone with 409 when a first use created the column at the old width meanwhile', async () => {
+    h.vectorTypes = [null, 'vector(2560)'];
+    const res = await put(widen);
+
+    expect(res.status).toBe(409);
+    expect(written()).toEqual(
+      expect.arrayContaining([
+        [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '1024'],
+        [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '2560'],
+      ]),
+    );
+    expect(
+      written()
+        .filter(([k]) => k === CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS)
+        .at(-1),
+    ).toEqual([CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '2560']);
   });
 
   it('is not checked, and accepted, when the width is unchanged', async () => {
