@@ -120,6 +120,8 @@ interface VerifyGateDetect {
   /** Tooling configs 08 saw one level below the root and did not use; absent on a payload that
    *  predates the field. */
   declinedConfigs?: string[];
+  /** Set when 08 found no runner for at least one of test, lint and typecheck. */
+  slotWithoutRunner?: boolean;
   /** Phase 4 pre-test validation result (null when the step didn't run). */
   validation: {
     verdict: string;
@@ -612,6 +614,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const declinedConfigs = Array.isArray(declinedRaw)
       ? declinedRaw.filter((c): c is string => typeof c === 'string')
       : [];
+    const prevDetect = (prev?.detect ?? null) as Record<string, unknown> | null;
+    const slotWithoutRunner =
+      prevDetect?.test === null || prevDetect?.lint === null || prevDetect?.typecheck === null;
 
     // Phase 4 pre-test validation: surface the verdict (the legacy "escalate to
     // user" lands here — exhausted budget / open issues / unparseable output).
@@ -908,6 +913,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       },
       allPassed: output.passed === true,
       ...(declinedConfigs.length > 0 ? { declinedConfigs } : {}),
+      ...(declinedConfigs.length > 0 && slotWithoutRunner ? { slotWithoutRunner } : {}),
       validation,
       testManagement,
       browser,
@@ -1053,6 +1059,13 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         ]
           .filter(Boolean)
           .join(' '),
+        defaultOpen: true,
+      });
+    } else if (detected.slotWithoutRunner && detected.declinedConfigs?.length) {
+      rows.push({
+        label: 'Tooling below the root',
+        status: 'warn',
+        body: declinedConfigsSentence(detected.declinedConfigs),
         defaultOpen: true,
       });
     }

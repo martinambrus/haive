@@ -1140,6 +1140,53 @@ describe('phase5VerifyStep.apply', () => {
     });
   });
 
+  describe('configs declined below the root, when only some checks ran', () => {
+    const LINT = { kind: 'host' as const, label: 'pnpm run lint', argv: ['pnpm', 'run', 'lint'] };
+    const TEST = { kind: 'host' as const, label: 'pnpm run test', argv: ['pnpm', 'run', 'test'] };
+    const TYPE = { kind: 'host' as const, label: 'pnpm run tsc', argv: ['pnpm', 'run', 'tsc'] };
+    const declinedConfigs = ['sub/phpunit.xml'];
+    beforeEach(() => {
+      ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://localhost' });
+      runStepCommandInSandbox.mockResolvedValue({ ran: true, exitCode: 0, output: 'ok' });
+    });
+
+    it('names them in the slot notes when lint ran and test had no runner', async () => {
+      const out = await runApply(
+        { ddevMode: false, workspacePath: tmpdir(), lint: LINT, declinedConfigs },
+        { runLint: true },
+      );
+      expect(out.lint.ran).toBe(true);
+      expect(out.degradedNote).toContain('sub/phpunit.xml');
+      expect(out.degradedNote).toContain('the repository root');
+      expect(out.degradedNote).not.toContain('No verification check ran');
+    });
+
+    it('says nothing when every slot has a runner', async () => {
+      const out = await runApply(
+        {
+          ddevMode: false,
+          workspacePath: tmpdir(),
+          test: TEST,
+          lint: LINT,
+          typecheck: TYPE,
+          declinedConfigs,
+        },
+        { runTest: true, runLint: true, runTypecheck: true },
+      );
+      expect(out.test.ran).toBe(true);
+      expect(out.degradedNote).toBeUndefined();
+    });
+
+    it('adds nothing when no config was declined', async () => {
+      const out = await runApply(
+        { ddevMode: false, workspacePath: tmpdir(), lint: LINT },
+        { runLint: true },
+      );
+      expect(out.lint.ran).toBe(true);
+      expect(out.degradedNote).toBeUndefined();
+    });
+  });
+
   describe('stores both ends of a long check output', () => {
     const hostCheck = (script: string) => ({
       kind: 'host' as const,

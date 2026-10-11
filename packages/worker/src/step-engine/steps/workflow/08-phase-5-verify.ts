@@ -1047,7 +1047,18 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       { test, lint, typecheck, ...(phpLint ? { phpLint } : {}) },
       args.detected.declinedConfigs,
     );
-    const slotNotes = [test.note, lint.note, phpLint?.note, typecheck.note]
+    const anyRan = test.ran || lint.ran || typecheck.ran || phpLint?.ran === true;
+    const slotUndetected =
+      args.detected.test === null ||
+      args.detected.lint === null ||
+      args.detected.typecheck === null;
+    const slotNotes = [
+      test.note,
+      lint.note,
+      phpLint?.note,
+      typecheck.note,
+      anyRan && slotUndetected ? declinedConfigsSentence(args.detected.declinedConfigs) : '',
+    ]
       .filter(Boolean)
       .join('\n');
     const degradedNote = buildVerifyDegradedNote(testEnvBlocker, unverified, slotNotes);
