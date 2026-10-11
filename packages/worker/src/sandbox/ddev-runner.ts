@@ -1183,7 +1183,7 @@ export function buildDdevCommand(
   const lifecycle = /^(?:start|restart|snapshot|export-db)(?:\s|$)/.test(ddevArgs);
   if (!lifecycle) {
     return {
-      shell: `cd ${projectDir} && ddev ${withWebContainerDeadline(ddevArgs, timeoutMs)}`,
+      shell: `cd ${projectDir} && ${withWebContainerDeadline(ddevArgs, timeoutMs)}`,
       hostTimeoutMs: timeoutMs,
     };
   }
@@ -1193,16 +1193,22 @@ export function buildDdevCommand(
 const DDEV_EXEC_WORD = String.raw`(?:\\.|'[^']*'|"(?:\\.|[^"\\])*"|[^\s'"\\])+`;
 // `exec`, then any flags (a value flag takes the next word), then an optional `--` separator.
 const DDEV_EXEC_HEAD = new RegExp(
-  String.raw`^['"]?exec['"]?(?:\s+(?:['"]?(?:-[dsup]|--dir|--service|--user|--project)['"]?\s+${DDEV_EXEC_WORD}|['"]?-(?!-['"]?(?:\s|$))${DDEV_EXEC_WORD}))*(?:\s+['"]?--['"]?)?(?=\s|$)`,
+  String.raw`^['"]?exec['"]?(?:\s+(?:['"]?(?:-[dsup]|--dir|--service|--user|--project)['"]?\s+${DDEV_EXEC_WORD}|(?!['"]?--['"]?(?:\s|$))(?=['"]?-)${DDEV_EXEC_WORD}))*(?:\s+['"]?--['"]?)?(?=\s|$)`,
 );
 
+const DDEV_EXEC_RAW = /(?:^|\s)['"]?--raw['"]?(?=\s|$)/;
+
 /** Killing the runner's ddev client leaves the command running in the web container, so an
- *  `exec` command carries its own deadline, just under the host's. Other verbs pass through. */
+ *  `exec` command carries its own deadline, just under the host's. Other verbs pass through.
+ *  ddev quotes a non-raw word that holds a space, so the words run raw under one `bash -c`. */
 function withWebContainerDeadline(ddevArgs: string, timeoutMs: number): string {
   const head = DDEV_EXEC_HEAD.exec(ddevArgs)?.[0];
-  if (head === undefined || ddevArgs.slice(head.length).trim() === '') return ddevArgs;
-  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000) - 10);
-  return `${head} timeout --kill-after=5s ${seconds}s${ddevArgs.slice(head.length)}`;
+  if (head === undefined || ddevArgs.slice(head.length).trim() === '') return `ddev ${ddevArgs}`;
+  const rest = ddevArgs.slice(head.length);
+  const deadline = `timeout --kill-after=5s ${Math.max(1, Math.ceil(timeoutMs / 1000) - 10)}s`;
+  if (DDEV_EXEC_RAW.test(head)) return `ddev ${head} ${deadline}${rest}`;
+  const flags = head.replace(/\s+['"]?--['"]?$/, '');
+  return `set --${rest} && ddev ${flags} --raw -- ${deadline} bash -c "$*"`;
 }
 
 function buildDdevLockedCommand(

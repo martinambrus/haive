@@ -48,36 +48,41 @@ describe('DDEV lifecycle commands across worker restarts', () => {
 
   it('stops an exec command inside the web container at the deadline, after any exec flags', () => {
     const shell = (args: string, ms = 60_000) => buildDdevCommand('/repos/x', args, ms).shell;
-    expect(shell('exec vendor/bin/phpunit')).toContain(
-      'ddev exec timeout --kill-after=5s 50s vendor/bin/phpunit',
+    const wrap = (head: string, rest: string, secs = 50) =>
+      `cd /repos/x && set -- ${rest} && ddev ${head} --raw -- timeout --kill-after=5s ${secs}s bash -c "$*"`;
+    expect(shell('exec vendor/bin/phpunit')).toBe(wrap('exec', 'vendor/bin/phpunit'));
+    expect(shell("exec 'APP_ENV=prod php artisan migrate'")).toBe(
+      wrap('exec', "'APP_ENV=prod php artisan migrate'"),
     );
-    expect(shell('exec -s db mysql')).toBe(
-      'cd /repos/x && ddev exec -s db timeout --kill-after=5s 50s mysql',
+    expect(shell("exec 'echo a | wc -c'")).toContain(
+      `set -- 'echo a | wc -c' && ddev exec --raw -- timeout`,
+    );
+    expect(shell('exec -s db mysql')).toBe(wrap('exec -s db', 'mysql'));
+    expect(shell("'exec' '-d' '/v/a'\\''b' 'pytest'")).toBe(
+      wrap("'exec' '-d' '/v/a'\\''b'", "'pytest'"),
+    );
+    expect(shell('exec --dir=/v/a php -v')).toBe(wrap('exec --dir=/v/a', 'php -v'));
+    expect(shell('exec -q -u root -p my-project id -u')).toBe(
+      wrap('exec -q -u root -p my-project', 'id -u'),
+    );
+    expect(shell('exec --project my-project ls')).toBe(wrap('exec --project my-project', 'ls'));
+    expect(shell('exec -- ls -la')).toBe(wrap('exec', 'ls -la'));
+    expect(shell('exec php -v', 5_000)).toBe(wrap('exec', 'php -v', 1));
+    expect(shell('exec')).toBe('cd /repos/x && ddev exec');
+    expect(buildDdevCommand('/repos/x', 'exec php -v', 60_000).hostTimeoutMs).toBe(60_000);
+  });
+
+  it('keeps the direct deadline for a raw exec, wherever the flag sits in the head', () => {
+    const shell = (args: string) => buildDdevCommand('/repos/x', args, 60_000).shell;
+    expect(shell('exec --raw -- ls -la')).toBe(
+      'cd /repos/x && ddev exec --raw -- timeout --kill-after=5s 50s ls -la',
     );
     expect(shell("exec -d '/var/www/html/a b' --raw ls")).toBe(
       "cd /repos/x && ddev exec -d '/var/www/html/a b' --raw timeout --kill-after=5s 50s ls",
     );
-    expect(shell("'exec' '-d' '/v/a'\\''b' 'pytest'")).toBe(
-      "cd /repos/x && ddev 'exec' '-d' '/v/a'\\''b' timeout --kill-after=5s 50s 'pytest'",
+    expect(shell("exec '--raw' -s db ls")).toBe(
+      "cd /repos/x && ddev exec '--raw' -s db timeout --kill-after=5s 50s ls",
     );
-    expect(shell('exec --dir=/v/a php -v')).toBe(
-      'cd /repos/x && ddev exec --dir=/v/a timeout --kill-after=5s 50s php -v',
-    );
-    expect(shell('exec --raw -- ls -la')).toBe(
-      'cd /repos/x && ddev exec --raw -- timeout --kill-after=5s 50s ls -la',
-    );
-    expect(shell('exec -q -u root -p my-project id -u')).toBe(
-      'cd /repos/x && ddev exec -q -u root -p my-project timeout --kill-after=5s 50s id -u',
-    );
-    expect(shell('exec --project my-project ls')).toBe(
-      'cd /repos/x && ddev exec --project my-project timeout --kill-after=5s 50s ls',
-    );
-    expect(shell('exec ls -la')).toBe(
-      'cd /repos/x && ddev exec timeout --kill-after=5s 50s ls -la',
-    );
-    expect(shell('exec php -v', 5_000)).toContain('timeout --kill-after=5s 1s php -v');
-    expect(shell('exec')).toBe('cd /repos/x && ddev exec');
-    expect(buildDdevCommand('/repos/x', 'exec php -v', 60_000).hostTimeoutMs).toBe(60_000);
   });
 
   it('reserves the full warm-start execution time after a nearly exhausted lock wait', () => {
