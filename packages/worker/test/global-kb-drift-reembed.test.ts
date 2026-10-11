@@ -68,6 +68,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
     enabled: true,
     ollamaUrl: 'http://ollama.invalid:11434',
     embedModel: h.model,
+    namespace: 'house',
     embeddingDimensions: 4,
   }),
   withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<unknown>) =>
@@ -86,6 +87,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
             if (text.includes('IS DISTINCT FROM')) {
               return h.entries
                 .filter((e: Entry) => e.status === 'active' && !e.superseded)
+                .filter((e: Entry) => e.namespace === params[1])
                 .filter(
                   (e: Entry) =>
                     e.embedStatus === 'failed' ||
@@ -94,7 +96,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
                         r.entryId === e.id &&
                         (r.kind !== 'model' ||
                           r.model !== params[0] ||
-                          (params.length > 1 && (r.width ?? 4) !== params[1])),
+                          (params.length > 2 && (r.width ?? 4) !== params[2])),
                     ),
                 )
                 .sort((a: Entry, b: Entry) => (a.id < b.id ? -1 : 1))
@@ -305,5 +307,13 @@ describe('the reconcile sweep re-embeds entries whose vectors drifted', () => {
 
     expect(await sweep()).toEqual([]);
     expect(h.statements.find((t) => t.includes('IS DISTINCT FROM'))).not.toContain('jsonb');
+  });
+
+  it("leaves another namespace's entries to the install that owns them", async () => {
+    h.entries = [entry('e1'), { ...entry('e2'), namespace: 'other' }];
+    h.rows = [rowOf('e1', 'model-a'), rowOf('e2', 'model-a')];
+
+    expect(await sweep()).toEqual(['e1']);
+    expect(h.statements.find((t) => t.includes('IS DISTINCT FROM'))).toContain('e.namespace = $2');
   });
 });
