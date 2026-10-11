@@ -79,8 +79,10 @@ CLAUDE.md or settings file the repository deliberately keeps out of history. 12 
 file only through its live artifact row, never by name, so one Haive did not record stays out. The
 check runs after any `git init`, since before it there is no repository to ask. A person's own file
 07 left untouched (`leftAsIs` on 07's output: one already standing where a template would go, or a
-rules file that is not UTF-8) is never staged either, though its row is recorded; an output from
-before that field stages as before.
+rules file that is not UTF-8) is never staged by 12's own `git add`, though its row is recorded;
+an output from before that field stages as before. A repository 12 had to `git init` is the
+exception: its first commit takes the whole working tree on purpose, the person's files included,
+since a worktree checks out tracked files only.
 
 **The cli-rules row records the region on disk, not the render.** 07 leaves an existing region
 alone unless its overwrite flag is on, so `12-post-onboarding` reads the region back and records
