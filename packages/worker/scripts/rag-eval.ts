@@ -37,6 +37,7 @@ import {
   openExistingRagDatabase,
   ragDatabaseName,
   ragHybridSearch,
+  RAG_TABLE,
   resolveRagConnection,
   type RagConnection,
   type RagMode,
@@ -94,6 +95,15 @@ async function main(): Promise<void> {
     }
   }
   const openConn = conn;
+  // ragHybridSearch ranks lexically on a store with no vector column, whatever the embed returns.
+  const storeHasVector =
+    (
+      await openConn.pg.unsafe(
+        `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = 'vector'`,
+        [RAG_TABLE],
+      )
+    ).length > 0;
+  const runLexicalOnly = forceLexicalOnly || !storeHasVector;
 
   async function search(text: string): Promise<{ hits: RagSearchHit[]; lexicalOnly: boolean }> {
     const vec = forceLexicalOnly
@@ -112,11 +122,11 @@ async function main(): Promise<void> {
       lexicalOnly: vec === null,
       identifierSearch,
     });
-    return { hits, lexicalOnly: vec === null };
+    return { hits, lexicalOnly: vec === null || !storeHasVector };
   }
 
   const settings =
-    `lexicalOnly=${forceLexicalOnly} identifierSearch=${identifierSearch} ` +
+    `lexicalOnly=${runLexicalOnly} identifierSearch=${identifierSearch} ` +
     `runbookBoost=${runbookBoost} topK=${topK}`;
 
   if (querySet) {
@@ -125,7 +135,7 @@ async function main(): Promise<void> {
     const all: (number | null)[] = [];
     for (const q of querySet) {
       const { hits, lexicalOnly } = await search(q.query);
-      if (lexicalOnly && !forceLexicalOnly) {
+      if (lexicalOnly && !runLexicalOnly) {
         // One degraded query would mix lexical-only ranks into a hybrid summary.
         console.error(`query fell back to lexical-only; aborting the set: ${q.query}`);
         await openConn.close();
