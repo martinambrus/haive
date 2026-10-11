@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { schema, type Database } from '@haive/database';
+import { logger } from '@haive/shared/logger';
 import {
   chmodNoFollow,
   chownNoFollow,
@@ -161,10 +162,14 @@ async function handBackWritten(
   names: readonly string[],
 ): Promise<void> {
   const seen = new Set<string>();
+  const skipped: string[] = [];
   let changed = false;
   for (const raw of names) {
     const name = utf8Name(raw);
-    if (name === null) continue;
+    if (name === null) {
+      skipped.push(shown(raw));
+      continue;
+    }
     const parts = name.split('/');
     for (let i = 1; i <= parts.length; i += 1) {
       const rel = `${plan.prefix}${parts.slice(0, i).join('/')}`;
@@ -181,6 +186,12 @@ async function handBackWritten(
     }
   }
   if (changed) await gitRun(dir, ['update-index', '-q', '--refresh']);
+  if (skipped.length > 0) {
+    logger.warn(
+      { dir, names: skipped.slice(0, 20), count: skipped.length },
+      'names that are not UTF-8 stay owned by the worker after a merge',
+    );
+  }
 }
 
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
@@ -292,9 +303,12 @@ export interface FixBaseline {
   mergeHead: string;
 }
 
-/** A baseline git could not record, kept so the relocation says why it checked nothing. */
+/** A baseline git could not record, kept so the relocation says why it checked nothing. `head` and
+ *  `mergeHead` name the merge it was sent into, absent when git could not read the merge. */
 export interface FixBaselineUnavailable {
   unavailable: string;
+  head?: string;
+  mergeHead?: string;
 }
 
 type TreeResult = { tree: string } | { error: string };
@@ -560,20 +574,25 @@ export async function captureFixBaseline(
   if (head === null || mergeHead === null || resolving === null) {
     return { unavailable: 'git could not read the merge' };
   }
+  const unavailable = (reason: string): FixBaselineUnavailable => ({
+    unavailable: reason,
+    head,
+    mergeHead,
+  });
   const masked = await readMaskPolicy(secrets);
   if ('error' in masked) {
-    return { unavailable: `the secret mask could not be read: ${masked.error}` };
+    return unavailable(`the secret mask could not be read: ${masked.error}`);
   }
   const raw = await rawBytes(dir);
-  if ('error' in raw) return { unavailable: `git could not record the tree: ${raw.error}` };
+  if ('error' in raw) return unavailable(`git could not record the tree: ${raw.error}`);
   const tree = await snapshotTree(dir, { raw, secrets: masked.policy });
-  if ('error' in tree) return { unavailable: `git could not record the tree: ${tree.error}` };
+  if ('error' in tree) return unavailable(`git could not record the tree: ${tree.error}`);
   const ignored = await recordIgnored(dir);
   if ('error' in ignored) {
-    return { unavailable: `git could not record the ignored files: ${ignored.error}` };
+    return unavailable(`git could not record the ignored files: ${ignored.error}`);
   }
   const index = await stagedTree(dir);
-  if ('error' in index) return { unavailable: `git could not record the index: ${index.error}` };
+  if ('error' in index) return unavailable(`git could not record the index: ${index.error}`);
   return { tree: tree.tree, index: index.tree, ignored: ignored.blob, resolving, head, mergeHead };
 }
 

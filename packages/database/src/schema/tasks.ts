@@ -700,7 +700,7 @@ export interface MergeResolveState {
         head: string;
         mergeHead: string;
       }
-    | { unavailable: string }
+    | { unavailable: string; head?: string; mergeHead?: string }
     | null;
   /** The last fixer was cut at the output limit: the next one, automatic or a person's retry,
    *  carries the shrink notice. Cleared when that fixer is dispatched. */

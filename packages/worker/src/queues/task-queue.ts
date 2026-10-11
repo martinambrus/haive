@@ -133,7 +133,14 @@ import {
   updateOwnedStep,
   type TaskFence,
 } from '../step-engine/step-ownership.js';
-import { abortMerge, isHostCheckout, revParse } from '../step-engine/git-merge.js';
+import {
+  abortMerge,
+  isHostCheckout,
+  revParse,
+  type FixBaseline,
+  type FixBaselineUnavailable,
+} from '../step-engine/git-merge.js';
+import { levelFixersInFlight } from '../step-engine/dag-executor.js';
 import { relocateAndRecordLeftovers } from '../step-engine/merge-resolver.js';
 import { refuseRevive } from './_revive-check.js';
 import { resetStepAndDownstream } from './_step-reset.js';
@@ -3286,8 +3293,10 @@ export async function backfillMissingRunSeq(db: Database): Promise<void> {
 
 /** A cancel runs no step code, so a merge fixer it stopped leaves its merge open and its changes
  *  outside the conflicted files in the tree. Once the sandboxes are gone, each merge the task's
- *  rows record is relocated and aborted wherever it still stands (a worktree the cleanup removed
- *  no longer does), unless it is in a person's checkout. Never throws: the cancel must finish. */
+ *  rows record (a step's, or a DAG level's) is relocated and aborted wherever it still stands (a
+ *  worktree the cleanup removed no longer does), unless it is in a person's checkout. A baseline
+ *  git could not record settles too when it names the merge that stands. Never throws: the cancel
+ *  must finish. */
 export async function settleCancelledMerges(db: Database, taskId: string): Promise<void> {
   const rows = await db
     .select({ id: schema.taskSteps.id, state: schema.taskSteps.mergeResolveState })
@@ -3295,39 +3304,97 @@ export async function settleCancelledMerges(db: Database, taskId: string): Promi
     .where(and(eq(schema.taskSteps.taskId, taskId), isNotNull(schema.taskSteps.mergeResolveState)));
   for (const row of rows) {
     const state = row.state as MergeResolveState | null;
-    const baseline = state?.fixBaseline;
-    if (!state || !baseline || !('tree' in baseline)) continue;
-    const dir = state.mergeDir;
-    if (isHostCheckout(dir)) continue;
-    try {
-      // Both ends, or the same feature merged again onto a base that moved reads as this merge.
-      const mergeHead = await revParse(dir, 'MERGE_HEAD').catch(() => null);
-      const head = await revParse(dir, 'HEAD').catch(() => null);
-      if (mergeHead !== baseline.mergeHead || head !== baseline.head) continue;
-      await relocateAndRecordLeftovers(db, {
-        taskId,
-        stepRowId: row.id,
-        runId: state.fixInvocationId ?? row.id,
-        dir,
-        branch: state.featureBranch,
-        baseline,
+    if (!state) continue;
+    await settleCancelledMerge(db, {
+      taskId,
+      stepRowId: row.id,
+      runId: state.fixInvocationId ?? row.id,
+      dir: state.mergeDir,
+      branch: state.featureBranch,
+      baseBranch: state.baseBranch,
+      baseline: state.fixBaseline,
+      clear: async () => {
+        await db
+          .update(schema.taskSteps)
+          .set({ mergeResolveState: { ...state, fixBaseline: null } })
+          .where(eq(schema.taskSteps.id, row.id));
+      },
+    });
+  }
+  const levels = await levelFixersInFlight(db, taskId).catch((err) => {
+    logger.warn({ err, taskId }, 'cancelled DAG level merges could not be read');
+    return [];
+  });
+  for (const level of levels) {
+    await settleCancelledMerge(db, {
+      taskId,
+      stepRowId: level.stepRowId,
+      runId: level.runId ?? level.levelId,
+      dir: level.dir,
+      branch: level.branch,
+      baseBranch: level.baseBranch,
+      baseline: level.baseline,
+      clear: async () => {
+        await db
+          .update(schema.taskDagLevels)
+          .set({
+            mergeState: { ...(level.mergeState as object), fixBaseline: null },
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.taskDagLevels.id, level.levelId));
+      },
+    });
+  }
+}
+
+type SentBaseline = FixBaseline | FixBaselineUnavailable;
+
+async function settleCancelledMerge(
+  db: Database,
+  at: {
+    taskId: string;
+    stepRowId: string;
+    runId: string;
+    dir: string;
+    branch: string;
+    baseBranch: string;
+    baseline: SentBaseline | null | undefined;
+    clear: () => Promise<void>;
+  },
+): Promise<void> {
+  const { baseline, dir } = at;
+  if (!baseline || typeof baseline.head !== 'string' || typeof baseline.mergeHead !== 'string') {
+    return;
+  }
+  if (isHostCheckout(dir)) return;
+  try {
+    // Both ends, or the same feature merged again onto a base that moved reads as this merge.
+    const mergeHead = await revParse(dir, 'MERGE_HEAD').catch(() => null);
+    const head = await revParse(dir, 'HEAD').catch(() => null);
+    if (mergeHead !== baseline.mergeHead || head !== baseline.head) return;
+    await relocateAndRecordLeftovers(db, {
+      taskId: at.taskId,
+      stepRowId: at.stepRowId,
+      runId: at.runId,
+      dir,
+      branch: at.branch,
+      baseline,
+    });
+    await at.clear();
+    const aborted = await abortMerge(dir);
+    if (!aborted.ok) {
+      await appendEvent(db, at.taskId, at.stepRowId, 'merge.abort_failed', {
+        featureBranch: at.branch,
+        baseBranch: at.baseBranch,
+        blocking: aborted.blocking.slice(0, 20),
+        detail: aborted.detail,
       });
-      await db
-        .update(schema.taskSteps)
-        .set({ mergeResolveState: { ...state, fixBaseline: null } })
-        .where(eq(schema.taskSteps.id, row.id));
-      const aborted = await abortMerge(dir);
-      if (!aborted.ok) {
-        await appendEvent(db, taskId, row.id, 'merge.abort_failed', {
-          featureBranch: state.featureBranch,
-          baseBranch: state.baseBranch,
-          blocking: aborted.blocking.slice(0, 20),
-          detail: aborted.detail,
-        });
-      }
-    } catch (err) {
-      logger.warn({ err, taskId, stepRowId: row.id }, 'cancelled merge could not be settled');
     }
+  } catch (err) {
+    logger.warn(
+      { err, taskId: at.taskId, stepRowId: at.stepRowId },
+      'cancelled merge could not be settled',
+    );
   }
 }
 

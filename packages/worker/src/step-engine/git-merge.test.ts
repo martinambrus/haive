@@ -30,6 +30,7 @@ import {
   unmergedPaths,
 } from './git-merge.js';
 import type { Database } from '@haive/database';
+import { logger } from '@haive/shared/logger';
 import { secretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
 
 const exec = promisify(execFile);
@@ -889,6 +890,22 @@ describe('fixer leftovers (real git)', () => {
     }
   });
 
+  it('names the merge a baseline git could not record was sent into, when git could read it', async () => {
+    const dir = await setupMergeWithOwnWork();
+    try {
+      const baseline = await captureFixBaseline(dir, async () => {
+        throw new Error('mask unavailable');
+      });
+      expect(baseline).toEqual({
+        unavailable: expect.stringContaining('mask unavailable'),
+        head: (await git(dir, ['rev-parse', 'HEAD'])).trim(),
+        mergeHead: (await git(dir, ['rev-parse', 'MERGE_HEAD'])).trim(),
+      });
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
   // git writes what it puts back as this process, where the sandbox user owned what stood there.
   it.runIf(process.getuid?.() === 0)(
     'hands what it puts back, and the directories git recreated, to the owner of the tree',
@@ -1432,6 +1449,25 @@ describe.runIf(process.getuid?.() === 0)('a root merge in a tree the sandbox use
       const rels = ['fdir', 'fdir/sub', 'fdir/sub/y.txt', 'fdir/z.txt'];
       expect(await ownersOf(dir, rels)).toEqual(Object.fromEntries(rels.map((r) => [r, 1000])));
     } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+describe('a root abort that cannot hand back a name', () => {
+  it('warns naming a name that is not UTF-8', async () => {
+    const { dir } = await setupOddNameMerge();
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ names: ['bad\uFFFD.txt'] }),
+        expect.any(String),
+      );
+    } finally {
+      asRoot.mockRestore();
+      warn.mockRestore();
       await rm(dir, REMOVE);
     }
   });

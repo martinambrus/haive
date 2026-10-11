@@ -525,6 +525,72 @@ async function saveMergeState(db: Database, levelId: string, ms: LevelMergeState
     .where(eq(schema.taskDagLevels.id, levelId));
 }
 
+/** A DAG conflict fixer a cancel stopped, with the merge dir it was sent into. */
+export interface LevelFixerInFlight {
+  levelId: string;
+  stepRowId: string;
+  dir: string;
+  baseBranch: string;
+  branch: string;
+  runId: string | null;
+  baseline: NonNullable<LevelMergeState['fixBaseline']>;
+  mergeState: unknown;
+}
+
+/** The levels of `taskId` that still record the tree a conflict fixer was sent into. Empty when the
+ *  task has no integration worktree to name. */
+export async function levelFixersInFlight(
+  db: Database,
+  taskId: string,
+): Promise<LevelFixerInFlight[]> {
+  const levels = await db
+    .select({
+      id: schema.taskDagLevels.id,
+      planId: schema.taskDagPlans.id,
+      stepRowId: schema.taskDagPlans.taskStepId,
+      mergeState: schema.taskDagLevels.mergeState,
+    })
+    .from(schema.taskDagLevels)
+    .innerJoin(schema.taskDagPlans, eq(schema.taskDagPlans.id, schema.taskDagLevels.dagPlanId))
+    .where(and(eq(schema.taskDagPlans.taskId, taskId), isNotNull(schema.taskDagLevels.mergeState)));
+  const live = levels
+    .map((l) => ({ ...l, state: readMergeState({ mergeState: l.mergeState } as DagLevelRow) }))
+    .filter((l) => l.state.fixBaseline);
+  if (live.length === 0) return [];
+  const integration = await loadIntegrationWorktree(db, taskId);
+  const found: LevelFixerInFlight[] = [];
+  for (const l of live) {
+    const [issue] = l.state.activeConflict
+      ? await db
+          .select({ branchName: schema.taskDagIssues.branchName })
+          .from(schema.taskDagIssues)
+          .where(
+            and(
+              eq(schema.taskDagIssues.dagPlanId, l.planId),
+              eq(schema.taskDagIssues.issueKey, l.state.activeConflict),
+            ),
+          )
+      : [];
+    const [run] = l.state.fixInvocationId
+      ? await db
+          .select({ taskStepId: schema.cliInvocations.taskStepId })
+          .from(schema.cliInvocations)
+          .where(eq(schema.cliInvocations.id, l.state.fixInvocationId))
+      : [];
+    found.push({
+      levelId: l.id,
+      stepRowId: run?.taskStepId ?? l.stepRowId,
+      dir: integration.path,
+      baseBranch: integration.branch,
+      branch: issue?.branchName ?? l.state.activeConflict ?? 'the active conflict',
+      runId: l.state.fixInvocationId,
+      baseline: l.state.fixBaseline!,
+      mergeState: l.mergeState,
+    });
+  }
+  return found;
+}
+
 async function clearAiFix(db: Database, stepRowId: string): Promise<void> {
   await db
     .update(schema.taskSteps)

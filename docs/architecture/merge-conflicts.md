@@ -83,7 +83,8 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   cannot rewrite or add to (MEASURED). The paths that differ from the commit before the merge, or
   from `HEAD` before the abort, and the directories above them that root owns, go to the tree's
   owner, one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
-  `merge --abort` refuses stat data that moved. `.haive/`,
+  `merge --abort` refuses stat data that moved. A name that is not UTF-8 stays root's and is logged as a
+  warning. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
   not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
   removed later takes the link with it. A name is judged by its bytes, since a valid one can hold
@@ -114,8 +115,12 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   mounts a local-path repository read-only, so no fixer can write there. A cancel runs no step
   code, so once it has stopped the task's sandboxes it does this itself (`settleCancelledMerges`):
   for each merge the task's rows record with a fixer in flight that still stands, outside a person's
-  checkout, it moves the changes aside and reports them as above, then aborts the merge, an abort
-  that fails being a `merge.abort_failed` event and not a failed cancel. A task's worktree the
+  checkout, a step's (`merge_resolve_state`) or a DAG level's (`task_dag_levels.merge_state`, in the
+  task's integration worktree), it moves the changes aside and reports them as above, then aborts the
+  merge, an abort that fails being a `merge.abort_failed` event and not a failed cancel. A baseline git
+  could not record counts when it names the merge (`head`, `mergeHead`, kept whenever git could read
+  it) and both still match: it is reported as unchecked, then aborted; one naming no merge is left
+  alone, since the merge could be someone else's. A task's worktree the
   cleanup removed takes a fixer's changes with the rest of the task's work; one it kept (shared with
   another live task) is settled like any other tree. A plan merge's scratch worktree waits for the
   next pass or a Save or Pull, as above.
