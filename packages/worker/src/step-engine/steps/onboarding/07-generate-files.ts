@@ -236,6 +236,10 @@ export function projectInfoMarkdown(info: ProjectInfo): string {
 export interface GenerateFilesApply {
   wroteFiles: string[];
   skippedFiles: string[];
+  /** The person's own files this run left untouched, a subset of `skippedFiles`: one that already
+   *  existed where a template would go, and a rules file that is not UTF-8. 12 never stages them.
+   *  Optional: outputs written before this existed must still parse. */
+  leftAsIs?: string[];
   agentCount: number;
   /** Unmanaged agent definitions moved out of the pick list, when the user asked.
    *  Present only when something moved — a step output is what a later reader has,
@@ -725,6 +729,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
 
     const wroteFiles: string[] = [];
     const skippedFiles: string[] = [];
+    const leftAsIs: string[] = [];
     const appendedFiles: string[] = [];
     const quarantinedAgentFiles: { from: string; to: string }[] = [];
     const wroteFileHashes: Record<string, string> = {};
@@ -743,6 +748,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       // the link names. replace-atomic (the default) because every file here is machine-parsed.
       if ((await lstatNoFollow(ctx.repoPath, rel)) !== null && !overwrite) {
         skippedFiles.push(rel);
+        leftAsIs.push(rel);
         return;
       }
       await writeFileNoFollow(ctx.repoPath, rel, contents, { createParents: true });
@@ -754,6 +760,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       if (!isNotUtf8Error(err)) throw err;
       ctx.logger.warn({ rel }, 'left a file that is not valid UTF-8 as it is');
       skippedFiles.push(rel);
+      leftAsIs.push(rel);
       return 'refused' as const;
     };
 
@@ -987,6 +994,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     return {
       wroteFiles: [...wroteFiles, ...appendedFiles],
       skippedFiles,
+      leftAsIs,
       agentCount: agents.length,
       ...(quarantinedAgentFiles.length > 0 ? { quarantinedAgentFiles } : {}),
       // LAST on purpose. `maybeEnqueueStepSummary` hands the step-summary model
