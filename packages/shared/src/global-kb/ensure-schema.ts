@@ -1,6 +1,7 @@
 import type postgres from 'postgres';
 import { logger } from '../logger/index.js';
 import { isPgvectorUnavailable } from '../rag/connection.js';
+import { IDENTIFIER_TSV_SENTINEL, identifierTsvSql } from '../rag/identifiers.js';
 import type { GlobalKbConnection } from './connection.js';
 import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
 
@@ -39,6 +40,9 @@ const RETIRED_FACET_INDEX_DIMENSIONS = [
 // one lock, with a check or a drop in the same transaction as the write that depends on it: tied to
 // the backend that holds the lock, and short, so a table lock is held no longer than its own step.
 const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';
+
+const IDENTIFIER_BACKFILL_BATCH = 2_000;
+const IDENTIFIER_BACKFILL_MAX_ROWS = 40_000;
 
 /** Idempotent schema creation for the global KB store (both the source-of-truth
  *  `global_kb_entries` and the global `ai_rag_embeddings` vector table), run on
@@ -239,12 +243,15 @@ export async function ensureGlobalKbSchema(
     await exec(`DROP INDEX IF EXISTS idx_global_rag_facets_${dim.toLowerCase()}`);
   }
 
-  // tsvector auto-update trigger (mirror ensureRagSchema; distinct trigger name
-  // since this is a different database).
+  // tsvector auto-update trigger (mirror ensureRagSchema; distinct trigger name since this is a
+  // different database). The identifier lexemes and sentinel are why snake_case names match whole;
+  // see docs/architecture/identifier-search.md.
   await exec(`
     CREATE OR REPLACE FUNCTION update_content_tsv() RETURNS trigger AS $$
     BEGIN
-      NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''));
+      NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''))
+        || ${identifierTsvSql("COALESCE(NEW.content, '')")}
+        || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}']);
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql
@@ -263,6 +270,32 @@ export async function ensureGlobalKbSchema(
         FOR EACH ROW EXECUTE FUNCTION update_content_tsv()
     `);
   });
+
+  // Rows stamped before the function emitted identifier lexemes lack the sentinel; `SET content =
+  // content` fires the trigger, which stamps it. A stale lexical index is a degraded search, so a
+  // failure warns and never fails the first use of the global KB.
+  try {
+    let total = 0;
+    while (total < IDENTIFIER_BACKFILL_MAX_ROWS) {
+      const result = await step((tx) =>
+        tx.unsafe(
+          `UPDATE ${VECTORS_TABLE} SET content = content
+             WHERE id IN (
+               SELECT id FROM ${VECTORS_TABLE}
+               WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)
+               LIMIT $2
+             )`,
+          [IDENTIFIER_TSV_SENTINEL, IDENTIFIER_BACKFILL_BATCH],
+        ),
+      );
+      const rows = result.count ?? 0;
+      total += rows;
+      if (rows < IDENTIFIER_BACKFILL_BATCH) break;
+    }
+    if (total > 0) log.info({ rows: total }, 'backfilled identifier lexemes into content_tsv');
+  } catch (err) {
+    log.warn({ err }, 'identifier tsv backfill failed; lexical identifier search may be stale');
+  }
 
   // Facet values are stored LOWERCASE, because retrieval compares them two ways and only one
   // can be lenient: `facetsMatchProject` lowercases in JS while `buildFacetClause` uses jsonb
