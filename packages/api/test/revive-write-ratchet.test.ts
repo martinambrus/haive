@@ -341,6 +341,15 @@ function isDeclarationName(n: ts.Identifier): boolean {
   );
 }
 
+function isExported(fn: ts.FunctionLikeDeclaration): boolean {
+  const exported = (n: ts.Node) =>
+    ts.canHaveModifiers(n) &&
+    (ts.getModifiers(n) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+  if (ts.isFunctionDeclaration(fn)) return exported(fn);
+  const decl = fn.parent;
+  return ts.isVariableDeclaration(decl) && exported(decl.parent.parent);
+}
+
 function nameOf(fn: ts.FunctionLikeDeclaration): string | null {
   if (ts.isFunctionDeclaration(fn) && fn.name) return fn.name.text;
   const parent = fn.parent;
@@ -391,7 +400,8 @@ function guarded(
   if (reassigns(scope, task) || redeclares(scope, task)) return false;
   if (dominated(node, scope, tx, task)) return true;
   const name = nameOf(scope);
-  if (!name || depth > 3) return false;
+  // Calls are read in this file only, by name: an export or a second binding of the name hides some.
+  if (!name || depth > 3 || isExported(scope) || bindingsOf(sf, name) !== 1) return false;
   const indexOf = (n: string) =>
     scope.parameters.findIndex((p) => ts.isIdentifier(p.name) && p.name.text === n);
   const follow = (n: string, c: ts.CallExpression): string | null => {
@@ -827,6 +837,8 @@ function reexportsTasks(decl: ts.ExportDeclaration): boolean {
 
 // A write that puts a task row back to a live status revives it, so it must run the revival's
 // exclusion on its own path, unless it only starts a task that was never live.
+// It reads code written in good faith: a write disguised on purpose (a split SQL keyword, a fake
+// database handle) is review's to catch, since closing every such form takes an interpreter.
 describe('a live-status write on a task row', () => {
   it(`calls ${GUARD} on its own path, or moves only a created task`, () => {
     const writes = sources(SRC).flatMap((f) =>
@@ -1070,6 +1082,20 @@ describe('a live-status write on a task row', () => {
       liveWrites('x.ts', `async function f(db, id) { ${body} }`).map((w) => w.covered);
     expect(covered(`await db.update(schema.tasks).set!({ status: 'running' });`)).toEqual([false]);
     expect(covered(`await (db.update(schema.tasks).set)({ status: 'running' });`)).toEqual([false]);
+  });
+
+  it('covers a named write helper only when its calls are all in sight', () => {
+    const write = `await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`;
+    const shadowed = `async function revive(tx, id) { ${write} }
+      async function route(tx, id) {
+        function revive(...args) {}
+        await ${GUARD}(tx, id);
+        await revive(tx, id);
+      }`;
+    expect(liveWrites('x.ts', shadowed).map((w) => w.covered)).toEqual([false]);
+    const exported = `export async function revive(tx, id) { ${write} }
+      async function route(tx, id) { await ${GUARD}(tx, id); await revive(tx, id); }`;
+    expect(liveWrites('x.ts', exported).map((w) => w.covered)).toEqual([false]);
   });
 
   it('does not let a call site rebind what a helper captures', () => {
