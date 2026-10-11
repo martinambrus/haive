@@ -18,6 +18,7 @@ import {
   normalizeCliArgsArray,
   secretsService,
   setCliProviderSecretRequestSchema,
+  splitSecretLikeEnv,
   updateCliProviderRequestSchema,
   type CliPackageVersionsEntry,
   type CliProbeJobPayload,
@@ -395,34 +396,41 @@ cliProviderRoutes.post('/', async (c) => {
     body.name,
     body.cliVersion?.trim() || null,
   );
-  const inserted = await db
-    .insert(schema.cliProviders)
-    .values({
-      userId,
-      name: body.name,
-      label: body.label,
-      executablePath: body.executablePath?.trim() || null,
-      wrapperPath: body.wrapperPath?.trim() || null,
-      wrapperContent: body.wrapperContent?.length ? body.wrapperContent : null,
-      envVars: body.envVars ?? null,
-      cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
-      supportsSubagents: meta.supportsSubagents,
-      networkPolicy: body.networkPolicy ?? { mode: 'full', domains: [], ips: [] },
-      egressDomains: body.egressDomains ?? [],
-      authMode: body.authMode,
-      cliVersion: resolvedVersion,
-      effortLevel: resolveEffortLevelForSave(body.name, body.effortLevel ?? null),
-      model: body.model?.trim() || null,
-      modelfile: body.modelfile?.trim() || null,
-      sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
-        ? body.sandboxDockerfileExtra
-        : null,
-      enabled: body.enabled ?? true,
-      isolateAuth: body.isolateAuth ?? false,
-      disableThinking: body.disableThinking ?? false,
-      rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
-    })
-    .returning();
+  const split = body.envVars ? splitSecretLikeEnv(body.envVars) : null;
+  const inserted = await db.transaction(async (tx) => {
+    const rows = await tx
+      .insert(schema.cliProviders)
+      .values({
+        userId,
+        name: body.name,
+        label: body.label,
+        executablePath: body.executablePath?.trim() || null,
+        wrapperPath: body.wrapperPath?.trim() || null,
+        wrapperContent: body.wrapperContent?.length ? body.wrapperContent : null,
+        envVars: split?.envVars ?? null,
+        cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
+        supportsSubagents: meta.supportsSubagents,
+        networkPolicy: body.networkPolicy ?? { mode: 'full', domains: [], ips: [] },
+        egressDomains: body.egressDomains ?? [],
+        authMode: body.authMode,
+        cliVersion: resolvedVersion,
+        effortLevel: resolveEffortLevelForSave(body.name, body.effortLevel ?? null),
+        model: body.model?.trim() || null,
+        modelfile: body.modelfile?.trim() || null,
+        sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
+          ? body.sandboxDockerfileExtra
+          : null,
+        enabled: body.enabled ?? true,
+        isolateAuth: body.isolateAuth ?? false,
+        disableThinking: body.disableThinking ?? false,
+        rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
+      })
+      .returning();
+    for (const [name, value] of Object.entries(split?.secrets ?? {})) {
+      await upsertProviderSecretValue(tx, rows[0]!.id, name, value);
+    }
+    return rows;
+  });
 
   const created = inserted[0]!;
   await enqueueBuildForProvider(created.id, userId);
@@ -474,7 +482,8 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.wrapperContent !== undefined) {
     updates.wrapperContent = body.wrapperContent.length ? body.wrapperContent : null;
   }
-  if (body.envVars !== undefined) updates.envVars = body.envVars;
+  const split = body.envVars !== undefined ? splitSecretLikeEnv(body.envVars) : null;
+  if (split) updates.envVars = split.envVars;
   if (body.cliArgs !== undefined) updates.cliArgs = normalizeCliArgsArray(body.cliArgs);
   if (body.authMode !== undefined) updates.authMode = body.authMode;
   if (body.networkPolicy !== undefined) updates.networkPolicy = body.networkPolicy;
@@ -520,11 +529,17 @@ cliProviderRoutes.patch('/:id', async (c) => {
   // themselves are written by the worker from observed failures, never by the client.
   if (body.clearModelLimits) updates.modelLimits = null;
 
-  const updated = await db
-    .update(schema.cliProviders)
-    .set(updates)
-    .where(eq(schema.cliProviders.id, id))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    const rows = await tx
+      .update(schema.cliProviders)
+      .set(updates)
+      .where(eq(schema.cliProviders.id, id))
+      .returning();
+    for (const [name, value] of Object.entries(split?.secrets ?? {})) {
+      await upsertProviderSecretValue(tx, id, name, value);
+    }
+    return rows;
+  });
   const updatedRow = updated[0]!;
 
   const provisioningModel =
@@ -714,48 +729,57 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
 
   const newLabel = await nextAvailableCloneLabel(db, userId, source.label);
 
-  const inserted = await db
-    .insert(schema.cliProviders)
-    .values({
-      userId: source.userId,
-      name: source.name,
-      label: newLabel,
-      executablePath: source.executablePath,
-      wrapperPath: source.wrapperPath,
-      wrapperContent: source.wrapperContent,
-      envVars: source.envVars,
-      cliArgs: source.cliArgs,
-      supportsSubagents: source.supportsSubagents,
-      networkPolicy: source.networkPolicy,
-      egressDomains: source.egressDomains,
-      authMode: source.authMode,
-      cliVersion: source.cliVersion,
-      effortLevel: source.effortLevel,
-      model: source.model,
-      modelfile: source.modelfile,
-      sandboxDockerfileExtra: source.sandboxDockerfileExtra,
-      enabled: source.enabled,
-      isolateAuth: source.isolateAuth,
-      disableThinking: source.disableThinking,
-      rulesContent: source.rulesContent,
-    })
-    .returning();
-  const created = inserted[0]!;
+  // A source saved before the split still holds secret-looking keys in envVars; the clone does not.
+  const split = splitSecretLikeEnv(source.envVars ?? {});
+  const created = await db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(schema.cliProviders)
+      .values({
+        userId: source.userId,
+        name: source.name,
+        label: newLabel,
+        executablePath: source.executablePath,
+        wrapperPath: source.wrapperPath,
+        wrapperContent: source.wrapperContent,
+        envVars: source.envVars ? split.envVars : null,
+        cliArgs: source.cliArgs,
+        supportsSubagents: source.supportsSubagents,
+        networkPolicy: source.networkPolicy,
+        egressDomains: source.egressDomains,
+        authMode: source.authMode,
+        cliVersion: source.cliVersion,
+        effortLevel: source.effortLevel,
+        model: source.model,
+        modelfile: source.modelfile,
+        sandboxDockerfileExtra: source.sandboxDockerfileExtra,
+        enabled: source.enabled,
+        isolateAuth: source.isolateAuth,
+        disableThinking: source.disableThinking,
+        rulesContent: source.rulesContent,
+      })
+      .returning();
+    const row = inserted[0]!;
 
-  const sourceSecrets = await db.query.cliProviderSecrets.findMany({
-    where: eq(schema.cliProviderSecrets.providerId, source.id),
+    const sourceSecrets = await tx.query.cliProviderSecrets.findMany({
+      where: eq(schema.cliProviderSecrets.providerId, source.id),
+    });
+    if (sourceSecrets.length > 0) {
+      await tx.insert(schema.cliProviderSecrets).values(
+        sourceSecrets.map((s) => ({
+          providerId: row.id,
+          secretName: s.secretName,
+          encryptedValue: s.encryptedValue,
+          encryptedDek: s.encryptedDek,
+          fingerprint: s.fingerprint,
+        })),
+      );
+    }
+    const copied = new Set(sourceSecrets.map((s) => s.secretName));
+    for (const [name, value] of Object.entries(split.secrets)) {
+      if (!copied.has(name)) await upsertProviderSecretValue(tx, row.id, name, value);
+    }
+    return row;
   });
-  if (sourceSecrets.length > 0) {
-    await db.insert(schema.cliProviderSecrets).values(
-      sourceSecrets.map((s) => ({
-        providerId: created.id,
-        secretName: s.secretName,
-        encryptedValue: s.encryptedValue,
-        encryptedDek: s.encryptedDek,
-        fingerprint: s.fingerprint,
-      })),
-    );
-  }
 
   await enqueueBuildForProvider(created.id, userId);
   const provisioningModel = shouldProvisionOllamaModel(created);
@@ -866,7 +890,7 @@ function usageAuthStateKey(userId: string, providerId: string): string {
 }
 
 async function upsertProviderSecretValue(
-  db: Database,
+  db: Pick<Database, 'insert'>,
   providerId: string,
   secretName: string,
   value: string,

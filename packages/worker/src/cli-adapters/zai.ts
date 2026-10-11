@@ -93,6 +93,7 @@ export class ZaiAdapter extends BaseCliAdapter {
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
+      secretTokenAlias: 'Z_AI_API_KEY',
       // Only when the prompt was too large for argv; steering delivers it as a
       // stdin user-message and leaves this unset.
       ...(invocation.stdinPrompt ? { stdinPrompt: invocation.stdinPrompt } : {}),

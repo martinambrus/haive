@@ -6,6 +6,7 @@ import {
   DEFAULT_AGENT_RULES,
   IN_STACK_OLLAMA_URL,
   IN_STACK_OLLAMA_HOSTS,
+  splitSecretLikeEnv,
 } from '@haive/shared/constants';
 import {
   api,
@@ -128,26 +129,6 @@ function parseCliArgs(text: string): string[] {
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
-}
-
-// Env-var names that look like secrets — auto-routed to the encrypted Secrets
-// store instead of plaintext provider env vars (guards against pasting a key in
-// the wrong box).
-const SECRETISH_ENV_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL/i;
-
-/** Partition parsed env vars into plaintext env vars and secret-like ones (by
- *  name), so the caller can store the latter encrypted rather than as plaintext. */
-function splitSecretishEnv(env: Record<string, string>): {
-  envVars: Record<string, string>;
-  secrets: Record<string, string>;
-} {
-  const envVars: Record<string, string> = {};
-  const secrets: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) {
-    if (SECRETISH_ENV_NAME.test(k)) secrets[k] = v;
-    else envVars[k] = v;
-  }
-  return { envVars, secrets };
 }
 
 function statesEqual(a: FormState, b: FormState): boolean {
@@ -495,7 +476,7 @@ export function CliProviderForm({
       ips: snapshot.networkMode === 'allowlist' ? parseLinesList(snapshot.networkIpsText) : [],
     };
 
-    const { envVars: cleanEnvVars, secrets: movedSecrets } = splitSecretishEnv(
+    const { envVars: cleanEnvVars, secrets: movedSecrets } = splitSecretLikeEnv(
       parseEnvVars(snapshot.envVarsText),
     );
     const payload = {
@@ -595,7 +576,7 @@ export function CliProviderForm({
           ips: state.networkMode === 'allowlist' ? parseLinesList(state.networkIpsText) : [],
         };
 
-        const { envVars: cleanEnvVars, secrets: movedSecrets } = splitSecretishEnv(
+        const { envVars: cleanEnvVars, secrets: movedSecrets } = splitSecretLikeEnv(
           parseEnvVars(state.envVarsText),
         );
         const payload = {

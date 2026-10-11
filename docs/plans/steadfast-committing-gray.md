@@ -481,10 +481,14 @@ exactly as before.*
 - **Call `runDestructiveDataMigrations(db)` at Phase 5**, after the health gate has passed and the
   upgrade is committed. It was exported by Slice 1 (`packages/worker/src/data-migrations.ts`) and is
   deliberately called by NOTHING until this slice — it reads as dead code in the meantime, so do not
-  delete it. Today it holds one entry, `dropHeadingOnlyGlobalKbChunks`, whose raw
+  delete it. Today it holds two entries. `dropHeadingOnlyGlobalKbChunks`'s raw
   `DELETE FROM ai_rag_embeddings` runs against the global KB store: a separate database, outside any
   core-DB transaction and outside the Phase 2 snapshot. Running it before the gate is precisely the
   case that makes a Phase 4 rollback restore old images onto data the new version already destroyed.
+  `dropCopiedSecretLikeProviderEnv` stores any secret-looking `envVars` key the boot half
+  (`copySecretLikeProviderEnv`) has not yet encrypted, then removes the plain copy, failing the commit
+  if a provider cannot be done; the release before reads only `envVars`, so a rollback must still
+  find it there.
 - Verify: the end-to-end matrix below, plus — a rollback at Phase 4 leaves the destructive set
   UNRUN, and a successful upgrade runs it exactly once.
 

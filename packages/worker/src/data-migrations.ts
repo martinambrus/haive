@@ -29,6 +29,10 @@ import { holdImportedMcpServers } from './sandbox/mcp-config.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
 import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-ops.js';
 import { recomputeSyncedApplicableSets } from './project-state/sync.js';
+import {
+  copySecretLikeProviderEnv,
+  dropCopiedSecretLikeProviderEnv,
+} from './secrets/move-secret-env.js';
 
 const log = logger.child({ module: 'data-migrations' });
 
@@ -107,10 +111,18 @@ const DATA_MIGRATIONS: DataMigration[] = [
   // `coverage: 'none'`), which is what makes the selection shrink to nothing.
   { id: 'backfillToolUsage', kind: 'convergent', run: backfillToolUsageAtBoot },
   { id: 'recomputeSyncedApplicableSets', kind: 'convergent', run: recomputeSyncedApplicableSets },
-  // The only one. It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
+  { id: 'copySecretLikeProviderEnv', kind: 'convergent', run: copySecretLikeProviderEnv },
+  // It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
   // Nothing can undo it.
   { id: 'dropHeadingOnlyGlobalKbChunks', kind: 'destructive', run: dropHeadingOnlyGlobalKbChunks },
+  // Removes the plain envVars copy of a secret the boot half copied: the previous release reads only
+  // envVars, so this waits until the upgrade is kept.
+  {
+    id: 'dropCopiedSecretLikeProviderEnv',
+    kind: 'destructive',
+    run: dropCopiedSecretLikeProviderEnv,
+  },
 ];
 
 /** Run one, and never let it take the process down with it.
@@ -155,10 +167,19 @@ export async function runDataMigrations(db: Database): Promise<void> {
  * what invokes it at its Phase 5.
  */
 export async function runDestructiveDataMigrations(db: Database): Promise<void> {
+  const failed: string[] = [];
   for (const migration of DATA_MIGRATIONS.filter((m) => m.kind === 'destructive')) {
     log.info({ migration: migration.id }, 'running destructive data migration');
-    await runOne(db, migration);
+    try {
+      await migration.run(db);
+    } catch (err) {
+      failed.push(migration.id);
+      log.error({ err, migration: migration.id }, 'destructive data migration failed');
+    }
   }
+  // Boot never retries these, so a failure must reach the updater's commit phase.
+  if (failed.length > 0)
+    throw new Error(`destructive data migrations failed: ${failed.join(', ')}`);
 }
 
 /** Finalize step-summary invocations whose row exists but whose job never reached BullMQ.
