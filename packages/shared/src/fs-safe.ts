@@ -1663,7 +1663,6 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
       let left = SWEEP_MAX_TEMPS;
       for (const name of await readdir(fdPath(dir.fh.fd))) {
         if (!name.startsWith(prefix) || !TEMP_SUFFIX.test(name.slice(prefix.length))) continue;
-        if (left-- === 0) break;
         // Held until its removal is done, so its inode cannot be reused by a replacement.
         const fh = await open(at(dir.fh.fd, name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK).catch(
           () => null,
@@ -1672,6 +1671,7 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
         try {
           const st = await fh.stat({ bigint: true });
           if (st.isFile() && Date.now() - Number(st.mtimeMs) > STALE_TEMP_MS) {
+            if (left-- === 0) break;
             await removeFileIfIdentityNoFollow(anchor, [...dirSegs, name].join('/'), {
               dev: st.dev,
               ino: st.ino,
