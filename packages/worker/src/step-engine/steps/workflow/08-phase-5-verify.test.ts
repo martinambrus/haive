@@ -81,8 +81,26 @@ describe('buildVerifyCommand', () => {
     expect(buildVerifyCommand({ runner: 'pm', pm: 'pnpm', script: 'test' }, true)).toEqual({
       kind: 'ddev',
       label: 'ddev exec pnpm run test',
-      argv: ['exec', 'pnpm', 'run', 'test'],
+      argv: [
+        'exec',
+        'sh',
+        '-c',
+        `'command -v "\\$1" >/dev/null 2>&1 || exit 199; exec "\\$@"'`,
+        'sh',
+        'pnpm',
+        'run',
+        'test',
+      ],
     });
+    expect(buildVerifyCommand({ runner: 'pm', pm: 'yarn', script: 'test' }, true)!.argv).toContain(
+      'yarn',
+    );
+    expect(buildVerifyCommand({ runner: 'pm', pm: 'npm', script: 'test' }, true)!.argv).toEqual([
+      'exec',
+      'npm',
+      'run',
+      'test',
+    ]);
   });
 
   it('returns null for pm runner without a package manager or script', () => {
@@ -626,6 +644,45 @@ describe('phase5VerifyStep.apply', () => {
         ddevExec,
         'a slot exec went through a handle no ensure returned',
       ).not.toHaveBeenCalled();
+    });
+
+    describe('a pnpm or yarn script on DDEV', () => {
+      const pmSlot = (pm: 'pnpm' | 'yarn' | 'npm') =>
+        buildVerifyCommand({ runner: 'pm', pm, script: 'test' }, true)!;
+
+      it.each(['pnpm', 'yarn'] as const)(
+        'guards %s and reports a missing binary as not run',
+        async (pm) => {
+          ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+            args.includes('curl')
+              ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+              : { exitCode: 199, output: '' },
+          );
+
+          const out = await runApply({ test: pmSlot(pm) }, { runTest: true });
+
+          expect(out.test).toMatchObject({
+            ran: false,
+            passed: false,
+            note: `${pm} is not available in the DDEV web container (set corepack_enable: true in .ddev/config.yaml)`,
+          });
+          expect(slotExecs()[0]![1]).toMatch(/^exec sh -c '.*exit 199.*' sh \w+ run test$/);
+          expect(slotExecs()[0]![1]).toContain(` sh ${pm} run test`);
+        },
+      );
+
+      it('leaves npm unguarded and a real failure a failure', async () => {
+        expect(pmSlot('npm').argv).toEqual(['exec', 'npm', 'run', 'test']);
+        ddevExec.mockImplementation(async (_handle: unknown, args: string) =>
+          args.includes('curl')
+            ? { exitCode: 0, output: 'HTTP/1.1 200 OK\r\n\r\nok\nHAIVE_HTTP_CODE=200' }
+            : { exitCode: 1, output: 'tests failed' },
+        );
+
+        const out = await runApply({ test: pmSlot('pnpm') }, { runTest: true });
+
+        expect(out.test).toMatchObject({ ran: true, passed: false });
+      });
     });
 
     // A suite its environment stopped did run as selected; "not selected" would say otherwise.

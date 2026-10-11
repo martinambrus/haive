@@ -22,6 +22,7 @@ import {
   type DdevRunnerHandle,
 } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
+import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { ensureAppServing, withDdevProgress, type ServingRuntime } from './_app-runtime.js';
 import {
   ensureDdevPlaywrightBrowsers,
@@ -175,6 +176,14 @@ export function buildUnverifiedNote(
   return parts.join('\n\n');
 }
 
+/** Exit of the guard below; DDEV ships npm but pnpm and yarn only with `corepack_enable: true`. */
+const PM_MISSING_EXIT = 199;
+
+/** `ddev exec` re-parses its words in the container, so `$` is escaped once more than quotes. */
+const DDEV_PM_GUARD = shellQuote(
+  `command -v "\\$1" >/dev/null 2>&1 || exit ${PM_MISSING_EXIT}; exec "\\$@"`,
+);
+
 /**
  * Build the command for a verify slot from the detected runner. Pure (no IO) so
  * it is unit-testable. Every runner goes through DDEV when `ddevMode`, else
@@ -191,7 +200,10 @@ export function buildVerifyCommand(
         return {
           kind: 'ddev',
           label: `ddev exec ${spec.pm} run ${spec.script}`,
-          argv: ['exec', spec.pm, 'run', spec.script],
+          argv:
+            spec.pm === 'npm'
+              ? ['exec', spec.pm, 'run', spec.script]
+              : ['exec', 'sh', '-c', DDEV_PM_GUARD, 'sh', spec.pm, 'run', spec.script],
         };
       return {
         kind: 'host',
@@ -327,6 +339,7 @@ async function resolveSlots(
 
 interface SlotRun {
   ran: boolean;
+  note?: string;
   exitCode: number;
   output: string;
   /** The whole output, for a classifier; never stored. */
@@ -366,6 +379,11 @@ async function execSlot(
         }),
       { initialLine: cmd.argv.join(' ') },
     );
+    const guardAt = cmd.argv.indexOf(DDEV_PM_GUARD);
+    if (guardAt >= 0 && res.exitCode === PM_MISSING_EXIT) {
+      const note = `${cmd.argv[guardAt + 2]} is not available in the DDEV web container (set corepack_enable: true in .ddev/config.yaml)`;
+      return { ran: false, note, exitCode: res.exitCode, output: note, raw: res.output };
+    }
     return {
       ran: true,
       exitCode: res.exitCode,
@@ -407,7 +425,7 @@ async function runSlotRaw(
     passed: run.ran && run.exitCode === 0,
     command: cmd.label,
     output: run.output,
-    ...(run.ran ? {} : { note: `DDEV runner unavailable — ${slot} not run` }),
+    ...(run.ran ? {} : { note: run.note ?? `DDEV runner unavailable — ${slot} not run` }),
   };
   return { check, raw: run.raw };
 }
