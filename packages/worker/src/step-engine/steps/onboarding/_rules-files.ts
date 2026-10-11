@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   buildCliRulesBlock,
@@ -22,6 +22,7 @@ import {
   importRulesFiles,
   importRulesFilesFor,
   isLinkToAgentsMd,
+  readUpgradeFile,
   RTK_BLOCK_FILES,
   RULES_FILE_READ_CAP,
   RULES_IMPORT_LINE,
@@ -207,7 +208,7 @@ export async function stripRtkBlocks(
 }
 
 export type RtkBlockRestore =
-  | { outcome: 'restored' }
+  | { outcome: 'restored'; held: string; left: string }
   | { outcome: 'standing' }
   | { outcome: 'absent' }
   | { outcome: 'kept'; reason: string };
@@ -226,6 +227,8 @@ export async function restoreRtkBlocks(
   let notUtf8 = false;
   let standing: string | null = null;
   let rewrote = false;
+  let heldText = '';
+  let leftText = '';
   let result;
   try {
     result = await rewriteFileIfNoFollow(
@@ -243,11 +246,14 @@ export async function restoreRtkBlocks(
           return null;
         }
         rewrote = true;
+        heldText = text;
         if (leftHash !== null && sha256Hex(normalizeContent(text)) === leftHash) {
-          return Buffer.from(before, 'utf8');
+          leftText = before;
+        } else {
+          const sep = text.length === 0 || text.endsWith('\n') ? '' : '\n';
+          leftText = `${text}${sep}${blocks}`;
         }
-        const sep = text.length === 0 || text.endsWith('\n') ? '' : '\n';
-        return Buffer.from(`${text}${sep}${blocks}`, 'utf8');
+        return Buffer.from(leftText, 'utf8');
       },
       { maxBytes: RULES_FILE_READ_CAP },
     );
@@ -260,11 +266,148 @@ export async function restoreRtkBlocks(
     };
   }
   if (result === 'absent') return { outcome: 'absent' };
-  if (result === 'rewritten') return { outcome: 'restored' };
+  if (result === 'rewritten') return { outcome: 'restored', held: heldText, left: leftText };
   if (standing === null) return { outcome: 'kept', reason: rtkRefusal(notUtf8) };
   return standing === blocks
     ? { outcome: 'standing' }
     : { outcome: 'kept', reason: 'it holds another RTK block now' };
+}
+
+/** The template id and kind 02 records an RTK block put back under, beside `RTK_BLOCK_RECORD`. */
+export const RTK_BLOCK_RESTORE_RECORD = 'rtk-block-restore';
+
+/** The one file 07 writes the RTK block into, and so the only one an upgrade offers it back to. */
+export const RTK_BLOCK_HOME = 'AGENTS.md';
+
+/** `[RTK_BLOCK_HOME]` when Haive's own newest record for it is a strip (a restore after it settles
+ *  the question) and the file reads as text with no RTK block standing, else none. */
+export async function restorableRtkBlockFiles(
+  db: Database,
+  repoPath: string,
+  repositoryId: string,
+): Promise<string[]> {
+  const [newest] = await db
+    .select({ templateKind: schema.onboardingArtifacts.templateKind })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+        eq(schema.onboardingArtifacts.diskPath, RTK_BLOCK_HOME),
+        inArray(schema.onboardingArtifacts.templateKind, [
+          RTK_BLOCK_RECORD,
+          RTK_BLOCK_RESTORE_RECORD,
+        ]),
+      ),
+    )
+    .orderBy(desc(schema.onboardingArtifacts.generatedAt))
+    .limit(1);
+  if (newest?.templateKind !== RTK_BLOCK_RECORD) return [];
+  const read = await readUpgradeFile(repoPath, RTK_BLOCK_HOME);
+  return read.kind === 'text' && !read.text.includes(RTK_REF_MARKER_START) ? [RTK_BLOCK_HOME] : [];
+}
+
+export interface RtkBlockPutBackOutcome {
+  result: 'appended' | 'standing' | 'absent' | 'refused';
+  error?: string;
+}
+
+/** Append `block` to `file` the way 07 appends one, only while no RTK block stands in it. `record`
+ *  runs before the file changes, with what it held and what the append leaves, and a throw there
+ *  leaves the file as it was. A refusal or an I/O error is returned and never thrown. */
+export async function appendRtkBlock(
+  repoPath: string,
+  file: string,
+  block: string,
+  record: (before: string, after: string) => Promise<void>,
+): Promise<RtkBlockPutBackOutcome> {
+  let notUtf8 = false;
+  let standing = false;
+  try {
+    const result = await rewriteFileIfNoFollow(
+      repoPath,
+      file,
+      async (data) => {
+        const before = data.toString('utf8');
+        if (!Buffer.from(before, 'utf8').equals(data)) {
+          notUtf8 = true;
+          return null;
+        }
+        if (before.includes(RTK_REF_MARKER_START)) {
+          standing = true;
+          return null;
+        }
+        const sep = before.length === 0 || before.endsWith('\n') ? '' : '\n';
+        const after = `${before}${sep}${block}`;
+        await record(before, after);
+        return Buffer.from(after, 'utf8');
+      },
+      { maxBytes: RULES_FILE_READ_CAP },
+    );
+    if (result === 'rewritten') return { result: 'appended' };
+    if (result === 'absent') return { result: 'absent' };
+    if (standing) return { result: 'standing' };
+    return { result: 'refused', error: rtkRefusal(notUtf8) };
+  } catch (err) {
+    return { result: 'refused', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export type RtkBlockTakenOut =
+  | { outcome: 'removed'; held: string; left: string }
+  | { outcome: 'already' }
+  | { outcome: 'absent' }
+  | { outcome: 'kept'; reason: string };
+
+/** Take back out the block a restore put in: write `before` back, only while the file still holds
+ *  what the restore left (`leftHash`). A file that already holds `before` is an earlier attempt of
+ *  the same rollback, and anything else is the person's and stays. */
+export async function takeOutRestoredRtkBlock(
+  repoPath: string,
+  file: string,
+  before: string,
+  leftHash: string,
+): Promise<RtkBlockTakenOut> {
+  const beforeHash = sha256Hex(normalizeContent(before));
+  let notUtf8 = false;
+  let already = false;
+  let changed = false;
+  let held = '';
+  let result;
+  try {
+    result = await rewriteFileIfNoFollow(
+      repoPath,
+      file,
+      (data) => {
+        const text = data.toString('utf8');
+        if (!Buffer.from(text, 'utf8').equals(data)) {
+          notUtf8 = true;
+          return null;
+        }
+        const hash = sha256Hex(normalizeContent(text));
+        if (hash === leftHash) {
+          held = text;
+          return Buffer.from(before, 'utf8');
+        }
+        if (hash === beforeHash) already = true;
+        else changed = true;
+        return null;
+      },
+      { maxBytes: RULES_FILE_READ_CAP },
+    );
+  } catch (err) {
+    if (!(err instanceof ParkedFileError)) throw err;
+    return {
+      outcome: 'kept',
+      reason: `it was saved while the rollback judged it, and what stood there is at ${err.parkedAt}`,
+    };
+  }
+  if (result === 'absent') return { outcome: 'absent' };
+  if (result === 'rewritten') return { outcome: 'removed', held, left: before };
+  if (already) return { outcome: 'already' };
+  return {
+    outcome: 'kept',
+    reason: changed ? 'it was changed after the upgrade' : rtkRefusal(notUtf8),
+  };
 }
 
 /** Which of `files` lacks the import where an upgrade can add it, as upgrade-status counts them: a

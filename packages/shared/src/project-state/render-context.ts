@@ -40,6 +40,12 @@ export function rtkLeftoversToRemove(choiceRecorded: boolean, rtkEnabled: boolea
   return choiceRecorded && !rtkEnabled;
 }
 
+/** The RTK block is offered back only where the render context recorded an RTK choice and the
+ *  switch is on: the mirror image of `rtkLeftoversToRemove`. */
+export function rtkBlockToRestore(choiceRecorded: boolean, rtkEnabled: boolean): boolean {
+  return choiceRecorded && rtkEnabled;
+}
+
 /** The render unit of a context: its five portable fields, and nothing else it holds. The values
  *  pass through as they are; the codec refuses a render unit that is not valid. */
 export function portableRender(context: { [K in keyof ProjectRender]: unknown }): ProjectRender {

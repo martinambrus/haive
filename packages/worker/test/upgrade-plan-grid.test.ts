@@ -364,7 +364,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
     }
   });
 
-  it('adds no field to its detect output', async () => {
+  it('keeps its detect output to the fields it persists', async () => {
     const detected = await contextOf({
       rows: 'recorded',
       history: 'none',
@@ -381,6 +381,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
       'renderCtxSnapshot',
       'repositoryId',
       'rtkBlockLeftovers',
+      'rtkBlockRestorable',
       'rtkFollowsLive',
     ]);
   });

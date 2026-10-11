@@ -12,7 +12,7 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
-import { rtkLeftoversToRemove } from '@haive/shared/project-state';
+import { rtkBlockToRestore, rtkLeftoversToRemove } from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandManifestFor,
@@ -35,6 +35,7 @@ import {
   loadCliRulesRenderHashes,
   missingRulesImportStubs,
   readAgentsRulesRegion,
+  restorableRtkBlockFiles,
 } from '../onboarding/_rules-files.js';
 import { computeLineDelta } from './_diff.js';
 
@@ -106,6 +107,9 @@ export interface UpgradePlanDetect {
   /** Rules files holding the RTK block of a repository that switched RTK off, which 02 takes it
    *  out of. Optional: persisted plans predate it. */
   rtkBlockLeftovers?: string[];
+  /** Rules files an earlier upgrade took the RTK block out of, which 02 offers to put back now
+   *  that RTK is on again. Optional: persisted plans predate it. */
+  rtkBlockRestorable?: string[];
 }
 
 export interface UpgradePlanOutput extends UpgradePlanDetect {
@@ -386,6 +390,11 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const rtkBlockLeftovers = rtkLeftoversToRemove(resolved.rtkLive, renderCtx.rtkEnabled)
       ? await rtkBlockFiles(ctx.repoPath)
       : [];
+    const rtkBlockRestorable =
+      rtkBlockToRestore(resolved.rtkLive, renderCtx.rtkEnabled) &&
+      renderCtx.enabledCliProviders.length > 0
+        ? await restorableRtkBlockFiles(ctx.db, ctx.repoPath, repositoryId)
+        : [];
 
     return {
       repositoryId,
@@ -398,6 +407,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       rtkFollowsLive: resolved.rtkLive,
       missingRulesImports,
       rtkBlockLeftovers,
+      rtkBlockRestorable,
     };
   },
 
