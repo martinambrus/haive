@@ -134,6 +134,16 @@ afterEach(async () => {
 const storedHashes = () => [...rows.values()].map((r) => r.hash);
 
 describe('onboarding populate with an embedding endpoint configured', () => {
+  it('attempts to embed when the probe failed, and under strict mode fails the step', async () => {
+    mocks.embedFails = true;
+    await expect(populate(detected({ ollamaReachable: false }))).rejects.toBeInstanceOf(
+      RagEmbedFailureError,
+    );
+    expect(mocks.ollamaEmbed).toHaveBeenCalled();
+    expect(rows.size).toBe(0);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
   it('hashes and passes when no endpoint is configured, with real hashes and no degradation', async () => {
     const result = await populate(
       detected({ ollamaUrl: null, embeddingModel: null, ollamaReachable: false }),

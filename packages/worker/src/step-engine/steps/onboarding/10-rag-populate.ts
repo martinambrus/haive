@@ -590,7 +590,9 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     ];
     if (!detected.ollamaReachable) {
       statusParts.push(
-        'WARNING: Ollama not reachable. Will use deterministic hash embeddings as fallback.',
+        detected.ollamaUrl && detected.embeddingModel
+          ? 'WARNING: Ollama did not answer the probe. Embedding is still attempted: with strict embedding on a failure stops this step, with it off the chunks get hash vectors that the next sync re-embeds.'
+          : 'WARNING: No embedding endpoint is configured. Will use deterministic hash embeddings.',
       );
     }
 
@@ -723,8 +725,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         sync = { existing: await loadExistingChunkHashes(conn, repositoryId!), seen: new Set() };
       }
 
-      const useOllama =
-        detected.ollamaReachable && !!detected.ollamaUrl && !!detected.embeddingModel;
+      const useOllama = !!detected.ollamaUrl && !!detected.embeddingModel;
 
       // Warm the embedding model ONCE before the per-file loop. A cold model (esp.
       // a multi-billion-parameter embedding model on CPU) can take longer to load
