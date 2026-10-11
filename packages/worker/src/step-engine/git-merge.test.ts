@@ -1463,6 +1463,33 @@ describe.runIf(process.getuid?.() === 0)('a root merge whose hand-back a crash c
       await rm(dir, REMOVE);
     }
   });
+  it('hands back what the earlier merge brought in when the ref moved on since', async () => {
+    const dir = await setupSandboxOwnedMerge();
+    try {
+      await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+      await git(dir, ['commit', '-qam', 'revert main edit']);
+      await git(dir, ['checkout', '-q', 'feature/x']);
+      await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+      await git(dir, ['commit', '-qam', 'revert feature edit']);
+      await git(dir, ['checkout', '-q', 'main']);
+      await exec('chown', ['-R', '1000:1000', dir]);
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await git(dir, ['checkout', '-q', 'feature/x']);
+      await writeFile(path.join(dir, 'later.txt'), 'later\n', 'utf8');
+      await git(dir, ['add', 'later.txt']);
+      await git(dir, ['commit', '-qm', 'later']);
+      await git(dir, ['checkout', '-q', 'main']);
+      expect((await lstat(path.join(dir, 'fdir', 'z.txt'))).uid).toBe(0);
+
+      expect(await openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).toEqual({
+        kind: 'merged',
+      });
+      const rels = ['fdir', 'fdir/sub', 'fdir/sub/y.txt', 'fdir/z.txt', 'later.txt'];
+      expect(await ownersOf(dir, rels)).toEqual(Object.fromEntries(rels.map((r) => [r, 1000])));
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
 });
 
 describe('a root abort that cannot hand back a name', () => {
