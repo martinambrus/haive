@@ -35,6 +35,7 @@ const MINE = 'MY OWN EDIT\n';
 const NEW = 'NEW RENDER\n';
 const OLD_REGION = `${CLI_RULES_START}\nOLD RULES\n${CLI_RULES_END}`;
 const NEW_REGION = `${CLI_RULES_START}\nNEW RULES\n${CLI_RULES_END}`;
+const MY_REGION = `${CLI_RULES_START}\nMY OWN RULES\n${CLI_RULES_END}`;
 const hashOf = (text: string) => sha256Hex(normalizeContent(text));
 
 const dirs: string[] = [];
@@ -66,7 +67,10 @@ function entry(partial: Partial<UpgradePlanEntry> & Pick<UpgradePlanEntry, 'disk
 /** A repository onboarded with OLD at two paths (one edited since), a third deleted since, and the
  *  rules region, and an upgrade that writes NEW over them and creates a file that was not there.
  *  Without `region`, AGENTS.md holds no rules region and no row records one. */
-async function setup({ region = true }: { region?: boolean } = {}) {
+async function setup({
+  region = true,
+  regionEdited = false,
+}: { region?: boolean; regionEdited?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-retry-'));
   const outside = await mkdtemp(join(tmpdir(), 'upgrade-apply-retry-out-'));
   dirs.push(root, outside);
@@ -75,7 +79,7 @@ async function setup({ region = true }: { region?: boolean } = {}) {
   await writeFile(join(root, CLEAN), OLD, 'utf8');
   await writeFile(
     join(root, 'AGENTS.md'),
-    region ? `# Notes\n\n${OLD_REGION}\n` : '# Notes\n',
+    region ? `# Notes\n\n${regionEdited ? MY_REGION : OLD_REGION}\n` : '# Notes\n',
     'utf8',
   );
   const fake = createFakeDb({
@@ -144,8 +148,9 @@ async function setup({ region = true }: { region?: boolean } = {}) {
       ? entry({
           ...rulesEntry,
           liveArtifactId: rulesRow,
-          currentContent: OLD_REGION,
-          currentHash: hashOf(OLD_REGION),
+          ...(regionEdited ? { bucket: 'conflict' as const } : {}),
+          currentContent: regionEdited ? MY_REGION : OLD_REGION,
+          currentHash: hashOf(regionEdited ? MY_REGION : OLD_REGION),
           baselineWrittenHash: hashOf(OLD_REGION),
           baselineTemplateContentHash: hashOf(OLD_REGION),
         })
@@ -174,10 +179,10 @@ async function setup({ region = true }: { region?: boolean } = {}) {
     selectedNew: region ? [`e:${CREATED}`] : [`e:${CREATED}`, 'e:AGENTS.md'],
     selectedReinstate: [`e:${REINSTATED}`],
   };
-  const conflictField = upgradeApplyStep.form!({} as StepContext, plan)?.fields.find(
-    (f) => 'label' in f && f.label === `Conflict: ${EDITED}`,
-  );
-  formValues[(conflictField as { id: string }).id] = 'apply_theirs';
+  const conflictFields = (upgradeApplyStep.form!({} as StepContext, plan)?.fields ?? []).filter(
+    (f) => 'label' in f && String(f.label).startsWith('Conflict: '),
+  ) as { id: string }[];
+  for (const f of conflictFields) formValues[f.id] = 'apply_theirs';
   const noop = () => undefined;
   const ctx = {
     db: fake.db,
@@ -196,7 +201,10 @@ async function setup({ region = true }: { region?: boolean } = {}) {
     });
   const byId = (ids: readonly string[]) =>
     fake.rows(schema.onboardingArtifacts).filter((r) => ids.includes(r.id as string));
-  return { root, outside, fake, apply, byId, reinstatedRow };
+  const answerConflicts = (choice: string) => {
+    for (const f of conflictFields) formValues[f.id] = choice;
+  };
+  return { root, outside, fake, apply, byId, reinstatedRow, editedRow, rulesRow, answerConflicts };
 }
 
 type Setup = Awaited<ReturnType<typeof setup>>;
@@ -274,6 +282,36 @@ describe('an upgrade apply retried after it failed part-way', () => {
       fileCreated: false,
       retiredRowId: null,
     });
+  });
+
+  // A Retry clears the form, so the conflict can be answered the other way the second time.
+  it("puts the person's bytes back when a retry keeps what a failed attempt overwrote", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+
+    s.answerConflicts('keep_ours');
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
+    expect(s.byId([s.editedRow])[0]).toMatchObject({
+      writtenContent: MINE,
+      lastObservedDiskHash: hashOf(MINE),
+    });
+  });
+
+  it("puts the person's rules region back when a retry keeps what a failed attempt overwrote", async () => {
+    const s = await setup({ regionEdited: true });
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('NEW RULES');
+
+    s.answerConflicts('keep_ours');
+    await s.apply();
+
+    expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toBe(`# Notes\n\n${MY_REGION}\n`);
+    expect(s.byId([s.rulesRow!])[0]?.lastObservedDiskHash).toBe(hashOf(MY_REGION));
   });
 
   it('never names a row something else retired meanwhile as the one it replaced', async () => {

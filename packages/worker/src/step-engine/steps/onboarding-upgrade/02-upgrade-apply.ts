@@ -1093,6 +1093,37 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           continue;
         }
         if (kept === null || !entry.currentTemplateContentHash || !entry.newContentHash) continue;
+        // A failed attempt answered Overwrite here and recorded what stood before writing: the
+        // bytes this Keep means are those, so they go back while the path still holds that write.
+        const earlier = earlierRecords.get(key);
+        if (
+          rel !== null &&
+          earlier?.lastObservedDiskHash &&
+          earlier.writtenContent !== null &&
+          entry.newContent &&
+          kept.hash === sha256Hex(normalizeContent(entry.newContent))
+        ) {
+          const restore = earlier.writtenContent;
+          try {
+            if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
+              const read = await readUpgradeFile(ctx.repoPath, rel);
+              if (read.kind !== 'text') throw new Error('the file changed while it was read');
+              await writeFileNoFollow(
+                ctx.repoPath,
+                rel,
+                upsertRegion(read.text, restore, CLI_RULES_START, CLI_RULES_END),
+              );
+            } else {
+              await writeFileNoFollow(ctx.repoPath, rel, restore);
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
+            continue;
+          }
+          writtenPaths.push(rel);
+          kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
+        }
         if (entry.liveArtifactId) {
           keptInPlace.push({
             id: entry.liveArtifactId,
