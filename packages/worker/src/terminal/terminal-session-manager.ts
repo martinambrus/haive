@@ -53,8 +53,8 @@ interface SessionState {
   inChannel: string;
   ctlChannel: string;
   outChannel: string;
-  /** Set on every session of a container whose tmux session a restart kills. */
-  restarting?: boolean;
+  /** When this session's attach began, before its exec, to tell whether a restart ended it. */
+  attachedAt: number;
 }
 
 export interface TerminalSessionManagerOptions {
@@ -84,6 +84,9 @@ export class TerminalSessionManager {
     gates: { hasRepo: boolean },
   ) => Promise<McpServerSpec[]>;
   private readonly sessions = new Map<string, SessionState>();
+  /** When a restart last killed the tmux session of each container. Set before the kill, since a
+   *  client can end before the kill returns, so any session attached until then is counted. */
+  private readonly restartedAt = new Map<string, number>();
   /** Per-(user,task,provider) in-flight ensureShellContainer call. Two
    *  near-simultaneous opens (React StrictMode double-mount, or two browser
    *  tabs racing) would otherwise both call createContainer and one would
@@ -178,10 +181,10 @@ export class TerminalSessionManager {
           log.warn({ sid, scope: session.scope }, 'restart_shell refused');
           return;
         }
-        for (const s of this.sessions.values()) {
-          if (s.containerName === session.containerName) s.restarting = true;
-        }
-        await this.runInContainer(session.containerName, [
+        const container = session.containerName;
+        const before = this.restartedAt.get(container);
+        this.restartedAt.set(container, Date.now());
+        const killed = await this.runInContainer(container, [
           'tmux',
           'kill-session',
           '-t',
@@ -190,8 +193,16 @@ export class TerminalSessionManager {
           .then((r) => {
             if (r.exitCode !== 0)
               log.warn({ sid, exitCode: r.exitCode }, 'tmux kill-session failed');
+            return r.exitCode === 0;
           })
-          .catch((err) => log.warn({ err, sid }, 'tmux kill-session failed'));
+          .catch((err) => {
+            log.warn({ err, sid }, 'tmux kill-session failed');
+            return false;
+          });
+        if (!killed) {
+          if (before === undefined) this.restartedAt.delete(container);
+          else this.restartedAt.set(container, before);
+        }
       }
     }
   }
@@ -396,6 +407,7 @@ export class TerminalSessionManager {
     // absolute host path under the repos volume that exists in no container, so git there fails
     // whatever is mounted. Falls back to the repo root when there's no worktree (skipped
     // 01-worktree-setup). Repo-scope shells stay at the repo root.
+    const attachedAt = Date.now();
     const ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
       Cmd: tmuxCommand,
       AttachStdin: true,
@@ -423,6 +435,7 @@ export class TerminalSessionManager {
       providerId,
       containerName: ensured.containerName,
       shell: ensured.shell,
+      attachedAt,
       ptyHandle,
       ptyStream,
       inChannel,
@@ -437,7 +450,8 @@ export class TerminalSessionManager {
       void this.redis.publish(outChannel, chunk.toString('utf8'));
     });
     ptyStream.on('end', () => {
-      const exit = session.restarting ? { type: 'exit', reason: 'restart' } : { type: 'exit' };
+      const restarted = (this.restartedAt.get(session.containerName) ?? -1) >= session.attachedAt;
+      const exit = restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' };
       void this.redis.publish(outChannel, JSON.stringify(exit)).catch(() => undefined);
       void this.teardownSession(session, 'pty-end').catch(() => undefined);
     });

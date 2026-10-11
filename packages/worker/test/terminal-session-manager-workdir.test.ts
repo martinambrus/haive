@@ -34,12 +34,15 @@ interface Harness {
   sendCtl: (sessionId: string, frame: unknown) => Promise<void>;
   attaches: PassThrough[];
   published: () => string[];
+  /** Each entry holds back the start of the next attach until it resolves. */
+  attachGates: Promise<void>[];
 }
 
 /** `probe` is what `tmux display-message` prints, or null for a non-zero exit (no session). */
 function harness(probe: string | null, killExit = 0): Harness {
   const execs: ExecCall[] = [];
   const attaches: PassThrough[] = [];
+  const attachGates: Promise<void>[] = [];
   const docker = {
     getContainer: (container: string) => ({
       exec: async (opts: { Cmd: string[]; WorkingDir?: string }) => {
@@ -48,6 +51,7 @@ function harness(probe: string | null, killExit = 0): Harness {
         const isProbe = opts.Cmd[1] === 'display-message';
         return {
           start: async () => {
+            if (isAttach && attachGates.length > 0) await attachGates.shift();
             const stream = new PassThrough();
             if (isAttach) attaches.push(stream);
             if (!isAttach) {
@@ -106,6 +110,7 @@ function harness(probe: string | null, killExit = 0): Harness {
     mgr,
     execs,
     attaches,
+    attachGates,
     published: () => redis.publish.mock.calls.map((c) => (c as unknown[])[1] as string),
     openTask: (userId = 'user-1') =>
       priv.openSession({
@@ -212,6 +217,56 @@ describe('restart shell', () => {
     expect(exits).toEqual([
       JSON.stringify({ type: 'exit', reason: 'restart' }),
       JSON.stringify({ type: 'exit', reason: 'restart' }),
+    ]);
+  });
+
+  it('tells a shell whose attach was still in flight during the restart', async () => {
+    const h = harness(ROOT);
+    const first = await h.openTask();
+    if (!first.ok) throw new Error('open failed');
+    let release!: () => void;
+    h.attachGates.push(new Promise<void>((r) => (release = r)));
+    const pending = h.openTask();
+    await vi.waitFor(() =>
+      expect(h.execs.filter((e) => e.cmd[1] === 'new-session')).toHaveLength(2),
+    );
+    await h.sendCtl(first.sessionId, { type: 'restart_shell', userId: 'user-1' });
+    release();
+    if (!(await pending).ok) throw new Error('open failed');
+    for (const a of h.attaches) a.end();
+    await new Promise((r) => setImmediate(r));
+    expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toEqual([
+      JSON.stringify({ type: 'exit', reason: 'restart' }),
+      JSON.stringify({ type: 'exit', reason: 'restart' }),
+    ]);
+  });
+
+  it('does not tell a shell attached after the restart', async () => {
+    const h = harness(ROOT);
+    const first = await h.openTask();
+    if (!first.ok) throw new Error('open failed');
+    await h.sendCtl(first.sessionId, { type: 'restart_shell', userId: 'user-1' });
+    h.attaches[0]!.end();
+    await new Promise((r) => setTimeout(r, 5));
+    const later = await h.openTask();
+    if (!later.ok) throw new Error('open failed');
+    h.attaches[1]!.end();
+    await new Promise((r) => setImmediate(r));
+    expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toEqual([
+      JSON.stringify({ type: 'exit', reason: 'restart' }),
+      JSON.stringify({ type: 'exit' }),
+    ]);
+  });
+
+  it('does not blame a later exit on a restart whose kill failed', async () => {
+    const h = harness(ROOT, 1);
+    const reply = await h.openTask();
+    if (!reply.ok) throw new Error('open failed');
+    await h.sendCtl(reply.sessionId, { type: 'restart_shell', userId: 'user-1' });
+    h.attaches[0]!.end();
+    await new Promise((r) => setImmediate(r));
+    expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toEqual([
+      JSON.stringify({ type: 'exit' }),
     ]);
   });
 
