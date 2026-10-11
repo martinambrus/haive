@@ -16,7 +16,9 @@ function sources(dir: string): string[] {
   });
 }
 
-/** The literal status a `.update(schema.tasks).set({ status })` chain writes, if any. */
+/** The status a `.update(schema.tasks).set(...)` chain writes: its literal, `UNKNOWN` when the value
+ *  or the object is computed and may carry one, or null when it writes no status. */
+const UNKNOWN = '<computed>';
 function writtenStatus(call: ts.CallExpression): string | null {
   const callee = call.expression;
   if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'set') return null;
@@ -29,14 +31,17 @@ function writtenStatus(call: ts.CallExpression): string | null {
     ) {
       if (inner.arguments[0]?.getText() !== 'schema.tasks') return null;
       const arg = call.arguments[0];
-      if (!arg || !ts.isObjectLiteralExpression(arg)) return null;
+      if (!arg) return null;
+      if (ts.isIdentifier(arg)) return objectMayCarryStatus(call, arg.text) ? UNKNOWN : null;
+      if (!ts.isObjectLiteralExpression(arg)) return UNKNOWN;
       for (const p of arg.properties) {
-        if (
-          ts.isPropertyAssignment(p) &&
-          p.name.getText() === 'status' &&
-          ts.isStringLiteralLike(p.initializer)
-        ) {
-          return p.initializer.text;
+        if (ts.isSpreadAssignment(p)) {
+          if (!ts.isIdentifier(p.expression)) return UNKNOWN;
+          if (objectMayCarryStatus(call, p.expression.text)) return UNKNOWN;
+        } else if (p.name?.getText() === 'status') {
+          return ts.isPropertyAssignment(p) && ts.isStringLiteralLike(p.initializer)
+            ? p.initializer.text
+            : UNKNOWN;
         }
       }
       return null;
@@ -44,6 +49,38 @@ function writtenStatus(call: ts.CallExpression): string | null {
     inner = inner.expression;
   }
   return null;
+}
+
+/** Whether the object a name holds gains a `status` in the function around the write. */
+function objectMayCarryStatus(at: ts.Node, name: string): boolean {
+  const fn = enclosingFunction(at);
+  if (!fn) return true;
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isPropertyAccessExpression(n) &&
+      n.name.text === 'status' &&
+      n.expression.getText() === name &&
+      ts.isBinaryExpression(n.parent) &&
+      n.parent.left === n
+    ) {
+      found = true;
+    }
+    if (
+      ts.isVariableDeclaration(n) &&
+      n.name.getText() === name &&
+      n.initializer &&
+      (!ts.isObjectLiteralExpression(n.initializer) ||
+        n.initializer.properties.some(
+          (p) => p.name?.getText() === 'status' || ts.isSpreadAssignment(p),
+        ))
+    ) {
+      found = true;
+    }
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(fn);
+  return found;
 }
 
 /** Whether the `.where(...)` after this `.set(...)` holds only a created task: the created equality
@@ -92,22 +129,31 @@ function nameOf(fn: ts.FunctionLikeDeclaration): string | null {
   return null;
 }
 
-function callsGuard(scope: ts.Node): boolean {
-  let found = false;
-  const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n) && n.expression.getText() === GUARD) found = true;
-    if (!found) ts.forEachChild(n, visit);
-  };
-  visit(scope);
-  return found;
+function isGuardStatement(st: ts.Statement): boolean {
+  if (!ts.isExpressionStatement(st)) return false;
+  let e: ts.Expression = st.expression;
+  if (ts.isAwaitExpression(e)) e = e.expression;
+  return ts.isCallExpression(e) && e.expression.getText() === GUARD;
 }
 
-/** Guarded on its own path: its scope calls the guard, or its scope is a named function every
- *  caller of which is guarded in turn. */
+/** Whether a guard call runs on every path to the node: it is a statement earlier in one of the
+ *  blocks that hold the node, within the node's scope. */
+function dominated(node: ts.Node, scope: ts.Node): boolean {
+  for (let child: ts.Node = node, n = node.parent; n && child !== scope; child = n, n = n.parent) {
+    if (ts.isBlock(n) || ts.isSourceFile(n)) {
+      const i = n.statements.indexOf(child as ts.Statement);
+      if (i > 0 && n.statements.slice(0, i).some(isGuardStatement)) return true;
+    }
+  }
+  return false;
+}
+
+/** Guarded on its own path: the guard dominates it within its scope, or its scope is a named
+ *  function every call of which is guarded in turn. */
 function guarded(sf: ts.SourceFile, node: ts.Node, depth = 0): boolean {
   const scope = scopeOf(node);
   if (!scope) return false;
-  if (callsGuard(scope)) return true;
+  if (dominated(node, scope)) return true;
   const name = nameOf(scope);
   if (!name || depth > 3) return false;
   const calls: ts.Node[] = [];
@@ -176,6 +222,44 @@ describe('a live-status write on a task row', () => {
       ),
     ).toBe(true);
     expect(covered(`await db.transaction(async (tx) => { await requeue(tx); });`)).toBe(false);
+  });
+
+  it('does not count a guard on another branch of the same transaction', () => {
+    const src = `async function route() {
+      await db.transaction(async (tx) => {
+        if (allowed) await ${GUARD}(tx, id);
+        else await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      });
+    }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('does not count a guard in a nested closure nobody calls', () => {
+    const src = `async function route() {
+      await db.transaction(async (tx) => {
+        const unused = async () => { await ${GUARD}(tx, id); };
+        await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      });
+    }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('checks a computed status or a patch that gains one', () => {
+    const write = (body: string) =>
+      liveWrites('x.ts', `async function f(next) { ${body} }`).map((w) => w.status);
+    expect(
+      write(`await db.update(schema.tasks).set({ status: next }).where(eq(schema.tasks.id, id));`),
+    ).toEqual(['<computed>']);
+    expect(
+      write(
+        `const patch = {}; patch.status = next; await db.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));`,
+      ),
+    ).toEqual(['<computed>']);
+    expect(
+      write(
+        `const patch = {}; patch.title = 't'; await db.update(schema.tasks).set({ ...patch, updatedAt: now }).where(eq(schema.tasks.id, id));`,
+      ),
+    ).toEqual([]);
   });
 
   it('exempts only a predicate that holds a created task alone', () => {
