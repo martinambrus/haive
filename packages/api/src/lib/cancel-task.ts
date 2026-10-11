@@ -216,6 +216,7 @@ export async function collectInternalRagProjectNamesForRepo(
 export async function enqueueRepoRagCleanupJob(payload: RepoRagCleanupPayload): Promise<void> {
   if (payload.projectNames.length === 0) return;
   await getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RAG, payload, {
+    ...(payload.cleanupId ? { jobId: `repo-cleanup-${payload.cleanupId}-0` } : {}),
     removeOnComplete: 50,
     removeOnFail: 50,
     attempts: 3,
@@ -230,6 +231,7 @@ export async function enqueueRepoResourceCleanupJob(
   payload: RepoResourceCleanupPayload,
 ): Promise<void> {
   await getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES, payload, {
+    ...(payload.cleanupId ? { jobId: `repo-cleanup-${payload.cleanupId}-0` } : {}),
     removeOnComplete: 50,
     removeOnFail: 50,
   });

@@ -40,6 +40,7 @@ function setup(rootClaimedAt: Date | null) {
     repositories: schema.repositories,
     tasks: schema.tasks,
     envTemplates: schema.envTemplates,
+    repoCleanups: schema.repoCleanups,
   });
   fake.insert(schema.repositories, {
     id: REPO,

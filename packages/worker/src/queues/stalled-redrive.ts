@@ -15,10 +15,16 @@ import {
   type SQLWrapper,
 } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger, TASK_JOB_NAMES } from '@haive/shared';
+import {
+  logger,
+  TASK_JOB_NAMES,
+  type RepoRagCleanupPayload,
+  type RepoResourceCleanupPayload,
+} from '@haive/shared';
 import {
   enqueueAdvance,
   enqueueCancel,
+  enqueueRepoCleanup,
   enqueueStart,
   finishFailedStep,
   getTaskQueue,
@@ -490,6 +496,85 @@ export async function redriveCancelledTasks(
   return redriven;
 }
 
+export interface RepoCleanupDeps {
+  enqueueRepoCleanup: (
+    kind: 'rag' | 'resources',
+    payload: RepoRagCleanupPayload | RepoResourceCleanupPayload,
+    jobId: string,
+  ) => Promise<void>;
+}
+
+export const defaultRepoCleanupDeps: RepoCleanupDeps = { enqueueRepoCleanup };
+
+export const REPO_CLEANUP_STALE_MS = 10 * 60 * 1000;
+/** A cleanup still standing after this many re-queues is dropped rather than looped on forever. */
+export const REPO_CLEANUP_MAX_ATTEMPTS = 5;
+export const REPO_CLEANUP_BATCH = 50;
+
+/** Queues again each `repo_cleanups` row whose job was never recorded as queued or was queued
+ *  before the cutoff: the worker deletes a row when its job succeeds, so a standing one is a
+ *  cleanup the api never queued or one that keeps failing. The attempt is counted before the job
+ *  exists, and its id carries the count, so two sweeps cannot queue one attempt twice. */
+export async function redriveRepoCleanups(
+  db: Database,
+  deps: RepoCleanupDeps = defaultRepoCleanupDeps,
+  opts: { staleMs: number } = { staleMs: REPO_CLEANUP_STALE_MS },
+): Promise<number> {
+  const cutoff = new Date(Date.now() - opts.staleMs);
+  const rows = await db
+    .select()
+    .from(schema.repoCleanups)
+    // A row the api has not stamped yet counts from its creation, so the sweep leaves the api's
+    // own enqueue its turn instead of racing it.
+    .where(
+      or(
+        and(isNull(schema.repoCleanups.lastEnqueuedAt), lt(schema.repoCleanups.createdAt, cutoff)),
+        lt(schema.repoCleanups.lastEnqueuedAt, cutoff),
+      ),
+    )
+    .orderBy(asc(schema.repoCleanups.createdAt))
+    .limit(REPO_CLEANUP_BATCH);
+
+  let queued = 0;
+  for (const row of rows) {
+    try {
+      const unchanged = and(
+        eq(schema.repoCleanups.id, row.id),
+        eq(schema.repoCleanups.attempts, row.attempts),
+      );
+      if (row.attempts >= REPO_CLEANUP_MAX_ATTEMPTS) {
+        await db.delete(schema.repoCleanups).where(unchanged);
+        log.warn(
+          { cleanupId: row.id, repositoryId: row.repositoryId, kind: row.kind },
+          'repo cleanup dropped after repeated attempts; what it would have removed is left behind',
+        );
+        continue;
+      }
+      const attempt = row.attempts + 1;
+      const claimed = await db
+        .update(schema.repoCleanups)
+        .set({ attempts: attempt, lastEnqueuedAt: new Date() })
+        .where(unchanged)
+        .returning({ id: schema.repoCleanups.id });
+      if (claimed.length === 0) continue;
+      const kind = row.kind === 'rag' ? 'rag' : 'resources';
+      await deps.enqueueRepoCleanup(
+        kind,
+        {
+          ...(row.payload as RepoRagCleanupPayload | RepoResourceCleanupPayload),
+          cleanupId: row.id,
+        },
+        `repo-cleanup-${row.id}-${attempt}`,
+      );
+      queued++;
+      log.info({ cleanupId: row.id, kind, attempt }, 'queued the cleanup of a deleted repository');
+    } catch (err) {
+      log.error({ err, cleanupId: row.id }, 'repo cleanup could not be queued');
+    }
+  }
+  return queued;
+}
+
 export interface StalledTaskSweeperOptions {
   db: Database;
   intervalMs?: number;
@@ -540,6 +625,7 @@ export class StalledTaskSweeper {
   async sweep(): Promise<{ redriven: number }> {
     let redriven = await redriveStalledTasks(this.db, defaultDeps, { staleMs: this.staleMs });
     redriven += await redriveCancelledTasks(this.db, defaultCancelDeps, { staleMs: this.staleMs });
+    redriven += await redriveRepoCleanups(this.db);
     return { redriven };
   }
 }

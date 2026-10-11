@@ -9,6 +9,7 @@ import {
   isNotNull,
   isNull,
   like,
+  lt,
   ne,
   notInArray,
   or,
@@ -102,6 +103,8 @@ describe('the fake database', () => {
 
     expect(match(gt(t.sizeBytes, 1))).toEqual(['b.md']);
     expect(match(gt(t.sizeBytes, 0))).toEqual(['a.md', 'b.md']);
+    expect(match(lt(t.sizeBytes, 5))).toEqual(['a.md']);
+    expect(match(lt(t.description, 'z'))).toEqual(['b.md']);
     expect(match(ne(t.filename, 'a.md'))).toEqual(['b.md']);
     expect(match(ne(t.description, 'other'))).toEqual(['b.md']);
     expect(match(notInArray(t.filename, ['b.md', 'c.md']))).toEqual(['a.md']);

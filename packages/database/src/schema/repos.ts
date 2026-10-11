@@ -9,9 +9,10 @@ import {
   jsonb,
   timestamp,
   index,
+  check,
   pgEnum,
 } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import { users } from './auth.js';
 import { tasks } from './tasks.js';
 import { envTemplates } from './env.js';
@@ -345,6 +346,27 @@ export const repoCredentials = pgTable(
   (table) => [
     index('repo_credentials_user_id_idx').on(table.userId),
     index('repo_credentials_host_idx').on(table.host),
+  ],
+);
+
+/** Outbox for the cleanup a deleted repository leaves behind. The row is written in the delete's
+ *  own transaction, so a lost enqueue still leaves the record; the worker deletes it once the job
+ *  has run, and a sweep re-enqueues the ones that stay. No foreign key: the repository row is gone. */
+export const repoCleanups = pgTable(
+  'repo_cleanups',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull(),
+    repositoryId: uuid('repository_id').notNull(),
+    kind: text('kind').notNull(),
+    payload: jsonb('payload').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    lastEnqueuedAt: timestamp('last_enqueued_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check('repo_cleanups_kind_check', sql`${table.kind} in ('rag', 'resources')`),
+    index('repo_cleanups_created_at_idx').on(table.createdAt),
   ],
 );
 

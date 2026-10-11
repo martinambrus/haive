@@ -344,6 +344,8 @@ export interface RepoRagCleanupPayload {
   repositoryId: string;
   userId: string;
   projectNames: string[];
+  /** The `repo_cleanups` row to delete once the job has run. */
+  cleanupId?: string;
 }
 
 /** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES`. Tears down what a deleted
@@ -362,6 +364,8 @@ export interface RepoResourceCleanupPayload {
   envTemplateIds: string[];
   envImageTags?: Record<string, string>;
   storagePath: string | null;
+  /** The `repo_cleanups` row to delete once the job has run. */
+  cleanupId?: string;
 }
 
 export const CLI_EXEC_JOB_NAMES = {

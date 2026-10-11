@@ -83,4 +83,50 @@ describe('repository resource cleanup', () => {
     expect(h.removed).toEqual(['haive-env:current']);
     expect(fake.rows(schema.envTemplates)).toHaveLength(0);
   });
+
+  describe('its repo_cleanups row', () => {
+    const ROW = '00000000-0000-4000-8000-0000000000e1';
+    const OTHER = '00000000-0000-4000-8000-0000000000e2';
+
+    function withRows() {
+      const fake = createFakeDb({
+        tasks: schema.tasks,
+        envTemplates: schema.envTemplates,
+        repoCleanups: schema.repoCleanups,
+      });
+      for (const id of [ROW, OTHER]) {
+        fake.insert(schema.repoCleanups, {
+          id,
+          userId: '00000000-0000-4000-8000-0000000000a1',
+          repositoryId: '00000000-0000-4000-8000-0000000000b1',
+          kind: 'resources',
+          payload: {},
+        });
+      }
+      h.db = fake.db;
+      return fake;
+    }
+
+    it('is deleted once the cleanup has run, and only that row', async () => {
+      const fake = withRows();
+      await cleanup({ taskIds: [], envTemplateIds: [], cleanupId: ROW });
+      expect(fake.rows(schema.repoCleanups).map((r) => r.id)).toEqual([OTHER]);
+    });
+
+    it('is kept when the cleanup throws', async () => {
+      const fake = withRows();
+      h.killRepoIde.mockRejectedValue(new Error('x'));
+      h.del.mockImplementation(() => {
+        throw new Error('redis gone');
+      });
+      await expect(cleanup({ taskIds: [], envTemplateIds: [], cleanupId: ROW })).rejects.toThrow();
+      expect(fake.rows(schema.repoCleanups)).toHaveLength(2);
+    });
+
+    it('is not needed by a payload queued before the table existed', async () => {
+      const fake = withRows();
+      await cleanup({ taskIds: [], envTemplateIds: [] });
+      expect(fake.rows(schema.repoCleanups)).toHaveLength(2);
+    });
+  });
 });

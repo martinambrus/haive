@@ -74,7 +74,7 @@ import {
   trimGlobSlashes,
   tagManagedKnowledgeNodes,
 } from '@haive/shared/knowledge-paths';
-import { logger } from '@haive/shared';
+import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -2852,6 +2852,27 @@ async function runOnboardingArtifactReset(
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 }
 
+/** Queues a cleanup its `repo_cleanups` row already records. A queue that refuses leaves the row
+ *  for the worker's sweep, so the delete that committed still answers 200. */
+async function queueRepoCleanup<P extends { cleanupId?: string }>(
+  db: ReturnType<typeof getDb>,
+  payload: P,
+  enqueue: (payload: P) => Promise<void>,
+): Promise<void> {
+  try {
+    await enqueue(payload);
+    await db
+      .update(schema.repoCleanups)
+      .set({ lastEnqueuedAt: new Date() })
+      .where(eq(schema.repoCleanups.id, payload.cleanupId!));
+  } catch (err) {
+    logger.warn(
+      { err, cleanupId: payload.cleanupId },
+      'repo delete: cleanup not queued; the sweep will retry',
+    );
+  }
+}
+
 repoRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -2869,6 +2890,8 @@ repoRoutes.delete('/:id', async (c) => {
   let capturedTasks: { id: string; envTemplateId: string | null }[] = [];
   let envTemplateIds: string[] = [];
   let envImageTags: Record<string, string> = {};
+  let ragCleanup: RepoRagCleanupPayload | null = null;
+  let resourceCleanup: RepoResourceCleanupPayload | null = null;
 
   await db.transaction(async (tx) => {
     // Locked, so a clone or a reset that has not claimed the root yet claims it only after this
@@ -2932,6 +2955,36 @@ repoRoutes.delete('/:id', async (c) => {
     await tx
       .delete(schema.repositories)
       .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
+
+    // Recorded with the delete: a crash before the jobs below are queued must not lose them.
+    const ragPayload: RepoRagCleanupPayload = {
+      repositoryId: id,
+      userId,
+      projectNames: internalRagProjectNames,
+    };
+    const resourcePayload: RepoResourceCleanupPayload = {
+      userId,
+      repositoryId: id,
+      taskIds: capturedTasks.map((t) => t.id),
+      envTemplateIds,
+      envImageTags,
+      storagePath,
+    };
+    const rows = await tx
+      .insert(schema.repoCleanups)
+      .values([
+        ...(ragPayload.projectNames.length > 0
+          ? [{ userId, repositoryId: id, kind: 'rag', payload: ragPayload }]
+          : []),
+        { userId, repositoryId: id, kind: 'resources', payload: resourcePayload },
+      ])
+      .returning({ id: schema.repoCleanups.id, kind: schema.repoCleanups.kind });
+    const ragRowId = rows.find((r) => r.kind === 'rag')?.id;
+    ragCleanup = ragRowId ? { ...ragPayload, cleanupId: ragRowId } : null;
+    resourceCleanup = {
+      ...resourcePayload,
+      cleanupId: rows.find((r) => r.kind === 'resources')!.id,
+    };
   });
 
   if (!repoFound) throw new HttpError(404, 'Repository not found');
@@ -2943,27 +2996,13 @@ repoRoutes.delete('/:id', async (c) => {
     await enqueueCancelJob(t.id, userId);
   }
 
-  // Enqueue the per-project RAG cleanup job AFTER commit so the worker's
-  // collision check sees the post-delete state of the tasks table. External
-  // and ddev RAG modes were filtered out at collection time — this only
-  // touches internal-mode databases Haive owns.
-  await enqueueRepoRagCleanupJob({
-    repositoryId: id,
-    userId,
-    projectNames: internalRagProjectNames,
-  });
-
-  // Tear down the repo's leftover Docker resources + workspace files (DDEV/app
-  // runners, env images no longer referenced by a surviving task, haive_repos
-  // files) — the cancel jobs above only cover open tasks, not terminal ones.
-  await enqueueRepoResourceCleanupJob({
-    userId,
-    repositoryId: id,
-    taskIds: capturedTasks.map((t) => t.id),
-    envTemplateIds,
-    envImageTags,
-    storagePath,
-  });
+  // The per-project RAG cleanup is queued AFTER commit so the worker's collision check sees the
+  // post-delete state of the tasks table. External and ddev RAG modes were filtered out at
+  // collection time, so this only touches internal-mode databases Haive owns. The resource
+  // cleanup tears down the repo's leftover Docker resources and workspace files; the cancel jobs
+  // above only cover open tasks, not terminal ones.
+  if (ragCleanup) await queueRepoCleanup(db, ragCleanup, enqueueRepoRagCleanupJob);
+  if (resourceCleanup) await queueRepoCleanup(db, resourceCleanup, enqueueRepoResourceCleanupJob);
 
   return c.json({
     ok: true,

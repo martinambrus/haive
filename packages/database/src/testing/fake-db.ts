@@ -10,7 +10,7 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * It evaluates `where` rather than ignoring it, because the code under test rides on it: a
  * children lookup that ignored its filter would hand back a sibling archive's row and delete the
  * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` / `ne` /
- * `gt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL never matching the last five —
+ * `gt` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL never matching the last five —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
  * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and stores any
  * other as it is. The foreign-key cascade is read off the schema.
@@ -235,13 +235,22 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           }
           return (row) => row[key] === v;
         }
-        if (ch.length === 3 && (text(op) === ' <> ' || text(op) === ' > ') && is(val, Param)) {
+        if (
+          ch.length === 3 &&
+          (text(op) === ' <> ' || text(op) === ' > ' || text(op) === ' < ') &&
+          is(val, Param)
+        ) {
           const v = checkValue(col, val.value);
           const above = text(op) === ' > ';
+          const below = text(op) === ' < ';
           return (row) =>
             row[key] != null &&
             v != null &&
-            (above ? (row[key] as number) > (v as number) : row[key] !== v);
+            (above
+              ? (row[key] as number) > (v as number)
+              : below
+                ? (row[key] as number) < (v as number)
+                : row[key] !== v);
         }
         if (
           ch.length === 3 &&
