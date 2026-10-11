@@ -6,44 +6,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api-client';
 import { Badge, Button } from '@/components/ui';
 import { DEV_VERSION } from '@haive/shared/constants';
-
-interface UpgradeStatusBundleChange {
-  bundleId: string;
-  bundleName: string;
-  changedItemCount: number;
-}
-
-interface UpgradeStatusResponse {
-  repositoryId: string;
-  hasUpgradeAvailable: boolean;
-  installedTemplateSetHash: string | null;
-  currentTemplateSetHash: string;
-  changedTemplateIds: string[];
-  /** The changed templates an upgrade removes rather than updates; older API versions omit it. */
-  obsoleteTemplateIds?: string[];
-  /** The changed templates no release renders any more, deletable or not; older API versions omit it. */
-  retiredTemplateIds?: string[];
-  isOnboarded: boolean;
-  installedHaiveVersion: string | null;
-  currentHaiveVersion: string;
-  hasInProgressUpgradeSession: boolean;
-  hasPriorUpgrade: boolean;
-  /** The live upgrade or rollback task; older API versions omit it. */
-  inProgressUpgradeTaskId?: string | null;
-  /** Optional per-bundle drift breakdown from the server. Older API versions
-   *  omit it entirely; treat undefined as zero custom drift. */
-  customChanges?: UpgradeStatusBundleChange[];
-  /** Rules files that do not import AGENTS.md; an upgrade restores the import. */
-  missingRulesImports?: string[];
-  /** Rules files that link somewhere other than AGENTS.md; no upgrade writes through them. */
-  linkedRulesFiles?: string[];
-  /** Rules files still holding the RTK block after RTK was switched off; an upgrade takes it out. */
-  rtkBlockLeftovers?: string[];
-  /** RTK settings files no row records that still hold its hook; an upgrade offers to take it out. */
-  rtkSettingsLeftovers?: string[];
-  /** A clone no row on this install records; older API versions omit it. */
-  firstUpgradeOnThisInstall?: boolean;
-}
+import type { UpgradeStatusResponse } from '@haive/shared/schemas';
 
 export interface UpgradeAvailableBannerProps {
   repositoryId: string;
