@@ -203,7 +203,11 @@ Each row is re-vetted, since an external store's approvals are trusted unsigned:
 `enforcementState` re-derives the hash from the stored content, and a missing description, refused
 text or a glob the grammar refuses moves the row to the stamp's
 `omitted` as `refused`. A call with a deadline never starts the shared schema ensure, whose failure
-every other caller awaiting it would inherit.
+every other caller awaiting it would inherit. It runs its own, with `SET LOCAL lock_timeout` and
+`statement_timeout` at the deadline ahead of the schema lock in every step: without them a waiter on
+that lock stayed on the server after the deadline had answered (MEASURED: 1 waiter 1.5 s later; 0
+with them). On a large store the first ensure's backfill can outlast a short deadline, so bounded
+calls fail their ensure until an unbounded caller completes it.
 
 **Each opted run records what it got** in `cli_invocations.house_rules` (migration 0176), written
 with `agent_rules` by the UPDATE that sets `started_at`: `{mode, entries: [{id, hash, title, why}],

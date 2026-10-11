@@ -67,7 +67,7 @@ async function openAndRun<T>(
       schemaReady.set(key, ready);
       await ready;
     } else {
-      await ensureGlobalKbSchema(conn);
+      await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs });
       if (!schemaReady.has(key)) schemaReady.set(key, Promise.resolve());
     }
     const db = createGlobalKbDb(conn.pg);
