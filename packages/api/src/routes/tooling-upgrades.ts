@@ -717,6 +717,11 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       updates.ragEmbedDegradedReason = null;
       if (body.ragEmbedAction === 'rebuild_index' || current.ragEmbedLexicalOnly) {
         reembedQueued = await forceRagReembed(db, repositoryId);
+        if (reembedQueued) {
+          updates.ragEmbedDegradedAt = new Date();
+          updates.ragEmbedDegradedReason =
+            'Index rebuild pending: chunks are re-embedded on the next sync.';
+        }
       }
     }
   }

@@ -66,17 +66,19 @@ const app = new Hono<AppEnv>();
 app.route('/', toolingUpgradeRoutes);
 app.onError(errorHandler);
 
-function setup(ragConnectionString: string): void {
+function setup(ragConnectionString: string, configured = true) {
   const fake = createFakeDb({ repositories: schema.repositories });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,
     name: 'r',
     source: 'local_path',
-    onboardingTooling: {
-      schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
-      tooling: { ragMode: 'external', ragConnectionString, embeddingDimensions: 8 },
-    },
+    onboardingTooling: configured
+      ? {
+          schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
+          tooling: { ragMode: 'external', ragConnectionString, embeddingDimensions: 8 },
+        }
+      : null,
   });
   h.db = fake.db;
   h.realStore = false;
@@ -85,6 +87,7 @@ function setup(ragConnectionString: string): void {
   h.batches = [0];
   h.hang = false;
   h.ended = 0;
+  return fake;
 }
 
 const rebuild = () =>
@@ -137,6 +140,28 @@ describe('forcing a re-embed of a repository', () => {
       expect(update.params).toEqual([REPO]);
     }
     expect(h.openOptions).toEqual([{ connectTimeoutSeconds: 3, fetchTypes: false }]);
+  });
+
+  it('leaves the repository marked degraded until the re-embed lands', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag');
+    h.batches = [500, 0];
+
+    const res = await rebuild();
+
+    expect(res.status).toBe(200);
+    const [row] = fake.rows(schema.repositories);
+    expect(row!.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(row!.ragEmbedDegradedReason).toEqual(expect.any(String));
+    expect(row!.ragEmbedLexicalOnly).toBe(false);
+  });
+
+  it('does not mark a repository degraded when there is no store to re-embed', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag', false);
+
+    const res = await rebuild();
+
+    expect(await res.json()).toMatchObject({ reembedQueued: false });
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt ?? null).toBeNull();
   });
 
   it('sets a statement timeout inside every batch transaction, before its UPDATE', async () => {
