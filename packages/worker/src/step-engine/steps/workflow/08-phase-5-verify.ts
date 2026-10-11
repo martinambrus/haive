@@ -75,6 +75,8 @@ interface VerifyDetect {
   testFramework?: TestFramework | null;
   test: SlotCommand | null;
   lint: SlotCommand | null;
+  /** The PHP lint runner beside a root JS lint script; absent when `lint` is the only runner. */
+  phpLint?: SlotCommand | null;
   typecheck: SlotCommand | null;
 }
 
@@ -106,6 +108,7 @@ interface RuntimeSmoke {
 interface VerifyApply {
   test: CheckResult;
   lint: CheckResult;
+  phpLint?: CheckResult;
   typecheck: CheckResult;
   passed: boolean;
   runtimeSmoke: RuntimeSmoke | null;
@@ -151,15 +154,28 @@ export function buildVerifyDegradedNote(
  *  Deliberately per-slot: "no runner exists in this repo" and "a runner exists and you
  *  unticked it" are different facts, and only the first is nobody's decision. */
 export function buildUnverifiedNote(
-  slots: { test: SlotCommand | null; lint: SlotCommand | null; typecheck: SlotCommand | null },
-  results: { test: CheckResult; lint: CheckResult; typecheck: CheckResult },
+  slots: {
+    test: SlotCommand | null;
+    lint: SlotCommand | null;
+    typecheck: SlotCommand | null;
+    phpLint?: SlotCommand | null;
+  },
+  results: {
+    test: CheckResult;
+    lint: CheckResult;
+    typecheck: CheckResult;
+    phpLint?: CheckResult;
+  },
 ): string {
-  if (results.test.ran || results.lint.ran || results.typecheck.ran) return '';
+  if (results.test.ran || results.lint.ran || results.typecheck.ran || results.phpLint?.ran) {
+    return '';
+  }
   const undetected: string[] = [];
   const unticked: string[] = [];
-  for (const name of ['test', 'lint', 'typecheck'] as const) {
-    if (results[name].note) continue;
-    (slots[name] === null ? undetected : unticked).push(name);
+  for (const name of ['test', 'lint', 'phpLint', 'typecheck'] as const) {
+    const result = results[name];
+    if (!result || result.note) continue;
+    (slots[name] === null ? undetected : unticked).push(name === 'phpLint' ? 'php lint' : name);
   }
   const parts = [
     `No verification check ran this pass, so this step passing means nothing was checked — not that everything passed.`,
@@ -307,7 +323,12 @@ function pick(scripts: Record<string, string>, names: string[]): string | null {
 async function resolveSlots(
   workspace: string,
   ddevMode: boolean,
-): Promise<{ test: SlotCommand | null; lint: SlotCommand | null; typecheck: SlotCommand | null }> {
+): Promise<{
+  test: SlotCommand | null;
+  lint: SlotCommand | null;
+  phpLint?: SlotCommand | null;
+  typecheck: SlotCommand | null;
+}> {
   const pmScripts = await readJsonScripts(workspace, 'package.json');
   const composerScripts = await readJsonScripts(workspace, 'composer.json');
   const pm = await detectPackageManager(workspace);
@@ -341,6 +362,14 @@ async function resolveSlots(
         ? buildVerifyCommand({ runner: 'phpcs' }, ddevMode)
         : null;
 
+  const phpLint = lintJs
+    ? lintComposer
+      ? buildVerifyCommand({ runner: 'composer', script: lintComposer }, ddevMode)
+      : hasPhpcs
+        ? buildVerifyCommand({ runner: 'phpcs' }, ddevMode)
+        : null
+    : null;
+
   const typeJs = pick(pmScripts, ['typecheck', 'type-check', 'tsc']);
   const typeComposer = pick(composerScripts, ['phpstan', 'analyse', 'analyze', 'stan']);
   const typecheck = typeJs
@@ -351,7 +380,7 @@ async function resolveSlots(
         ? buildVerifyCommand({ runner: 'phpstan' }, ddevMode)
         : null;
 
-  return { test, lint, typecheck };
+  return { test, lint, ...(phpLint ? { phpLint } : {}), typecheck };
 }
 
 interface SlotRun {
@@ -739,9 +768,10 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       for (const [name, check] of [
         ['tests', out.test],
         ['lint', out.lint],
+        ['php lint', out.phpLint],
         ['typecheck', out.typecheck],
       ] as const) {
-        if (check.ran && !check.passed) {
+        if (check?.ran && !check.passed) {
           const shown = check.scope ? check.output : check.output.slice(-2000);
           parts.push(
             `### ${name} failed${check.command ? ` (\`${check.command}\`)` : ''}\n${shown}`,
@@ -780,6 +810,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         detected.ddevMode ? 'PHP/Python checks run inside the DDEV runner.' : '',
         `test: ${label(detected.test)}`,
         `lint: ${label(detected.lint)}`,
+        detected.phpLint ? `php lint: ${label(detected.phpLint)}` : '',
         `typecheck: ${label(detected.typecheck)}`,
       ]
         .filter(Boolean)
@@ -807,6 +838,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const { workspacePath, ddevMode, testFramework } = args.detected;
     const testCmd = ddevSlot(args.detected.test, ddevMode);
     const lintCmd = ddevSlot(args.detected.lint, ddevMode);
+    const phpLintCmd = ddevSlot(args.detected.phpLint ?? null, ddevMode);
     const typeCmd = ddevSlot(args.detected.typecheck, ddevMode);
 
     // A runner gone since 01c reads as a failing check and spends a fix round on "No such
@@ -858,6 +890,11 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       values.runLint && lintCmd
         ? await runLint(lintCmd, ctx, workspacePath, ddevHandle)
         : skippedResult();
+    const phpLint = phpLintCmd
+      ? values.runLint
+        ? await runLint(phpLintCmd, ctx, workspacePath, ddevHandle)
+        : skippedResult()
+      : undefined;
     const typecheck =
       values.runTypecheck && typeCmd
         ? await runSlot('typecheck', typeCmd, ctx, ddevHandle)
@@ -866,6 +903,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const passed =
       (!test.ran || test.passed) &&
       (!lint.ran || lint.passed) &&
+      (!phpLint?.ran || phpLint.passed) &&
       (!typecheck.ran || typecheck.passed);
 
     // Always smoke the running app, regardless of the test/lint checkboxes — this
@@ -882,6 +920,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       {
         test: test.ran ? (test.passed ? 'pass' : 'fail') : 'skip',
         lint: lint.ran ? (lint.passed ? 'pass' : 'fail') : 'skip',
+        ...(phpLint ? { phpLint: phpLint.ran ? (phpLint.passed ? 'pass' : 'fail') : 'skip' } : {}),
         typecheck: typecheck.ran ? (typecheck.passed ? 'pass' : 'fail') : 'skip',
         smoke: runtimeSmokeVerdict(runtimeSmoke),
       },
@@ -912,6 +951,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       text: [
         slotFact('test', test),
         slotFact('lint', lint),
+        ...(phpLint ? [slotFact('php lint', phpLint)] : []),
         slotFact('typecheck', typecheck),
         runtimeSmoke.ran
           ? `runtime smoke: ${runtimeSmoke.url} answered ${runtimeSmoke.httpStatus ?? 'nothing'}`
@@ -919,14 +959,22 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       ].join('; '),
     });
     const unverified = buildUnverifiedNote(
-      { test: testCmd, lint: lintCmd, typecheck: typeCmd },
-      { test, lint, typecheck },
+      {
+        test: testCmd,
+        lint: lintCmd,
+        typecheck: typeCmd,
+        ...(phpLintCmd ? { phpLint: phpLintCmd } : {}),
+      },
+      { test, lint, typecheck, ...(phpLint ? { phpLint } : {}) },
     );
-    const slotNotes = [test.note, lint.note, typecheck.note].filter(Boolean).join('\n');
+    const slotNotes = [test.note, lint.note, phpLint?.note, typecheck.note]
+      .filter(Boolean)
+      .join('\n');
     const degradedNote = buildVerifyDegradedNote(testEnvBlocker, unverified, slotNotes);
     return {
       test,
       lint,
+      ...(phpLint ? { phpLint } : {}),
       typecheck,
       passed,
       runtimeSmoke,

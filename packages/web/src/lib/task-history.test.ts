@@ -502,6 +502,15 @@ describe('implementation overview', () => {
     );
     expect(entry({ output: { test: { ran: true, passed: true } } }).tone).toBe('success');
   });
+  it('flags a failure that only the second lint runner reports', () => {
+    const output = {
+      test: { ran: true, passed: true },
+      lint: { ran: true, passed: true },
+      phpLint: { ran: true, passed: false },
+    };
+    expect(entry({ output }).message).toContain('failing checks');
+    expect(entry({ output: { ...output, phpLint: undefined } }).tone).toBe('success');
+  });
   it('describes a fix pass concisely without reprinting the implementation recap', () => {
     const output = {
       filesTouched: ['a.php', 'b.php'],

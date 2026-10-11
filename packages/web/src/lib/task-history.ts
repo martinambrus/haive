@@ -37,7 +37,7 @@ function list(value: unknown): unknown[] {
 }
 
 const SEVERITY: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
-const CHECKS = ['test', 'lint', 'typecheck', 'runtimeSmoke'];
+const CHECKS = ['test', 'lint', 'phpLint', 'typecheck', 'runtimeSmoke'];
 // The implementation/verification segment of the workflow registry. Use IDs,
 // not display titles, phase numbers from other workflows, or round positions.
 const IMPLEMENTATION_STEPS = new Set([
