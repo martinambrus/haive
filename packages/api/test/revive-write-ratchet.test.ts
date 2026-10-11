@@ -309,6 +309,17 @@ function guarded(sf: ts.SourceFile, node: ts.Node, depth = 0): boolean {
 }
 
 /** Every live-status write on a task row in one source, with whether it is covered. */
+/** A `.update(schema.tasks)` not chained straight into `.set(...)`: whatever later sets its status
+ *  is out of sight, so the builder itself is the write. */
+function detachedTaskBuilder(call: ts.CallExpression): boolean {
+  return (
+    ts.isPropertyAccessExpression(call.expression) &&
+    call.expression.name.text === 'update' &&
+    call.arguments[0]?.getText() === 'schema.tasks' &&
+    !(ts.isPropertyAccessExpression(call.parent) && call.parent.name.text === 'set')
+  );
+}
+
 function liveWrites(
   file: string,
   text: string,
@@ -317,7 +328,7 @@ function liveWrites(
   const out: { site: string; status: string; covered: boolean }[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
-      const status = writtenStatus(node);
+      const status = detachedTaskBuilder(node) ? UNKNOWN : writtenStatus(node);
       if (status !== null && !ENDED.has(status)) {
         const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
         out.push({
@@ -480,6 +491,19 @@ describe('a live-status write on a task row', () => {
         `import { patchy } from './p.js'; const patch = { title: 't' }; async function f() { await db.update(schema.tasks).set(patch); }`,
       ),
     ).toBe(0);
+  });
+
+  it('counts a task update builder kept apart from its set', () => {
+    const writes = (body: string) =>
+      liveWrites('x.ts', `async function f(tx) { ${body} }`).map((w) => w.covered);
+    expect(
+      writes(`const update = tx.update(schema.tasks); await update.set({ status: 'running' });`),
+    ).toEqual([false]);
+    expect(
+      writes(
+        `await ${GUARD}(tx, id); const update = tx.update(schema.tasks); await update.set({ status: 'running' });`,
+      ),
+    ).toEqual([true]);
   });
 
   it('counts a local patch that is replaced or assigned into', () => {
