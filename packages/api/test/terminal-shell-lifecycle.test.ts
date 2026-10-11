@@ -480,6 +480,35 @@ describe('shell start directory and restart', () => {
     expect(connected).not.toHaveProperty('workdirMismatch');
   });
 
+  it('takes the resize a page sends the moment it reads the connected frame', async () => {
+    const ws = new FakeWs();
+    const send = ws.send.bind(ws);
+    ws.send = (data: string) => {
+      send(data);
+      if ((JSON.parse(data) as { type: string }).type === 'connected') {
+        ws.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: 80, rows: 24 })));
+      }
+    };
+    const done = runScopedShellSession(ws as never, 'u1', 'task', 't1', 'p1');
+    let sub: FakeRedis | undefined;
+    for (let i = 0; i < 50 && !(sub = publisherFake.duplicates[0])?.subscribeCalls.length; i += 1) {
+      await new Promise((r) => setImmediate(r));
+    }
+    const open = publisherFake.publishCalls.find((c) => c.channel === TERMINAL_REQUEST_CHANNEL);
+    const { correlationId } = JSON.parse(open!.data) as { correlationId: string };
+    sub!.emitReply(`${TERMINAL_REPLY_CHANNEL_PREFIX}${correlationId}`, {
+      ok: true,
+      sessionId: 'sess-1',
+      containerName: 'haive-shell-1',
+      shell: 'bash',
+    });
+    await done;
+    await new Promise((r) => setImmediate(r));
+    expect(ctlPublishes().map((c) => JSON.parse(c.data))).toEqual([
+      { type: 'resize', cols: 80, rows: 24 },
+    ]);
+  });
+
   it('forwards a restart to the worker with the requesting user', async () => {
     const ws = await connect('task');
     ws.emit('message', Buffer.from(JSON.stringify({ type: 'restart_shell' })));

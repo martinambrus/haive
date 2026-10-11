@@ -151,7 +151,7 @@ async function main() {
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        reject(new Error('timeout waiting for smoke_ok'));
+        reject(new Error(`timeout waiting for smoke_ok; frames: ${JSON.stringify(frames)}`));
       }, 15_000);
       ws.on('message', (data) => {
         const text = data.toString();
