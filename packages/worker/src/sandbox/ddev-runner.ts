@@ -1191,8 +1191,9 @@ export function buildDdevCommand(
 }
 
 const DDEV_EXEC_WORD = String.raw`(?:\\.|'[^']*'|"(?:\\.|[^"\\])*"|[^\s'"\\])+`;
+// `exec`, then any flags (a value flag takes the next word), then an optional `--` separator.
 const DDEV_EXEC_HEAD = new RegExp(
-  String.raw`^['"]?exec['"]?(?:\s+(?:['"]?(?:-[ds]|--dir|--service)['"]?\s+${DDEV_EXEC_WORD}|['"]?--raw['"]?|--(?:dir|service)=${DDEV_EXEC_WORD}))*(?=\s|$)`,
+  String.raw`^['"]?exec['"]?(?:\s+(?:['"]?(?:-[dsu]|--dir|--service|--user)['"]?\s+${DDEV_EXEC_WORD}|['"]?-(?!-['"]?(?:\s|$))${DDEV_EXEC_WORD}))*(?:\s+['"]?--['"]?)?(?=\s|$)`,
 );
 
 /** Killing the runner's ddev client leaves the command running in the web container, so an

@@ -63,6 +63,15 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     expect(shell('exec --dir=/v/a php -v')).toBe(
       'cd /repos/x && ddev exec --dir=/v/a timeout --kill-after=5s 50s php -v',
     );
+    expect(shell('exec --raw -- ls -la')).toBe(
+      'cd /repos/x && ddev exec --raw -- timeout --kill-after=5s 50s ls -la',
+    );
+    expect(shell('exec -q -u root -p id -u')).toBe(
+      'cd /repos/x && ddev exec -q -u root -p timeout --kill-after=5s 50s id -u',
+    );
+    expect(shell('exec ls -la')).toBe(
+      'cd /repos/x && ddev exec timeout --kill-after=5s 50s ls -la',
+    );
     expect(shell('exec php -v', 5_000)).toContain('timeout --kill-after=5s 1s php -v');
     expect(shell('exec')).toBe('cd /repos/x && ddev exec');
     expect(buildDdevCommand('/repos/x', 'exec php -v', 60_000).hostTimeoutMs).toBe(60_000);
