@@ -374,6 +374,7 @@ function tasksAliases(file: string, text: string): string[] {
     if (
       tasksTableEscapes(n) ||
       (ts.isImportDeclaration(n) && importRenamesTasks(n)) ||
+      (ts.isExportDeclaration(n) && reexportsTasks(n)) ||
       schemaEscapes(n)
     ) {
       out.push(`${file}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`);
@@ -423,6 +424,7 @@ function schemaEscapes(n: ts.Node): boolean {
   const p = n.parent;
   if (ts.isPropertyAccessExpression(p)) return p.questionDotToken !== undefined;
   if (ts.isImportSpecifier(p) || ts.isTypeQueryNode(p) || ts.isQualifiedName(p)) return false;
+  if (ts.isExportSpecifier(p) && p.parent.parent.moduleSpecifier) return false;
   if ((ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p)) && p.name === n) return false;
   return true;
 }
@@ -438,6 +440,16 @@ function importRenamesTasks(decl: ts.ImportDeclaration): boolean {
     const imported = (e.propertyName ?? e.name).text;
     return imported === 'tasks' || (imported === 'schema' && e.name.text !== 'schema');
   });
+}
+
+/** A re-export from the database package that hands the tasks table to another module, whose
+ *  importers the scan would read under a name it does not know. */
+function reexportsTasks(decl: ts.ExportDeclaration): boolean {
+  const from = decl.moduleSpecifier;
+  if (!from || !ts.isStringLiteral(from) || !from.text.startsWith('@haive/database')) return false;
+  const clause = decl.exportClause;
+  if (!clause || ts.isNamespaceExport(clause)) return true;
+  return clause.elements.some((e) => ['tasks', 'schema'].includes((e.propertyName ?? e.name).text));
 }
 
 // A write that puts a task row back to a live status revives it, so it must run the revival's
@@ -518,6 +530,16 @@ describe('a live-status write on a task row', () => {
     expect(renames(`import * as db from '@haive/database/schema';`)).toBe(true);
     expect(renames(`import { schema as s } from '@haive/database';`)).toBe(true);
     expect(renames(`import { schema, type Database } from '@haive/database';`)).toBe(false);
+  });
+
+  it('reads a re-export that hands the tasks table on as an alias', () => {
+    const found = (text: string) => tasksAliases('x.ts', text).length;
+    expect(found(`export { tasks } from '@haive/database/schema';`)).toBe(1);
+    expect(found(`export { schema as s } from '@haive/database';`)).toBe(1);
+    expect(found(`export * from '@haive/database/schema';`)).toBe(1);
+    expect(found(`export * as db from '@haive/database';`)).toBe(1);
+    expect(found(`export { schema };`)).toBe(1);
+    expect(found(`export { users } from '@haive/database/schema';`)).toBe(0);
   });
 
   it('reads the tasks table through a comment or spacing inside schema.tasks', () => {
