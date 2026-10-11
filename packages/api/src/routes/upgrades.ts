@@ -800,11 +800,15 @@ export async function lastUpgradeRemovedContent(
   const output = applied?.output as {
     removedPaths?: unknown;
     rtkBlockStrips?: unknown;
+    rtkBlockRestores?: unknown;
     untrackedRowIds?: unknown;
   } | null;
-  return [output?.removedPaths, output?.rtkBlockStrips, output?.untrackedRowIds].some(
-    (l) => Array.isArray(l) && l.length > 0,
-  );
+  return [
+    output?.removedPaths,
+    output?.rtkBlockStrips,
+    output?.rtkBlockRestores,
+    output?.untrackedRowIds,
+  ].some((l) => Array.isArray(l) && l.length > 0);
 }
 
 /**

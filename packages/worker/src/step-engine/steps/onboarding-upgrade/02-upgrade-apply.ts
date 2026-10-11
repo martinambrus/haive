@@ -1333,6 +1333,14 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       }
     }
 
+    // A record whose write did not land would read as Haive's last action on the block.
+    const dropRecords = async (ids: string[]) => {
+      if (ids.length === 0) return;
+      await ctx.db
+        .delete(schema.onboardingArtifacts)
+        .where(inArray(schema.onboardingArtifacts.id, ids));
+    };
+
     // A retry finds the block an earlier attempt took out gone, or put in standing, and takes that
     // attempt's record while the file still holds what it left: anything else there is not its doing.
     const earlierRecord = async (templateId: string, file: string) => {
@@ -1383,6 +1391,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             : strip.result === 'none'
               ? await earlierRecord(RTK_BLOCK_RECORD, strip.file)
               : undefined;
+        const unwritten = recorded.get(strip.file);
+        if (strip.result !== 'stripped' && unwritten !== undefined) await dropRecords([unwritten]);
         if (recordId === undefined) continue;
         writtenPaths.push(strip.file);
         rtkBlockStrips.push({ file: strip.file, recordId });
@@ -1427,6 +1437,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       } else if (put.result === 'refused') {
         warnings.push(`did not put back the RTK block in ${RTK_BLOCK_HOME}: ${put.error}`);
       }
+      if (put.result !== 'appended') await dropRecords(recorded);
       const recordId =
         put.result === 'appended'
           ? recorded[0]

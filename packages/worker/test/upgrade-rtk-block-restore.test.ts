@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -130,7 +131,7 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
     return [{ file: 'AGENTS.md', recordId: row.id as string }];
   };
   const form = () => upgradeApplyStep.form!({} as StepContext, plan);
-  return { root, apply, rollBack, read, records, seedRestore, form };
+  return { root, fake, apply, rollBack, read, records, seedRestore, form };
 }
 
 const TICKED = { restoreRtkBlock: true };
@@ -173,6 +174,20 @@ describe('an upgrade that offers the RTK block back', () => {
       supersededAt: expect.any(Date),
     });
     expect(out.retiredRowIds).not.toContain(restores?.[0]?.recordId);
+  });
+
+  // A record whose write never landed would read as Haive's last action on the block.
+  it('keeps no record when the file is saved while the restore judges it', async () => {
+    const { root, fake, apply, records } = await setup();
+    let saved = false;
+    fake.hooks.beforeInsert = (table) => {
+      if (table !== schema.onboardingArtifacts || saved) return;
+      saved = true;
+      writeFileSync(join(root, 'AGENTS.md'), 'saved meanwhile\n');
+    };
+    const out = await apply(TICKED);
+    expect(restoresOf(out) ?? []).toEqual([]);
+    expect(records()).toEqual([]);
   });
 
   it('(d) does nothing for a tick the plan did not offer', async () => {
