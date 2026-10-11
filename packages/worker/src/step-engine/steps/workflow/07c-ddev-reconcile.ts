@@ -170,13 +170,15 @@ export function classifyDrift(
   return { kind: 'restart', migrateTarget: null, unsupportedReason: null };
 }
 
+const APPLIED_BASELINE_ROUNDS = 100;
+
 /**
  * The `.ddev/` state a PREVIOUS reconcile applied, or null when none has run yet.
  *
  * Deliberately not loadPreviousStepOutput: that returns the HIGHEST-round row, which during
  * this step's own run is this row with a null output — so the prior round's answer would
  * never be seen and the stamp would do nothing. Filtering on a written output also makes a
- * retry correct for free, since resetRowsForRerun nulls the column.
+ * retry correct for free, since resetRowsForRerun nulls the column. A no-op round has no stamp: skip it.
  */
 async function loadAppliedBaseline(ctx: StepContext): Promise<DdevBaseline | null> {
   const rows = await ctx.db
@@ -190,8 +192,12 @@ async function loadAppliedBaseline(ctx: StepContext): Promise<DdevBaseline | nul
       ),
     )
     .orderBy(desc(schema.taskSteps.round))
-    .limit(1);
-  return ((rows[0]?.output ?? null) as ReconcileApply | null)?.appliedBaseline ?? null;
+    .limit(APPLIED_BASELINE_ROUNDS);
+  for (const row of rows) {
+    const stamp = (row.output as ReconcileApply | null)?.appliedBaseline;
+    if (stamp) return stamp;
+  }
+  return null;
 }
 
 /** The baseline to stamp on a reconcile that succeeded: what is on disk now, which is what
@@ -309,7 +315,9 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
     // config now reads as ABSENT, so this step skips rather than reconciling against a file outside
     // the tree — the same verdict `01c-ddev-env` reaches for the same file.
     const cfg = ddevConfigRef(ws.workspace);
-    return (await lstatNoFollow(cfg.anchor, cfg.rel))?.kind === 'file';
+    if ((await lstatNoFollow(cfg.anchor, cfg.rel))?.kind !== 'file') return false;
+    // No drift needs no runner, so decide it here, before runtime admission; apply keeps its own check.
+    return (await loadReconcileState(ctx)).drift.kind !== 'none';
   },
 
   async detect(ctx: StepContext): Promise<ReconcileDetect> {

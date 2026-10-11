@@ -98,7 +98,12 @@ OPTIONAL, so a payload written before it existed falls back to the boot baseline
 exactly as it did. `loadAppliedBaseline` deliberately does not use `loadPreviousStepOutput`:
 that returns the highest-round row, which during this step's own run is THIS row with a null
 output, so the prior round's answer would never be seen — filtering on a written output also
-makes a retry correct for free, since the reset nulls that column.
+makes a retry correct for free, since the reset nulls that column. It returns the newest row
+whose output CARRIES a stamp: a no-drift round or a declined migration writes an output without
+one, and reading only the newest output let such a round hide the stamp before it, so the next
+round fell back to the boot baseline and restarted again. No drift needs no runner, so 07c's
+`shouldRun` decides it too and the step skips before runtime admission; `apply` keeps its own
+no-drift branch for a `.ddev/` that changes in between.
 
 **Playwright's runtime is provisioned per task, and the two halves have different lifetimes.**
 The DDEV web image ships neither the browser binaries nor the libraries they link against —
