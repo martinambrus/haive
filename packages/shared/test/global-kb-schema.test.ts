@@ -29,6 +29,7 @@ function fakeConn(
     vectorThrows?: string;
     lockThrowsOnce?: string;
     hnswThrows?: boolean;
+    columnType?: string;
     triggersExist?: 'current' | 'stale';
     unstampedRows?: number;
     stamping?: boolean;
@@ -69,6 +70,9 @@ function fakeConn(
       }
       if (q.includes('count(*)') && q.includes('content_tsv')) {
         return Promise.resolve([{ n: unstamped }]);
+      }
+      if (opts.columnType && q.includes('format_type')) {
+        return Promise.resolve([{ type: opts.columnType }]);
       }
       if (opts.hnswThrows && q.includes('USING hnsw')) {
         return Promise.reject(new Error('hnsw unavailable'));
@@ -444,6 +448,59 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql.indexOf('ADD COLUMN IF NOT EXISTS embed_kind')).toBeLessThan(
       sql.indexOf('idx_global_rag_vector_hnsw_model'),
     );
+  });
+
+  describe('with a width resolved under the lock', () => {
+    const hnsw = (sql: string) => /halfvec\((\d+)\)/.exec(sql)?.[1];
+
+    it('creates the vector column at the resolved width, read inside the transaction that creates it', async () => {
+      const { conn, queries, transactions } = fakeConn();
+      const resolveDims = vi.fn(async () => 16);
+      await ensureGlobalKbSchema(conn, { resolveDims });
+      const create = transactions().find((tx) => tx.some((q) => q.includes('vector(')));
+
+      expect(resolveDims).toHaveBeenCalledTimes(1);
+      expect(create?.[0]).toBe('SELECT pg_advisory_xact_lock(hashtext())');
+      expect(create?.join('\n')).toContain('vector(16) NOT NULL');
+      expect(queries()).not.toContain('vector(2560)');
+      expect(hnsw(queries())).toBe('16');
+    });
+
+    it('indexes at the width of a table that already exists, not the resolved one', async () => {
+      const { conn, queries } = fakeConn({ columnType: 'vector(768)' });
+      await ensureGlobalKbSchema(conn, { resolveDims: async () => 16 });
+
+      expect(hnsw(queries())).toBe('768');
+    });
+
+    it('indexes at the resolved width when the column has no fixed width', async () => {
+      const { conn, queries } = fakeConn({ columnType: 'vector' });
+      await ensureGlobalKbSchema(conn, { resolveDims: async () => 16 });
+
+      expect(hnsw(queries())).toBe('16');
+    });
+
+    it('creates nothing when the width cannot be resolved', async () => {
+      const { conn, queries } = fakeConn();
+
+      await expect(
+        ensureGlobalKbSchema(conn, {
+          resolveDims: async () => {
+            throw new Error('settings unavailable');
+          },
+        }),
+      ).rejects.toThrow('settings unavailable');
+      expect(queries()).not.toContain('CREATE TABLE IF NOT EXISTS ai_rag_embeddings');
+    });
+
+    it('leaves the DDL as it was without one: the connection width, and no width read', async () => {
+      const { conn, queries } = fakeConn({ columnType: 'vector(768)' });
+      await ensureGlobalKbSchema(conn);
+
+      expect(queries()).toContain('vector(2560) NOT NULL');
+      expect(queries()).not.toContain('format_type');
+      expect(hnsw(queries())).toBe('2560');
+    });
   });
 
   it('stores identifiers whole: the trigger function adds the identifier lexemes and the sentinel', async () => {

@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 type Store = { mode: 'internal' | 'external'; connectionString: string | null };
 
 const h = vi.hoisted(() => ({
-  ensure: vi.fn<(conn: { store: string }) => Promise<unknown>>(),
-  settings: { mode: 'internal', connectionString: null } as Store,
+  ensure: vi.fn<(conn: { store: string }, opts?: unknown) => Promise<unknown>>(),
+  settings: { mode: 'internal', connectionString: null } as Store & {
+    embeddingDimensions?: number;
+  },
   connectOpts: [] as unknown[],
   connectDelayMs: 0,
   ends: [] as unknown[],
@@ -34,7 +36,7 @@ vi.mock('../src/global-kb/connection.js', () => ({
   },
 }));
 vi.mock('../src/global-kb/ensure-schema.js', () => ({
-  ensureGlobalKbSchema: async (...args: [{ store: string }]) =>
+  ensureGlobalKbSchema: async (...args: [{ store: string }, unknown?]) =>
     (await h.ensure(...args)) ?? { usedPgvector: true, identifierBackfillDone: true },
   backfillGlobalIdentifierTsv: h.backfill,
 }));
@@ -60,6 +62,19 @@ beforeEach(() => {
 });
 
 describe('withGlobalKb', () => {
+  it('hands the ensure a width that reads the settings when it asks, not when the call opened', async () => {
+    const asked: number[] = [];
+    h.ensure.mockImplementation(async (_conn, opts) => {
+      h.settings = { ...h.settings, embeddingDimensions: 16 };
+      asked.push(await (opts as { resolveDims: () => Promise<number> }).resolveDims());
+    });
+    h.settings = { ...h.settings, embeddingDimensions: 8 };
+    const withGlobalKb = await load();
+
+    await withGlobalKb(haiveDb, async () => {});
+    expect(asked).toEqual([16]);
+  });
+
   it('runs one schema ensure for concurrent first calls, and none after', async () => {
     let finish!: () => void;
     h.ensure.mockImplementation(() => new Promise<void>((resolve) => (finish = resolve)));

@@ -63,12 +63,13 @@ async function openAndRun<T>(
   onOpen?.(conn);
   try {
     const key = storeKey(settings);
+    const resolveDims = async () => (await resolveGlobalKbSettings()).embeddingDimensions;
     // A call with a deadline never starts the shared ensure: its deadline kills the pool under it.
     const shared = schemaReady.get(key);
     if (shared) {
       await shared;
     } else if (opts.deadlineMs === undefined) {
-      const ready = ensureGlobalKbSchema(conn).then(
+      const ready = ensureGlobalKbSchema(conn, { resolveDims }).then(
         (r) => noteIdentifierBackfill(key, r.identifierBackfillDone),
         (err: unknown) => {
           schemaReady.delete(key);
@@ -78,7 +79,7 @@ async function openAndRun<T>(
       schemaReady.set(key, ready);
       await ready;
     } else {
-      const r = await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs });
+      const r = await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs, resolveDims });
       noteIdentifierBackfill(key, r.identifierBackfillDone);
       if (!schemaReady.has(key)) schemaReady.set(key, Promise.resolve());
     }
