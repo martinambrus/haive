@@ -138,3 +138,38 @@ describe('slots go in activation order', () => {
     expect(invokeFields()).toEqual([]);
   });
 });
+
+describe('a refused job waits briefly for a slot a turned-away holder frees', () => {
+  it('takes the slot a paused job releases instead of deferring', async () => {
+    pool.set('lease:a', String(Date.now() + 60_000));
+    let unblock!: (paused: boolean) => void;
+    pauseCheck.mockImplementation((taskId: string) =>
+      taskId === 'paused' ? new Promise<boolean>((r) => (unblock = r)) : Promise.resolve(false),
+    );
+    const job = (id: string, taskId: string) => ({
+      ...invokeJob,
+      id,
+      data: { taskId, invocationId: `inv-${id}` },
+      moveToDelayed: vi.fn(async () => undefined),
+    });
+    const paused = processor(job('1', 'paused'), 'tok');
+    const live = job('2', 'live');
+    const running = processor(live, 'tok');
+    await vi.waitFor(() => expect(pauseCheck).toHaveBeenCalledWith('paused'));
+    unblock(true);
+    await expect(paused).rejects.toBeInstanceOf(DelayedError);
+    await running;
+    expect(live.moveToDelayed).not.toHaveBeenCalled();
+    expect(findInvocation).toHaveBeenCalledTimes(1);
+  });
+
+  it('still defers when the pool stays full past the retry window', async () => {
+    pool.set('lease:a', String(Date.now() + 60_000));
+    pool.set('lease:b', String(Date.now() + 60_000));
+    const job = { ...invokeJob, moveToDelayed: vi.fn(async () => undefined) };
+    const started = Date.now();
+    await expect(processor(job, 'tok')).rejects.toBeInstanceOf(DelayedError);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(job.moveToDelayed).toHaveBeenCalledTimes(1);
+  });
+});

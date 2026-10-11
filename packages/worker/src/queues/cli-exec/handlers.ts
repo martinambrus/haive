@@ -1268,6 +1268,10 @@ const TASK_AGENT_CAP_DEFER_MS = 4000;
  *  waits on a sibling agent finishing seconds from now, this one waits on a human clicking
  *  Resume, so re-checking every 4s would be pure churn for the whole hold. */
 const PAUSE_DEFER_MS = 30_000;
+/** How long a refused INVOKE keeps retrying before it defers, and how often. A slot held by a job
+ *  a later gate turns away frees within milliseconds, and should go to a peer that is still here. */
+const LANE_RETRY_WINDOW_MS = 1_000;
+const LANE_RETRY_POLL_MS = 50;
 
 /** Pause gate, enforced at job pickup. A paused task's queued invocations must not start —
  *  that is what "we will not round robin into it with the next CLI call" means: the slot they
@@ -1324,7 +1328,9 @@ const LIGHT_JOB_LANE = 3;
  *  run; without this gate that widening would also let agentCap+LIGHT_JOB_LANE agents run.
  *  Admission reserves `invoke:<jobId>:<token>` in the pool hash the step-command leases share,
  *  one script for both, so the cap is exact; the caller releases the returned slot when the job
- *  leaves the processor. A Redis failure lets the job through with no slot. */
+ *  leaves the processor. A refused job retries for LANE_RETRY_WINDOW_MS before it defers, since
+ *  the processor reserves ahead of the gates that may turn a holder away. A Redis failure lets
+ *  the job through with no slot. */
 export async function enforceAgentLaneCap(
   _db: Database,
   job: Job<CliExecQueuePayload>,
@@ -1332,14 +1338,20 @@ export async function enforceAgentLaneCap(
   agentCap: number,
 ): Promise<AgentSlot | undefined> {
   if (!token) return undefined;
-  let slot: AgentSlot | null;
-  try {
-    slot = await reserveAgentSlot(`invoke:${job.id ?? ''}:${token}`, agentCap);
-  } catch (err) {
-    log.warn({ err }, 'agent-lane reserve failed; allowing job');
-    return undefined;
+  const field = `invoke:${job.id ?? ''}:${token}`;
+  const retryUntil = Date.now() + LANE_RETRY_WINDOW_MS;
+  for (;;) {
+    let slot: AgentSlot | null;
+    try {
+      slot = await reserveAgentSlot(field, agentCap);
+    } catch (err) {
+      log.warn({ err }, 'agent-lane reserve failed; allowing job');
+      return undefined;
+    }
+    if (slot) return slot;
+    if (Date.now() >= retryUntil) break;
+    await new Promise((resolve) => setTimeout(resolve, LANE_RETRY_POLL_MS));
   }
-  if (slot) return slot;
   try {
     await job.moveToDelayed(Date.now() + PAUSE_DEFER_MS, token);
   } catch (err) {
