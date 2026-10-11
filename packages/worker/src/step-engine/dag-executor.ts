@@ -2769,6 +2769,10 @@ export async function resolveDagPhase(
         }
         if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
         const result = parseCoderResult(inv);
+        // A refusal fails the issue whatever partial result the coder printed before it.
+        const refused =
+          inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
+        if (refused) result.outcome = 'failed_unrecoverable';
         // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
         // finished, so re-running it — bounded by the coder's own infra_retries — honours
@@ -2886,7 +2890,7 @@ export async function resolveDagPhase(
             );
             continue; // re-dispatched by step (B) on the next loop pass
           }
-          if (inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter)) {
+          if (refused) {
             result.concerns = `${issue.issueKey} coder was refused by the provider. Not retrying: the same prompt is refused again.`;
           } else if (cls === 'transient') {
             // Re-dispatch budget spent: a persistently-killed coder is an environment
@@ -2905,9 +2909,7 @@ export async function resolveDagPhase(
             filesModified: result.parsed ? result.filesModified : (issue.filesModified ?? []),
             debtItems: result.debtItems,
             concerns: result.concerns,
-            ...(inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter)
-              ? { errorMessage: inv.errorMessage }
-              : {}),
+            ...(refused ? { errorMessage: inv.errorMessage } : {}),
             similarSites: mergeSimilarSites(issue.similarSites, result.similarSites),
             rawOutput: inv.rawOutput ?? null,
             endedAt: new Date(),

@@ -3245,6 +3245,29 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       prompt: 'implement the issue',
     };
 
+    it('fails a refused coder even when the JSON it printed before the refusal parses', async () => {
+      const { issueUpdates } = await ingestCoder(
+        'running',
+        {
+          ...refusedCoder,
+          parsedOutput: {
+            issue_id: 'ISSUE-1',
+            outcome: 'completed',
+            files_modified: ['a.ts'],
+            debt_items: [],
+            concerns: '',
+          },
+        },
+        { issue: { infraRetries: 0 }, enqueued: [] },
+      );
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({
+          outcome: 'failed_unrecoverable',
+          errorMessage: expect.stringContaining(PROVIDER_FATAL_HEADLINES.content_filter),
+        }),
+      ]);
+    });
+
     it('fails a refused coder with the refusal as its error and does not re-dispatch it', async () => {
       const enqueued: unknown[] = [];
       const { issueUpdates } = await ingestCoder('running', refusedCoder, {
