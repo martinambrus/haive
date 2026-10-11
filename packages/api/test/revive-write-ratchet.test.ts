@@ -226,14 +226,16 @@ function enclosingFunction(node: ts.Node): ts.FunctionLikeDeclaration | null {
   return null;
 }
 
-/** The innermost transaction callback holding the node, else its innermost function. */
+/** The innermost function holding the node that is a transaction callback or has a name, whose
+ *  call sites are then checked; else its innermost function. */
 function scopeOf(node: ts.Node): ts.FunctionLikeDeclaration | null {
   for (let fn = enclosingFunction(node); fn; fn = enclosingFunction(fn)) {
     const call = fn.parent;
     if (
-      ts.isCallExpression(call) &&
-      ts.isPropertyAccessExpression(call.expression) &&
-      call.expression.name.text === 'transaction'
+      (ts.isCallExpression(call) &&
+        ts.isPropertyAccessExpression(call.expression) &&
+        call.expression.name.text === 'transaction') ||
+      nameOf(fn) !== null
     ) {
       return fn;
     }
@@ -317,6 +319,16 @@ describe('a live-status write on a task row', () => {
     );
     expect(writes.length).toBeGreaterThan(0);
     expect(writes.filter((w) => !w.covered)).toEqual([]);
+  });
+
+  it('checks a named function inside a transaction at its call sites', () => {
+    const covered = (body: string) =>
+      liveWrites(
+        'x.ts',
+        `async function route() { await db.transaction(async (tx) => { ${body} function run() { return tx.update(schema.tasks).set({ status: 'running' }); } }); }`,
+      ).map((w) => w.covered);
+    expect(covered(`await run(); await ${GUARD}(tx, id);`)).toEqual([false]);
+    expect(covered(`await ${GUARD}(tx, id); await run();`)).toEqual([true]);
   });
 
   it('does not count a guard in a sibling transaction', () => {
