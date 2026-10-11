@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   closes: 0,
   onEnd: undefined as (() => void) | undefined,
   backfill: vi.fn<(step: unknown) => Promise<boolean>>(),
+  freshDims: null as string | null,
 }));
 
 vi.mock('../src/global-kb/connection.js', () => ({
@@ -40,6 +41,10 @@ vi.mock('../src/global-kb/ensure-schema.js', () => ({
     (await h.ensure(...args)) ?? { usedPgvector: true, identifierBackfillDone: true },
   backfillGlobalIdentifierTsv: h.backfill,
 }));
+vi.mock('../src/config/config.service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/config/config.service.js')>()),
+  configService: { getFresh: async () => h.freshDims },
+}));
 vi.mock('../src/global-kb/schema.js', () => ({ createGlobalKbDb: () => ({}) }));
 
 /** A fresh module each time: the ensure is remembered per process, i.e. per module instance. */
@@ -62,17 +67,31 @@ beforeEach(() => {
 });
 
 describe('withGlobalKb', () => {
-  it('hands the ensure a width that reads the settings when it asks, not when the call opened', async () => {
+  it('hands the ensure a width read fresh from Redis when it asks, not the cached settings', async () => {
     const asked: number[] = [];
     h.ensure.mockImplementation(async (_conn, opts) => {
-      h.settings = { ...h.settings, embeddingDimensions: 16 };
+      h.freshDims = '16';
       asked.push(await (opts as { resolveDims: () => Promise<number> }).resolveDims());
     });
     h.settings = { ...h.settings, embeddingDimensions: 8 };
+    h.freshDims = '8';
     const withGlobalKb = await load();
 
     await withGlobalKb(haiveDb, async () => {});
     expect(asked).toEqual([16]);
+  });
+
+  it('falls back to the settings width when Redis holds none', async () => {
+    const asked: number[] = [];
+    h.ensure.mockImplementation(async (_conn, opts) => {
+      asked.push(await (opts as { resolveDims: () => Promise<number> }).resolveDims());
+    });
+    h.settings = { ...h.settings, embeddingDimensions: 8 };
+    h.freshDims = null;
+    const withGlobalKb = await load();
+
+    await withGlobalKb(haiveDb, async () => {});
+    expect(asked).toEqual([8]);
   });
 
   it('runs one schema ensure for concurrent first calls, and none after', async () => {

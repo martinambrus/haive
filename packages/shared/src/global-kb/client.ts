@@ -6,6 +6,7 @@ import {
   type GlobalKbConnection,
   type GlobalKbSettings,
 } from './connection.js';
+import { configService, CONFIG_KEYS } from '../config/config.service.js';
 import { backfillGlobalIdentifierTsv, ensureGlobalKbSchema } from './ensure-schema.js';
 import { GlobalKbDeadlineError } from './errors.js';
 import { createGlobalKbDb, type GlobalKbDb } from './schema.js';
@@ -63,7 +64,14 @@ async function openAndRun<T>(
   onOpen?.(conn);
   try {
     const key = storeKey(settings);
-    const resolveDims = async () => (await resolveGlobalKbSettings()).embeddingDimensions;
+    // Fresh, not cached: the api may have saved a new width a moment ago in another process.
+    const resolveDims = async () => {
+      const raw = Number.parseInt(
+        (await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS)) ?? '',
+        10,
+      );
+      return Number.isNaN(raw) ? settings.embeddingDimensions : raw;
+    };
     // A call with a deadline never starts the shared ensure: its deadline kills the pool under it.
     const shared = schemaReady.get(key);
     if (shared) {
