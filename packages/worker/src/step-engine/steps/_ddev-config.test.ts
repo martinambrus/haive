@@ -6,6 +6,7 @@ import {
   renderDdevConfig,
   slugifyDdevName,
   ddevUrlFromConfigText,
+  ddevConfigUnreadable,
 } from './_ddev-config.js';
 
 const MARIADB_CONFIG = `name: myproject
@@ -472,5 +473,46 @@ describe('renderDdevConfig + slugifyDdevName', () => {
   it('slugifies to a DNS-safe DDEV name, falling back to "app"', () => {
     expect(slugifyDdevName('My Legacy App!')).toBe('my-legacy-app');
     expect(slugifyDdevName('___')).toBe('app');
+  });
+});
+
+describe('ddevConfigUnreadable', () => {
+  it.each([
+    ['a binary-tagged database key', 'database: { !!binary dHlwZQ==: postgres, version: "16" }\n'],
+    ['a binary-tagged top-level key', '!!binary cGhwX3ZlcnNpb24=: "8.1"\n'],
+    [
+      'a custom-tagged key in a merge source',
+      'base: &b\n  !foo type: mariadb\ndatabase:\n  <<: *b\n',
+    ],
+    ['a tagged php_version value', 'php_version: !!float 8.1\n'],
+    ['a tagged database type', 'database:\n  type: !!binary cG9zdGdyZXM=\n  version: "16"\n'],
+    ['a tagged database version', 'database:\n  type: mariadb\n  version: !!float 10.11\n'],
+    [
+      'a !!merge-tagged merge key',
+      'database:\n  !!merge <<: {type: mariadb}\n  version: "10.11"\n',
+    ],
+    ['a duplicate-key first document', 'php_version: "8.1"\nphp_version: "8.2"\n'],
+    ['a first document that is not a map', '- a\n'],
+  ])('gives a reason for %s', (_name, text) => {
+    expect(ddevConfigUnreadable(text)).toEqual(expect.any(String));
+  });
+
+  it.each([
+    ['a plain config', MARIADB_CONFIG],
+    ['an aliased database', 'base: &b {type: mariadb, version: "10.11"}\ndatabase: *b\n'],
+    ['a merged database', 'database:\n  ! <<: {type: mariadb}\n  version: "10.11"\n'],
+    [
+      '!!str keys and values',
+      '!!str php_version: !!str "8.1"\ndatabase:\n  !!str type: !!str mariadb\n',
+    ],
+    ['non-specific tags', '! php_version: ! "8.1"\n'],
+    ['!!null values', 'php_version: !!null\ndatabase:\n  version: !!null\n'],
+    ['a quoted " #"', 'database:\n  type: mariadb\n  version: "10.11 # lts"\n'],
+    ['a tag on a value nothing reads', 'webserver_type: !!float 1.5\n'],
+    ['a second document that is odd', 'php_version: "8.1"\n---\n- a\n'],
+    ['comments only', '# nothing here\n'],
+    ['an empty string', ''],
+  ])('gives null for %s', (_name, text) => {
+    expect(ddevConfigUnreadable(text)).toBeNull();
   });
 });
