@@ -98,6 +98,48 @@ beforeEach(() => {
 });
 
 describe('runStepCommandInSandbox', () => {
+  it('starts the loopback forwarder, with host and port quoted, only when the reach asks for it', async () => {
+    ran(0);
+    await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
+    const plain = runInSandbox.mock.calls[0]![0] as {
+      args: string[];
+      extraFiles: { containerPath: string }[];
+    };
+    expect(plain.args[1]).not.toContain('loopback-forward');
+    expect(plain.extraFiles.map((f) => f.containerPath)).toEqual([
+      '/haive/workdir/.env',
+      '/haive/workdir/.git/config',
+    ]);
+
+    resolveAppReach.mockResolvedValue({
+      mode: 'sandbox_http',
+      url: 'http://app:3000',
+      addHosts: [],
+      mounts: [],
+      env: {},
+      noProxyHosts: [],
+      tlsTrusted: false,
+      loopbackForward: { port: 3000, host: "app'; touch /pwned #" },
+    });
+    runInSandbox.mockClear();
+    ran(0);
+    await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
+    const fwd = runInSandbox.mock.calls[0]![0] as {
+      args: string[];
+      extraFiles: { containerPath: string; content: string }[];
+    };
+    const script = fwd.extraFiles.find((f) => f.containerPath.includes('loopback-forward'));
+    expect(script?.content).toContain("'127.0.0.1'");
+    expect(script?.content).toContain("'::1'");
+    const [, shellText, , ...argv] = fwd.args;
+    expect(shellText).toContain(`'3000' 'app'\\''; touch /pwned #'`);
+    expect(shellText).toContain('command -v node');
+    expect(argv).toEqual(['pnpm', 'test']);
+    expect(shellText!.indexOf('loopback-forward')).toBeLessThan(
+      shellText!.indexOf('step-bin-missing'),
+    );
+  });
+
   it('reports not run when the task has no CLI provider, and takes no lease', async () => {
     const res = await runStepCommandInSandbox(ctx({ cliProviderId: null }), {
       argv: ['pnpm', 'test'],

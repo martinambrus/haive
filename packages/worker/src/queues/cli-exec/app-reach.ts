@@ -75,6 +75,9 @@ export interface AppReach {
    *  PROMPT turns on, and a prompt promising a clean handshake it cannot deliver is the very
    *  failure this module exists to stop. */
   tlsTrusted: boolean;
+  /** Set only on the app-runner arm after a successful probe: the sandbox forwards its own
+   *  localhost:<port> to this host and port, because the recorded appUrl is `http://localhost:<port>`. */
+  loopbackForward?: { port: number; host: string } | null;
 }
 
 /** Where the CA lands in the sandbox. `/etc/ssl/certs` already exists in the image, and a
@@ -90,6 +93,7 @@ const NO_REACH: AppReach = {
   env: {},
   noProxyHosts: [],
   tlsTrusted: false,
+  loopbackForward: null,
 };
 
 /** How the sandbox reaches this task's running app, or a 'none' reach when nothing serves.
@@ -176,6 +180,7 @@ async function resolveDdevReach(
     env: caVolume ? { CURL_CA_BUNDLE: SANDBOX_CA_PATH, NODE_EXTRA_CA_CERTS: SANDBOX_CA_PATH } : {},
     noProxyHosts: [hostname],
     tlsTrusted: caVolume !== null,
+    loopbackForward: null,
   };
 }
 
@@ -224,6 +229,7 @@ async function resolveAppRunnerReach(
         noProxyHosts: [container],
         // Plain http — there is no handshake to promise anything about.
         tlsTrusted: false,
+        loopbackForward: { port: boot.port, host: container },
       }
     : { ...NO_REACH, mode: 'browser_only', url };
 }

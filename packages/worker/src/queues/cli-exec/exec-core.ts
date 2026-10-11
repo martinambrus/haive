@@ -22,6 +22,7 @@ import { NPM_CACHE_ENV, npmCacheMount, warmNpmPackage } from '../../sandbox/npm-
 import { resolveMcpSurface } from '../../sandbox/mcp-surface.js';
 import { resolveAppReach, type AppReach } from './app-reach.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
+import { loopbackForwardSetup, prefixWrapper } from '../../sandbox/loopback-forward.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliCommandSpec } from '../../cli-adapters/types.js';
 import {
@@ -1587,7 +1588,22 @@ export function createSandboxSpawner(
     if (appReach && appReach.noProxyHosts.length > 0) {
       runnerOptions.noProxyHosts = appReach.noProxyHosts;
     }
-    const finalArgs = mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args;
+    let finalArgs = mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args;
+    let command = spec.command;
+    let wrapper = wrapperContent;
+    const forward = appReach?.loopbackForward
+      ? loopbackForwardSetup(appReach.loopbackForward)
+      : null;
+    if (forward) {
+      // The provider wrapper replaces the command in the runner, so the prefix goes into it; with
+      // none, an sh wrapper starts the forwarder and then execs the CLI with its own argv.
+      if (wrapper && wrapper.trim().length > 0) {
+        wrapper = prefixWrapper(wrapper, forward.prefix);
+      } else {
+        finalArgs = ['-c', `${forward.prefix}exec "$@"`, 'sh', command, ...finalArgs];
+        command = 'sh';
+      }
+    }
     // A Retry or a Stop kills the task's sandboxes once, and this one may not exist yet then. It is
     // read again right before the container starts, and once it first speaks, when it surely runs.
     const superseded = invocationId ? watchSupersededRun(invocationId) : null;
@@ -1607,11 +1623,11 @@ export function createSandboxSpawner(
       };
     const result = await runInSandbox(
       {
-        command: spec.command,
+        command,
         args: finalArgs,
         // appReach's CA vars go BEFORE spec.env so a provider that sets its own bundle wins.
         env: { ...NPM_CACHE_ENV, ...(appReach?.env ?? {}), ...spec.env },
-        wrapperContent: wrapperContent ?? undefined,
+        wrapperContent: wrapper ?? undefined,
         // The adapter's config files and a prompt too large for argv (both grok), and
         // its mirrored agent files (agy), are appended to whatever masking already
         // contributed rather than replacing it — the mask list is a security control
@@ -1620,6 +1636,7 @@ export function createSandboxSpawner(
         extraFiles: (() => {
           const all = [
             ...extraFiles,
+            ...(forward ? [forward.file] : []),
             ...(spec.configFiles ?? []),
             ...mirrors.files,
             ...(spec.promptFile ? [spec.promptFile] : []),
