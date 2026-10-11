@@ -872,7 +872,7 @@ const TASK_TABLE = String.raw`(only\s+)?("?\w+"?\s*\.\s*)?"?tasks"?`;
 // Shaped as a statement, not just named: "Update tasks before retrying" has no SET.
 const TASK_MUTATION = new RegExp(
   [
-    String.raw`\bupdate\s+${TASK_TABLE}(\s+(as\s+)?\w+)?\s+set\b`,
+    String.raw`\bupdate\s+${TASK_TABLE}(\s+(as\s+)?("[^"]+"|\w+))?\s+set\b`,
     String.raw`\binsert\s+into\s+${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\bdelete\s+from\s+${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\bmerge\s+into\s+${TASK_TABLE}([^\w$-]|$)`,
@@ -995,6 +995,7 @@ describe('a live-status write on a task row', () => {
     ).toBe(1);
     expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
     expect(found("throw new HttpError(409, 'Update tasks before retrying');")).toBe(0);
+    expect(found('sql`UPDATE tasks AS "current" SET status = 1`')).toBe(1);
     expect(
       found(
         "sql`INSERT INTO tasks AS current (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET status = 'running'`",
