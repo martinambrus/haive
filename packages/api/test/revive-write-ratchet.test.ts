@@ -19,6 +19,19 @@ function sources(dir: string): string[] {
 /** The status a `.update(schema.tasks).set(...)` chain writes: its literal, `UNKNOWN` when the value
  *  or the object is computed and may carry one, or null when it writes no status. */
 const UNKNOWN = '<computed>';
+
+/** A property's name as the object sees it: `status`, `'status'` and `['status']` all read `status`;
+ *  a computed name that is not a literal is `null`, which may be anything. */
+function keyOf(name: ts.PropertyName | undefined): string | null {
+  if (!name) return null;
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)) {
+    return name.text;
+  }
+  if (ts.isComputedPropertyName(name) && ts.isStringLiteralLike(name.expression)) {
+    return name.expression.text;
+  }
+  return null;
+}
 function writtenStatus(call: ts.CallExpression): string | null {
   const callee = call.expression;
   if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'set') return null;
@@ -38,7 +51,7 @@ function writtenStatus(call: ts.CallExpression): string | null {
         if (ts.isSpreadAssignment(p)) {
           if (!ts.isIdentifier(p.expression)) return UNKNOWN;
           if (objectMayCarryStatus(call, p.expression.text)) return UNKNOWN;
-        } else if (p.name?.getText() === 'status') {
+        } else if (keyOf(p.name) === null || keyOf(p.name) === 'status') {
           return ts.isPropertyAssignment(p) && ts.isStringLiteralLike(p.initializer)
             ? p.initializer.text
             : UNKNOWN;
@@ -59,10 +72,18 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
   let declared = false;
   let found = false;
   const visit = (n: ts.Node): void => {
+    const assignedKey = ts.isPropertyAccessExpression(n)
+      ? n.name.text
+      : ts.isElementAccessExpression(n)
+        ? ts.isStringLiteralLike(n.argumentExpression)
+          ? n.argumentExpression.text
+          : null
+        : undefined;
     if (
-      ts.isPropertyAccessExpression(n) &&
-      n.name.text === 'status' &&
-      n.expression.getText() === name &&
+      assignedKey !== undefined &&
+      (assignedKey === null || assignedKey === 'status') &&
+      (n as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression.getText() ===
+        name &&
       ts.isBinaryExpression(n.parent) &&
       n.parent.left === n
     ) {
@@ -75,7 +96,7 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
       n.initializer &&
       (!ts.isObjectLiteralExpression(n.initializer) ||
         n.initializer.properties.some(
-          (p) => p.name?.getText() === 'status' || ts.isSpreadAssignment(p),
+          (p) => ts.isSpreadAssignment(p) || keyOf(p.name) === null || keyOf(p.name) === 'status',
         ))
     ) {
       found = true;
@@ -279,6 +300,22 @@ describe('a live-status write on a task row', () => {
       await db.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));
     }`;
     expect(liveWrites('x.ts', src).map((w) => w.status)).toEqual(['<computed>']);
+  });
+
+  it('reads a quoted or bracketed status key, and a bracket assignment', () => {
+    const status = (body: string) =>
+      liveWrites('x.ts', `async function f() { ${body} }`).map((w) => w.status);
+    expect(status(`await db.update(schema.tasks).set({ 'status': 'running' });`)).toEqual([
+      'running',
+    ]);
+    expect(status(`await db.update(schema.tasks).set({ ['status']: 'queued' });`)).toEqual([
+      'queued',
+    ]);
+    expect(
+      status(
+        `const patch = {}; patch['status'] = 'running'; await db.update(schema.tasks).set(patch);`,
+      ),
+    ).toEqual(['<computed>']);
   });
 
   it('exempts only a predicate that holds a created task alone', () => {
