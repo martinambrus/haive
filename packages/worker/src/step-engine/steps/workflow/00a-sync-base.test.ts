@@ -149,6 +149,12 @@ function makeMergeDb() {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState;
   };
   const db = {
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+    execute: async () => [],
+    // No other task holds the merge dir.
+    select: () => ({
+      from: () => ({ innerJoin: () => ({ where: () => ({ limit: async () => [] }) }) }),
+    }),
     // resolveGitEnv walks tasks -> repositories before users; an unlinked task means
     // the merge commit uses merge-resolver's FALLBACK_GIT_IDENTITY, as before.
     query: {

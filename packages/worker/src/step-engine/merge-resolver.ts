@@ -28,6 +28,7 @@ import {
   unmergedPaths,
   type MergeAbort,
 } from './git-merge.js';
+import { findOtherMergeHolder, lockMergeDir } from './merge-dir-claim.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import {
   addStepWarning,
@@ -753,23 +754,54 @@ export async function resolveMergePhase(
 
   // --- pending: attempt the merge; clean -> done, conflict -> resolving (live) ---
   if (state.phase === 'pending') {
-    // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
-    const cleared = await abortOtherMerge(state.mergeDir, state.featureBranch);
-    const stale = cleared.ok ? await abortMerge(state.mergeDir) : cleared;
-    if (!stale.ok) return haltUnaborted(db, current, params.taskId, state, stale);
-    const opened = await openMerge(
-      state.mergeDir,
-      state.featureBranch,
-      ['-m', `Merge ${state.featureBranch}`],
-      commitEnv,
-    );
-    if (opened.kind === 'merged') {
+    const pending = state;
+    // Locked per merge dir: a second task's check cannot interleave with this one's abort and open.
+    const attempt = await db.transaction(async (tx) => {
+      await lockMergeDir(tx, pending.mergeDir);
+      const holder = await findOtherMergeHolder(tx, {
+        mergeDir: pending.mergeDir,
+        taskId: params.taskId,
+      });
+      if (holder) return { kind: 'held' as const, holder };
+      // The task that held the dir removes it when it finishes, so a Retry after a hold finds it gone.
+      if (pending.mode === 'cross-branch') {
+        await ensureBaseWorktree(ctx, pending.mergeDir, pending.baseBranch);
+      }
+      // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
+      const cleared = await abortOtherMerge(pending.mergeDir, pending.featureBranch);
+      const stale = cleared.ok ? await abortMerge(pending.mergeDir) : cleared;
+      if (!stale.ok) return { kind: 'unaborted' as const, stale };
+      const opened = await openMerge(
+        pending.mergeDir,
+        pending.featureBranch,
+        ['-m', `Merge ${pending.featureBranch}`],
+        commitEnv,
+      );
+      // Recorded before the lock drops, so a landed merge the squash has yet to reset is held too.
+      if (opened.kind !== 'refused') {
+        await saveMergeState(db, current.id, { ...pending, phase: 'resolving' });
+      }
+      return { kind: 'opened' as const, opened };
+    });
+    if (attempt.kind === 'held') {
+      return haltFailed(
+        db,
+        current,
+        `Task "${attempt.holder.title}" (${attempt.holder.id}) is still merging into ${state.baseBranch} in ${state.mergeDir}; retry once it finishes.`,
+        'merge dir in use',
+      );
+    }
+    if (attempt.kind === 'unaborted') {
+      return haltUnaborted(db, current, params.taskId, state, attempt.stale);
+    }
+    if (attempt.opened.kind === 'merged') {
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
-    if (opened.kind === 'refused') return haltRefused(db, current, state, opened.detail);
+    if (attempt.opened.kind === 'refused') {
+      return haltRefused(db, current, state, attempt.opened.detail);
+    }
     // Conflict: leave the mid-merge LIVE (no --abort) so the fix agent edits it.
     state = { ...state, phase: 'resolving' };
-    await saveMergeState(db, current.id, state);
   }
 
   // --- awaiting-guidance: the user's answer (via /clarify, in task_events) resumes

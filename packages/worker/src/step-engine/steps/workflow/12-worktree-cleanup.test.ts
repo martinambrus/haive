@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema, type MergeResolveState } from '@haive/database';
 import { MERGE_CLARIFICATION_ANSWERED_EVENT, MERGE_CLARIFICATION_ASKED_EVENT } from '@haive/shared';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
@@ -183,6 +185,9 @@ function makeDb(
     /** Rejects the fix-agent invocation insert, as the one-live-per-step unique index does
      *  when a concurrent advance already dispatched one. */
     insertRejects?: unknown;
+    /** A merge another task's step has recorded; the claim query only returns it while that
+     *  task is live, is not the caller, and the bound merge dir and phase list match. */
+    mergeSharer?: { id: string; title: string; status: string; mergeDir: string; phase: string };
   } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
@@ -199,6 +204,7 @@ function makeDb(
   };
   const db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+    execute: async () => [],
     query: {
       users: { findFirst: async () => undefined },
       tasks: { findFirst: async () => opts.worktreeSharer ?? undefined },
@@ -245,6 +251,25 @@ function makeDb(
     // by its columns argument, and honours the same ownership guard as the update mock above.
     select: (cols?: unknown) => ({
       from: (table?: unknown) => {
+        if (table === schema.taskSteps && cols && typeof cols === 'object' && 'title' in cols) {
+          return {
+            innerJoin: () => ({
+              where: (cond: unknown) => ({
+                limit: async () => {
+                  const bound = new PgDialect().sqlToQuery(cond as SQL).params;
+                  const s = opts.mergeSharer;
+                  const matches =
+                    s &&
+                    bound.includes(s.mergeDir) &&
+                    bound.includes(s.phase) &&
+                    !bound.includes(s.id) &&
+                    !bound.includes(s.status);
+                  return matches ? [{ id: s.id, title: s.title, status: s.status }] : [];
+                },
+              }),
+            }),
+          };
+        }
         if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
           return {
             where: () => ({
@@ -414,6 +439,138 @@ describe('12 merge phase + apply (real git)', () => {
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
+  });
+
+  describe('cross-branch: a merge another task left open in the shared base worktree', () => {
+    /** `main--base` holds an open, conflicted merge of `feature/other`, as another task's fixer leaves it. */
+    async function openOtherMerge(parent: string, wt: string): Promise<string> {
+      await divergeBase(parent, wt);
+      const tmp = path.join(parent, '.haive', 'worktrees', 'other-src');
+      await git(parent, ['worktree', 'add', '-b', 'feature/other', tmp, 'main~1']);
+      await writeFile(path.join(tmp, 'base.txt'), 'other-edit\n', 'utf8');
+      await git(tmp, ['commit', '-am', 'edit base on other']);
+      await git(parent, ['worktree', 'remove', '--force', tmp]);
+      await git(parent, ['checkout', '-b', 'develop']);
+      const base = path.join(parent, '.haive', 'worktrees', 'main--base');
+      await git(parent, ['worktree', 'add', base, 'main']);
+      expect(await gitCode(base, ['merge', '--no-ff', 'feature/other', '-m', 'other'])).not.toBe(0);
+      return base;
+    }
+    const sharer = (over: { id?: string; status?: string }, mergeDir: string) => ({
+      id: 'other-task',
+      title: 'Other feature',
+      status: 'running',
+      mergeDir,
+      phase: 'resolving',
+      ...over,
+    });
+    const runB = async (parent: string, wt: string, mergeSharer: ReturnType<typeof sharer>) => {
+      const h = makeDb({ mergeSharer });
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt, { parentBranch: 'develop' }), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      );
+      return { h, merge };
+    };
+
+    it('a live task with a resolving merge there is not aborted; this task halts naming it', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const base = await openOtherMerge(parent, wt);
+        const { h, merge } = await runB(parent, wt, sharer({}, base));
+        expect(merge.resolved).toBe(false);
+        if (!merge.resolved) {
+          expect(merge.result.status).toBe('failed');
+          const err = (merge.result as { error: string }).error;
+          expect(err).toContain('Other feature');
+          expect(err).toContain('other-task');
+          expect(err).toContain('retry once it finishes');
+        }
+        expect(h.getStatus()).toBe('failed');
+        expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+        expect(await git(base, ['diff', '--name-only', '--diff-filter=U'])).toContain('base.txt');
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a failed task there still holds its merge, which its Retry resumes', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const base = await openOtherMerge(parent, wt);
+        const { merge } = await runB(parent, wt, sharer({ status: 'failed' }, base));
+        expect(merge.resolved).toBe(false);
+        if (!merge.resolved) {
+          expect((merge.result as { error: string }).error).toContain('retry once it finishes');
+        }
+        expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a cancelled task there is cleaned up as before: its merge is aborted and this one proceeds', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const base = await openOtherMerge(parent, wt);
+        const { merge } = await runB(parent, wt, sharer({ status: 'cancelled' }, base));
+        expect(merge.resolved).toBe(false);
+        if (!merge.resolved) {
+          expect((merge.result as { error: string }).error).not.toContain('retry once it finishes');
+        }
+        expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a hold is retried into a base worktree the holder removed meanwhile', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const base = await openOtherMerge(parent, wt);
+        const first = await runB(parent, wt, sharer({}, base));
+        expect(first.merge.resolved).toBe(false);
+        await git(base, ['merge', '--abort']);
+        await git(parent, ['worktree', 'remove', '--force', base]);
+        const h = makeDb();
+        const ctx = mkCtx(parent, h.db);
+        const retry = await resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(
+            det(wt, { parentBranch: 'develop' }),
+            { action: 'merge_remove' },
+            first.h.getState(),
+          ),
+          ctx,
+          mkParams(h.db),
+        );
+        expect(retry.resolved).toBe(false);
+        if (!retry.resolved) {
+          expect((retry.result as { error: string }).error).toContain('requires a CLI provider');
+        }
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it("this task's own earlier attempt there is aborted as before", async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const base = await openOtherMerge(parent, wt);
+        const { merge } = await runB(parent, wt, sharer({ id: 't1' }, base));
+        expect(merge.resolved).toBe(false);
+        if (!merge.resolved) {
+          expect((merge.result as { error: string }).error).not.toContain('retry once it finishes');
+        }
+        expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
   });
 
   it('conflict with no CLI provider: phase halts (failed), aborts the merge, keeps the worktree', async () => {
