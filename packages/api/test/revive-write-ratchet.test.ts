@@ -844,7 +844,12 @@ function inSqlContext(n: ts.Node): boolean {
       );
     }
     if (ts.isVariableDeclaration(p) && p.initializer === at && ts.isIdentifier(p.name)) {
-      return usedInSql(at.getSourceFile(), p.name);
+      // An exported value is used in files this walk does not read, so it counts as query text.
+      const stmt = p.parent.parent;
+      const exported =
+        ts.isVariableStatement(stmt) &&
+        (ts.getModifiers(stmt) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+      return exported || usedInSql(at.getSourceFile(), p.name);
     }
     const passes =
       (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
@@ -986,6 +991,7 @@ describe('a live-status write on a task row', () => {
     ).toBe(1);
     expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
     expect(found("throw new HttpError(409, 'Update tasks before retrying');")).toBe(0);
+    expect(found(`export const reviveTask = "UPDATE tasks SET status = 'running'";`)).toBe(1);
     expect(
       found(
         "import { sql as statement } from 'drizzle-orm'; statement`UPDATE tasks SET status = 1`;",
