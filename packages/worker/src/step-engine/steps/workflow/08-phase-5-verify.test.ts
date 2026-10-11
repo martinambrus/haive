@@ -69,16 +69,20 @@ beforeEach(() => {
 });
 
 describe('buildVerifyCommand', () => {
-  it('builds host pm-script commands (JS, always host)', () => {
+  it('builds host pm-script commands outside ddev', () => {
     expect(buildVerifyCommand({ runner: 'pm', pm: 'pnpm', script: 'test' }, false)).toEqual({
       kind: 'host',
       label: 'pnpm run test',
       argv: ['pnpm', 'run', 'test'],
     });
-    // ddevMode does not move JS scripts into ddev
-    expect(buildVerifyCommand({ runner: 'pm', pm: 'npm', script: 'lint' }, true)?.kind).toBe(
-      'host',
-    );
+  });
+
+  it('routes pm scripts through ddev exec when ddevMode', () => {
+    expect(buildVerifyCommand({ runner: 'pm', pm: 'pnpm', script: 'test' }, true)).toEqual({
+      kind: 'ddev',
+      label: 'ddev exec pnpm run test',
+      argv: ['exec', 'pnpm', 'run', 'test'],
+    });
   });
 
   it('returns null for pm runner without a package manager or script', () => {

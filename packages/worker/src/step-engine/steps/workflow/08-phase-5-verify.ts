@@ -177,8 +177,8 @@ export function buildUnverifiedNote(
 
 /**
  * Build the command for a verify slot from the detected runner. Pure (no IO) so
- * it is unit-testable. PHP/Python runners go through DDEV when `ddevMode`, else
- * run the binary host-side; JS package scripts always run host-side.
+ * it is unit-testable. Every runner goes through DDEV when `ddevMode`, else
+ * runs the binary host-side.
  */
 export function buildVerifyCommand(
   spec: { runner: SlotRunner; pm?: PackageManager; script?: string },
@@ -187,6 +187,12 @@ export function buildVerifyCommand(
   switch (spec.runner) {
     case 'pm': {
       if (!spec.pm || spec.pm === 'none' || !spec.script) return null;
+      if (ddevMode)
+        return {
+          kind: 'ddev',
+          label: `ddev exec ${spec.pm} run ${spec.script}`,
+          argv: ['exec', spec.pm, 'run', spec.script],
+        };
       return {
         kind: 'host',
         label: `${spec.pm} run ${spec.script}`,
