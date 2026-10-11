@@ -67,13 +67,17 @@ of every workflow task via `02-pre-rag-sync`), in the same shape as
 `dedupeAndEnforceRepoUniqueness`: warns rather than throws, keeps no applied-record, and
 converges structurally — `SET content = content` fires the trigger, which stamps
 `IDENTIFIER_TSV_SENTINEL`, and a stamped row never matches the predicate again. MEASURED,
-9,197 rows in 17.5s, and the next run is 1.2s writing nothing. The sentinel deliberately
-contains no `_`, `.` or hump so `extractIdentifiers` can never emit it from a chunk's own text
-— otherwise indexing Haive's own source would stamp a row as upgraded when it was not, and a
-version bump would skip exactly those rows. It is capped per invocation so a large store
-finishes over the next few syncs rather than making one task wait for the whole rewrite.
+9,197 rows in 17.5s, and the next run is 1.2s writing nothing. The sentinel (`haive tsv v3`)
+holds spaces, so no text-search parser can emit it as one lexeme from a row's own text and
+`identifierTsvSentinelQuery` matches it as a single quoted lexeme. Its predecessor `haivetsvv2`
+was safe from `extractIdentifiers` but not from the english parser, so a row whose prose held that
+word read as upgraded when it was not; moving to v3 rewrites every per-repo store once. It is
+capped per invocation so a large store finishes over the next few syncs rather than making one
+task wait for the whole rewrite.
 
 **The global KB store carries the same lexemes.** `ensureGlobalKbSchema` installs the same
-function body and runs the same backfill, through its bounded step, once per process. Before
+function body and runs the same backfill through its bounded step, but with no row cap: the
+ensure runs once per process, so a capped pass would never get a second one. It counts the
+unstamped rows first and stops after `ceil(count / batch) + 1` passes. Before
 that the global store's `content_tsv` was plain `to_tsvector('english', …)`, so only camelCase
 names survived the parser whole and a snake_case identifier could never match the global half.
