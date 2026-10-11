@@ -2781,6 +2781,7 @@ export async function resolveDagPhase(
         const refused =
           inv.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
         if (refused) result.outcome = 'failed_unrecoverable';
+        let exhausted: string | null = null;
         // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
         // finished, so re-running it — bounded by the coder's own infra_retries — honours
@@ -2904,9 +2905,10 @@ export async function resolveDagPhase(
             // Re-dispatch budget spent: a persistently-killed coder is an environment
             // problem (usually a runner OOM). Stamp the marker the ENVIRONMENT halt reads.
             result.concerns =
-              `${DAG_INFRA_EXHAUSTED_MARKER}: ${issue.issueKey} coder was killed/orphaned ` +
+              `${issue.issueKey} coder was killed/orphaned ` +
               `${issue.infraRetries + 1} times without completing (worker restart or runner ` +
               `OOM). Not retrying — raise RUNTIME_MEMORY_MB or reduce the issue's scope.`;
+            exhausted = `${DAG_INFRA_EXHAUSTED_MARKER}: ${result.concerns}`;
           }
         }
         await db
@@ -2918,6 +2920,7 @@ export async function resolveDagPhase(
             debtItems: result.debtItems,
             concerns: result.concerns,
             ...(refused ? { errorMessage: inv.errorMessage } : {}),
+            ...(exhausted ? { errorMessage: exhausted } : {}),
             similarSites: mergeSimilarSites(issue.similarSites, result.similarSites),
             rawOutput: inv.rawOutput ?? null,
             endedAt: new Date(),

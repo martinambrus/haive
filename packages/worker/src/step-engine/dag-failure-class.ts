@@ -25,15 +25,15 @@ import {
 
 export type DagFailureClass = 'transient' | 'environment' | 'truncated' | 'genuine';
 
-/** Stable marker stamped on the issue's `concerns` when transient re-dispatch is
+/** Stable marker that opens the issue's `errorMessage` when transient re-dispatch is
  *  exhausted, so the downstream ENVIRONMENT halt recognises a persistently-killed agent
- *  (typically a runner OOM) without needing the original exit code. */
+ *  (typically a runner OOM) without needing the original exit code. Read there alone: a
+ *  coder's own `concerns` may quote it. */
 export const DAG_INFRA_EXHAUSTED_MARKER = 'DAG_INFRA_EXHAUSTED';
 
 /** True execution-ENVIRONMENT problems: re-running will not help until fixed. Mirrors
  *  the pre-existing infra deny-set MINUS the "no result JSON" phrases (those are now
- *  TRANSIENT when killed, or GENUINE when the agent exited clean), PLUS the
- *  transient-exhausted marker. */
+ *  TRANSIENT when killed, or GENUINE when the agent exited clean). */
 const ENVIRONMENT_FAILURE_RE = new RegExp(
   [
     '\\bEACCES\\b',
@@ -48,7 +48,6 @@ const ENVIRONMENT_FAILURE_RE = new RegExp(
     'unable to write',
     'cannot write',
     'no cli provider available',
-    DAG_INFRA_EXHAUSTED_MARKER,
   ].join('|'),
   'i',
 );
@@ -63,8 +62,9 @@ export function classifyDagIssueFailure(signal: {
   concerns?: string | null;
 }): DagFailureClass {
   const text = [signal.errorMessage, signal.concerns].filter(Boolean).join(' ; ');
-  // A transient MARKER-exhausted concern reads as ENVIRONMENT, so check that first.
-  if (ENVIRONMENT_FAILURE_RE.test(text)) return 'environment';
+  if (infraExhausted(signal.errorMessage) || ENVIRONMENT_FAILURE_RE.test(text)) {
+    return 'environment';
+  }
   if (isOutputTruncationMessage(signal.errorMessage?.trim())) return 'truncated';
   // Delegate the transient (killed/orphaned/timed-out) test to the shared classifier,
   // passing the combined error+concerns text so a concern-only marker still matches.
@@ -82,5 +82,11 @@ export function dagEnvironmentHaltReason(issue: {
   errorMessage?: string | null;
 }): string | null {
   const detail = [issue.errorMessage, issue.concerns].filter(Boolean).join('; ').trim();
-  return detail && ENVIRONMENT_FAILURE_RE.test(detail) ? detail : null;
+  return detail && (infraExhausted(issue.errorMessage) || ENVIRONMENT_FAILURE_RE.test(detail))
+    ? detail
+    : null;
+}
+
+function infraExhausted(errorMessage: string | null | undefined): boolean {
+  return errorMessage?.startsWith(DAG_INFRA_EXHAUSTED_MARKER) ?? false;
 }

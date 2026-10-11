@@ -77,10 +77,16 @@ describe('classifyDagIssueFailure', () => {
     ).toBe('environment');
   });
 
-  it('environment: transient re-dispatch exhausted marker', () => {
-    expect(classifyDagIssueFailure({ concerns: 'DAG_INFRA_EXHAUSTED: killed 3 times' })).toBe(
+  it('environment: transient re-dispatch exhausted marker on the error', () => {
+    expect(classifyDagIssueFailure({ errorMessage: 'DAG_INFRA_EXHAUSTED: killed 3 times' })).toBe(
       'environment',
     );
+  });
+
+  it('not environment: the marker quoted in the concerns a coder wrote', () => {
+    expect(
+      classifyDagIssueFailure({ exitCode: 0, concerns: 'DAG_INFRA_EXHAUSTED: killed 3 times' }),
+    ).toBe('genuine');
   });
 
   it('genuine: clean exit 0 but no valid ISSUE_RESULT_JSON', () => {

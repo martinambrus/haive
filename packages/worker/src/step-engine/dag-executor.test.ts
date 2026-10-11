@@ -248,9 +248,15 @@ describe('dagEnvironmentHaltReason', () => {
   it('halts on a transient re-dispatch exhausted (repeatedly-killed) coder', () => {
     expect(
       dagEnvironmentHaltReason({
-        concerns: 'DAG_INFRA_EXHAUSTED: ISSUE-004 coder was killed/orphaned 3 times',
+        errorMessage: 'DAG_INFRA_EXHAUSTED: ISSUE-004 coder was killed/orphaned 3 times',
       }),
     ).not.toBeNull();
+  });
+
+  it('does NOT halt on the marker quoted in the concerns a coder wrote', () => {
+    expect(
+      dagEnvironmentHaltReason({ concerns: 'Saw DAG_INFRA_EXHAUSTED in the logs; unrelated.' }),
+    ).toBeNull();
   });
 
   it('does NOT halt on a clean contract violation (missing result JSON) — that escalates', () => {
@@ -3289,6 +3295,21 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
         expect.objectContaining({
           outcome: 'failed_unrecoverable',
           errorMessage: expect.stringContaining(PROVIDER_FATAL_HEADLINES.content_filter),
+        }),
+      ]);
+    });
+
+    it('stamps the exhausted marker on the error of a coder, never on its concerns', async () => {
+      const { issueUpdates } = await ingestCoder(
+        'running',
+        { ...killedCoder, supersededAt: null },
+        { issue: { infraRetries: 2 }, enqueued: [] },
+      );
+      expect(issueUpdates).toEqual([
+        expect.objectContaining({
+          outcome: 'failed_unrecoverable',
+          errorMessage: expect.stringMatching(/^DAG_INFRA_EXHAUSTED: /),
+          concerns: expect.not.stringContaining('DAG_INFRA_EXHAUSTED'),
         }),
       ]);
     });
