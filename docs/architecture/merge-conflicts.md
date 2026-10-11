@@ -118,7 +118,8 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
   rest of the task's work, and a same-branch root is left as the fixer left it, merge still open.
   A cancelled plan merge is the exception (`discardPlanMerge`, from `handleCancelTask`): the worker
   moves aside what the recorded fixers left, aborts the merge and removes the scratch worktree,
-  unless another live `plan_merge` task of the repository holds it (`plan_merge.discard_skipped`),
+  unless another `plan_merge` task of the repository holds it, a live one or a failed one opened after it
+  (`plan_merge.discard_skipped`),
   and a move that fails keeps the worktree (`plan_merge.discard_failed`).
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
