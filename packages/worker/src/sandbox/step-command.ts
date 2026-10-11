@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -15,11 +16,17 @@ import { currentAgentCap } from '../queues/cli-exec/handlers.js';
 import type { DockerVolumeMount } from './docker-runner.js';
 import { runInSandbox, SANDBOX_WORKDIR } from './sandbox-runner.js';
 
-/** Exit status of the Haive-owned preamble when the command's binary is not on the image's PATH.
- *  The command's own 127 stays the command's. */
+/** Exit status of the Haive-owned preamble when the command's binary is not on the image's PATH,
+ *  taken as that only together with the run's own marker on stdout: a command may exit 199 itself. */
 export const BINARY_MISSING_EXIT = 199;
 
-const PREAMBLE = `command -v "$1" >/dev/null 2>&1 || exit ${BINARY_MISSING_EXIT}; exec "$@"`;
+function missingBinaryGuard(): { marker: string; preamble: string } {
+  const marker = `haive-missing-${randomBytes(8).toString('hex')}`;
+  return {
+    marker,
+    preamble: `command -v "$1" >/dev/null 2>&1 || { echo ${marker}; exit ${BINARY_MISSING_EXIT}; }; exec "$@"`,
+  };
+}
 
 export interface StepCommandOptions {
   argv: string[];
@@ -80,6 +87,7 @@ export async function runStepCommandInSandbox(
     if (err instanceof AgentLeaseAbortedError) throw new TaskCancelledError();
     throw err;
   }
+  const { marker, preamble } = missingBinaryGuard();
   try {
     const runnerOptions: Parameters<typeof runInSandbox>[1] = {
       workdir,
@@ -91,13 +99,13 @@ export async function runStepCommandInSandbox(
     if (provider.networkPolicy) runnerOptions.networkPolicy = provider.networkPolicy;
     const runSpec: Parameters<typeof runInSandbox>[0] = {
       command: 'sh',
-      args: ['-c', PREAMBLE, 'sh', ...options.argv],
+      args: ['-c', preamble, 'sh', ...options.argv],
       timeoutMs: options.timeoutMs,
       signal: ctx.signal,
     };
     if (maskFiles.length > 0) runSpec.extraFiles = maskFiles;
     const result = await runInSandbox(runSpec, runnerOptions);
-    if (result.exitCode === BINARY_MISSING_EXIT) {
+    if (result.exitCode === BINARY_MISSING_EXIT && result.stdout.includes(marker)) {
       return { ran: false, note: `not run: ${bin} is not in the sandbox image` };
     }
     return {

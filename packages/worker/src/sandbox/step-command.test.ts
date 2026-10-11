@@ -90,7 +90,16 @@ describe('runStepCommandInSandbox', () => {
   });
 
   it('maps the Haive sentinel to not run, naming the binary', async () => {
-    ran(BINARY_MISSING_EXIT);
+    runInSandbox.mockImplementation(async (spec: { args: string[] }) => {
+      const marker = /haive-missing-[0-9a-f]{16}/.exec(spec.args[1] ?? '')?.[0];
+      return {
+        exitCode: BINARY_MISSING_EXIT,
+        stdout: `${marker}\n`,
+        stderr: '',
+        durationMs: 1,
+        timedOut: false,
+      };
+    });
     const res = await runStepCommandInSandbox(ctx(), {
       argv: ['vendor/bin/phpunit'],
       timeoutMs: 1,
@@ -100,6 +109,29 @@ describe('runStepCommandInSandbox', () => {
       note: 'not run: vendor/bin/phpunit is not in the sandbox image',
     });
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the command's own exit 199 as a run", async () => {
+    ran(BINARY_MISSING_EXIT, 'my own failure\n');
+    const res = await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
+    expect(res).toEqual({ ran: true, exitCode: 199, output: 'my own failure\n' });
+  });
+
+  it("does not accept another run's marker", async () => {
+    ran(BINARY_MISSING_EXIT, 'haive-missing-0000000000000000\n');
+    const res = await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
+    expect(res).toMatchObject({ ran: true, exitCode: 199 });
+  });
+
+  it('draws a fresh marker for every run', async () => {
+    ran(0);
+    await runStepCommandInSandbox(ctx(), { argv: ['pnpm'], timeoutMs: 1 });
+    await runStepCommandInSandbox(ctx(), { argv: ['pnpm'], timeoutMs: 1 });
+    const markers = runInSandbox.mock.calls.map(
+      (c) => /haive-missing-[0-9a-f]{16}/.exec(c[0].args[1])?.[0],
+    );
+    expect(markers[0]).toBeDefined();
+    expect(markers[0]).not.toBe(markers[1]);
   });
 
   it("leaves the command's own exit 127 as a run", async () => {
