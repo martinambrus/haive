@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   IDENTIFIER_TSV_SENTINEL,
+  identifierTsvSentinelQuery,
   extractIdentifiers,
   identifierTsQuery,
   identifierTsvSql,
@@ -56,6 +57,13 @@ describe('extractIdentifiers', () => {
     // those rows.
     expect(extractIdentifiers(IDENTIFIER_TSV_SENTINEL)).toEqual([]);
     expect(extractIdentifiers(`const x = '${IDENTIFIER_TSV_SENTINEL}';`)).toEqual([]);
+  });
+});
+
+describe('identifierTsvSentinelQuery', () => {
+  it('is one quoted lexeme, and the sentinel holds a space no parser emits', () => {
+    expect(IDENTIFIER_TSV_SENTINEL).toContain(' ');
+    expect(identifierTsvSentinelQuery()).toBe(`'${IDENTIFIER_TSV_SENTINEL}'`);
   });
 });
 

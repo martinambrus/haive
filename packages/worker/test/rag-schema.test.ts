@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import postgres from 'postgres';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureRagSchema } from '../src/step-engine/steps/onboarding/_rag-connection.js';
+import { IDENTIFIER_TSV_SENTINEL, identifierTsvSentinelQuery } from '@haive/shared/rag';
 import type { RagConnection } from '@haive/shared/rag';
 
 // Mirrors packages/shared/test/global-kb-schema.test.ts: no live Postgres — a
@@ -13,12 +15,19 @@ const drizzleError = (code: string) =>
   Object.assign(new Error('Failed query: CREATE EXTENSION'), { cause: pgError(code) });
 
 function fakeConn(
-  opts: { vectorThrows?: string; wrapped?: boolean; trigger?: 'stale' | 'current' } = {},
+  opts: {
+    vectorThrows?: string;
+    wrapped?: boolean;
+    trigger?: 'stale' | 'current';
+    fullBatches?: boolean;
+  } = {},
 ): {
   conn: RagConnection;
   queries: () => string;
   statements: () => string[];
+  backfillParams: () => unknown[][];
 } {
+  const backfillParams: unknown[][] = [];
   const captured: string[] = [];
   const pg = ((strings: TemplateStringsArray | string) => {
     // Called as a tag (conn.pg`...`) and as a function (conn.pg(RAG_TABLE)) for
@@ -33,8 +42,12 @@ function fakeConn(
     }
     return Promise.resolve([]);
   }) as unknown as { unsafe: (q: string, params?: unknown[]) => Promise<unknown[]> };
-  pg.unsafe = (q: string) => {
+  pg.unsafe = (q: string, params?: unknown[]) => {
     captured.push(q);
+    if (q.includes('SET content = content')) {
+      backfillParams.push(params ?? []);
+      return Promise.resolve(Object.assign([], { count: opts.fullBatches ? 2_000 : 0 }));
+    }
     if (q.includes('FROM pg_trigger') && opts.trigger) {
       return Promise.resolve([{ stale: opts.trigger === 'stale' }]);
     }
@@ -52,7 +65,12 @@ function fakeConn(
     embeddingDimensions: 2560,
     close: async () => {},
   } as unknown as RagConnection;
-  return { conn, queries: () => captured.join('\n'), statements: () => captured };
+  return {
+    conn,
+    queries: () => captured.join('\n'),
+    statements: () => captured,
+    backfillParams: () => backfillParams,
+  };
 }
 
 describe('ensureRagSchema', () => {
@@ -179,4 +197,75 @@ describe('ensureRagSchema', () => {
       expect(queries()).not.toContain('CREATE TABLE');
     },
   );
+});
+
+describe('the identifier backfill', () => {
+  it('matches the stamp as one lexeme and keeps its per-run cap', async () => {
+    const { conn, backfillParams } = fakeConn({ fullBatches: true });
+    await ensureRagSchema(conn);
+    expect(backfillParams()).toHaveLength(20);
+    expect(backfillParams()[0]).toEqual([identifierTsvSentinelQuery(), 2_000]);
+  });
+});
+
+// Needs a server with pgvector; HAIVE_GKB_TEST_DB_URL is any superuser URL on it.
+const ADMIN_URL = process.env.HAIVE_GKB_TEST_DB_URL ?? '';
+const SCRATCH_DB = `ragident_${process.pid}_${Date.now()}`;
+
+describe.skipIf(!ADMIN_URL)('the identifier backfill against Postgres', () => {
+  const admin = postgres(ADMIN_URL, { max: 1, onnotice: () => {} });
+  let pg: postgres.Sql;
+  let conn: RagConnection;
+
+  beforeAll(async () => {
+    await admin.unsafe(`CREATE DATABASE "${SCRATCH_DB}"`);
+    const url = new URL(ADMIN_URL);
+    url.pathname = `/${SCRATCH_DB}`;
+    pg = postgres(url.toString(), { max: 1, onnotice: () => {} });
+    conn = { mode: 'internal', pg, embeddingDimensions: 8, close: async () => {} } as never;
+  });
+
+  afterAll(async () => {
+    await pg?.end({ timeout: 5 });
+    await admin.unsafe(`DROP DATABASE IF EXISTS "${SCRATCH_DB}" WITH (FORCE)`);
+    await admin.end({ timeout: 5 });
+  });
+
+  const insert = (section: string, content: string) =>
+    pg.unsafe(
+      `INSERT INTO ai_rag_embeddings (source_type, source_path, section_id, content, vector)
+       VALUES ('code', 'a.ts', $1, $2, $3::vector)`,
+      [section, content, `[${Array(8).fill(0.1).join(',')}]`],
+    );
+  const whole = async (section: string) =>
+    (
+      await pg.unsafe(
+        `SELECT content_tsv @@ $1::tsquery AS hit FROM ai_rag_embeddings WHERE section_id = $2`,
+        [`'pdf_generator'`, section],
+      )
+    )[0]!.hit as boolean;
+  const xmin = async (section: string) =>
+    (
+      await pg.unsafe(`SELECT xmin::text AS x FROM ai_rag_embeddings WHERE section_id = $1`, [
+        section,
+      ])
+    )[0]!.x as string;
+
+  it('stamps a legacy row whose prose carries every word of the stamp, and does not touch a stamped row again', async () => {
+    await ensureRagSchema(conn);
+    const prose = `Notes on ${IDENTIFIER_TSV_SENTINEL} and haive tsv v3 and haivetsvv2 as plain words, then pdf_generator.`;
+    await insert('prose', prose);
+    await insert('legacy', prose);
+    await pg.unsafe(
+      `UPDATE ai_rag_embeddings SET content_tsv = to_tsvector('english', content) WHERE section_id = 'legacy'`,
+    );
+
+    await ensureRagSchema(conn);
+    const before = [await xmin('prose'), await xmin('legacy')];
+    await ensureRagSchema(conn);
+
+    expect(await whole('prose')).toBe(true);
+    expect(await whole('legacy'), 'the legacy row').toBe(true);
+    expect([await xmin('prose'), await xmin('legacy')]).toEqual(before);
+  }, 30_000);
 });

@@ -8,7 +8,11 @@ vi.mock('../src/logger/index.js', () => {
 });
 
 import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
-import { IDENTIFIER_TSV_SENTINEL, identifierTsvSql } from '../src/rag/identifiers.js';
+import {
+  IDENTIFIER_TSV_SENTINEL,
+  identifierTsvSentinelQuery,
+  identifierTsvSql,
+} from '../src/rag/identifiers.js';
 import { orphanFacetMajorSql, trimFacetValueSql } from '../src/global-kb/schema.js';
 
 type EnsureConn = Parameters<typeof ensureGlobalKbSchema>[0];
@@ -476,7 +480,7 @@ describe('ensureGlobalKbSchema', () => {
       ]);
       expect(update![3]).toContain('UPDATE ai_rag_embeddings SET content = content');
       expect(update![3]).toContain('NOT (content_tsv @@ $1::tsquery)');
-      expect(backfillParams()).toEqual([[IDENTIFIER_TSV_SENTINEL, 2_000]]);
+      expect(backfillParams()).toEqual([[identifierTsvSentinelQuery(), 2_000]]);
       expect(txs.indexOf(update!)).toBeGreaterThan(
         txs.findIndex((tx) => tx.some((q) => q.includes('CREATE TRIGGER trg_global_content_tsv'))),
       );

@@ -1,7 +1,11 @@
 import type postgres from 'postgres';
 import { logger } from '../logger/index.js';
 import { isPgvectorUnavailable } from '../rag/connection.js';
-import { IDENTIFIER_TSV_SENTINEL, identifierTsvSql } from '../rag/identifiers.js';
+import {
+  IDENTIFIER_TSV_SENTINEL,
+  identifierTsvSentinelQuery,
+  identifierTsvSql,
+} from '../rag/identifiers.js';
 import type { GlobalKbConnection } from './connection.js';
 import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
 
@@ -273,7 +277,7 @@ export async function ensureGlobalKbSchema(
   try {
     const unstamped = `FROM ${VECTORS_TABLE} WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)`;
     const counted = await step((tx) =>
-      tx.unsafe(`SELECT count(*)::int AS n ${unstamped}`, [IDENTIFIER_TSV_SENTINEL]),
+      tx.unsafe(`SELECT count(*)::int AS n ${unstamped}`, [identifierTsvSentinelQuery()]),
     );
     const pending = Number((counted[0] as { n?: number } | undefined)?.n ?? 0);
     const maxPasses = Math.ceil(pending / IDENTIFIER_BACKFILL_BATCH) + 1;
@@ -283,7 +287,7 @@ export async function ensureGlobalKbSchema(
         tx.unsafe(
           `UPDATE ${VECTORS_TABLE} SET content = content
              WHERE id IN (SELECT id ${unstamped} LIMIT $2)`,
-          [IDENTIFIER_TSV_SENTINEL, IDENTIFIER_BACKFILL_BATCH],
+          [identifierTsvSentinelQuery(), IDENTIFIER_BACKFILL_BATCH],
         ),
       );
       const rows = result.count ?? 0;
