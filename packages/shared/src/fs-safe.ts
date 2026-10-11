@@ -1669,7 +1669,10 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
           info.kind === 'file' &&
           Date.now() - info.stats.mtimeMs > STALE_TEMP_MS
         ) {
-          await removeNoFollow(anchor, rel);
+          await removeFileIfIdentityNoFollow(anchor, rel, {
+            dev: BigInt(info.stats.dev),
+            ino: BigInt(info.stats.ino),
+          });
         }
       } catch {}
     }

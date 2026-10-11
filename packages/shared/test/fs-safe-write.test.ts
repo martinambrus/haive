@@ -34,6 +34,10 @@ import {
 } from '../src/fs-safe.js';
 
 const unlinkBlock = vi.hoisted(() => ({ name: null as string | null }));
+const swapAfterLstat = vi.hoisted(() => ({
+  name: null as string | null,
+  held: [] as { close: () => Promise<void> }[],
+}));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -44,6 +48,25 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
       }
       return actual.unlink(target);
+    },
+    lstat: (async (target: Parameters<typeof actual.lstat>[0], opts?: never) => {
+      const st = await actual.lstat(target, opts);
+      if (swapAfterLstat.name !== null && String(target).endsWith(`/${swapAfterLstat.name}`)) {
+        swapAfterLstat.name = null;
+        swapAfterLstat.held.push(await actual.open(target, 'r'));
+        await actual.writeFile(`${String(target)}.next`, 'fresh');
+        await actual.rename(`${String(target)}.next`, target);
+      }
+      return st;
+    }) as typeof actual.lstat,
+    rename: async (
+      from: Parameters<typeof actual.rename>[0],
+      to: Parameters<typeof actual.rename>[1],
+    ) => {
+      if (unlinkBlock.name !== null && String(from).endsWith(`/${unlinkBlock.name}`)) {
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
+      return actual.rename(from, to);
     },
   };
 });
@@ -799,6 +822,21 @@ describe('fs-safe write primitives', () => {
         expect(await readdir(root)).not.toContain(
           '.top.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
         );
+      });
+
+      it('keeps a temp replaced between its age check and its removal', async () => {
+        const name = '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001';
+        const stale = path.join(root, 'src', name);
+        await writeFile(stale, 'orphan', 'utf8');
+        await ageBy(stale, HOURS_2);
+        swapAfterLstat.name = name;
+        try {
+          await writeFileNoFollow(root, 'src/a.txt', 'next');
+        } finally {
+          swapAfterLstat.name = null;
+          await Promise.all(swapAfterLstat.held.splice(0).map((h) => h.close()));
+        }
+        expect(await readFile(stale, 'utf8')).toBe('fresh');
       });
 
       it('keeps a stale file whose name only starts like a temp', async () => {
