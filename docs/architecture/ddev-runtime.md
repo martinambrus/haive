@@ -55,9 +55,10 @@ acquisition cannot launch a command with only seconds remaining before its clien
 A warm recovery whose lock wait expires fails without rebuilding or deleting the existing
 runner: the earlier operation may still be restoring its live database. Snapshot locking
 also prevents a re-driven access change from reusing a slot while an orphaned snapshot writes it.
-An `exec` command carries its own deadline into the web container (`withWebContainerDeadline`,
+An `exec` in the web container carries its own deadline there (`withWebContainerDeadline`,
 ten seconds under the host's, then KILL five later), because killing the runner's ddev client
-leaves the command running there. A non-raw exec runs as `ddev exec <flags> --raw -- timeout …
+leaves the command running there. An exec naming another service (`-s db`, an add-on) passes
+through unwrapped, since its image need not carry GNU `timeout`. A non-raw exec runs as `ddev exec <flags> --raw -- timeout …
 bash -c "$c"`, where the runner first builds `$c` exactly as ddev's own `quoteArgs` would
 (`cmd/ddev/cmd/exec.go`: one word passes as is; from two up, a word holding `" \t\r\n#` is
 double-quoted with `"` escaped). A wrapper in front of the words instead breaks them, because ddev
