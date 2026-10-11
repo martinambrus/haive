@@ -2383,6 +2383,71 @@ export async function finishedStepResult(
   return { status: 'done', row, output: row.output };
 }
 
+function buildStepContext(
+  params: Pick<
+    AdvanceStepParams,
+    | 'db'
+    | 'taskId'
+    | 'userId'
+    | 'repoPath'
+    | 'workspacePath'
+    | 'cliProviderId'
+    | 'stepDef'
+    | 'round'
+  >,
+  row: TaskStepRow,
+  signal: AbortSignal,
+  throwIfCancelled: () => void,
+): StepContext {
+  const { db, taskId } = params;
+  const round = params.round ?? 0;
+  return {
+    taskId,
+    taskStepId: row.id,
+    userId: params.userId,
+    repoPath: params.repoPath,
+    workspacePath: params.workspacePath,
+    sandboxWorkdir: SANDBOX_WORKDIR,
+    cliProviderId: params.cliProviderId,
+    round,
+    db,
+    logger: log.child({ stepId: params.stepDef.metadata.id, taskId, taskStepId: row.id }),
+    signal,
+    throwIfCancelled,
+    async emitProgress(message: string) {
+      // Cosmetic status-line write. Best-effort: emitters fire this and discard the
+      // promise (`void ctx.emitProgress(...)` on a setInterval heartbeat, per-file RAG
+      // sync, etc.), so a transient DB/DNS blip here (e.g. `EAI_AGAIN postgres`) would
+      // reject unhandled and kill the whole worker — freezing every task. Swallow + log.
+      try {
+        await updateRow(db, row.id, { statusMessage: message });
+      } catch (err) {
+        log.warn({ err, taskId, taskStepId: row.id }, 'progress update failed (non-fatal)');
+      }
+    },
+  };
+}
+
+/** Whether the step's own `shouldRun` already says skip, asked before runtime admission so a step
+ *  that will only skip takes no slot. A throw answers false: the gate stays, as it was. */
+export async function willSkipBeforeAdmission(
+  params: Parameters<typeof buildStepContext>[0],
+  row: TaskStepRow,
+): Promise<boolean> {
+  const { stepDef } = params;
+  if (!stepDef.shouldRun) return false;
+  try {
+    const ctx = buildStepContext(params, row, new AbortController().signal, () => {});
+    return !(await stepDef.shouldRun(ctx));
+  } catch (err) {
+    log.warn(
+      { err, taskId: params.taskId, stepId: stepDef.metadata.id },
+      'pre-admission shouldRun threw; keeping the runtime gate',
+    );
+    return false;
+  }
+}
+
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
   const meta = stepDef.metadata;
@@ -2445,36 +2510,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     })();
   }, CANCEL_POLL_INTERVAL_MS);
 
-  const ctx: StepContext = {
-    taskId,
-    taskStepId: row.id,
-    userId: params.userId,
-    repoPath: params.repoPath,
-    workspacePath: params.workspacePath,
-    sandboxWorkdir: SANDBOX_WORKDIR,
-    cliProviderId: params.cliProviderId,
-    round,
-    db,
-    logger: log.child({ stepId: meta.id, taskId, taskStepId: row.id }),
-    signal: controller.signal,
-    throwIfCancelled,
-    async emitProgress(message: string) {
-      // Cosmetic status-line write. Best-effort: emitters fire this and discard the
-      // promise (`void ctx.emitProgress(...)` on a setInterval heartbeat, per-file RAG
-      // sync, etc.), so a transient DB/DNS blip here (e.g. `EAI_AGAIN postgres`) would
-      // reject unhandled and kill the whole worker — freezing every task. Swallow + log.
-      try {
-        await updateRow(db, row.id, { statusMessage: message });
-      } catch (err) {
-        log.warn({ err, taskId, taskStepId: row.id }, 'progress update failed (non-fatal)');
-      }
-    },
-  };
+  const ctx = buildStepContext(params, row, controller.signal, throwIfCancelled);
 
   try {
     if (stepDef.shouldRun && isFreshStepEntry(row.status)) {
       const should = await stepDef.shouldRun(ctx);
       if (!should) {
+        await foldCliParkOnResume(db, row.id);
         const updated = await openPendingStep(db, taskId, params.epoch, row.id, {
           status: 'skipped',
           endedAt: new Date(),

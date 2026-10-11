@@ -131,6 +131,8 @@ const h = vi.hoisted(() => {
     /** Set to fail the step's error-hint write and the usage-snapshot read. */
     hintWriteFails: false,
     snapshotReadFails: false,
+    /** What the skip-first step's shouldRun answers. */
+    shouldRun: (async () => true) as () => Promise<boolean>,
   };
   return { state };
 });
@@ -359,6 +361,25 @@ for (const [id, index] of [
   } as unknown as StepDefinition);
 }
 
+stepRegistry.register({
+  metadata: {
+    id: 'epoch-skip-runtime',
+    workflowType: 'epoch_chain_skip',
+    index: 0,
+    title: 'epoch-skip-runtime',
+    description: 'a runtime step that may skip itself',
+    requiresCli: false,
+  },
+  needsRuntime: 'ddev',
+  shouldRun: () => h.state.shouldRun(),
+  async detect() {
+    return {};
+  },
+  async apply() {
+    return {};
+  },
+} as unknown as StepDefinition);
+
 afterEach(() => {
   h.state.taskEpoch = 5;
   h.state.readsAnswer = false;
@@ -387,6 +408,7 @@ afterEach(() => {
   h.state.endedRuns = [];
   h.state.hintWriteFails = false;
   h.state.snapshotReadFails = false;
+  h.state.shouldRun = async () => true;
   vi.restoreAllMocks();
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
@@ -1318,6 +1340,70 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       await processTaskJob(job('epoch-chain-runtime'), 'tok');
       expect(h.state.taskHolds).toEqual([{ epochs: [5], landed: false }]);
       expect(h.state.add).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('on the runtime pool, for a step that may skip itself', () => {
+    const full = {
+      decision: 'park',
+      position: 1,
+      waiting: 1,
+      busyMb: 1,
+      budgetMb: 1,
+      myWeightMb: 1,
+    };
+    afterEach(() => {
+      vi.mocked(runtimeAdmission).mockClear();
+    });
+
+    it('takes no slot, ticket or preemption for a step whose shouldRun says skip', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      h.state.shouldRun = async () => false;
+      await processTaskJob(job('epoch-skip-runtime'), 'tok');
+      expect(vi.mocked(runtimeAdmission)).not.toHaveBeenCalled();
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('still parks a step whose shouldRun says run', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      await processTaskJob(job('epoch-skip-runtime'), 'tok');
+      expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      parkQueued(15_000);
+    });
+
+    it('still parks a step whose shouldRun throws', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      h.state.shouldRun = async () => {
+        throw new Error('no ddev for a pending saved database');
+      };
+      await processTaskJob(job('epoch-skip-runtime'), 'tok');
+      expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      parkQueued(15_000);
+    });
+
+    it('still consults admission for a continuation, whatever its shouldRun says', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.shouldRun = async () => false;
+      h.state.parkRow = unparked;
+      h.state.existingRow = {
+        ...unparked,
+        stepId: 'epoch-skip-runtime',
+        round: 0,
+        status: 'waiting_form',
+        formValues: null,
+      };
+      await processTaskJob(job('epoch-skip-runtime', { formValues: { answer: 'yes' } }), 'tok');
+      expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
     });
   });
 
