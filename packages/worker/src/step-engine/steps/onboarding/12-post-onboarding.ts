@@ -2,7 +2,6 @@ import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type {
-  CliProviderName,
   FormField,
   FormSchema,
   OnboardingEnvironmentMirror,
@@ -16,15 +15,12 @@ import {
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_TEMPLATE_ID,
   CLI_RULES_TEMPLATE_KIND,
-  getCliProviderMetadata,
   getHaiveVersion,
   HAIVE_DATA_FILES,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
   ONBOARDING_TOOLING_CONSENT_KEYS,
   ONBOARDING_TOOLING_INFRA_KEYS,
-  unmanagedAgentsDir,
 } from '@haive/shared';
-import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
@@ -33,6 +29,12 @@ import { writePlanMirror } from '../../../plan/mirror.js';
 import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import {
+  collectOnboardingStagePaths,
+  commitOnly,
+  stageNamed,
+  stagedChanges,
+} from './_stage-paths.js';
 import {
   cliRulesRegionRecord,
   dropIgnoredRulesFiles,
@@ -55,7 +57,7 @@ import { gitExec } from '../../../repo/git-exec.js';
 const DEFAULT_COMMIT_MESSAGE = [
   'add: agentic workflow setup',
   '',
-  'Generated .claude/ (agents, skills), the updated .gitignore, and',
+  'Generated .claude/ (agents, skills), the rules files, and',
   `${HAIVE_DATA_DIR}/ (knowledge base, learnings, onboarding metadata).`,
 ].join('\n');
 
@@ -65,32 +67,12 @@ const INIT_COMMIT_MESSAGE = [
   'add: initial commit with agentic workflow setup',
   '',
   'Initializes the repository with the existing project files plus the generated',
-  '.claude/ (agents, skills), the updated .gitignore, and',
+  '.claude/ (agents, skills), the rules files, and',
   `${HAIVE_DATA_DIR}/ (knowledge base, learnings, onboarding metadata).`,
 ].join('\n');
 
-const BASE_STAGE_PATHS = [
-  '.gitignore',
-  '.claude/agents/',
-  // 07 moves unmanaged agent definitions to a SIBLING of the agents dir, so this
-  // commit has to reach it: without it the commit records the deletions from
-  // `.claude/agents/` and none of the additions, which reads as Haive deleting them.
-  // Absent paths are filtered out before `git add`, so this costs nothing when the
-  // user declined the move.
-  `${unmanagedAgentsDir('.claude/agents')}/`,
-  '.claude/skills/',
-  '.claude/workflow/',
-  '.claude/mcp_settings.json',
-  '.claude/workflow-checkpoint.json',
-  '.claude/project-config.yaml',
-  '.haive/install.json',
-  // Committed onboarding mirror (environment/tooling/exclusions) plus the
-  // knowledge base and learnings, so a fresh clone restores both its
-  // onboarding-derived DB state and its project knowledge. A distinct dir from
-  // `.haive/` (which workflow tasks add to `.git/info/exclude`), so it is never
-  // excluded.
-  `${HAIVE_DATA_DIR}/`,
-];
+// Fixed names an earlier step (04, 12 itself) writes. Everything else comes from the step outputs.
+const FIXED_STAGE_PATHS = ['.claude/mcp_settings.json', '.haive/install.json'];
 
 // Rules files onboarding writes that are NOT tracked as onboarding_artifacts, so
 // the artifact union below would miss them: the import stubs (CLAUDE.md/GEMINI.md).
@@ -98,30 +80,28 @@ const BASE_STAGE_PATHS = [
 // holds only the project-info block and is untracked.
 const EXTRA_RULES_STAGE_PATHS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
 
-async function resolveStagePaths(
-  db: Database,
-  userId: string,
+// Removed when the plan has no nodes, so the mirror files can leave a committed tree.
+const PLAN_MIRROR_PATHS = [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown];
+
+/** The paths this commit may touch: what the task's own step outputs and artifact rows record,
+ *  plus `ownFiles`, the files this step wrote. Never a directory. */
+async function resolveStagePlan(
+  ctx: StepContext,
   repositoryId: string | null,
-): Promise<string[]> {
-  const providerRows = await db.query.cliProviders.findMany({
-    where: eq(schema.cliProviders.userId, userId),
-    columns: { name: true, enabled: true },
-  });
-  const paths = new Set<string>([...BASE_STAGE_PATHS, ...EXTRA_RULES_STAGE_PATHS]);
-  for (const row of providerRows) {
-    if (!row.enabled) continue;
-    const meta = getCliProviderMetadata(row.name as CliProviderName);
-    if (meta.projectAgentsDir) {
-      paths.add(`${meta.projectAgentsDir}/`);
-      paths.add(`${unmanagedAgentsDir(meta.projectAgentsDir)}/`);
-    }
-    if (meta.projectSkillsDir) paths.add(`${meta.projectSkillsDir}/`);
-  }
+  ownFiles: readonly string[],
+): Promise<{ add: string[]; remove: string[] }> {
+  const recorded = await collectOnboardingStagePaths(ctx.repoPath, ctx.db, ctx.taskId);
+  const add = new Set<string>([
+    ...FIXED_STAGE_PATHS,
+    ...EXTRA_RULES_STAGE_PATHS,
+    ...ownFiles,
+    ...recorded.add,
+  ]);
   // Stage every tracked onboarding artifact for this repo so the AGENTS.md
   // cli-rules region, RTK settings, workflow-config, commands, Drupal LSP, and any
   // future tracked template are committed without having to re-list them here.
   if (repositoryId) {
-    const artifactRows = await db
+    const artifactRows = await ctx.db
       .select({ diskPath: schema.onboardingArtifacts.diskPath })
       .from(schema.onboardingArtifacts)
       .where(
@@ -130,9 +110,9 @@ async function resolveStagePaths(
           isNull(schema.onboardingArtifacts.supersededAt),
         ),
       );
-    for (const r of artifactRows) paths.add(r.diskPath);
+    for (const r of artifactRows) add.add(r.diskPath);
   }
-  return [...paths];
+  return { add: [...add], remove: [...recorded.remove, ...PLAN_MIRROR_PATHS] };
 }
 
 /** Used only when neither the repo's bound credential nor the user carries an identity,
@@ -378,8 +358,8 @@ async function recordOnboardingArtifacts(
  *  onboarding_* columns (already populated by steps 02/04/06_7). A fresh clone
  *  on another machine restores its onboarding-derived DB state from these files
  *  via persistDetection, since the onboarding task's rows never travel. Runs
- *  always (independent of the commit checkbox); the files are staged by
- *  resolveStagePaths (BASE_STAGE_PATHS) when the user opts into a commit. The
+ *  always (independent of the commit checkbox); the files it returns are staged
+ *  when the user opts into a commit. The
  *  tooling file drops the machine-specific infra keys (ollamaUrl,
  *  ragConnectionString) — those do not move between machines. */
 async function writeHaiveDataMirror(
@@ -650,6 +630,9 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       ctx.logger.warn({ err }, 'onboarding-artifacts recording failed');
     }
 
+    // The files this step writes itself, which it stages by name below.
+    const ownFiles: string[] = [];
+
     const result = (): PostOnboardingOutput => ({
       commitPerformed,
       commitSha,
@@ -665,7 +648,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
 
     // Write the committed .haive-data/ mirror from the onboarding_* columns so a
     // fresh clone restores its onboarding-derived DB state. Always runs (like the
-    // artifact recording above); staged by resolveStagePaths when committing.
+    // artifact recording above); staged by name when committing.
     const mirrorTaskRow = await ctx.db
       .select({ repositoryId: schema.tasks.repositoryId })
       .from(schema.tasks)
@@ -676,6 +659,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       try {
         const res = await writeHaiveDataMirror(ctx, mirrorRepositoryId);
         warnings.push(...res.warnings);
+        ownFiles.push(...res.filesWritten);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         warnings.push(`haive-data mirror write failed: ${message}`);
@@ -683,12 +667,13 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       }
       if (renderContext) {
         try {
-          await writeProjectStateRecord(ctx.db, {
+          const stateFiles = await writeProjectStateRecord(ctx.db, {
             repositoryId: mirrorRepositoryId,
             repoPath: ctx.repoPath,
             context: renderContext,
             rtkChoiceRecorded,
           });
+          ownFiles.push(...stateFiles);
         } catch (err) {
           failIfColumnStale(err);
           const message = err instanceof Error ? err.message : String(err);
@@ -710,12 +695,17 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     // A person's own file 07 left untouched is theirs to commit, however a template names it.
     const generated = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
     const leftAsIs = new Set((generated?.output as GenerateFilesApply | null)?.leftAsIs ?? []);
-    const stagePaths = (
-      await resolveStagePaths(ctx.db, ctx.userId, taskRow[0]?.repositoryId ?? null)
-    ).filter((rel) => !leftAsIs.has(rel));
+    const plan = await resolveStagePlan(ctx, taskRow[0]?.repositoryId ?? null, ownFiles);
     const existingPaths: string[] = [];
-    for (const rel of stagePaths) {
+    for (const rel of plan.add) {
+      if (leftAsIs.has(rel)) continue;
       if ((await lstatNoFollow(ctx.repoPath, rel)) !== null) existingPaths.push(rel);
+    }
+    // A removal has nothing on disk to name, and only while the path is still absent.
+    const removedPaths: string[] = [];
+    for (const rel of plan.remove) {
+      if (leftAsIs.has(rel)) continue;
+      if ((await lstatNoFollow(ctx.repoPath, rel)) === null) removedPaths.push(rel);
     }
 
     if (existingPaths.length === 0) {
@@ -729,10 +719,10 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       // "fatal: not a git repository". Create the repo first, then stage the WHOLE
       // working tree: `git worktree add` checks out tracked files only, so a first
       // commit holding just the generated files would hand every later workflow task
-      // an empty project. The generated .gitignore (written by 07) is already on disk,
-      // so `add -A` honours it. requireUsableGit rather than detect.hasGit: it throws on
-      // a `.git` git refuses (corruption gets reported, never initialized over) and it
-      // re-reads state detect may have missed, e.g. a Terminal-tab `git init`.
+      // an empty project. A .gitignore already on disk is honoured by `add -A`.
+      // requireUsableGit rather than detect.hasGit: it throws on a `.git` git refuses
+      // (corruption gets reported, never initialized over) and it re-reads state detect
+      // may have missed, e.g. a Terminal-tab `git init`.
       let didInit = false;
       if (!(await requireUsableGit(ctx.repoPath))) {
         const initBranch =
@@ -754,18 +744,15 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       // .git/info/exclude on repos that ran a workflow task. A plain `git add` of an
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
       // staged but uncommitted). Every path here is a curated deliverable, so force it.
-      if (keep.length > 0) {
-        const excluded = [...leftAsIs].map((rel) => `:(exclude,literal)${rel}`);
-        await gitExec(['add', '-f', '--', ...keep, ...excluded], {
-          cwd: ctx.repoPath,
-          maxBuffer: GIT_MAX_BUFFER,
-        });
-      }
-      const { stdout: stagedOut } = await gitExec(['diff', '--cached', '--name-only', '-z'], {
-        cwd: ctx.repoPath,
-        maxBuffer: GIT_MAX_BUFFER,
-      });
-      const staged = stagedOut.split('\0').filter((s) => s.length > 0);
+      await stageNamed(ctx.repoPath, keep, removedPaths);
+      // The first commit of a new repository holds the whole index on purpose; any other one holds
+      // only the paths named here, so what the person had staged is theirs to commit.
+      const named = [...keep, ...removedPaths];
+      const staged = didInit
+        ? await stagedChanges(ctx.repoPath)
+        : named.length > 0
+          ? await stagedChanges(ctx.repoPath, named)
+          : [];
       stagedPaths.push(...staged);
 
       if (staged.length === 0) {
@@ -782,11 +769,16 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             : DEFAULT_COMMIT_MESSAGE;
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
-      await gitExec(['commit', '-m', message], {
-        cwd: ctx.repoPath,
-        env: { ...process.env, ...identity },
-        maxBuffer: GIT_MAX_BUFFER,
-      });
+      const commitEnv = { ...process.env, ...identity };
+      if (didInit) {
+        await gitExec(['commit', '-m', message], {
+          cwd: ctx.repoPath,
+          env: commitEnv,
+          maxBuffer: GIT_MAX_BUFFER,
+        });
+      } else {
+        await commitOnly(ctx.repoPath, staged, message, commitEnv);
+      }
       const { stdout } = await gitExec(['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;

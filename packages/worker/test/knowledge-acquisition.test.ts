@@ -528,6 +528,7 @@ describe('knowledgeAcquisitionStep.apply — existing KB reuse', () => {
     expect(index).toContain('ARCHITECTURE.md');
     expect(index).toContain('DEPLOYMENT.md');
     expect(result.written.some((w) => w.source === 'existing')).toBe(true);
+    expect(result.removedPaths).toEqual(['.haive-data/knowledge_base/old-arch.md']);
   });
 
   it('never overwrites an existing file when a gap entry targets the same slot', async () => {
@@ -637,6 +638,7 @@ describe('knowledgeAcquisitionStep.apply — improve stale KB files', () => {
     expect(arch).not.toContain('Outdated.'); // stale content replaced
     await expect(readFile(path.join(kbDir, 'old-arch.md'), 'utf8')).rejects.toThrow();
     expect(result.written.some((w) => w.source === 'updated')).toBe(true);
+    expect(result.removedPaths).toEqual(['.haive-data/knowledge_base/old-arch.md']);
   });
 
   it('lets an update win over a placement for the same file', async () => {
