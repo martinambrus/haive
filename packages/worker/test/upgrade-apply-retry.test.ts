@@ -466,7 +466,9 @@ describe('an upgrade apply retried after it failed part-way', () => {
     ).toBe(false);
   });
 
-  it("spends the pre-image when the Keep's first read finds no regular file there", async () => {
+  // An unreadable read cannot tell a link or a directory from a transient I/O error, which proves
+  // nothing about the bytes, so the person's only copy of their edits stays.
+  it("keeps the pre-image when the Keep's first read cannot read the path", async () => {
     const s = await setup();
     failOneCommit(s);
     await expect(s.apply()).rejects.toThrow('commit refused');
@@ -480,7 +482,7 @@ describe('an upgrade apply retried after it failed part-way', () => {
       s.fake
         .rows(schema.onboardingArtifacts)
         .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
