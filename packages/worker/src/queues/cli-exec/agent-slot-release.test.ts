@@ -44,7 +44,10 @@ vi.mock('../../db.js', () => ({
     select: () => ({ from: () => ({ where: async () => [{ n: 0 }] }) }),
   }),
 }));
-vi.mock('../../orchestrator/pause.js', () => ({ resolvePause: async () => false }));
+const pauseCheck = vi.fn(async (_taskId: string): Promise<boolean> => false);
+vi.mock('../../orchestrator/pause.js', () => ({
+  resolvePause: (_db: unknown, taskId: string) => pauseCheck(taskId),
+}));
 vi.mock('../../sandbox/runtime-admission.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../sandbox/runtime-admission.js')>()),
   resolveAgentConcurrency: async () => 2,
@@ -68,6 +71,8 @@ beforeEach(async () => {
   pool.clear();
   findInvocation.mockReset();
   holderReserve.mockReset();
+  pauseCheck.mockReset();
+  pauseCheck.mockImplementation(async () => false);
   await startCliExecWorker();
 });
 
@@ -100,6 +105,36 @@ describe('the INVOKE slot is held for the whole processor run', () => {
     pool.set('lease:b', String(Date.now() + 60_000));
     await expect(processor(invokeJob, 'tok')).rejects.toBeInstanceOf(DelayedError);
     expect(findInvocation).not.toHaveBeenCalled();
+    expect(invokeFields()).toEqual([]);
+  });
+});
+
+describe('slots go in activation order', () => {
+  it('gives the last slot to the job activated first, however long its pause check takes', async () => {
+    pool.set('lease:a', String(Date.now() + 60_000));
+    let unblock!: (paused: boolean) => void;
+    pauseCheck.mockImplementation((taskId: string) =>
+      taskId === 'first' ? new Promise<boolean>((r) => (unblock = r)) : Promise.resolve(false),
+    );
+    const job = (id: string, taskId: string) => ({
+      ...invokeJob,
+      id,
+      data: { taskId, invocationId: `inv-${id}` },
+      moveToDelayed: vi.fn(async () => undefined),
+    });
+    const first = processor(job('1', 'first'), 'tok');
+    const second = processor(job('2', 'second'), 'tok');
+    await expect(second).rejects.toBeInstanceOf(DelayedError);
+    await vi.waitFor(() => expect(pauseCheck).toHaveBeenCalledWith('first'));
+    unblock(false);
+    await first;
+    expect(findInvocation).toHaveBeenCalledTimes(1);
+    expect(invokeFields()).toEqual([]);
+  });
+
+  it('frees the slot of a job its pause gate defers', async () => {
+    pauseCheck.mockImplementation(async () => true);
+    await expect(processor(invokeJob, 'tok')).rejects.toBeInstanceOf(DelayedError);
     expect(invokeFields()).toEqual([]);
   });
 });

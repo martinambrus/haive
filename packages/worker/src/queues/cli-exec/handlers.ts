@@ -1475,16 +1475,15 @@ export async function startCliExecWorker(
       const db = getDb();
       if (job.name === CLI_EXEC_JOB_NAMES.INVOKE) {
         const payload = job.data as CliExecJobPayload;
-        // Paused task (or global switch): defer before anything else, so a held task never
-        // spends a slot. Throws DelayedError on defer; no-op when the task is live.
-        await enforcePauseGate(db, payload, job, token);
         // Agent-pool cap: the worker runs LIGHT_JOB_LANE wider than the pool so a sign-in is
         // never stuck behind agents, and this is what still holds AGENTS to the pool size.
-        // After the pause gate on purpose — a held job is briefly `active` before it defers, and
-        // a slot reserved for it would bounce a live agent for work that is not going to run.
-        // The slot is held until the job leaves the processor, whatever a later gate or run does.
+        // First, with no await before it: BullMQ activates in priority order, so the slots are
+        // reserved in that order too. Held until the job leaves the processor, whatever happens.
         const slot = await enforceAgentLaneCap(db, job, token, agentCap);
         try {
+          // Paused task (or global switch): throws DelayedError on defer, freeing the slot it
+          // held for those few milliseconds; no-op when the task is live.
+          await enforcePauseGate(db, payload, job, token);
           // Per-task cap: if this task already runs its max parallel agents, defer
           // the job (freeing the slot for others) and let BullMQ redeliver it.
           // Throws DelayedError on defer; no-op when under the cap.
