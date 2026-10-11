@@ -378,6 +378,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
       'installedTemplateSetHash',
       'missingRulesImports',
       'ranBackfill',
+      'renderContextColumn',
       'renderCtxSnapshot',
       'repositoryId',
       'rtkBlockLeftovers',

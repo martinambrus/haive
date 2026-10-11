@@ -26,7 +26,7 @@ import {
   upsertRegion,
   type FormSchema,
 } from '@haive/shared';
-import { rtkLeftoversToRemove } from '@haive/shared/project-state';
+import { rtkLeftoversToRemove, sameValue } from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandCustomBundlesFor,
@@ -39,7 +39,9 @@ import {
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
 import {
   failIfColumnStale,
+  lockProjectState,
   ProjectStateWriteError,
+  renderContextColumnFor,
   writeProjectStateRecord,
 } from '../../../project-state/write.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
@@ -58,6 +60,7 @@ import {
 import { buildRtkAwarenessBlock, withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
 import {
   backfillRecord,
+  readRenderContextColumnRaw,
   recordableContext,
   type UpgradePlanOutput,
   type UpgradePlanEntry,
@@ -89,6 +92,17 @@ export interface ApplySelections {
  *  row whose source bundle item is gone AND no other entry in the plan rewrites the
  *  same diskPath; that combination signals the file is now user-owned and should
  *  drop out of drift tracking on the next upgrade. */
+function ownRecordColumn(plan: UpgradePlanOutput): unknown {
+  try {
+    return renderContextColumnFor(
+      plan.renderCtxSnapshot as unknown as TemplateRenderContext,
+      plan.rtkFollowsLive === true,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 export function classifyApplyAction(
   entry: UpgradePlanEntry,
   allEntries: ReadonlyArray<UpgradePlanEntry>,
@@ -733,6 +747,26 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         throw new Error(
           `RTK was switched ${repo.rtkEnabled ? 'on' : 'off'} after this upgrade was planned, so ` +
             'its plan no longer holds. Retry the plan step to plan the upgrade again.',
+        );
+      }
+    }
+    // A sync that began before this upgrade was live can commit after 01 read the column; writing
+    // this plan's context back would undo it. Read under the sync's lock: a sync in flight commits
+    // first, and one after it sees this live upgrade and defers. A sync never clears the column.
+    if (plan.renderContextColumn !== undefined) {
+      const now = await ctx.db.transaction(async (tx) => {
+        await lockProjectState(tx, plan.repositoryId);
+        return readRenderContextColumnRaw(tx, plan.repositoryId);
+      });
+      // A retry after this plan's own record write committed finds the column it wrote.
+      if (
+        now !== null &&
+        !sameValue(now, plan.renderContextColumn) &&
+        !sameValue(now, ownRecordColumn(plan))
+      ) {
+        throw new Error(
+          "The repository's project settings changed after this upgrade was planned, so its plan " +
+            'no longer holds. Retry the plan step to plan the upgrade again.',
         );
       }
     }

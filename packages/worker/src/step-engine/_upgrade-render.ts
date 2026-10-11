@@ -123,7 +123,6 @@ export async function resolveRenderContext(
     logger: LoaderLogger;
   },
 ): Promise<ResolvedRenderContext | null> {
-  const { repositoryId, userId, liveRows, logger } = args;
   const [repo] = await db
     .select({
       renderContext: schema.repositories.renderContext,
@@ -132,8 +131,25 @@ export async function resolveRenderContext(
       name: schema.repositories.name,
     })
     .from(schema.repositories)
-    .where(eq(schema.repositories.id, repositoryId))
+    .where(eq(schema.repositories.id, args.repositoryId))
     .limit(1);
+  const resolved = await resolveFromRepository(db, args, repo);
+  return resolved && { ...resolved, column: repo?.renderContext ?? null };
+}
+
+async function resolveFromRepository(
+  db: Database | DbTx,
+  args: {
+    repositoryId: string;
+    userId: string;
+    liveRows: LiveArtifactRow[];
+    logger: LoaderLogger;
+  },
+  repo:
+    | { renderContext: unknown; rtkEnabled: boolean; source: string; name: string | null }
+    | undefined,
+): Promise<Omit<ResolvedRenderContext, 'column'> | null> {
+  const { repositoryId, userId, liveRows, logger } = args;
   const column = readRenderContextColumn(repo?.renderContext);
   if (column.kind === 'refused') {
     logger.warn(
@@ -268,6 +284,8 @@ export async function resolveRenderContext(
 export interface ResolvedRenderContext {
   renderCtx: TemplateRenderContext;
   rtkLive: boolean;
+  /** The render context column exactly as the read that resolved this context found it. */
+  column: unknown;
 }
 
 /** A context that recorded an RTK choice follows the repository's live one, so switching RTK off
@@ -276,7 +294,7 @@ function withLiveRtk(
   repo: { rtkEnabled: boolean } | undefined,
   recorded: TemplateRenderContext,
   recordedChoice: boolean,
-): ResolvedRenderContext {
+): Omit<ResolvedRenderContext, 'column'> {
   return recordedChoice && repo
     ? { renderCtx: { ...recorded, rtkEnabled: repo.rtkEnabled }, rtkLive: true }
     : { renderCtx: recorded, rtkLive: false };

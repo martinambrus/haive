@@ -110,6 +110,22 @@ export interface UpgradePlanDetect {
   /** Rules files an earlier upgrade took the RTK block out of, which 02 offers to put back now
    *  that RTK is on again. Optional: persisted plans predate it. */
   rtkBlockRestorable?: string[];
+  /** The repository's render context column as this plan read it, before resolving from it. 02
+   *  refuses the plan once the column moved. Optional: persisted plans predate it. */
+  renderContextColumn?: unknown;
+}
+
+/** The render context column exactly as stored, null when the repository holds none. */
+export async function readRenderContextColumnRaw(
+  db: Pick<StepContext['db'], 'select'>,
+  repositoryId: string,
+): Promise<unknown> {
+  const [repo] = await db
+    .select({ renderContext: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  return repo?.renderContext ?? null;
 }
 
 export interface UpgradePlanOutput extends UpgradePlanDetect {
@@ -408,6 +424,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       missingRulesImports,
       rtkBlockLeftovers,
       rtkBlockRestorable,
+      renderContextColumn: resolved.column,
     };
   },
 

@@ -49,6 +49,11 @@ export function failIfColumnStale(err: unknown): void {
   if (err instanceof ProjectStateWriteError && err.columnStale) throw err;
 }
 
+/** The render context column a record write stores for this context. Throws when it would not read back. */
+export function renderContextColumnFor(context: TemplateRenderContext, rtkChoiceRecorded: boolean) {
+  return renderContextColumnSchema.parse({ ...context, rtkChoiceRecorded });
+}
+
 /** Writes the record holding the context's render unit, then moves the repository's render context
  *  and the sync base to it in one transaction. Returns the repository-relative paths written. */
 export async function writeProjectStateRecord(
@@ -58,7 +63,7 @@ export async function writeProjectStateRecord(
   const written: string[] = [];
   try {
     // Refused before anything is written, so the column only ever holds what reads back.
-    const column = renderContextColumnSchema.parse({ ...context, rtkChoiceRecorded });
+    const column = renderContextColumnFor(context, rtkChoiceRecorded);
     const record = { ...emptyProjectState(), render: portableRender(column) };
     for (const [rel, text] of renderProjectState(record)) {
       const path = `${PROJECT_STATE_DIR}/${rel}`;

@@ -95,6 +95,7 @@ const DETECT_KEYS = [
   'installedTemplateSetHash',
   'missingRulesImports',
   'ranBackfill',
+  'renderContextColumn',
   'renderCtxSnapshot',
   'repositoryId',
   'rtkBlockLeftovers',

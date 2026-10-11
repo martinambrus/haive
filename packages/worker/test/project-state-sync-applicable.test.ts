@@ -15,6 +15,7 @@ import {
   type ProjectRender,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
+import { lockProjectState } from '../src/project-state/write.js';
 import {
   recomputeSyncedApplicableSets,
   syncProjectStateFromCheckout,
@@ -736,6 +737,73 @@ describe('D2d: 02 writes what its plan renders and retains nothing', () => {
       PLUGIN_MARKETPLACE,
       'workflow-config',
     ]);
+  });
+});
+
+// A sync that began before the upgrade task existed commits after 01 read the column.
+describe('D2e: 02 refuses a plan whose column moved after it was planned', () => {
+  it('writes nothing back and asks for the plan again', async () => {
+    const s = await setup({ column: column(BASE), base: BASE, set: P, claims: BASE_CLAIMS });
+    const detected = await s.plan();
+    s.fake.patch(schema.repositories, REPO, { renderContext: jsonb(column(TEAM)) });
+
+    await expect(s.applyPlan(detected)).rejects.toThrow(/changed after this upgrade was planned/);
+
+    expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
+  });
+
+  it('waits for a sync still holding the lock, and refuses the column it then commits', async () => {
+    const s = await setup({ column: column(BASE), base: BASE, set: P, claims: BASE_CLAIMS });
+    const detected = await s.plan();
+    let commit!: () => void;
+    let locked!: () => void;
+    const held = new Promise<void>((r) => (locked = r));
+    const sync = s.fake.db.transaction(async (tx) => {
+      await lockProjectState(tx as never, REPO);
+      locked();
+      await new Promise<void>((r) => (commit = r));
+      s.fake.patch(schema.repositories, REPO, { renderContext: jsonb(column(TEAM)) });
+    });
+    await held;
+    const applied = s.applyPlan(detected).then(
+      () => 'applied',
+      (err: unknown) => err,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    commit();
+    await sync;
+    expect(await applied).toBeInstanceOf(Error);
+    expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
+  });
+
+  it('records the column its render context came from, even when a sync commits between reads', async () => {
+    const s = await setup({ column: column(BASE), base: BASE, set: P, claims: BASE_CLAIMS });
+    const select = s.fake.db.select.bind(s.fake.db);
+    let reads = 0;
+    s.fake.db.select = ((fields?: Record<string, unknown>) => {
+      if (fields && 'renderContext' in fields && ++reads === 2) {
+        s.fake.patch(schema.repositories, REPO, { renderContext: jsonb(column(TEAM)) });
+      }
+      return select(fields as never);
+    }) as typeof s.fake.db.select;
+
+    const detected = await s.plan();
+
+    const recorded = detected.renderContextColumn as { acceptedAgentIds?: unknown };
+    expect(recorded.acceptedAgentIds).toEqual(detected.renderCtxSnapshot.acceptedAgentIds);
+  });
+
+  it('lets a retry through once its own record write filled the per-install fields', async () => {
+    const synced = { ...BASE, rtkChoiceRecorded: false };
+    const s = await setup({ column: synced, base: BASE, set: P, claims: BASE_CLAIMS });
+    const detected = await s.plan();
+    await s.applyPlan(detected);
+    const written = s.rowOf().renderContext;
+    expect(written).not.toEqual(json(jsonb(synced)));
+
+    await s.applyPlan(detected);
+
+    expect(s.rowOf().renderContext).toEqual(written);
   });
 });
 
