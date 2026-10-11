@@ -233,6 +233,8 @@ export interface RagFacetFilter {
    *  dimension iff it does not constrain that dimension OR its set overlaps the
    *  project's; an empty project array excludes chunks that constrain it. */
   facets: Record<string, string[]>;
+  /** The configured embedding model: the dense half ranks only vectors this model wrote. */
+  embedModel: string;
 }
 
 /** The dimensions the facet filter constrains. Exported so a consumer that
@@ -484,7 +486,10 @@ export async function ragHybridSearch(
     // the global KB passes the facet filter. They are mutually exclusive today but
     // combine cleanly (AND) if both are ever supplied.
     const conds = [fc?.core, repoCond, EXCLUDE_TASK_ROWS].filter(Boolean) as string[];
-    const denseConds = filter ? [...conds, `embed_kind = 'model'`] : conds;
+    const modelParam = (repositoryId ? repoParam : boostParam) + 1;
+    const denseConds = filter
+      ? [...conds, `embed_kind = 'model'`, `embed_model = $${modelParam}`]
+      : conds;
     const denseWhere = denseConds.length ? `WHERE ${denseConds.join('\n          AND ')}` : '';
     const lexExtra = conds.map((c) => `\n          AND ${c}`).join('');
     // The identifier ranker is a THIRD input to the fusion, appended after every
@@ -494,7 +499,7 @@ export async function ragHybridSearch(
     // whole risk story for queries that never mention code.
     const ident = await planIdentifierRanker(conn, queryText, cfg, filter, repositoryId);
     const useIdent = ident.use;
-    const identTermsParam = (repositoryId ? repoParam : boostParam) + 1;
+    const identTermsParam = (repositoryId ? repoParam : boostParam) + (filter ? 2 : 1);
     const identIdfsParam = identTermsParam + 1;
     const identQueryParam = identIdfsParam + 1;
     // pgvector's HNSW index (idx_rag_vector_hnsw) is built on the `vector::halfvec(dims)`
@@ -597,6 +602,7 @@ export async function ragHybridSearch(
       ...(fc?.params ?? []),
       cfg.runbookBoost,
       ...(repositoryId ? [repositoryId] : []),
+      ...(filter ? [filter.embedModel] : []),
       ...(useIdent
         ? [pgTextArrayLiteral(ident.terms), pgFloatArrayLiteral(ident.idfs), ident.query as string]
         : []),
@@ -768,9 +774,10 @@ async function fetchKnowledgeCandidates(
   // Base params are $1..$4; facet params (if any) start at $5; repository_id last.
   const fc = filter ? buildFacetClause(filter, 5) : null;
   const repoParam = 5 + (fc?.params.length ?? 0);
+  const modelParam = repoParam + (repositoryId ? 1 : 0);
   const conds = [
     `source_type = ANY($2::text[])`,
-    ...(fc ? [fc.core, `embed_kind = 'model'`] : []),
+    ...(fc ? [fc.core, `embed_kind = 'model'`, `embed_model = $${modelParam}`] : []),
     ...(repositoryId ? [`repository_id = $${repoParam}`] : []),
   ];
   const params: (string | number)[] = [
@@ -780,6 +787,7 @@ async function fetchKnowledgeCandidates(
     denseFloor,
     ...(fc?.params ?? []),
     ...(repositoryId ? [repositoryId] : []),
+    ...(filter ? [filter.embedModel] : []),
   ];
 
   return (await conn.pg.unsafe(

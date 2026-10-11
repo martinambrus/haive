@@ -101,6 +101,7 @@ async function measure(
               and r.entry_id = any(${ids}::uuid[])
               and e.embed_status = 'embedded'
               and r.embed_kind = 'model'
+              and r.embed_model = ${embedModel}
             group by r.entry_id, e.enforced_hash`);
           return read as unknown as Array<{
             id: string;
@@ -115,7 +116,8 @@ async function measure(
           where r.namespace = ${settings.namespace}
             and r.entry_id = any(${ids}::uuid[])
             and e.embed_status = 'embedded'
-            and r.embed_kind = 'model'`);
+            and r.embed_kind = 'model'
+            and r.embed_model = ${embedModel}`);
         return bestCosines(
           read as unknown as Array<{ id: string; hash: string | null; embedding: unknown }>,
           vector,

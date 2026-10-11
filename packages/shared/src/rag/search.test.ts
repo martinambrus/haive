@@ -203,7 +203,7 @@ function recordingConn(df = 1): {
 describe('ragHybridSearch parameters', () => {
   const QUERY = 'getUserById validation';
   const VEC = [0.1, 0.2, 0.3, 0.4];
-  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] } };
+  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] }, embedModel: 'model-a' };
 
   it.each([
     ['a facet filter, the global KB', FILTER, undefined],

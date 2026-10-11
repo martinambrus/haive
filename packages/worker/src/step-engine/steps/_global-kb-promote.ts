@@ -486,7 +486,7 @@ async function rankArticleIdsByRelevance(
       vec ?? [],
       query,
       { topK: limit * CHUNKS_PER_ARTICLE_ALLOWANCE, lexicalOnly: vec === null },
-      { namespace: settings.namespace, facets },
+      { namespace: settings.namespace, facets, embedModel: settings.embedModel ?? '' },
     );
     if (hits.length === 0) return [];
 
