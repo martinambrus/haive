@@ -661,6 +661,11 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
     await removePlanMergeWorktree(repoPath);
     // A forced removal takes an open merge with it, so the worktree being gone is what counts.
     const listed = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
+    if (listed.code !== 0) {
+      throw new Error(
+        `the scratch worktree could not be confirmed gone: ${listed.stderr || listed.stdout}`,
+      );
+    }
     if (listed.stdout.split('\0').includes(`worktree ${worktreePath}`)) {
       throw new Error(
         `the scratch worktree is still there${aborted.ok ? '' : `; the merge abort also failed: ${aborted.detail}`}`,
