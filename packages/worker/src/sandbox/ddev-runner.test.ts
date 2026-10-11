@@ -66,8 +66,11 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     expect(shell('exec --raw -- ls -la')).toBe(
       'cd /repos/x && ddev exec --raw -- timeout --kill-after=5s 50s ls -la',
     );
-    expect(shell('exec -q -u root -p id -u')).toBe(
-      'cd /repos/x && ddev exec -q -u root -p timeout --kill-after=5s 50s id -u',
+    expect(shell('exec -q -u root -p my-project id -u')).toBe(
+      'cd /repos/x && ddev exec -q -u root -p my-project timeout --kill-after=5s 50s id -u',
+    );
+    expect(shell('exec --project my-project ls')).toBe(
+      'cd /repos/x && ddev exec --project my-project timeout --kill-after=5s 50s ls',
     );
     expect(shell('exec ls -la')).toBe(
       'cd /repos/x && ddev exec timeout --kill-after=5s 50s ls -la',
