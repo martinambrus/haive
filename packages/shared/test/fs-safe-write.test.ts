@@ -839,6 +839,20 @@ describe('fs-safe write primitives', () => {
         expect(await readFile(stale, 'utf8')).toBe('fresh');
       });
 
+      it('removes at most a bounded number of stale temps per write', async () => {
+        for (let i = 0; i < 40; i += 1) {
+          const stale = path.join(
+            root,
+            'src',
+            `.a.txt.haive-tmp-${i}-00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+          );
+          await writeFile(stale, 'orphan', 'utf8');
+          await ageBy(stale, HOURS_2);
+        }
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect((await readdir(path.join(root, 'src'))).length).toBe(1 + 40 - 32);
+      });
+
       it('keeps a stale file whose name only starts like a temp', async () => {
         const mine = path.join(root, 'src', '.a.txt.haive-tmp-backup');
         await writeFile(mine, 'keep', 'utf8');
