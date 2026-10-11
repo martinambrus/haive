@@ -323,6 +323,13 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
 - **F15. Deleted vectors keep their index space.** The dev install's shared project store holds 0
   rows and a 0-byte heap, yet 312 MB, 275 MB of it the HNSW index; the vectors of the repositories
   deleted since stay allocated in it. A full re-embed churns the index the same way. → P1.
+- **F16. The identifier ranker scores mentions, not the definition.** The lexical-only branch
+  gained the hybrid branch's identifier ranker (FNF #42), measured read-only on a 1,820-row store
+  with the identifier lexemes computed on the fly: 14 identifier queries whose gold chunk is the
+  function's definition went from MRR 0.143 (hit@8 2/14) to 0.595 (11/14), and 8 prose queries kept
+  byte-identical pages. Three of the remaining misses (`CheckAdminLogin`, `getMultiPages`,
+  `compareOldSettings`) are lost because callers tie with or outrank the definition on the summed
+  IDF: the ranker cannot tell where a name is defined. → P2.
 
 ## Phases
 
