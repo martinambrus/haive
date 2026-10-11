@@ -42,7 +42,7 @@ function writtenStatus(call: ts.CallExpression): string | null {
       ts.isPropertyAccessExpression(inner.expression) &&
       inner.expression.name.text === 'update'
     ) {
-      if (inner.arguments[0]?.getText() !== 'schema.tasks') return null;
+      if (!isTasksTable(inner.arguments[0])) return null;
       const arg = call.arguments[0];
       if (!arg) return null;
       if (ts.isIdentifier(arg)) return objectMayCarryStatus(call, arg.text) ? UNKNOWN : null;
@@ -337,7 +337,7 @@ function detachedTaskBuilder(call: ts.CallExpression): boolean {
   return (
     ts.isPropertyAccessExpression(call.expression) &&
     call.expression.name.text === 'update' &&
-    call.arguments[0]?.getText() === 'schema.tasks' &&
+    isTasksTable(call.arguments[0]) &&
     !(ts.isPropertyAccessExpression(call.parent) && call.parent.name.text === 'set')
   );
 }
@@ -386,10 +386,22 @@ function tasksAliases(file: string, text: string): string[] {
 
 const QUERY_BUILDERS = new Set(['update', 'from', 'insert', 'delete', 'innerJoin', 'leftJoin']);
 
+/** `schema.tasks` read off the AST, so comments or spacing inside it do not hide it. */
+function isTasksTable(n: ts.Node | undefined): n is ts.PropertyAccessExpression {
+  return (
+    n !== undefined &&
+    ts.isPropertyAccessExpression(n) &&
+    n.questionDotToken === undefined &&
+    ts.isIdentifier(n.expression) &&
+    n.expression.text === 'schema' &&
+    n.name.text === 'tasks'
+  );
+}
+
 /** `schema.tasks` used whole other than as a query builder's table or in a raw `sql` read: an
  *  alias, an argument or a return carries it to a write the scan does not read. */
 function tasksTableEscapes(n: ts.Node): boolean {
-  if (!ts.isPropertyAccessExpression(n) || n.getText() !== 'schema.tasks') return false;
+  if (!isTasksTable(n)) return false;
   const p = n.parent;
   if (ts.isPropertyAccessExpression(p) && p.expression === n) return false;
   if (ts.isTemplateSpan(p) && ts.isTaggedTemplateExpression(p.parent.parent)) {
@@ -506,6 +518,18 @@ describe('a live-status write on a task row', () => {
     expect(renames(`import * as db from '@haive/database/schema';`)).toBe(true);
     expect(renames(`import { schema as s } from '@haive/database';`)).toBe(true);
     expect(renames(`import { schema, type Database } from '@haive/database';`)).toBe(false);
+  });
+
+  it('reads the tasks table through a comment or spacing inside schema.tasks', () => {
+    for (const table of ['schema /* row */.tasks', 'schema\n  .tasks']) {
+      const src = `async function route() {
+        await db.transaction(async (tx) => {
+          await tx.update(${table}).set({ status: 'running' });
+        });
+      }`;
+      expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+      expect(tasksAliases('x.ts', `revive(${table});`)).toHaveLength(1);
+    }
   });
 
   it('does not count a guard in a sibling transaction', () => {
