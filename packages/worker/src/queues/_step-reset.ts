@@ -222,6 +222,11 @@ export async function autoResumeFailedStep(
     .limit(1);
   const step = stepRows[0];
   if (!step) return false;
+  const [watch] = await db
+    .select({ since: schema.tasks.awaitingProviderSince })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
 
   let flipped = false;
   try {
@@ -364,7 +369,7 @@ export async function autoResumeFailedStep(
           ? { reason: 'live-upgrade-index' }
           : null;
     if (!refusal) throw err;
-    await refuseAutoResume(db, taskId, stepId, refusal);
+    await refuseAutoResume(db, taskId, stepId, refusal, watch?.since ?? null);
   }
   return flipped;
 }
@@ -377,6 +382,7 @@ async function refuseAutoResume(
   taskId: string,
   stepId: string,
   { reason, otherTaskId }: ReviveRefused,
+  watchSince: Date | null,
 ): Promise<void> {
   await db.insert(schema.taskEvents).values({
     taskId,
@@ -387,5 +393,14 @@ async function refuseAutoResume(
   await db
     .update(schema.tasks)
     .set({ allowanceReplenishedAt: new Date(), updatedAt: new Date() })
-    .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
+    .where(
+      and(
+        eq(schema.tasks.id, taskId),
+        eq(schema.tasks.status, 'failed'),
+        // A Retry that failed again since armed a new watch, which this refusal says nothing about.
+        watchSince
+          ? eq(schema.tasks.awaitingProviderSince, watchSince)
+          : isNull(schema.tasks.awaitingProviderSince),
+      ),
+    );
 }

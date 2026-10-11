@@ -226,6 +226,31 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
     expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
   });
 
+  it('leaves a newer watch alone when the task was retried and failed again meanwhile', async () => {
+    const first = new Date(Date.now() - DAY);
+    const t = setup({
+      ...admitted(),
+      type: 'onboarding',
+      live: { type: 'onboarding_upgrade', status: 'running' },
+      task: {
+        awaitingAllowanceProviderId: PROVIDER,
+        awaitingProviderReason: 'rate_limit',
+        awaitingProviderSince: first,
+      },
+    });
+    const transaction = t.fake.db.transaction.bind(t.fake.db);
+    t.fake.db.transaction = (async (fn: never) => {
+      try {
+        return await transaction(fn);
+      } finally {
+        t.fake.patch(schema.tasks, TASK, { awaitingProviderSince: new Date() });
+      }
+    }) as typeof t.fake.db.transaction;
+
+    expect(await t.resume()).toBe(false);
+    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
+  });
+
   it.each(['onboarding', 'onboarding_upgrade'] as const)(
     'resumes a failed %s with nothing opposing it, as before',
     async (type) => {
