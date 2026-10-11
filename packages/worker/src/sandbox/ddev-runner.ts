@@ -1181,9 +1181,27 @@ export function buildDdevCommand(
   timeoutMs: number,
 ): { shell: string; hostTimeoutMs: number } {
   const lifecycle = /^(?:start|restart|snapshot|export-db)(?:\s|$)/.test(ddevArgs);
-  if (!lifecycle)
-    return { shell: `cd ${projectDir} && ddev ${ddevArgs}`, hostTimeoutMs: timeoutMs };
+  if (!lifecycle) {
+    return {
+      shell: `cd ${projectDir} && ddev ${withWebContainerDeadline(ddevArgs, timeoutMs)}`,
+      hostTimeoutMs: timeoutMs,
+    };
+  }
   return buildDdevLockedCommand(projectDir, `ddev ${ddevArgs}`, timeoutMs);
+}
+
+const DDEV_EXEC_WORD = String.raw`(?:\\.|'[^']*'|"(?:\\.|[^"\\])*"|[^\s'"\\])+`;
+const DDEV_EXEC_HEAD = new RegExp(
+  String.raw`^['"]?exec['"]?(?:\s+(?:['"]?(?:-[ds]|--dir|--service)['"]?\s+${DDEV_EXEC_WORD}|['"]?--raw['"]?|--(?:dir|service)=${DDEV_EXEC_WORD}))*(?=\s|$)`,
+);
+
+/** Killing the runner's ddev client leaves the command running in the web container, so an
+ *  `exec` command carries its own deadline, just under the host's. Other verbs pass through. */
+function withWebContainerDeadline(ddevArgs: string, timeoutMs: number): string {
+  const head = DDEV_EXEC_HEAD.exec(ddevArgs)?.[0];
+  if (head === undefined || ddevArgs.slice(head.length).trim() === '') return ddevArgs;
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000) - 10);
+  return `${head} timeout --kill-after=5s ${seconds}s${ddevArgs.slice(head.length)}`;
 }
 
 function buildDdevLockedCommand(
