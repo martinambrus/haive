@@ -444,6 +444,18 @@ export function pickFatalProviderError(rows: { errorMessage: string | null }[]):
  *  fails that issue without sending its content to an advisor or retrying it. */
 export const DAG_REFUSED_MARKER = 'DAG_REFUSED';
 
+/** Why a level with review off failed, naming the issues the provider refused apart. */
+export function levelFailureMessage(
+  level: number,
+  failed: { issueKey: string; concerns?: string | null; errorMessage?: string | null }[],
+): string {
+  const refused = failed.filter(issueRefused).map((f) => f.issueKey);
+  const head = `DAG level ${level} failed: ${failed.map((f) => f.issueKey).join(', ')}`;
+  return refused.length === 0
+    ? head
+    : `${head}; the provider refused ${refused.join(', ')}, so it is not retried with the same prompt`;
+}
+
 function issueRefused(issue: { concerns?: string | null; errorMessage?: string | null }): boolean {
   return (
     issue.concerns?.includes(DAG_REFUSED_MARKER) === true ||
@@ -2944,7 +2956,7 @@ export async function resolveDagPhase(
       };
     }
     if (coderFailed.length > 0 && !plan.reviewEnabled) {
-      const msg = `DAG level ${curLevel.level} failed: ${coderFailed.map((f) => f.issueKey).join(', ')}`;
+      const msg = levelFailureMessage(curLevel.level, coderFailed);
       const updated = await setStepStatus(db, current.id, {
         status: 'failed',
         errorMessage: msg,

@@ -22,6 +22,7 @@ import {
   parseReplanner,
   resolveDagPhase,
   ingestReviewRun,
+  levelFailureMessage,
   ingestAdvisor,
   resolveEscalationPhase,
   resolveReviewPhase,
@@ -2131,6 +2132,24 @@ describe('ingestReviewRun: a fix coder that never answered', () => {
       expect(runInsert!.seq).toBeLessThan(consumeUpdate!.seq);
     },
   );
+});
+
+describe('levelFailureMessage', () => {
+  it('names the refused issues apart when review is off', () => {
+    const msg = levelFailureMessage(2, [
+      { issueKey: 'ISSUE-1', concerns: `${DAG_REFUSED_MARKER}: refused`, errorMessage: null },
+      { issueKey: 'ISSUE-2', concerns: null, errorMessage: 'tests failed' },
+    ]);
+    expect(msg).toBe(
+      'DAG level 2 failed: ISSUE-1, ISSUE-2; the provider refused ISSUE-1, so it is not retried with the same prompt',
+    );
+  });
+
+  it('reads as before when nothing was refused', () => {
+    expect(levelFailureMessage(0, [{ issueKey: 'ISSUE-2', errorMessage: 'x' }])).toBe(
+      'DAG level 0 failed: ISSUE-2',
+    );
+  });
 });
 
 describe('ingestReviewRun: a refused review-loop agent', () => {
