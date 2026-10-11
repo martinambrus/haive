@@ -372,10 +372,7 @@ function tasksAliases(file: string, text: string): string[] {
   const out: string[] = [];
   const visit = (n: ts.Node): void => {
     if (
-      (ts.isVariableDeclaration(n) && n.initializer?.getText() === 'schema.tasks') ||
-      (ts.isBinaryExpression(n) &&
-        n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        n.right.getText() === 'schema.tasks') ||
+      tasksTableEscapes(n) ||
       (ts.isImportDeclaration(n) && importRenamesTasks(n)) ||
       schemaEscapes(n)
     ) {
@@ -385,6 +382,26 @@ function tasksAliases(file: string, text: string): string[] {
   };
   visit(sf);
   return out;
+}
+
+const QUERY_BUILDERS = new Set(['update', 'from', 'insert', 'delete', 'innerJoin', 'leftJoin']);
+
+/** `schema.tasks` used whole other than as a query builder's table or in a raw `sql` read: an
+ *  alias, an argument or a return carries it to a write the scan does not read. */
+function tasksTableEscapes(n: ts.Node): boolean {
+  if (!ts.isPropertyAccessExpression(n) || n.getText() !== 'schema.tasks') return false;
+  const p = n.parent;
+  if (ts.isPropertyAccessExpression(p) && p.expression === n) return false;
+  if (ts.isTemplateSpan(p) && ts.isTaggedTemplateExpression(p.parent.parent)) {
+    const tagged = p.parent.parent;
+    return tagged.tag.getText() !== 'sql' || /\bupdate\b/i.test(tagged.template.getText());
+  }
+  return !(
+    ts.isCallExpression(p) &&
+    p.arguments[0] === n &&
+    ts.isPropertyAccessExpression(p.expression) &&
+    QUERY_BUILDERS.has(p.expression.name.text)
+  );
 }
 
 /** `schema` used as a value other than `schema.<table>`: an alias, a destructure, a computed key or
@@ -467,6 +484,11 @@ describe('a live-status write on a task row', () => {
     expect(found(`const tables = schema; db.update(tables.tasks).set({ status: 'x' });`)).toBe(1);
     expect(found(`let tables; tables = schema;`)).toBe(1);
     expect(found(`write({ schema });`)).toBe(1);
+    expect(found(`revive(schema.tasks);`)).toBe(1);
+    expect(found(`return schema.tasks;`)).toBe(1);
+    expect(found('db.execute(sql`update ${schema.tasks} set status = 1`);')).toBe(1);
+    expect(found('const from = sql`from ${schema.tasks} t`;')).toBe(0);
+    expect(found(`db.select().from(schema.tasks).where(eq(schema.tasks.id, id));`)).toBe(0);
     expect(found(`type T = typeof schema; const x = { schema: 1 };`)).toBe(0);
     expect(found(`db.update(schema.tasks).set({ status: 'running' });`)).toBe(0);
   });
