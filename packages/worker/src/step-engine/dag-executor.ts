@@ -758,6 +758,7 @@ async function dispatchMergeFixAgent(
       mode: 'cli',
       agentTitle: issueAgentTitle(issue, 'Merge fix'),
       prompt: plan.effectivePrompt ?? prompt,
+      truncationRetry: afterTruncation,
     }));
   } catch (err) {
     if (isUniqueViolation(err)) return { kind: 'already_live' };
@@ -1140,10 +1141,9 @@ const REVIEW_ROLE_LABEL: Record<'reviewer' | 'coder' | 'issue_advisor', string> 
   issue_advisor: 'Advisor',
 };
 
-/** A run cut at the output limit is retried once: not when its prompt already carried the notice
- *  anywhere (dispatch can wrap a prompt, so not only at its end). */
-function truncationRetryable(inv: { prompt?: string | null }): boolean {
-  return typeof inv.prompt === 'string' && !inv.prompt.includes(TRUNCATION_RETRY_NOTICE);
+/** A run cut at the output limit is retried once: not when it was itself that retry. */
+function truncationRetryable(inv: { truncationRetry: boolean }): boolean {
+  return !inv.truncationRetry;
 }
 
 /** Dispatch one review-loop agent (reviewer, fix-coder or advisor) into the issue
@@ -1216,6 +1216,7 @@ async function spawnReviewAgent(
       iteration > 0 ? `${REVIEW_ROLE_LABEL[role]} ${iteration}` : REVIEW_ROLE_LABEL[role],
     ),
     prompt: plan.effectivePrompt ?? fullPrompt,
+    truncationRetry: afterTruncation,
   });
   await ra.db.transaction(async (tx) => {
     await tx.insert(schema.dagAgentRuns).values({
@@ -2188,6 +2189,7 @@ async function spawnReplanner(
       assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
       mode: 'cli',
       prompt: plan.effectivePrompt ?? prompt,
+      truncationRetry: afterTruncation,
     }));
   } catch (err) {
     if (isUniqueViolation(err)) return true; // a replanner is already in flight
@@ -2609,7 +2611,8 @@ export async function resolveDagPhase(
           ),
         );
         // Section (C) leaves the truncation headline on the reset issue; the claim below clears it.
-        const prompt = isOutputTruncationMessage(issue.errorMessage?.trim())
+        const afterTruncation = isOutputTruncationMessage(issue.errorMessage?.trim());
+        const prompt = afterTruncation
           ? `${augmentedPrompt}\n\n${TRUNCATION_RETRY_NOTICE}`
           : augmentedPrompt;
         const worktreeRel = issueWorktreeRel(issue);
@@ -2652,6 +2655,7 @@ export async function resolveDagPhase(
           mode: 'dag_parallel',
           agentTitle: issueAgentTitle(issue, 'Coder'),
           prompt: planDispatch.effectivePrompt ?? prompt,
+          truncationRetry: afterTruncation,
         });
         // Atomic claim: only the pass that flips pending→running owns the issue;
         // a concurrent re-entry that lost the race voids its orphan invocation.

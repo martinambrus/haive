@@ -190,7 +190,7 @@ function makeDb(
   let errorMessage: string | null = null;
   let warningMessage: string | null = null;
   const events: { eventType: string; payload: unknown }[] = [];
-  const invocationInserts: { prompt?: string }[] = [];
+  const invocationInserts: { prompt?: string; truncationRetry?: boolean }[] = [];
   const applyPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState as MergeResolveState;
     if ('status' in patch) status = patch.status as string;
@@ -228,7 +228,8 @@ function makeDb(
     insert: (table?: unknown) => ({
       values: (v: { eventType: string; payload: unknown }) => {
         if (table === schema.taskEvents) events.push(v);
-        if (table === schema.cliInvocations) invocationInserts.push(v as { prompt?: string });
+        if (table === schema.cliInvocations)
+          invocationInserts.push(v as { prompt?: string; truncationRetry?: boolean });
         return {
           returning: async () => {
             if (opts.insertRejects) throw opts.insertRejects;
@@ -781,6 +782,7 @@ describe('12 merge fix-agent dispatch', () => {
       errorMessage?: string | null;
       prompt?: string;
       supersededAt?: Date | null;
+      truncationRetry?: boolean;
     },
   ) {
     const dbOpts: NonNullable<Parameters<typeof makeDb>[0]> = {};
@@ -833,6 +835,25 @@ describe('12 merge fix-agent dispatch', () => {
         expect(h.getState()?.fixInvocationId).toBe('inv1');
         expect(h.invocationInserts).toHaveLength(2);
         expect(h.invocationInserts[1]!.prompt).toContain(TRUNCATION_RETRY_NOTICE);
+        expect(h.invocationInserts[1]!.truncationRetry).toBe(true);
+        expect(h.invocationInserts[0]!.truncationRetry).toBe(false);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('whose prompt only quotes the notice is still retried once, smaller', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        const { h, second } = await fixerRound(parent, det(wt), halfResolve, {
+          ...cut,
+          prompt: `resolve a diff that quotes:\n${TRUNCATION_RETRY_NOTICE}\nand goes on`,
+        });
+        expect(second.resolved).toBe(false);
+        expect(h.getState()?.conflictRetries).toBe(1);
+        expect(h.invocationInserts).toHaveLength(2);
+        expect(h.invocationInserts[1]!.truncationRetry).toBe(true);
       } finally {
         await rm(parent, { recursive: true, force: true });
       }
@@ -845,6 +866,7 @@ describe('12 merge fix-agent dispatch', () => {
         const { h, second } = await fixerRound(parent, det(wt), halfResolve, {
           ...cut,
           prompt: `resolve the merge\n\n${TRUNCATION_RETRY_NOTICE}\n\n## Boundary added at dispatch`,
+          truncationRetry: true,
         });
         expect(second.resolved).toBe(false);
         expect(h.getState()?.conflictRetries).toBe(2);

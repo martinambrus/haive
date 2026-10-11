@@ -917,6 +917,7 @@ async function resolveLlmPhase(
       limitsSnapshot: limitsSnapshotOf(params.providers, plan.providerId),
       mode,
       prompt: plan.effectivePrompt ?? prompt,
+      truncationRetry: trailingTruncations > 0,
       agentTitle: roleLabel,
       steerable,
     }),
@@ -1600,6 +1601,8 @@ type MiningRetryTargets = Map<
     chargeAttempt?: boolean;
     /** The prior run was cut at the output limit, so the re-dispatch carries the shrink notice. */
     truncated?: boolean;
+    /** The prior run's prompt already carries the shrink notice. */
+    noticed?: boolean;
     /** Rung the re-dispatch runs at: the row's stored consecutive-timeout count, already
      *  incremented when the prior run burned its budget and reset to 0 when it did not.
      *  Required, not optional — the one construction site must decide, because defaulting
@@ -1864,10 +1867,9 @@ async function dispatchMiningAgents(
         : await augmentPromptWithTerseness(
             await augmentPromptWithLedger(db, params.taskId, attachmentsNotice + dispatch.prompt),
           );
-      const prompt =
-        target.truncated && !augmented.includes(TRUNCATION_RETRY_NOTICE)
-          ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}`
-          : augmented;
+      const replaysNotice = dispatch.replayVerbatim === true && target.noticed === true;
+      const appendNotice = target.truncated === true && !replaysNotice;
+      const prompt = appendNotice ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
       const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
         await resolveSeat(dispatch.roleKey ?? 'default');
       const requirements = dispatchRequirements(dispatch);
@@ -1931,6 +1933,7 @@ async function dispatchMiningAgents(
         limitsSnapshot: limitsSnapshotOf(params.providers, plan.providerId),
         mode: 'agent_mining',
         prompt: plan.effectivePrompt ?? prompt,
+        truncationRetry: appendNotice || replaysNotice,
         steerable: plan.invocation.spec.steerable === true,
       });
       linking = { rowId: target.id, invocationId: invRow.id, linked: false };
@@ -3880,6 +3883,7 @@ async function retryMiningAgents(
   const timedOutInvocationIds = new Set<string>();
   const truncatedInvocationIds = new Set<string>();
   const retriedTruncationIds = new Set<string>();
+  const noticedInvocationIds = new Set<string>();
   const runsById = new Map<string, FailedRunStamp>();
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
@@ -3887,7 +3891,7 @@ async function retryMiningAgents(
       .select({
         id: schema.cliInvocations.id,
         errorMessage: schema.cliInvocations.errorMessage,
-        prompt: schema.cliInvocations.prompt,
+        truncationRetry: schema.cliInvocations.truncationRetry,
         startedAt: schema.cliInvocations.startedAt,
         createdAt: schema.cliInvocations.createdAt,
         limitsSnapshot: schema.cliInvocations.limitsSnapshot,
@@ -3896,11 +3900,12 @@ async function retryMiningAgents(
       .where(inArray(schema.cliInvocations.id, priorIds));
     for (const p of priors) {
       runsById.set(p.id, p);
+      if (p.truncationRetry) noticedInvocationIds.add(p.id);
       if (isFreeRedispatch(p)) freeInvocationIds.add(p.id);
       if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
       if (isOutputTruncationMessage(p.errorMessage?.trim())) {
         truncatedInvocationIds.add(p.id);
-        if (p.prompt.includes(TRUNCATION_RETRY_NOTICE)) retriedTruncationIds.add(p.id);
+        if (p.truncationRetry) retriedTruncationIds.add(p.id);
       }
     }
   }
@@ -3941,6 +3946,7 @@ async function retryMiningAgents(
       status: r.status,
       chargeAttempt: !runsFree(r),
       truncated: truncated(r),
+      noticed: !!r.cliInvocationId && noticedInvocationIds.has(r.cliInvocationId),
       // Consecutive, so anything that is not a timeout resets the chain. A preemption
       // between two timeouts must not climb a rung — it never spent a budget to justify one.
       timeoutAttempts: timedOut(r) ? r.timeoutAttempts + 1 : 0,

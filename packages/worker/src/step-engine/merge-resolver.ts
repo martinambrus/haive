@@ -573,6 +573,7 @@ async function dispatchFixAgent(
       assignedAgentIds: plan.invocation?.spec.assignedAgentIds ?? [],
       mode: 'cli',
       prompt: plan.effectivePrompt ?? prompt,
+      truncationRetry: afterTruncation,
     }));
   } catch (err) {
     if (isUniqueViolation(err)) return { kind: 'already_live' };
@@ -823,10 +824,7 @@ export async function resolveMergePhase(
         !runNeverAnswered(inv) && isOutputTruncationMessage(inv.errorMessage?.trim());
       // Saved with the state below, so a person's later "Retry with AI" keeps the shrink notice.
       if (lastFixerCut) state = { ...state, lastFixerCut: true };
-      truncatedOnce =
-        lastFixerCut &&
-        typeof inv.prompt === 'string' &&
-        !inv.prompt.includes(TRUNCATION_RETRY_NOTICE);
+      truncatedOnce = lastFixerCut && !inv.truncationRetry;
       if ((runNeverAnswered(inv) && !fix) || truncatedOnce) {
         // A fixer that never answered, or was cut at the output limit, may have left the merge
         // half-resolved, so its edits are discarded and it is dispatched again without spending an attempt.

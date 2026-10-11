@@ -329,7 +329,9 @@ function retryingStep(): StepDefinition {
   return { ...rest, llm: { ...step.llm!, retry: { maxAttempts: 3 } } };
 }
 
-async function dispatchNonLoop(errorMessage: string | null): Promise<string> {
+async function dispatchNonLoop(
+  errorMessage: string | null,
+): Promise<{ prompt: string; truncationRetry: unknown }> {
   const state = freshState();
   state.taskStepRow = {
     ...state.taskStepRow,
@@ -372,7 +374,10 @@ async function dispatchNonLoop(errorMessage: string | null): Promise<string> {
   expect(result.status).toBe('waiting_cli');
   const inserted = state.inserts.filter((i) => i.table === 'cli_invocations');
   expect(inserted).toHaveLength(1);
-  return String(inserted[0]!.row.prompt);
+  return {
+    prompt: String(inserted[0]!.row.prompt),
+    truncationRetry: inserted[0]!.row.truncationRetry,
+  };
 }
 
 function plainStep(): StepDefinition {
@@ -429,6 +434,7 @@ describe('advanceStep loop hook', () => {
       const prompt = String(inserts[0]!.row.prompt);
       expect(prompt).toContain('base prompt');
       expect(prompt.endsWith(TRUNCATION_NOTICE)).toBe(true);
+      expect(inserts[0]!.row.truncationRetry).toBe(true);
     });
 
     it('fails the step when the retry is cut off as well', async () => {
@@ -555,15 +561,19 @@ describe('advanceStep loop hook', () => {
 
   describe('a truncation retry of a step that is not a loop', () => {
     it('resends the prompt with the cut-off notice once', async () => {
-      const prompt = await dispatchNonLoop(`${OUTPUT_TRUNCATION_HEADLINE} — cut off`);
+      const { prompt, truncationRetry } = await dispatchNonLoop(
+        `${OUTPUT_TRUNCATION_HEADLINE} — cut off`,
+      );
       expect(prompt).toContain('base prompt');
       expect(countOccurrences(prompt, TRUNCATION_NOTICE)).toBe(1);
+      expect(truncationRetry).toBe(true);
     });
 
     it('leaves the prompt without the notice when no call was cut off', async () => {
-      const prompt = await dispatchNonLoop(null);
+      const { prompt, truncationRetry } = await dispatchNonLoop(null);
       expect(prompt).toContain('base prompt');
       expect(prompt).not.toContain('cut off at the output-token limit');
+      expect(truncationRetry).toBe(false);
     });
   });
 
