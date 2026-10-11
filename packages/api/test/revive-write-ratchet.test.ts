@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, posix, relative } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
@@ -460,10 +460,31 @@ function shadowsName(sf: ts.SourceFile, name: string): boolean {
     ) {
       found = true;
     }
+    if (
+      (ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) &&
+      n.name?.text === name &&
+      !importsFromOwnModule(sf, n, name)
+    ) {
+      found = true;
+    }
     if (!found) ts.forEachChild(n, visit);
   };
   visit(sf);
   return found;
+}
+
+// The module each name the scan reads must come from, relative to the sources it checks.
+const OWN_MODULE: Record<string, (from: string) => boolean> = {
+  [GUARD]: (from) => from === 'routes/upgrades.js',
+  eq: (from) => from === 'drizzle-orm',
+  and: (from) => from === 'drizzle-orm',
+};
+
+function importsFromOwnModule(sf: ts.SourceFile, n: ts.Node, name: string): boolean {
+  if (!ts.isImportSpecifier(n) || (n.propertyName ?? n.name).text !== name) return false;
+  const spec = (n.parent.parent.parent.moduleSpecifier as ts.StringLiteral).text;
+  const from = spec.startsWith('.') ? posix.join(posix.dirname(sf.fileName), spec) : spec;
+  return OWN_MODULE[name]?.(from) ?? false;
 }
 
 /** The task a write revives: the identifier `X` of `eq(schema.tasks.id, X)` in the `.where(...)`
@@ -611,7 +632,8 @@ function tasksAliases(file: string, text: string): string[] {
       (ts.isImportDeclaration(n) && importRenamesTasks(n)) ||
       (ts.isExportDeclaration(n) && reexportsTasks(n)) ||
       importsDatabaseDynamically(n) ||
-      schemaEscapes(n)
+      schemaEscapes(n) ||
+      writesTasksAsText(n)
     ) {
       out.push(`${file}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`);
     }
@@ -674,6 +696,12 @@ function schemaEscapes(n: ts.Node): boolean {
   if (ts.isExportSpecifier(p) && p.parent.parent.moduleSpecifier) return false;
   if ((ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p)) && p.name === n) return false;
   return true;
+}
+
+/** Query text that writes the tasks table by name, such as a raw `sql` UPDATE: no builder is there to read. */
+function writesTasksAsText(n: ts.Node): boolean {
+  if (!ts.isStringLiteralLike(n) && !ts.isTemplateLiteralToken(n)) return false;
+  return /\b(update|insert\s+into)\s+(only\s+)?("?\w+"?\.)?"?tasks"?(\s|$|;|\))/i.test(n.text);
 }
 
 /** An import from the database package that reaches the tasks table under another name: `tasks`
@@ -756,6 +784,12 @@ describe('a live-status write on a task row', () => {
   it('reads every other way to reach the tasks table as an alias', () => {
     const found = (text: string) => tasksAliases('x.ts', text).length;
     expect(found(`const t = schema.tasks;`)).toBe(1);
+    expect(
+      found("await db.execute(sql`UPDATE tasks SET status = 'running' WHERE id = ${id}`);"),
+    ).toBe(1);
+    expect(found('await db.execute(sql.raw(\'update "public"."tasks" set status = 1\'));')).toBe(1);
+    expect(found('await db.execute(sql`INSERT INTO tasks (id) VALUES (${id})`);')).toBe(1);
+    expect(found("await db.execute(sql`UPDATE task_steps SET status = 'done'`);")).toBe(0);
     expect(found(`let t; t = schema.tasks;`)).toBe(1);
     expect(found(`const { tasks } = schema;`)).toBe(1);
     expect(
@@ -900,6 +934,25 @@ describe('a live-status write on a task row', () => {
       covered(
         `await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.status, 'created'));`,
       ),
+    ).toEqual([false]);
+  });
+
+  it('counts the guard and the Drizzle helpers only from their own modules', () => {
+    const write = `await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));`;
+    const covered = (imports: string, file = 'routes/tasks/x.ts') =>
+      liveWrites(file, `${imports} async function f(tx, id) { ${write} }`).map((w) => w.covered);
+    const drizzle = `import { eq } from 'drizzle-orm';`;
+    expect(covered(`import { ${GUARD} } from '../upgrades.js'; ${drizzle}`)).toEqual([true]);
+    expect(covered(`import { ${GUARD} } from './upgrades.js'; ${drizzle}`, 'routes/x.ts')).toEqual([
+      true,
+    ]);
+    expect(covered(`import { ${GUARD} } from './noop.js'; ${drizzle}`)).toEqual([false]);
+    expect(covered(`import { other as ${GUARD} } from '../upgrades.js'; ${drizzle}`)).toEqual([
+      false,
+    ]);
+    expect(covered(`import ${GUARD} from '../upgrades.js'; ${drizzle}`)).toEqual([false]);
+    expect(
+      covered(`import { ${GUARD} } from '../upgrades.js'; import { eq } from './eq.js';`),
     ).toEqual([false]);
   });
 
