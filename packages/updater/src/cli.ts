@@ -197,8 +197,6 @@ async function main(): Promise<number> {
         await rollback(ctx, 'the new containers never reported the target version');
         return EXIT.rolledBack;
       }
-      await phaseCommit(ctx);
-      return EXIT.ok;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       emit('error', { message });
@@ -209,6 +207,16 @@ async function main(): Promise<number> {
       );
       await finishRun(sql, runId, 'rolled_back', message).catch(() => {});
       return EXIT.rolledBack;
+    }
+    // Past the point of no return (`decideResume`): the run stays at `commit`, and the next run
+    // resumes it forward rather than restoring old images onto data already changed.
+    try {
+      await phaseCommit(ctx);
+      return EXIT.ok;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      emit('error', { message, phase: 'commit', next: 'run the updater again to finish it' });
+      return EXIT.failed;
     }
   } finally {
     await sql.end({ timeout: 5 }).catch(() => {});
