@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Redis } from 'ioredis';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
+  TERMINAL_OUT_CHANNEL_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
   TERMINAL_SESSION_PREFIX,
@@ -480,6 +481,16 @@ describe('shell start directory and restart', () => {
     expect(ctlPublishes().map((c) => JSON.parse(c.data))).toEqual([
       { type: 'restart_shell', userId: 'u1' },
     ]);
+  });
+
+  it.each([
+    [JSON.stringify({ type: 'exit', reason: 'restart' }), { type: 'exit', reason: 'restart' }],
+    [JSON.stringify({ type: 'exit' }), { type: 'exit' }],
+  ])('relays the end of the shell as %s', async (raw, frame) => {
+    const ws = await connect('task');
+    publisherFake.duplicates[0]!.emitOutput(`${TERMINAL_OUT_CHANNEL_PREFIX}sess-1`, raw);
+    await new Promise((r) => setImmediate(r));
+    expect(ws.sent.map((f) => JSON.parse(f)).find((f) => f.type === 'exit')).toEqual(frame);
   });
 
   it('refuses a restart on a repo shell', async () => {

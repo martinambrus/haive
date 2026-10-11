@@ -211,6 +211,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
         case 'exit':
           setState('closed');
           term.writeln('\r\n\x1b[36m[shell exited]\x1b[0m');
+          if (parsed.reason === 'restart') restartingRef.current = true;
           reconnectIfRestarting();
           break;
         case 'error':

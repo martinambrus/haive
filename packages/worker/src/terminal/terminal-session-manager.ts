@@ -53,6 +53,8 @@ interface SessionState {
   inChannel: string;
   ctlChannel: string;
   outChannel: string;
+  /** Set on every session of a container whose tmux session a restart kills. */
+  restarting?: boolean;
 }
 
 export interface TerminalSessionManagerOptions {
@@ -175,6 +177,9 @@ export class TerminalSessionManager {
         if (session.scope !== 'task' || session.userId !== frame.userId) {
           log.warn({ sid, scope: session.scope }, 'restart_shell refused');
           return;
+        }
+        for (const s of this.sessions.values()) {
+          if (s.containerName === session.containerName) s.restarting = true;
         }
         await this.runInContainer(session.containerName, [
           'tmux',
@@ -432,7 +437,8 @@ export class TerminalSessionManager {
       void this.redis.publish(outChannel, chunk.toString('utf8'));
     });
     ptyStream.on('end', () => {
-      void this.redis.publish(outChannel, JSON.stringify({ type: 'exit' })).catch(() => undefined);
+      const exit = session.restarting ? { type: 'exit', reason: 'restart' } : { type: 'exit' };
+      void this.redis.publish(outChannel, JSON.stringify(exit)).catch(() => undefined);
       void this.teardownSession(session, 'pty-end').catch(() => undefined);
     });
     ptyStream.on('error', (err) => {

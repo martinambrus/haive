@@ -32,11 +32,14 @@ interface Harness {
   openTask: (userId?: string) => Promise<TerminalOpenResult>;
   openRepo: () => Promise<TerminalOpenResult>;
   sendCtl: (sessionId: string, frame: unknown) => Promise<void>;
+  attaches: PassThrough[];
+  published: () => string[];
 }
 
 /** `probe` is what `tmux display-message` prints, or null for a non-zero exit (no session). */
 function harness(probe: string | null, killExit = 0): Harness {
   const execs: ExecCall[] = [];
+  const attaches: PassThrough[] = [];
   const docker = {
     getContainer: (container: string) => ({
       exec: async (opts: { Cmd: string[]; WorkingDir?: string }) => {
@@ -46,6 +49,7 @@ function harness(probe: string | null, killExit = 0): Harness {
         return {
           start: async () => {
             const stream = new PassThrough();
+            if (isAttach) attaches.push(stream);
             if (!isAttach) {
               setImmediate(() => {
                 if (isProbe && probe !== null) stream.write(`${probe}\r\n`);
@@ -101,6 +105,8 @@ function harness(probe: string | null, killExit = 0): Harness {
   return {
     mgr,
     execs,
+    attaches,
+    published: () => redis.publish.mock.calls.map((c) => (c as unknown[])[1] as string),
     openTask: (userId = 'user-1') =>
       priv.openSession({
         op: 'open',
@@ -191,6 +197,33 @@ describe('restart shell', () => {
       container: 'haive-shell-1',
       cmd: ['tmux', 'kill-session', '-t', 'haive-task'],
     });
+  });
+
+  // tmux detaches every client of the killed session, so every tab on it must learn why.
+  it('tells every shell on the restarted session that its end was the restart', async () => {
+    const h = harness(ROOT);
+    const first = await h.openTask();
+    const second = await h.openTask();
+    if (!first.ok || !second.ok) throw new Error('open failed');
+    await h.sendCtl(first.sessionId, { type: 'restart_shell', userId: 'user-1' });
+    for (const a of h.attaches) a.end();
+    await new Promise((r) => setImmediate(r));
+    const exits = h.published().filter((m) => m.startsWith('{"type":"exit"'));
+    expect(exits).toEqual([
+      JSON.stringify({ type: 'exit', reason: 'restart' }),
+      JSON.stringify({ type: 'exit', reason: 'restart' }),
+    ]);
+  });
+
+  it('ends a shell that exits on its own without the restart reason', async () => {
+    const h = harness(ROOT);
+    const reply = await h.openTask();
+    if (!reply.ok) throw new Error('open failed');
+    h.attaches[0]!.end();
+    await new Promise((r) => setImmediate(r));
+    expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toEqual([
+      JSON.stringify({ type: 'exit' }),
+    ]);
   });
 
   it("refuses another user's request", async () => {

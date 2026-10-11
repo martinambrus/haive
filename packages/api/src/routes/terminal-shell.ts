@@ -304,7 +304,8 @@ export async function runScopedShellSession(
     // Worker publishes raw PTY bytes (utf8 string). One special JSON message:
     // {"type":"exit"} signals the PTY ended (process exit / container gone).
     if (raw.startsWith('{"type":"exit"')) {
-      sendJson(ws, { type: 'exit' });
+      const restarted = raw === JSON.stringify({ type: 'exit', reason: 'restart' });
+      sendJson(ws, restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' });
       try {
         ws.close(1000, 'pty_ended');
       } catch {
