@@ -1,6 +1,13 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { hashEmbed, ollamaEmbed, resolveEmbedBudget } from '@haive/shared/rag';
+import {
+  hashEmbed,
+  ollamaEmbed,
+  resolveEmbedBudget,
+  RAG_TABLE,
+  TASK_SOURCE_TYPE,
+  type RagConnection,
+} from '@haive/shared/rag';
 import { logger } from '@haive/shared';
 
 type Logger = ReturnType<typeof logger.child>;
@@ -129,6 +136,21 @@ export async function loadRagEmbedHealth(
   };
 }
 
+async function storeRagEmbedDegraded(
+  db: Database,
+  repositoryId: string,
+  reason: string,
+): Promise<void> {
+  const current = await loadRagEmbedHealth(db, repositoryId);
+  await db
+    .update(schema.repositories)
+    .set({
+      ragEmbedDegradedAt: current.degradedAt ?? new Date(),
+      ragEmbedDegradedReason: reason,
+    })
+    .where(eq(schema.repositories.id, repositoryId));
+}
+
 /** Remember that this repo's embeddings broke, so the condition outlives the step
  *  row (a manual retry nulls `task_steps.output`) and every later RAG step can say
  *  so. Best-effort with an error log rather than a throw: the caller is already
@@ -143,16 +165,50 @@ export async function recordRagEmbedDegraded(
 ): Promise<void> {
   if (!repositoryId) return;
   try {
-    const current = await loadRagEmbedHealth(db, repositoryId);
-    await db
-      .update(schema.repositories)
-      .set({
-        ragEmbedDegradedAt: current.degradedAt ?? new Date(),
-        ragEmbedDegradedReason: reason,
-      })
-      .where(eq(schema.repositories.id, repositoryId));
+    await storeRagEmbedDegraded(db, repositoryId, reason);
   } catch (err) {
     log.error({ err, repositoryId }, 'failed to record rag embed degradation');
+  }
+}
+
+/** Same write, but a failure throws: the caller must not write fallback vectors
+ *  while the flag that keeps dense search off over them is unstored. */
+export async function requireRagEmbedDegraded(
+  db: Database,
+  repositoryId: string | null,
+  reason: string,
+): Promise<void> {
+  if (!repositoryId) return;
+  try {
+    await storeRagEmbedDegraded(db, repositoryId, reason);
+  } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `could not record the RAG embedding degradation, so no fallback vectors were written: ${cause}`,
+      { cause: err },
+    );
+  }
+}
+
+/** Whether the repo's store still holds a row awaiting re-embed (NULL `chunk_hash`).
+ *  Task rows are excluded: `indexTaskEmbedding` never writes a hash for them. A failed
+ *  read answers true, so the caller keeps the flag rather than clearing it blind. */
+export async function ragStoreAwaitsReembed(
+  conn: RagConnection,
+  repositoryId: string | null,
+  log: Logger,
+): Promise<boolean> {
+  if (!repositoryId) return false;
+  try {
+    const found = await conn.pg.unsafe(
+      `SELECT 1 FROM ${RAG_TABLE}
+        WHERE repository_id = $1 AND source_type <> $2 AND chunk_hash IS NULL LIMIT 1`,
+      [repositoryId, TASK_SOURCE_TYPE],
+    );
+    return found.length > 0;
+  } catch (err) {
+    log.error({ err, repositoryId }, 'failed to check for rows awaiting re-embed; keeping flag');
+    return true;
   }
 }
 
@@ -185,7 +241,7 @@ export async function clearRagEmbedDegraded(
  *  display copy that outlives the state it describes. */
 export function ragEmbedWarning(
   health: RagEmbedHealth,
-  thisRun: { skippedChunks: number } = { skippedChunks: 0 },
+  thisRun: { skippedChunks: number; hashedChunks?: number } = { skippedChunks: 0 },
 ): string | null {
   if (health.lexicalOnly) {
     return (
@@ -196,15 +252,23 @@ export function ragEmbedWarning(
     );
   }
   if (!health.degradedAt) return null;
+  const hashed = thisRun.hashedChunks ?? 0;
   const skipped =
     thisRun.skippedChunks > 0
       ? ` ${thisRun.skippedChunks} chunk${thisRun.skippedChunks === 1 ? '' : 's'} from this run ` +
         'were left unindexed rather than stored with meaningless vectors, so they are ' +
         'not searchable yet.'
-      : ' Chunks left unindexed by the failure are not searchable yet.';
+      : hashed > 0
+        ? ''
+        : ' Chunks left unindexed by the failure are not searchable yet.';
+  const fallback =
+    hashed > 0
+      ? ` ${hashed} chunk${hashed === 1 ? ' was' : 's were'} indexed with fallback vectors and ` +
+        'will be re-embedded on the next sync; semantic search is off until then.'
+      : '';
   return (
-    `RAG embeddings are failing for this repository — ${health.degradedReason ?? 'reason unrecorded'}.` +
-    `${skipped} Retry or accept lexical-only search on the repository tooling page; ` +
+    `RAG embeddings are failing for this repository — ${(health.degradedReason ?? 'reason unrecorded').replace(/\.$/, '')}.` +
+    `${skipped}${fallback} Retry or accept lexical-only search on the repository tooling page; ` +
     'raising the embedding timeout or lowering the batch size in Admin usually fixes a ' +
     'slow host.'
   );

@@ -63,12 +63,18 @@ let onboarding: { id: string } | null;
 let writes: Record<string, unknown>[];
 let warnings: Array<string | null>;
 let inserts: unknown[][];
+let order: string[];
+let failInsertAt: number | null;
 let stalePaths: string[];
 let deletedPaths: string[];
 let indexedChunks: Map<
   string,
   { section_id: string; chunk_index: number; chunk_hash: string | null; content: string }[]
 >;
+let failDegradedWrite: boolean;
+let leftoverNullHash: boolean;
+let nullHashProbeFails: boolean;
+let nullHashProbes: unknown[][];
 let ctx: StepContext;
 let executionPath: 'full_workflow' | 'quick_bugfix';
 let priorSteps: Map<string, { output?: unknown; detectOutput?: unknown }>;
@@ -105,14 +111,23 @@ beforeEach(async () => {
   writes = [];
   warnings = [];
   inserts = [];
+  order = [];
+  failInsertAt = null;
   stalePaths = [];
   deletedPaths = [];
   indexedChunks = new Map();
+  failDegradedWrite = false;
+  leftoverNullHash = false;
+  nullHashProbeFails = false;
+  nullHashProbes = [];
   mocks.connect.mockImplementation(async () => ({
     close: mocks.close,
     pg: {
       unsafe: async (query: string, params: unknown[] = []) => {
         if (query.includes('INSERT INTO')) {
+          order.push('insert');
+          if (failInsertAt !== null && order.filter((e) => e === 'insert').length === failInsertAt)
+            throw new Error('store went away');
           inserts.push(params);
           const rows = indexedChunks.get(params[3] as string) ?? [];
           const row = {
@@ -130,6 +145,14 @@ beforeEach(async () => {
         }
         if (query.includes('SELECT section_id, chunk_index, chunk_hash'))
           return indexedChunks.get(params[1] as string) ?? [];
+        if (query.includes('chunk_hash IS NULL') && query.startsWith('SELECT')) {
+          nullHashProbes.push(params);
+          if (nullHashProbeFails) throw new Error('store read failed');
+          const stored = [...indexedChunks.values()].some((rows) =>
+            rows.some((row) => row.chunk_hash === null),
+          );
+          return leftoverNullHash || stored ? [{ found: 1 }] : [];
+        }
         if (query.includes('UPDATE') && query.includes('SET chunk_hash = NULL')) {
           let count = 0;
           for (const rows of indexedChunks.values())
@@ -212,6 +235,8 @@ beforeEach(async () => {
             warnings.push(values.warningMessage as string | null);
           if (table !== schema.repositories) return [];
           if ('scopeExcludeGlobs' in values || 'ragEmbedDegradedAt' in values) {
+            if (failDegradedWrite && values.ragEmbedDegradedAt) throw new Error('database is down');
+            if ('ragEmbedDegradedAt' in values) order.push('degraded');
             writes.push(values);
             Object.assign(repo, values);
             return [];
@@ -244,7 +269,7 @@ beforeEach(async () => {
     workspacePath: root,
     emitProgress: async () => {},
     throwIfCancelled: () => {},
-    logger: { info: () => {}, warn: () => {} },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
   } as unknown as StepContext;
 });
 
@@ -1284,5 +1309,190 @@ describe('workflow RAG source scope before each ingestion', () => {
     ).toBe(false);
     expect(mocks.connect).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
+  });
+});
+
+describe('hash vectors written while an embedding endpoint is configured', () => {
+  const sync = async () =>
+    ragReindexStep.apply(ctx, {
+      detected: await ragReindexStep.detect!(ctx),
+      formValues: { runReindex: true },
+      iteration: 0,
+      previousIterations: [],
+    });
+  const hashes = () =>
+    [...indexedChunks.entries()].flatMap(([path, rows]) =>
+      rows.map((row) => [path, row.chunk_hash] as const),
+    );
+  const hashedOnce = (texts: string[]) => ({
+    kind: 'hashed' as const,
+    embeddings: texts.map(() => [0.3, 0.4]),
+  });
+
+  it('leaves a NULL chunk_hash and records degradation, which a sibling batch that embedded does not clear', async () => {
+    mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
+    const first = await sync();
+    expect(first.inserted).toBeGreaterThanOrEqual(2);
+    const nulls = hashes().filter(([, hash]) => hash === null);
+    expect(nulls).toHaveLength(1);
+    expect(hashes().filter(([, hash]) => hash !== null).length).toBeGreaterThanOrEqual(1);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(repo.ragEmbedDegradedReason).toEqual(expect.any(String));
+    expect(warnings.at(-1)).toContain('RAG embeddings are failing');
+  });
+
+  it('records the degradation once, before the first hashed row is upserted, so an aborted run keeps it', async () => {
+    mocks.embed.mockImplementation(async ({ texts }) => hashedOnce(texts));
+    failInsertAt = 2;
+    await expect(sync()).rejects.toThrow('store went away');
+    expect(order.slice(0, 2)).toEqual(['degraded', 'insert']);
+    expect(order.filter((event) => event === 'degraded')).toHaveLength(1);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('writes the degradation once for a run whose every batch fell back', async () => {
+    mocks.embed.mockImplementation(async ({ texts }) => hashedOnce(texts));
+    await sync();
+    expect(order.filter((event) => event === 'insert').length).toBeGreaterThanOrEqual(2);
+    expect(order.filter((event) => event === 'degraded')).toHaveLength(1);
+    expect(order[0]).toBe('degraded');
+  });
+
+  it('words a fallback-only run as fallback vectors that are still searchable lexically', async () => {
+    mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
+    await sync();
+    const warning = warnings.at(-1)!;
+    expect(warning).toContain('fallback vectors');
+    expect(warning).toContain('re-embedded on the next sync');
+    expect(warning).not.toContain('not searchable');
+    expect(warning).not.toContain('left unindexed');
+  });
+
+  it('keeps the strict-failure wording for chunks left unindexed', async () => {
+    mocks.embed.mockResolvedValue({ kind: 'failed', reason: 'Ollama is unreachable' });
+    await sync();
+    const warning = warnings.at(-1)!;
+    expect(warning).toContain('were left unindexed rather than stored with meaningless vectors');
+    expect(warning).toContain('not searchable yet');
+    expect(warning).not.toContain('fallback vectors');
+  });
+
+  it('shows both facts when a run skipped some chunks and hashed others', async () => {
+    mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
+    mocks.embed.mockResolvedValueOnce({ kind: 'failed', reason: 'Ollama is unreachable' });
+    await sync();
+    const warning = warnings.at(-1)!;
+    expect(warning).toContain('left unindexed');
+    expect(warning).toContain('fallback vectors');
+  });
+
+  it('re-embeds those rows as updates on the next healthy sync and clears the flag', async () => {
+    mocks.embed.mockImplementationOnce(async ({ texts }) => hashedOnce(texts));
+    await sync();
+    const hashedPath = hashes().find(([, hash]) => hash === null)![0];
+    mocks.embed.mockClear();
+
+    const healed = await sync();
+    expect(healed.inserted).toBe(0);
+    expect(healed.updated).toBeGreaterThanOrEqual(1);
+    expect(mocks.embed).toHaveBeenCalledTimes(1);
+    expect(mocks.embed.mock.calls[0]![0].texts.join('\n')).toBe(
+      indexedChunks
+        .get(hashedPath)!
+        .map((row) => row.content)
+        .join('\n'),
+    );
+    expect(hashes().every(([, hash]) => hash !== null)).toBe(true);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+    expect(warnings.at(-1)).toBeNull();
+  });
+
+  it('writes no hashed row when the degradation could not be stored', async () => {
+    mocks.embed.mockImplementation(async ({ texts }) => hashedOnce(texts));
+    failDegradedWrite = true;
+    await expect(sync()).rejects.toThrow('database is down');
+    expect(order).not.toContain('insert');
+    expect(hashes()).toEqual([]);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('keeps the flag over a leftover NULL-hash row the run did not re-embed', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    leftoverNullHash = true;
+    await sync();
+    expect(hashes().every(([, hash]) => hash !== null)).toBe(true);
+    expect(nullHashProbes).toEqual([['repo-1', 'task']]);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('clears the flag when the store holds no NULL-hash row', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    await sync();
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+    expect(warnings.at(-1)).toBeNull();
+  });
+
+  it('keeps the flag when the NULL-hash read fails', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    nullHashProbeFails = true;
+    await sync();
+    expect(nullHashProbes).toHaveLength(1);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('keeps the real hash and records nothing when no endpoint is configured', async () => {
+    mocks.embed.mockImplementation(async ({ texts }) => hashedOnce(texts));
+    const detected = await ragReindexStep.detect!(ctx);
+    await runRagIndexSync(ctx, {
+      repoPath: worktree,
+      prefs: { ...detected.ragToolingPrefs!, ollamaUrl: null, embeddingModel: null },
+      projectName: detected.projectName,
+      ollamaReachable: false,
+      codeCollect: detected.codeCollect,
+    });
+    expect(hashes().length).toBeGreaterThanOrEqual(2);
+    expect(hashes().every(([, hash]) => typeof hash === 'string')).toBe(true);
+    expect(mocks.embed.mock.calls.every(([opts]) => opts.useOllama === false)).toBe(true);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+
+  it('writes the same rows as before when embedding works', async () => {
+    await sync();
+    expect(inserts).toMatchInlineSnapshot(`
+      [
+        [
+          "task-1",
+          "repo-1",
+          "kb",
+          ".haive-data/knowledge_base/architecture.md",
+          "architecture",
+          0,
+          "90e379bc783064249992bd15e1d88b7b4d619a316d4ec7b0172d3c80dfa761ee",
+          "[.haive-data/knowledge_base/architecture.md > Architecture]
+
+      # Architecture
+
+      The app stores its documents in PostgreSQL.",
+          "[0.1,0.2]",
+        ],
+        [
+          "task-1",
+          "repo-1",
+          "code",
+          "app.ts",
+          "function-greeting",
+          0,
+          "c2cb0fd3dd89b0e03d7c2ea26a1e60baf779b69372feaa4e4b2dccaf06cd0ebe",
+          "[app.ts > function greeting]
+
+      function greeting() { return "hello"; }",
+          "[0.1,0.2]",
+        ],
+      ]
+    `);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
   });
 });

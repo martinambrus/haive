@@ -32,7 +32,9 @@ import {
   embedBatch,
   loadRagEmbedHealth,
   ragEmbedWarning,
+  ragStoreAwaitsReembed,
   recordRagEmbedDegraded,
+  requireRagEmbedDegraded,
   resolveEmbedBatchSize,
   RagEmbedFailureError,
 } from '../_rag-embed-health.js';
@@ -86,6 +88,9 @@ export interface RagPopulateApply {
 /* ------------------------------------------------------------------ */
 
 const SOURCE_PREFIXES = [`${KB_DIR}/`];
+
+const HASH_WITH_ENDPOINT_REASON =
+  'Hash vectors were written because the embedding endpoint did not answer and strict embedding is off. They are re-embedded on the next sync.';
 
 /* ------------------------------------------------------------------ */
 /* File collection                                                     */
@@ -199,7 +204,7 @@ export async function insertChunk(
   sourcePath: string,
   sectionId: string,
   chunkIndex: number,
-  chunkHash: string,
+  chunkHash: string | null,
   content: string,
   embedding: number[],
   upsert: boolean,
@@ -380,6 +385,7 @@ async function embedAndStore(opts: {
   embeddingModel: string | null;
   embeddingDimensions: number;
   sync: IncrementalSync | null;
+  hashed: { chunks: number; realEmbedding: boolean };
 }): Promise<{ embedded: number; skipped: number }> {
   const { sync } = opts;
   const toEmbed: RagChunk[] = [];
@@ -435,6 +441,15 @@ async function embedAndStore(opts: {
       throw new RagEmbedFailureError(outcome.reason);
     }
     const embeddings = outcome.embeddings;
+    if (outcome.kind === 'embedded') opts.hashed.realEmbedding = true;
+    const hashedHere = outcome.kind === 'hashed' && !!opts.ollamaUrl && !!opts.embeddingModel;
+    if (hashedHere) {
+      // Recorded before the first hashed upsert, so an aborted run still leaves the repo degraded.
+      if (opts.hashed.chunks === 0) {
+        await requireRagEmbedDegraded(opts.ctx.db, opts.repositoryId, HASH_WITH_ENDPOINT_REASON);
+      }
+      opts.hashed.chunks += batch.length;
+    }
     for (let i = 0; i < batch.length; i += 1) {
       const chunk = batch[i]!;
       await insertChunk(
@@ -446,7 +461,7 @@ async function embedAndStore(opts: {
         opts.filePath,
         chunk.sectionId,
         chunk.chunkIndex,
-        chunk.chunkHash,
+        hashedHere ? null : chunk.chunkHash,
         chunk.content,
         embeddings[i]!,
         sync !== null,
@@ -584,7 +599,9 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     ];
     if (!detected.ollamaReachable) {
       statusParts.push(
-        'WARNING: Ollama not reachable. Will use deterministic hash embeddings as fallback.',
+        detected.ollamaUrl && detected.embeddingModel
+          ? 'WARNING: Ollama did not answer the probe. Embedding is still attempted: with strict embedding on a failure stops this step, with it off the chunks get hash vectors that the next sync re-embeds.'
+          : 'WARNING: No embedding endpoint is configured. Will use deterministic hash embeddings.',
       );
     }
 
@@ -717,8 +734,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         sync = { existing: await loadExistingChunkHashes(conn, repositoryId!), seen: new Set() };
       }
 
-      const useOllama =
-        detected.ollamaReachable && !!detected.ollamaUrl && !!detected.embeddingModel;
+      const useOllama = !!detected.ollamaUrl && !!detected.embeddingModel;
 
       // Warm the embedding model ONCE before the per-file loop. A cold model (esp.
       // a multi-billion-parameter embedding model on CPU) can take longer to load
@@ -763,6 +779,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       let codeFileCount = 0;
       let chunksEmbedded = 0;
       let chunksSkipped = 0;
+      const hashed = { chunks: 0, realEmbedding: false };
 
       // --- KB files ---
       const totalKb = detected.kbFiles.length;
@@ -821,6 +838,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           embeddingModel: detected.embeddingModel,
           embeddingDimensions: detected.embeddingDimensions,
           sync,
+          hashed,
         });
         chunksEmbedded += kbRes.embedded;
         chunksSkipped += kbRes.skipped;
@@ -883,6 +901,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           embeddingModel: detected.embeddingModel,
           embeddingDimensions: detected.embeddingDimensions,
           sync,
+          hashed,
         });
         chunksEmbedded += codeRes.embedded;
         chunksSkipped += codeRes.skipped;
@@ -924,7 +943,29 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       );
       // A completed run with real embeddings is the only evidence that clears the
       // degradation — a hash-mode run proves nothing about whether embeddings work.
-      if (useOllama && health.degradedAt) {
+      if (hashed.chunks > 0) {
+        await ctx.db
+          .update(schema.taskSteps)
+          .set({
+            warningMessage: composeRagWarning(
+              embedDeviceWarning(embedDevice),
+              ragEmbedWarning(
+                {
+                  degradedAt: health.degradedAt ?? new Date(),
+                  degradedReason: HASH_WITH_ENDPOINT_REASON,
+                  lexicalOnly: false,
+                },
+                { skippedChunks: 0, hashedChunks: hashed.chunks },
+              ),
+            ),
+          })
+          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      } else if (
+        useOllama &&
+        hashed.realEmbedding &&
+        health.degradedAt &&
+        !(await ragStoreAwaitsReembed(conn, repositoryId ?? null, ctx.logger))
+      ) {
         await clearRagEmbedDegraded(ctx.db, repositoryId ?? null, ctx.logger);
       }
       return {

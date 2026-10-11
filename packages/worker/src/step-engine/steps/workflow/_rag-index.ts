@@ -50,10 +50,15 @@ import {
   embedBatch,
   loadRagEmbedHealth,
   ragEmbedWarning,
+  ragStoreAwaitsReembed,
   recordRagEmbedDegraded,
+  requireRagEmbedDegraded,
   resolveEmbedBatchSize,
 } from '../_rag-embed-health.js';
 import { indexTaskEmbedding, TASK_EMBED_SOURCE_TYPE } from './_task-embedding.js';
+
+const HASH_WITH_ENDPOINT_REASON =
+  'Hash vectors were written because the embedding endpoint did not answer and strict embedding is off. They are re-embedded on the next sync.';
 
 /* ------------------------------------------------------------------ */
 /* Shared RAG indexing — used by 02-pre-rag-sync (run start, indexes  */
@@ -521,6 +526,14 @@ export async function runRagIndexSync(
     // hash rows (which ranks worse than not using the dense half at all). The existing
     // `useOllama && health.degradedAt` clear below lifts it when this run finishes.
     if (useOllama && opts.ollamaUrlDerived && !health.degradedAt && !health.lexicalOnly) {
+      // Stored before the reset, so a run that dies after it leaves no NULL hash over a hash vector
+      // unflagged; a reset that finds nothing leaves the flag for this run's own clear.
+      await requireRagEmbedDegraded(
+        ctx.db,
+        repositoryId,
+        'Indexed without an embedding endpoint (the URL was stripped from the committed onboarding mirror). Re-embedding now.',
+      );
+      health.degradedAt = new Date();
       const reset = await conn.pg.unsafe(
         `UPDATE ${RAG_TABLE} SET chunk_hash = NULL
           WHERE repository_id = $1 AND chunk_hash IS NOT NULL`,
@@ -531,13 +544,6 @@ export async function runRagIndexSync(
           { repositoryId, rows: reset.count },
           'embedding endpoint was re-derived; forcing a re-embed of hash-indexed chunks',
         );
-        await recordRagEmbedDegraded(
-          ctx.db,
-          repositoryId,
-          'Indexed without an embedding endpoint (the URL was stripped from the committed onboarding mirror). Re-embedding now.',
-          ctx.logger,
-        );
-        health.degradedAt = new Date();
       }
     }
 
@@ -575,6 +581,7 @@ export async function runRagIndexSync(
     let embedSkippedChunks = 0;
     let embedFailureReason: string | null = null;
     let realEmbeddingSucceeded = false;
+    let hashedChunks = 0;
     const embedBatchSize = await resolveEmbedBatchSize();
 
     const kbFiles = await collectKbFiles(repoPath);
@@ -743,6 +750,16 @@ export async function runRagIndexSync(
         }
         const embeddings = outcome.embeddings;
         if (outcome.kind === 'embedded') realEmbeddingSucceeded = true;
+        const hashedHere = outcome.kind === 'hashed' && useOllama;
+        if (hashedHere) {
+          // Recorded before the first hashed upsert, so an aborted run still leaves the repo degraded.
+          if (hashedChunks === 0) {
+            await requireRagEmbedDegraded(ctx.db, repositoryId, HASH_WITH_ENDPOINT_REASON);
+            health.degradedAt ??= new Date();
+            health.degradedReason = HASH_WITH_ENDPOINT_REASON;
+          }
+          hashedChunks += batch.length;
+        }
 
         for (let i = 0; i < batch.length; i += 1) {
           const { chunk, action } = batch[i]!;
@@ -760,7 +777,7 @@ export async function runRagIndexSync(
                 relPath,
                 chunk.sectionId,
                 chunk.chunkIndex,
-                chunk.chunkHash,
+                hashedHere ? null : chunk.chunkHash,
                 chunk.content,
                 literal,
               ],
@@ -779,7 +796,7 @@ export async function runRagIndexSync(
                 relPath,
                 chunk.sectionId,
                 chunk.chunkIndex,
-                chunk.chunkHash,
+                hashedHere ? null : chunk.chunkHash,
                 chunk.content,
                 json,
               ],
@@ -868,7 +885,13 @@ export async function runRagIndexSync(
     // An unchanged scan proves nothing about an endpoint that previously failed.
     // A small real batch lets a healthy endpoint recover without requiring a file
     // edit, while an outage (or an explicitly enabled hash fallback) keeps the flag.
-    if (useOllama && health.degradedAt && !embedFailureReason && !realEmbeddingSucceeded) {
+    if (
+      useOllama &&
+      health.degradedAt &&
+      !embedFailureReason &&
+      hashedChunks === 0 &&
+      !realEmbeddingSucceeded
+    ) {
       const outcome = await embedBatch({
         ollamaUrl: prefs.ollamaUrl,
         model: prefs.embeddingModel,
@@ -888,7 +911,12 @@ export async function runRagIndexSync(
       await recordRagEmbedDegraded(ctx.db, repositoryId, embedFailureReason, ctx.logger);
       health.degradedAt ??= new Date();
       health.degradedReason = embedFailureReason;
-    } else if (realEmbeddingSucceeded && health.degradedAt) {
+    } else if (
+      hashedChunks === 0 &&
+      realEmbeddingSucceeded &&
+      health.degradedAt &&
+      !(await ragStoreAwaitsReembed(conn, repositoryId, ctx.logger))
+    ) {
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
       health.degradedAt = null;
       health.degradedReason = null;
@@ -898,7 +926,10 @@ export async function runRagIndexSync(
       .set({
         warningMessage: composeRagWarning(
           embedDeviceWarning(embedDevice),
-          ragEmbedWarning(health, { skippedChunks: embedSkippedChunks }),
+          ragEmbedWarning(health, {
+            skippedChunks: embedSkippedChunks,
+            hashedChunks,
+          }),
         ),
       })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));

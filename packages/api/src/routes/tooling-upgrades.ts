@@ -716,7 +716,17 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       updates.ragEmbedDegradedAt = null;
       updates.ragEmbedDegradedReason = null;
       if (body.ragEmbedAction === 'rebuild_index' || current.ragEmbedLexicalOnly) {
+        const pending = {
+          ragEmbedDegradedAt: new Date(),
+          ragEmbedDegradedReason: 'Index rebuild pending: chunks are re-embedded on the next sync.',
+        };
+        // Stored before the reset: a reset that fails part-way leaves NULL hashes over the old vectors.
+        await db
+          .update(schema.repositories)
+          .set(pending)
+          .where(eq(schema.repositories.id, repositoryId));
         reembedQueued = await forceRagReembed(db, repositoryId);
+        if (reembedQueued) Object.assign(updates, pending);
       }
     }
   }
