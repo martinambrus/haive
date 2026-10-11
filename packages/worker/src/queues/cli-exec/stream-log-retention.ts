@@ -34,7 +34,7 @@ export interface CliStreamLogReaperOptions {
  *    once the task gate exists because 96 invocations on this instance ended AFTER their
  *    task's completed_at (max +57m): cancel stamps the task terminal immediately while
  *    in-flight sandboxes drain behind it. That clock is when the invocation was FINALIZED,
- *    the codebase's own definition (`finalizedInvocationIds`): `ended_at`, or else
+ *    the codebase's own definition (`enforceTaskAgentCap`): `ended_at`, or else
  *    `superseded_at`. A step retry supersedes a queued or running invocation without
  *    ending it, so keyed on `ended_at` alone such a row never aged at all — measured here,
  *    every never-ended row (33) was superseded, on a completed task, and still held its

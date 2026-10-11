@@ -83,7 +83,7 @@ import {
   type CliExecDeps,
   type CliExecQueuePayload,
 } from './_shared.js';
-import { finalizedInvocationIds, liveAgentLeaseCount } from './agent-lease.js';
+import { reserveAgentSlot, type AgentSlot } from './agent-lease.js';
 import { enforceRuntimeHolderReserve } from './agent-reserve.js';
 import { executeByKind, interpretCliFailure } from './exec-core.js';
 import { fatalClassFromMessage } from './failure-class.js';
@@ -1268,6 +1268,10 @@ const TASK_AGENT_CAP_DEFER_MS = 4000;
  *  waits on a sibling agent finishing seconds from now, this one waits on a human clicking
  *  Resume, so re-checking every 4s would be pure churn for the whole hold. */
 const PAUSE_DEFER_MS = 30_000;
+/** How long a refused INVOKE keeps retrying before it defers, and how often. A slot held by a job
+ *  a later gate turns away frees within milliseconds, and should go to a peer that is still here. */
+const LANE_RETRY_WINDOW_MS = 1_000;
+const LANE_RETRY_POLL_MS = 50;
 
 /** Pause gate, enforced at job pickup. A paused task's queued invocations must not start —
  *  that is what "we will not round robin into it with the next CLI call" means: the slot they
@@ -1318,89 +1322,43 @@ const PAUSE_DEFER_MS = 30_000;
  *  provision — because INVOKE is the only job name that spawns a sandboxed agent. */
 const LIGHT_JOB_LANE = 3;
 
-/** Position of `jobId` among the active INVOKE jobs that still have work to do, or -1 when it
- *  is not one of them.
- *
- *  A job whose invocation is already finalized is EXCLUDED, and that is the whole point: BullMQ
- *  keeps a job in `active` holding its lock when the worker dies mid-job, and `lockDuration` is
- *  30 minutes by design (a long step must survive a restart without redelivery). Ranking against
- *  those corpses hands them agent slots they will never use — OBSERVED on a 16 GB host where the
- *  measured pool is 2: two orphans from worker restarts held both slots, every real job logged
- *  "agent pool full" every 30s for 15 minutes, and `docker ps` showed no agent container at all.
- *  Their rows were already `ended_at` AND `superseded_at`, so the redelivery guard in
- *  handleCliExecJob would have skipped them the moment they were reclaimed.
- *
- *  Pure, so the ordering and the exclusion are testable without a queue or a db. */
-export function agentLaneRank(
-  active: { id: string; priority: number; invocationId: string }[],
-  jobId: string,
-  finalized: ReadonlySet<string>,
-): number {
-  return active
-    .filter((j) => !finalized.has(j.invocationId))
-    .sort((a, b) => a.priority - b.priority || compareJobIds(a.id, b.id))
-    .findIndex((j) => j.id === jobId);
-}
-
 /** Hold INVOKE to the agent cap now that the worker runs wider than it.
  *
  *  The Worker's concurrency is agentCap + LIGHT_JOB_LANE so a light job always has somewhere to
- *  run; without this gate that widening would also let agentCap+LIGHT_JOB_LANE agents run,
- *  quietly over-committing the RAM the pool exists to protect. Same defer mechanism as the pause
- *  gate and the runtime-holder reserve.
- *
- *  Admission is by POSITION in the active set, not by counting the others. Counting livelocks:
- *  BullMQ moves a job to `active` before calling its processor, so on a thundering start every
- *  one of N simultaneously-activated jobs sees the other N-1 and, at N > agentCap, they ALL
- *  defer — zero agents running on a machine with a free pool. Ranking instead means the first
- *  agentCap of the same set always proceed, whoever reads first.
- *
- *  Ranked by (priority, id) — the queue's own order. Priority is read off the job rather than
- *  its opts, which `changePriority` leaves stale, so the fair-scheduling band and the vote that
- *  moves it are both honoured; id breaks a tie in enqueue order. Over-admission would need a job
- *  to be missing from a peer's read while outranking it, and BullMQ activates in queue order, so
- *  a job that outranks this one is already active by the time this one is. */
+ *  run; without this gate that widening would also let agentCap+LIGHT_JOB_LANE agents run.
+ *  Admission reserves `invoke:<jobId>:<token>` in the pool hash the step-command leases share,
+ *  one script for both, so the cap is exact; the caller releases the returned slot when the job
+ *  leaves the processor. A refused job retries for LANE_RETRY_WINDOW_MS before it defers, since
+ *  the processor reserves ahead of the gates that may turn a holder away. A Redis failure lets
+ *  the job through with no slot. */
 export async function enforceAgentLaneCap(
-  db: Database,
+  _db: Database,
   job: Job<CliExecQueuePayload>,
   token: string | undefined,
   agentCap: number,
-): Promise<void> {
-  if (!token) return;
-  let rank: number;
-  try {
-    const active = await getCliExecQueue().getActive(0, -1);
-    const entries = active
-      .filter((j) => j?.name === CLI_EXEC_JOB_NAMES.INVOKE && j.id)
-      .map((j) => ({
-        id: j.id as string,
-        priority: j.priority ?? 0,
-        invocationId: (j.data as CliExecJobPayload).invocationId,
-      }));
-    rank = agentLaneRank(
-      entries,
-      job.id ?? '',
-      await finalizedInvocationIds(
-        db,
-        entries.map((e) => e.invocationId),
-      ),
-    );
-    // Not in the set we just read — allow rather than guess a position it does not have.
-    if (rank < 0) return;
-  } catch (err) {
-    log.warn({ err }, 'agent-lane rank failed; allowing job');
-    return;
+): Promise<AgentSlot | undefined> {
+  if (!token) return undefined;
+  const field = `invoke:${job.id ?? ''}:${token}`;
+  const retryUntil = Date.now() + LANE_RETRY_WINDOW_MS;
+  for (;;) {
+    let slot: AgentSlot | null;
+    try {
+      slot = await reserveAgentSlot(field, agentCap);
+    } catch (err) {
+      log.warn({ err }, 'agent-lane reserve failed; allowing job');
+      return undefined;
+    }
+    if (slot) return slot;
+    if (Date.now() >= retryUntil) break;
+    await new Promise((resolve) => setTimeout(resolve, LANE_RETRY_POLL_MS));
   }
-  // A lease is a slot no job holds; the two reads are not atomic, so this overshoots by at most one.
-  const leases = await liveAgentLeaseCount();
-  if (rank < Math.max(0, agentCap - leases)) return;
   try {
     await job.moveToDelayed(Date.now() + PAUSE_DEFER_MS, token);
   } catch (err) {
     log.warn({ err }, 'agent-lane defer failed; allowing job');
-    return;
+    return undefined;
   }
-  log.info({ jobId: job.id, rank, agentCap, leases }, 'agent pool full; deferring invocation');
+  log.info({ jobId: job.id, agentCap }, 'agent pool full; deferring invocation');
   throw new DelayedError();
 }
 
@@ -1529,24 +1487,28 @@ export async function startCliExecWorker(
       const db = getDb();
       if (job.name === CLI_EXEC_JOB_NAMES.INVOKE) {
         const payload = job.data as CliExecJobPayload;
-        // Paused task (or global switch): defer before anything else, so a held task never
-        // spends a slot. Throws DelayedError on defer; no-op when the task is live.
-        await enforcePauseGate(db, payload, job, token);
         // Agent-pool cap: the worker runs LIGHT_JOB_LANE wider than the pool so a sign-in is
         // never stuck behind agents, and this is what still holds AGENTS to the pool size.
-        // After the pause gate on purpose — a held job is briefly `active` before it defers, and
-        // ranking against it would bounce a live agent for work that is not going to run.
-        await enforceAgentLaneCap(db, job, token, agentCap);
-        // Per-task cap: if this task already runs its max parallel agents, defer
-        // the job (freeing the slot for others) and let BullMQ redeliver it.
-        // Throws DelayedError on defer; no-op when under the cap.
-        await enforceTaskAgentCap(db, payload, job, token);
-        // Runtime-holder reserve: a task holding no live runtime runner yields the slot to one
-        // that does, so a primed DDEV environment is not left idle holding gigabytes it can only
-        // release by finishing. Last of the three because it is the only one that reads docker.
-        // Throws DelayedError on defer; no-op when this task holds a runner or none does.
-        await enforceRuntimeHolderReserve(db, payload, job, token);
-        await handleCliExecJob(db, payload, deps);
+        // First, with no await before it: BullMQ activates in priority order, so the slots are
+        // reserved in that order too. Held until the job leaves the processor, whatever happens.
+        const slot = await enforceAgentLaneCap(db, job, token, agentCap);
+        try {
+          // Paused task (or global switch): throws DelayedError on defer, freeing the slot it
+          // held for those few milliseconds; no-op when the task is live.
+          await enforcePauseGate(db, payload, job, token);
+          // Per-task cap: if this task already runs its max parallel agents, defer
+          // the job (freeing the slot for others) and let BullMQ redeliver it.
+          // Throws DelayedError on defer; no-op when under the cap.
+          await enforceTaskAgentCap(db, payload, job, token);
+          // Runtime-holder reserve: a task holding no live runtime runner yields the slot to one
+          // that does, so a primed DDEV environment is not left idle holding gigabytes it can only
+          // release by finishing. Last of the three because it is the only one that reads docker.
+          // Throws DelayedError on defer; no-op when this task holds a runner or none does.
+          await enforceRuntimeHolderReserve(db, payload, job, token);
+          await handleCliExecJob(db, payload, deps);
+        } finally {
+          await slot?.release();
+        }
         return;
       }
       if (job.name === CLI_EXEC_JOB_NAMES.PROBE) {
