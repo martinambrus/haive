@@ -167,7 +167,7 @@ export default function RepoToolingPage() {
           : action === 'accept_lexical_only'
             ? 'Search on this repository now ranks by full text alone.'
             : res.degradationKept
-              ? 'Embeddings will be attempted again on the next RAG sync. The warning stays until then: some chunks still hold fallback vectors awaiting re-embed, or the index could not be checked.'
+              ? 'Embeddings will be attempted again on the next RAG sync. The warning stays until then: some chunks still await re-embed, or the index could not be checked.'
               : 'Embeddings will be attempted again on the next RAG sync.',
       );
     } catch (err) {

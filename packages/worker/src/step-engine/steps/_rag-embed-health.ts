@@ -273,7 +273,7 @@ export function ragEmbedWarning(
       : hashed > 0
         ? ''
         : thisRun.awaitingReembed
-          ? ' Chunks indexed with fallback vectors will be re-embedded on the next sync; they are searchable by words, and semantic search is off until then.'
+          ? ' Chunks awaiting re-embed (fallback vectors or a pending rebuild) are re-embedded on the next sync; they are searchable by words, and semantic search is off until then.'
           : ' Chunks left unindexed by the failure are not searchable yet.';
   const fallback =
     hashed > 0

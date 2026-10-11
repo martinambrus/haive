@@ -131,7 +131,7 @@ page's Retry runs the same bounded probe before it clears: rows awaiting re-embe
 store that does not answer, keep the flag (`degradationKept`), while a missing internal database or
 index table counts as nothing awaiting. The probe opens an internal store only if it exists, since
 `resolveRagConnection` creates the database it is asked for. A degraded sync's first banner says
-that fallback rows await re-embed when the store holds them, rather than "not searchable".
+that rows await re-embed (fallback vectors or a pending rebuild) when the store holds them, rather than "not searchable".
 
 **`rag_embed_lexical_only` is the accepted verdict, and it is NOT "keep hashing".** It forces
 `ragHybridSearch`'s existing lexical-only branch (the one a jsonb-only store already takes), so an
