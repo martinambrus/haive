@@ -17,11 +17,19 @@ export async function moveSecretLikeProviderEnv(db: Database): Promise<void> {
     columns: { id: true, envVars: true },
   });
   for (const provider of providers) {
-    const { envVars, secrets } = splitSecretLikeEnv(provider.envVars ?? {});
-    const names = Object.keys(secrets);
-    if (names.length === 0) continue;
+    if (Object.keys(splitSecretLikeEnv(provider.envVars ?? {}).secrets).length === 0) continue;
     const masterKek = await secretsService.getMasterKek();
     await db.transaction(async (tx) => {
+      // Re-read under a row lock, so a PATCH saved since the scan above is neither lost nor raced.
+      const [locked] = await tx
+        .select({ envVars: schema.cliProviders.envVars })
+        .from(schema.cliProviders)
+        .where(eq(schema.cliProviders.id, provider.id))
+        .for('update');
+      if (!locked) return;
+      const { envVars, secrets } = splitSecretLikeEnv(locked.envVars ?? {});
+      const names = Object.keys(secrets);
+      if (names.length === 0) return;
       const held = await tx.query.cliProviderSecrets.findMany({
         where: eq(schema.cliProviderSecrets.providerId, provider.id),
         columns: { secretName: true },
