@@ -72,3 +72,8 @@ contains no `_`, `.` or hump so `extractIdentifiers` can never emit it from a ch
 — otherwise indexing Haive's own source would stamp a row as upgraded when it was not, and a
 version bump would skip exactly those rows. It is capped per invocation so a large store
 finishes over the next few syncs rather than making one task wait for the whole rewrite.
+
+**The global KB store carries the same lexemes.** `ensureGlobalKbSchema` installs the same
+function body and runs the same backfill, through its bounded step, once per process. Before
+that the global store's `content_tsv` was plain `to_tsvector('english', …)`, so only camelCase
+names survived the parser whole and a snake_case identifier could never match the global half.
