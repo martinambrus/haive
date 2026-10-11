@@ -128,7 +128,7 @@ async function setup() {
   dirs.push(root);
   const repositories = schema.repositories;
   const sync = tableNamed('project_state_sync');
-  const fake = createFakeDb({ repositories, projectStateSync: sync });
+  const fake = createFakeDb({ repositories, projectStateSync: sync, tasks: schema.tasks });
   fake.insert(repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
   fake.insert(repositories, { id: OTHER, userId: USER, name: 'other', source: 'blank' });
 
@@ -226,7 +226,12 @@ async function setup() {
   const write = (
     c: Context,
     rtkChoiceRecorded: boolean,
-    over: { repositoryId?: string; repoPath?: string; expectedColumns?: unknown[] } = {},
+    over: {
+      repositoryId?: string;
+      repoPath?: string;
+      expectedColumns?: unknown[];
+      holdingTaskId?: string;
+    } = {},
   ): Promise<readonly string[]> =>
     writeProjectStateRecord(db, {
       repositoryId: over.repositoryId ?? REPO,
@@ -234,6 +239,7 @@ async function setup() {
       context: c as never,
       rtkChoiceRecorded,
       ...(over.expectedColumns ? { expectedColumns: over.expectedColumns } : {}),
+      ...(over.holdingTaskId ? { holdingTaskId: over.holdingTaskId } : {}),
     });
   const syncSeed = (values: Record<string, unknown>) =>
     fake.insert(sync, {
@@ -291,6 +297,31 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
       t.write(context(), true, { expectedColumns: [{ planned: 'here' }] }),
     ).rejects.toBeInstanceOf(ProjectStateMovedError);
     expect(t.onDisk()).toEqual({ format: null, render: null });
+  });
+
+  it('refuses once its task no longer holds the checkout, so a refresh may have moved it', async () => {
+    const TASK = '00000000-0000-4000-8000-0000000000c1';
+    for (const [status, refused] of [
+      ['running', false],
+      ['cancelled', true],
+    ] as const) {
+      const s = await setup();
+      s.fake.insert(schema.tasks, {
+        id: TASK,
+        userId: USER,
+        repositoryId: REPO,
+        status,
+        type: 'onboarding_upgrade',
+      });
+      const write = s.write(context(), true, { expectedColumns: [null], holdingTaskId: TASK });
+      if (refused) {
+        await expect(write).rejects.toBeInstanceOf(ProjectStateMovedError);
+        expect(s.onDisk()).toEqual({ format: null, render: null });
+      } else {
+        await write;
+        expect(s.onDisk()).toEqual(expectedFiles(context()));
+      }
+    }
   });
 
   it('writes when the column is one the writer expected, or none', async () => {

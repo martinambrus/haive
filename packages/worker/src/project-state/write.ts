@@ -10,6 +10,7 @@ import {
   renderContextColumnSchema,
   renderProjectState,
 } from '@haive/shared/project-state';
+import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
 import type { TemplateRenderContext } from '../step-engine/template-manifest.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -30,6 +31,9 @@ export interface ProjectStateRecordInput {
   /** The columns the writer planned against; a column found holding anything else (null aside)
    *  refuses the write before a file changes. Omitted: written whatever the column holds. */
   expectedColumns?: unknown[];
+  /** The task writing the record. Its write is refused once the task no longer holds the checkout,
+   *  since a refresh may then have fast-forwarded the record files under it. */
+  holdingTaskId?: string;
 }
 
 /** The column moved past what the writer planned against, so its record would undo a newer one. */
@@ -70,7 +74,14 @@ export function renderContextColumnFor(context: TemplateRenderContext, rtkChoice
  *  and the sync base to it in one transaction. Returns the repository-relative paths written. */
 export async function writeProjectStateRecord(
   db: Database,
-  { repositoryId, repoPath, context, rtkChoiceRecorded, expectedColumns }: ProjectStateRecordInput,
+  {
+    repositoryId,
+    repoPath,
+    context,
+    rtkChoiceRecorded,
+    expectedColumns,
+    holdingTaskId,
+  }: ProjectStateRecordInput,
 ): Promise<string[]> {
   const written: string[] = [];
   try {
@@ -96,6 +107,7 @@ export async function writeProjectStateRecord(
       await lockProjectState(tx, repositoryId);
       if (expectedColumns) {
         await refuseMovedColumn(tx, repositoryId, expectedColumns);
+        if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId);
         await writeFiles();
       }
       await tx
@@ -113,6 +125,17 @@ export async function writeProjectStateRecord(
     throw new ProjectStateWriteError(err, written, !cleared);
   }
   return written;
+}
+
+async function refuseReleasedCheckout(tx: Tx, taskId: string): Promise<void> {
+  const [task] = await tx
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  if (!task || !(CHECKOUT_HOLDING_TASK_STATUSES as readonly string[]).includes(task.status)) {
+    throw new ProjectStateMovedError();
+  }
 }
 
 /** Throws ProjectStateMovedError when the column holds a context none of `expected` is. Call it

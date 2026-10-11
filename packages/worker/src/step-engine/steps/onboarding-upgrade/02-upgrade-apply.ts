@@ -1657,7 +1657,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           context: renderCtx,
           rtkChoiceRecorded: plan.rtkFollowsLive === true,
           ...(plan.renderContextColumn !== undefined
-            ? { expectedColumns: plannedColumns(plan) }
+            ? { expectedColumns: plannedColumns(plan), holdingTaskId: ctx.taskId }
             : {}),
         })),
       );

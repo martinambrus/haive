@@ -13,6 +13,7 @@ import { logger, type RepoJobPayload } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
+import { lockProjectState } from '../src/project-state/write.js';
 
 const log = logger.child({ module: 'repo-refresh-smoke' });
 
@@ -208,6 +209,46 @@ async function main(): Promise<void> {
         'a task using the repository holds the refresh off',
         git(dest, 'rev-parse', 'HEAD') === before &&
           /1 task is using this repository/.test(row.statusMessage ?? ''),
+        row,
+      );
+      await db.delete(schema.tasks).where(eq(schema.tasks.id, task!.id));
+    }
+
+    // 5b. A task that starts holding the checkout while the refresh waits for the project-state lock
+    // (an upgrade writing its record) keeps the checkout where it was.
+    {
+      const { payload, dest } = await cloned();
+      const before = git(dest, 'rev-parse', 'HEAD');
+      await push('during-record.txt', 'x\n');
+      let release!: () => void;
+      let held!: () => void;
+      const locked = new Promise<void>((r) => (held = r));
+      const writer = db.transaction(async (tx) => {
+        await lockProjectState(tx, payload.repositoryId);
+        held();
+        await new Promise<void>((r) => (release = r));
+      });
+      await locked;
+      const refreshing = handleRefresh(payload, db, storage);
+      await new Promise((r) => setTimeout(r, 500));
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: payload.repositoryId,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id });
+      release();
+      await writer;
+      await refreshing;
+      const row = await statusOf(payload.repositoryId);
+      check(
+        'a task that starts while the refresh waits for the lock holds it off',
+        git(dest, 'rev-parse', 'HEAD') === before &&
+          /started using this repository/.test(row.statusMessage ?? ''),
         row,
       );
       await db.delete(schema.tasks).where(eq(schema.tasks.id, task!.id));
