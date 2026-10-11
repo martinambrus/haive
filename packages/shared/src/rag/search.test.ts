@@ -447,7 +447,7 @@ describe('ragHybridSearch identifier statistics', () => {
 
 describe('ragHybridSearch lexical-only identifier ranker', () => {
   const VEC = [0.1, 0.2, 0.3, 0.4];
-  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] } };
+  const FILTER = { namespace: 'default', facets: { framework: ['drupal'] }, embedModel: 'model-a' };
   const lexicalOnly = { lexicalOnly: true };
   const mainCall = (calls: Array<{ statement: string; params: unknown[] }>) =>
     calls.find((c) => c.statement.includes('ts_rank_cd'))!;
