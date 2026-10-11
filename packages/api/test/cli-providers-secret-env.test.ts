@@ -168,7 +168,7 @@ describe('POST /:providerId/secrets', () => {
       value: SECRET_VALUE,
     });
     expect(second.status).toBe(200);
-    const body = await second.json();
+    const body = (await second.json()) as { secret: Record<string, unknown> };
     expect(JSON.stringify(body)).not.toContain(SECRET_VALUE);
     expect(body.secret).toMatchObject({ secretName: 'API_KEY' });
     expect(secretValues(fake)).toEqual({ API_KEY: SECRET_VALUE });
