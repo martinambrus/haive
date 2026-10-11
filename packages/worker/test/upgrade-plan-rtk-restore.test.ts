@@ -123,6 +123,29 @@ describe('01 offers the RTK block back', () => {
     ).toEqual([]);
   });
 
+  // A re-onboarding writes the block without a record, so a strip from before the reset proves nothing.
+  it('(b) offers nothing for a strip recorded before the last onboarding reset', async () => {
+    expect(
+      await offered({
+        seed: (f) => {
+          record(f, 'rtk-block', 'AGENTS.md', 1000);
+          f.patch(schema.repositories, REPO, { onboardingResetAt: new Date(2000) });
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it('(b) still offers a strip recorded after the last onboarding reset', async () => {
+    expect(
+      await offered({
+        seed: (f) => {
+          f.patch(schema.repositories, REPO, { onboardingResetAt: new Date(500) });
+          record(f, 'rtk-block', 'AGENTS.md', 1000);
+        },
+      }),
+    ).toEqual(['AGENTS.md']);
+  });
+
   it('(b) offers again when a strip record is newer than the restore', async () => {
     expect(
       await offered({

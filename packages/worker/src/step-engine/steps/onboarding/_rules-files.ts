@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   buildCliRulesBlock,
@@ -286,6 +286,12 @@ export async function restorableRtkBlockFiles(
   repoPath: string,
   repositoryId: string,
 ): Promise<string[]> {
+  // A reset and re-onboarding write the block with no record, so only records since then count.
+  const [repo] = await db
+    .select({ resetAt: schema.repositories.onboardingResetAt })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
   const [newest] = await db
     .select({ templateKind: schema.onboardingArtifacts.templateKind })
     .from(schema.onboardingArtifacts)
@@ -297,6 +303,7 @@ export async function restorableRtkBlockFiles(
           RTK_BLOCK_RECORD,
           RTK_BLOCK_RESTORE_RECORD,
         ]),
+        ...(repo?.resetAt ? [gt(schema.onboardingArtifacts.generatedAt, repo.resetAt)] : []),
       ),
     )
     .orderBy(desc(schema.onboardingArtifacts.generatedAt))
