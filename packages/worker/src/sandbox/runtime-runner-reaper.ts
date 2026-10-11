@@ -4,6 +4,7 @@ import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { APP_RUNNER_LABEL, CONFIG_KEYS, configService, logger } from '@haive/shared';
 import { hasLiveCliInvocation } from '../orchestrator/pause.js';
+import { runnerExecLive, taskRunnerBusy, withRunnersFenced } from './runner-activity.js';
 import { markPreempted } from '../queues/cli-exec/preempt-mark.js';
 
 const exec = promisify(execFile);
@@ -86,6 +87,23 @@ export function reapDecision(
   }
   // running / waiting_* / created / queued — in use, keep.
   return null;
+}
+
+/** No CLI run live and no exec in either runner: a migration, a lint slot or a Playwright run is
+ *  an exec with no CLI run behind it, and reaping the runner under it fails the step. Docker is
+ *  asked as well, since an exec outlives a worker reload that empties this process's count. */
+export async function runnerSettled(
+  db: Parameters<typeof hasLiveCliInvocation>[0],
+  taskId: string,
+): Promise<boolean> {
+  // The live-CLI read runs again after the Docker probe, which can take seconds: a run that started
+  // meanwhile may not have reached its first exec yet.
+  return (
+    !taskRunnerBusy(taskId) &&
+    !(await hasLiveCliInvocation(db, taskId)) &&
+    !(await runnerExecLive(taskId)) &&
+    !(await hasLiveCliInvocation(db, taskId))
+  );
 }
 
 export interface RunnerContainer {
@@ -324,7 +342,17 @@ export class RuntimeRunnerReaper {
         return null;
       });
       if (!reason) continue;
-      await this.reap(c.id);
+      if (reason === 'paused-grace' && c.taskId) {
+        const taskId = c.taskId;
+        const reapedHeld = await withRunnersFenced(taskId, async (idle) => {
+          if (!(await runnerSettled(this.db, taskId).catch(() => false)) || !idle()) return false;
+          await this.reap(c.id);
+          return true;
+        });
+        if (!reapedHeld) continue;
+      } else {
+        await this.reap(c.id);
+      }
       log.info({ id: c.id, taskId: c.taskId, reason }, 'reaped leaked runtime runner');
       reaped += 1;
     }
@@ -368,9 +396,7 @@ export class RuntimeRunnerReaper {
           taskById.set(c.taskId, {
             ...t,
             settled:
-              t.pausedAt || couldBeScoreTier
-                ? !(await hasLiveCliInvocation(this.db, c.taskId))
-                : false,
+              t.pausedAt || couldBeScoreTier ? await runnerSettled(this.db, c.taskId) : false,
           });
         }
       } catch (err) {
@@ -395,31 +421,34 @@ export class RuntimeRunnerReaper {
     // one resumed, in the gap since we listed (list->reap TOCTOU). Only reap if the task is
     // still preemptible. An orphan (task row gone) stays reapable — findFirst returns undefined,
     // we fall through.
-    if (pick.taskId) {
-      try {
-        const t = await this.db.query.tasks.findFirst({
-          where: eq(schema.tasks.id, pick.taskId),
-          columns: { status: true, pausedAt: true, voteScore: true },
-        });
-        // Still a valid target if it is dead, still held, OR still outscored-and-settled.
-        // Checking only the status would veto every tier-2 pick (a paused task's status is
-        // `running`) and, now, every tier-3 pick too. The settled re-check is the important half:
-        // the holder may have started a new agent since we listed, and taking its environment
-        // then is the one outcome tier 3 must never produce.
-        const stillOutscored =
-          !!t &&
-          scoreTier !== null &&
-          t.voteScore < scoreTier &&
-          !(await hasLiveCliInvocation(this.db, pick.taskId));
-        if (t && !PREEMPTIBLE_TASK_STATUSES.has(t.status) && !t.pausedAt && !stillOutscored) {
+    const taskId = pick.taskId;
+    if (taskId) {
+      const reaped = await withRunnersFenced(taskId, async (idle) => {
+        try {
+          const t = await this.db.query.tasks.findFirst({
+            where: eq(schema.tasks.id, taskId),
+            columns: { status: true, pausedAt: true, voteScore: true },
+          });
+          // Still a valid target if it is dead, or still held or outscored AND settled. The
+          // settled re-check is the important half: the holder may have started an agent or an
+          // exec since we listed, and taking its environment then is what tiers 2 and 3 must
+          // never do.
+          if (t && !PREEMPTIBLE_TASK_STATUSES.has(t.status)) {
+            const heldOrOutscored = !!t.pausedAt || (scoreTier !== null && t.voteScore < scoreTier);
+            if (!heldOrOutscored || !(await runnerSettled(this.db, taskId))) return false;
+          }
+        } catch (err) {
+          log.warn({ err, taskId }, 'preemption re-check failed; not reaping');
           return false;
         }
-      } catch (err) {
-        log.warn({ err, taskId: pick.taskId }, 'preemption re-check failed; not reaping');
-        return false;
-      }
+        if (!idle()) return false;
+        await this.reap(pick.id);
+        return true;
+      });
+      if (!reaped) return false;
+    } else {
+      await this.reap(pick.id);
     }
-    await this.reap(pick.id);
     // Confirm the reap actually removed the container. `reap` swallows a failed `docker rm`,
     // so without this a persistent rm failure would report success — and the gate's pump
     // re-picks the same runner on its `continue`, spinning forever. If it's still there, park.
@@ -457,7 +486,7 @@ export class RuntimeRunnerReaper {
       task = row
         ? {
             ...row,
-            settled: row.pausedAt ? !(await hasLiveCliInvocation(this.db, c.taskId)) : false,
+            settled: row.pausedAt ? await runnerSettled(this.db, c.taskId) : false,
           }
         : undefined;
     } catch (err) {

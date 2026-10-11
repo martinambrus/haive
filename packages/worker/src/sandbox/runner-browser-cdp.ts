@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { whileRunnerBusy } from './runner-activity.js';
 
 const exec = promisify(execFile);
 
@@ -31,9 +32,11 @@ export async function browserCdpUrlForRunner(name: string): Promise<string | nul
   const ip = await containerIpOnNetwork(name, network);
   if (!ip) return null;
   try {
-    await exec('docker', ['exec', name, 'curl', '-fsS', `http://${ip}:9223/json/version`], {
-      timeout: 8_000,
-    });
+    await whileRunnerBusy(name, () =>
+      exec('docker', ['exec', name, 'curl', '-fsS', `http://${ip}:9223/json/version`], {
+        timeout: 8_000,
+      }),
+    );
     return `http://${ip}:9223`;
   } catch {
     return null;
@@ -58,9 +61,11 @@ export async function closeExtraBrowserTabs(
   scriptPath: string,
 ): Promise<number | null> {
   try {
-    const { stdout } = await exec('docker', ['exec', name, 'node', scriptPath], {
-      timeout: 30_000,
-    });
+    const { stdout } = await whileRunnerBusy(name, () =>
+      exec('docker', ['exec', name, 'node', scriptPath], {
+        timeout: 30_000,
+      }),
+    );
     // The script prints one JSON line; anything the runtime wrote before it is noise.
     const line = stdout.trim().split('\n').pop() ?? '';
     const parsed = JSON.parse(line) as { closed?: unknown };
@@ -85,9 +90,11 @@ export async function restoreBrowserWindow(
   scriptPath: string,
 ): Promise<number | null> {
   try {
-    const { stdout } = await exec('docker', ['exec', name, 'node', scriptPath], {
-      timeout: 30_000,
-    });
+    const { stdout } = await whileRunnerBusy(name, () =>
+      exec('docker', ['exec', name, 'node', scriptPath], {
+        timeout: 30_000,
+      }),
+    );
     const line = stdout.trim().split('\n').pop() ?? '';
     const parsed = JSON.parse(line) as { restored?: unknown };
     return typeof parsed.restored === 'number' ? parsed.restored : null;
