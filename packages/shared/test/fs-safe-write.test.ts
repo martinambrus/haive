@@ -1,7 +1,8 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import {
   chmod,
   lstat,
+  lutimes,
   mkdir,
   mkdtemp,
   readdir,
@@ -9,12 +10,13 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyTreeNoFollow,
   chmodNoFollow,
@@ -30,6 +32,44 @@ import {
   updateFileNoFollow,
   writeFileNoFollow,
 } from '../src/fs-safe.js';
+
+const unlinkBlock = vi.hoisted(() => ({ name: null as string | null }));
+const swapAfterLstat = vi.hoisted(() => ({
+  name: null as string | null,
+  held: [] as { close: () => Promise<void> }[],
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    unlink: async (target: Parameters<typeof actual.unlink>[0]) => {
+      if (unlinkBlock.name !== null && String(target).endsWith(`/${unlinkBlock.name}`)) {
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
+      return actual.unlink(target);
+    },
+    lstat: (async (target: Parameters<typeof actual.lstat>[0], opts?: never) => {
+      const st = await actual.lstat(target, opts);
+      if (swapAfterLstat.name !== null && String(target).endsWith(`/${swapAfterLstat.name}`)) {
+        swapAfterLstat.name = null;
+        swapAfterLstat.held.push(await actual.open(target, 'r'));
+        await actual.writeFile(`${String(target)}.next`, 'fresh');
+        await actual.rename(`${String(target)}.next`, target);
+      }
+      return st;
+    }) as typeof actual.lstat,
+    rename: async (
+      from: Parameters<typeof actual.rename>[0],
+      to: Parameters<typeof actual.rename>[1],
+    ) => {
+      if (unlinkBlock.name !== null && String(from).endsWith(`/${unlinkBlock.name}`)) {
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
+      return actual.rename(from, to);
+    },
+  };
+});
 
 const run = promisify(execFile);
 
@@ -749,6 +789,198 @@ describe('fs-safe write primitives', () => {
       await expect(
         writeFileNoFollow(root, 'src', 'x', { replaceLeafLink: true }),
       ).rejects.toMatchObject({ reason: 'not-regular-file' });
+    });
+
+    describe('stale temp sweep', () => {
+      const ageBy = async (file: string, ms: number) => {
+        const when = new Date(Date.now() - ms);
+        await utimes(file, when, when);
+      };
+      const HOURS_2 = 2 * 60 * 60 * 1000;
+
+      afterEach(() => {
+        unlinkBlock.name = null;
+      });
+
+      it('removes a stale temp of the same leaf after a write', async () => {
+        const stale = path.join(
+          root,
+          'src',
+          '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+        );
+        await writeFile(stale, 'orphan', 'utf8');
+        await ageBy(stale, HOURS_2);
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect((await readdir(path.join(root, 'src'))).sort()).toEqual(['a.txt']);
+      });
+
+      it('sweeps beside a leaf at the anchor itself', async () => {
+        const stale = path.join(root, '.top.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001');
+        await writeFile(stale, 'orphan', 'utf8');
+        await ageBy(stale, HOURS_2);
+        await writeFileNoFollow(root, 'top.txt', 'x');
+        expect(await readdir(root)).not.toContain(
+          '.top.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+        );
+      });
+
+      it('keeps a stale FIFO without opening it, so a writer waiting on it stays blocked', async () => {
+        const fifo = path.join(
+          root,
+          'src',
+          '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+        );
+        await promisify(execFile)('mkfifo', [fifo]);
+        await ageBy(fifo, HOURS_2);
+        const writer = spawn('sh', ['-c', 'printf hi > "$1"', 'sh', fifo], { stdio: 'ignore' });
+        try {
+          await writeFileNoFollow(root, 'src/a.txt', 'next');
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          expect(writer.exitCode).toBeNull();
+          expect((await lstat(fifo)).isFIFO()).toBe(true);
+        } finally {
+          writer.kill();
+        }
+      });
+
+      it('keeps a temp replaced between its age check and its removal', async () => {
+        const name = '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001';
+        const stale = path.join(root, 'src', name);
+        await writeFile(stale, 'orphan', 'utf8');
+        await ageBy(stale, HOURS_2);
+        swapAfterLstat.name = name;
+        try {
+          await writeFileNoFollow(root, 'src/a.txt', 'next');
+        } finally {
+          swapAfterLstat.name = null;
+          await Promise.all(swapAfterLstat.held.splice(0).map((h) => h.close()));
+        }
+        expect(await readFile(stale, 'utf8')).toBe('fresh');
+      });
+
+      it('removes at most a bounded number of stale temps per write', async () => {
+        for (let i = 0; i < 40; i += 1) {
+          const stale = path.join(
+            root,
+            'src',
+            `.a.txt.haive-tmp-${i + 1}-00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+          );
+          await writeFile(stale, 'orphan', 'utf8');
+          await ageBy(stale, HOURS_2);
+        }
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect((await readdir(path.join(root, 'src'))).length).toBe(1 + 40 - 32);
+      });
+
+      it('lets no number of fresh temps use up the budget', async () => {
+        for (let i = 0; i < 40; i += 1) {
+          await writeFile(
+            path.join(
+              root,
+              'src',
+              `.a.txt.haive-tmp-${i + 1}-00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+            ),
+            'live',
+            'utf8',
+          );
+        }
+        const stale = path.join(
+          root,
+          'src',
+          '.a.txt.haive-tmp-99-00000000-0000-4000-8000-000000000099',
+        );
+        await writeFile(stale, 'orphan', 'utf8');
+        await ageBy(stale, HOURS_2);
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect(await readdir(path.join(root, 'src'))).not.toContain(path.basename(stale));
+        expect((await readdir(path.join(root, 'src'))).length).toBe(41);
+      });
+
+      it.each([
+        '.a.txt.haive-tmp-0-00000000-0000-4000-8000-000000000001',
+        '.a.txt.haive-tmp-01-00000000-0000-4000-8000-000000000001',
+        '.a.txt.haive-tmp-1-00000000-0000-1000-8000-000000000001',
+        '.a.txt.haive-tmp-1-00000000-0000-4000-0000-000000000001',
+        '.a.txt.haive-tmp-9999999999-00000000-0000-4000-8000-000000000001',
+        '.a.txt.haive-tmp-4194304-00000000-0000-4000-8000-000000000001',
+      ])('keeps a stale %s, a name no write could have made', async (name) => {
+        const file = path.join(root, 'src', name);
+        await writeFile(file, 'keep', 'utf8');
+        await ageBy(file, HOURS_2);
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect(await readdir(path.join(root, 'src'))).toContain(name);
+      });
+
+      it('keeps a stale file whose name only starts like a temp', async () => {
+        const mine = path.join(root, 'src', '.a.txt.haive-tmp-backup');
+        await writeFile(mine, 'keep', 'utf8');
+        await ageBy(mine, HOURS_2);
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect(await readdir(path.join(root, 'src'))).toContain('.a.txt.haive-tmp-backup');
+      });
+
+      it('keeps a fresh temp, which may belong to a live writer', async () => {
+        await writeFile(
+          path.join(root, 'src', '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001'),
+          'live',
+          'utf8',
+        );
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect((await readdir(path.join(root, 'src'))).sort()).toEqual([
+          '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+          'a.txt',
+        ]);
+      });
+
+      it('keeps a stale temp of a different leaf', async () => {
+        const other = path.join(
+          root,
+          'src',
+          '.b.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+        );
+        await writeFile(other, 'orphan', 'utf8');
+        await ageBy(other, HOURS_2);
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect(await readFile(other, 'utf8')).toBe('orphan');
+      });
+
+      it('leaves a link named like a stale temp alone, target included', async () => {
+        const link = path.join(
+          root,
+          'src',
+          '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+        );
+        await symlink(path.join(outside, 'secret.txt'), link);
+        const when = new Date(Date.now() - HOURS_2);
+        await lutimes(link, when, when);
+        await writeFileNoFollow(root, 'src/a.txt', 'next');
+        expect((await lstat(link)).isSymbolicLink()).toBe(true);
+        expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('elsewhere');
+      });
+
+      it('returns the write’s result when a stale temp cannot be removed', async () => {
+        const blocked = path.join(
+          root,
+          'src',
+          '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+        );
+        const removable = path.join(
+          root,
+          'src',
+          '.a.txt.haive-tmp-2-00000000-0000-4000-8000-000000000002',
+        );
+        await writeFile(blocked, 'orphan', 'utf8');
+        await writeFile(removable, 'orphan', 'utf8');
+        await ageBy(blocked, HOURS_2);
+        await ageBy(removable, HOURS_2);
+        unlinkBlock.name = '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001';
+        expect(await writeFileNoFollow(root, 'src/a.txt', 'next')).toBe('overwritten');
+        expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('next');
+        expect((await readdir(path.join(root, 'src'))).sort()).toEqual([
+          '.a.txt.haive-tmp-1-00000000-0000-4000-8000-000000000001',
+          'a.txt',
+        ]);
+      });
     });
   });
 

@@ -759,6 +759,14 @@ export interface ApplyTreeResult {
 
 const APPLY_TREE_CONCURRENCY = 32;
 
+const STALE_TEMP_MS = 60 * 60 * 1000;
+const SWEEP_MAX_TEMPS = 32;
+const SWEEP_MAX_ENTRIES = 4096;
+/** Linux's PID_MAX_LIMIT: pid_max wraps there, so every process.pid is below it. */
+const PID_MAX = 4_194_304;
+const TEMP_SUFFIX =
+  /^[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 function wantedOwner(stats: Stats, opts: ApplyTreeOptions): Owner | null {
   if (!opts.owner) return null;
   return stats.uid === opts.owner.uid && stats.gid === opts.owner.gid ? null : opts.owner;
@@ -1570,6 +1578,7 @@ export interface WriteFileOptions {
  * Three modes, because the right one depends on who else is reading the file:
  * - `replace-atomic` (default) — write a temp beside it and rename over. A concurrent reader sees
  *   the old bytes or the new ones, never a half-written file. For anything parsed by a machine.
+ *   A write also removes that name's temps a dead process left, once they are an hour old.
  * - `overwrite-in-place` — keeps the inode, owner and mode, for a file something holds open or
  *   whose identity matters.
  * - `create-exclusive` — refuses to replace anything at all. A write that fails while the process
@@ -1645,7 +1654,52 @@ export async function writeFileNoFollow(
     await closeQuietly(fh);
     if (!renamed) await removeNoFollow(anchor, tmpRel).catch(() => undefined);
   }
+  await sweepStaleTemps(anchor, segs, leaf);
   return found === null ? 'created' : 'overwritten';
+}
+
+// Age, not pid: a restarted container reuses pids, and a live writer's temp is fresh.
+async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string): Promise<void> {
+  const prefix = `.${leaf}.haive-tmp-`;
+  try {
+    const dir = await walkDir(anchor, toSafeRel(dirSegs.join('/')), [...dirSegs]);
+    try {
+      let left = SWEEP_MAX_TEMPS;
+      let seen = 0;
+      // Streamed and capped: the directory is the repository's, so its size is not ours to choose.
+      for await (const entry of await opendir(fdPath(dir.fh.fd), { bufferSize: 32 })) {
+        if (++seen > SWEEP_MAX_ENTRIES) break;
+        const name = entry.name;
+        if (!name.startsWith(prefix)) continue;
+        const suffix = name.slice(prefix.length);
+        if (!TEMP_SUFFIX.test(suffix) || Number(suffix.slice(0, suffix.indexOf('-'))) >= PID_MAX) {
+          continue;
+        }
+        // Held until its removal is done, so its inode cannot be reused by a replacement. O_PATH
+        // stats a FIFO or device without opening it as one.
+        const fh = await open(at(dir.fh.fd, name), O_PATH | O_NOFOLLOW).catch(() => null);
+        if (fh === null) continue;
+        try {
+          const st = await fh.stat({ bigint: true });
+          if (st.isFile() && Date.now() - Number(st.mtimeMs) > STALE_TEMP_MS) {
+            if (left-- === 0) break;
+            await removeFileIfIdentityNoFollow(anchor, [...dirSegs, name].join('/'), {
+              dev: st.dev,
+              ino: st.ino,
+            });
+          }
+        } catch {
+          // best effort: a sweep never fails the write it follows
+        } finally {
+          await closeQuietly(fh);
+        }
+      }
+    } finally {
+      await closeQuietly(dir.fh);
+    }
+  } catch {
+    // as above
+  }
 }
 
 export interface UpdateFileOptions {
