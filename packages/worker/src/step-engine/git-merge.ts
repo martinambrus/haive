@@ -99,7 +99,17 @@ export async function openMerge(
         ? { kind: 'conflict' }
         : { kind: 'refused', detail: gitDetail(res) };
   if (handBack && before && opened.kind !== 'refused') {
-    await handBackWritten(handBack, dir, await differingFrom(dir, before));
+    // A worker that died after an earlier attempt's merge commit, before its hand-back, left HEAD
+    // on a merge of this ref (or of an earlier position of it): what that merge brought in goes too.
+    const priorTheirs = await revParse(dir, `${before}^2`);
+    const priorMerge =
+      priorTheirs !== null &&
+      (await gitRun(dir, ['merge-base', '--is-ancestor', priorTheirs, ref])).code === 0;
+    await handBackWritten(
+      handBack,
+      dir,
+      await differingFrom(dir, priorMerge ? `${before}^1` : before),
+    );
   }
   return opened;
 }
