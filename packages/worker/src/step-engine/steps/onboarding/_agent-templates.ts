@@ -5,6 +5,8 @@ import { SCOPE_FENCE_INSIGHTS, SCOPE_FENCE_IN_SCOPE_FLAG } from '../_scope-fence
 import { retrievalGuidanceLinesFor } from '../_retrieval-guidance.js';
 import { yamlScalar } from '../_yaml-scalar.js';
 
+export { shouldEmitAgentsReadme } from '@haive/shared/project-state';
+
 // Re-export the canonical types so existing worker imports keep working without
 // touching every call site. Source of truth lives in @haive/shared.
 export type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec };
@@ -183,15 +185,6 @@ export function buildAgentFileMarkdownGemini(
   ].join('\n');
 
   return frontmatter + buildAgentBody(spec, options.supportsLsp ?? false);
-}
-
-/** Gemini CLI loads every `*.md` file in `.gemini/agents/` as an agent
- *  definition and errors if frontmatter is missing — so an index README
- *  triggers "Missing mandatory YAML frontmatter" on every run. Claude and
- *  Codex both ignore non-agent files in their dirs, so the README is only
- *  problematic for gemini. */
-export function shouldEmitAgentsReadme(target: { dir: string }): boolean {
-  return target.dir !== '.gemini/agents';
 }
 
 /** Route an `AgentSpec` to the right serializer for a given target directory

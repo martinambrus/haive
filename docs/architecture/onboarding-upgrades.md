@@ -18,7 +18,9 @@ not hold as changed while 02 could still act on one of its paths: one that is ab
 bytes its row records as Haive's, or an RTK settings file whose hook can come out. A path 02 keeps (a
 person's bytes, a link, a file past 1 MiB) stays quiet, since no plan could finish it. Custom bundle
 items and the cli-rules region keep their per-repository comparison, and a NULL set reads as the
-installed one. A repository with no claim keeps its set until 01's first plan: with no claims a
+installed one. A custom item 01 cannot render (an agent with no agent target, a skill with no
+skills directory) is current for neither side: it raises no banner of its own, and its live rows go
+through the same check as a claim outside the set. A repository with no claim keeps its set until 01's first plan: with no claims a
 recomputed set makes every applicable template read as changed. Boot recomputes the set of every
 repository with a claim (`recomputeSyncedApplicableSets`): a sync from before the set followed the
 column moved the column alone, and a release adds templates no stored set holds, so without it a new
@@ -118,6 +120,18 @@ restored file is offered again at the next upgrade rather than classified `uncha
 `GET /repos/:id/upgrade-status` keeps one row per template, and a rendering that is not current
 stands for it, so such a file keeps the banner up beside current siblings. A path with no row at all
 is invisible there once a sibling rendering has one; the next upgrade still offers it.
+
+**The banner and 01 derive the render targets from one module.** Which agent directories and skills
+directories a repository renders to is `project-state/render-targets.ts` in `@haive/shared`
+(`originAgentTargets`, `skillTargetDirs`, `agentFilePath`, `bundleItemRenders`, `rendersAt`), and
+the worker's 07, 01 and bundle expansion call the same functions, so the two cannot drift
+(`render-targets-drift.test.ts`). The banner resolves the targets from the origin 01 renders from: a
+column's stored targets, else the enabled CLIs; a snapshot's, else the same completion (01 would
+throw on one with none); the blank scaffold's, which has no fallback; an onboarding's recorded, else
+the `.claude/agents` fallback. A live row whose template no longer renders to its path (the
+directory of a CLI since disabled) reads as changed even when the hashes match, and as obsolete
+when 02 would delete the file; a row 02 would keep stays quiet. No agent kind is judged where no
+context resolves.
 
 **A file already holding the new render is recorded, never asked about.** A live row whose
 template moved while its path already holds the current render (one another install upgraded and

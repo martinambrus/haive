@@ -4,10 +4,15 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import {
+  CLI_RULES_TEMPLATE_ID,
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
   buildClaudeSettingsJson,
+  buildCliRulesBlockFromProviders,
   buildGeminiSettingsJson,
+  bundleAgentTemplateHash,
+  normalizeContent,
+  sha256Hex,
 } from '@haive/shared';
 
 const { state } = vi.hoisted(() => ({
@@ -136,8 +141,9 @@ const agent = { templateId: 'agent.x', schemaVersion: 1, contentHash: 'h1' };
  *  database could say, so that column is NULL, as `jsonb_typeof(NULL)` is. */
 const artifact = (id: string, at: number, snapshot: 'none' | 'recorded' | 'unrecorded') => ({
   id,
-  diskPath: `.claude/agents/${id}.md`,
+  diskPath: id === 'row-1' ? '.codex/agents/x.toml' : '.claude/agents/x.md',
   templateId: agent.templateId,
+  templateKind: 'agent',
   templateSchemaVersion: agent.schemaVersion,
   templateContentHash: agent.contentHash,
   bundleItemId: null,
@@ -471,5 +477,313 @@ describe('the banner reads the context the plan reads', () => {
   it('S-c: offers no RTK block on a snapshot from before RTK, switch off', async () => {
     seed(cell, dir, null);
     expect(await answerFor()).toContain('rtkBlocks=-');
+  });
+});
+
+/**
+ * #242-1 and #234: the banner and 01 agree on which paths a repository's templates render to. A
+ * custom item 01 cannot render (no agent target, no skills directory) is no upgrade, a live row of
+ * one 01 would remove is, and so is a row at a path the template no longer renders to, such as the
+ * skills directory of a CLI since disabled, whatever the hashes say.
+ */
+describe('the banner and the plan agree on the paths a template renders to', () => {
+  const SPEC_AGENT = {
+    id: 'a1',
+    title: 'Agent',
+    description: 'A bundle agent',
+    color: 'blue',
+    field: 'qa',
+    tools: [],
+    coreMission: 'Review',
+    responsibilities: [],
+    whenInvoked: [],
+    executionSteps: [],
+    outputFormat: '',
+    qualityCriteria: [],
+    antiPatterns: [],
+  };
+  const SPEC_SKILL = { id: 'sk', title: 'Skill', description: 'A bundle skill' };
+  const AMP_ONLY = [{ name: 'amp', rulesContent: '', enabled: true }];
+  const CLAUDE_ONLY = [
+    { name: 'claude-code', rulesContent: '', enabled: true },
+    { name: 'codex', rulesContent: '', enabled: false },
+    { name: 'gemini', rulesContent: '', enabled: false },
+  ];
+  const NO_CLI = [{ name: 'claude-code', rulesContent: '', enabled: false }];
+  const portable = { ...PORTABLE_COLUMN, rtkEnabled: true };
+
+  let dir: string;
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'upgrade-status-targets-'));
+    await writeFile(path.join(dir, 'AGENTS.md'), '# rules\n', 'utf8');
+    await writeFile(path.join(dir, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+  });
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const row = (
+    templateId: string,
+    templateKind: string,
+    diskPath: string,
+    contentHash: string,
+  ) => ({
+    id: `row-${diskPath}`,
+    diskPath,
+    templateId,
+    templateKind,
+    templateSchemaVersion: 1,
+    templateContentHash: contentHash,
+    writtenHash: 'w',
+    bundleItemId: templateId.startsWith('custom.') ? templateId.split('.')[2] : null,
+    haiveVersion: null,
+    repositoryId: 'repo-1',
+    generatedAt: new Date(1000),
+    hasSnapshot: null,
+    rtkRecorded: null,
+    snapshotProviders: null,
+  });
+  const item = (itemId: string, kind: 'agent' | 'skill', spec: Record<string, unknown>) => ({
+    itemId,
+    bundleId: 'b1',
+    kind,
+    schemaVersion: 1,
+    contentHash: 'h-c',
+    normalizedSpec: spec,
+  });
+
+  /** A repository in sync apart from what the cell puts in: its rules row is current, so the
+   *  banner's answer is down to the custom or agent rows it adds. */
+  function world(args: {
+    providers: { name: string; rulesContent: string; enabled: boolean }[];
+    column: unknown;
+    applicable?: string[];
+    items?: ReturnType<typeof item>[];
+    rows: Record<string, unknown>[];
+  }): void {
+    const block = buildCliRulesBlockFromProviders(args.providers);
+    const rules = block
+      ? [row(CLI_RULES_TEMPLATE_ID, 'cli-rules', 'AGENTS.md', sha256Hex(normalizeContent(block)))]
+      : [];
+    state.onboarded = true;
+    state.snapshotGroups = [];
+    state.repo = {
+      id: 'repo-1',
+      applicableTemplateIds: args.applicable ?? [],
+      storagePath: dir,
+      localPath: null,
+      rtkEnabled: true,
+      source: 'blank',
+      status: 'ready',
+      onboardedAt: null,
+      onboardingResetAt: null,
+      renderContext: args.column,
+    };
+    state.rows = new Map<unknown, unknown[]>([
+      [schema.templateManifestCache, [{ ...agent, templateKind: 'agent', setHash: 's' }]],
+      [schema.cliProviders, args.providers],
+      [schema.onboardingArtifacts, [...rules, ...args.rows]],
+      [schema.customBundleItems, args.items ?? []],
+      [schema.customBundles, [{ name: 'House bundle' }]],
+      [
+        schema.tasks,
+        [
+          {
+            id: 'onboarding-1',
+            repositoryId: 'repo-1',
+            type: 'onboarding',
+            status: 'completed',
+            completedAt: new Date(1),
+            metadata: null,
+          },
+        ],
+      ],
+      [schema.taskSteps, [{ recorded: true }]],
+    ]);
+  }
+
+  async function body(): Promise<Record<string, unknown>> {
+    const res = await app.request('/repo-1/upgrade-status');
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  it('A1: offers no upgrade for a bundle agent a repository with no agent target cannot render', async () => {
+    world({
+      providers: AMP_ONLY,
+      column: { ...portable, agentTargets: [] },
+      items: [item('a1', 'agent', SPEC_AGENT)],
+      rows: [],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([]);
+    expect(got.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('A2: reports the rows of a bundle skill no skills directory exists for as an obsolete change', async () => {
+    world({
+      providers: NO_CLI,
+      column: { ...portable, agentTargets: [], enabledCliProviders: [] },
+      items: [item('sk', 'skill', SPEC_SKILL)],
+      rows: [row('custom.b1.sk', 'custom-skill', '.claude/skills/sk/SKILL.md', 'h-c')],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual(['custom.b1.sk']);
+    expect(got.obsoleteTemplateIds).toEqual(['custom.b1.sk']);
+    expect(got.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('B1: reports a skill row in the directory of a CLI since disabled, hashes unchanged', async () => {
+    world({
+      providers: CLAUDE_ONLY,
+      column: portable,
+      items: [item('sk', 'skill', SPEC_SKILL)],
+      rows: [
+        row('custom.b1.sk', 'custom-skill', '.claude/skills/sk/SKILL.md', 'h-c'),
+        row('custom.b1.sk', 'custom-skill', '.agents/skills/sk/SKILL.md', 'h-c'),
+      ],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual(['custom.b1.sk']);
+    expect(got.obsoleteTemplateIds).toEqual(['custom.b1.sk']);
+    expect(got.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('B2: reports an agent row in the directory of a CLI since disabled, on a column a sync filled', async () => {
+    world({
+      providers: CLAUDE_ONLY,
+      column: portable,
+      applicable: [agent.templateId],
+      rows: [
+        row(agent.templateId, 'agent', '.claude/agents/x.md', agent.contentHash),
+        row(agent.templateId, 'agent', '.gemini/agents/x.md', agent.contentHash),
+      ],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([agent.templateId]);
+    expect(got.obsoleteTemplateIds).toEqual([agent.templateId]);
+    expect(got.hasUpgradeAvailable).toBe(true);
+  });
+
+  const CLAUDE_AGENTS = [{ dir: '.claude/agents', format: 'markdown' }];
+  const BOTH_CLIS = [
+    { name: 'claude-code', rulesContent: '', enabled: true },
+    { name: 'codex', rulesContent: '', enabled: true },
+  ];
+  const agentRows = () => [
+    row(agent.templateId, 'agent', '.claude/agents/x.md', agent.contentHash),
+    row(agent.templateId, 'agent', '.codex/agents/x.toml', agent.contentHash),
+  ];
+
+  it('B3: reads the targets a snapshot recorded, not the CLIs enabled now', async () => {
+    world({
+      providers: BOTH_CLIS,
+      column: null,
+      applicable: [agent.templateId],
+      rows: agentRows().map((r, i) =>
+        i === 0
+          ? {
+              ...r,
+              hasSnapshot: true,
+              rtkRecorded: true,
+              snapshotProviders: [{ name: 'claude-code' }],
+              snapshotAgentTargets: CLAUDE_AGENTS,
+              snapshotLspLanguages: [],
+            }
+          : r,
+      ),
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([agent.templateId]);
+    expect(got.obsoleteTemplateIds).toEqual([agent.templateId]);
+  });
+
+  it('judges no path where no render context resolves, as 01 plans nothing there', async () => {
+    world({
+      providers: CLAUDE_ONLY,
+      column: null,
+      items: [item('sk', 'skill', SPEC_SKILL)],
+      rows: [
+        row('custom.b1.sk', 'custom-skill', '.claude/skills/sk/SKILL.md', 'h-c'),
+        row('custom.b1.sk', 'custom-skill', '.agents/skills/sk/SKILL.md', 'h-c'),
+      ],
+    });
+    state.repo = { ...(state.repo as Record<string, unknown>), source: 'git' };
+    state.rows.set(schema.taskSteps, []);
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([]);
+    expect(got.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('B4: reads the targets step 07 recorded when no column or snapshot is left', async () => {
+    world({
+      providers: BOTH_CLIS,
+      column: null,
+      applicable: [agent.templateId],
+      rows: agentRows(),
+    });
+    state.rows.set(schema.taskSteps, [{ recorded: true, agentTargets: CLAUDE_AGENTS }]);
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([agent.templateId]);
+    expect(got.obsoleteTemplateIds).toEqual([agent.templateId]);
+  });
+
+  it('keeps a stranded row quiet while 02 would keep its file', async () => {
+    const edited = path.join(dir, '.gemini/agents/x.md');
+    await mkdir(path.dirname(edited), { recursive: true });
+    await writeFile(edited, "a person's own bytes\n", 'utf8');
+    try {
+      world({
+        providers: CLAUDE_ONLY,
+        column: portable,
+        applicable: [agent.templateId],
+        rows: [
+          row(agent.templateId, 'agent', '.claude/agents/x.md', agent.contentHash),
+          row(agent.templateId, 'agent', '.gemini/agents/x.md', agent.contentHash),
+        ],
+      });
+      const got = await body();
+      expect(got.changedTemplateIds).toEqual([]);
+      expect(got.hasUpgradeAvailable).toBe(false);
+    } finally {
+      await rm(path.join(dir, '.gemini'), { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a non-rendering bundle item quiet when a stale applicable set still names it', async () => {
+    const edited = path.join(dir, '.claude/skills/sk/SKILL.md');
+    await mkdir(path.dirname(edited), { recursive: true });
+    await writeFile(edited, "a person's own bytes\n", 'utf8');
+    try {
+      world({
+        providers: NO_CLI,
+        column: { ...portable, agentTargets: [], enabledCliProviders: [] },
+        applicable: ['custom.b1.sk'],
+        items: [item('sk', 'skill', SPEC_SKILL)],
+        rows: [row('custom.b1.sk', 'custom-skill', '.claude/skills/sk/SKILL.md', 'h-c')],
+      });
+      const got = await body();
+      expect(got.changedTemplateIds).toEqual([]);
+      expect(got.hasUpgradeAvailable).toBe(false);
+    } finally {
+      await rm(path.join(dir, '.claude/skills'), { recursive: true, force: true });
+    }
+  });
+
+  it('stays quiet while every row stands at a path the template renders to', async () => {
+    world({
+      providers: CLAUDE_ONLY,
+      column: portable,
+      applicable: [agent.templateId],
+      items: [item('sk', 'skill', SPEC_SKILL), item('a1', 'agent', SPEC_AGENT)],
+      rows: [
+        row(agent.templateId, 'agent', '.claude/agents/x.md', agent.contentHash),
+        row('custom.b1.sk', 'custom-skill', '.claude/skills/sk/SKILL.md', 'h-c'),
+        row('custom.b1.a1', 'custom-agent', '.claude/agents/a1.md', bundleAgentTemplateHash('h-c')),
+      ],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([]);
+    expect(got.hasUpgradeAvailable).toBe(false);
   });
 });
