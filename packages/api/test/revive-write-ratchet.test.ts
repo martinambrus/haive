@@ -47,17 +47,21 @@ function writtenStatus(call: ts.CallExpression): string | null {
       if (!arg) return null;
       if (ts.isIdentifier(arg)) return objectMayCarryStatus(call, arg.text) ? UNKNOWN : null;
       if (!ts.isObjectLiteralExpression(arg)) return UNKNOWN;
+      // Later properties override earlier ones, so the last that may carry a status decides.
+      let status: string | null = null;
       for (const p of arg.properties) {
         if (ts.isSpreadAssignment(p)) {
-          if (!ts.isIdentifier(p.expression)) return UNKNOWN;
-          if (objectMayCarryStatus(call, p.expression.text)) return UNKNOWN;
+          if (!ts.isIdentifier(p.expression) || objectMayCarryStatus(call, p.expression.text)) {
+            status = UNKNOWN;
+          }
         } else if (keyOf(p.name) === null || keyOf(p.name) === 'status') {
-          return ts.isPropertyAssignment(p) && ts.isStringLiteralLike(p.initializer)
-            ? p.initializer.text
-            : UNKNOWN;
+          status =
+            ts.isPropertyAssignment(p) && ts.isStringLiteralLike(p.initializer)
+              ? p.initializer.text
+              : UNKNOWN;
         }
       }
-      return null;
+      return status;
     }
     inner = inner.expression;
   }
@@ -65,7 +69,7 @@ function writtenStatus(call: ts.CallExpression): string | null {
 }
 
 /** Whether the object a name holds may carry a `status`: it gains one in the function around the
- *  write, or it is not declared there at all (a parameter, an import, an outer binding). */
+ *  write or in its module, or it is declared in neither (a parameter, an import). */
 function objectMayCarryStatus(at: ts.Node, name: string): boolean {
   const fn = enclosingFunction(at);
   if (!fn) return true;
@@ -104,6 +108,8 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
     if (!found) ts.forEachChild(n, visit);
   };
   visit(fn);
+  // Not declared in the function: a module-level constant is read from the file the same way.
+  if (!declared && !found) visit(at.getSourceFile());
   return found || !declared;
 }
 
@@ -316,6 +322,16 @@ describe('a live-status write on a task row', () => {
         `const patch = {}; patch['status'] = 'running'; await db.update(schema.tasks).set(patch);`,
       ),
     ).toEqual(['<computed>']);
+  });
+
+  it('reads the status the last property leaves, a spread after a literal included', () => {
+    const status = (set: string) =>
+      liveWrites(
+        'x.ts',
+        `async function f(patch) { await db.update(schema.tasks).set(${set}); }`,
+      ).map((w) => w.status);
+    expect(status(`{ status: 'failed', ...patch }`)).toEqual(['<computed>']);
+    expect(status(`{ ...patch, status: 'failed' }`)).toEqual([]);
   });
 
   it('exempts only a predicate that holds a created task alone', () => {
