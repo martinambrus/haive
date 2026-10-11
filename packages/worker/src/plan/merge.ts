@@ -1,9 +1,9 @@
 import { HAIVE_DATA_FILES } from '@haive/shared';
 import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js';
-import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
+import { lstatNoFollow, relUnder, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
-import { unmergedPaths } from '../step-engine/git-merge.js';
+import { abortMerge as abortGitMerge, openMerge, utf8Name } from '../step-engine/git-merge.js';
 import { PLAN_SNAPSHOT_GIT_PATHS } from './snapshot-git.js';
 import type { Database } from '@haive/database';
 
@@ -135,9 +135,35 @@ export async function divergence(
   };
 }
 
-/** Paths git reports as unmerged — the same call the task-side resolver makes. */
-export async function conflictedPaths(worktreePath: string): Promise<string[]> {
-  return (await unmergedPaths(worktreePath)) ?? [];
+/** Unmerged paths judged on their bytes: a valid UTF-8 name is listed, any other only counted. */
+export interface ConflictedPaths {
+  paths: string[];
+  undecodable: number;
+  /** The undecodable names as a person can be shown them (U+FFFD for each bad byte), never acted on. */
+  undecodableShown: string[];
+}
+
+export const conflictCount = (found: ConflictedPaths): number =>
+  found.paths.length + found.undecodable;
+
+/** Read with `-z` and as latin1, so each byte of a name stays one character until it is judged. */
+export async function conflictedPaths(worktreePath: string): Promise<ConflictedPaths> {
+  const res = await gitRun(
+    worktreePath,
+    ['diff', '--name-only', '--diff-filter=U', '-z'],
+    undefined,
+    { encoding: 'latin1' },
+  );
+  const found: ConflictedPaths = { paths: [], undecodable: 0, undecodableShown: [] };
+  if (res.code !== 0) return found;
+  for (const raw of new Set(res.stdout.split('\0').filter(Boolean))) {
+    const name = utf8Name(raw);
+    if (name === null) {
+      found.undecodable += 1;
+      found.undecodableShown.push(Buffer.from(raw, 'latin1').toString('utf8'));
+    } else found.paths.push(name);
+  }
+  return found;
 }
 
 const PLAN_PATHS = new Set<string>(PLAN_SNAPSHOT_GIT_PATHS);
@@ -158,7 +184,7 @@ const PLAN_PATHS = new Set<string>(PLAN_SNAPSHOT_GIT_PATHS);
  */
 export async function autoResolvePlanFiles(worktreePath: string): Promise<string[]> {
   const resolved: string[] = [];
-  for (const path of await conflictedPaths(worktreePath)) {
+  for (const path of (await conflictedPaths(worktreePath)).paths) {
     if (!PLAN_PATHS.has(path)) continue;
     // --theirs on a conflicted path is the incoming side. An add/add where OUR side
     // is the only one present cannot be checked out that way, so a failure here
@@ -177,6 +203,10 @@ export interface PlanMergeAttempt {
   clean: boolean;
   /** Unmerged paths a person or an agent has to decide, plan files excluded. */
   conflicts: string[];
+  /** Further unmerged paths whose names are not UTF-8, so none can be listed. */
+  undecodable: number;
+  /** Those names for a person to read, not to act on. */
+  undecodableShown: string[];
   /** Plan-mirror files resolved automatically, reported so the caller can say so. */
   autoResolved: string[];
   unrelated: boolean;
@@ -199,29 +229,86 @@ export async function mergeOriginInto(
   // on "Committer identity unknown" — the container runs as root with no git config.
   gitEnv: Record<string, string>,
 ): Promise<PlanMergeAttempt> {
-  const args = ['merge', '--no-ff', '--no-edit'];
-  if (unrelated) args.push('--allow-unrelated-histories');
-  args.push(`origin/${branch}`);
-  const merged = await gitRun(worktreePath, args, gitEnv);
-  if (merged.code === 0) {
-    return { clean: true, conflicts: [], autoResolved: [], unrelated };
+  const flags = ['--no-edit', ...(unrelated ? ['--allow-unrelated-histories'] : [])];
+  const opened = await openMerge(worktreePath, `origin/${branch}`, flags, gitEnv);
+  if (opened.kind === 'merged') {
+    return {
+      clean: true,
+      conflicts: [],
+      undecodable: 0,
+      undecodableShown: [],
+      autoResolved: [],
+      unrelated,
+    };
   }
-  // A non-zero exit means EITHER conflicts or a merge that never started (refused
-  // unrelated histories, a dirty tree, a bad ref). MERGE_HEAD is what separates them,
-  // and the difference is load-bearing: with no merge open there are no unmerged
-  // paths, so judging by the conflict list alone reports a refusal as a CLEAN merge
-  // and the caller goes on to land nothing. Caught by the unrelated-histories test.
-  const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-  if (open.code !== 0) {
-    throw new Error(`git merge could not start: ${merged.stderr || merged.stdout}`);
+  // A refusal opens no merge, so reading it off the conflict list would report it as clean.
+  if (opened.kind === 'refused') {
+    throw new Error(`git merge could not start: ${opened.detail}`);
   }
   const autoResolved = await autoResolvePlanFiles(worktreePath);
-  const conflicts = await conflictedPaths(worktreePath);
-  return { clean: conflicts.length === 0, conflicts, autoResolved, unrelated };
+  const left = await conflictedPaths(worktreePath);
+  return {
+    clean: conflictCount(left) === 0,
+    conflicts: left.paths,
+    undecodable: left.undecodable,
+    undecodableShown: left.undecodableShown,
+    autoResolved,
+    unrelated,
+  };
 }
 
 export async function abortMerge(worktreePath: string): Promise<void> {
-  await gitRun(worktreePath, ['merge', '--abort']).catch(() => undefined);
+  await abortGitMerge(worktreePath).catch(() => undefined);
+}
+
+async function commitOf(worktreePath: string, spec: string): Promise<string | null> {
+  const res = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', `${spec}^{commit}`]);
+  return res.code === 0 ? res.stdout.trim() : null;
+}
+
+/** Reopen an unlanded resolved merge at its conflicts, each path holding the previous resolution
+ *  for the agent to edit; null when HEAD is not such a merge. Only the scratch worktree is written. */
+export async function reopenResolvedMerge(args: {
+  repoPath: string;
+  worktreePath: string;
+  branch: string;
+  unrelated: boolean;
+  gitEnv: Record<string, string>;
+}): Promise<PlanMergeAttempt | null> {
+  const { repoPath, worktreePath, branch } = args;
+  const prior = await commitOf(worktreePath, 'HEAD');
+  const priorRemote = prior === null ? null : await commitOf(worktreePath, `${prior}^2`);
+  if (prior === null || priorRemote === null) return null;
+  const landed = await gitRun(repoPath, [
+    'merge-base',
+    '--is-ancestor',
+    prior,
+    `refs/heads/${branch}`,
+  ]);
+  if (landed.code !== 1) return null;
+
+  const reset = await gitRun(worktreePath, ['reset', '--hard', `${prior}^1`]);
+  if (reset.code !== 0) {
+    throw new Error(`git reset (plan merge) failed: ${reset.stderr || reset.stdout}`);
+  }
+  const attempt = await mergeOriginInto(worktreePath, branch, args.unrelated, args.gitEnv);
+  // Only a resolution of the very remote commit now being merged is still an answer to it.
+  if (attempt.clean || priorRemote !== (await commitOf(worktreePath, `origin/${branch}`))) {
+    return attempt;
+  }
+  for (const name of attempt.conflicts) {
+    const blob = await gitRun(worktreePath, ['cat-file', 'blob', `${prior}:${name}`], undefined, {
+      encoding: 'latin1',
+    });
+    if (blob.code !== 0) continue;
+    await writeFileNoFollow(
+      repoPath,
+      `${WORKTREE_SUBDIR}/${PLAN_MERGE_DIR}/${name}`,
+      Buffer.from(blob.stdout, 'latin1'),
+      { mode: 'overwrite-in-place' },
+    ).catch(() => undefined);
+  }
+  return attempt;
 }
 
 /** Commit a merge whose conflicts are all resolved. Separate from

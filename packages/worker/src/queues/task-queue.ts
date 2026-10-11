@@ -95,6 +95,7 @@ import {
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { splitRepoStoragePath } from '../repo/worktree-paths.js';
 import { getTaskEnvTemplate, pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
+import { discardPlanMerge } from '../step-engine/steps/plan/01-plan-merge.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
@@ -3324,6 +3325,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  await discardPlanMerge(db, payload.taskId);
   try {
     await cleanupTaskScratchWorkspace(db, payload.taskId);
   } catch (err) {

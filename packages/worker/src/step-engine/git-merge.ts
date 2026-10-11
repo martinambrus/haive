@@ -118,7 +118,7 @@ function shown(name: string): string {
 
 /** A latin1 listing's name decoded, or null when its bytes are not UTF-8. Judged on the bytes:
  *  U+FFFD is also what an undecodable byte reads as, and a valid name can hold it. */
-function utf8Name(name: string): string | null {
+export function utf8Name(name: string): string | null {
   const bytes = Buffer.from(name, 'latin1');
   return isUtf8(bytes) ? bytes.toString('utf8') : null;
 }
