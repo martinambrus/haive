@@ -868,11 +868,12 @@ function inSqlContext(n: ts.Node): boolean {
   }
 }
 
-const TASK_TABLE = String.raw`(only\s+)?("?\w+"?\s*\.\s*)?"?tasks"?`;
+const SQL_IDENT = String.raw`("(?:[^"]|"")+"|\w+)`;
+const TASK_TABLE = String.raw`(only\s+)?(${SQL_IDENT}\s*\.\s*)?"?tasks"?`;
 // Shaped as a statement, not just named: "Update tasks before retrying" has no SET.
 const TASK_MUTATION = new RegExp(
   [
-    String.raw`\bupdate\s+${TASK_TABLE}(\s+(as\s+)?("[^"]+"|\w+))?\s+set\b`,
+    String.raw`\bupdate\s+${TASK_TABLE}(\s+(as\s+)?${SQL_IDENT})?\s+set\b`,
     String.raw`\binsert\s+into\s+${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\bdelete\s+from\s+${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\bmerge\s+into\s+${TASK_TABLE}([^\w$-]|$)`,
@@ -881,8 +882,10 @@ const TASK_MUTATION = new RegExp(
   ].join('|'),
   'i',
 );
-const DANGLING_TARGET =
-  /\b(update|insert\s+into|merge\s+into|delete\s+from|truncate(\s+table)?)\s+(only\s+)?("?\w+"?\s*\.\s*)?$/i;
+const DANGLING_TARGET = new RegExp(
+  String.raw`\b(update|insert\s+into|merge\s+into|delete\s+from|truncate(\s+table)?)\s+(only\s+)?(${SQL_IDENT}\s*\.\s*)?$`,
+  'i',
+);
 
 /** Text holding a mutating statement on the tasks table, wherever it flows (a raw `sql` UPDATE,
  *  a constant run later): no builder is there to read. Comments are dropped. */
@@ -996,6 +999,7 @@ describe('a live-status write on a task row', () => {
     expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
     expect(found("throw new HttpError(409, 'Update tasks before retrying');")).toBe(0);
     expect(found('sql`UPDATE tasks AS "current" SET status = 1`')).toBe(1);
+    expect(found('sql`UPDATE "tenant-app".tasks SET status = 1`')).toBe(1);
     expect(
       found(
         "sql`INSERT INTO tasks AS current (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET status = 'running'`",
