@@ -130,22 +130,25 @@ and 0.0000 with it off. The api reaches that branch by two routes and both skip 
 than hashing one: the repo flag, and `embedQueryOrNull` returning null for a single query that could
 not be embedded or came back at the wrong width (a model or dimension change reached pgvector as
 SQLSTATE 22000, a 500). The global half of `rag_search`, global KB promotion
-(`rankArticleIdsByRelevance`) and `scripts/rag-eval.ts` take the same null the same way. The
-global half embeds before it opens the store, so the embed stays outside the store's deadline, and
-opens it with the settings it embedded with (`GlobalKbCallOptions.settings`): a model or store
-switched in between never meets a vector made for the other.
-`embedQuery` keeps its hash fallback for callers that must have a vector of the right width. The
-lexical-only branch has no identifier ranker, so a degraded search also loses identifier matches
-(MEASURED: an article naming `getUserById` ranks 2nd with a vector and drops out without one). Both
-halves of `rag_search` run their search in a transaction for the server-side statement bound, so the
-identifier-statistics query runs in a SAVEPOINT: its failure costs only the identifier ranker, never
-the whole search (MEASURED: an injected failure answered 500 locally until the savepoint). The local
-half takes the same bounds as the global one: 3 s to connect, 3 s per statement, a 6 s deadline that
-destroys the pool, and a failure answers the loud local 500 rather than holding the request (a
-silent store held it the full 30 s connect default). Forcing a re-embed (`tooling-upgrades.ts`) gets
-the connect bound only: resetting the hashes of a large store legitimately takes seconds (MEASURED
-9.4-11.3 s for 4,000 chunks, the content trigger re-running on each row), so a 3 s statement bound
-would fail every healthy store past about 1,000 chunks.
+(`rankArticleIdsByRelevance`) and `scripts/rag-eval.ts` take the same null the same way. The global
+half embeds before it opens the store, so the embed stays outside the store's deadline, and opens it
+with the settings it embedded with (`GlobalKbCallOptions.settings`): a model or store switched in
+between never meets a vector made for the other. `embedQuery` keeps its hash fallback for callers
+that must have a vector of the right width. The lexical-only branch has no identifier ranker, so a
+degraded search also loses identifier matches (MEASURED: an article naming `getUserById` ranks 2nd
+with a vector and drops out without one). Both halves of `rag_search` run their search in a
+transaction for the server-side statement bound, so the identifier-statistics query runs in a
+SAVEPOINT: its failure costs only the identifier ranker, never the whole search (MEASURED: an
+injected failure answered 500 locally until the savepoint). The local half takes the same bounds as
+the global one: 3 s to connect, 3 s per statement, a 6 s deadline that destroys the pool, and a
+failure answers the loud local 500 rather than holding the request (a silent store held it the full
+30 s connect default). Forcing a re-embed (`tooling-upgrades.ts`) resets the hashes in batches of
+500, each its own transaction under a 3 s statement bound, inside a 60 s deadline; a timeout or the
+deadline answers 503 with how many chunks were marked, and a re-run continues where it stopped. The
+content trigger fires only on `UPDATE OF content`, so a hash-only reset no longer recomputes every
+tsvector (MEASURED on 4,000 chunks: 7.6 s as one statement with the old trigger, 3.6 s batched with
+the new one; a held lock answers in 3.0 s, a silent store at the deadline). A single statement over
+a large store is what a 3 s bound could not hold.
 
 Recovery re-embeds only where hash rows can actually exist — leaving lexical-only mode, or
 the explicit Rebuild action for a repo indexed before this existed (those carry no
