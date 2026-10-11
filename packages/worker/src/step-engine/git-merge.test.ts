@@ -30,6 +30,7 @@ import {
   unmergedPaths,
 } from './git-merge.js';
 import type { Database } from '@haive/database';
+import { logger } from '@haive/shared/logger';
 import { secretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
 
 const exec = promisify(execFile);
@@ -1432,6 +1433,25 @@ describe.runIf(process.getuid?.() === 0)('a root merge in a tree the sandbox use
       const rels = ['fdir', 'fdir/sub', 'fdir/sub/y.txt', 'fdir/z.txt'];
       expect(await ownersOf(dir, rels)).toEqual(Object.fromEntries(rels.map((r) => [r, 1000])));
     } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+describe('a root abort that cannot hand back a name', () => {
+  it('warns naming a name that is not UTF-8', async () => {
+    const { dir } = await setupOddNameMerge();
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      expect(await abortMerge(dir)).toEqual({ ok: true });
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ names: ['bad\uFFFD.txt'] }),
+        expect.any(String),
+      );
+    } finally {
+      asRoot.mockRestore();
+      warn.mockRestore();
       await rm(dir, REMOVE);
     }
   });

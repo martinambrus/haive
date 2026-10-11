@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { schema, type Database } from '@haive/database';
+import { logger } from '@haive/shared/logger';
 import {
   chmodNoFollow,
   chownNoFollow,
@@ -60,7 +61,7 @@ export async function unmergedPaths(dir: string): Promise<string[] | null> {
   return res.code === 0 ? nulPaths(res.stdout) : null;
 }
 
-export async function revParse(dir: string, spec: string): Promise<string | null> {
+async function revParse(dir: string, spec: string): Promise<string | null> {
   const res = await gitRun(dir, ['rev-parse', '-q', '--verify', spec]);
   return res.code === 0 ? res.stdout.trim() : null;
 }
@@ -105,7 +106,7 @@ export async function openMerge(
 export type MergeAbort = { ok: true } | { ok: false; blocking: string[]; detail: string };
 
 /** A person's own checkout, mounted from the host: Haive discards nothing there. */
-export function isHostCheckout(dir: string): boolean {
+function isHostCheckout(dir: string): boolean {
   return dir === HOST_REPO_ROOT || dir.startsWith(`${HOST_REPO_ROOT}/`);
 }
 
@@ -161,10 +162,14 @@ async function handBackWritten(
   names: readonly string[],
 ): Promise<void> {
   const seen = new Set<string>();
+  const skipped: string[] = [];
   let changed = false;
   for (const raw of names) {
     const name = utf8Name(raw);
-    if (name === null) continue;
+    if (name === null) {
+      skipped.push(shown(raw));
+      continue;
+    }
     const parts = name.split('/');
     for (let i = 1; i <= parts.length; i += 1) {
       const rel = `${plan.prefix}${parts.slice(0, i).join('/')}`;
@@ -181,6 +186,12 @@ async function handBackWritten(
     }
   }
   if (changed) await gitRun(dir, ['update-index', '-q', '--refresh']);
+  if (skipped.length > 0) {
+    logger.warn(
+      { dir, names: skipped.slice(0, 20), count: skipped.length },
+      'names that are not UTF-8 stay owned by the worker after a merge',
+    );
+  }
 }
 
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
