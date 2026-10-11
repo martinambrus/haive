@@ -48,8 +48,16 @@ describe('summarizeRanks', () => {
 describe('parseQuerySet', () => {
   it('rejects an empty expected', () => {
     expect(() => parseQuerySet([{ query: 'q', expected: '' }], 'set.json')).toThrow(
-      'set.json[0]: "expected" must not be empty',
+      'set.json[0]: "query" and "expected" must not be empty',
     );
+  });
+
+  it('rejects an empty or blank query', () => {
+    for (const query of ['', '  ']) {
+      expect(() => parseQuerySet([{ query, expected: 'x.ts' }], 'set.json')).toThrow(
+        'set.json[0]: "query" and "expected" must not be empty',
+      );
+    }
   });
 
   it('defaults kind to all', () => {

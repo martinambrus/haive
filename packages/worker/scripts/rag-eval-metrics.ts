@@ -40,8 +40,8 @@ export function parseQuerySet(raw: unknown, path: string): SetQuery[] {
     if (typeof e?.query !== 'string' || typeof e?.expected !== 'string') {
       throw new Error(`${path}[${i}]: "query" and "expected" must be strings`);
     }
-    if (e.expected === '') {
-      throw new Error(`${path}[${i}]: "expected" must not be empty`);
+    if (e.query.trim() === '' || e.expected === '') {
+      throw new Error(`${path}[${i}]: "query" and "expected" must not be empty`);
     }
     return {
       query: e.query,

@@ -124,7 +124,13 @@ async function main(): Promise<void> {
     const byKind = new Map<string, (number | null)[]>();
     const all: (number | null)[] = [];
     for (const q of querySet) {
-      const { hits } = await search(q.query);
+      const { hits, lexicalOnly } = await search(q.query);
+      if (lexicalOnly && !forceLexicalOnly) {
+        // One degraded query would mix lexical-only ranks into a hybrid summary.
+        console.error(`query fell back to lexical-only; aborting the set: ${q.query}`);
+        await openConn.close();
+        process.exit(1);
+      }
       const rank = rankOfExpected(hits, q.expected);
       console.log(
         `[${q.kind}] ${rank === null ? 'NOT in top-k' : `rank ${rank}`}  "${q.expected}"  <- ${q.query}`,
