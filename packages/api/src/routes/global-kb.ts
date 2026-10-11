@@ -26,9 +26,11 @@ import {
   refusedHouseRuleText,
   resolveGlobalKbConnection,
   resolveGlobalKbSettings,
+  readVectorColumnWidth,
   resolveHouseRulesEnabled,
   validateHouseRuleGlobs,
   withGlobalKb,
+  withGlobalKbSchemaLock,
   type EnforceSpec,
   type GlobalKbCategory,
   FACET_DIMENSIONS,
@@ -283,30 +285,50 @@ const VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS = 3;
 const VECTOR_CHECK_DEADLINE_MS = 6_000;
 const VECTOR_CHECK_STATEMENT_TIMEOUT_MS = 3_000;
 
-/** The width of the store's `vector` column: null when there is none (a jsonb store, or no table yet), NaN when it has no fixed width.
+/** Runs `apply` while holding the store's schema lock, once the `vector` column is known to be `width` wide or absent.
+ *  A schema ensure takes the same lock and reads the width afterwards, so it creates the column at what `apply` saved.
  *  A bare connection: `withGlobalKb` would first ensure the schema, creating the column at the saved width. */
-async function storeVectorWidth(settings: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) {
+async function withVectorWidthLock(
+  settings: Awaited<ReturnType<typeof resolveGlobalKbSettings>>,
+  width: number,
+  apply: () => Promise<void>,
+) {
   const conn = await resolveGlobalKbConnection(settings, getDb(), {
     connectTimeoutSeconds: VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
     fetchTypes: false,
   });
+  let applying = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      if (!applying)
+        reject(new Error('the global KB store did not answer the vector width check in time'));
+    }, VECTOR_CHECK_DEADLINE_MS);
+  });
+  const locked = withGlobalKbSchemaLock(
+    conn.pg,
+    async (tx) => {
+      const current = await readVectorColumnWidth(tx);
+      if (current !== null && current !== width) {
+        throw new HttpError(
+          409,
+          "the store's vector column has another width and cannot be resized here; the embedding dimensions must match it",
+          'embed_dimensions_locked',
+        );
+      }
+      applying = true;
+      await apply();
+    },
+    { timeoutMs: VECTOR_CHECK_STATEMENT_TIMEOUT_MS },
+  );
+  void locked.catch(() => {});
   try {
-    return await withTimeout(
-      conn.pg.begin(async (tx) => {
-        await tx.unsafe(`SET LOCAL statement_timeout = '${VECTOR_CHECK_STATEMENT_TIMEOUT_MS}ms'`);
-        const columns = (await tx.unsafe(
-          `SELECT format_type(a.atttypid, a.atttypmod) AS type FROM pg_attribute a
-            WHERE a.attrelid = to_regclass('ai_rag_embeddings') AND a.attname = 'vector' AND NOT a.attisdropped`,
-        )) as unknown as Array<{ type: string }>;
-        return columns.length > 0 ? Number(/\((\d+)\)/.exec(columns[0]!.type)?.[1]) : null;
-      }),
-      VECTOR_CHECK_DEADLINE_MS,
-      'the global KB store did not answer the vector width check in time',
-    );
+    await Promise.race([locked, deadline]);
   } catch (err) {
     void conn.pg.end({ timeout: 0 }).catch(() => {});
     throw err;
   } finally {
+    clearTimeout(timer);
     await conn.close().catch(() => {});
   }
 }
@@ -351,64 +373,36 @@ globalKbRoutes.put('/config', async (c) => {
     ((d.mode !== undefined && d.mode !== saved.mode) ||
       (given !== '' && given !== saved.connectionString))
   ) {
-    // The vector check below reads the saved store, so it cannot vouch for one this save switches to.
+    // The width check reads the saved store, so it cannot vouch for one this save switches to.
     throw new HttpError(
       409,
       'change the embedding dimensions and the store in separate saves',
       'embed_dimensions_with_store_change',
     );
   }
-  if (dimsChange) {
-    const width = await storeVectorWidth(saved);
-    if (width !== null && width !== d.embedDimensions) {
-      throw new HttpError(
-        409,
-        "the store's vector column has another width and cannot be resized here; the embedding dimensions must match it",
-        'embed_dimensions_locked',
+  const write = async () => {
+    if (isAdmin && d.enabled !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
+    if (d.digestEnabled !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
+    if (isAdmin && d.mode !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
+    if (isAdmin && d.namespace !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);
+    if (d.ollamaUrl !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl);
+    if (d.embedModel !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
+    if (d.embedDimensions !== undefined)
+      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
+    if (d.archiveRetentionDays !== undefined)
+      await configService.set(
+        CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+        String(d.archiveRetentionDays),
       );
-    }
-  }
-  // Each write remembers what it replaced, so a late width conflict can undo the whole save.
-  const written: Array<[string, string]> = [];
-  const write = async (key: string, value: string, previous: unknown) => {
-    await configService.set(key, value);
-    written.push([key, String(previous)]);
   };
-  if (isAdmin && d.enabled !== undefined)
-    await write(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled), saved.enabled);
-  if (d.digestEnabled !== undefined)
-    await write(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled), saved.digestEnabled);
-  if (isAdmin && d.mode !== undefined) await write(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode, saved.mode);
-  if (isAdmin && d.namespace !== undefined)
-    await write(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace, saved.namespace);
-  if (d.ollamaUrl !== undefined)
-    await write(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl, saved.ollamaUrl);
-  if (d.embedModel !== undefined)
-    await write(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel, saved.embedModel);
-  if (d.embedDimensions !== undefined)
-    await write(
-      CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS,
-      String(d.embedDimensions),
-      saved.embeddingDimensions,
-    );
-  if (d.archiveRetentionDays !== undefined)
-    await write(
-      CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
-      String(d.archiveRetentionDays),
-      saved.archiveRetentionDays,
-    );
-  // A first use racing this save can create the column at the old width; read it again and undo.
-  if (dimsChange) {
-    const width = await storeVectorWidth(saved).catch(() => null);
-    if (width !== null && width !== d.embedDimensions) {
-      for (const [key, previous] of written.reverse()) await configService.set(key, previous);
-      throw new HttpError(
-        409,
-        "the store's vector column was created at another width while saving; nothing was saved, and the embedding dimensions must match it",
-        'embed_dimensions_locked',
-      );
-    }
-  }
+  if (dimsChange) await withVectorWidthLock(saved, d.embedDimensions!, write);
+  else await write();
   if (isAdmin && d.connectionString !== undefined && d.connectionString.trim().length > 0) {
     await secretsService.set(
       SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,

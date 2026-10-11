@@ -4,27 +4,56 @@ const h = vi.hoisted(() => ({
   role: 'admin',
   flags: new Map<string, boolean>(),
   settings: {} as Record<string, unknown>,
-  set: vi.fn(async (_key: string, _value: string) => {}),
+  events: [] as string[],
+  lockFails: false,
+  readFails: false,
+  set: vi.fn(async (key: string, _value: string) => {
+    h.events.push(`set:${key}`);
+  }),
   setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
   vectorType: null as string | null,
-  vectorTypes: [] as Array<string | null>,
   checks: [] as unknown[],
   connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
     pg: Object.assign(async () => [], {
-      begin: (run: (t: { unsafe: (text: string) => Promise<unknown[]> }) => unknown) =>
-        run({
-          unsafe: async (text: string) => (text.startsWith('SET') ? [] : rows(text)),
-        }),
+      begin: async (run: (tx: unknown) => Promise<unknown>) => {
+        h.events.push('begin');
+        const tx = Object.assign(
+          async (strings: TemplateStringsArray) => {
+            if (strings.join('').includes('pg_advisory_xact_lock')) {
+              if (h.lockFails) throw new Error('lock wait timed out');
+              h.events.push('lock');
+            }
+            return [];
+          },
+          {
+            unsafe: async (text: string) => {
+              if (text.startsWith('SET')) return [];
+              h.events.push('read');
+              if (h.readFails) throw new Error('statement timeout');
+              return rows(text);
+            },
+          },
+        );
+        try {
+          const result = await run(tx);
+          h.events.push('commit');
+          return result;
+        } catch (err) {
+          h.events.push('rollback');
+          throw err;
+        }
+      },
       end: async () => {},
     }),
-    close: async () => {},
+    close: async () => {
+      h.events.push('close');
+    },
   })),
 }));
 
 const rows = (text: string) => {
   if (!text.includes('format_type')) return [];
-  const type = h.vectorTypes.length > 0 ? h.vectorTypes.shift()! : h.vectorType;
-  return type === null ? [] : [{ type }];
+  return h.vectorType === null ? [] : [{ type: h.vectorType }];
 };
 
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
@@ -112,7 +141,9 @@ beforeEach(() => {
   h.setSecret.mockClear();
   h.connect.mockClear();
   h.vectorType = null;
-  h.vectorTypes = [];
+  h.events = [];
+  h.lockFails = false;
+  h.readFails = false;
   h.checks = [];
   h.role = 'admin';
   h.flags = new Map();
@@ -372,36 +403,60 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     expect(h.set).not.toHaveBeenCalled();
   });
 
-  it('undoes the whole save with 409 when a first use created the column at the old width meanwhile', async () => {
-    h.vectorTypes = [null, 'vector(2560)'];
+  it('writes the save inside the schema lock, after the width is read, and commits last', async () => {
     const res = await put({ ...widen, namespace: 'other', embedModel: 'model-z' });
-    const last = (key: string) =>
-      written()
-        .filter(([k]) => k === key)
-        .at(-1);
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual([
+      'begin',
+      'lock',
+      'read',
+      `set:${CONFIG_KEYS.GLOBAL_KB_ENABLED}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_MODE}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_NAMESPACE}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS}`,
+      `set:${CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS}`,
+      'commit',
+      'close',
+    ]);
+  });
+
+  it('writes nothing and rolls back on a width mismatch', async () => {
+    h.vectorType = 'vector(2560)';
+    const res = await put(widen);
 
     expect(res.status).toBe(409);
-    expect(last(CONFIG_KEYS.GLOBAL_KB_NAMESPACE)).toEqual([
-      CONFIG_KEYS.GLOBAL_KB_NAMESPACE,
-      'default',
-    ]);
-    expect(last(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL)).toEqual([
-      CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL,
-      'qwen3-embedding:4b',
-    ]);
+    expect(h.events).toEqual(['begin', 'lock', 'read', 'rollback', 'close']);
+  });
 
-    expect(res.status).toBe(409);
-    expect(written()).toEqual(
-      expect.arrayContaining([
-        [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '1024'],
-        [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '2560'],
-      ]),
-    );
-    expect(
-      written()
-        .filter(([k]) => k === CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS)
-        .at(-1),
-    ).toEqual([CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, '2560']);
+  it('fails the request, writing nothing, when the lock cannot be taken', async () => {
+    h.lockFails = true;
+    const res = await put(widen);
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.events).not.toContain('commit');
+  });
+
+  it('fails the request, writing nothing, when the width cannot be read', async () => {
+    h.readFails = true;
+    const res = await put(widen);
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.setSecret).not.toHaveBeenCalled();
+    expect(h.events).not.toContain('commit');
+  });
+
+  it('fails the request, writing nothing, when the store cannot be reached', async () => {
+    h.connect.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    const res = await put(widen);
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(h.set).not.toHaveBeenCalled();
   });
 
   it('is not checked, and accepted, when the width is unchanged', async () => {
@@ -410,6 +465,15 @@ describe('PUT /global-kb/config with a different embedding width', () => {
 
     expect(res.status).toBe(200);
     expect(h.checks).toEqual([]);
+    expect(h.connect).not.toHaveBeenCalled();
+    expect(h.events).toEqual(expect.not.arrayContaining(['begin']));
+  });
+
+  it('opens no connection for a save that leaves the width alone', async () => {
+    expect((await put({ digestEnabled: false })).status).toBe(200);
+
+    expect(h.connect).not.toHaveBeenCalled();
+    expect(h.set).toHaveBeenCalledTimes(1);
   });
 });
 
