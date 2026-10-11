@@ -733,6 +733,26 @@ describe('the banner and the plan agree on the paths a template renders to', () 
     }
   });
 
+  it('keeps a non-rendering bundle item quiet when a stale applicable set still names it', async () => {
+    const edited = path.join(dir, '.claude/skills/sk/SKILL.md');
+    await mkdir(path.dirname(edited), { recursive: true });
+    await writeFile(edited, "a person's own bytes\n", 'utf8');
+    try {
+      world({
+        providers: NO_CLI,
+        column: { ...portable, agentTargets: [], enabledCliProviders: [] },
+        applicable: ['custom.b1.sk'],
+        items: [item('sk', 'skill', SPEC_SKILL)],
+        rows: [row('custom.b1.sk', 'custom-skill', '.claude/skills/sk/SKILL.md', 'h-c')],
+      });
+      const got = await body();
+      expect(got.changedTemplateIds).toEqual([]);
+      expect(got.hasUpgradeAvailable).toBe(false);
+    } finally {
+      await rm(path.join(dir, '.claude/skills'), { recursive: true, force: true });
+    }
+  });
+
   it('stays quiet while every row stands at a path the template renders to', async () => {
     world({
       providers: CLAUDE_ONLY,

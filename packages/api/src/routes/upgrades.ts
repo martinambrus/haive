@@ -520,7 +520,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       .filter((id) => !customSpecs.has(id) || rendersNothing.has(id)),
   );
   const claimed = (id: string) =>
-    applicableSet.has(id) || (isPerRepoTemplateId(id) && !nonCurrentCustom.has(id));
+    (applicableSet.has(id) || isPerRepoTemplateId(id)) && !nonCurrentCustom.has(id);
   // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
   // apply again wherever the providers of the render context the upgrade uses read them.
   const rtkProviders = repo.rtkEnabled ? rtkProviderNames(origin, enabledNames) : null;
