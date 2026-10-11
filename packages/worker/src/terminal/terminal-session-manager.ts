@@ -8,6 +8,8 @@ import {
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
+  TERMINAL_EXIT_KEY_PREFIX,
+  TERMINAL_EXIT_KEY_TTL_SECONDS,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
   terminalSessionKey,
@@ -488,8 +490,14 @@ export class TerminalSessionManager {
     });
     ptyStream.on('end', () => {
       const restarted = (this.restartedAt.get(session.containerName) ?? -1) > session.attachedAt;
-      const exit = restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' };
-      void this.redis.publish(outChannel, JSON.stringify(exit)).catch(() => undefined);
+      const exit = JSON.stringify(
+        restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' },
+      );
+      void this.redis
+        .set(`${TERMINAL_EXIT_KEY_PREFIX}${sessionId}`, exit, 'EX', TERMINAL_EXIT_KEY_TTL_SECONDS)
+        .catch(() => undefined)
+        .then(() => this.redis.publish(outChannel, exit))
+        .catch(() => undefined);
       void this.teardownSession(session, 'pty-end').catch(() => undefined);
     });
     ptyStream.on('error', (err) => {

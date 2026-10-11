@@ -579,6 +579,10 @@ export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
 export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';
 export const TERMINAL_OUT_CHANNEL_PREFIX = 'terminal:out:';
 export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
+/** The exit frame of a session whose PTY ended, kept briefly so an api that subscribes to the out
+ *  channel after the one-shot publish still learns it. */
+export const TERMINAL_EXIT_KEY_PREFIX = 'terminal:exited:';
+export const TERMINAL_EXIT_KEY_TTL_SECONDS = 600;
 /** The worker's answers to a task shell's workdir probe, apart from the raw PTY bytes. */
 export const TERMINAL_WORKDIR_CHANNEL_PREFIX = 'terminal:workdir:';
 /** Pub/sub channel the api publishes a user's mid-run steering message to, keyed
