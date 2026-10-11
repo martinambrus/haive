@@ -20,7 +20,7 @@ import {
 } from '@haive/shared';
 import type { Redis } from 'ioredis';
 import { createRedisConnection } from '@haive/shared';
-import { ensureShellContainer } from './terminal-container.js';
+import { ensureShellContainer, seedShellTrust } from './terminal-container.js';
 import {
   resolveRepoMount,
   resolveTaskRepoMount,
@@ -431,6 +431,12 @@ export class TerminalSessionManager {
       // move the task's workspace meanwhile.
       const workdir =
         scope === 'task' ? await resolveTaskSandboxWorkdir(this.db, scopeId) : ptyWorkingDir;
+      // A reused container, or one seeded for another dir, has never trusted this one.
+      if (ensured.cliName && (!ensured.created || workdir !== ptyWorkingDir)) {
+        await seedShellTrust(this.docker, ensured.containerName, ensured.cliName, [workdir]).catch(
+          (err) => log.warn({ err, workdir }, 'shell trust seed failed'),
+        );
+      }
       workdirMismatch =
         scope === 'task'
           ? await this.probeWorkdirMismatch(ensured.containerName, workdir)

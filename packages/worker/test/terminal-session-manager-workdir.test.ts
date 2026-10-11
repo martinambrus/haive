@@ -12,9 +12,11 @@ vi.mock('../src/queues/cli-exec/gitfile-mask.js', () => ({
 }));
 vi.mock('../src/terminal/terminal-container.js', () => ({
   ensureShellContainer: vi.fn(async () => ({ containerName: 'haive-shell-1', shell: 'bash' })),
+  seedShellTrust: vi.fn(async () => undefined),
 }));
 
 import { TerminalSessionManager } from '../src/terminal/terminal-session-manager.js';
+import { ensureShellContainer, seedShellTrust } from '../src/terminal/terminal-container.js';
 import { resolveTaskSandboxWorkdir } from '../src/queues/cli-exec-queue.js';
 
 const WORKTREE = '/haive/workdir/.haive-worktrees/task-1';
@@ -211,6 +213,25 @@ describe('task shell start directory', () => {
     const h = harness(null);
     await h.openTask();
     expect(h.execs.find((e) => e.cmd[1] === 'new-session')?.workingDir).toBe(ROOT);
+  });
+
+  it('trusts the workdir it attaches at in a reused container', async () => {
+    vi.mocked(ensureShellContainer).mockResolvedValueOnce({
+      containerName: 'haive-shell-1',
+      shell: 'bash',
+      created: false,
+      imageTag: 'img',
+      cliName: 'claude-code',
+    } as never);
+    vi.mocked(resolveTaskSandboxWorkdir).mockResolvedValue(WORKTREE);
+    const h = harness(null);
+    await h.openTask();
+    expect(vi.mocked(seedShellTrust)).toHaveBeenCalledWith(
+      expect.anything(),
+      'haive-shell-1',
+      'claude-code',
+      [WORKTREE],
+    );
   });
 
   it('answers no probe for a repo shell', async () => {
