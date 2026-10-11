@@ -17,6 +17,7 @@ import {
 import { initDatabase, getDb } from '../src/db.js';
 import { initRedis, getBullRedis, closeRedis } from '../src/redis.js';
 import { closeTaskQueue, startTaskWorker } from '../src/queues/task-queue.js';
+import { taskAtParkedForm } from './_smoke-parked-form.js';
 
 process.env.HAIVE_TEST_BYPASS_LLM = '1';
 
@@ -212,10 +213,7 @@ async function main(): Promise<void> {
     let lastStepId: string | null = null;
     for (let iter = 0; iter < 40; iter += 1) {
       const updated = await pollUntil(
-        async () => {
-          const row = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task.id) });
-          return row ?? null;
-        },
+        () => taskAtParkedForm(db, task.id),
         (t) => {
           if (t.status === 'completed' || t.status === 'failed') return true;
           if (t.status === 'waiting_user' && t.currentStepId !== lastStepId) return true;
