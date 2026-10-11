@@ -335,19 +335,6 @@ export async function runScopedShellSession(
     sendJson(ws, { type: 'output', data: raw });
   });
 
-  sendJson(ws, {
-    type: 'connected',
-    sessionId,
-    containerName,
-    shell,
-    ...(reply.workdirMismatch ? { workdirMismatch: reply.workdirMismatch } : {}),
-  });
-  // A PTY that ended before the subscribe above published its one exit frame to nobody.
-  const endedBefore = await publisher
-    .get(`${TERMINAL_EXIT_KEY_PREFIX}${sessionId}`)
-    .catch(() => null);
-  if (endedBefore !== null && ws.readyState === WebSocket.OPEN) deliverExit(endedBefore);
-
   keepalive = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
       try {
@@ -407,6 +394,20 @@ export async function runScopedShellSession(
     // set_control_passthrough is a no-op here — shell terminal always passes
     // control chars through (it's the whole point).
   });
+
+  // Sent once the handler above is in place: the page resizes the moment it reads this.
+  sendJson(ws, {
+    type: 'connected',
+    sessionId,
+    containerName,
+    shell,
+    ...(reply.workdirMismatch ? { workdirMismatch: reply.workdirMismatch } : {}),
+  });
+  // A PTY that ended before the subscribe above published its one exit frame to nobody.
+  const endedBefore = await publisher
+    .get(`${TERMINAL_EXIT_KEY_PREFIX}${sessionId}`)
+    .catch(() => null);
+  if (endedBefore !== null && ws.readyState === WebSocket.OPEN) deliverExit(endedBefore);
 }
 
 interface OpenSessionArgs {

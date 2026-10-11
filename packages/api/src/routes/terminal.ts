@@ -103,7 +103,6 @@ async function runTerminalSession(
   const stream = await attachContainerStream(docker, container.dockerContainerId!);
 
   await incrementAttached(container.id);
-  sendFrame(ws, { type: 'connected', sessionId });
 
   const logBuffer = new TerminalLogBuffer();
   const dbSessionId = await createTerminalSession(userId, container.id).catch((err) => {
@@ -230,6 +229,9 @@ async function runTerminalSession(
     });
     log.info({ sessionId, containerId: container.id }, 'terminal session closed');
   });
+
+  // Only now: a client may send input the moment it reads this, and the handlers above take it.
+  sendFrame(ws, { type: 'connected', sessionId });
 }
 
 async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
@@ -396,9 +398,15 @@ export async function attachContainerStream(
 ): Promise<Duplex> {
   const modemOpts = (
     docker as unknown as {
-      modem: { socketPath?: string; host?: string; port?: number; protocol?: string };
+      modem: {
+        getSocketPath(): Promise<string | undefined> | undefined;
+        host?: string;
+        port?: number;
+      };
     }
   ).modem;
+  // The modem's socketPath may be a lookup function; getSocketPath resolves it either way.
+  const socketPath = await modemOpts.getSocketPath();
   return new Promise<Duplex>((resolve, reject) => {
     const reqOpts: http.RequestOptions = {
       method: 'POST',
@@ -411,8 +419,8 @@ export async function attachContainerStream(
         'Content-Length': '0',
       },
     };
-    if (modemOpts.socketPath) {
-      reqOpts.socketPath = modemOpts.socketPath;
+    if (socketPath) {
+      reqOpts.socketPath = socketPath;
     } else {
       reqOpts.host = modemOpts.host;
       reqOpts.port = modemOpts.port;
