@@ -370,20 +370,23 @@ describe('a task Retry from START that is refused', () => {
     expect(t.fake.rows(schema.tasks).filter((r) => r.type === 'onboarding_upgrade')).toEqual([]);
   });
 
-  it('touches nothing when a Cancel lands before the task is requeued', async () => {
-    const t = withRun('onboarding');
-    t.fake.hooks.beforeUpdate = (table) => {
-      if (table !== schema.tasks) return;
-      t.fake.hooks.beforeUpdate = null;
-      t.fake.patch(schema.tasks, TASK, { status: 'cancelled' });
-    };
-    const res = await parked.request();
-    expect(res.status).toBe(409);
-    expect(t.run()).toMatchObject({ supersededAt: null, endedAt: null });
-    expect(t.parkedStep()).toMatchObject({ status: 'waiting_form' });
-    expect(h.kill).not.toHaveBeenCalled();
-    expect(h.add).not.toHaveBeenCalled();
-  });
+  it.each(['onboarding', 'workflow'])(
+    'touches nothing of a %s when a Cancel lands before the task is requeued',
+    async (type) => {
+      const t = withRun(type);
+      t.fake.hooks.beforeUpdate = (table) => {
+        if (table !== schema.tasks) return;
+        t.fake.hooks.beforeUpdate = null;
+        t.fake.patch(schema.tasks, TASK, { status: 'cancelled' });
+      };
+      const res = await parked.request();
+      expect(res.status).toBe(409);
+      expect(t.run()).toMatchObject({ supersededAt: null, endedAt: null });
+      expect(t.parkedStep()).toMatchObject({ status: 'waiting_form' });
+      expect(h.kill).not.toHaveBeenCalled();
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['onboarding', 'onboarding_upgrade', 'workflow'])(
     'still requeues a failed %s, supersedes its run, re-offers the form and kills',

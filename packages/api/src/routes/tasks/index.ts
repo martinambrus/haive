@@ -1160,12 +1160,10 @@ taskRoutes.post('/:id/action', async (c) => {
       // running/waiting_cli (the other-step guard in task-queue.ts). A task that failed
       // with a step left parked — a worker killed mid-run leaves exactly that — would
       // otherwise restart into a permanent deadlock: every advance skipped, current_step_id
-      // drifting backwards, and Retry the only enabled button. Same helper Stop/cancel use;
-      // it supersedes live invocations, ends the parked step, and kills the haive-cli-*
-      // sandboxes while leaving the DDEV/app runtime up.
-      // An onboarding or upgrade requeues in one locked transaction, so a refusal changes nothing.
-      const lockedRevival = task.type === 'onboarding' || task.type === 'onboarding_upgrade';
-      if (!lockedRevival) await db.transaction((tx) => refuseReviveBesideLive(tx, id));
+      // drifting backwards, and Retry the only enabled button. One transaction supersedes live
+      // invocations, ends the parked step and requeues, so a refusal or a Cancel landing first
+      // changes nothing; the haive-cli-* sandboxes are killed after it commits, the DDEV/app
+      // runtime left up.
       const clearMessages = async (h: typeof db | DbTx) => {
         // Wipe the transient wait notes ("Waiting for a free runtime slot…", "Queued — machine at
         // capacity…") off every pending row. A retry replays from step 0 and the fix loop restarts
@@ -1207,30 +1205,14 @@ taskRoutes.post('/:id/action', async (c) => {
           .returning({ id: schema.tasks.id });
       // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
       // dropped by the worker's epoch guard instead of running against the restarted task.
-      let requeued: { id: string } | undefined;
-      if (lockedRevival) {
-        requeued = await db.transaction(async (tx) => {
-          await refuseReviveBesideLive(tx, id);
-          await supersedeLiveRuns(tx, id, { failTask: false });
-          await settleActiveStepsIn(tx, id);
-          await clearMessages(tx);
-          const [moved] = await requeue(tx);
-          if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
-          return moved;
-        });
-      } else {
-        await stopActiveCliInvocations(db, id, { failTask: false });
-        // stopActiveCliInvocations deliberately covers running/waiting_cli only. A step parked
-        // at a FORM should be re-offered by the restart, not failed, so reset it to pending.
-        await settleActiveSteps(db, id);
-        await clearMessages(db);
-        [requeued] = await db.transaction(async (tx) => {
-          await refuseReviveBesideLive(tx, id);
-          return requeue(tx);
-        });
-      }
-      // A Cancel that landed since the read stands.
-      if (!requeued) throw new HttpError(409, 'The task is no longer failed; reload it');
+      await db.transaction(async (tx) => {
+        await refuseReviveBesideLive(tx, id);
+        await supersedeLiveRuns(tx, id, { failTask: false });
+        await settleActiveStepsIn(tx, id);
+        await clearMessages(tx);
+        const [moved] = await requeue(tx);
+        if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
+      });
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.
       await stopActiveCliInvocations(db, id, { failTask: false });
