@@ -302,13 +302,29 @@ function objectMayCarryStatus(at: ts.Node, name: string): boolean {
   return found;
 }
 
+// The only call a completed update chain may end in after its WHERE: anything else (a second
+// where, $dynamic) can replace the predicate read.
+const AFTER_WHERE = new Set(['returning']);
+
+/** The `.where(...)` straight after a `.set(...)`, when nothing later in the chain can replace it. */
+function soleWhere(set: ts.CallExpression): ts.CallExpression | null {
+  const access = set.parent;
+  if (!ts.isPropertyAccessExpression(access) || access.name.text !== 'where') return null;
+  const where = access.parent;
+  if (!ts.isCallExpression(where) || where.expression !== access) return null;
+  for (let at: ts.Node = where; ;) {
+    const next = at.parent;
+    if (!ts.isPropertyAccessExpression(next) || next.expression !== at) return where;
+    if (!AFTER_WHERE.has(next.name.text)) return null;
+    at = next.parent;
+  }
+}
+
 /** Whether the `.where(...)` after this `.set(...)` holds only a created task: the created equality
  *  is the predicate itself, or a direct conjunct of `and(...)`. */
 function movesOnlyCreated(set: ts.CallExpression): boolean {
-  const access = set.parent;
-  if (!ts.isPropertyAccessExpression(access) || access.name.text !== 'where') return false;
-  const where = access.parent;
-  if (!ts.isCallExpression(where)) return false;
+  const where = soleWhere(set);
+  if (!where) return false;
   const pred = where.arguments[0];
   const sf = set.getSourceFile();
   if (!pred || shadowsName(sf, 'eq') || shadowsName(sf, 'and')) return false;
@@ -577,10 +593,8 @@ function importsFromOwnModule(sf: ts.SourceFile, n: ts.Node, name: string): bool
  *  after its `.set(...)`. Read through `and(...)`, a conditional whose branches agree, and a helper
  *  in the same file that returns such a predicate for one of its parameters. */
 function writeTask(set: ts.CallExpression): string | null {
-  const access = set.parent;
-  if (!ts.isPropertyAccessExpression(access) || access.name.text !== 'where') return null;
-  const where = access.parent;
-  if (!ts.isCallExpression(where)) return null;
+  const where = soleWhere(set);
+  if (!where) return null;
   const sf = set.getSourceFile();
   if (!where.arguments[0] || shadowsName(sf, 'eq') || shadowsName(sf, 'and')) return null;
   return taskOfPredicate(sf, where.arguments[0], 0);
@@ -1248,6 +1262,21 @@ describe('a live-status write on a task row', () => {
         await later;
       }`;
     expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
+  });
+
+  it('reads no task or created-only predicate a later where can replace', () => {
+    const covered = (body: string) =>
+      liveWrites('x.ts', `async function f(tx, id) { ${body} }`).map((w) => w.covered);
+    expect(
+      covered(
+        `await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.status, 'created')).$dynamic().where(eq(schema.tasks.id, id));`,
+      ),
+    ).toEqual([false]);
+    expect(
+      covered(
+        `await tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.status, 'created')).returning();`,
+      ),
+    ).toEqual([true]);
   });
 
   it('does not cover a generator write helper', () => {
