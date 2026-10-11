@@ -332,6 +332,21 @@ function scopeOf(node: ts.Node): ts.FunctionLikeDeclaration | null {
   return enclosingFunction(node);
 }
 
+/** A call whose result runs where it is made: awaited, a statement of its own, or returned from
+ *  a function whose own call sites are followed. One kept for later can run after the guard's
+ *  transaction has ended. */
+function consumedInPlace(c: ts.CallExpression): boolean {
+  let at: ts.Node = c;
+  while (ts.isParenthesizedExpression(at.parent)) at = at.parent;
+  const p = at.parent;
+  return (
+    ts.isAwaitExpression(p) ||
+    ts.isExpressionStatement(p) ||
+    ts.isReturnStatement(p) ||
+    (ts.isArrowFunction(p) && p.body === at)
+  );
+}
+
 function isDeclarationName(n: ts.Identifier): boolean {
   const p = n.parent;
   return (
@@ -425,7 +440,9 @@ function guarded(
   return (
     !escaped &&
     calls.length > 0 &&
-    calls.every((c) => guarded(sf, c, follow(tx, c), follow(task, c), depth + 1))
+    calls.every(
+      (c) => consumedInPlace(c) && guarded(sf, c, follow(tx, c), follow(task, c), depth + 1),
+    )
   );
 }
 
@@ -753,7 +770,7 @@ function tasksTableEscapes(n: ts.Node): boolean {
   if (ts.isPropertyAccessExpression(p) && p.expression === n) return false;
   if (ts.isTemplateSpan(p) && ts.isTaggedTemplateExpression(p.parent.parent)) {
     const tagged = p.parent.parent;
-    return tagged.tag.getText() !== 'sql' || /\bupdate\b/i.test(tagged.template.getText());
+    return !isSqlTag(tagged.tag) || /\bupdate\b/i.test(tagged.template.getText());
   }
   if (
     !ts.isCallExpression(p) ||
@@ -790,6 +807,25 @@ function nextSubstitution(n: ts.Node): ts.Expression | null {
   return owner.templateSpans[at]?.expression ?? null;
 }
 
+/** Drizzle's `sql` tag, under its own name or the one an import gives it. */
+function isSqlTag(tag: ts.Expression): boolean {
+  if (!ts.isIdentifier(tag)) return false;
+  if (tag.text === 'sql') return true;
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isImportSpecifier(n) &&
+      n.name.text === tag.text &&
+      (n.propertyName ?? n.name).text === 'sql'
+    ) {
+      found = true;
+    }
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(tag.getSourceFile());
+  return found;
+}
+
 const RAW_SQL_CALLS = new Set(['raw', 'execute', 'unsafe', 'query']);
 
 /** Text that reaches a query: a `sql` template, or an argument of a raw-SQL call, through
@@ -799,7 +835,7 @@ function inSqlContext(n: ts.Node): boolean {
   for (;;) {
     const p = at.parent;
     if (!p) return false;
-    if (ts.isTaggedTemplateExpression(p)) return p.tag.getText() === 'sql';
+    if (ts.isTaggedTemplateExpression(p)) return isSqlTag(p.tag);
     if (ts.isCallExpression(p)) {
       return (
         p.arguments.includes(at as ts.Expression) &&
@@ -950,6 +986,11 @@ describe('a live-status write on a task row', () => {
     ).toBe(1);
     expect(found("const m = 'Cancel them first, or delete the tasks.';")).toBe(0);
     expect(found("throw new HttpError(409, 'Update tasks before retrying');")).toBe(0);
+    expect(
+      found(
+        "import { sql as statement } from 'drizzle-orm'; statement`UPDATE tasks SET status = 1`;",
+      ),
+    ).toBe(1);
     expect(found(`const q = "UPDATE tasks SET status = 'running'"; await tx.unsafe(q);`)).toBe(1);
     expect(found(`const q = 'Update tasks before retrying'; throw new HttpError(409, q);`)).toBe(0);
     expect(found("await tx.unsafe(`UPDATE tasks SET status = 'running'`);")).toBe(1);
@@ -1161,6 +1202,18 @@ describe('a live-status write on a task row', () => {
         await later;
       }`;
     expect(liveWrites('x.ts', src).map((w) => w.covered)).toContain(false);
+  });
+
+  it('does not cover a helper whose result is kept past the guarded transaction', () => {
+    const src = `function make(tx, id) {
+        return tx.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      }
+      async function route(id) {
+        let later;
+        await db.transaction(async (tx) => { await ${GUARD}(tx, id); later = make(tx, id); });
+        await later;
+      }`;
+    expect(liveWrites('x.ts', src).map((w) => w.covered)).toEqual([false]);
   });
 
   it('does not let a call site rebind what a helper captures', () => {
