@@ -11,8 +11,11 @@ onboarding output, and the folder often has no remote). It refuses, saying why b
 repository, while a task holds the checkout (`CHECKOUT_HOLDING_TASK_STATUSES`, shared with plan
 Pull), when the checkout has commits the source lacks or no history in common, and on a detached
 HEAD; git itself refuses a fast-forward that would overwrite a local change. The task check is read
-once, under the claim, and nothing that starts a task reads the claim, so a task that starts during
-a refresh is not fenced out: the window writer 1 in [Onboarding reset](onboarding-reset.md) leaves open for the reset. It loses nothing
+twice: once under the claim, and again with the fast-forward itself under the project-state lock
+(`lockProjectState`), so a task that starts while the refresh fetches or waits for that lock, and an
+upgrade still writing its record (which holds the same lock), keeps the checkout where it was. A task
+that starts after the fast-forward is not fenced out, since nothing that starts a task reads the claim:
+the window writer 1 in [Onboarding reset](onboarding-reset.md) leaves open for the reset. It loses nothing
 here either, since the fetch writes no working tree, the fast-forward stops at a change git sees and
 the rebuild renames; what it can cost is a git lock collision that fails one side, which a Retry
 clears. Only a checkout that is not usable (no `HEAD` at its own top level) is rebuilt, and whatever
