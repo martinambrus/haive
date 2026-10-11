@@ -91,7 +91,7 @@ describe('runStepCommandInSandbox', () => {
 
   it('maps the Haive sentinel to not run, naming the binary', async () => {
     runInSandbox.mockImplementation(async (spec: { args: string[] }) => {
-      const marker = /haive-missing-[0-9a-f]{16}/.exec(spec.args[1] ?? '')?.[0];
+      const marker = /step-bin-missing-[0-9a-f]{16}/.exec(spec.args[1] ?? '')?.[0];
       return {
         exitCode: BINARY_MISSING_EXIT,
         stdout: `${marker}\n`,
@@ -118,7 +118,7 @@ describe('runStepCommandInSandbox', () => {
   });
 
   it("does not accept another run's marker", async () => {
-    ran(BINARY_MISSING_EXIT, 'haive-missing-0000000000000000\n');
+    ran(BINARY_MISSING_EXIT, 'step-bin-missing-0000000000000000\n');
     const res = await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], timeoutMs: 1 });
     expect(res).toMatchObject({ ran: true, exitCode: 199 });
   });
@@ -128,7 +128,7 @@ describe('runStepCommandInSandbox', () => {
     await runStepCommandInSandbox(ctx(), { argv: ['pnpm'], timeoutMs: 1 });
     await runStepCommandInSandbox(ctx(), { argv: ['pnpm'], timeoutMs: 1 });
     const markers = runInSandbox.mock.calls.map(
-      (c) => /haive-missing-[0-9a-f]{16}/.exec(c[0].args[1])?.[0],
+      (c) => /step-bin-missing-[0-9a-f]{16}/.exec(c[0].args[1])?.[0],
     );
     expect(markers[0]).toBeDefined();
     expect(markers[0]).not.toBe(markers[1]);

@@ -21,7 +21,7 @@ import { runInSandbox, SANDBOX_WORKDIR } from './sandbox-runner.js';
 export const BINARY_MISSING_EXIT = 199;
 
 function missingBinaryGuard(): { marker: string; preamble: string } {
-  const marker = ['haive', 'missing', randomBytes(8).toString('hex')].join('-');
+  const marker = `step-bin-missing-${randomBytes(8).toString('hex')}`;
   return {
     marker,
     preamble: `command -v "$1" >/dev/null 2>&1 || { echo ${marker}; exit ${BINARY_MISSING_EXIT}; }; exec "$@"`,
