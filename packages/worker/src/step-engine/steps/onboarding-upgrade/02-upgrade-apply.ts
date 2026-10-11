@@ -2,6 +2,7 @@ import {
   decodeUtf8Strict,
   errno,
   isPathContainmentError,
+  ParkedFileError,
   removeFileIfNoFollow,
   rewriteFileIfNoFollow,
   toSafeRel,
@@ -829,11 +830,32 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // Superseded baselines of what a hook strip replaced.
     const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     // Live rows whose conflict was answered "Keep my edits", moved to the version declined.
-    const keptInPlace: { id: string; update: ReturnType<typeof keptRowUpdate> }[] = [];
+    const keptInPlace: {
+      id: string;
+      diskPath: string;
+      update: ReturnType<typeof keptRowUpdate>;
+    }[] = [];
     // Baselines of what a removal took, each written before the removal it records.
     const removalRecords: string[] = [];
     // What stood at each written path, recorded before the write.
     const preimageIds: string[] = [];
+    // A pre-image a retried Keep answered is deleted in its own statement as soon as the held file
+    // is settled, so a later failure of the apply cannot leave it for another retry to restore.
+    // Every one of this task's records for the path goes, not only the newest: an older one would be
+    // the newest the next retry finds.
+    const spendPreimages = (entry: { templateId: string; diskPath: string }) =>
+      ctx.db
+        .delete(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.taskId, ctx.taskId),
+            eq(schema.onboardingArtifacts.sourceStepId, '02-upgrade-apply'),
+            eq(schema.onboardingArtifacts.source, 'backfill'),
+            isNotNull(schema.onboardingArtifacts.supersededAt),
+            eq(schema.onboardingArtifacts.templateId, entry.templateId),
+            eq(schema.onboardingArtifacts.diskPath, entry.diskPath),
+          ),
+        );
     // An attempt that failed part-way leaves its records, and a path it rewrote no longer shows
     // what stood there, so a retry takes the newest record of each path from them.
     const earlierRecords = new Map<
@@ -1089,13 +1111,101 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           kept = rel === null ? null : await pathContent(ctx.repoPath, rel, entry.templateKind);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          // The person's edits live only in this task's pre-image: failing keeps them for a Retry.
+          if (earlierRecords.get(key)?.lastObservedDiskHash) {
+            throw new Error(
+              `could not read ${entry.diskPath} to put back the edits kept there (${msg}); retry once it can be read`,
+            );
+          }
           warnings.push(`did not record keeping ${entry.diskPath}: ${msg}`);
           continue;
         }
-        if (kept === null || !entry.currentTemplateContentHash || !entry.newContentHash) continue;
+        if (kept === null) {
+          // The failed attempt's write is gone from the path, so nothing may restore over it later.
+          const gone = earlierRecords.get(key);
+          if (gone?.lastObservedDiskHash) await spendPreimages(entry);
+          continue;
+        }
+        if (!entry.currentTemplateContentHash || !entry.newContentHash) continue;
+        // A failed attempt answered Overwrite here and recorded what stood before writing: the
+        // bytes this Keep means are those, so they go back while the path still holds that write.
+        const earlier = earlierRecords.get(key);
+        if (
+          rel !== null &&
+          earlier?.lastObservedDiskHash &&
+          earlier.writtenContent !== null &&
+          entry.newContent
+        ) {
+          const restore = earlier.writtenContent;
+          const rules = entry.templateKind === CLI_RULES_TEMPLATE_KIND;
+          // For a region, the bytes upsertRegion actually left between the markers.
+          const render = rules
+            ? (extractRegion(
+                upsertRegion('', entry.newContent, CLI_RULES_START, CLI_RULES_END),
+                CLI_RULES_START,
+                CLI_RULES_END,
+              ) ?? entry.newContent)
+            : entry.newContent;
+          let restored = false;
+          // What the held file showed when the callback declined: the bytes the Keep records.
+          let seen: { content: string; hash: string } | null | undefined;
+          try {
+            // Checked and written on one held file, so a save landing meanwhile is kept.
+            await rewriteFileIfNoFollow(
+              ctx.repoPath,
+              rel,
+              (data) => {
+                const text = data.toString('utf8');
+                if (!Buffer.from(text, 'utf8').equals(data)) return null;
+                const standing = rules ? extractRegion(text, CLI_RULES_START, CLI_RULES_END) : text;
+                // The exact bytes written, not a normalized match: a save differing only in line
+                // endings or trailing space is the person's, and stays.
+                if (standing === null || standing !== render) {
+                  const content =
+                    standing === null ? null : rules ? normalizeContent(standing) : standing;
+                  seen =
+                    content === null
+                      ? null
+                      : { content, hash: sha256Hex(rules ? content : normalizeContent(content)) };
+                  return null;
+                }
+                restored = true;
+                return Buffer.from(
+                  rules ? upsertRegion(text, restore, CLI_RULES_START, CLI_RULES_END) : restore,
+                  'utf8',
+                );
+              },
+              { maxBytes: RULES_FILE_READ_CAP },
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            // The render was moved off the path and something else took it: that write is gone too.
+            if (err instanceof ParkedFileError) {
+              await spendPreimages(entry);
+              warnings.push(`did not put back the edits kept at ${entry.diskPath}: ${msg}`);
+              continue;
+            }
+            throw new Error(
+              `could not put back the edits kept at ${entry.diskPath} (${msg}); retry to try again`,
+            );
+          }
+          // Either way the failed attempt's write no longer stands, so its pre-image is spent.
+          await spendPreimages(entry);
+          if (!restored && !seen) {
+            warnings.push(`did not record keeping ${entry.diskPath}: it changed while it was read`);
+            continue;
+          }
+          // The person's own bytes, not an upgrade's write, so not staged with the upgrade.
+          if (restored) {
+            kept = { content: restore, hash: sha256Hex(normalizeContent(restore)) };
+          } else if (seen) {
+            kept = seen;
+          }
+        }
         if (entry.liveArtifactId) {
           keptInPlace.push({
             id: entry.liveArtifactId,
+            diskPath: entry.diskPath,
             update: keptRowUpdate(entry, entry.currentTemplateContentHash, kept, liveBundleItemIds),
           });
           continue;
@@ -1589,7 +1699,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             .where(inArray(schema.onboardingArtifacts.id, markers));
         }
         for (const k of keptInPlace) {
-          await tx
+          const updated = await tx
             .update(schema.onboardingArtifacts)
             .set({ ...k.update, updatedAt: now })
             .where(
@@ -1597,7 +1707,29 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
                 eq(schema.onboardingArtifacts.id, k.id),
                 isNull(schema.onboardingArtifacts.supersededAt),
               ),
-            );
+            )
+            .returning({ id: schema.onboardingArtifacts.id });
+          if (updated.length > 0) continue;
+          // An attempt of this task that committed and then failed retired the row for its own
+          // write: that row goes, and the one the plan saw comes back carrying the decision.
+          const ours = await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(
+              and(
+                eq(schema.onboardingArtifacts.taskId, ctx.taskId),
+                eq(schema.onboardingArtifacts.sourceStepId, '02-upgrade-apply'),
+                eq(schema.onboardingArtifacts.source, 'upgrade'),
+                eq(schema.onboardingArtifacts.diskPath, k.diskPath),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            )
+            .returning({ id: schema.onboardingArtifacts.id });
+          if (ours.length === 0) continue;
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ ...k.update, supersededAt: null, updatedAt: now })
+            .where(eq(schema.onboardingArtifacts.id, k.id));
         }
         if (baselineRows.length > 0) {
           // Insert as already-superseded so the live upgrade row is the only

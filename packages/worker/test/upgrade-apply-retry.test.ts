@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -20,6 +20,27 @@ import type {
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 
+const beforeRewrite = vi.hoisted(() => ({
+  run: null as null | (() => Promise<void>),
+  parked: false,
+}));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    rewriteFileIfNoFollow: async (...args: Parameters<typeof real.rewriteFileIfNoFollow>) => {
+      const run = beforeRewrite.run;
+      beforeRewrite.run = null;
+      if (run) await run();
+      if (beforeRewrite.parked) {
+        beforeRewrite.parked = false;
+        throw new real.ParkedFileError(args[1], `.parked-${args[1]}`, 'EEXIST');
+      }
+      return real.rewriteFileIfNoFollow(...args);
+    },
+  };
+});
+
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const TASK = '00000000-0000-4000-8000-0000000000c1';
@@ -35,6 +56,7 @@ const MINE = 'MY OWN EDIT\n';
 const NEW = 'NEW RENDER\n';
 const OLD_REGION = `${CLI_RULES_START}\nOLD RULES\n${CLI_RULES_END}`;
 const NEW_REGION = `${CLI_RULES_START}\nNEW RULES\n${CLI_RULES_END}`;
+const MY_REGION = `${CLI_RULES_START}\nMY OWN RULES\n${CLI_RULES_END}`;
 const hashOf = (text: string) => sha256Hex(normalizeContent(text));
 
 const dirs: string[] = [];
@@ -66,7 +88,10 @@ function entry(partial: Partial<UpgradePlanEntry> & Pick<UpgradePlanEntry, 'disk
 /** A repository onboarded with OLD at two paths (one edited since), a third deleted since, and the
  *  rules region, and an upgrade that writes NEW over them and creates a file that was not there.
  *  Without `region`, AGENTS.md holds no rules region and no row records one. */
-async function setup({ region = true }: { region?: boolean } = {}) {
+async function setup({
+  region = true,
+  regionEdited = false,
+}: { region?: boolean; regionEdited?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-retry-'));
   const outside = await mkdtemp(join(tmpdir(), 'upgrade-apply-retry-out-'));
   dirs.push(root, outside);
@@ -75,7 +100,7 @@ async function setup({ region = true }: { region?: boolean } = {}) {
   await writeFile(join(root, CLEAN), OLD, 'utf8');
   await writeFile(
     join(root, 'AGENTS.md'),
-    region ? `# Notes\n\n${OLD_REGION}\n` : '# Notes\n',
+    region ? `# Notes\n\n${regionEdited ? MY_REGION : OLD_REGION}\n` : '# Notes\n',
     'utf8',
   );
   const fake = createFakeDb({
@@ -110,7 +135,8 @@ async function setup({ region = true }: { region?: boolean } = {}) {
     diskPath: 'AGENTS.md',
     templateId: 'cli-rules',
     templateKind: CLI_RULES_TEMPLATE_KIND,
-    newContent: NEW_REGION,
+    // The plan's render ends in a newline that upsertRegion trims when it writes the region.
+    newContent: regionEdited ? `${NEW_REGION}\n` : NEW_REGION,
     newContentHash: hashOf(NEW_REGION),
     currentTemplateContentHash: hashOf(NEW_REGION),
   };
@@ -144,8 +170,9 @@ async function setup({ region = true }: { region?: boolean } = {}) {
       ? entry({
           ...rulesEntry,
           liveArtifactId: rulesRow,
-          currentContent: OLD_REGION,
-          currentHash: hashOf(OLD_REGION),
+          ...(regionEdited ? { bucket: 'conflict' as const } : {}),
+          currentContent: regionEdited ? MY_REGION : OLD_REGION,
+          currentHash: hashOf(regionEdited ? MY_REGION : OLD_REGION),
           baselineWrittenHash: hashOf(OLD_REGION),
           baselineTemplateContentHash: hashOf(OLD_REGION),
         })
@@ -174,10 +201,10 @@ async function setup({ region = true }: { region?: boolean } = {}) {
     selectedNew: region ? [`e:${CREATED}`] : [`e:${CREATED}`, 'e:AGENTS.md'],
     selectedReinstate: [`e:${REINSTATED}`],
   };
-  const conflictField = upgradeApplyStep.form!({} as StepContext, plan)?.fields.find(
-    (f) => 'label' in f && f.label === `Conflict: ${EDITED}`,
-  );
-  formValues[(conflictField as { id: string }).id] = 'apply_theirs';
+  const conflictFields = (upgradeApplyStep.form!({} as StepContext, plan)?.fields ?? []).filter(
+    (f) => 'label' in f && String(f.label).startsWith('Conflict: '),
+  ) as { id: string }[];
+  for (const f of conflictFields) formValues[f.id] = 'apply_theirs';
   const noop = () => undefined;
   const ctx = {
     db: fake.db,
@@ -196,7 +223,10 @@ async function setup({ region = true }: { region?: boolean } = {}) {
     });
   const byId = (ids: readonly string[]) =>
     fake.rows(schema.onboardingArtifacts).filter((r) => ids.includes(r.id as string));
-  return { root, outside, fake, apply, byId, reinstatedRow };
+  const answerConflicts = (choice: string) => {
+    for (const f of conflictFields) formValues[f.id] = choice;
+  };
+  return { root, outside, fake, apply, byId, reinstatedRow, editedRow, rulesRow, answerConflicts };
 }
 
 type Setup = Awaited<ReturnType<typeof setup>>;
@@ -274,6 +304,228 @@ describe('an upgrade apply retried after it failed part-way', () => {
       fileCreated: false,
       retiredRowId: null,
     });
+  });
+
+  // A Retry clears the form, so the conflict can be answered the other way the second time.
+  it("puts the person's bytes back when a retry keeps what a failed attempt overwrote", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+
+    s.answerConflicts('keep_ours');
+    const out = await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
+    expect(out.writtenPaths ?? []).not.toContain(EDITED);
+    expect(s.byId([s.editedRow])[0]).toMatchObject({
+      writtenContent: MINE,
+      lastObservedDiskHash: hashOf(MINE),
+    });
+  });
+
+  it("puts the person's rules region back when a retry keeps what a failed attempt overwrote", async () => {
+    const s = await setup({ regionEdited: true });
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('NEW RULES');
+
+    s.answerConflicts('keep_ours');
+    await s.apply();
+
+    expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toBe(`# Notes\n\n${MY_REGION}\n`);
+    expect(s.byId([s.rulesRow!])[0]?.lastObservedDiskHash).toBe(hashOf(MY_REGION));
+  });
+
+  it("keeps the plan's row live with the person's bytes when the failed attempt had committed", async () => {
+    const s = await setup();
+    await symlink(s.outside, join(s.root, '.haive'));
+    await expect(s.apply()).rejects.toThrow();
+    await rm(join(s.root, '.haive'));
+
+    s.answerConflicts('keep_ours');
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
+    const live = s.fake
+      .rows(schema.onboardingArtifacts)
+      .filter((r) => r.diskPath === EDITED && r.supersededAt === null);
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({ id: s.editedRow, lastObservedDiskHash: hashOf(MINE) });
+  });
+
+  it('restores a pre-image once: a later retry after the Keep committed leaves a save alone', async () => {
+    const s = await setup();
+    await symlink(s.outside, join(s.root, '.haive'));
+    await expect(s.apply()).rejects.toThrow();
+    s.answerConflicts('keep_ours');
+    await expect(s.apply()).rejects.toThrow();
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
+    await rm(join(s.root, '.haive'));
+    await writeFile(join(s.root, EDITED), NEW, 'utf8');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+  });
+
+  it('consumes the pre-image even when a Keep found the path edited and restored nothing', async () => {
+    const s = await setup();
+    await symlink(s.outside, join(s.root, '.haive'));
+    await expect(s.apply()).rejects.toThrow();
+    await writeFile(join(s.root, EDITED), 'SAVED SINCE\n', 'utf8');
+    s.answerConflicts('keep_ours');
+    await expect(s.apply()).rejects.toThrow();
+    await rm(join(s.root, '.haive'));
+    await writeFile(join(s.root, EDITED), NEW, 'utf8');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+  });
+
+  it("records the bytes a save left between the Keep's first read and its held rewrite", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+    beforeRewrite.run = () => writeFile(join(s.root, EDITED), 'SAVED MEANWHILE\n', 'utf8');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe('SAVED MEANWHILE\n');
+    expect(s.byId([s.editedRow])[0]).toMatchObject({
+      writtenContent: 'SAVED MEANWHILE\n',
+      lastObservedDiskHash: hashOf('SAVED MEANWHILE\n'),
+    });
+  });
+
+  it('records no Keep, and spends the pre-image, when the held rewrite finds no file to read', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+    beforeRewrite.run = () => rm(join(s.root, EDITED));
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContainEqual(expect.stringContaining('did not record keeping'));
+    expect(s.byId([s.editedRow])[0]?.lastObservedDiskHash).not.toBe(hashOf(NEW));
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
+    ).toBe(false);
+    beforeRewrite.run = null;
+  });
+
+  it('spends the pre-image when the held rewrite parked the render and could not put it back', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+    beforeRewrite.parked = true;
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContainEqual(expect.stringContaining('did not put back'));
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
+    ).toBe(false);
+  });
+
+  it("spends the pre-image even when the Keep's own transaction then fails", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
+    await writeFile(join(s.root, EDITED), NEW, 'utf8');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
+  });
+
+  it("spends the pre-image when the path is already gone at the Keep's first read", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await rm(join(s.root, EDITED));
+    s.answerConflicts('keep_ours');
+
+    await s.apply();
+
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
+    ).toBe(false);
+  });
+
+  // An unreadable read cannot tell a link or a directory from a transient I/O error, which proves
+  // nothing about the bytes, so the person's only copy of their edits stays.
+  it("fails, keeping the pre-image, when the Keep's first read cannot read the path", async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await rm(join(s.root, EDITED));
+    await mkdir(join(s.root, EDITED));
+    s.answerConflicts('keep_ours');
+
+    await expect(s.apply()).rejects.toThrow('could not read');
+
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .some((r) => r.diskPath === EDITED && r.taskId === TASK && r.writtenContent === MINE),
+    ).toBe(true);
+  });
+
+  it('leaves a save that differs from the failed write only in line endings', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await writeFile(join(s.root, EDITED), NEW.replace(/\n/g, '\r\n'), 'utf8');
+    s.answerConflicts('keep_ours');
+
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW.replace(/\n/g, '\r\n'));
+  });
+
+  it('spends every pre-image of the path, not only the newest, once a Keep settles it', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await writeFile(join(s.root, EDITED), 'SECOND EDIT\n', 'utf8');
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    s.answerConflicts('keep_ours');
+
+    await s.apply();
+
+    expect(
+      s.fake
+        .rows(schema.onboardingArtifacts)
+        .filter((r) => r.diskPath === EDITED && r.taskId === TASK && r.source === 'backfill'),
+    ).toEqual([]);
+  });
+
+  it('leaves a path alone that was edited after the failed attempt wrote it', async () => {
+    const s = await setup();
+    failOneCommit(s);
+    await expect(s.apply()).rejects.toThrow('commit refused');
+    await writeFile(join(s.root, EDITED), 'SAVED SINCE\n', 'utf8');
+
+    s.answerConflicts('keep_ours');
+    await s.apply();
+
+    expect(await readFile(join(s.root, EDITED), 'utf8')).toBe('SAVED SINCE\n');
   });
 
   it('never names a row something else retired meanwhile as the one it replaced', async () => {

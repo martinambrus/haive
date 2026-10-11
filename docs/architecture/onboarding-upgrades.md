@@ -369,7 +369,17 @@ as offered would change nothing, and the banner promises changes.
 version declined, so the next upgrade offers only a newer one. On a live row it moves
 `templateContentHash` in place. An untracked path gets a `backfill` row whose `writtenHash` is the
 render, so it claims nothing, and a rollback, which reads only `upgrade` rows, never takes the file
-for one it introduced. Skip records nothing, so the path is offered again. An obsolete Haive file
+for one it introduced. A Retry clears the form, so a conflict a failed attempt answered with
+Overwrite can be answered with Keep: while the path still holds that attempt's render, Keep first
+writes back the bytes the attempt recorded before writing (the whole file, or the rules region),
+so the version kept is the person's and not the render. Those bytes are the person's own, so the
+restored path is not reported as written and the upgrade commit does not stage it. The check and the write run on one held
+file (`rewriteFileIfNoFollow`), so a save landing meanwhile stays. When that attempt had committed,
+its own row is retired and the row the plan saw comes back carrying the decision. The pre-image
+is deleted in its own statement as soon as the held file is settled, whether or not it was written
+back and before the Keep's transaction, so no later failure leaves it for a retry to write over a
+save that happens to match the render. Skip records
+nothing, so the path is offered again. An obsolete Haive file
 has no newer version to decline, so it is kept by "Keep these files, and stop tracking them": its row
 is superseded and the file left, and neither the plan nor the banner offers it again until a rollback
 of that upgrade puts the row back. Removal wins when one file is picked for both.
