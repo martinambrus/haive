@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray, ne } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, ne, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -609,8 +609,9 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
 /** The task states a conversation is live in: the ones `findOpenPlanMerge` (api) counts. */
 const LIVE_STATUSES = ['created', 'queued', 'running', 'paused', 'waiting_user'] as const;
 
-/** Discard a cancelled conversation's scratch worktree unless another live one of the repository
- *  may have resumed its merge. Never throws: a cancel must finish. */
+/** Discard a cancelled conversation's scratch worktree unless another conversation of the repository
+ *  may hold it: a live one, or a failed one opened after this one, whose Retry resumes it. Never
+ *  throws: a cancel must finish. */
 export async function discardPlanMerge(db: Database, taskId: string): Promise<void> {
   const note = (eventType: string, payload: Record<string, unknown>) =>
     db
@@ -620,7 +621,7 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
-      columns: { type: true, repositoryId: true },
+      columns: { type: true, repositoryId: true, createdAt: true },
     });
     if (task?.type !== 'plan_merge' || !task.repositoryId) return;
     const repo = await db.query.repositories.findFirst({
@@ -634,7 +635,10 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
         eq(schema.tasks.repositoryId, task.repositoryId),
         eq(schema.tasks.type, 'plan_merge'),
         ne(schema.tasks.id, taskId),
-        inArray(schema.tasks.status, [...LIVE_STATUSES]),
+        or(
+          inArray(schema.tasks.status, [...LIVE_STATUSES]),
+          and(eq(schema.tasks.status, 'failed'), gt(schema.tasks.createdAt, task.createdAt)),
+        ),
       ),
       columns: { id: true },
       limit: 1,

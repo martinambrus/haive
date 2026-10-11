@@ -164,12 +164,30 @@ async function main(): Promise<void> {
     out.heldWorktreeRegistered = await registered(wt2);
     out.skippedEvent = events.find((e) => e.type === 'plan_merge.discard_skipped')?.payload ?? null;
     out.holder = holder;
+
+    // 3. A failed conversation opened after the cancelled one may be Retried onto the merge: kept.
+    const setStatus = (id: string, status: 'completed' | 'failed') =>
+      db.update(schema.tasks).set({ status }).where(eq(schema.tasks.id, id));
+    await setStatus(holder, 'completed');
+    const third = await mk('waiting_user');
+    const newerFailed = await mk('running');
+    await setStatus(newerFailed, 'failed');
+    await cancel(third);
+    out.newerFailedKept = await registered(wt2);
+
+    // 4. A failed conversation older than the cancelled one does not hold it: discarded.
+    const fourth = await mk('waiting_user');
+    await cancel(fourth);
+    out.olderFailedDiscarded = !(await registered(wt2));
     console.log(JSON.stringify(out, null, 2));
     if (out.worktreeRegistered || out.worktreeDirExists) {
       throw new Error('the cancelled conversation left its scratch worktree behind');
     }
     if (!out.heldWorktreeRegistered || !out.skippedEvent) {
       throw new Error('a worktree another live conversation holds was discarded or unreported');
+    }
+    if (!out.newerFailedKept || !out.olderFailedDiscarded) {
+      throw new Error('a newer failed conversation lost its worktree, or an older one kept it');
     }
     console.log('PLAN_MERGE_CANCEL_OK');
   } catch (err) {
