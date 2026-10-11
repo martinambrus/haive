@@ -870,10 +870,11 @@ function inSqlContext(n: ts.Node): boolean {
 
 const SQL_IDENT = String.raw`("(?:[^"]|"")+"|\w+)`;
 const TASK_TABLE = String.raw`(only\s+)?(${SQL_IDENT}\s*\.\s*)?"?tasks"?`;
-// Shaped as a statement, not just named: "Update tasks before retrying" has no SET.
+// Shaped as a statement, not just named: "Update tasks before retrying" has no SET. Whatever
+// sits between an UPDATE's target and its SET (alias, `*`) is not parsed.
 const TASK_MUTATION = new RegExp(
   [
-    String.raw`\bupdate\s+${TASK_TABLE}(\s+(as\s+)?${SQL_IDENT})?\s+set\b`,
+    String.raw`\bupdate\s+${TASK_TABLE}([^\w$-][^;]*?)?\bset\b`,
     String.raw`\binsert\s+into\s+${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\bdelete\s+from\s+${TASK_TABLE}([^\w$-]|$)`,
     String.raw`\bmerge\s+into\s+${TASK_TABLE}([^\w$-]|$)`,
@@ -1000,6 +1001,8 @@ describe('a live-status write on a task row', () => {
     expect(found("throw new HttpError(409, 'Update tasks before retrying');")).toBe(0);
     expect(found('sql`UPDATE tasks AS "current" SET status = 1`')).toBe(1);
     expect(found('sql`UPDATE "tenant-app".tasks SET status = 1`')).toBe(1);
+    expect(found('sql`UPDATE tasks * SET status = 1`')).toBe(1);
+    expect(found("const m = 'Update tasks before retrying; set a new base first.';")).toBe(0);
     expect(
       found(
         "sql`INSERT INTO tasks AS current (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET status = 'running'`",
