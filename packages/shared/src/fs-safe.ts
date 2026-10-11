@@ -761,6 +761,9 @@ const APPLY_TREE_CONCURRENCY = 32;
 
 const STALE_TEMP_MS = 60 * 60 * 1000;
 const SWEEP_MAX_TEMPS = 32;
+const SWEEP_MAX_ENTRIES = 4096;
+/** Linux's PID_MAX_LIMIT: no process.pid is larger. */
+const PID_MAX = 4_194_304;
 const TEMP_SUFFIX =
   /^[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -1662,8 +1665,16 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
     const dir = await walkDir(anchor, toSafeRel(dirSegs.join('/')), [...dirSegs]);
     try {
       let left = SWEEP_MAX_TEMPS;
-      for (const name of await readdir(fdPath(dir.fh.fd))) {
-        if (!name.startsWith(prefix) || !TEMP_SUFFIX.test(name.slice(prefix.length))) continue;
+      let seen = 0;
+      // Streamed and capped: the directory is the repository's, so its size is not ours to choose.
+      for await (const entry of await opendir(fdPath(dir.fh.fd), { bufferSize: 32 })) {
+        if (++seen > SWEEP_MAX_ENTRIES) break;
+        const name = entry.name;
+        if (!name.startsWith(prefix)) continue;
+        const suffix = name.slice(prefix.length);
+        if (!TEMP_SUFFIX.test(suffix) || Number(suffix.slice(0, suffix.indexOf('-'))) > PID_MAX) {
+          continue;
+        }
         // Held until its removal is done, so its inode cannot be reused by a replacement.
         const fh = await open(at(dir.fh.fd, name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK).catch(
           () => null,
