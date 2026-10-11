@@ -368,7 +368,7 @@ function dominated(node: ts.Node, scope: ts.Node, tx: string): boolean {
 function guarded(sf: ts.SourceFile, node: ts.Node, tx: string | null, depth = 0): boolean {
   if (tx === null) return false;
   const scope = scopeOf(node);
-  if (!scope || reassigns(scope, tx)) return false;
+  if (!scope || reassigns(scope, tx) || redeclares(scope, tx)) return false;
   if (dominated(node, scope, tx)) return true;
   const name = nameOf(scope);
   if (!name || depth > 3) return false;
@@ -414,6 +414,55 @@ function reassigns(scope: ts.Node, name: string): boolean {
   return found;
 }
 
+/** Whether `name` is declared again inside `scope`, beyond the scope's own parameter: a nested
+ *  binding can shadow the handle the guard locked, under the same text. */
+function redeclares(scope: ts.FunctionLikeDeclaration, name: string): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (
+      n !== scope &&
+      (ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isBindingElement(n)) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name &&
+      !(ts.isParameter(n) && n.parent === scope)
+    ) {
+      found = true;
+    }
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(scope);
+  return found;
+}
+
+/** Whether the guard's name is bound in this file by anything but its import or its own exported
+ *  definition, which would let an unrelated function pass for it. */
+function shadowsGuard(sf: ts.SourceFile): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    const named = (n as { name?: ts.Node }).name;
+    if (
+      named &&
+      ts.isIdentifier(named) &&
+      named.text === GUARD &&
+      (ts.isVariableDeclaration(n) ||
+        ts.isFunctionDeclaration(n) ||
+        ts.isParameter(n) ||
+        ts.isBindingElement(n) ||
+        ts.isClassDeclaration(n)) &&
+      !(
+        ts.isFunctionDeclaration(n) &&
+        ts.isSourceFile(n.parent) &&
+        n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+      )
+    ) {
+      found = true;
+    }
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return found;
+}
+
 /** The transaction a write runs in: the identifier its builder chain starts at, if it is one. */
 function writeTx(call: ts.CallExpression): string | null {
   const root = chainRoot(call.expression);
@@ -456,7 +505,8 @@ function liveWrites(
         out.push({
           site: `${file}:${line}`,
           status,
-          covered: movesOnlyCreated(node) || guarded(sf, node, writeTx(node)),
+          covered:
+            movesOnlyCreated(node) || (!shadowsGuard(sf) && guarded(sf, node, writeTx(node))),
         });
       }
     }
@@ -695,6 +745,17 @@ describe('a live-status write on a task row', () => {
       covered(
         `let h = lockTx; await ${GUARD}(h, id); h = tx; await h.update(schema.tasks).set({ status: 'running' });`,
       ),
+    ).toEqual([false]);
+    expect(
+      covered(
+        `await ${GUARD}(tx, id); { const tx = lockTx; await tx.update(schema.tasks).set({ status: 'running' }); }`,
+      ),
+    ).toEqual([false]);
+    expect(
+      liveWrites(
+        'x.ts',
+        `async function f(tx, id) { const ${GUARD} = async () => {}; await ${GUARD}(tx, id); await tx.update(schema.tasks).set({ status: 'running' }); }`,
+      ).map((w) => w.covered),
     ).toEqual([false]);
   });
 
