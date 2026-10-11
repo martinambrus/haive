@@ -57,7 +57,8 @@ describe('DDEV lifecycle commands across worker restarts', () => {
       wrap('exec', "'APP_ENV=prod php artisan migrate'"),
     );
     expect(shell("exec 'echo a | wc -c'")).toBe(wrap('exec', "'echo a | wc -c'"));
-    expect(shell('exec -s db mysql')).toBe(wrap('exec -s db', 'mysql'));
+    expect(shell('exec -s web mysql')).toBe(wrap('exec -s web', 'mysql'));
+    expect(shell("exec '--service' 'web' ls")).toBe(wrap("exec '--service' 'web'", 'ls'));
     expect(shell("'exec' '-d' '/v/a'\\''b' 'pytest'")).toBe(
       wrap("'exec' '-d' '/v/a'\\''b'", "'pytest'"),
     );
@@ -70,6 +71,20 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     expect(shell('exec php -v', 5_000)).toBe(wrap('exec', 'php -v', 1));
     expect(shell('exec')).toBe('cd /repos/x && ddev exec');
     expect(buildDdevCommand('/repos/x', 'exec php -v', 60_000).hostTimeoutMs).toBe(60_000);
+  });
+
+  it('leaves an exec in another service unwrapped, since its image need not carry timeout', () => {
+    const shell = (args: string) => buildDdevCommand('/repos/x', args, 60_000).shell;
+    for (const args of [
+      'exec -s db mysql',
+      'exec -s redis --raw redis-cli ping',
+      'exec --service=redis redis-cli ping',
+      'exec -sredis redis-cli ping',
+      "exec '-s' 'redis' redis-cli ping",
+      'exec -d /tmp --service solr -- ls',
+    ]) {
+      expect(shell(args)).toBe(`cd /repos/x && ddev ${args}`);
+    }
   });
 
   it('hands the inner bash the command string ddev itself would have built', () => {
@@ -97,10 +112,10 @@ describe('DDEV lifecycle commands across worker restarts', () => {
       'APP_ENV=prod php -r "echo 1;"',
     );
     expect(argv('exec php -v').at(-1)).toBe('php -v');
-    expect(argv(`exec -s db -- mysql -e 'select 1 #x' "a\\"b" ''`)).toEqual([
+    expect(argv(`exec -s web -- mysql -e 'select 1 #x' "a\\"b" ''`)).toEqual([
       'exec',
       '-s',
-      'db',
+      'web',
       '--raw',
       '--',
       'timeout',
@@ -120,8 +135,8 @@ describe('DDEV lifecycle commands across worker restarts', () => {
     expect(shell("exec -d '/var/www/html/a b' --raw ls")).toBe(
       "cd /repos/x && ddev exec -d '/var/www/html/a b' --raw timeout --kill-after=5s 50s ls",
     );
-    expect(shell("exec '--raw' -s db ls")).toBe(
-      "cd /repos/x && ddev exec '--raw' -s db timeout --kill-after=5s 50s ls",
+    expect(shell("exec '--raw' -s web ls")).toBe(
+      "cd /repos/x && ddev exec '--raw' -s web timeout --kill-after=5s 50s ls",
     );
   });
 

@@ -1197,17 +1197,21 @@ const DDEV_EXEC_HEAD = new RegExp(
 );
 
 const DDEV_EXEC_RAW = /(?:^|\s)['"]?--raw['"]?(?=\s|$)/;
+const DDEV_EXEC_SERVICE = /(?:^|\s)['"]?(?:-s|--service)(?:['"]?\s+['"]?|=|(?=[^\s'"=]))([^\s'"]+)/;
 
 // ddev's quoteArgs (cmd/ddev/cmd/exec.go): from two words up, one holding `" \t\r\n#` is double-quoted.
 const DDEV_QUOTE_ARGS =
   'c=; unset f; if [ $# -lt 2 ]; then c="$*"; else for a; do case $a in *[\\"\\ \\#$\'\\t\\r\\n\']*) a="\\"${a//\\"/\\\\\\"}\\"";; esac; c="$c${f+ }$a"; f=1; done; fi';
 
 /** Killing the runner's ddev client leaves the command running in the web container, so an
- *  `exec` command carries its own deadline, just under the host's. Other verbs pass through.
+ *  web-container `exec` carries its own deadline, just under the host's. Anything else passes through.
  *  A non-raw exec's words are joined the way ddev joins them and run raw under one `bash -c`. */
 function withWebContainerDeadline(ddevArgs: string, timeoutMs: number): string {
   const head = DDEV_EXEC_HEAD.exec(ddevArgs)?.[0];
   if (head === undefined || ddevArgs.slice(head.length).trim() === '') return `ddev ${ddevArgs}`;
+  // Another service's image need not carry GNU timeout.
+  const service = DDEV_EXEC_SERVICE.exec(head)?.[1];
+  if (service !== undefined && service !== 'web') return `ddev ${ddevArgs}`;
   const rest = ddevArgs.slice(head.length);
   const deadline = `timeout --kill-after=5s ${Math.max(1, Math.ceil(timeoutMs / 1000) - 10)}s`;
   if (DDEV_EXEC_RAW.test(head)) return `ddev ${head} ${deadline}${rest}`;
