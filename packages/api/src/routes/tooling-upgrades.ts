@@ -13,7 +13,15 @@ import {
   type OnboardingToolingMirror,
   type ToolName,
 } from '@haive/shared';
-import { RAG_TABLE, resolveRagConnection, type RagMode } from '@haive/shared/rag';
+import {
+  RAG_TABLE,
+  openExistingRagDatabase,
+  ragDatabaseName,
+  ragRowsAwaitReembed,
+  resolveRagConnection,
+  type RagConnection,
+  type RagMode,
+} from '@haive/shared/rag';
 import {
   ALL_REVIEW_DIMENSION_IDS,
   REVIEW_DIMENSIONS,
@@ -250,9 +258,101 @@ const RAG_REEMBED_CONNECT_TIMEOUT_SECONDS = 3;
 const RAG_REEMBED_BATCH_ROWS = 500;
 const RAG_REEMBED_STATEMENT_TIMEOUT_MS = 3_000;
 const RAG_REEMBED_DEADLINE_MS = 60_000;
+const RAG_PROBE_DEADLINE_MS = 10_000;
 const QUERY_CANCELED = '57014';
+const UNDEFINED_TABLE = '42P01';
 
 class ReembedDeadline extends Error {}
+
+/** Opens the repository's RAG store from its own onboarding mirrors rather than a
+ *  task's step outputs, since the callers run from a settings page with no task in hand.
+ *  Null when the repo has no usable RAG config. */
+async function openRagStore(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+  opts: { existingOnly?: boolean } = {},
+): Promise<RagConnection | null> {
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { onboardingTooling: true, onboardingEnvironment: true },
+  });
+  const toolingMirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
+  const envMirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
+  if (
+    toolingMirror?.schemaVersion !== ONBOARDING_TOOLING_SCHEMA_VERSION ||
+    !toolingMirror.tooling
+  ) {
+    return null;
+  }
+  const t = toolingMirror.tooling as {
+    ragMode?: string;
+    ragConnectionString?: string | null;
+    ollamaUrl?: string | null;
+    embeddingModel?: string | null;
+    embeddingDimensions?: number;
+  };
+  if (!t.ragMode || t.ragMode === 'none') return null;
+  const projectName =
+    envMirror?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION
+      ? ((envMirror.envDetectData as { project?: { name?: string } } | undefined)?.project?.name ??
+        'default')
+      : 'default';
+
+  const dims = typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560;
+  // A read must not create the internal database it is asking about.
+  if (opts.existingOnly && t.ragMode === 'internal') {
+    return openExistingRagDatabase(db, ragDatabaseName(projectName), dims);
+  }
+  return resolveRagConnection(
+    {
+      ragMode: t.ragMode as RagMode,
+      ragConnectionString: t.ragConnectionString || null,
+      ollamaUrl: t.ollamaUrl || null,
+      embeddingModel: t.embeddingModel || null,
+      embeddingDimensions: dims,
+    },
+    db,
+    projectName,
+    { connectTimeoutSeconds: RAG_REEMBED_CONNECT_TIMEOUT_SECONDS, fetchTypes: false },
+  );
+}
+
+/** Whether the repository's store holds rows awaiting re-embed. A store that is
+ *  configured but does not answer in time reads as true: the caller keeps its flag
+ *  rather than clearing it blind. No store configured reads as false. */
+async function ragStoreAwaitsReembedBounded(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+): Promise<boolean> {
+  const held: { conn: RagConnection | null } = { conn: null };
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ReembedDeadline()), RAG_PROBE_DEADLINE_MS);
+  });
+  const probe = async () => {
+    held.conn = await openRagStore(db, repositoryId, { existingOnly: true });
+    if (!held.conn) return false;
+    try {
+      return await held.conn.pg.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_REEMBED_STATEMENT_TIMEOUT_MS}ms'`);
+        return ragRowsAwaitReembed(tx, repositoryId);
+      });
+    } catch (err) {
+      // A store with no index table holds no rows to re-embed.
+      if ((err as { code?: unknown } | null)?.code === UNDEFINED_TABLE) return false;
+      throw err;
+    }
+  };
+  try {
+    return await Promise.race([probe(), deadline]);
+  } catch {
+    void held.conn?.pg.end({ timeout: 0 }).catch(() => {});
+    return true;
+  } finally {
+    clearTimeout(timer);
+    await held.conn?.close().catch(() => {});
+  }
+}
 
 /** Force every chunk of a repository's RAG index to be re-embedded on the next
  *  sync, WITHOUT deleting anything: nulling `chunk_hash` makes the incremental
@@ -264,8 +364,6 @@ class ReembedDeadline extends Error {}
  *  lexical-only mode, and one indexed before strict embedding existed (those carry
  *  no degradation record, so this is their only route back).
  *
- *  Resolves the RAG target from the repo's own onboarding mirrors rather than a
- *  task's step outputs, since this runs from a settings page with no task in hand.
  *  Returns false when the repo has no usable RAG config — nothing to re-embed.
  *  Resets in bounded batches, so a stopped run is not rolled back: running it again
  *  continues, since it only touches rows that still hold a hash. */
@@ -273,44 +371,7 @@ async function forceRagReembed(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
 ): Promise<boolean> {
-  const repo = await db.query.repositories.findFirst({
-    where: eq(schema.repositories.id, repositoryId),
-    columns: { onboardingTooling: true, onboardingEnvironment: true },
-  });
-  const toolingMirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
-  const envMirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
-  if (
-    toolingMirror?.schemaVersion !== ONBOARDING_TOOLING_SCHEMA_VERSION ||
-    !toolingMirror.tooling
-  ) {
-    return false;
-  }
-  const t = toolingMirror.tooling as {
-    ragMode?: string;
-    ragConnectionString?: string | null;
-    ollamaUrl?: string | null;
-    embeddingModel?: string | null;
-    embeddingDimensions?: number;
-  };
-  if (!t.ragMode || t.ragMode === 'none') return false;
-  const projectName =
-    envMirror?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION
-      ? ((envMirror.envDetectData as { project?: { name?: string } } | undefined)?.project?.name ??
-        'default')
-      : 'default';
-
-  const conn = await resolveRagConnection(
-    {
-      ragMode: t.ragMode as RagMode,
-      ragConnectionString: t.ragConnectionString || null,
-      ollamaUrl: t.ollamaUrl || null,
-      embeddingModel: t.embeddingModel || null,
-      embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
-    },
-    db,
-    projectName,
-    { connectTimeoutSeconds: RAG_REEMBED_CONNECT_TIMEOUT_SECONDS, fetchTypes: false },
-  );
+  const conn = await openRagStore(db, repositoryId);
   if (!conn) return false;
   const progress = { reset: 0 };
   let timer: NodeJS.Timeout | undefined;
@@ -700,11 +761,18 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   // that merely failed under strict mode has no hash rows — those chunks were left
   // unindexed — so its next incremental sync picks them up as ordinary inserts and
   // re-embedding the whole repository would be wasted work.
+  let retryCleared: { ragEmbedDegradedAt: Date; ragEmbedDegradedReason: string | null } | null =
+    null;
   let reembedQueued = false;
+  let degradationKept = false;
   if (body.ragEmbedAction) {
     const current = await db.query.repositories.findFirst({
       where: eq(schema.repositories.id, repositoryId),
-      columns: { ragEmbedLexicalOnly: true },
+      columns: {
+        ragEmbedLexicalOnly: true,
+        ragEmbedDegradedAt: true,
+        ragEmbedDegradedReason: true,
+      },
     });
     if (!current) throw new HttpError(404, 'Repository not found');
     if (body.ragEmbedAction === 'accept_lexical_only') {
@@ -713,8 +781,22 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       updates.ragEmbedDegradedReason = null;
     } else {
       updates.ragEmbedLexicalOnly = false;
-      updates.ragEmbedDegradedAt = null;
-      updates.ragEmbedDegradedReason = null;
+      // A retry re-embeds nothing, so rows a degraded run left awaiting re-embed keep the dense half off.
+      degradationKept =
+        body.ragEmbedAction !== 'rebuild_index' &&
+        !current.ragEmbedLexicalOnly &&
+        !!current.ragEmbedDegradedAt &&
+        (await ragStoreAwaitsReembedBounded(db, repositoryId));
+      if (!degradationKept) {
+        updates.ragEmbedDegradedAt = null;
+        updates.ragEmbedDegradedReason = null;
+        if (body.ragEmbedAction === 'retry' && current.ragEmbedDegradedAt) {
+          retryCleared = {
+            ragEmbedDegradedAt: current.ragEmbedDegradedAt,
+            ragEmbedDegradedReason: current.ragEmbedDegradedReason,
+          };
+        }
+      }
       if (body.ragEmbedAction === 'rebuild_index' || current.ragEmbedLexicalOnly) {
         const pending = {
           ragEmbedDegradedAt: new Date(),
@@ -732,5 +814,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   }
 
   await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));
-  return c.json({ repositoryId, ok: true, reembedQueued });
+  // A sync can write fallback rows between the probe and the clear; look once more after it.
+  if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
+    await db
+      .update(schema.repositories)
+      .set(retryCleared)
+      .where(eq(schema.repositories.id, repositoryId));
+    degradationKept = true;
+  }
+  return c.json({ repositoryId, ok: true, reembedQueued, degradationKept });
 });

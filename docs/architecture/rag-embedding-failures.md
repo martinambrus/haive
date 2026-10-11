@@ -125,7 +125,13 @@ hash-mode run proves nothing about whether embeddings work.
 An unchanged scan also proves nothing: if the repo is already degraded and no file batch
 produces a real embedding, workflow sync embeds one short health-check text before clearing
 the flag. A failed or hashed check retains degradation and the step warning; a healthy
-check permits recovery without requiring a source edit.
+check permits recovery without requiring a source edit. A clear also needs the store to hold no
+non-task row with a NULL `chunk_hash` (a fallback row or one reset for re-embed), and the tooling
+page's Retry runs the same bounded probe before it clears: rows awaiting re-embed, or a configured
+store that does not answer, keep the flag (`degradationKept`), while a missing internal database or
+index table counts as nothing awaiting. The probe opens an internal store only if it exists, since
+`resolveRagConnection` creates the database it is asked for. A degraded sync's first banner says
+that rows await re-embed (fallback vectors or a pending rebuild) when the store holds them, rather than "not searchable".
 
 **`rag_embed_lexical_only` is the accepted verdict, and it is NOT "keep hashing".** It forces
 `ragHybridSearch`'s existing lexical-only branch (the one a jsonb-only store already takes), so an
