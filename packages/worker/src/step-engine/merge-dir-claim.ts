@@ -1,7 +1,7 @@
 import { and, eq, inArray, ne, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 
-type DbHandle = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+export type DbHandle = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /** Phases whose merge dir still holds the task's work: an open merge, or a landed one the squash or
  *  the push has yet to finish. `pending` has opened nothing, and `done` has released the dir. */

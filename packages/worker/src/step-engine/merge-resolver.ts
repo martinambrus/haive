@@ -28,7 +28,7 @@ import {
   unmergedPaths,
   type MergeAbort,
 } from './git-merge.js';
-import { findOtherMergeHolder, lockMergeDir } from './merge-dir-claim.js';
+import { findOtherMergeHolder, lockMergeDir, type DbHandle } from './merge-dir-claim.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import {
   addStepWarning,
@@ -208,7 +208,7 @@ async function setStepStatus(
 }
 
 async function saveMergeState(
-  db: Database,
+  db: DbHandle,
   stepRowId: string,
   state: MergeResolveState,
 ): Promise<void> {
@@ -777,9 +777,9 @@ export async function resolveMergePhase(
         ['-m', `Merge ${pending.featureBranch}`],
         commitEnv,
       );
-      // Recorded before the lock drops, so a landed merge the squash has yet to reset is held too.
+      // Recorded inside the lock's transaction, so a landed merge the squash has yet to reset is held too.
       if (opened.kind !== 'refused') {
-        await saveMergeState(db, current.id, { ...pending, phase: 'resolving' });
+        await saveMergeState(tx, current.id, { ...pending, phase: 'resolving' });
       }
       return { kind: 'opened' as const, opened };
     });
