@@ -87,6 +87,9 @@ export class TerminalSessionManager {
   /** When a restart last killed the tmux session of each container. Set before the kill, since a
    *  client can end before the kill returns, so any session attached until then is counted. */
   private readonly restartedAt = new Map<string, number>();
+  /** One open probe-and-attach or one restart per container at a time, so a restart never lands
+   *  between an open's probe and its attach, and two restarts never undo each other's mark. */
+  private readonly containerTurns = new Map<string, Promise<void>>();
   /** Per-(user,task,provider) in-flight ensureShellContainer call. Two
    *  near-simultaneous opens (React StrictMode double-mount, or two browser
    *  tabs racing) would otherwise both call createContainer and one would
@@ -182,6 +185,7 @@ export class TerminalSessionManager {
           return;
         }
         const container = session.containerName;
+        const endTurn = await this.containerTurn(container);
         const before = this.restartedAt.get(container);
         this.restartedAt.set(container, Date.now());
         const killed = await this.runInContainer(container, [
@@ -203,6 +207,7 @@ export class TerminalSessionManager {
           if (before === undefined) this.restartedAt.delete(container);
           else this.restartedAt.set(container, before);
         }
+        endTurn();
       }
     }
   }
@@ -377,10 +382,6 @@ export class TerminalSessionManager {
     // SIGHUP). The tmux server keeps running inside the container until
     // the container itself is reaped, giving the user the full grace
     // window to reconnect.
-    const workdirMismatch =
-      scope === 'task'
-        ? await this.probeWorkdirMismatch(ensured.containerName, ptyWorkingDir)
-        : undefined;
     const sessionId = randomUUID();
     // No -x/-y: let tmux size the pane from the controlling PTY. The xterm
     // sends a resize control frame on first connect (and on every window
@@ -407,21 +408,34 @@ export class TerminalSessionManager {
     // absolute host path under the repos volume that exists in no container, so git there fails
     // whatever is mounted. Falls back to the repo root when there's no worktree (skipped
     // 01-worktree-setup). Repo-scope shells stay at the repo root.
-    const attachedAt = Date.now();
-    const ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
-      Cmd: tmuxCommand,
-      AttachStdin: true,
-      AttachStdout: true,
-      AttachStderr: true,
-      Tty: true,
-      WorkingDir: ptyWorkingDir,
-      Env: execEnv,
-    });
-    const ptyStream = (await ptyHandle.start({
-      hijack: true,
-      stdin: true,
-      Tty: true,
-    })) as Duplex;
+    const endTurn = await this.containerTurn(ensured.containerName);
+    let workdirMismatch: TerminalWorkdirMismatch | undefined;
+    let attachedAt: number;
+    let ptyHandle: Docker.Exec;
+    let ptyStream: Duplex;
+    try {
+      workdirMismatch =
+        scope === 'task'
+          ? await this.probeWorkdirMismatch(ensured.containerName, ptyWorkingDir)
+          : undefined;
+      attachedAt = Date.now();
+      ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
+        Cmd: tmuxCommand,
+        AttachStdin: true,
+        AttachStdout: true,
+        AttachStderr: true,
+        Tty: true,
+        WorkingDir: ptyWorkingDir,
+        Env: execEnv,
+      });
+      ptyStream = (await ptyHandle.start({
+        hijack: true,
+        stdin: true,
+        Tty: true,
+      })) as Duplex;
+    } finally {
+      endTurn();
+    }
 
     const inChannel = `${TERMINAL_IN_CHANNEL_PREFIX}${sessionId}`;
     const ctlChannel = `${TERMINAL_CTL_CHANNEL_PREFIX}${sessionId}`;
@@ -483,6 +497,20 @@ export class TerminalSessionManager {
       containerName: ensured.containerName,
       shell: ensured.shell,
       ...(workdirMismatch ? { workdirMismatch } : {}),
+    };
+  }
+
+  /** Waits for this container's turn and returns the call that ends it. */
+  private async containerTurn(container: string): Promise<() => void> {
+    const previous = this.containerTurns.get(container) ?? Promise.resolve();
+    let end!: () => void;
+    const turn = previous.then(() => new Promise<void>((resolve) => (end = resolve)));
+    this.containerTurns.set(container, turn);
+    await previous;
+    await Promise.resolve();
+    return () => {
+      end();
+      if (this.containerTurns.get(container) === turn) this.containerTurns.delete(container);
     };
   }
 

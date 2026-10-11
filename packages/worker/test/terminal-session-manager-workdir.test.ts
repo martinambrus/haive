@@ -39,7 +39,8 @@ interface Harness {
 }
 
 /** `probe` is what `tmux display-message` prints, or null for a non-zero exit (no session). */
-function harness(probe: string | null, killExit = 0): Harness {
+function harness(probe: string | null, killExit: number | number[] = 0): Harness {
+  const killExits = Array.isArray(killExit) ? [...killExit] : null;
   const execs: ExecCall[] = [];
   const attaches: PassThrough[] = [];
   const attachGates: Promise<void>[] = [];
@@ -63,7 +64,15 @@ function harness(probe: string | null, killExit = 0): Harness {
             return stream;
           },
           inspect: async () => ({
-            ExitCode: isProbe ? (probe === null ? 1 : 0) : isAttach ? null : killExit,
+            ExitCode: isProbe
+              ? probe === null
+                ? 1
+                : 0
+              : isAttach
+                ? null
+                : killExits
+                  ? (killExits.shift() ?? 0)
+                  : killExit,
           }),
           resize: async () => undefined,
         };
@@ -230,10 +239,48 @@ describe('restart shell', () => {
     await vi.waitFor(() =>
       expect(h.execs.filter((e) => e.cmd[1] === 'new-session')).toHaveLength(2),
     );
-    await h.sendCtl(first.sessionId, { type: 'restart_shell', userId: 'user-1' });
+    const restart = h.sendCtl(first.sessionId, { type: 'restart_shell', userId: 'user-1' });
     release();
+    await restart;
     if (!(await pending).ok) throw new Error('open failed');
     for (const a of h.attaches) a.end();
+    await new Promise((r) => setImmediate(r));
+    expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toEqual([
+      JSON.stringify({ type: 'exit', reason: 'restart' }),
+      JSON.stringify({ type: 'exit', reason: 'restart' }),
+    ]);
+  });
+
+  it('runs a restart only after an open has attached, never between its probe and its attach', async () => {
+    const h = harness('/haive/workdir/.haive/worktrees/old');
+    const first = await h.openTask();
+    if (!first.ok) throw new Error('open failed');
+    let release!: () => void;
+    h.attachGates.push(new Promise<void>((r) => (release = r)));
+    const pending = h.openTask();
+    await vi.waitFor(() =>
+      expect(h.execs.filter((e) => e.cmd[1] === 'new-session')).toHaveLength(2),
+    );
+    const restart = h.sendCtl(first.sessionId, { type: 'restart_shell', userId: 'user-1' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(killCalls(h.execs)).toHaveLength(0);
+    release();
+    await restart;
+    await pending;
+    const order = h.execs.map((e) => e.cmd[1]);
+    expect(order.lastIndexOf('new-session')).toBeLessThan(order.indexOf('kill-session'));
+  });
+
+  it('keeps the mark of a restart that killed the session when a concurrent one finds it gone', async () => {
+    const h = harness(ROOT, [1, 0]);
+    const a = await h.openTask();
+    const b = await h.openTask();
+    if (!a.ok || !b.ok) throw new Error('open failed');
+    await Promise.all([
+      h.sendCtl(a.sessionId, { type: 'restart_shell', userId: 'user-1' }),
+      h.sendCtl(b.sessionId, { type: 'restart_shell', userId: 'user-1' }),
+    ]);
+    for (const att of h.attaches) att.end();
     await new Promise((r) => setImmediate(r));
     expect(h.published().filter((m) => m.startsWith('{"type":"exit"'))).toEqual([
       JSON.stringify({ type: 'exit', reason: 'restart' }),
