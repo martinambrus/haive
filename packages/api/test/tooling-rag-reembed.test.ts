@@ -181,6 +181,16 @@ describe('forcing a re-embed of a repository', () => {
     expect(h.statements[0]!.statement).toBe("SET LOCAL statement_timeout = '3000ms'");
   });
 
+  it('leaves the repository marked degraded when the reset fails part-way', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag');
+    h.batches = [500, { code: '57014' }];
+
+    expect((await rebuild()).status).toBe(503);
+    const [row] = fake.rows(schema.repositories);
+    expect(row!.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(row!.ragEmbedDegradedReason).toEqual(expect.any(String));
+  });
+
   it('answers 503 with the number of chunks already marked when a batch hits the statement timeout', async () => {
     setup('postgres://rag:rag@127.0.0.1:1/rag');
     h.batches = [500, { code: '57014' }];
