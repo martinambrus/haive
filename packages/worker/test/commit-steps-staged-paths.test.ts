@@ -416,6 +416,14 @@ describe('commit steps stage only the paths their step outputs record', () => {
     expect(files).not.toContain('.haive-data/knowledge_base/U.md');
   });
 
+  it('12 commits recorded removals when nothing else is left to add', async () => {
+    const repo = await seeded({ '.claude/knowledge_base/A.md': 'a\n' });
+    await rm(path.join(repo, '.claude/knowledge_base/A.md'));
+    const out = await twelve(repo, { '08-knowledge-acquisition': { output: { written: [] } } });
+    expect(out.commitPerformed).toBe(true);
+    expect(await tracked(repo)).not.toContain('.claude/knowledge_base/A.md');
+  });
+
   it('12 commits the whole tree of a repository with no git, as before', async () => {
     const repo = await mkdtemp(path.join(tmpdir(), 'commit-scope-nogit-'));
     dirs.push(repo);

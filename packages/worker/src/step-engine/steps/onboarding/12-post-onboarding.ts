@@ -717,7 +717,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       if ((await lstatNoFollow(ctx.repoPath, rel)) === null) removedPaths.push(rel);
     }
 
-    if (existingPaths.length === 0) {
+    if (existingPaths.length === 0 && removedPaths.length === 0) {
       warnings.push('no generated files found to stage');
       ctx.logger.warn('post-onboarding: no existing paths to stage');
       return result();
