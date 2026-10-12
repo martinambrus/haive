@@ -183,7 +183,7 @@ describe('a RAG store fenced by its sync lock', () => {
         const state = { lost: false };
         const fenced = fenceRagStore(conn, lockWith(state));
         const failures: unknown[] = [];
-        await (fenced.pg.begin as (...args: unknown[]) => Promise<unknown>)(
+        const done = (fenced.pg.begin as (...args: unknown[]) => Promise<unknown>)(
           ...leading,
           async (tx: { unsafe: (q: string, p?: unknown[]) => Promise<unknown>; other: string }) => {
             expect(tx.other).toBe('kept');
@@ -196,6 +196,7 @@ describe('a RAG store fenced by its sync lock', () => {
             }
           },
         );
+        await expect(done).rejects.toThrow(RagSyncLockLostError);
         expect(failures).toHaveLength(1);
         expect(failures[0]).toBeInstanceOf(RagSyncLockLostError);
         expect(sent).toEqual([['STMT 1', [1]]]);
@@ -227,13 +228,37 @@ describe('a RAG store fenced by its sync lock', () => {
     const state = { lost: false };
     const fenced = fenceRagStore({ pg }, lockWith(state));
     fenced.pg`SELECT 1`;
-    await fenced.pg.begin(async (t) => {
-      t`SELECT pg_advisory_xact_lock(1)`;
-      state.lost = true;
-      expect(() => t`CREATE TABLE x ()`).toThrow(RagSyncLockLostError);
-    });
+    await expect(
+      fenced.pg.begin(async (t) => {
+        t`SELECT pg_advisory_xact_lock(1)`;
+        state.lost = true;
+        expect(() => t`CREATE TABLE x ()`).toThrow(RagSyncLockLostError);
+      }),
+    ).rejects.toThrow(RagSyncLockLostError);
     expect(() => fenced.pg`SELECT 2`).toThrow(RagSyncLockLostError);
     expect(sent).toEqual(['pg:SELECT 1', 'tx:SELECT pg_advisory_xact_lock(1)']);
+  });
+
+  it('fails the transaction callback when the lock is lost after its last statement', async () => {
+    const state = { lost: false };
+    let committed = false;
+    const pg = {
+      unsafe: () => [],
+      begin: async (cb: (t: { unsafe: () => unknown[] }) => Promise<unknown>) => {
+        const result = await cb({ unsafe: () => [] });
+        committed = true;
+        return result;
+      },
+    };
+    const fenced = fenceRagStore({ pg }, lockWith(state));
+    await expect(
+      fenced.pg.begin(async (t) => {
+        t.unsafe();
+        state.lost = true;
+        return 'done';
+      }),
+    ).rejects.toThrow(RagSyncLockLostError);
+    expect(committed).toBe(false);
   });
 
   it('returns the connection itself when there is no lock', () => {

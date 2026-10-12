@@ -237,7 +237,14 @@ export function fenceRagStore<C extends { pg: object }>(conn: C, lock: RagSyncLo
     if (at < 0) return args;
     const run = args[at] as (tx: object) => unknown;
     return args.map((arg, i) =>
-      i === at ? (tx: object) => run(fenced(tx, { unsafe: keep })) : arg,
+      i === at
+        ? async (tx: object) => {
+            const result = await run(fenced(tx, { unsafe: keep }));
+            // Thrown inside the callback, so postgres.js rolls back instead of committing.
+            lock.assertHeld();
+            return result;
+          }
+        : arg,
     );
   };
   return { ...conn, pg: fenced(conn.pg, { unsafe: keep, begin: fenceTransaction }) };
