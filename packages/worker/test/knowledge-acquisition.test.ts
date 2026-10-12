@@ -447,6 +447,27 @@ describe('knowledgeAcquisitionStep.apply — merged legacy sources', () => {
     );
   });
 
+  it('records the merged page even when deleting a folded-in source then fails', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');
+    await seedLegacy(kbDir);
+    const elsewhere = path.join(tmpRoot, 'elsewhere');
+    await mkdir(elsewhere, { recursive: true });
+    await writeFile(path.join(elsewhere, 'X.md'), '# X\n', 'utf8');
+    await symlink(elsewhere, path.join(kbDir, 'legacy', 'sub'));
+
+    const out = await knowledgeAcquisitionStep.apply(ctx, {
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
+      formValues: { selectedTopics: [] },
+      llmOutput: updateRaw(['legacy/sub/X.md']),
+    });
+
+    expect(out.written.map((w) => w.filePath)).toContain(path.join(kbDir, 'ARCHITECTURE.md'));
+    expect(await readFile(path.join(elsewhere, 'X.md'), 'utf8')).toBe('# X\n');
+  });
+
   it('leaves the legacy copy alone when the agent reports no merge', async () => {
     const ctx = makeCtx(tmpRoot);
     const kbDir = path.join(tmpRoot, '.haive-data', 'knowledge_base');

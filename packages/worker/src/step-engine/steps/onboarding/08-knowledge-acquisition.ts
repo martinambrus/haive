@@ -2137,6 +2137,8 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           }),
           { createParents: true },
         );
+        // Recorded as soon as it is on disk: a deletion below that throws must not leave it unstaged.
+        written.push({ id: src.relPath, filePath: destPath, source: 'updated' });
         if (dest !== src.relPath) {
           await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
           removedPaths.push(`${KB_DIR}/${src.relPath}`);
@@ -2163,7 +2165,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           await removeNoFollow(ctx.repoPath, `${KB_DIR}/${safe.normalized}`);
           mergedRemoved.push(safe.normalized);
         }
-        written.push({ id: src.relPath, filePath: destPath, source: 'updated' });
       } catch (err) {
         ctx.logger.warn({ err, path: u.path, dest }, 'kb update write failed');
       }
@@ -2271,9 +2272,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         await writeFileNoFollow(ctx.repoPath, `${KB_DIR}/${dest}`, content, {
           createParents: true,
         });
+        written.push({ id: src.relPath, filePath: destPath, source: 'existing' });
         await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
         removedPaths.push(`${KB_DIR}/${src.relPath}`);
-        written.push({ id: src.relPath, filePath: destPath, source: 'existing' });
       } catch (err) {
         ctx.logger.warn({ err, path: p.path, dest }, 'kb placement move failed');
       }
