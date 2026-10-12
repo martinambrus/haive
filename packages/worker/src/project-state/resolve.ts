@@ -34,9 +34,11 @@ const MAX_RENDER_BYTES = 1024 * 1024;
 
 type Json = Record<string, unknown>;
 
-/** The checkout's render file, or null when it is gone, links out of the repository or does not read
- *  as a render unit: whatever the question was asked against has moved. */
-async function readRenderFile(repoPath: string): Promise<ProjectRender | null> {
+/** The checkout's render file as parsed and as its bytes stand, or null when it is gone, links out of
+ *  the repository or does not read as a render unit: whatever the question was asked against has moved. */
+async function readRenderFile(
+  repoPath: string,
+): Promise<{ render: ProjectRender; raw: Buffer } | null> {
   try {
     const read = await readFileNoFollow(repoPath, RENDER_FILE, {
       strict: true,
@@ -44,22 +46,62 @@ async function readRenderFile(repoPath: string): Promise<ProjectRender | null> {
     });
     if (read === null || read.truncated) return null;
     const parsed = renderSchema.safeParse(JSON.parse(read.data.toString('utf8')));
-    return parsed.success ? parsed.data : null;
+    return parsed.success ? { render: parsed.data, raw: read.data } : null;
   } catch (err) {
     if (err instanceof SyntaxError || isPathContainmentError(err)) return null;
     throw err;
   }
 }
 
+interface After {
+  resync: string | null;
+  putBack: { repoPath: string; raw: Buffer } | null;
+}
+
 /** Answers one pending conflict of the render unit, so that the file, the sync base and the column
  *  agree on the answered key and the next sync finds nothing to ask. Idempotent: the same answer to
- *  a closed row returns it again. */
+ *  a closed row returns it again. A failure after the file was rewritten puts its bytes back. */
 export async function resolveProjectStateConflict(
   db: Database,
-  { repositoryId, userId, conflictId, answer }: ProjectStateResolvePayload,
+  payload: ProjectStateResolvePayload,
 ): Promise<ProjectStateResolveResult> {
-  const after: { resync: string | null } = { resync: null };
-  const result = await db.transaction(async (tx): Promise<ProjectStateResolveResult> => {
+  const after: After = { resync: null, putBack: null };
+  let result: ProjectStateResolveResult;
+  try {
+    result = await answerInTransaction(db, payload, after);
+  } catch (err) {
+    if (after.putBack !== null) {
+      await writeFileNoFollow(after.putBack.repoPath, RENDER_FILE, after.putBack.raw).catch(
+        (putBackErr: unknown) => {
+          throw new AggregateError(
+            [err, putBackErr],
+            `${err}; putting the render file's bytes back failed too: ${putBackErr}`,
+          );
+        },
+      );
+    }
+    throw err;
+  }
+  if (after.resync !== null) {
+    await syncProjectStateFromCheckout(db, {
+      repositoryId: payload.repositoryId,
+      repoPath: after.resync,
+    }).catch((err) =>
+      logger.warn(
+        { err, repositoryId: payload.repositoryId },
+        'project state not re-synced after a moved answer',
+      ),
+    );
+  }
+  return result;
+}
+
+async function answerInTransaction(
+  db: Database,
+  { repositoryId, userId, conflictId, answer }: ProjectStateResolvePayload,
+  after: After,
+): Promise<ProjectStateResolveResult> {
+  return db.transaction(async (tx): Promise<ProjectStateResolveResult> => {
     await lockProjectState(tx, repositoryId);
     const [repo] = await tx
       .select({
@@ -112,8 +154,9 @@ export async function resolveProjectStateConflict(
     const whole = row.unit === RENDER_UNIT;
     const key = keyOf(row.unit);
     const incoming = conflictSideValue(row.incoming);
-    const onDisk = await readRenderFile(repoPath);
-    if (onDisk === null) return moved();
+    const read = await readRenderFile(repoPath);
+    if (read === null) return moved();
+    const onDisk = read.render;
     const onDiskValue = whole ? onDisk : (onDisk as Json)[key];
     if (incoming === undefined || !sameValue(onDiskValue, incoming)) return moved();
 
@@ -171,11 +214,7 @@ export async function resolveProjectStateConflict(
       ? (chosen as ProjectRender)
       : ({ ...baseRender, [key]: chosen } as ProjectRender);
 
-    const written: string[] = [];
-    if (fileText !== null) {
-      await writeFileNoFollow(repoPath, RENDER_FILE, fileText, { createParents: true });
-      written.push(RENDER_FILE);
-    }
+    const now = new Date();
     if (!sameValue(next.data, repo.renderContext ?? null)) {
       await tx
         .update(schema.repositories)
@@ -184,7 +223,6 @@ export async function resolveProjectStateConflict(
       await writeApplicableTemplateIds(tx, { repositoryId, userId: repo.userId });
     }
 
-    const now = new Date();
     const [closed] = await tx
       .update(schema.projectStateConflicts)
       .set({ resolution: answer, resolvedAt: now, resolvedBy: userId })
@@ -216,17 +254,18 @@ export async function resolveProjectStateConflict(
       .values({ repositoryId, ...synced })
       .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
 
+    // Last, so only the commit follows it; a failure from here on puts the previous bytes back.
+    const written: string[] = [];
+    if (fileText !== null) {
+      after.putBack = { repoPath, raw: read.raw };
+      await writeFileNoFollow(repoPath, RENDER_FILE, fileText, { createParents: true });
+      written.push(RENDER_FILE);
+    }
+
     return {
       kind: 'resolved',
       conflict: conflictBody(closed ?? { ...row, resolution: answer, resolvedAt: now }),
       written,
     };
   });
-
-  if (after.resync !== null) {
-    await syncProjectStateFromCheckout(db, { repositoryId, repoPath: after.resync }).catch((err) =>
-      logger.warn({ err, repositoryId }, 'project state not re-synced after a moved answer'),
-    );
-  }
-  return result;
 }

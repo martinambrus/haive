@@ -442,7 +442,12 @@ old base, and still holds the upgrade. The row is stamped `resolution`, `resolve
 left alone). A cleared column with a per-key row is rebuilt as the sync rebuilds it
 (`rebuildLocalRender`); a whole-file row has no local value, so only take theirs applies and keep
 mine is refused (`no_local`). Keeping mine rewrites a tracked file: it stays uncommitted until the
-person commits and pushes it, as with any record change.
+person commits and pushes it, as with any record change. The file is rewritten after every database
+write, so only the commit follows it; the bytes read for the `moved` check are put back
+(`writeFileNoFollow`) if the transaction then fails, and the row stays pending. A render file
+the checkout deleted never makes a conflict: the sync returns `absent` before its transaction when
+`project/render.json` or the state directory is gone (`readCheckout`), so no row has an absent
+`incoming`, and the one a deleted file leaves pending stays `moved` until the file is back.
 
 **An upgrade offers the RTK block back, unticked.** 07 is the only writer of the block, so once an
 upgrade took it out, only a re-onboarding used to restore it. 01 now lists `AGENTS.md` in

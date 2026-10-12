@@ -537,3 +537,62 @@ describe('the whole render file as one question', () => {
     expect((await sync(s)).outcome).toBe('unchanged');
   });
 });
+
+describe('a failure after the file would be rewritten', () => {
+  const failures: [string, (s: Awaited<ReturnType<typeof setup>>) => void][] = [
+    [
+      'the commit',
+      (s) => {
+        s.fake.hooks.beforeCommit = () => {
+          throw new Error('commit failed');
+        };
+      },
+    ],
+    [
+      'closing the row',
+      (s) => {
+        s.fake.hooks.beforeUpdate = (table) => {
+          if (table === schema.projectStateConflicts) throw new Error('update failed');
+        };
+      },
+    ],
+    [
+      'writing the sync base',
+      (s) => {
+        s.fake.hooks.beforeInsert = (table) => {
+          if (table === schema.projectStateSync) throw new Error('insert failed');
+        };
+      },
+    ],
+  ];
+
+  it.each(failures)(
+    'leaves render.json byte-identical, the row pending and the column and base as they were when %s fails',
+    async (_name, fail) => {
+      const s = await setup();
+      const original = JSON.stringify(THEIRS, null, 4);
+      await writeFile(join(s.root, RENDER_REL), original);
+      const before = s.dump();
+      fail(s);
+
+      await expect(s.answer('keep_mine')).rejects.toThrow();
+
+      expect(await s.fileText()).toBe(original);
+      expect(s.dump()).toEqual(before);
+      expect(s.rowOf(s.ids[KEY]!).resolvedAt).toBeNull();
+    },
+  );
+
+  it('answers once the failure is gone, and the next sync finds nothing to ask', async () => {
+    const s = await setup();
+    s.fake.hooks.beforeCommit = () => {
+      throw new Error('commit failed');
+    };
+    await expect(s.answer('keep_mine')).rejects.toThrow();
+    s.fake.hooks.beforeCommit = null;
+
+    expect((await s.answer('keep_mine')).kind).toBe('resolved');
+    expect(await s.fileText()).toBe(renderText(MINE));
+    expect((await sync(s)).outcome).toBe('unchanged');
+  });
+});
