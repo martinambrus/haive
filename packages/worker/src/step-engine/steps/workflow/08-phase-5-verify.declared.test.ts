@@ -50,7 +50,7 @@ vi.mock('../../task-ledger.js', async (importOriginal) => ({
 
 import { buildDdevCommand } from '../../../sandbox/ddev-runner.js';
 import { shellQuote } from '../../../sandbox/shell-quote.js';
-import { phase5VerifyStep } from './08-phase-5-verify.js';
+import { buildUnverifiedNote, phase5VerifyStep } from './08-phase-5-verify.js';
 
 const execFileP = promisify(execFile);
 
@@ -277,6 +277,18 @@ describe('08 apply with a declared command', () => {
     expect(out.lint.note).toBe('lint verdict unscoped: declared command');
   });
 
+  it('an Off slot runs nothing and the ledger says it is off', async () => {
+    const out = await run({ test: null, offSlots: ['test'] }, { runTest: true });
+
+    expect(runStepCommandInSandbox).not.toHaveBeenCalled();
+    expect(out.test.ran).toBe(false);
+    expect(recordLedgerEntry.mock.calls[0]![3].text).toContain(
+      'test: turned off for this repository',
+    );
+    expect(out.degradedNote).toContain('Turned off for this repository: test.');
+    expect(out.degradedNote).toContain("Declare commands on the repository's Tooling page.");
+  });
+
   it('a command with every shell-special character reaches ddev as one quoted bash -c word', async () => {
     ensureAppServing.mockResolvedValue({ mode: 'ddev', url: 'http://x', handle: RUNNER });
     const command = `echo 'a' "b" $HOME \`id\` # c; d \\ e`;
@@ -344,5 +356,61 @@ describe('the runner shell sees a declared command as exactly one argument', () 
       command,
     ]);
     expect(seen.join('')).not.toContain('EXPANDED-BY-OUTER-SHELL');
+  });
+});
+
+describe('08 notes and form for declared and turned-off slots', () => {
+  const skipped = { ran: false, passed: false, command: null, output: 'skipped' };
+  const results = { test: skipped, lint: skipped, typecheck: skipped };
+  const cmd = { kind: 'host' as const, label: 'npm run test', argv: ['npm', 'run', 'test'] };
+  const ROOT =
+    'Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.';
+
+  it('names a turned-off slot apart from an undetected one, and points at the Tooling page', () => {
+    const note = buildUnverifiedNote(
+      { test: null, lint: null, typecheck: null },
+      results,
+      [],
+      ['test'],
+    );
+    expect(note).toBe(
+      'No verification check ran this pass, so this step passing means nothing was checked — not that everything passed.\n\n' +
+        `No runner was detected in this workspace for: lint, typecheck. ${ROOT} Declare commands on the repository's Tooling page.\n\n` +
+        'Turned off for this repository: test.',
+    );
+  });
+
+  it('adds the hint when a declared command is among the unticked slots', () => {
+    const declared = { ...cmd, label: 'make test', source: 'declared' as const };
+    const note = buildUnverifiedNote({ test: declared, lint: null, typecheck: cmd }, results);
+    expect(note).toContain(`${ROOT} Declare commands on the repository's Tooling page.`);
+    expect(note).toContain('Detected but not selected for this pass: test, typecheck.');
+  });
+
+  it('is unchanged without declared or off slots', () => {
+    const plain = buildUnverifiedNote({ test: cmd, lint: null, typecheck: null }, results);
+    expect(plain).not.toContain('Tooling page');
+    expect(plain).not.toContain('Turned off');
+    expect(buildUnverifiedNote({ test: cmd, lint: null, typecheck: null }, results, [], [])).toBe(
+      plain,
+    );
+  });
+
+  it('the form labels a declared command and a turned-off slot, and an old payload is as before', () => {
+    const base = { workspacePath: '/w', ddevMode: false, test: cmd, lint: null, typecheck: null };
+    const description = (d: Record<string, unknown>) =>
+      phase5VerifyStep.form!({} as never, d as never)!.description;
+    expect(description(base)).toBe(
+      'Workspace: /w\ntest: npm run test\nlint: none detected\ntypecheck: none detected',
+    );
+    expect(
+      description({
+        ...base,
+        test: { ...cmd, label: 'make test', source: 'declared' },
+        offSlots: ['lint'],
+      }),
+    ).toBe(
+      'Workspace: /w\ntest: make test (declared)\nlint: turned off for this repository\ntypecheck: none detected',
+    );
   });
 });

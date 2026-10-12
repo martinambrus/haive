@@ -182,15 +182,23 @@ export function buildUnverifiedNote(
     phpLint?: CheckResult;
   },
   declinedConfigs?: string[],
+  offSlots?: VerifySlotName[],
 ): string {
   if (results.test.ran || results.lint.ran || results.typecheck.ran || results.phpLint?.ran) {
     return '';
   }
   const undetected: string[] = [];
   const unticked: string[] = [];
+  const turnedOff: string[] = [];
+  const hasDeclaration =
+    (offSlots?.length ?? 0) > 0 || Object.values(slots).some((c) => c?.source === 'declared');
   for (const name of ['test', 'lint', 'phpLint', 'typecheck'] as const) {
     const result = results[name];
     if (!result || result.note) continue;
+    if (name !== 'phpLint' && offSlots?.includes(name)) {
+      turnedOff.push(name);
+      continue;
+    }
     (slots[name] === null ? undetected : unticked).push(name === 'phpLint' ? 'php lint' : name);
   }
   const parts = [
@@ -198,16 +206,22 @@ export function buildUnverifiedNote(
   ];
   if (undetected.length > 0) {
     parts.push(
-      `No runner was detected in this workspace for: ${undetected.join(', ')}. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.`,
+      `No runner was detected in this workspace for: ${undetected.join(', ')}. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.${hasDeclaration ? ` ${TOOLING_PAGE_HINT}` : ''}`,
     );
     const declined = declinedConfigsSentence(declinedConfigs);
     if (declined) parts.push(declined);
+  }
+  if (turnedOff.length > 0) {
+    parts.push(`Turned off for this repository: ${turnedOff.join(', ')}.`);
   }
   if (unticked.length > 0) {
     parts.push(`Detected but not selected for this pass: ${unticked.join(', ')}.`);
   }
   return parts.join('\n\n');
 }
+
+/** Appended to the root-only sentence once the repository declares anything. */
+export const TOOLING_PAGE_HINT = "Declare commands on the repository's Tooling page.";
 
 /** What gate 2 and the unverified note say about the configs one level down that were not used. */
 export function declinedConfigsSentence(declined: string[] | undefined): string {
@@ -953,16 +967,24 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
   },
 
   form(_ctx, detected): FormSchema {
-    const label = (c: SlotCommand | null) => (c ? c.label : 'none detected');
+    const off = detected.offSlots ?? [];
+    const label = (c: SlotCommand | null, slot?: VerifySlotName) =>
+      c
+        ? c.source === 'declared'
+          ? `${c.label} (declared)`
+          : c.label
+        : slot && off.includes(slot)
+          ? 'turned off for this repository'
+          : 'none detected';
     return {
       title: 'Phase 5: Verify',
       description: [
         `Workspace: ${detected.workspacePath}`,
         detected.ddevMode ? 'PHP/Python checks run inside the DDEV runner.' : '',
-        `test: ${label(detected.test)}`,
-        `lint: ${label(detected.lint)}`,
+        `test: ${label(detected.test, 'test')}`,
+        `lint: ${label(detected.lint, 'lint')}`,
         detected.phpLint ? `php lint: ${label(detected.phpLint)}` : '',
-        `typecheck: ${label(detected.typecheck)}`,
+        `typecheck: ${label(detected.typecheck, 'typecheck')}`,
       ]
         .filter(Boolean)
         .join('\n'),
@@ -1088,22 +1110,25 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         ? `passes on changed lines (${r.scope.preExisting} pre-existing)`
         : 'passes';
     };
-    const slotFact = (name: string, r: CheckResult): string =>
-      r.ran
-        ? `${name}: \`${r.command}\` ${verdict(r)}`
-        : r.note
-          ? `${name}: ${r.note}`
-          : r.command
-            ? `${name}: \`${r.command}\` exists but was not run this pass`
-            : `${name}: no runner detected in this workspace`;
+    const off = args.detected.offSlots ?? [];
+    const slotFact = (name: string, r: CheckResult, slot?: VerifySlotName): string =>
+      slot && off.includes(slot) && !r.ran
+        ? `${name}: turned off for this repository`
+        : r.ran
+          ? `${name}: \`${r.command}\` ${verdict(r)}`
+          : r.note
+            ? `${name}: ${r.note}`
+            : r.command
+              ? `${name}: \`${r.command}\` exists but was not run this pass`
+              : `${name}: no runner detected in this workspace`;
     await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
       stepId: '08-phase-5-verify',
       round: ctx.round,
       text: [
-        slotFact('test', test),
-        slotFact('lint', lint),
+        slotFact('test', test, 'test'),
+        slotFact('lint', lint, 'lint'),
         ...(phpLint ? [slotFact('php lint', phpLint)] : []),
-        slotFact('typecheck', typecheck),
+        slotFact('typecheck', typecheck, 'typecheck'),
         runtimeSmoke.ran
           ? `runtime smoke: ${runtimeSmoke.url} answered ${runtimeSmoke.httpStatus ?? 'nothing'}`
           : 'runtime smoke: no servable runtime',
@@ -1118,12 +1143,13 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       },
       { test, lint, typecheck, ...(phpLint ? { phpLint } : {}) },
       args.detected.declinedConfigs,
+      args.detected.offSlots,
     );
     const anyRan = test.ran || lint.ran || typecheck.ran || phpLint?.ran === true;
     const slotUndetected =
-      args.detected.test === null ||
-      args.detected.lint === null ||
-      args.detected.typecheck === null;
+      (args.detected.test === null && !off.includes('test')) ||
+      (args.detected.lint === null && !off.includes('lint')) ||
+      (args.detected.typecheck === null && !off.includes('typecheck'));
     const slotNotes = [
       test.note,
       lint.note,
