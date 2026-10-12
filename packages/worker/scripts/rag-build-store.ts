@@ -218,8 +218,15 @@ export function stringArrayEnv(name: string): string[] | undefined {
 function parseOptions(): Options {
   const tree = process.env.RAG_TREE;
   if (!tree) fail('RAG_TREE is required');
-  const exclude = stringArrayEnv('RAG_EXCLUDE') ?? [];
-  const heuristicExclude = stringArrayEnv('RAG_HEURISTIC_EXCLUDE') ?? [];
+  const scope = stringArrayEnv('RAG_EXCLUDE');
+  const heuristic = stringArrayEnv('RAG_HEURISTIC_EXCLUDE');
+  if (scope !== undefined && heuristic !== undefined) {
+    fail(
+      'set RAG_EXCLUDE or RAG_HEURISTIC_EXCLUDE, not both: a saved scope switches the heuristic off',
+    );
+  }
+  const exclude = scope ?? [];
+  const heuristicExclude = heuristic ?? [];
   const extensionSet = stringArrayEnv('RAG_EXTENSION_SET');
   const selectedDirs = stringArrayEnv('RAG_SELECTED_DIRS');
   const ownPaths = stringArrayEnv('RAG_OWN_PATHS') ?? [];
