@@ -44,7 +44,7 @@ app.use('*', async (c, next) => {
 app.route('/tasks', mergeRoutes);
 app.onError(errorHandler);
 
-const abort = (body: unknown = { dir: DIR }) =>
+const abort = (body: unknown = { dir: DIR, mergeHead: 'm1' }) =>
   app.request(`/tasks/${TASK}/merges/abort`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -63,7 +63,7 @@ describe('POST /tasks/:id/merges/abort', () => {
     expect(res.status).toBe(202);
     expect(state.added).toHaveLength(1);
     expect(state.added[0]![0]).toBe(TASK_JOB_NAMES.ABORT_LEFT_MERGE);
-    expect(state.added[0]![1]).toEqual({ taskId: TASK, userId: 'u1', dir: DIR });
+    expect(state.added[0]![1]).toEqual({ taskId: TASK, userId: 'u1', dir: DIR, mergeHead: 'm1' });
   });
 
   it('is a 404 for a task the user does not own, queueing nothing', async () => {
@@ -79,7 +79,12 @@ describe('POST /tasks/:id/merges/abort', () => {
   });
 
   it('is a 404 for a dir no event names', async () => {
-    expect((await abort({ dir: '/etc' })).status).toBe(404);
+    expect((await abort({ dir: '/etc', mergeHead: 'm1' })).status).toBe(404);
+    expect(state.added).toEqual([]);
+  });
+
+  it('is a 404 for a merge head no unsettled report of that dir names', async () => {
+    expect((await abort({ dir: DIR, mergeHead: 'other' })).status).toBe(404);
     expect(state.added).toEqual([]);
   });
 
@@ -105,7 +110,7 @@ describe('POST /tasks/:id/merges/abort', () => {
     const res = await full.request(`/tasks/${TASK}/merges/abort`, {
       method: 'POST',
       headers: { host: 'localhost:3001', origin: 'http://localhost:5173' },
-      body: JSON.stringify({ dir: DIR }),
+      body: JSON.stringify({ dir: DIR, mergeHead: 'm1' }),
     });
     expect(res.status).toBe(403);
     expect(state.added).toEqual([]);

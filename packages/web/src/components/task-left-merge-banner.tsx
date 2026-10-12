@@ -30,14 +30,14 @@ export function TaskLeftMergeBanner({
   const [error, setError] = useState<string | null>(null);
 
   const banners = leftMergeBanners(events, { taskStatus });
-  const inFlight = (dir: string) => {
-    const b = banners.find((x) => x.dir === dir && x.canAbort);
-    return b !== undefined && requested.get(dir) === b.refusals;
+  const inFlight = (key: string) => {
+    const b = banners.find((x) => x.key === key && x.canAbort);
+    return b !== undefined && requested.get(key) === b.refusals;
   };
   // The cancel records its reports before `task.cancel_finished`, so polling may stop once that is
   // in and no abort is waiting on its outcome.
   const polling =
-    !events.some((e) => e.eventType === CANCEL_FINISHED) || banners.some((b) => inFlight(b.dir));
+    !events.some((e) => e.eventType === CANCEL_FINISHED) || banners.some((b) => inFlight(b.key));
 
   useEffect(() => {
     if (taskStatus !== 'cancelled') return;
@@ -62,13 +62,17 @@ export function TaskLeftMergeBanner({
 
   if (banners.length === 0) return null;
 
-  async function abort(dir: string): Promise<void> {
+  async function abort(key: string): Promise<void> {
+    const target = banners.find((b) => b.key === key);
+    if (!target) return;
     setBusy(true);
     setError(null);
     try {
-      await api.post(`/tasks/${taskId}/merges/abort`, { dir });
-      const refusals = banners.find((b) => b.dir === dir)?.refusals ?? 0;
-      setRequested((prev) => new Map(prev).set(dir, refusals));
+      await api.post(`/tasks/${taskId}/merges/abort`, {
+        dir: target.dir,
+        mergeHead: target.mergeHead,
+      });
+      setRequested((prev) => new Map(prev).set(key, target.refusals));
       setConfirming(null);
     } catch (e) {
       setError((e as Error).message);
@@ -79,9 +83,9 @@ export function TaskLeftMergeBanner({
 
   return (
     <>
-      {banners.map((b, i) => (
+      {banners.map((b) => (
         <div
-          key={`${i}:${b.dir}`}
+          key={b.key}
           role="status"
           className="flex items-start gap-3 rounded-md border border-amber-900 bg-amber-950/40 px-4 py-3 text-amber-300"
         >
@@ -89,11 +93,11 @@ export function TaskLeftMergeBanner({
           <div className="flex min-w-0 flex-1 flex-col gap-2">
             <InlineMarkdown className="text-sm [overflow-wrap:anywhere]" body={b.text} />
             {b.canAbort &&
-              (inFlight(b.dir) ? (
+              (inFlight(b.key) ? (
                 <span className="text-xs opacity-80">Aborting…</span>
               ) : (
                 <div>
-                  <Button size="sm" variant="destructive" onClick={() => setConfirming(b.dir)}>
+                  <Button size="sm" variant="destructive" onClick={() => setConfirming(b.key)}>
                     Abort merge
                   </Button>
                 </div>
@@ -113,7 +117,7 @@ export function TaskLeftMergeBanner({
           {confirming && (
             <InlineMarkdown
               className="text-xs text-neutral-400"
-              body={banners.find((b) => b.dir === confirming)?.text ?? ''}
+              body={banners.find((b) => b.key === confirming)?.text ?? ''}
             />
           )}
           {error && <FormError message={error} />}

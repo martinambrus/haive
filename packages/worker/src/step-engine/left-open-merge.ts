@@ -118,6 +118,30 @@ async function recordedMerges(db: Database, taskId: string): Promise<RecordedMer
   return merges;
 }
 
+/** Another task still working in `dir`: a live one pointing at it, or a cancelled one whose
+ *  teardown has not finished, since its fixer may still be writing there. */
+async function worktreeSharer(
+  db: Database,
+  dir: string,
+  taskId: string,
+): Promise<{ id: string; title: string } | null> {
+  const live = await findWorktreePathClaimant(db, { worktreePath: dir, taskId });
+  if (live) return live;
+  const [tearingDown] = await db
+    .select({ id: schema.tasks.id, title: schema.tasks.title })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.worktreePath, dir),
+        ne(schema.tasks.id, taskId),
+        eq(schema.tasks.status, 'cancelled'),
+        sql`not exists (select 1 from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = 'task.cancel_finished')`,
+      ),
+    )
+    .limit(1);
+  return tearingDown ?? null;
+}
+
 async function taskLeftOpen(db: Database, taskId: string): Promise<LeftOpenMerge[]> {
   const rows = await db
     .select({ eventType: schema.taskEvents.eventType, payload: schema.taskEvents.payload })
@@ -167,7 +191,7 @@ export async function recordLeftOpenMerges(db: Database, taskId: string): Promis
         .from(schema.mergeDirClaims)
         .where(eq(schema.mergeDirClaims.mergeDir, recorded.dir));
       if (claim && claim.taskId !== taskId) return null;
-      if (await findWorktreePathClaimant(db, { worktreePath: recorded.dir, taskId })) return null;
+      if (await worktreeSharer(db, recorded.dir, taskId)) return null;
       if (!(await mergeOpenFor(recorded.dir, recorded.ref))) return null;
       const open = await peekOpenMerge(recorded.dir);
       if (!open) return null;
@@ -208,7 +232,7 @@ interface AbortDecision {
  *  are the reported ones: anything else changed since, and nothing is done. The outcome is the
  *  settled event; it throws only when no outcome could be recorded, so the job is retried. */
 export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayload): Promise<void> {
-  const { taskId, dir } = payload;
+  const { taskId, dir, mergeHead } = payload;
   let changed = false;
   try {
     const task = await db.query.tasks.findFirst({
@@ -216,10 +240,9 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
       columns: { status: true },
     });
     if (task?.status !== 'cancelled') return;
-    const reported = (await taskLeftOpen(db, taskId)).filter(
-      (m) => m.dir === dir && m.settled === null,
+    const target = (await taskLeftOpen(db, taskId)).find(
+      (m) => m.dir === dir && m.mergeHead === mergeHead && m.settled === null,
     );
-    const target = reported.at(-1);
     if (!target) return;
     const recorded = (await recordedMerges(db, taskId)).find((m) => m.dir === dir);
     const baseline =
@@ -239,7 +262,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
         .for('update');
       const holder = claim ? await liveClaimHolder(tx, claim) : null;
       // A DAG level merge takes no dir claim, so a live task sharing the worktree is asked for too.
-      const sharer = holder ?? (await findWorktreePathClaimant(db, { worktreePath: dir, taskId }));
+      const sharer = holder ?? (await worktreeSharer(db, dir, taskId));
       if (sharer) {
         return {
           outcome: 'refused',
@@ -305,7 +328,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
     // from the unreported manifest, so the job is retried rather than settled as refused.
     if (changed) throw err;
     const target = (await taskLeftOpen(db, taskId)).find(
-      (m) => m.dir === dir && m.settled === null,
+      (m) => m.dir === dir && m.mergeHead === mergeHead && m.settled === null,
     );
     if (target) {
       await settle(

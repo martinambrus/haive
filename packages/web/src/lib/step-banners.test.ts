@@ -269,6 +269,13 @@ describe('leftMergeBanners', () => {
     expect(b?.text).toContain('Another task is merging here.');
   });
 
+  it('keeps two reports of one directory apart by the commit being merged', () => {
+    const second = { ...opened, payload: { ...opened.payload, mergeHead: 'm2' } };
+    const banners = leftMergeBanners([opened, second], { taskStatus: 'cancelled' });
+    expect(banners.map((b) => b.mergeHead)).toEqual(['m1', 'm2']);
+    expect(new Set(banners.map((b) => b.key)).size).toBe(2);
+  });
+
   it('words each outcome differently', () => {
     const text = (o: string) =>
       leftMergeBanners([opened, settled(o, 'why')], { taskStatus: 'cancelled' })[0]!.text;

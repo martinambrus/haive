@@ -99,6 +99,12 @@ async function events(db: Database, taskId: string, type: string) {
     .orderBy(asc(schema.taskEvents.createdAt));
 }
 
+async function reportedHead(db: Database, taskId: string, dir: string): Promise<string> {
+  const rows = await events(db, taskId, 'merge.left_open');
+  const row = rows.find((r) => (r.payload as { dir?: string }).dir === dir);
+  return (row?.payload as { mergeHead?: string } | undefined)?.mergeHead ?? '';
+}
+
 async function main(): Promise<void> {
   let exitCode = 0;
   const taskIds: string[] = [];
@@ -213,7 +219,12 @@ async function main(): Promise<void> {
     );
 
     // 2. The abort job: matching state -> aborted, the stray file moved aside, settled written.
-    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, { taskId: a.task.id, userId: uid, dir: dirA });
+    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, {
+      taskId: a.task.id,
+      userId: uid,
+      dir: dirA,
+      mergeHead: await reportedHead(db, a.task.id, dirA),
+    });
     const settledA = await pollUntil(async () => {
       const rows = await events(db, a.task.id, SETTLED);
       return rows.length > 0 ? rows : null;
@@ -229,7 +240,12 @@ async function main(): Promise<void> {
       (await events(db, a.task.id, 'merge.fixer_leftovers')).length === 1,
       'the relocation must be reported as an event',
     );
-    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, { taskId: a.task.id, userId: uid, dir: dirA });
+    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, {
+      taskId: a.task.id,
+      userId: uid,
+      dir: dirA,
+      mergeHead: await reportedHead(db, a.task.id, dirA),
+    });
     await new Promise((r) => setTimeout(r, 1500));
     assert(
       (await events(db, a.task.id, SETTLED)).length === 1,
@@ -246,7 +262,12 @@ async function main(): Promise<void> {
     git(dirB, 'commit', '-q', '-m', 'later');
     gitTry(dirB, 'merge', '--no-ff', 'feat/a');
     assert(mergeOpen(dirB), 'the reopened merge must be open');
-    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, { taskId: b.task.id, userId: uid, dir: dirB });
+    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, {
+      taskId: b.task.id,
+      userId: uid,
+      dir: dirB,
+      mergeHead: await reportedHead(db, b.task.id, dirB),
+    });
     const settledB = await pollUntil(async () => {
       const rows = await events(db, b.task.id, SETTLED);
       return rows.length > 0 ? rows : null;
@@ -279,7 +300,12 @@ async function main(): Promise<void> {
     await db
       .insert(schema.mergeDirClaims)
       .values({ mergeDir: dirC, taskId: holder!.id, taskStepId: holderStep!.id });
-    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, { taskId: c.task.id, userId: uid, dir: dirC });
+    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, {
+      taskId: c.task.id,
+      userId: uid,
+      dir: dirC,
+      mergeHead: await reportedHead(db, c.task.id, dirC),
+    });
     const settledC = await pollUntil(async () => {
       const rows = await events(db, c.task.id, SETTLED);
       return rows.length > 0 ? rows : null;
@@ -291,7 +317,12 @@ async function main(): Promise<void> {
     assert(mergeOpen(dirC), 'a merge another live task holds must not be aborted');
     // A refusal leaves the report open: once the holder lets go, a second request aborts it.
     await db.delete(schema.mergeDirClaims).where(eq(schema.mergeDirClaims.mergeDir, dirC));
-    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, { taskId: c.task.id, userId: uid, dir: dirC });
+    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, {
+      taskId: c.task.id,
+      userId: uid,
+      dir: dirC,
+      mergeHead: await reportedHead(db, c.task.id, dirC),
+    });
     const retriedC = await pollUntil(async () => {
       const rows = await events(db, c.task.id, SETTLED);
       return rows.length > 1 ? rows : null;
@@ -317,7 +348,12 @@ async function main(): Promise<void> {
       })
       .returning();
     taskIds.push(sharer!.id);
-    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, { taskId: f.task.id, userId: uid, dir: dirF });
+    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, {
+      taskId: f.task.id,
+      userId: uid,
+      dir: dirF,
+      mergeHead: await reportedHead(db, f.task.id, dirF),
+    });
     const settledF = await pollUntil(async () => {
       const rows = await events(db, f.task.id, SETTLED);
       return rows.length > 0 ? rows : null;

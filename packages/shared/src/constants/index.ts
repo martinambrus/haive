@@ -345,6 +345,7 @@ export interface TaskJobPayload {
  *  event of the task; the worker re-checks it. */
 export interface AbortLeftMergePayload extends TaskJobPayload {
   dir: string;
+  mergeHead: string;
 }
 
 /** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RAG`. For each of `projectNames` the worker

@@ -148,7 +148,7 @@ describe('abortLeftMerge', () => {
   it('leaves the merge open while the index still holds what the fixer staged', async () => {
     git.relocateFixerChanges.mockResolvedValue({ moved: [], indexHeld: 'index.lock exists' });
     const { db, inserted } = fixture();
-    await abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo' });
+    await abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo', mergeHead: 'm1' });
     expect(git.abortMerge).not.toHaveBeenCalled();
     expect(inserted).toEqual([
       expect.objectContaining({
@@ -157,12 +157,25 @@ describe('abortLeftMerge', () => {
     ]);
   });
 
+  it('refuses while a cancelled task sharing the worktree has not finished tearing down', async () => {
+    git.relocateFixerChanges.mockResolvedValue({ moved: [], interrupted: [] });
+    const { db, inserted } = chainDb(
+      [reportedOpen(), fixerStep(), [{ worktreePath: null }], [{ id: 'sharer', title: 'other' }]],
+      { status: 'cancelled' },
+    );
+    await abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo', mergeHead: 'm1' });
+    expect(git.abortMerge).not.toHaveBeenCalled();
+    expect(inserted).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ outcome: 'refused' }) }),
+    ]);
+  });
+
   it('is retried, not settled as refused, when reporting fails after the abort went through', async () => {
     git.relocateFixerChanges.mockResolvedValue({ moved: ['a.txt'], interrupted: [] });
     git.recordFixerLeftovers.mockRejectedValue(new Error('connection lost'));
     const { db, inserted } = fixture();
     await expect(
-      abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo' }),
+      abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo', mergeHead: 'm1' }),
     ).rejects.toThrow('connection lost');
     expect(git.abortMerge).toHaveBeenCalled();
     expect(inserted).toEqual([]);
@@ -173,7 +186,7 @@ describe('abortLeftMerge', () => {
     const unreported = { moved: [], interrupted: ['.haive/merge-leftovers/task-1/inv-1'] };
     git.relocateFixerChanges.mockResolvedValue(unreported);
     const { db, inserted } = fixture();
-    await abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo' });
+    await abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo', mergeHead: 'm1' });
     expect(git.relocateFixerChanges).toHaveBeenCalledWith(
       '/repo',
       null,

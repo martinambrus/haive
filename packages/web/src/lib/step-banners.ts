@@ -172,7 +172,10 @@ export interface LeftMergeEventRow {
 }
 
 export interface LeftMergeBanner {
+  /** One report: its directory and the commit that was being merged. */
+  key: string;
   dir: string;
+  mergeHead: string;
   /** The branch that was being merged. */
   ref: string;
   /** True while the merge is still reported open: the person may abort it. */
@@ -209,7 +212,9 @@ export function leftMergeBanners(
     if (m.settled === null) {
       const last = m.refused ? ` The last attempt was not carried out: ${m.refused.reason}` : '';
       return {
+        key: `${m.dir}\0${m.mergeHead}`,
         dir: m.dir,
+        mergeHead: m.mergeHead,
         ref: m.ref,
         canAbort: true,
         refusals,
@@ -217,7 +222,9 @@ export function leftMergeBanners(
       };
     }
     return {
+      key: `${m.dir}\0${m.mergeHead}`,
       dir: m.dir,
+      mergeHead: m.mergeHead,
       ref: m.ref,
       canAbort: false,
       refusals,

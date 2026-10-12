@@ -20,14 +20,14 @@ import { getTaskQueue } from '../../queues.js';
 
 export const mergeRoutes = new Hono<AppEnv>();
 
-const abortBody = z.object({ dir: z.string().min(1) });
+const abortBody = z.object({ dir: z.string().min(1), mergeHead: z.string().min(1) });
 
 mergeRoutes.post('/:id/merges/abort', async (c) => {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
   const parsed = abortBody.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) throw new HttpError(400, 'dir is required');
-  const { dir } = parsed.data;
+  if (!parsed.success) throw new HttpError(400, 'dir and mergeHead are required');
+  const { dir, mergeHead } = parsed.data;
 
   const db = getDb();
   const task = await db.query.tasks.findFirst({
@@ -50,15 +50,18 @@ mergeRoutes.post('/:id/merges/abort', async (c) => {
       ),
     )
     .orderBy(asc(schema.taskEvents.createdAt));
-  if (!leftOpenMerges(events).some((m) => m.dir === dir && m.settled === null)) {
+  const open = leftOpenMerges(events).some(
+    (m) => m.dir === dir && m.mergeHead === mergeHead && m.settled === null,
+  );
+  if (!open) {
     throw new HttpError(404, 'No open merge is reported for that directory');
   }
 
   await getTaskQueue().add(
     TASK_JOB_NAMES.ABORT_LEFT_MERGE,
-    { taskId, userId, dir } satisfies AbortLeftMergePayload,
+    { taskId, userId, dir, mergeHead } satisfies AbortLeftMergePayload,
     {
-      jobId: `abort-left-merge-${taskId}-${createHash('sha1').update(dir).digest('hex')}`,
+      jobId: `abort-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${mergeHead}`).digest('hex')}`,
       attempts: 5,
       backoff: { type: 'exponential', delay: 2000 },
       removeOnComplete: true,
