@@ -325,6 +325,8 @@ export const TASK_JOB_NAMES = {
    *  left behind: DDEV/app runners (incl. failed tasks kept for recovery), env
    *  images no longer referenced by a surviving task, and haive_repos files. */
   CLEANUP_REPO_RESOURCES: 'cleanup-repo-resources',
+  /** Aborts the merge a cancelled task left open in `dir`, on the person's confirmed click. */
+  ABORT_LEFT_MERGE: 'abort-left-merge',
 } as const;
 
 export interface TaskJobPayload {
@@ -337,6 +339,13 @@ export interface TaskJobPayload {
   /** Orchestration epoch this job was enqueued under. handleAdvanceStep skips the
    *  job when it is older than the task's current epoch (a retry/reset bumped it). */
   epoch?: number;
+}
+
+/** Payload for `TASK_JOB_NAMES.ABORT_LEFT_MERGE`. `dir` must name an unsettled `merge.left_open`
+ *  event of the task; the worker re-checks it. */
+export interface AbortLeftMergePayload extends TaskJobPayload {
+  dir: string;
+  mergeHead: string;
 }
 
 /** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RAG`. For each of `projectNames` the worker

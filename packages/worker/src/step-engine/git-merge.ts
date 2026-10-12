@@ -62,7 +62,7 @@ export async function unmergedPaths(dir: string): Promise<string[] | null> {
   return res.code === 0 ? nulPaths(res.stdout) : null;
 }
 
-async function revParse(dir: string, spec: string): Promise<string | null> {
+export async function revParse(dir: string, spec: string): Promise<string | null> {
   const res = await gitRun(dir, ['rev-parse', '-q', '--verify', spec]);
   return res.code === 0 ? res.stdout.trim() : null;
 }
@@ -117,7 +117,7 @@ export async function openMerge(
 export type MergeAbort = { ok: true } | { ok: false; blocking: string[]; detail: string };
 
 /** A person's own checkout, mounted from the host: Haive discards nothing there. */
-function isHostCheckout(dir: string): boolean {
+export function isHostCheckout(dir: string): boolean {
   return dir === HOST_REPO_ROOT || dir.startsWith(`${HOST_REPO_ROOT}/`);
 }
 

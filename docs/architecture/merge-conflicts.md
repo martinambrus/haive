@@ -162,6 +162,28 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   mounts a local-path repository read-only, so no fixer can write there. A cancel runs no step
   code, so it moves nothing aside: a task's worktree is removed whole, a fixer's changes with the
   rest of the task's work, and a same-branch root is left as the fixer left it, merge still open.
+  That open merge is reported, never settled on its own, since a cancel cannot prove the merge
+  open in a directory is the task's. Before it releases its claims, and under each directory's lock, the CANCEL
+  appends a `merge.left_open` event `{dir, ref, head, mergeHead}` for each directory a merge step in
+  `resolving`, `pending`, `awaiting-guidance` or `squashing` (or a DAG level with a conflict in
+  flight, in the task's integration worktree) recorded, and only where MERGE_HEAD is the commit of
+  the ref it was merging and the directory is not a host checkout (`isHostCheckout`, a person's own); one per directory and merge head, so a re-driven cancel adds none. The task
+  page shows it with an "Abort merge" button behind a confirm (`POST /tasks/:id/merges/abort`, owner
+  only, cancelled tasks only, naming a directory an unsettled event reports). The worker job
+  (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
+  `{dir, mergeHead, outcome, reason}`: `refused` while a live task's `merge_dir_claims` row holds the
+  directory (`liveClaimHolder`, the staleness rules `claimMergeDir` uses), `moved` with nothing
+  done when HEAD or MERGE_HEAD are no longer the reported ones, otherwise the fixer's changes outside
+  the conflict are moved aside if a `fixBaseline` for that head and merge head is still recorded
+  (reported unchecked when not) and `abortMerge` ends the merge. A `refused` outcome (a live holder,
+  an abort git refused, a job that threw) leaves the report open with the reason shown and the button
+  offered again; `moved`, `aborted` and `aborted-by-next` close it. A failure while recording a
+  report throws, so the cancel is re-driven before `task.cancel_finished`; the page polls until that
+  event is in and no abort it sent is still waiting. A resolver that clears a stale
+  merge before opening its own first moves that task's fixer changes aside under its report
+  (`relocateLeftOpenFixers`, halting instead while the index still holds what the fixer staged),
+  then (`peekOpenMerge` before the abort, `noteAbortedByNext` after) settles
+  the report of the same directory, head and merge head with `aborted-by-next` and warns on its step.
   A cancelled plan merge is the exception (`discardPlanMerge`, from `handleCancelTask`): the worker
   moves aside what the recorded fixers left, aborts the merge and removes the scratch worktree,
   unless another `plan_merge` task of the repository holds it, a live one or a failed one opened after it

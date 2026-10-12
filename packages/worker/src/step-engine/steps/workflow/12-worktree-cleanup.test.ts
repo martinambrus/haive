@@ -190,6 +190,12 @@ function makeDb(
     /** Rejects the fix-agent invocation insert, as the one-live-per-step unique index does
      *  when a concurrent advance already dispatched one. */
     insertRejects?: unknown;
+    /** A cancelled task's `merge.left_open` report, as the lookup for the merge this pass clears finds it. */
+    leftOpen?: {
+      owner: { taskId: string; title: string };
+      events: unknown[];
+      ownerSteps?: unknown[];
+    };
   } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
@@ -246,12 +252,20 @@ function makeDb(
         };
       },
     }),
+    selectDistinct: () => ({
+      from: () => ({
+        innerJoin: () => ({ where: async () => (opts.leftOpen ? [opts.leftOpen.owner] : []) }),
+      }),
+    }),
     // One chain answers both shapes: buildSquashCommitMessage awaits orderBy directly,
     // loadOutstandingMergeGuidance continues to limit(1). lockOwnedStep's ownership probe
     // (select({id}).from(taskSteps).where(owned(id)).for('update')) is a third, distinguished
     // by its columns argument, and honours the same ownership guard as the update mock above.
     select: (cols?: unknown) => ({
       from: (table?: unknown) => {
+        if (table === schema.taskSteps && cols && typeof cols === 'object' && 'state' in cols) {
+          return { where: async () => opts.leftOpen?.ownerSteps ?? [] };
+        }
         if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
           return {
             where: () => ({
@@ -261,6 +275,17 @@ function makeDb(
                   : [{ id: 'step1' }],
             }),
           };
+        }
+        if (table === schema.tasks && cols && typeof cols === 'object' && 'worktreePath' in cols) {
+          return { where: async () => [{ worktreePath: null }] };
+        }
+        if (
+          table === schema.taskEvents &&
+          cols &&
+          typeof cols === 'object' &&
+          'eventType' in cols
+        ) {
+          return { where: () => ({ orderBy: async () => opts.leftOpen?.events ?? [] }) };
         }
         return {
           where: () => ({
@@ -526,6 +551,42 @@ describe('12 merge phase + apply (real git)', () => {
           expect((merge.result as { error: string }).error).not.toContain('retry once it finishes');
         }
         expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it("a cancelled task's reported merge is settled, and this step says it cleared it", async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const base = await openOtherMerge(parent, wt);
+        const report = {
+          eventType: 'merge.left_open',
+          payload: {
+            dir: base,
+            ref: 'feature/other',
+            head: (await git(base, ['rev-parse', 'HEAD'])).trim(),
+            mergeHead: (await git(base, ['rev-parse', 'MERGE_HEAD'])).trim(),
+          },
+        };
+        const h = makeDb({
+          leftOpen: { owner: { taskId: 'cancelled-task', title: 'Old feature' }, events: [report] },
+        });
+        await resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(det(wt, { parentBranch: 'develop' }), { action: 'merge_remove' }),
+          mkCtx(parent, h.db),
+          mkParams(h.db),
+        );
+        expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+        const settled = h.events.filter((e) => e.eventType === 'merge.left_open_settled');
+        expect(settled).toHaveLength(1);
+        expect(settled[0]).toMatchObject({
+          taskId: 'cancelled-task',
+          payload: { dir: base, mergeHead: report.payload.mergeHead, outcome: 'aborted-by-next' },
+        });
+        expect(h.getWarning()).toContain('Old feature');
       } finally {
         await rm(parent, { recursive: true, force: true });
       }

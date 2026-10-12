@@ -56,6 +56,41 @@ async function requireLiveOwner(tx: DbHandle, owner: MergeDirOwner): Promise<voi
   if (live.length === 0) throw new StepSupersededError(owner.stepId);
 }
 
+/** The task a claim holds the dir for, or null once the claim is stale: its task completed, its
+ *  step skipped (a stale merge), or the task cancelled with its teardown recorded
+ *  (`task.cancel_finished`, written after the release). */
+export async function liveClaimHolder(
+  tx: DbHandle,
+  claim: { taskId: string; taskStepId: string },
+): Promise<MergeDirHolder | null> {
+  const [holder] = await tx
+    .select({
+      title: schema.tasks.title,
+      taskStatus: schema.tasks.status,
+      stepStatus: schema.taskSteps.status,
+    })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(eq(schema.taskSteps.id, claim.taskStepId));
+  const [tornDown] =
+    holder?.taskStatus === 'cancelled'
+      ? await tx
+          .select({ id: schema.taskEvents.id })
+          .from(schema.taskEvents)
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, claim.taskId),
+              eq(schema.taskEvents.eventType, 'task.cancel_finished'),
+            ),
+          )
+          .limit(1)
+      : [];
+  if (holder && holder.taskStatus !== 'completed' && holder.stepStatus !== 'skipped' && !tornDown) {
+    return { id: claim.taskId, title: holder.title };
+  }
+  return null;
+}
+
 /** Take `mergeDir` for the pass's step before its first git write, committed ahead of it. Another
  *  task's claim holds unless that task is completed, that step skipped (a stale merge), or the task
  *  is cancelled with its teardown recorded (`task.cancel_finished`, written after the release). */
@@ -77,39 +112,8 @@ export async function claimMergeDir(db: Database, owner: MergeDirOwner): Promise
     }
     if (claim.taskStepId === owner.stepId) return { kind: 'claimed' as const };
     if (claim.taskId !== owner.taskId) {
-      const [holder] = await tx
-        .select({
-          title: schema.tasks.title,
-          taskStatus: schema.tasks.status,
-          stepStatus: schema.taskSteps.status,
-        })
-        .from(schema.taskSteps)
-        .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
-        .where(eq(schema.taskSteps.id, claim.taskStepId));
-      const [tornDown] =
-        holder?.taskStatus === 'cancelled'
-          ? await tx
-              .select({ id: schema.taskEvents.id })
-              .from(schema.taskEvents)
-              .where(
-                and(
-                  eq(schema.taskEvents.taskId, claim.taskId),
-                  eq(schema.taskEvents.eventType, 'task.cancel_finished'),
-                ),
-              )
-              .limit(1)
-          : [];
-      if (
-        holder &&
-        holder.taskStatus !== 'completed' &&
-        holder.stepStatus !== 'skipped' &&
-        !tornDown
-      ) {
-        return {
-          kind: 'held' as const,
-          holder: { id: claim.taskId, title: holder.title },
-        };
-      }
+      const holder = await liveClaimHolder(tx, claim);
+      if (holder) return { kind: 'held' as const, holder };
     }
     await tx
       .update(schema.mergeDirClaims)

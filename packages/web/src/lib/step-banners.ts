@@ -1,3 +1,5 @@
+import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
+
 /** Banner visibility for step cards, invocation terminals and attachment rows.
  *
  *  ONE RULE: a message column is display copy, not state. `task_steps.status_message`,
@@ -161,4 +163,72 @@ export interface ArchiveBannerRow {
 export function archiveExpansionBanner(a: ArchiveBannerRow): { text: string } | null {
   if (a.expandedAt == null || !a.expansionNote) return null;
   return { text: a.expansionNote };
+}
+
+/** The event rows the left-open merge banner reads. */
+export interface LeftMergeEventRow {
+  eventType: string;
+  payload: Record<string, unknown> | null;
+}
+
+export interface LeftMergeBanner {
+  /** One report: its directory and the commit that was being merged. */
+  key: string;
+  dir: string;
+  mergeHead: string;
+  /** The branch that was being merged. */
+  ref: string;
+  /** True while the merge is still reported open: the person may abort it. */
+  canAbort: boolean;
+  /** Refused attempts so far; a new one means the last request came back. */
+  refusals: number;
+  /** Markdown. */
+  text: string;
+}
+
+const LEFT_MERGE_OUTCOME_LABEL: Record<Exclude<MergeLeftOpenOutcome, 'refused'>, string> = {
+  aborted: 'Merge aborted:',
+  moved: 'Merge left as it is:',
+  'aborted-by-next': 'Merge aborted by another task:',
+};
+
+function codeSpan(value: string): string {
+  const longest = Math.max(0, ...(value.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return `${fence}${value}${fence}`;
+}
+
+/** The merges a cancelled task left open, one banner each: offering the abort while the report is
+ *  unsettled, then the settled outcome's words. Gated on the `merge.left_open` events and on a
+ *  matching `merge.left_open_settled` one, never on a message column; only a cancelled task has any. */
+export function leftMergeBanners(
+  events: readonly LeftMergeEventRow[],
+  opts: { taskStatus: string },
+): LeftMergeBanner[] {
+  if (opts.taskStatus !== 'cancelled') return [];
+  return leftOpenMerges(events).map((m) => {
+    const where = `${codeSpan(m.ref)} in ${codeSpan(m.dir)}`;
+    const refusals = m.refused?.count ?? 0;
+    if (m.settled === null) {
+      const last = m.refused ? ` The last attempt was not carried out: ${m.refused.reason}` : '';
+      return {
+        key: `${m.dir}\0${m.mergeHead}`,
+        dir: m.dir,
+        mergeHead: m.mergeHead,
+        ref: m.ref,
+        canAbort: true,
+        refusals,
+        text: `A merge of ${where} was left open when this task was cancelled. Aborting it puts that checkout back to how it was before the merge started.${last}`,
+      };
+    }
+    return {
+      key: `${m.dir}\0${m.mergeHead}`,
+      dir: m.dir,
+      mergeHead: m.mergeHead,
+      ref: m.ref,
+      canAbort: false,
+      refusals,
+      text: `${LEFT_MERGE_OUTCOME_LABEL[m.settled.outcome]} ${where}. ${m.settled.reason}`.trim(),
+    };
+  });
 }

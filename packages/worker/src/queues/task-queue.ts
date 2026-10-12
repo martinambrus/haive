@@ -32,6 +32,7 @@ import {
   logger,
   parseAllowanceWatchMode,
   type CliExecJobPayload,
+  type AbortLeftMergePayload,
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
   type ExecutionPath,
@@ -132,6 +133,7 @@ import {
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
+import { abortLeftMerge, recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
 import {
   StepSupersededError,
   TERMINAL_TASK_STATUSES,
@@ -3385,6 +3387,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
   const sandboxesGone = (await listCliSandboxesForTask(payload.taskId))?.length === 0;
   if (sandboxesGone) {
+    await recordLeftOpenMerges(db, payload.taskId);
     await releaseTaskMergeClaims(db, payload.taskId);
     await discardPlanMerge(db, payload.taskId);
     try {
@@ -3551,7 +3554,8 @@ async function handleCleanupRepoResources(
   await dropRepoCleanupRow(db, payload.cleanupId);
 }
 
-type TaskWorkerPayload = TaskJobPayload | RepoRagCleanupPayload | RepoResourceCleanupPayload;
+type TaskWorkerPayload =
+  TaskJobPayload | AbortLeftMergePayload | RepoRagCleanupPayload | RepoResourceCleanupPayload;
 
 /** Steps whose advance this process is running, by task, step and round. */
 const advancingSteps = new Set<string>();
@@ -3636,6 +3640,11 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       return;
     }
 
+    if (job.name === TASK_JOB_NAMES.ABORT_LEFT_MERGE) {
+      await abortLeftMerge(db, job.data as AbortLeftMergePayload);
+      return;
+    }
+
     const payload = job.data as TaskJobPayload;
     if (job.name === TASK_JOB_NAMES.START) {
       await handleStartTask(db, payload, held);
@@ -3654,7 +3663,8 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
     if (
       taskId &&
       job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG &&
-      job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
+      job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES &&
+      job.name !== TASK_JOB_NAMES.ABORT_LEFT_MERGE
     ) {
       // Only at the epoch this job holds the task at: a Retry that moved it on owns it now.
       const epoch =
