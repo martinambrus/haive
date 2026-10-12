@@ -64,7 +64,7 @@ import {
   unmanagedAgentsDir,
   type ArchiveFormat,
 } from '@haive/shared';
-import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
+import { PROJECT_STATE_DIR, claimFileName, isClaimablePath } from '@haive/shared/project-state';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { parseScpLikeGitUrl } from '@haive/shared/schemas';
 import {
@@ -1568,7 +1568,11 @@ const ONBOARDING_RESET_FILES = [
 
 /** What the record files above leave behind, and removed only once empty: a file somebody put
  *  beside the record keeps the directory it is in. */
-const ONBOARDING_RESET_EMPTY_DIRS = [`${PROJECT_STATE_DIR}/project`, PROJECT_STATE_DIR];
+const ONBOARDING_RESET_EMPTY_DIRS = [
+  `${PROJECT_STATE_DIR}/project`,
+  `${PROJECT_STATE_DIR}/artifacts`,
+  PROJECT_STATE_DIR,
+];
 
 /** The one directory swept entry by entry rather than removed whole: `.claude` holds Haive's
  *  workflow config, commands and review files beside things Haive must not take back. */
@@ -2369,6 +2373,10 @@ export async function resetOnboardingArtifacts(
   }
 
   for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
+  for (const diskPath of writtenHashes.keys()) {
+    if (isClaimablePath(diskPath))
+      await remove(`${PROJECT_STATE_DIR}/${claimFileName(diskPath)}`, false);
+  }
   for (const rel of ONBOARDING_RESET_EMPTY_DIRS) await removeIfEmpty(rel);
 
   for (const rel of ONBOARDING_RULES_FILES) {

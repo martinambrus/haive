@@ -23,6 +23,7 @@ import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { claimFileName } from '@haive/shared/project-state';
 import { repoRoutes, resetOnboardingArtifacts } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -34,6 +35,9 @@ const FORMAT = '.haive-data/state/format.json';
 const RENDER = '.haive-data/state/project/render.json';
 const PROJECT_DIR = '.haive-data/state/project';
 const STATE_DIR = '.haive-data/state';
+const ARTIFACTS_DIR = '.haive-data/state/artifacts';
+const AGENT = '.claude/agents/code-reviewer.md';
+const claimFile = (diskPath: string) => `${STATE_DIR}/${claimFileName(diskPath)}`;
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -101,6 +105,45 @@ describe('the reset takes back the project state onboarding recorded', () => {
     expect(await exists(root, FORMAT)).toBe(false);
     expect(await readFile(path.join(root, PROJECT_DIR, 'mine.json'), 'utf8')).toBe('{}\n');
     expect(removed).not.toContain(PROJECT_DIR);
+    expect(removed).not.toContain(STATE_DIR);
+  });
+});
+
+describe('the reset takes back the claim files of the rows it supersedes', () => {
+  const provenance = (...paths: string[]) => ({
+    ...noProvenance,
+    writtenHashes: new Map(paths.map((p) => [p, 'h'.repeat(64)])),
+  });
+
+  it('removes a claim file per live row and the empty directory that held them', async () => {
+    const marker = '.claude/agents/imported.md';
+    const root = await repoRoot({
+      [claimFile(AGENT)]: '{}\n',
+      [claimFile(marker)]: '{}\n',
+    });
+
+    const { removed } = await resetOnboardingArtifacts(root, provenance(AGENT, marker));
+
+    for (const rel of [claimFile(AGENT), claimFile(marker), ARTIFACTS_DIR, STATE_DIR]) {
+      expect(await exists(root, rel), rel).toBe(false);
+      expect(removed, rel).toContain(rel);
+    }
+  });
+
+  it('leaves a claim file no live row names, and the directory around it', async () => {
+    const teammate = '.claude/agents/teammate.md';
+    const root = await repoRoot({
+      [claimFile(AGENT)]: '{}\n',
+      [claimFile(teammate)]: '{"unsynced":true}\n',
+    });
+
+    const { removed } = await resetOnboardingArtifacts(root, provenance(AGENT));
+
+    expect(await exists(root, claimFile(AGENT))).toBe(false);
+    expect(await readFile(path.join(root, claimFile(teammate)), 'utf8')).toBe(
+      '{"unsynced":true}\n',
+    );
+    expect(removed).not.toContain(ARTIFACTS_DIR);
     expect(removed).not.toContain(STATE_DIR);
   });
 });
@@ -188,6 +231,31 @@ describe('resetting a repository through the route', () => {
     expect(res.status).toBe(200);
     const { removed } = (await res.json()) as { removed: string[] };
     expect(removed).toEqual(expect.arrayContaining([FORMAT, RENDER, PROJECT_DIR, STATE_DIR]));
+    expect(await exists(root, STATE_DIR)).toBe(false);
+  });
+
+  it('takes the claim files of its live rows off the checkout, with their directory', async () => {
+    const root = await repoRoot({ [claimFile(AGENT)]: '{}\n' });
+    const fake = await setup(root);
+    fake.insert(schema.onboardingArtifacts, {
+      userId: USER,
+      repositoryId: REPO,
+      taskId: null,
+      diskPath: AGENT,
+      templateId: 'agent.code-reviewer',
+      templateKind: 'agent',
+      templateSchemaVersion: 1,
+      templateContentHash: 'a'.repeat(64),
+      writtenHash: 'b'.repeat(64),
+      sourceStepId: 'project-state-import',
+      source: 'backfill',
+      importedAt: new Date(1),
+    });
+
+    expect((await reset()).status).toBe(200);
+
+    expect(await exists(root, claimFile(AGENT))).toBe(false);
+    expect(await exists(root, ARTIFACTS_DIR)).toBe(false);
     expect(await exists(root, STATE_DIR)).toBe(false);
   });
 

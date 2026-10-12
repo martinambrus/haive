@@ -1807,22 +1807,25 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
     ctx.throwIfCancelled();
     try {
-      writtenPaths.push(
-        ...(await writeProjectStateRecord(ctx.db, {
-          repositoryId: plan.repositoryId,
-          repoPath: ctx.repoPath,
-          context: renderCtx,
-          rtkChoiceRecorded: plan.rtkFollowsLive === true,
-          ...(plan.renderContextColumn !== undefined
-            ? { expectedColumns: plannedColumns(plan), holdingTaskId: ctx.taskId }
-            : {}),
-        })),
-      );
+      const state = await writeProjectStateRecord(ctx.db, {
+        repositoryId: plan.repositoryId,
+        repoPath: ctx.repoPath,
+        context: renderCtx,
+        rtkChoiceRecorded: plan.rtkFollowsLive === true,
+        ...(plan.renderContextColumn !== undefined
+          ? { expectedColumns: plannedColumns(plan), holdingTaskId: ctx.taskId }
+          : {}),
+      });
+      writtenPaths.push(...state.written);
+      deletedPaths.push(...state.removed);
     } catch (err) {
       failIfColumnStale(err);
       if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);
       // The files stand on disk whatever the database kept, and the commit stages what is listed here.
-      if (err instanceof ProjectStateWriteError) writtenPaths.push(...err.written);
+      if (err instanceof ProjectStateWriteError) {
+        writtenPaths.push(...err.written);
+        deletedPaths.push(...err.removed);
+      }
       const message = err instanceof Error ? err.message : String(err);
       warnings.push(`project state record write failed: ${message}`);
       ctx.logger.warn({ err }, 'project state record write failed');

@@ -75,6 +75,7 @@ async function setup(seedColumn: Context | null = null) {
     repositories,
     projectStateSync: sync,
     projectStateConflicts: schema.projectStateConflicts,
+    onboardingArtifacts: schema.onboardingArtifacts,
   });
   const column = keyOf(repositories, 'render_context');
   fake.insert(repositories, {
@@ -97,7 +98,7 @@ async function setup(seedColumn: Context | null = null) {
       repoPath: root,
       context: c as never,
       rtkChoiceRecorded: true,
-    });
+    }).then((result) => result.written);
   return {
     root,
     fake,
