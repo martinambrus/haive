@@ -359,6 +359,16 @@ async function ragStoreAwaitsReembedBounded(
   }
 }
 
+/** Fences each write of a RAG embed action: once the lock is lost another sync may be writing. */
+function assertRagLockHeld(lock: RagSyncLock | null): void {
+  if (lock?.lost) {
+    throw new HttpError(
+      409,
+      'The RAG sync lock of this repository was lost while this action ran (another sync may have started); run it again when no sync is running',
+    );
+  }
+}
+
 /** Force every chunk of a repository's RAG index to be re-embedded on the next
  *  sync, WITHOUT deleting anything: nulling `chunk_hash` makes the incremental
  *  differ (`_rag-index.ts`) see every chunk as changed, so the rows stay
@@ -375,6 +385,7 @@ async function ragStoreAwaitsReembedBounded(
 async function forceRagReembed(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
+  lock: RagSyncLock | null,
 ): Promise<boolean> {
   const conn = await openRagStore(db, repositoryId);
   if (!conn) return false;
@@ -385,6 +396,7 @@ async function forceRagReembed(
   });
   const resetBatches = async () => {
     for (;;) {
+      assertRagLockHeld(lock);
       const res = await conn.pg.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_REEMBED_STATEMENT_TIMEOUT_MS}ms'`);
         return tx.unsafe(
@@ -838,16 +850,18 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
               'Index rebuild pending: chunks are re-embedded on the next sync.',
           };
           // Stored before the reset: a reset that fails part-way leaves NULL hashes over the old vectors.
+          assertRagLockHeld(lock);
           await db
             .update(schema.repositories)
             .set(pending)
             .where(eq(schema.repositories.id, repositoryId));
-          reembedQueued = await forceRagReembed(db, repositoryId);
+          reembedQueued = await forceRagReembed(db, repositoryId, lock);
           if (reembedQueued) Object.assign(updates, pending);
         }
       }
     }
 
+    assertRagLockHeld(lock);
     await db
       .update(schema.repositories)
       .set(updates)

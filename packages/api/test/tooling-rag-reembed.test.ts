@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   existingOpened: [] as string[],
   internalExists: false,
   tableMissing: false,
+  onStatement: null as ((statement: string) => void) | null,
 }));
 
 const lockFake = vi.hoisted(() => ({ value: undefined as unknown }));
@@ -61,6 +62,7 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
         pg: (() => {
           const unsafe = async (statement: string, params?: unknown[]) => {
             h.statements.push({ statement, params });
+            h.onStatement?.(statement);
             if (statement.startsWith('SELECT')) {
               if (h.probeError) throw new Error('store read failed');
               const awaiting = h.awaitingSeq.length > 0 ? h.awaitingSeq.shift() : h.awaiting;
@@ -141,6 +143,7 @@ function setup(
   h.awaiting = false;
   h.awaitingSeq = [];
   h.probeError = false;
+  h.onStatement = null;
   return fake;
 }
 
@@ -516,6 +519,37 @@ describe('a RAG embed action while a sync of the repository runs', () => {
     expect(res.status).toBe(200);
     expect(fakeLock.state.tried).toEqual([]);
     expect(fake.rows(schema.repositories)[0]!.rtkEnabled).toBe(false);
+  });
+
+  it('stops resetting and answers 409 once the lock is lost between two batches', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag');
+    h.batches = [500, 500, 0];
+    h.onStatement = (statement) => {
+      if (statement.startsWith('UPDATE')) fakeLock.state.handles[0]!.lost = true;
+    };
+
+    const res = await rebuild();
+
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { error: string }).toMatchObject({
+      error: expect.stringMatching(/lock of this repository was lost/i),
+    });
+    expect(h.statements.filter((s) => s.statement.startsWith('UPDATE'))).toHaveLength(1);
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedReason).toMatch(/rebuild pending/i);
+    expect(fakeLock.state.handles.map((handle) => handle.released)).toEqual([1]);
+  });
+
+  it('keeps the degradation and answers 409 when the lock is lost during the retry probe', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag', true, true);
+    const before = structuredClone(fake.rows(schema.repositories));
+    h.onStatement = (statement) => {
+      if (statement.startsWith('SELECT')) fakeLock.state.handles[0]!.lost = true;
+    };
+
+    const res = await retry();
+
+    expect(res.status).toBe(409);
+    expect(fake.rows(schema.repositories)).toEqual(before);
   });
 
   it('answers a different repository while another is syncing', async () => {
