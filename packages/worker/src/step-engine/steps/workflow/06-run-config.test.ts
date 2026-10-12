@@ -39,3 +39,41 @@ describe('06-run-config path-aware fields', () => {
     expect(field(d, 'adversarialQaLevel')?.label).toBe('Code review depth');
   });
 });
+
+describe('06-run-config declared verify commands', () => {
+  const detected = (extra: Record<string, unknown>) =>
+    ({
+      specBody: 'spec',
+      ddevMode: false,
+      appRunnerMode: false,
+      taskAdversarialQaLevel: null,
+      taskMaxFixRounds: 5,
+      runsBrowserVerify: true,
+      runsAdversarialQa: true,
+      ...extra,
+    }) as never;
+  const note = (d: never) =>
+    runConfigStep.form!({} as never, d, null)!.fields.find(
+      (f) => f.id === 'declaredVerifyCommands',
+    );
+
+  it('lists the declared commands and the slots that are off, read-only', () => {
+    const field = note(detected({ verifyCommands: { test: 'make test', lint: null } })) as {
+      type: string;
+      body: string;
+    };
+    expect(field.type).toBe('note');
+    expect(field.body).toContain('test: make test\nlint: (turned off)');
+    expect(field.body).not.toContain('typecheck');
+  });
+
+  it('keeps a command that holds backticks inside one fence', () => {
+    const field = note(detected({ verifyCommands: { test: 'echo ```id```' } })) as { body: string };
+    expect(field.body).toContain('````\ntest: echo ```id```\n````');
+  });
+
+  it('shows nothing when none is declared, and for a payload without the field', () => {
+    expect(note(detected({}))).toBeUndefined();
+    expect(note(detected({ verifyCommands: {} }))).toBeUndefined();
+  });
+});

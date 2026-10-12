@@ -355,10 +355,10 @@ describe('gate-2 status summary', () => {
     expect(r?.body).toContain('subdirectory');
   });
 
-  it("keeps today's exact NOT RUN body when no config was declined", () => {
+  it('keeps the exact NOT RUN body, with the Tooling page hint, when no config was declined', () => {
     const r = row(baseDetect({ verify: allSkipped }), 'Tests / lint / typecheck');
     expect(r?.body).toBe(
-      '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Nothing here says the code is correct.',
+      "08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Declare commands on the repository's Tooling page. Nothing here says the code is correct.",
     );
     expect(r?.detail).toBe('no check was executed — this is not a passing verification');
   });
@@ -374,6 +374,44 @@ describe('gate-2 status summary', () => {
     expect(r?.body).toContain("only the project's own root tooling");
   });
 
+  describe('commands the repository declared or turned off', () => {
+    const lintRan = { ...allSkipped, lint: { ran: true, passed: true, output: '' } };
+
+    it('labels a declared slot as declared', () => {
+      const d = baseDetect({ verify: lintRan, declaredSlots: ['lint'] });
+      expect(rows(d).map((r) => r.label)).toEqual(['Lint (declared)']);
+    });
+
+    it('shows a turned-off slot as its own row, apart from the no-runner wording', () => {
+      const d = baseDetect({ verify: lintRan, offSlots: ['test'] });
+      expect(row(d, 'Tests')).toEqual({
+        label: 'Tests',
+        status: 'warn',
+        statusLabel: 'TURNED OFF',
+        detail: 'turned off for this repository',
+      });
+      expect(rows(d).map((r) => r.label)).toEqual(['Tests', 'Lint']);
+    });
+
+    it('adds the Tooling page hint to the NOT RUN body whether or not the repository declared something', () => {
+      const plain = row(baseDetect({ verify: allSkipped }), 'Tests / lint / typecheck');
+      expect(plain?.body).toContain('Tooling page');
+      const off = row(
+        baseDetect({ verify: allSkipped, offSlots: ['test', 'lint', 'typecheck'] }),
+        'Tests / lint / typecheck',
+      );
+      expect(off?.body).toBe(
+        "08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Declare commands on the repository's Tooling page. Nothing here says the code is correct.",
+      );
+    });
+
+    it('renders exactly as before for a payload without the new fields', () => {
+      expect(rows(baseDetect({ verify: lintRan, declaredSlots: [], offSlots: [] }))).toEqual(
+        rows(baseDetect({ verify: lintRan })),
+      );
+    });
+  });
+
   describe('configs declined below the root, when some check ran', () => {
     const declinedConfigs = ['sub/phpunit.xml'];
     const lintRan = { ...allSkipped, lint: { ran: true, passed: true, output: '' } };
@@ -384,6 +422,7 @@ describe('gate-2 status summary', () => {
       expect(r?.status).toBe('warn');
       expect(r?.body).toContain('sub/phpunit.xml');
       expect(r?.body).toContain('the repository root');
+      expect(r?.body).toContain("Declare commands on the repository's Tooling page.");
       expect(row(d, 'Tests / lint / typecheck')).toBeUndefined();
       expect(decisionDefault(d)).toBe('approve');
     });
@@ -1554,6 +1593,51 @@ describe('gate-2 verification results read from 08', () => {
     expect((await gate2VerifyApprovalStep.detect!(ctx)).slotWithoutRunner).toBeUndefined();
     withDetect({ ...slots, test: null });
     expect((await gate2VerifyApprovalStep.detect!(ctx)).slotWithoutRunner).toBeUndefined();
+  });
+
+  it('does not count a slot turned off on purpose as one with no runner', async () => {
+    m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: unknown, id: string) =>
+      id === '08-phase-5-verify'
+        ? {
+            detect: {
+              test: null,
+              lint: { label: 'l' },
+              typecheck: { label: 'c' },
+              declinedConfigs: ['sub/phpunit.xml'],
+              offSlots: ['test'],
+            },
+            output: { lint: passedRun, passed: true, runtimeSmoke: null },
+          }
+        : null,
+    );
+    const d = await gate2VerifyApprovalStep.detect!(ctx);
+    expect(d.slotWithoutRunner).toBeUndefined();
+    expect(d.offSlots).toEqual(['test']);
+    const labels = (gate2VerifyApprovalStep.form!(ctx, d)!.statusSummary ?? []).map((r) => r.label);
+    expect(labels).not.toContain('Tooling below the root');
+  });
+
+  it('reads the declared and turned-off slots from 08, and nothing when there are none', async () => {
+    const withDetect = (detect: Record<string, unknown>) =>
+      m.loadPreviousStepOutput.mockImplementation(
+        async (_db: unknown, _task: unknown, id: string) =>
+          id === '08-phase-5-verify'
+            ? { detect, output: { lint: passedRun, passed: true, runtimeSmoke: null } }
+            : null,
+      );
+    withDetect({
+      test: { label: 'make test', source: 'declared' },
+      lint: { label: 'l' },
+      typecheck: null,
+      offSlots: ['typecheck', 'bogus'],
+    });
+    const found = await gate2VerifyApprovalStep.detect!(ctx);
+    expect(found.declaredSlots).toEqual(['test']);
+    expect(found.offSlots).toEqual(['typecheck']);
+    withDetect({ test: { label: 't' }, lint: { label: 'l' }, typecheck: null });
+    const plain = await gate2VerifyApprovalStep.detect!(ctx);
+    expect('declaredSlots' in plain).toBe(false);
+    expect('offSlots' in plain).toBe(false);
   });
 
   it('reads the house rules of the task into the payload, and nothing when it has none', async () => {

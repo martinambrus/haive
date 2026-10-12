@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { verifyCommandsSchema, type VerifyCommands, type logger } from '@haive/shared';
 import { decidedWorktreePath, loadTaskWorktreeDecision } from '../../../repo/task-worktree.js';
 
 export interface TaskMeta {
@@ -94,6 +95,33 @@ export async function loadTaskMeta(db: Database, taskId: string): Promise<TaskMe
     affectedClients,
     category,
   };
+}
+
+/** The repository's declared verify commands; null when none are stored or the stored value is invalid. */
+export async function loadDeclaredVerifyCommands(
+  db: Database,
+  taskId: string,
+  log: ReturnType<typeof logger.child>,
+): Promise<VerifyCommands | null> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { repositoryId: true },
+  });
+  if (!task?.repositoryId) return null;
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, task.repositoryId),
+    columns: { verifyCommands: true },
+  });
+  if (repo?.verifyCommands == null) return null;
+  const parsed = verifyCommandsSchema.safeParse(repo.verifyCommands);
+  if (!parsed.success) {
+    log.warn(
+      { issues: parsed.error.issues },
+      'stored verify_commands is invalid — treated as absent',
+    );
+    return null;
+  }
+  return parsed.data;
 }
 
 export interface AppBootOutput {

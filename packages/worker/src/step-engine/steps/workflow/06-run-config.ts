@@ -1,11 +1,12 @@
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { FormSchema, ExecutionPath } from '@haive/shared';
+import type { FormField, FormSchema, ExecutionPath, VerifyCommands } from '@haive/shared';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { resolveDdevWorkspace } from './_task-meta.js';
+import { loadDeclaredVerifyCommands, resolveDdevWorkspace } from './_task-meta.js';
+import { codeBlock } from './_plan-ops.js';
 import { parseConfigRecommendation, markRecommended } from './_gate1-recommendation.js';
 import { buildBrowserModeOptions } from './_browser-modes.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
@@ -56,6 +57,9 @@ interface RunConfigDetect {
    *  otherwise the repository policy, otherwise all of them. So the accordion opens
    *  showing what would happen if the user changed nothing. */
   reviewDimensionIds: string[];
+  /** The repository's declared verify commands, shown read-only. Absent when it declares none, and
+   *  on a payload persisted before the field existed. */
+  verifyCommands?: VerifyCommands;
 }
 
 /** Front-loaded run answers for the hands-free stretch to Gate 2 (browser/MCP mode,
@@ -113,6 +117,24 @@ function resolveSubmittedDimensions(raw: unknown, detected: string[] | undefined
   return chosen.length > 0 ? chosen : policy;
 }
 
+function declaredVerifyNote(declared: VerifyCommands | undefined): FormField[] {
+  if (!declared) return [];
+  const lines = (['test', 'lint', 'typecheck'] as const).flatMap((slot) => {
+    const value = declared[slot];
+    return value === undefined ? [] : [`${slot}: ${value === null ? '(turned off)' : value}`];
+  });
+  if (lines.length === 0) return [];
+  return [
+    {
+      type: 'note',
+      id: 'declaredVerifyCommands',
+      label: 'Verify commands declared for this repository',
+      body: `Verify runs these in place of what it would detect; change them on the repository's Tooling page. Slots not listed are detected.\n\n${codeBlock(lines.join('\n'))}`,
+      variant: 'info',
+    },
+  ];
+}
+
 export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
   metadata: {
     id: '06-run-config',
@@ -161,6 +183,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     // A null execution_path means triage didn't filter the run (full_workflow): every step runs.
     const execPath = (taskRow?.executionPath ?? 'full_workflow') as ExecutionPath;
     const dbAvailable = await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true);
+    const verifyCommands = await loadDeclaredVerifyCommands(ctx.db, ctx.taskId, ctx.logger);
 
     return {
       specBody,
@@ -175,6 +198,9 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       reviewDimensionIds: (await resolveTaskReviewDimensions(ctx.db, ctx.taskId)).enabled.map(
         (d) => d.id,
       ),
+      ...(verifyCommands && Object.values(verifyCommands).some((v) => v !== undefined)
+        ? { verifyCommands }
+        : {}),
     };
   },
 
@@ -346,6 +372,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
           label: 'AI-review each issue before merge (DAG mode)',
           default: true,
         },
+        ...declaredVerifyNote(detected.verifyCommands),
         {
           type: 'checkbox',
           id: 'verifyRunTest',

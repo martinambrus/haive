@@ -15,7 +15,12 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { isOutOfScope } from '../_scope-fence.js';
 import { loadFindingRecurrence, recurrenceKey } from './_review-findings.js';
 import { checkOutputExcerpt, excerptDiagnosis } from './_fix-loop.js';
-import { declinedConfigsSentence } from './08-phase-5-verify.js';
+import {
+  TOOLING_PAGE_HINT,
+  declinedConfigsSentence,
+  withToolingHint,
+  type VerifySlotName,
+} from './08-phase-5-verify.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -122,6 +127,10 @@ interface VerifyGateDetect {
   declinedConfigs?: string[];
   /** Set when 08 found no runner for at least one of test, lint and typecheck. */
   slotWithoutRunner?: boolean;
+  /** Slots whose command the repository declared. Absent on a payload that predates the field. */
+  declaredSlots?: VerifySlotName[];
+  /** Slots the repository turned off. Absent on a payload that predates the field. */
+  offSlots?: VerifySlotName[];
   /** Phase 4 pre-test validation result (null when the step didn't run). */
   validation: {
     verdict: string;
@@ -615,8 +624,16 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ? declinedRaw.filter((c): c is string => typeof c === 'string')
       : [];
     const prevDetect = (prev?.detect ?? null) as Record<string, unknown> | null;
-    const slotWithoutRunner =
-      prevDetect?.test === null || prevDetect?.lint === null || prevDetect?.typecheck === null;
+    const slotNames: VerifySlotName[] = ['test', 'lint', 'typecheck'];
+    const declaredSlots = slotNames.filter(
+      (n) => (prevDetect?.[n] as { source?: unknown } | null | undefined)?.source === 'declared',
+    );
+    const offRaw = prevDetect?.offSlots;
+    const offSlots = Array.isArray(offRaw) ? slotNames.filter((n) => offRaw.includes(n)) : [];
+    // A slot turned off on purpose is not a missing runner.
+    const slotWithoutRunner = slotNames.some(
+      (n) => prevDetect?.[n] === null && !offSlots.includes(n),
+    );
 
     // Phase 4 pre-test validation: surface the verdict (the legacy "escalate to
     // user" lands here — exhausted budget / open issues / unparseable output).
@@ -914,6 +931,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       allPassed: output.passed === true,
       ...(declinedConfigs.length > 0 ? { declinedConfigs } : {}),
       ...(declinedConfigs.length > 0 && slotWithoutRunner ? { slotWithoutRunner } : {}),
+      ...(declaredSlots.length > 0 ? { declaredSlots } : {}),
+      ...(offSlots.length > 0 ? { offSlots } : {}),
       validation,
       testManagement,
       browser,
@@ -1008,12 +1027,23 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const selectedCheckNotRun = verifySlots.some((c) => c?.ran === false && !!c.note);
     const rows: StatusSummaryItem[] = [];
 
-    for (const [label, c] of [
-      ['Tests', detected.verify.test],
-      ['Lint', detected.verify.lint],
-      ['PHP lint', detected.verify.phpLint],
-      ['Typecheck', detected.verify.typecheck],
+    for (const [shownLabel, slot, c] of [
+      ['Tests', 'test', detected.verify.test],
+      ['Lint', 'lint', detected.verify.lint],
+      ['PHP lint', null, detected.verify.phpLint],
+      ['Typecheck', 'typecheck', detected.verify.typecheck],
     ] as const) {
+      const label =
+        slot && detected.declaredSlots?.includes(slot) ? `${shownLabel} (declared)` : shownLabel;
+      if (slot && detected.offSlots?.includes(slot) && (!c || (!c.ran && !c.note))) {
+        rows.push({
+          label,
+          status: 'warn',
+          statusLabel: 'TURNED OFF',
+          detail: 'turned off for this repository',
+        });
+        continue;
+      }
       if (!c || (!c.ran && !c.note)) continue;
       if (!c.ran) {
         rows.push({
@@ -1054,7 +1084,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         statusLabel: 'NOT RUN',
         detail: 'no check was executed — this is not a passing verification',
         body: [
-          '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Nothing here says the code is correct.',
+          '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.',
+          TOOLING_PAGE_HINT,
+          'Nothing here says the code is correct.',
           declinedConfigsSentence(detected.declinedConfigs),
         ]
           .filter(Boolean)
@@ -1065,7 +1097,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       rows.push({
         label: 'Tooling below the root',
         status: 'warn',
-        body: declinedConfigsSentence(detected.declinedConfigs),
+        body: withToolingHint(declinedConfigsSentence(detected.declinedConfigs)),
         defaultOpen: true,
       });
     }

@@ -7,7 +7,7 @@ import {
 } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
-import type { FormSchema } from '@haive/shared';
+import type { FormSchema, VerifyCommands } from '@haive/shared';
 import {
   AdvisedStepError,
   TaskCancelledError,
@@ -17,7 +17,7 @@ import {
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { resolveDdevWorkspace } from './_task-meta.js';
+import { loadDeclaredVerifyCommands, resolveDdevWorkspace } from './_task-meta.js';
 import {
   DDEV_PROJECT_MOUNT,
   ddevExec,
@@ -35,6 +35,7 @@ import {
   killStalePlaywrightRuns,
 } from '../../../sandbox/ddev-playwright.js';
 import { checkOutputExcerpt } from './_fix-loop.js';
+import { codeBlock } from './_plan-ops.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
 import { DRUPAL_CORE_MARKER, type TestFramework } from './08b-test-management.js';
@@ -65,7 +66,11 @@ export interface SlotCommand {
   kind: 'host' | 'ddev';
   label: string;
   argv: string[];
+  /** Set when the repository declared this command; `label` is then the declared text. */
+  source?: 'declared';
 }
+
+export type VerifySlotName = 'test' | 'lint' | 'typecheck';
 
 type SlotRunner = 'pm' | 'composer' | 'phpunit' | 'pytest' | 'phpcs' | 'phpstan';
 
@@ -86,6 +91,9 @@ interface VerifyDetect {
   /** Tooling configs one level below the root that were seen and not used, each with its reason.
    *  Optional because detect_output is persisted and replayed; absent when nothing was declined. */
   declinedConfigs?: string[];
+  /** Slots the repository turned off: no runner, whatever the workspace holds. Optional because
+   *  detect_output is persisted and replayed; absent when no slot is off. */
+  offSlots?: VerifySlotName[];
 }
 
 interface CheckResult {
@@ -175,15 +183,21 @@ export function buildUnverifiedNote(
     phpLint?: CheckResult;
   },
   declinedConfigs?: string[],
+  offSlots?: VerifySlotName[],
 ): string {
   if (results.test.ran || results.lint.ran || results.typecheck.ran || results.phpLint?.ran) {
     return '';
   }
   const undetected: string[] = [];
   const unticked: string[] = [];
+  const turnedOff: string[] = [];
   for (const name of ['test', 'lint', 'phpLint', 'typecheck'] as const) {
     const result = results[name];
     if (!result || result.note) continue;
+    if (name !== 'phpLint' && offSlots?.includes(name)) {
+      turnedOff.push(name);
+      continue;
+    }
     (slots[name] === null ? undetected : unticked).push(name === 'phpLint' ? 'php lint' : name);
   }
   const parts = [
@@ -191,15 +205,26 @@ export function buildUnverifiedNote(
   ];
   if (undetected.length > 0) {
     parts.push(
-      `No runner was detected in this workspace for: ${undetected.join(', ')}. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.`,
+      `No runner was detected in this workspace for: ${undetected.join(', ')}. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. ${TOOLING_PAGE_HINT}`,
     );
     const declined = declinedConfigsSentence(declinedConfigs);
     if (declined) parts.push(declined);
+  }
+  if (turnedOff.length > 0) {
+    parts.push(`Turned off for this repository: ${turnedOff.join(', ')}.`);
   }
   if (unticked.length > 0) {
     parts.push(`Detected but not selected for this pass: ${unticked.join(', ')}.`);
   }
   return parts.join('\n\n');
+}
+
+/** Appended to every root-only sentence: declaring commands is how a repo past root-only detection runs. */
+export const TOOLING_PAGE_HINT = "Declare commands on the repository's Tooling page.";
+
+/** The declined-configs sentence with the Tooling page hint, for the notices that carry no root-only sentence. */
+export function withToolingHint(sentence: string): string {
+  return sentence ? `${sentence} ${TOOLING_PAGE_HINT}` : '';
 }
 
 /** What gate 2 and the unverified note say about the configs one level down that were not used. */
@@ -303,6 +328,50 @@ export function buildVerifyCommand(
       if (ddevMode) return { kind: 'ddev', label: 'ddev exec pytest', argv: ['exec', 'pytest'] };
       return { kind: 'host', label: 'pytest', argv: ['pytest'] };
   }
+}
+
+/** One shell string. DDEV runs it raw, so the runner's shell sees exactly one quoted word. */
+export function buildDeclaredCommand(command: string, ddevMode: boolean): SlotCommand {
+  if (ddevMode) {
+    return {
+      kind: 'ddev',
+      label: command,
+      argv: ['exec', '--raw', '--', 'bash', '-c', shellQuote(command)],
+      source: 'declared',
+    };
+  }
+  return { kind: 'host', label: command, argv: ['sh', '-c', command], source: 'declared' };
+}
+
+interface ResolvedSlots {
+  test: SlotCommand | null;
+  lint: SlotCommand | null;
+  phpLint?: SlotCommand | null;
+  typecheck: SlotCommand | null;
+}
+
+/** Overlay the repository's declared commands on the detected slots: a command replaces the slot,
+ *  null empties it, an absent key leaves detection alone. A declared or off lint drops phpLint too. */
+export function applyDeclaredCommands(
+  slots: ResolvedSlots,
+  declared: VerifyCommands | null,
+  ddevMode: boolean,
+): { slots: ResolvedSlots; offSlots: VerifySlotName[] } {
+  if (!declared) return { slots, offSlots: [] };
+  const out = { ...slots };
+  const offSlots: VerifySlotName[] = [];
+  for (const name of ['test', 'lint', 'typecheck'] as const) {
+    const value = declared[name];
+    if (value === undefined) continue;
+    if (value === null) {
+      out[name] = null;
+      offSlots.push(name);
+    } else {
+      out[name] = buildDeclaredCommand(value, ddevMode);
+    }
+    if (name === 'lint') delete out.phpLint;
+  }
+  return { slots: out, offSlots };
 }
 
 async function readJsonScripts(workspace: string, file: string): Promise<Record<string, string>> {
@@ -468,6 +537,9 @@ interface SlotRun {
 /** A shell reports a missing command as 127. */
 const NOT_FOUND_EXIT = 127;
 
+/** A shell reports a command it found but could not execute as 126. */
+const NOT_EXECUTABLE_EXIT = 126;
+
 const SLOT_TIMEOUT_MS = 600_000;
 
 /** Whether the runner went away or started again during a run; unknown either side says no. */
@@ -544,13 +616,59 @@ async function execSlot(
   };
 }
 
+const PROGRAM_WORD = /^[A-Za-z0-9._/+-]+$/;
+
+const PROBE_SCRIPT =
+  'command -v -- "$1" >/dev/null 2>&1 && case $1 in */*) [ -x "$1" ] && [ ! -d "$1" ] ;; esac';
+
+/** An aggregate shell status cannot say the outer program never started, so its first word is probed. */
+function probeCommand(cmd: SlotCommand): SlotCommand | null {
+  const match = /^(\S+)(\s|$)/.exec(cmd.label.trimStart());
+  const word = match?.[1];
+  if (!word || !PROGRAM_WORD.test(word)) return null;
+  if (cmd.kind === 'ddev')
+    return {
+      kind: 'ddev',
+      label: cmd.label,
+      argv: [
+        'exec',
+        '--raw',
+        '--',
+        'bash',
+        '-c',
+        shellQuote(PROBE_SCRIPT),
+        shellQuote('probe'),
+        shellQuote(word),
+      ],
+    };
+  return { kind: 'host', label: cmd.label, argv: ['sh', '-c', PROBE_SCRIPT, 'sh', word] };
+}
+
+/** A declared command whose program cannot start is a repository setting to correct, not a defect a fix round can repair. */
+async function declaredNotRunnable(
+  cmd: SlotCommand,
+  slot: string,
+  run: SlotRun,
+  ctx: StepContext,
+  handle: DdevRunnerHandle | null,
+): Promise<SlotRun> {
+  if (cmd.source !== 'declared' || !run.ran) return run;
+  if (run.exitCode !== NOT_FOUND_EXIT && run.exitCode !== NOT_EXECUTABLE_EXIT) return run;
+  const probe = probeCommand(cmd);
+  if (!probe) return run;
+  const probed = await execSlot(probe, ctx, handle);
+  if (!probed.ran || probed.exitCode === 0) return run;
+  const note = `the declared ${slot} command was not run — command not found / not executable (exit ${run.exitCode})`;
+  return { ran: false, note, exitCode: run.exitCode, output: note, raw: run.raw };
+}
+
 async function runSlotRaw(
   slot: 'test' | 'lint' | 'typecheck',
   cmd: SlotCommand,
   ctx: StepContext,
   handle: DdevRunnerHandle | null,
 ): Promise<{ check: CheckResult; raw: string }> {
-  const run = await execSlot(cmd, ctx, handle);
+  const run = await declaredNotRunnable(cmd, slot, await execSlot(cmd, ctx, handle), ctx, handle);
   const check = {
     ran: run.ran,
     passed: run.ran && run.exitCode === 0,
@@ -577,7 +695,8 @@ const PHPCS_TIMED_OUT = 'phpcs reached its time limit — lint not verified';
 /** A kill timer can fire a little before the clock this step reads agrees. */
 const TIME_LIMIT_SLACK_MS = 5_000;
 
-const isDirectPhpcs = (cmd: SlotCommand): boolean => cmd.argv.at(-1) === 'vendor/bin/phpcs';
+const isDirectPhpcs = (cmd: SlotCommand): boolean =>
+  cmd.source !== 'declared' && cmd.argv.at(-1) === 'vendor/bin/phpcs';
 
 const unscoped = (check: CheckResult, reason: string): CheckResult =>
   check.ran && !check.passed ? { ...check, note: `lint verdict unscoped: ${reason}` } : check;
@@ -665,7 +784,10 @@ async function runLint(
   handle: DdevRunnerHandle | null,
 ): Promise<CheckResult> {
   if (!isDirectPhpcs(cmd)) {
-    return unscoped(await runSlot('lint', cmd, ctx, handle), 'project script');
+    return unscoped(
+      await runSlot('lint', cmd, ctx, handle),
+      cmd.source === 'declared' ? 'declared command' : 'project script',
+    );
   }
   if (cmd.kind === 'ddev' && !handle) return runSlot('lint', cmd, ctx, handle);
   const changed = await collectChangedLineMap(ctx, workspace);
@@ -869,7 +991,12 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const infra = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08b-test-management');
     const testFramework =
       ((infra?.detect ?? null) as { primary?: TestFramework | null } | null)?.primary ?? null;
-    const slots = await resolveSlots(workspace, ddevMode);
+    const declared = await loadDeclaredVerifyCommands(ctx.db, ctx.taskId, ctx.logger);
+    const { slots, offSlots } = applyDeclaredCommands(
+      await resolveSlots(workspace, ddevMode),
+      declared,
+      ddevMode,
+    );
     const declinedConfigs = await findDeclinedConfigs(workspace);
     return {
       workspacePath: workspace,
@@ -877,23 +1004,38 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       testFramework,
       ...slots,
       ...(declinedConfigs.length > 0 ? { declinedConfigs } : {}),
+      ...(offSlots.length > 0 ? { offSlots } : {}),
     };
   },
 
   form(_ctx, detected): FormSchema {
-    const label = (c: SlotCommand | null) => (c ? c.label : 'none detected');
+    const off = detected.offSlots ?? [];
+    const label = (c: SlotCommand | null, slot?: VerifySlotName) =>
+      c
+        ? c.source === 'declared'
+          ? `${c.label} (declared)`
+          : c.label
+        : slot && off.includes(slot)
+          ? 'turned off for this repository'
+          : 'none detected';
     return {
       title: 'Phase 5: Verify',
       description: [
-        `Workspace: ${detected.workspacePath}`,
         detected.ddevMode ? 'PHP/Python checks run inside the DDEV runner.' : '',
-        `test: ${label(detected.test)}`,
-        `lint: ${label(detected.lint)}`,
-        detected.phpLint ? `php lint: ${label(detected.phpLint)}` : '',
-        `typecheck: ${label(detected.typecheck)}`,
+        codeBlock(
+          [
+            `workspace: ${detected.workspacePath}`,
+            `test: ${label(detected.test, 'test')}`,
+            `lint: ${label(detected.lint, 'lint')}`,
+            detected.phpLint ? `php lint: ${label(detected.phpLint)}` : '',
+            `typecheck: ${label(detected.typecheck, 'typecheck')}`,
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        ),
       ]
         .filter(Boolean)
-        .join('\n'),
+        .join('\n\n'),
       fields: [
         { type: 'checkbox', id: 'runTest', label: 'Run tests', default: detected.test !== null },
         { type: 'checkbox', id: 'runLint', label: 'Run lint', default: detected.lint !== null },
@@ -956,8 +1098,10 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     // burns a whole round on something no agent can repair, which is the exact failure 08b's
     // own guard exists for. `ran: false` keeps it out of `passed` the same way a skipped slot
     // is kept out, and the note below says so rather than letting it read as green.
+    // A declared command may drive Playwright wherever 08b looked; its own error IDs decide then.
+    const envFramework = testCmd?.source === 'declared' ? 'playwright' : (testFramework ?? null);
     const testEnvBlocker =
-      test.ran && !test.passed ? classifyTestEnvFailure(testFramework ?? null, testRun.raw) : null;
+      test.ran && !test.passed ? classifyTestEnvFailure(envFramework, testRun.raw) : null;
     if (testEnvBlocker) {
       test = {
         ...test,
@@ -1016,22 +1160,25 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
         ? `passes on changed lines (${r.scope.preExisting} pre-existing)`
         : 'passes';
     };
-    const slotFact = (name: string, r: CheckResult): string =>
-      r.ran
-        ? `${name}: \`${r.command}\` ${verdict(r)}`
-        : r.note
-          ? `${name}: ${r.note}`
-          : r.command
-            ? `${name}: \`${r.command}\` exists but was not run this pass`
-            : `${name}: no runner detected in this workspace`;
+    const off = args.detected.offSlots ?? [];
+    const slotFact = (name: string, r: CheckResult, slot?: VerifySlotName): string =>
+      slot && off.includes(slot) && !r.ran
+        ? `${name}: turned off for this repository`
+        : r.ran
+          ? `${name}: \`${r.command}\` ${verdict(r)}`
+          : r.note
+            ? `${name}: ${r.note}`
+            : r.command
+              ? `${name}: \`${r.command}\` exists but was not run this pass`
+              : `${name}: no runner detected in this workspace`;
     await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
       stepId: '08-phase-5-verify',
       round: ctx.round,
       text: [
-        slotFact('test', test),
-        slotFact('lint', lint),
+        slotFact('test', test, 'test'),
+        slotFact('lint', lint, 'lint'),
         ...(phpLint ? [slotFact('php lint', phpLint)] : []),
-        slotFact('typecheck', typecheck),
+        slotFact('typecheck', typecheck, 'typecheck'),
         runtimeSmoke.ran
           ? `runtime smoke: ${runtimeSmoke.url} answered ${runtimeSmoke.httpStatus ?? 'nothing'}`
           : 'runtime smoke: no servable runtime',
@@ -1046,18 +1193,21 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       },
       { test, lint, typecheck, ...(phpLint ? { phpLint } : {}) },
       args.detected.declinedConfigs,
+      args.detected.offSlots,
     );
     const anyRan = test.ran || lint.ran || typecheck.ran || phpLint?.ran === true;
     const slotUndetected =
-      args.detected.test === null ||
-      args.detected.lint === null ||
-      args.detected.typecheck === null;
+      (args.detected.test === null && !off.includes('test')) ||
+      (args.detected.lint === null && !off.includes('lint')) ||
+      (args.detected.typecheck === null && !off.includes('typecheck'));
     const slotNotes = [
       test.note,
       lint.note,
       phpLint?.note,
       typecheck.note,
-      anyRan && slotUndetected ? declinedConfigsSentence(args.detected.declinedConfigs) : '',
+      anyRan && slotUndetected
+        ? withToolingHint(declinedConfigsSentence(args.detected.declinedConfigs))
+        : '',
     ]
       .filter(Boolean)
       .join('\n');

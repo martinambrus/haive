@@ -88,6 +88,22 @@ lint failed` section and its own gate-2 row. The one `runLint` checkbox covers b
 single lint runner gets no `phpLint` key, so its detect, output and gate rows are unchanged, and an
 old persisted payload reads as one lint.
 
+Detection searches only the workspace ROOT, so a repository can declare its own commands on its
+Tooling page (`repositories.verify_commands`; `applyDeclaredCommands`). Per slot: a key left out
+keeps detection, `null` turns the slot off, and a string replaces the runner. A declared or off lint
+replaces both lint slots, `phpLint` included. A declared command runs as one shell string, `sh -c`
+on the host and `ddev exec --raw -- bash -c` with the string quoted once in DDEV, so nothing in it
+expands in the runner's own shell. Its verdict is unscoped, like a project script's. A declared
+command whose own program cannot start reads as NOT RUN with a note, since it is a repository
+setting to correct, not a defect a fix round can repair. An exit 127 or 126 alone does not prove that,
+since a script that started can pass either through, so after one verify probes the command's first
+word in the same environment (`command -v`, and `-x` for a path); only a probe that fails makes it NOT
+RUN. A first word that is not a plain program name proves nothing, and the exit stays a failure. A failed declared test is checked for
+Playwright's own missing-browser errors whatever 08b detected, since it may drive Playwright from a
+directory 08b never looked in; browser provisioning still follows 08b's detection. Gate 2 lists a turned-off slot
+as off, never as a missing runner, so it raises no "Tooling below the root" row, and every
+root-only notice ends by pointing at the Tooling page. `06-run-config` shows the declared commands.
+
 **Each fix pass is a fresh CLI process, so what earlier passes concluded has to be carried
 explicitly.** `priorPassNotes` (08b) does it inside one step's loop and `loadPriorFixContext`
 (`_fix-loop.ts`) does it across rounds; both dedupe with the ledger's `contentFingerprint` and

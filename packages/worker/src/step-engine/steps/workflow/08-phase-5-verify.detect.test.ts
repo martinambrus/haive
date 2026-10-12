@@ -3,10 +3,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
-const { loadPreviousStepOutput, resolveDdevWorkspace } = vi.hoisted(() => ({
-  loadPreviousStepOutput: vi.fn(),
-  resolveDdevWorkspace: vi.fn(),
-}));
+const { loadPreviousStepOutput, resolveDdevWorkspace, loadDeclaredVerifyCommands } = vi.hoisted(
+  () => ({
+    loadPreviousStepOutput: vi.fn(),
+    resolveDdevWorkspace: vi.fn(),
+    loadDeclaredVerifyCommands: vi.fn(),
+  }),
+);
 
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../onboarding/_helpers.js')>()),
@@ -15,6 +18,7 @@ vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
 vi.mock('./_task-meta.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_task-meta.js')>()),
   resolveDdevWorkspace,
+  loadDeclaredVerifyCommands,
 }));
 
 import { phase5VerifyStep } from './08-phase-5-verify.js';
@@ -34,6 +38,7 @@ describe('phase5VerifyStep.detect lint runners', () => {
     workspace = await mkdtemp(path.join(tmpdir(), 'verify-detect-'));
     loadPreviousStepOutput.mockReset().mockResolvedValue(null);
     resolveDdevWorkspace.mockReset().mockResolvedValue(null);
+    loadDeclaredVerifyCommands.mockReset().mockResolvedValue(null);
   });
   afterEach(() => rm(workspace, { recursive: true, force: true }));
 
