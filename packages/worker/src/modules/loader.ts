@@ -3,6 +3,7 @@ import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import {
   isCoreStepId,
+  MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   type ComposableStepEntry,
   type ModuleManifest,
@@ -34,8 +35,6 @@ export type LoadedWorkerModule = {
   stepIds: string[];
   composable: ComposableStepEntry[];
 };
-
-export const MODULES_LOADED_WORKER_KEY = 'haive:modules:loaded:worker';
 
 const namespaced = (moduleId: string, localId: string) => `module.${moduleId}.${localId}`;
 

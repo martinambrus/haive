@@ -46,7 +46,7 @@ const manifest = moduleManifestSchema.parse({
 });
 
 const app = new Hono<AppEnv>();
-app.route('/modules', moduleRoutes([{ packageName: 'acme', manifest }]));
+app.route('/modules', moduleRoutes([{ packageName: 'acme', manifest, hasRoutes: false }]));
 app.onError(errorHandler);
 
 describe('GET /modules/:id/settings/:kind', () => {
