@@ -629,6 +629,21 @@ describe('a failure after the file would be rewritten', () => {
     expect(await s.fileText()).toBe(renderText(MINE));
   });
 
+  it('leaves a file someone changed after the failed answer wrote it', async () => {
+    const s = await setup();
+    const theirs = JSON.stringify({ ...THEIRS, framework: 'laravel' }, null, 2);
+    s.fake.hooks.beforeCommit = async () => {
+      s.fake.hooks.beforeCommit = null;
+      await writeFile(join(s.root, RENDER_REL), theirs);
+      throw new Error('commit failed');
+    };
+
+    await expect(s.answer('keep_mine')).rejects.toThrow();
+
+    expect(await s.fileText()).toBe(theirs);
+    expect(s.rowOf(s.ids[KEY]!).resolvedAt).toBeNull();
+  });
+
   it('answers once the failure is gone, and the next sync finds nothing to ask', async () => {
     const s = await setup();
     s.fake.hooks.beforeCommit = () => {

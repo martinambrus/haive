@@ -103,7 +103,7 @@ projectStateConflictRoutes.post(
       logger.warn({ err, repositoryId, conflictId }, 'project state conflict answer failed');
       throw new HttpError(
         502,
-        'Could not apply the answer. Nothing was changed; try again in a moment.',
+        'Could not confirm the answer was applied. Reload to see where it stands, then answer again if it is still asked.',
         'project_state_conflict_failed',
       );
     }

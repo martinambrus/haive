@@ -6,7 +6,6 @@ import {
   isPathContainmentError,
   readFileNoFollow,
   rewriteFileIfNoFollow,
-  writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
@@ -69,7 +68,7 @@ class RenderFileMovedError extends Error {
 
 interface After {
   resync: string | null;
-  putBack: { repoPath: string; raw: Buffer } | null;
+  putBack: { repoPath: string; raw: Buffer; wrote: Buffer } | null;
 }
 
 /** Answers one pending conflict of the render unit, so that the file, the sync base and the column
@@ -120,7 +119,7 @@ export async function resolveProjectStateConflict(
 async function putBackIfPending(
   db: Database,
   conflictId: string,
-  putBack: { repoPath: string; raw: Buffer },
+  putBack: { repoPath: string; raw: Buffer; wrote: Buffer },
 ): Promise<void> {
   await db.transaction(async (tx) => {
     const [row] = await tx
@@ -134,7 +133,10 @@ async function putBackIfPending(
       .from(schema.projectStateConflicts)
       .where(eq(schema.projectStateConflicts.id, conflictId));
     if (again?.resolvedAt !== null) return;
-    await writeFileNoFollow(putBack.repoPath, RENDER_FILE, putBack.raw);
+    // Only over the bytes the failed answer wrote: a file someone changed since is theirs.
+    await rewriteFileIfNoFollow(putBack.repoPath, RENDER_FILE, (data) =>
+      data.equals(putBack.wrote) ? putBack.raw : null,
+    );
   });
 }
 
@@ -303,7 +305,7 @@ async function answerInTransaction(
         data.equals(read.raw) ? Buffer.from(fileText, 'utf8') : null,
       );
       if (outcome !== 'rewritten') throw new RenderFileMovedError(repoPath);
-      after.putBack = { repoPath, raw: read.raw };
+      after.putBack = { repoPath, raw: read.raw, wrote: Buffer.from(fileText, 'utf8') };
       written.push(RENDER_FILE);
     }
 
