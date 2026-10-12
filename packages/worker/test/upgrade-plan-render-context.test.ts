@@ -15,8 +15,11 @@ import {
   type TemplateRenderContext,
 } from '../src/step-engine/template-manifest.js';
 import {
+  ONBOARDING,
   PROVIDERS,
+  REPO,
   RTK_BLOCK,
+  USER,
   ctxFor,
   newDb,
   seedLiveRow,
@@ -508,5 +511,54 @@ describe('01 reads a refused column as NULL, and says so', () => {
     const logs: LoggerCalls = { calls: [] };
     await planOf({ column: portableOnly(), logs }).detect();
     expect(warned(logs)).toEqual([]);
+  });
+});
+
+describe('the installed-set hash covers the rows this install manages', () => {
+  const own = (fake: Fake) =>
+    seedLiveRow(fake, {
+      path: '.claude/agents/row-0.md',
+      snapshot: rowSnapshot('rows-recorded', true),
+      at: 1000,
+    });
+  const foreign = (fake: Fake) => {
+    fake.insert(schema.onboardingArtifacts, {
+      userId: USER,
+      repositoryId: REPO,
+      taskId: ONBOARDING,
+      diskPath: '.claude/agents/y.md',
+      templateId: 'custom:git@host/a/b:items/y',
+      templateKind: 'custom-agent',
+      templateSchemaVersion: 1,
+      templateContentHash: 'h-foreign',
+      writtenHash: 'w-foreign',
+      userModified: false,
+      formValuesSnapshot: null,
+      sourceStepId: 'project-state-import',
+      source: 'backfill',
+      haiveVersion: null,
+      generatedAt: new Date(1000),
+      supersededAt: null,
+      bundleItemId: null,
+    });
+  };
+
+  const withForeign = (fake: Fake) => {
+    own(fake);
+    foreign(fake);
+  };
+
+  it('is the same with and without a row of a bundle this install does not hold', async () => {
+    const alone = await planOf({ column: null, seed: own }).detect();
+    const withOther = await planOf({ column: null, seed: withForeign }).detect();
+
+    expect(alone.installedTemplateSetHash).not.toBeNull();
+    expect(withOther.installedTemplateSetHash).toBe(alone.installedTemplateSetHash);
+  });
+
+  it('is null while the ledger holds nothing this install manages', async () => {
+    const detected = await planOf({ column: portableOnly(), seed: foreign }).detect();
+
+    expect(detected.installedTemplateSetHash).toBeNull();
   });
 });

@@ -698,7 +698,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const admission = await upgradeAdmission(db, userId, repo);
   let admitted = admission.admitted;
   let firstUpgradeOnThisInstall = false;
-  if (admitted && distinctInstalled.size === 0) {
+  if (admitted && liveArtifacts.length === 0) {
     const priorOnboarding = await db.query.tasks.findFirst({
       where: and(
         eq(schema.tasks.repositoryId, repositoryId),
