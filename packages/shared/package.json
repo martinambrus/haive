@@ -111,6 +111,10 @@
       "types": "./dist/git-args.d.ts",
       "import": "./dist/git-args.js"
     },
+    "./modularity": {
+      "types": "./dist/modularity/index.d.ts",
+      "import": "./dist/modularity/index.js"
+    },
     "./markdown-fences": {
       "types": "./dist/markdown-fences.d.ts",
       "import": "./dist/markdown-fences.js"
