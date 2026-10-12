@@ -46,7 +46,9 @@ export async function raiseRtkQuestion(db: Database, repositoryId: string): Prom
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
-      .limit(1);
+      .limit(1)
+      // Every writer of rtk_enabled updates this row, so a question cannot be raised past a switch-off.
+      .for('update');
     if (repo && !repo.rtkEnabled) {
       await convergeRtkQuestion(tx, repositoryId, null);
       return false;
