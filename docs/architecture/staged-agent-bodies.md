@@ -26,7 +26,7 @@ a measured failure:
   project has no architecture" to every later reader. Failures are reported per item so one
   bad body cannot discard the fifteen beside it.
 - **The drafts are deleted once filed.** `.haive/` is NOT gitignored and `12-post-onboarding`
-  stages `.haive/install.json` by name, so leftovers sit in the user's `git status` for good —
+  stages files by name, so leftovers sit in the user's `git status` for good —
   and on a repo onboarding has to `git init` itself that step stages the whole tree with
   `git add -A` and commits every draft. `discardKbDrafts` runs at the end of apply, and KEEPS
   them when a body failed to resolve, since that is the one case where the files are evidence.

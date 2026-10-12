@@ -281,7 +281,7 @@ export async function prepareAgentWritableDir(
 /** Drop the staging dir once its bodies have been filed.
  *
  *  The drafts are scratch, and they are scratch INSIDE the repo: `.haive/` is not
- *  gitignored and `12-post-onboarding` stages `.haive/install.json` by name rather than
+ *  gitignored and `12-post-onboarding` stages files by name rather than
  *  the directory, so on an ordinary repo they sit in the user's `git status` for good —
  *  and on one onboarding has to `git init` itself (uploaded or blank) that step stages the
  *  WHOLE tree with `git add -A`, which commits every draft into the first commit.

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -23,9 +23,13 @@ afterEach(async () => {
 });
 
 /** An upgrade with nothing to change, so that what 02 reports is what it did about the record. */
-async function setup() {
+async function setup(installJson?: string) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-record-paths-'));
   dirs.push(root);
+  if (installJson !== undefined) {
+    await mkdir(join(root, '.haive'), { recursive: true });
+    await writeFile(join(root, '.haive/install.json'), installJson, 'utf8');
+  }
   const fake = createFakeDb({
     onboardingArtifacts: schema.onboardingArtifacts,
     repositories: schema.repositories,
@@ -120,5 +124,58 @@ describe('02 reports the record files it wrote', () => {
     };
 
     await expect(s.apply()).rejects.toThrow('database refused');
+  });
+});
+
+describe('02 and .haive/install.json', () => {
+  const HAIVE_SHAPED = JSON.stringify({ schemaVersion: 1, templateSetHash: 'abc', templates: [] });
+  const INSTALL = '.haive/install.json';
+
+  it('writes none, and lists none, when there is none', async () => {
+    const s = await setup();
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
+    expect(out).not.toHaveProperty('installManifestWritten');
+  });
+
+  it('retires a Haive-shaped one and lists it for the commit to drop', async () => {
+    const s = await setup(HAIVE_SHAPED);
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
+    expect(out.deletedPaths).toContain(INSTALL);
+    expect(out.warnings).toEqual([]);
+  });
+
+  it('keeps a file that is not Haive’s, lists nothing, and says so', async () => {
+    const s = await setup('{"keep":true}');
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(true);
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(out.warnings).toEqual([
+      '.haive/install.json was left in place: it is not a Haive install manifest',
+    ]);
+  });
+
+  it('leaves it when the record write failed', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    let refused = false;
+    s.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContain('project state record write failed: database refused');
+    expect(existsSync(join(s.root, INSTALL))).toBe(true);
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
 });

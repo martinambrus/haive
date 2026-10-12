@@ -28,13 +28,13 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import { rtkLeftoversToRemove, sameValue } from '@haive/shared/project-state';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import type { StepDefinition } from '../../step-definition.js';
 import {
-  getTemplateManifest,
   updateApplicableTemplateIds,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
+import { INSTALL_MANIFEST_PATH, retireInstallManifest } from '../../_retire-install-manifest.js';
 import { unionExpandedFor } from '../../_upgrade-render.js';
 import {
   failIfColumnStale,
@@ -407,7 +407,6 @@ export interface UpgradeApplyOutput {
    *  read back from a persisted output that may predate it. */
   adoptedCount?: number;
   warnings: string[];
-  installManifestWritten: boolean;
   rulesImportStubs: RulesImportStubOutcome[];
   /** Every repository path this run wrote, for 03 to stage. Optional because it is read back
    *  from a persisted output that may predate it. */
@@ -801,7 +800,6 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         throw new Error(PLAN_NO_LONGER_HOLDS);
       }
     }
-    const manifest = getTemplateManifest();
     const haiveVersion = getHaiveVersion();
 
     const selectedUpdates = new Set<string>(toStringArray(values.selectedUpdates));
@@ -1794,14 +1792,6 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         });
     }
 
-    // Rewrite .haive/install.json to reflect the post-upgrade state. Query
-    // live rows fresh so deletions and upgrades are both accounted for.
-    const installManifestWritten = await writeInstallManifest(
-      ctx,
-      plan.repositoryId,
-      manifest.setHash,
-    );
-
     ctx.throwIfCancelled();
     try {
       const state = await writeProjectStateRecord(ctx.db, {
@@ -1815,6 +1805,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       });
       writtenPaths.push(...state.written);
       deletedPaths.push(...state.removed);
+      if ((await retireInstallManifest(ctx, warnings)) === 'removed') {
+        deletedPaths.push(INSTALL_MANIFEST_PATH);
+      }
     } catch (err) {
       failIfColumnStale(err);
       if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);
@@ -1848,7 +1841,6 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       deletedCount,
       adoptedCount,
       warnings,
-      installManifestWritten,
       rulesImportStubs,
       writtenPaths,
       deletedPaths,
@@ -1877,13 +1869,4 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 function toStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === 'string');
-}
-
-async function writeInstallManifest(
-  ctx: StepContext,
-  repositoryId: string,
-  currentSetHash: string,
-): Promise<boolean> {
-  const { writeInstallManifestFromLiveRows } = await import('../../_install-manifest.js');
-  return writeInstallManifestFromLiveRows(ctx, repositoryId, currentSetHash);
 }

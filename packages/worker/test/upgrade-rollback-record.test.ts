@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,12 +47,16 @@ const UPGRADE = context({
 
 /** An upgrade that only created a file, rolled back. The repository holds the upgrade's context, the
  *  upgrade's own row (the newest, still live until the rollback retires it) and one older row. */
-async function rollback(older: Record<string, unknown> | null) {
+async function rollback(older: Record<string, unknown> | null, installJson?: string) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-rollback-record-'));
   dirs.push(root);
   await mkdir(join(root, '.claude/agents'), { recursive: true });
   await writeFile(join(root, CREATED), 'HAIVE\n', 'utf8');
   const hash = sha256Hex(normalizeContent('HAIVE\n'));
+  if (installJson !== undefined) {
+    await mkdir(join(root, '.haive'), { recursive: true });
+    await writeFile(join(root, '.haive/install.json'), installJson, 'utf8');
+  }
 
   const fake = createFakeDb({
     repositories: schema.repositories,
@@ -133,6 +138,7 @@ async function rollback(older: Record<string, unknown> | null) {
   return {
     root,
     out,
+    exists: (rel: string) => existsSync(join(root, rel)),
     column: fake.rows(schema.repositories)[0]!.renderContext,
     sync: fake.rows(schema.projectStateSync),
   };
@@ -174,5 +180,40 @@ describe('the context a rollback records when the upgrade only created files', (
     await expect(readFile(join(root, RECORD_RENDER), 'utf8')).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+});
+
+describe('04 and .haive/install.json', () => {
+  const HAIVE_SHAPED = JSON.stringify({ schemaVersion: 1, templateSetHash: 'abc', templates: [] });
+
+  it('writes none', async () => {
+    const { out, exists } = await rollback(BEFORE);
+
+    expect(out.warnings).toEqual([]);
+    expect(exists('.haive/install.json')).toBe(false);
+  });
+
+  it('retires a Haive-shaped one once the record is written', async () => {
+    const { out, exists } = await rollback(BEFORE, HAIVE_SHAPED);
+
+    expect(out.warnings).toEqual([]);
+    expect(exists(RECORD_RENDER)).toBe(true);
+    expect(exists('.haive/install.json')).toBe(false);
+  });
+
+  it('keeps a file that is not Haive’s, and says so', async () => {
+    const { out, exists } = await rollback(BEFORE, '{"keep":true}');
+
+    expect(exists('.haive/install.json')).toBe(true);
+    expect(out.warnings).toEqual([
+      '.haive/install.json was left in place: it is not a Haive install manifest',
+    ]);
+  });
+
+  it('leaves it when no record was written', async () => {
+    const { exists } = await rollback(null, HAIVE_SHAPED);
+
+    expect(exists(RECORD_RENDER)).toBe(false);
+    expect(exists('.haive/install.json')).toBe(true);
   });
 });

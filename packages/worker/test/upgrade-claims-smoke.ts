@@ -4,7 +4,7 @@
  * user, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -1206,24 +1206,23 @@ async function main(): Promise<void> {
       'the fourth plan offers the moved template as a clean update',
       fourthDetected.entries.find((e) => e.diskPath === clean.path)?.bucket === 'clean_update',
     );
-    const applyFourth = () =>
-      upgradeApplyStep.apply(fourthApplyCtx!, {
+    const applyFourth = (applyCtx = fourthApplyCtx!) =>
+      upgradeApplyStep.apply(applyCtx, {
         detected: fourthPlan,
         formValues: fourthValues,
         iteration: 0,
         previousIterations: [],
       });
-    // A link where the install manifest goes fails the apply once its transaction has committed.
-    const haiveDir = join(repoPath, '.haive');
-    const hadHaiveDir = (await lstat(haiveDir).catch(() => null)) !== null;
-    if (hadHaiveDir) await rename(haiveDir, `${haiveDir}-aside`);
-    await symlink('elsewhere', haiveDir);
-    const firstAttempt = await applyFourth().then(
+    // A cancel seen once the transaction has committed fails the apply after it wrote.
+    const firstAttempt = await applyFourth({
+      ...fourthApplyCtx!,
+      throwIfCancelled: () => {
+        throw new TaskCancelledError();
+      },
+    }).then(
       () => null,
       (err: unknown) => err,
     );
-    await rm(haiveDir);
-    if (hadHaiveDir) await rename(`${haiveDir}-aside`, haiveDir);
     check(
       'the first attempt fails after writing',
       firstAttempt !== null && (await readOrNull(tracked)) !== trackedBytes,

@@ -331,6 +331,26 @@ describe('03 apply stages the rules delivery HEAD lacks', () => {
     expect(await headTree()).not.toContain('.claude');
   });
 
+  it('commits the removal of a tracked .haive/install.json 02 retired', async () => {
+    await mkdir(join(repo, '.haive'), { recursive: true });
+    await writeFile(join(repo, '.haive', 'install.json'), '{}\n');
+    await run('git', ['-C', repo, 'add', '-f', '.haive/install.json']);
+    await run('git', ['-C', repo, 'commit', '-qm', 'manifest']);
+    await rm(join(repo, '.haive', 'install.json'));
+    const out = await applyWith({ writtenPaths: [], deletedPaths: ['.haive/install.json'] });
+    expect(out.commitPerformed).toBe(true);
+    expect(await headTree()).not.toContain('.haive');
+  });
+
+  it('does not stage a .haive/install.json 02 did not report', async () => {
+    await mkdir(join(repo, '.haive'), { recursive: true });
+    await writeFile(join(repo, '.haive', 'install.json'), '{"keep":true}\n');
+    await writeFile(join(repo, 'CLAUDE.md'), '@AGENTS.md\n');
+    const out = await applyWith({ rulesImportStubs: [{ file: 'CLAUDE.md', result: 'created' }] });
+    expect(out.commitPerformed).toBe(true);
+    expect(await headTree()).not.toContain('.haive');
+  });
+
   it('commits an AGENTS.md whose rules block HEAD lacks', async () => {
     await writeFile(join(repo, 'AGENTS.md'), RULES('- rule one'));
     const out = await applyWith({ writtenPaths: [] });
