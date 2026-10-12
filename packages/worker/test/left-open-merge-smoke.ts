@@ -302,6 +302,32 @@ async function main(): Promise<void> {
     );
     assert(!mergeOpen(dirC), 'the retried abort must clear the merge');
 
+    // 4b. A live task sharing the worktree path, with no dir claim (a DAG level merge) -> refused.
+    const dirF = await conflictedRepo(tmp, 'f');
+    const f = await fixerTask('left open F', dirF);
+    await cancel(f.task.id, 1);
+    const [sharer] = await db
+      .insert(schema.tasks)
+      .values({
+        userId: uid,
+        type: 'workflow',
+        title: 'live sharer',
+        status: 'running',
+        worktreePath: dirF,
+      })
+      .returning();
+    taskIds.push(sharer!.id);
+    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, { taskId: f.task.id, userId: uid, dir: dirF });
+    const settledF = await pollUntil(async () => {
+      const rows = await events(db, f.task.id, SETTLED);
+      return rows.length > 0 ? rows : null;
+    }, 'settled event for F');
+    assert(
+      (settledF[0]!.payload as { outcome: string }).outcome === 'refused',
+      `expected refused for a live worktree sharer, got ${JSON.stringify(settledF[0]!.payload)}`,
+    );
+    assert(mergeOpen(dirF), "a merge in a live task's worktree must not be aborted");
+
     // 5. The next resolver clearing the stale merge settles it and warns on its step.
     const { peekOpenMerge, noteAbortedByNext } =
       await import('../src/step-engine/left-open-merge.js');

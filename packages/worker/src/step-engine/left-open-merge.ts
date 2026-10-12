@@ -25,6 +25,7 @@ import {
   type SecretMaskSource,
 } from './git-merge.js';
 import { inMergeDirLock, liveClaimHolder } from './merge-dir-claim.js';
+import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { addStepWarning } from './step-ownership.js';
 import type { TaskStepRow } from './step-runner.js';
 
@@ -192,8 +193,8 @@ interface AbortDecision {
 /** Abort the merge a cancelled task left open in `payload.dir`, on the person's confirmed click.
  *  The directory must name a report of this task still unsettled. Under the directory's lock it
  *  refuses while a live task holds the directory, and aborts only a merge whose HEAD and MERGE_HEAD
- *  are the reported ones: anything else changed since, and nothing is done. Never throws: the
- *  outcome is the settled event. */
+ *  are the reported ones: anything else changed since, and nothing is done. The outcome is the
+ *  settled event; it throws only when no outcome could be recorded, so the job is retried. */
 export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayload): Promise<void> {
   const { taskId, dir } = payload;
   try {
@@ -224,10 +225,12 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
         .where(eq(schema.mergeDirClaims.mergeDir, dir))
         .for('update');
       const holder = claim ? await liveClaimHolder(tx, claim) : null;
-      if (holder) {
+      // A DAG level merge takes no dir claim, so a live task sharing the worktree is asked for too.
+      const sharer = holder ?? (await findWorktreePathClaimant(db, { worktreePath: dir, taskId }));
+      if (sharer) {
         return {
           outcome: 'refused',
-          reason: `Task "${holder.title}" (${holder.id}) is merging in this directory; abort once it finishes.`,
+          reason: `Task "${sharer.title}" (${sharer.id}) is working in this directory; abort once it finishes.`,
         };
       }
       const open = await peekOpenMerge(dir);
@@ -269,7 +272,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
     await settle(db, taskId, target, decision.outcome, decision.reason);
   } catch (err) {
     logger.warn({ err, taskId, dir }, 'aborting the merge a cancel left open failed');
-    const target = (await taskLeftOpen(db, taskId).catch(() => [])).find(
+    const target = (await taskLeftOpen(db, taskId)).find(
       (m) => m.dir === dir && m.settled === null,
     );
     if (target) {
@@ -279,7 +282,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
         target,
         'refused',
         `The abort failed: ${err instanceof Error ? err.message : String(err)}`,
-      ).catch(() => undefined);
+      );
     }
   }
 }

@@ -59,6 +59,8 @@ mergeRoutes.post('/:id/merges/abort', async (c) => {
     { taskId, userId, dir } satisfies AbortLeftMergePayload,
     {
       jobId: `abort-left-merge-${taskId}-${createHash('sha1').update(dir).digest('hex')}`,
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 2000 },
       removeOnComplete: true,
       removeOnFail: true,
     },
