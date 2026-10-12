@@ -33,6 +33,10 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
     fn({ db: h.gdb, settings: { namespace: 'default' } }),
 }));
 
+vi.mock('../src/lib/task-type-definition.js', () => ({
+  definitionForCreate: async () => ({ runListSnapshot: null }),
+}));
+
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
