@@ -155,8 +155,10 @@ async function readSyncRow(db: Database | Tx, repositoryId: string) {
   return row ?? null;
 }
 
+export const CONFLICT_ERROR_PREFIX = "render context conflicts with the checkout's record: ";
+
 /** A conflict's unit is `<file>#<key>`, or the file itself when a side holds no such file. */
-const keyOf = (unit: string): string => unit.slice(unit.indexOf('#') + 1);
+export const keyOf = (unit: string): string => unit.slice(unit.indexOf('#') + 1);
 
 /** The record's render unit as the base is to keep it: each key the merge left in conflict stays at
  *  what the base held, so the next sync finds the same conflict again. */
@@ -224,7 +226,7 @@ async function recordConflicts(
 
 /** A failed writer's clear leaves no column: the file with each contested key back at its pending row's
  *  local value stands in, so the conflict stays per key. Null when none is pending or it is no column. */
-async function rebuildLocalRender(
+export async function rebuildLocalRender(
   tx: Tx,
   repositoryId: string,
   onDisk: ProjectRender,
@@ -238,7 +240,7 @@ async function rebuildLocalRender(
 
 /** The set 01's apply writes from the column just written, which upgrade-status compares a
  *  repository's claims against. A repository with no claim keeps its set until 01's first plan. */
-async function writeApplicableTemplateIds(
+export async function writeApplicableTemplateIds(
   tx: Tx,
   {
     repositoryId,
@@ -400,9 +402,7 @@ export async function syncProjectStateFromCheckout(
     const lastError =
       merge.conflicts.length === 0
         ? null
-        : `render context conflicts with the checkout's record: ${merge.conflicts
-            .map(({ unit }) => keyOf(unit))
-            .join(', ')}`;
+        : `${CONFLICT_ERROR_PREFIX}${merge.conflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
     const baseSnapshot = normalizeProjectState(
       recordOf(keptRender(checkout.render, baseRender, merge.conflicts)),
     );

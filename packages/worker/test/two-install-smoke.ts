@@ -25,6 +25,7 @@ import { applyPlanPatch } from '@haive/shared/plan';
 import { upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { handleClone, handleScan } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
+import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import { writeProjectStateRecord } from '../src/project-state/write.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
@@ -1094,6 +1095,7 @@ async function main(): Promise<void> {
 
       const unitsOf = (install: Install) =>
         rowsOf<{
+          id: string;
           unit: string;
           base: { v: unknown } | null;
           local: { v: unknown } | null;
@@ -1101,7 +1103,7 @@ async function main(): Promise<void> {
           resolved_at: Date | null;
         }>(
           install.db,
-          sql`select unit, base, local, incoming, resolved_at from project_state_conflicts where repository_id = ${install.repositoryId} order by unit`,
+          sql`select id, unit, base, local, incoming, resolved_at from project_state_conflicts where repository_id = ${install.repositoryId} order by unit`,
         );
       const pendingB = await unitsOf(b);
       const row = 'rows' in pendingB && pendingB.rows.length === 1 ? pendingB.rows[0]! : null;
@@ -1218,6 +1220,175 @@ async function main(): Promise<void> {
         'rows' in noConflictOnA && noConflictOnA.rows.length === 0,
         noConflictOnA,
       );
+
+      // ---- B answers: take A's value, then a second round where B keeps its own (B1.5b) ----------
+      const admissionOf = async () => {
+        const [r] = await b.db
+          .select({
+            id: schema.repositories.id,
+            source: schema.repositories.source,
+            renderContext: schema.repositories.renderContext,
+            status: schema.repositories.status,
+            storagePath: schema.repositories.storagePath,
+            localPath: schema.repositories.localPath,
+            onboardedAt: schema.repositories.onboardedAt,
+            onboardingResetAt: schema.repositories.onboardingResetAt,
+          })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, b.repositoryId));
+        return r ? upgradeAdmission(b.db, b.userId, r) : null;
+      };
+      const baseIdsOf = async (install: Install) => {
+        const base = await rowsOf<{ base_snapshot: { render?: { acceptedAgentIds?: string[] } } }>(
+          install.db,
+          sql`select base_snapshot from project_state_sync where repository_id = ${install.repositoryId}`,
+        );
+        return 'rows' in base ? base.rows[0]?.base_snapshot.render?.acceptedAgentIds : undefined;
+      };
+      const fileIdsOn = async (install: Install) =>
+        (
+          JSON.parse(
+            await readFile(path.join(install.repoPath, RECORD_RENDER), 'utf8').catch(() => 'null'),
+          ) as { acceptedAgentIds?: string[] } | null
+        )?.acceptedAgentIds;
+
+      const takeId = row?.id ?? '';
+      const taken = await resolveProjectStateConflict(b.db, {
+        repositoryId: b.repositoryId,
+        userId: b.userId,
+        conflictId: takeId,
+        answer: 'take_theirs',
+      });
+      const afterTake = await unitsOf(b);
+      const columnTaken = await repoStateOf(b);
+      const admittedAfterTake = await admissionOf();
+      const syncAfterTake = await syncProjectStateFromCheckout(b.db, {
+        repositoryId: b.repositoryId,
+        repoPath: b.repoPath,
+      });
+      check(
+        "B answers take theirs: the row is closed, the column holds A's value, the file and the base agree",
+        taken.kind === 'resolved' &&
+          taken.written.length === 0 &&
+          'rows' in afterTake &&
+          afterTake.rows.length === 1 &&
+          afterTake.rows[0]!.resolved_at !== null &&
+          'rows' in columnTaken &&
+          isDeepStrictEqual(
+            sorted(columnTaken.rows[0]?.render_context?.acceptedAgentIds),
+            sorted(idsA),
+          ) &&
+          isDeepStrictEqual(sorted(await fileIdsOn(b)), sorted(idsA)) &&
+          isDeepStrictEqual(sorted(await baseIdsOf(b)), sorted(idsA)),
+        { taken, afterTake, columnTaken },
+      );
+      check(
+        'and an upgrade on B is no longer held for it, and the next sync finds nothing to ask',
+        admittedAfterTake !== null &&
+          !(!admittedAfterTake.admitted && admittedAfterTake.reason === 'contested') &&
+          syncAfterTake.outcome === 'unchanged',
+        { admittedAfterTake, syncAfterTake },
+      );
+      const repeated = await resolveProjectStateConflict(b.db, {
+        repositoryId: b.repositoryId,
+        userId: b.userId,
+        conflictId: takeId,
+        answer: 'take_theirs',
+      });
+      const flipped = await resolveProjectStateConflict(b.db, {
+        repositoryId: b.repositoryId,
+        userId: b.userId,
+        conflictId: takeId,
+        answer: 'keep_mine',
+      });
+      check(
+        'the same answer again returns the closed row, and the other answer is refused as settled',
+        repeated.kind === 'resolved' && repeated.written.length === 0 && flipped.kind === 'settled',
+        { repeated, flipped },
+      );
+
+      const cutAgent2 =
+        BASELINE_AGENT_SPECS.find(
+          (spec) => spec.id !== 'code-reviewer' && spec.id !== cutAgent && idsA.includes(spec.id),
+        )?.id ?? null;
+      const extraAgent2 =
+        [...BASELINE_AGENT_SPECS, ...Object.values(FRAMEWORK_AGENT_SPECS).flat()].find(
+          (spec) => !baseIds.includes(spec.id) && spec.id !== extraAgent,
+        )?.id ?? null;
+      check(
+        'a second agent is left for each side to change again',
+        cutAgent2 !== null && extraAgent2 !== null,
+        idsA,
+      );
+      if (cutAgent2 !== null && extraAgent2 !== null && planA.plan !== null) {
+        const idsA2 = idsA.filter((id) => id !== cutAgent2);
+        const idsB2 = [...idsA, extraAgent2];
+        await writeProjectStateRecord(a.db, {
+          repositoryId: a.repositoryId,
+          repoPath: a.repoPath,
+          context: { ...planA.plan.renderCtxSnapshot, acceptedAgentIds: idsA2 } as never,
+          rtkChoiceRecorded: true,
+        });
+        git(a.repoPath, 'add', '.haive-data/state');
+        git(a.repoPath, 'commit', '-q', '-m', 'A drops a second agent');
+        git(a.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+        await b.db.execute(
+          sql`update repositories set render_context = jsonb_set(render_context, '{acceptedAgentIds}', ${JSON.stringify(idsB2)}::jsonb) where id = ${b.repositoryId}`,
+        );
+        await refresh(b, 'storage-b');
+        const second = await unitsOf(b);
+        const open = 'rows' in second ? second.rows.find((r) => r.resolved_at === null) : undefined;
+        check(
+          'the same setting changed again on both sides opens a new question',
+          open !== undefined &&
+            isDeepStrictEqual(sorted(open.base?.v), sorted(idsA)) &&
+            isDeepStrictEqual(sorted(open.local?.v), sorted(idsB2)) &&
+            isDeepStrictEqual(sorted(open.incoming?.v), sorted(idsA2)),
+          second,
+        );
+        const kept = await resolveProjectStateConflict(b.db, {
+          repositoryId: b.repositoryId,
+          userId: b.userId,
+          conflictId: open?.id ?? '',
+          answer: 'keep_mine',
+        });
+        const columnKept = await repoStateOf(b);
+        const syncAfterKeep = await syncProjectStateFromCheckout(b.db, {
+          repositoryId: b.repositoryId,
+          repoPath: b.repoPath,
+        });
+        check(
+          "B answers keep mine: the column stays, B's value goes to the file and the base, and the next sync finds nothing",
+          kept.kind === 'resolved' &&
+            kept.written.length === 1 &&
+            'rows' in columnKept &&
+            isDeepStrictEqual(
+              sorted(columnKept.rows[0]?.render_context?.acceptedAgentIds),
+              sorted(idsB2),
+            ) &&
+            isDeepStrictEqual(sorted(await fileIdsOn(b)), sorted(idsB2)) &&
+            isDeepStrictEqual(sorted(await baseIdsOf(b)), sorted(idsB2)) &&
+            syncAfterKeep.outcome === 'unchanged',
+          { kept, columnKept, syncAfterKeep },
+        );
+        git(b.repoPath, 'add', '.haive-data/state');
+        git(b.repoPath, 'commit', '-q', '-m', 'B keeps its agents');
+        git(b.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+        await refresh(a, 'storage-a');
+        const columnA = await repoStateOf(a);
+        const afterA = await unitsOf(a);
+        const noneOnA = 'rows' in afterA && afterA.rows.length === 0;
+        check(
+          "A takes B's pushed answer on its next refresh and holds no conflict",
+          'rows' in columnA &&
+            isDeepStrictEqual(
+              sorted(columnA.rows[0]?.render_context?.acceptedAgentIds),
+              sorted(idsB2),
+            ) &&
+            noneOnA,
+          columnA,
+        );
+      }
     }
 
     for (const name of Object.keys(KNOWN_GAPS)) {
