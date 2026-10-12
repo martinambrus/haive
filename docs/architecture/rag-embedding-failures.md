@@ -123,9 +123,12 @@ onboarding's `10-rag-populate` and the tooling page's RAG embed actions share on
 renewed every 30 s, compare-and-delete on release. A second sync WAITS, polling every 5 s for up to 2 hours
 (the longest measured populate ran ~71 minutes), shows that it is waiting, honours Stop, and fails with a
 retryable error at the bound. The api does not wait: a RAG action while a sync runs answers 409, and 503
-when Redis is down, before anything is written. A crashed holder frees the key when its expiry lapses; a
-holder whose heartbeat finds the key gone or taken over does not clear the degraded flag. A run with no
-repository id takes no lock.
+when Redis is down, before anything is written. A crashed holder frees the key when its expiry lapses. A
+holder counts its lock lost once a heartbeat finds the key gone or taken over, or once no refresh has been
+confirmed for a whole expiry, and checks before every write (`assertHeld`): each file's upserts, the orphan
+sweep, the degraded flag (again after the awaited NULL-hash read that gates its clear), and in the api
+each re-embed batch and the repository update. A sync that lost it fails with a retryable error, and the
+api answers 409. A run with no repository id takes no lock.
 
 **Per-repo memory, because a step row does not survive a retry.** `repositories.
 rag_embed_degraded_at` is the STRUCTURAL flag every reader gates on;
