@@ -184,6 +184,11 @@ jobs:
         env:
           HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
 
+      - name: RAG sync lock on a real Redis
+        run: pnpm --filter @haive/shared exec vitest run test/rag-sync-lock.test.ts
+        env:
+          HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
+
       # The migration runner's live-database coverage. Not part of smoke:ci, which is
       # worker-scoped; this package had no smoke of its own before.
       - name: Run migration smokes
