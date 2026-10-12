@@ -1,10 +1,17 @@
+import type { Database } from '@haive/database';
 import { stepRegistry } from './registry.js';
+import { syncStepCatalog } from './step-catalog.js';
 import { registerAllSteps } from './steps/index.js';
 
-let booted = false;
+let registered = false;
 
-export function bootStepEngine(): void {
-  if (booted) return;
+export function registerStepsOnce(): void {
+  if (registered) return;
   registerAllSteps(stepRegistry);
-  booted = true;
+  registered = true;
+}
+
+export async function bootStepEngine(db: Database): Promise<void> {
+  registerStepsOnce();
+  await syncStepCatalog(db, stepRegistry);
 }

@@ -58,7 +58,7 @@ import {
   advanceStep,
   computeGlobalStepIndex,
   stepRegistry,
-  bootStepEngine,
+  registerStepsOnce,
   dagTimeoutInfo,
   finishedStepResult,
   isFreshStepEntry,
@@ -3674,7 +3674,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
 }
 
 export function startTaskWorker(): Worker<TaskWorkerPayload> {
-  bootStepEngine();
+  registerStepsOnce();
   const worker = new Worker<TaskWorkerPayload>(QUEUE_NAMES.TASK, processTaskJob, {
     connection: getBullRedis(),
     concurrency: 5,
