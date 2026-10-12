@@ -1,0 +1,453 @@
+/**
+ * Scratch RAG store builder.
+ *
+ * Builds a store byte-compatible with what onboarding step 10-rag-populate writes (same collector,
+ * chunkers, header, hash, schema and insert) into a NEW named database haive_rag_<RAG_STORE>, so a
+ * retrieval eval can run against a store built from the current chunker. It never stores a
+ * hash-fallback vector: an embed error, or a vector of the wrong length, aborts the run (exit 1).
+ * It refuses (exit 2, before any store connection) the live store names and any existing database
+ * whose rows carry a different repository_id. Resumable: a chunk whose (source_path, section_id,
+ * chunk_index, chunk_hash) is already stored for the repository is skipped.
+ *
+ * Run inside the worker container (has DATABASE_URL + ollama reachable):
+ *   docker exec -e RAG_TREE=/var/lib/haive/repos/<user>/<repo> -e RAG_STORE=p0_eval \
+ *     -e RAG_REPOSITORY_ID=<uuid> -w /app/packages/worker haive-worker \
+ *     ../../node_modules/.bin/tsx scripts/rag-build-store.ts
+ *
+ * Env:
+ *   RAG_TREE           repository tree to index (required)
+ *   RAG_EXCLUDE        JSON array of anchored directory prefixes to leave out (default [])
+ *   RAG_STORE          NAME of the store: database haive_rag_<NAME> (required unless RAG_DRY_RUN=1)
+ *   RAG_REPOSITORY_ID  uuid stamped on every row (required unless RAG_DRY_RUN=1)
+ *   RAG_TASK_ID        uuid stamped on every row (default: a fresh uuid, printed)
+ *   RAG_OLLAMA_URL     default http://ollama:11434
+ *   RAG_MODEL          default qwen3-embedding:4b
+ *   RAG_DIMS           default 2560
+ *   RAG_DRY_RUN        1 collects and chunks only: no database, no embed
+ *   RAG_LIMIT_FILES    index only the first N code files after sorting by path (KB is always all)
+ */
+import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { createDatabase } from '@haive/database';
+import { readTextNoFollow } from '@haive/shared/fs-safe';
+import { KB_DIR } from '@haive/shared/knowledge-paths';
+import {
+  EMBED_BATCH_SIZE,
+  ollamaEmbed,
+  openExistingRagDatabase,
+  ragDatabaseName,
+  resolveEmbedBudget,
+  resolveRagConnection,
+  warmOllamaModel,
+  type RagConnection,
+} from '@haive/shared/rag';
+import { listFilesMatching } from '../src/step-engine/steps/onboarding/_helpers.js';
+import { collectCodeFiles } from '../src/step-engine/steps/onboarding/_rag-collect.js';
+import {
+  capChunks,
+  chunkSection,
+  contextHeader,
+  extractCodeSections,
+  extractMarkdownSections,
+  MAX_FILE_BYTES,
+  type RagChunk,
+} from '../src/step-engine/steps/onboarding/_rag-chunkers.js';
+import { ensureRagSchema, RAG_TABLE } from '../src/step-engine/steps/onboarding/_rag-connection.js';
+import { chunkKey, insertChunk } from '../src/step-engine/steps/onboarding/10-rag-populate.js';
+
+const REFUSED_STORE_NAMES = ['elmont_rs', 'rs_final', 'kb_global'] as const;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PROGRESS_EVERY_BATCHES = 50;
+
+type SourceType = 'kb' | 'code';
+
+export class StoreRefusedError extends Error {}
+
+export function storeDatabaseName(store: string): string {
+  if (store.trim() === '') throw new StoreRefusedError('RAG_STORE is empty');
+  const dbName = ragDatabaseName(store);
+  for (const refused of REFUSED_STORE_NAMES) {
+    if (dbName === ragDatabaseName(refused)) {
+      throw new StoreRefusedError(`store ${refused} (database ${dbName}) is a live store`);
+    }
+  }
+  return dbName;
+}
+
+export function validateEmbeddings(
+  embeddings: unknown,
+  expectedCount: number,
+  dimensions: number,
+): number[][] {
+  if (!Array.isArray(embeddings) || embeddings.length !== expectedCount) {
+    throw new Error(
+      `embed returned ${Array.isArray(embeddings) ? embeddings.length : 'no'} vectors for ${expectedCount} inputs`,
+    );
+  }
+  for (const [i, vec] of embeddings.entries()) {
+    if (!Array.isArray(vec) || vec.length !== dimensions) {
+      throw new Error(
+        `vector ${i} has ${Array.isArray(vec) ? vec.length : 'no'} dimensions, expected ${dimensions}`,
+      );
+    }
+    if (!vec.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+      throw new Error(`vector ${i} holds a non-finite value`);
+    }
+  }
+  return embeddings as number[][];
+}
+
+interface Options {
+  tree: string;
+  exclude: string[];
+  store: string | null;
+  repositoryId: string | null;
+  taskId: string;
+  ollamaUrl: string;
+  model: string;
+  dims: number;
+  dryRun: boolean;
+  limitFiles: number | null;
+}
+
+function fail(message: string, code = 1): never {
+  console.error(message);
+  process.exit(code);
+}
+
+function parseOptions(): Options {
+  const tree = process.env.RAG_TREE;
+  if (!tree) fail('RAG_TREE is required');
+  let exclude: string[] = [];
+  if (process.env.RAG_EXCLUDE) {
+    const parsed: unknown = JSON.parse(process.env.RAG_EXCLUDE);
+    if (!Array.isArray(parsed) || !parsed.every((p) => typeof p === 'string')) {
+      fail('RAG_EXCLUDE must be a JSON array of strings');
+    }
+    exclude = parsed;
+  }
+  const dims = Number(process.env.RAG_DIMS || 2560);
+  if (!Number.isInteger(dims) || dims <= 0) fail('RAG_DIMS must be a positive integer');
+  const limitRaw = process.env.RAG_LIMIT_FILES;
+  const limitFiles = limitRaw ? Number(limitRaw) : null;
+  if (limitFiles !== null && (!Number.isInteger(limitFiles) || limitFiles <= 0)) {
+    fail('RAG_LIMIT_FILES must be a positive integer');
+  }
+  const dryRun = process.env.RAG_DRY_RUN === '1';
+  const store = process.env.RAG_STORE || null;
+  const repositoryId = process.env.RAG_REPOSITORY_ID || null;
+  const taskId = process.env.RAG_TASK_ID || randomUUID();
+  if (!dryRun) {
+    if (!store) fail('RAG_STORE is required');
+    if (!repositoryId || !UUID_PATTERN.test(repositoryId)) {
+      fail('RAG_REPOSITORY_ID must be a uuid');
+    }
+    if (!UUID_PATTERN.test(taskId)) fail('RAG_TASK_ID must be a uuid');
+  }
+  return {
+    tree,
+    exclude,
+    store,
+    repositoryId,
+    taskId,
+    ollamaUrl: process.env.RAG_OLLAMA_URL || 'http://ollama:11434',
+    model: process.env.RAG_MODEL || 'qwen3-embedding:4b',
+    dims,
+    dryRun,
+    limitFiles,
+  };
+}
+
+async function collectKbFiles(tree: string): Promise<string[]> {
+  const rels = await listFilesMatching(
+    tree,
+    (rel, isDir) => !isDir && rel.endsWith('.md') && rel.startsWith(`${KB_DIR}/`),
+    5,
+  );
+  return rels.sort((a, b) => a.localeCompare(b));
+}
+
+async function collectCodeFilesSorted(tree: string, exclude: string[]): Promise<string[]> {
+  const rels = await collectCodeFiles(tree, { exclude });
+  return rels.sort((a, b) => a.localeCompare(b));
+}
+
+interface FileChunks {
+  kind: SourceType;
+  relPath: string;
+  chunks: RagChunk[];
+  dropped: number;
+}
+
+interface Tally {
+  files: Record<SourceType, number>;
+  chunks: Record<SourceType, number>;
+  dropped: number;
+  filesCapped: number;
+  unreadable: number;
+  oversize: number;
+}
+
+async function chunkFile(
+  tree: string,
+  kind: SourceType,
+  relPath: string,
+  tally: Tally,
+): Promise<FileChunks | null> {
+  let text: string | null;
+  try {
+    text = await readTextNoFollow(tree, relPath);
+  } catch {
+    text = null;
+  }
+  if (text === null) {
+    tally.unreadable += 1;
+    return null;
+  }
+  if (Buffer.byteLength(text, 'utf8') > MAX_FILE_BYTES) {
+    tally.oversize += 1;
+    return null;
+  }
+  const sections =
+    kind === 'kb' ? extractMarkdownSections(text, relPath) : extractCodeSections(text, relPath);
+  const built: RagChunk[] = [];
+  for (const section of sections) {
+    built.push(...chunkSection(section, { header: contextHeader(relPath, section.breadcrumb) }));
+  }
+  const { chunks, dropped } = capChunks(built);
+  if (dropped > 0) {
+    tally.dropped += dropped;
+    tally.filesCapped += 1;
+  }
+  if (chunks.length === 0) return null;
+  tally.files[kind] += 1;
+  tally.chunks[kind] += chunks.length;
+  return { kind, relPath, chunks, dropped };
+}
+
+async function* chunkAll(
+  tree: string,
+  kbFiles: string[],
+  codeFiles: string[],
+  tally: Tally,
+): AsyncGenerator<FileChunks> {
+  for (const relPath of kbFiles) {
+    const file = await chunkFile(tree, 'kb', relPath, tally);
+    if (file) yield file;
+  }
+  for (const relPath of codeFiles) {
+    const file = await chunkFile(tree, 'code', relPath, tally);
+    if (file) yield file;
+  }
+}
+
+function newTally(): Tally {
+  return {
+    files: { kb: 0, code: 0 },
+    chunks: { kb: 0, code: 0 },
+    dropped: 0,
+    filesCapped: 0,
+    unreadable: 0,
+    oversize: 0,
+  };
+}
+
+function printTally(tally: Tally): void {
+  console.log(`kb files:     ${tally.files.kb}`);
+  console.log(`code files:   ${tally.files.code}`);
+  console.log(`kb chunks:    ${tally.chunks.kb}`);
+  console.log(`code chunks:  ${tally.chunks.code}`);
+  console.log(`total chunks: ${tally.chunks.kb + tally.chunks.code}`);
+  console.log(`dropped by cap: ${tally.dropped} chunks in ${tally.filesCapped} files`);
+  console.log(`unreadable files: ${tally.unreadable}, over the size limit: ${tally.oversize}`);
+}
+
+async function refuseForeignRows(
+  opts: Options,
+  db: ReturnType<typeof createDatabase>,
+  dbName: string,
+): Promise<void> {
+  const existing = await openExistingRagDatabase(db, dbName, opts.dims);
+  if (!existing) return;
+  try {
+    const present = (await existing.pg.unsafe(`SELECT to_regclass($1) AS rel`, [
+      RAG_TABLE,
+    ])) as unknown as Array<{ rel: string | null }>;
+    if (!present[0]?.rel) return;
+    const foreign = (await existing.pg.unsafe(
+      `SELECT count(*)::int AS n FROM ${RAG_TABLE} WHERE repository_id IS DISTINCT FROM $1`,
+      [opts.repositoryId],
+    )) as unknown as Array<{ n: number }>;
+    if (foreign[0]!.n > 0) {
+      throw new StoreRefusedError(
+        `database ${dbName} already holds ${foreign[0]!.n} rows with a repository_id other than ${opts.repositoryId}`,
+      );
+    }
+  } finally {
+    await existing.close();
+  }
+}
+
+async function loadExistingHashes(
+  conn: RagConnection,
+  repositoryId: string,
+): Promise<Map<string, string | null>> {
+  const rows = (await conn.pg.unsafe(
+    `SELECT source_path, section_id, chunk_index, chunk_hash FROM ${RAG_TABLE} WHERE repository_id = $1`,
+    [repositoryId],
+  )) as unknown as Array<{
+    source_path: string;
+    section_id: string;
+    chunk_index: number;
+    chunk_hash: string | null;
+  }>;
+  return new Map(
+    rows.map((r) => [chunkKey(r.source_path, r.section_id, r.chunk_index), r.chunk_hash]),
+  );
+}
+
+async function build(
+  opts: Options,
+  conn: RagConnection,
+  kbFiles: string[],
+  codeFiles: string[],
+): Promise<void> {
+  const repositoryId = opts.repositoryId!;
+  const started = Date.now();
+  const { usedPgvector } = await ensureRagSchema(conn);
+  if (!usedPgvector) throw new Error('pgvector is unavailable: refusing to write jsonb embeddings');
+  const existing = await loadExistingHashes(conn, repositoryId);
+  console.log(`store holds ${existing.size} rows for ${repositoryId} before this run`);
+
+  const warmed = await warmOllamaModel(opts.ollamaUrl, opts.model);
+  if (!warmed) console.warn(`warning: ${opts.model} at ${opts.ollamaUrl} did not warm`);
+  const { embedTimeoutMs } = await resolveEmbedBudget();
+
+  const tally = newTally();
+  let inserted = 0;
+  let skipped = 0;
+  let batches = 0;
+  const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
+
+  for await (const file of chunkAll(opts.tree, kbFiles, codeFiles, tally)) {
+    const toEmbed: RagChunk[] = [];
+    for (const chunk of file.chunks) {
+      const key = chunkKey(file.relPath, chunk.sectionId, chunk.chunkIndex);
+      if (existing.get(key) === chunk.chunkHash) skipped += 1;
+      else toEmbed.push(chunk);
+    }
+    for (let start = 0; start < toEmbed.length; start += EMBED_BATCH_SIZE) {
+      const batch = toEmbed.slice(start, start + EMBED_BATCH_SIZE);
+      let embeddings: number[][];
+      try {
+        embeddings = validateEmbeddings(
+          await ollamaEmbed(
+            opts.ollamaUrl,
+            opts.model,
+            batch.map((c) => c.content),
+            { timeoutMs: embedTimeoutMs },
+          ),
+          batch.length,
+          opts.dims,
+        );
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new Error(`embed failed for ${file.relPath} (batch at chunk ${start}): ${reason}`, {
+          cause: err,
+        });
+      }
+      for (const [i, chunk] of batch.entries()) {
+        await insertChunk(
+          conn,
+          true,
+          opts.taskId,
+          repositoryId,
+          file.kind,
+          file.relPath,
+          chunk.sectionId,
+          chunk.chunkIndex,
+          chunk.chunkHash,
+          chunk.content,
+          embeddings[i]!,
+          true,
+        );
+        inserted += 1;
+      }
+      batches += 1;
+      if (batches % PROGRESS_EVERY_BATCHES === 0) {
+        console.log(
+          `batch ${batches}: inserted ${inserted}, skipped ${skipped}, at ${file.relPath} (${elapsed()})`,
+        );
+      }
+    }
+  }
+
+  console.log(
+    `done: inserted ${inserted}, skipped ${skipped}, files ${tally.files.kb + tally.files.code} ` +
+      `(${tally.files.kb} kb, ${tally.files.code} code), elapsed ${elapsed()}`,
+  );
+}
+
+async function main(): Promise<void> {
+  const opts = parseOptions();
+  let dbName: string | null = null;
+  if (!opts.dryRun) {
+    try {
+      dbName = storeDatabaseName(opts.store!);
+    } catch (err) {
+      if (err instanceof StoreRefusedError) fail(`refused: ${err.message}`, 2);
+      throw err;
+    }
+    if (!process.env.DATABASE_URL) fail('DATABASE_URL is required');
+  }
+
+  const kbFiles = await collectKbFiles(opts.tree);
+  const allCode = await collectCodeFilesSorted(opts.tree, opts.exclude);
+  const codeFiles = opts.limitFiles === null ? allCode : allCode.slice(0, opts.limitFiles);
+  console.log(`tree ${opts.tree}`);
+  console.log(
+    `candidates: ${kbFiles.length} kb files, ${codeFiles.length} of ${allCode.length} code files`,
+  );
+
+  if (opts.dryRun) {
+    const tally = newTally();
+    for await (const file of chunkAll(opts.tree, kbFiles, codeFiles, tally)) void file;
+    printTally(tally);
+    process.exit(0);
+  }
+
+  const db = createDatabase(process.env.DATABASE_URL!);
+  try {
+    await refuseForeignRows(opts, db, dbName!);
+  } catch (err) {
+    if (err instanceof StoreRefusedError) fail(`refused: ${err.message}`, 2);
+    throw err;
+  }
+
+  console.log(`store ${dbName}, repository ${opts.repositoryId}, task ${opts.taskId}`);
+  const conn = await resolveRagConnection(
+    {
+      ragMode: 'internal',
+      ragConnectionString: null,
+      ollamaUrl: opts.ollamaUrl,
+      embeddingModel: opts.model,
+      embeddingDimensions: opts.dims,
+    },
+    db,
+    opts.store!,
+  );
+  if (!conn) fail('could not open the store');
+  try {
+    await build(opts, conn, kbFiles, codeFiles);
+  } finally {
+    await conn.close();
+  }
+  process.exit(0);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? (err.stack ?? err.message) : err);
+    process.exit(1);
+  });
+}
