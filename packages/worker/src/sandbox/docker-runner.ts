@@ -126,6 +126,9 @@ export interface DockerRunOpts {
   /** Receives the writable attached to the container's stdin so the caller can
    *  inject more input mid-run. Only invoked when interactive. */
   onStdinWritable?: (writable: NodeJS.WritableStream) => void;
+  /** Wraps the `docker create` call; null from it means nothing was created and nothing runs. Forces
+   *  the create -> start flow, because `docker run` creates inside the call that outlives the run. */
+  guardCreate?: (create: () => Promise<DockerRunResult>) => Promise<DockerRunResult | null>;
 }
 
 export interface DockerRunResult {
@@ -446,7 +449,7 @@ export const defaultDockerRunner: DockerRunner = {
 
     // Plain path: a single `docker run`. `-i` keeps the container's stdin open
     // (no `-t`: NDJSON wants a clean pipe).
-    if (!opts.connectNetworks?.length) {
+    if (!opts.connectNetworks?.length && !opts.guardCreate) {
       const runArgs = ['run', '--rm'];
       if (attachStdin) runArgs.push('-i');
       runArgs.push('--name', name, ...flagArgs, opts.image, ...opts.cmd);
@@ -472,12 +475,18 @@ export const defaultDockerRunner: DockerRunner = {
     const createArgs = ['create', '--rm'];
     if (attachStdin) createArgs.push('-i');
     createArgs.push('--name', name, ...flagArgs, opts.image, ...opts.cmd);
-    const created = await spawnAndCollect('docker', createArgs, { timeoutMs: 30_000 });
+    const createContainer = () => spawnAndCollect('docker', createArgs, { timeoutMs: 30_000 });
+    const created = opts.guardCreate
+      ? await opts.guardCreate(createContainer)
+      : await createContainer();
+    if (!created) {
+      return { exitCode: null, stdout: '', stderr: '', durationMs: 0, timedOut: false };
+    }
     if (created.exitCode !== 0) {
       await forceRemove();
       return created;
     }
-    for (const net of opts.connectNetworks) {
+    for (const net of opts.connectNetworks ?? []) {
       const connected = await spawnAndCollect('docker', ['network', 'connect', net, name], {
         timeoutMs: 15_000,
       });

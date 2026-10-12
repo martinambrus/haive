@@ -88,6 +88,7 @@ import {
 } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killCliSandboxesForTask, listCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
+import { supersedeTaskRuns } from '../sandbox/cli-sandbox-fence.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers, killRepoIdeRunner } from '../sandbox/ide-runner.js';
 import {
@@ -3371,16 +3372,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   // Before the kill and the listing: a run still queued reads this right before it creates its sandbox.
-  await db
-    .update(schema.cliInvocations)
-    .set({ supersededAt: new Date() })
-    .where(
-      and(
-        eq(schema.cliInvocations.taskId, payload.taskId),
-        isNull(schema.cliInvocations.endedAt),
-        isNull(schema.cliInvocations.supersededAt),
-      ),
-    );
+  await supersedeTaskRuns(db, payload.taskId);
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
   await killCliSandboxesForTask(payload.taskId);
   // The cleanup above swallows docker failures, so the claims and the finish record wait for a

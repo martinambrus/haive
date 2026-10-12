@@ -43,6 +43,8 @@ import {
 } from '../../cli-executor/codex-app-server.js';
 import { codexExecFallbackSpec } from '../../cli-adapters/codex.js';
 import { runInSandbox } from '../../sandbox/sandbox-runner.js';
+import { createUnlessSuperseded } from '../../sandbox/cli-sandbox-fence.js';
+import { getDb } from '../../db.js';
 import {
   publishCliChunk,
   publishCliRetry,
@@ -1637,6 +1639,19 @@ export function createSandboxSpawner(
         onStderrChunk: wrapStreamCallback(invocationId, 'stderr', firstSpeech(opts.onStderrChunk)),
         signal,
         ...(superseded ? { beforeRun: async () => !(await superseded.poll()) } : {}),
+        ...(taskId && invocationId
+          ? {
+              createFence: async (create) => {
+                const created = await createUnlessSuperseded(
+                  getDb(),
+                  { taskId, invocationId },
+                  create,
+                );
+                if (!created) await superseded?.poll();
+                return created;
+              },
+            }
+          : {}),
         interactive: spec.steerable === true,
         stdinInitial: spec.stdinInitial,
         stdinPrompt: spec.stdinPrompt,
