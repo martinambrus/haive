@@ -19,6 +19,7 @@
  *   RAG_EXCLUDE        JSON array of anchored directory prefixes to leave out (default [])
  *   RAG_STORE          NAME of the store: database haive_rag_<NAME> (required unless RAG_DRY_RUN=1)
  *   RAG_REPOSITORY_ID  uuid stamped on every row (required unless RAG_DRY_RUN=1)
+ *   RAG_SOURCE_REPOSITORY_ID  uuid of the repository whose secret-mask rules apply (default: the default globs)
  *   RAG_TASK_ID        uuid stamped on every row (default: a fresh uuid, printed)
  *   RAG_OLLAMA_URL     default http://ollama:11434
  *   RAG_MODEL          default qwen3-embedding:4b
@@ -28,7 +29,8 @@
  */
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { createDatabase } from '@haive/database';
+import { createDatabase, schema } from '@haive/database';
+import { eq } from 'drizzle-orm';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
@@ -41,6 +43,12 @@ import {
   warmOllamaModel,
   type RagConnection,
 } from '@haive/shared/rag';
+import {
+  secretMaskDeniesPath,
+  secretMaskPolicy,
+  type SecretMaskPolicy,
+} from '../src/queues/cli-exec/secret-mask-policy.js';
+import { listTrackedFiles } from '../src/queues/cli-exec/secret-mask.js';
 import { listFilesMatching } from '../src/step-engine/steps/onboarding/_helpers.js';
 import { collectCodeFiles } from '../src/step-engine/steps/onboarding/_rag-collect.js';
 import {
@@ -53,7 +61,11 @@ import {
   type RagChunk,
 } from '../src/step-engine/steps/onboarding/_rag-chunkers.js';
 import { ensureRagSchema, RAG_TABLE } from '../src/step-engine/steps/onboarding/_rag-connection.js';
-import { chunkKey, insertChunk } from '../src/step-engine/steps/onboarding/10-rag-populate.js';
+import {
+  chunkKey,
+  computeStaleKeys,
+  insertChunk,
+} from '../src/step-engine/steps/onboarding/10-rag-populate.js';
 
 const REFUSED_STORE_NAMES = ['elmont_rs', 'rs_final', 'kb_global'] as const;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -102,6 +114,7 @@ interface Options {
   exclude: string[];
   store: string | null;
   repositoryId: string | null;
+  sourceRepositoryId: string | null;
   taskId: string;
   ollamaUrl: string;
   model: string;
@@ -136,6 +149,10 @@ function parseOptions(): Options {
   const dryRun = process.env.RAG_DRY_RUN === '1';
   const store = process.env.RAG_STORE || null;
   const repositoryId = process.env.RAG_REPOSITORY_ID || null;
+  const sourceRepositoryId = process.env.RAG_SOURCE_REPOSITORY_ID || null;
+  if (sourceRepositoryId && !UUID_PATTERN.test(sourceRepositoryId)) {
+    fail('RAG_SOURCE_REPOSITORY_ID must be a uuid');
+  }
   const taskId = process.env.RAG_TASK_ID || randomUUID();
   if (!dryRun) {
     if (!store) fail('RAG_STORE is required');
@@ -149,6 +166,7 @@ function parseOptions(): Options {
     exclude,
     store,
     repositoryId,
+    sourceRepositoryId,
     taskId,
     ollamaUrl: process.env.RAG_OLLAMA_URL || 'http://ollama:11434',
     model: process.env.RAG_MODEL || 'qwen3-embedding:4b',
@@ -170,6 +188,44 @@ async function collectKbFiles(tree: string): Promise<string[]> {
 async function collectCodeFilesSorted(tree: string, exclude: string[]): Promise<string[]> {
   const rels = await collectCodeFiles(tree, { exclude });
   return rels.sort((a, b) => a.localeCompare(b));
+}
+
+export function dropMaskedPaths(
+  policy: SecretMaskPolicy,
+  rels: string[],
+): { kept: string[]; masked: string[] } {
+  const kept: string[] = [];
+  const masked: string[] = [];
+  for (const rel of rels) (secretMaskDeniesPath(policy, rel) ? masked : kept).push(rel);
+  return { kept, masked };
+}
+
+export function staleChunks(
+  existingKeys: Iterable<string>,
+  produced: ReadonlySet<string>,
+): Array<{ sourcePath: string; sectionId: string; chunkIndex: number }> {
+  return computeStaleKeys(existingKeys, produced).map((key) => {
+    const [sourcePath, sectionId, chunkIndex] = JSON.parse(key) as [string, string, number];
+    return { sourcePath, sectionId, chunkIndex };
+  });
+}
+
+async function resolveMaskPolicy(
+  opts: Options,
+  db: ReturnType<typeof createDatabase> | null,
+): Promise<SecretMaskPolicy> {
+  const tracked = await listTrackedFiles(opts.tree);
+  if (!opts.sourceRepositoryId) return secretMaskPolicy({ tracked });
+  const [row] = await db!
+    .select({
+      allow: schema.repositories.secretMaskAllow,
+      denyExtend: schema.repositories.secretMaskDenyExtend,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, opts.sourceRepositoryId))
+    .limit(1);
+  if (!row) fail(`refused: repository ${opts.sourceRepositoryId} not found`, 2);
+  return secretMaskPolicy({ allow: row.allow, denyExtend: row.denyExtend, tracked });
 }
 
 interface FileChunks {
@@ -318,6 +374,7 @@ async function build(
   if (!usedPgvector) throw new Error('pgvector is unavailable: refusing to write jsonb embeddings');
   const existing = await loadExistingHashes(conn, repositoryId);
   console.log(`store holds ${existing.size} rows for ${repositoryId} before this run`);
+  const produced = new Set<string>();
 
   const warmed = await warmOllamaModel(opts.ollamaUrl, opts.model);
   if (!warmed) console.warn(`warning: ${opts.model} at ${opts.ollamaUrl} did not warm`);
@@ -333,6 +390,7 @@ async function build(
     const toEmbed: RagChunk[] = [];
     for (const chunk of file.chunks) {
       const key = chunkKey(file.relPath, chunk.sectionId, chunk.chunkIndex);
+      produced.add(key);
       if (existing.get(key) === chunk.chunkHash) skipped += 1;
       else toEmbed.push(chunk);
     }
@@ -382,6 +440,25 @@ async function build(
     }
   }
 
+  const stale = staleChunks(existing.keys(), produced);
+  let purged = 0;
+  const PURGE_BATCH = 200;
+  for (let i = 0; i < stale.length; i += PURGE_BATCH) {
+    const batch = stale.slice(i, i + PURGE_BATCH);
+    const params: (string | number)[] = [repositoryId];
+    const tuples = batch.map((c, j) => {
+      const base = 2 + j * 3;
+      params.push(c.sourcePath, c.sectionId, c.chunkIndex);
+      return `($${base}, $${base + 1}, $${base + 2})`;
+    });
+    const res = (await conn.pg.unsafe(
+      `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND (source_path, section_id, chunk_index) IN (${tuples.join(', ')})`,
+      params,
+    )) as unknown as { count?: number };
+    purged += typeof res?.count === 'number' ? res.count : batch.length;
+  }
+  console.log(`purged: ${purged} stale rows`);
+
   console.log(
     `done: inserted ${inserted}, skipped ${skipped}, files ${tally.files.kb + tally.files.code} ` +
       `(${tally.files.kb} kb, ${tally.files.code} code), elapsed ${elapsed()}`,
@@ -398,11 +475,19 @@ async function main(): Promise<void> {
       if (err instanceof StoreRefusedError) fail(`refused: ${err.message}`, 2);
       throw err;
     }
-    if (!process.env.DATABASE_URL) fail('DATABASE_URL is required');
   }
 
-  const kbFiles = await collectKbFiles(opts.tree);
-  const allCode = await collectCodeFilesSorted(opts.tree, opts.exclude);
+  if ((!opts.dryRun || opts.sourceRepositoryId) && !process.env.DATABASE_URL) {
+    fail('DATABASE_URL is required');
+  }
+  const db =
+    !opts.dryRun || opts.sourceRepositoryId ? createDatabase(process.env.DATABASE_URL!) : null;
+  const policy = await resolveMaskPolicy(opts, db);
+  const keptKb = dropMaskedPaths(policy, await collectKbFiles(opts.tree));
+  const keptCode = dropMaskedPaths(policy, await collectCodeFilesSorted(opts.tree, opts.exclude));
+  const kbFiles = keptKb.kept;
+  const allCode = keptCode.kept;
+  console.log(`masked: ${keptKb.masked.length + keptCode.masked.length} files`);
   const codeFiles = opts.limitFiles === null ? allCode : allCode.slice(0, opts.limitFiles);
   console.log(`tree ${opts.tree}`);
   console.log(
@@ -416,9 +501,8 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const db = createDatabase(process.env.DATABASE_URL!);
   try {
-    await refuseForeignRows(opts, db, dbName!);
+    await refuseForeignRows(opts, db!, dbName!);
   } catch (err) {
     if (err instanceof StoreRefusedError) fail(`refused: ${err.message}`, 2);
     throw err;
@@ -433,7 +517,7 @@ async function main(): Promise<void> {
       embeddingModel: opts.model,
       embeddingDimensions: opts.dims,
     },
-    db,
+    db!,
     opts.store!,
   );
   if (!conn) fail('could not open the store');

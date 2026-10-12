@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { secretMaskPolicy } from '../src/queues/cli-exec/secret-mask-policy.js';
+import { chunkKey } from '../src/step-engine/steps/onboarding/10-rag-populate.js';
 import {
+  dropMaskedPaths,
+  staleChunks,
   StoreRefusedError,
   storeDatabaseName,
   validateEmbeddings,
@@ -43,5 +47,37 @@ describe('validateEmbeddings', () => {
 
   it('rejects a non-finite value', () => {
     expect(() => validateEmbeddings([[0.1, Number.NaN]], 1, 2)).toThrow(/non-finite/);
+  });
+});
+
+describe('staleChunks', () => {
+  it('returns the stored chunks this run did not produce', () => {
+    const kept = chunkKey('a.php', 's1', 0);
+    const gone = chunkKey('b.php', 's2', 3);
+    const stale = staleChunks([kept, gone], new Set([kept, chunkKey('c.php', 's', 0)]));
+    expect(stale).toEqual([{ sourcePath: 'b.php', sectionId: 's2', chunkIndex: 3 }]);
+  });
+
+  it('returns nothing when every stored chunk was produced', () => {
+    const key = chunkKey('a.php', 's1', 0);
+    expect(staleChunks([key], new Set([key]))).toEqual([]);
+  });
+});
+
+describe('dropMaskedPaths', () => {
+  it('drops a denied path and keeps a tracked denied path', () => {
+    const files = ['src/a.php', '.env', 'config/.env.production', 'secrets/key.pem'];
+    const untracked = secretMaskPolicy({ tracked: new Set(['src/a.php']) });
+    expect(dropMaskedPaths(untracked, files)).toEqual({
+      kept: ['src/a.php'],
+      masked: ['.env', 'config/.env.production', 'secrets/key.pem'],
+    });
+    const tracked = secretMaskPolicy({ tracked: new Set(['.env']) });
+    expect(dropMaskedPaths(tracked, ['.env', 'src/a.php']).kept).toEqual(['.env', 'src/a.php']);
+  });
+
+  it('treats an unlistable tree as all untracked', () => {
+    const policy = secretMaskPolicy({ tracked: null });
+    expect(dropMaskedPaths(policy, ['.env']).masked).toEqual(['.env']);
   });
 });
