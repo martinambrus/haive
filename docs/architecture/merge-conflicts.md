@@ -53,7 +53,8 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   policy, the squash message, a fetch credential) are made before it. The squash saves `squashing` in
   a section of its own ahead of the reset, so a crash between the reset and the commit re-enters it.
   The push runs outside a section, since it is network-bound, and sends the commit a section read
-  from the base ref (`<sha>:refs/heads/<base>`, with the upstream set afterwards), so a pass that
+  from the base ref (`<sha>:refs/heads/<base>`, with the upstream set afterwards; a failed upstream setup does not fail the push, it is logged and
+  added to the step's warning), so a pass that
   lost the dir can push only what it merged. The directory is keyed rather than the repository
   because two repository rows can share one local path. The DAG executor needs none: its integration
   worktree is the task's own feature worktree, which `findBranchClaimant` keeps to one task.

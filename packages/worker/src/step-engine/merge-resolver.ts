@@ -213,15 +213,12 @@ async function setStepStatus(
   return updateOwnedStep(db, stepRowId, patch);
 }
 
-async function saveMergeState(
+export async function saveMergeState(
   db: DbHandle,
   stepRowId: string,
   state: MergeResolveState,
 ): Promise<void> {
-  await db
-    .update(schema.taskSteps)
-    .set({ mergeResolveState: state, updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, stepRowId));
+  await updateOwnedStep(db, stepRowId, { mergeResolveState: state });
 }
 
 /** A host-side write to the merge dir, fenced on this step's claim and the pass's epoch. */
@@ -321,8 +318,9 @@ async function reachDone(
       return tip.code === 0 ? tip.stdout.trim() : undefined;
     });
     const fv = (current.formValues ?? {}) as { credentialId?: string; setUpstream?: boolean };
+    let upstreamError: string | undefined;
     try {
-      await pushBranch({
+      ({ upstreamError } = await pushBranch({
         cwd: ctx.repoPath,
         branch: state.baseBranch,
         sha,
@@ -330,7 +328,7 @@ async function reachDone(
         credentialId: fv.credentialId || undefined,
         db,
         userId: ctx.userId,
-      });
+      }));
     } catch (err) {
       const row = await halt(
         db,
@@ -343,6 +341,17 @@ async function reachDone(
         resolved: false,
         result: { status: 'failed', row, error: row.errorMessage ?? 'push failed' },
       };
+    }
+    if (upstreamError) {
+      ctx.logger.warn(
+        { branch: state.baseBranch, upstreamError },
+        'base branch pushed, but its upstream was not set',
+      );
+      current = await addStepWarning(
+        db,
+        current,
+        `'${state.baseBranch}' was pushed, but git could not set its upstream: ${upstreamError}`,
+      );
     }
     state = { ...pushing, pushed: true };
   }

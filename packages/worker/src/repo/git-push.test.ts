@@ -104,7 +104,7 @@ describe('git-push helpers', () => {
       const sha = (await git(work, ['rev-parse', 'main'])).trim();
       await writeFile(path.join(work, 'f.txt'), 'two\n', 'utf8');
       await git(work, ['commit', '-am', 'two']);
-      await pushBranch({
+      const res = await pushBranch({
         cwd: work,
         branch: 'main',
         sha,
@@ -112,10 +112,34 @@ describe('git-push helpers', () => {
         db: stubDb,
         userId: 'u1',
       });
+      expect(res).toEqual({ pushed: true, remote: 'origin', branch: 'main' });
       expect((await git(bare, ['rev-parse', 'main'])).trim()).toBe(sha);
       expect((await git(work, ['rev-parse', '--abbrev-ref', 'main@{upstream}'])).trim()).toBe(
         'origin/main',
       );
+    } finally {
+      await rm(work, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('pushBranch with a sha reports a failed upstream setup, and still resolves as pushed', async () => {
+    const { work, bare } = await setupRepoWithBareOrigin();
+    try {
+      await git(work, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(work, ['config', '--unset-all', 'remote.origin.fetch']);
+      const sha = (await git(work, ['rev-parse', 'main'])).trim();
+      const res = await pushBranch({
+        cwd: work,
+        branch: 'main',
+        sha,
+        setUpstream: true,
+        db: stubDb,
+        userId: 'u1',
+      });
+      expect(res).toMatchObject({ pushed: true, remote: 'origin', branch: 'main' });
+      expect(res.upstreamError).toMatch(/origin\/main/);
+      expect((await git(bare, ['rev-parse', 'main'])).trim()).toBe(sha);
     } finally {
       await rm(work, { recursive: true, force: true });
       await rm(bare, { recursive: true, force: true });

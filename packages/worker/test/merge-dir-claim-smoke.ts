@@ -16,6 +16,7 @@ import {
   releaseTaskMergeClaims,
   withMergeDirSection,
 } from '../src/step-engine/merge-dir-claim.js';
+import { saveMergeState } from '../src/step-engine/merge-resolver.js';
 import { StepSupersededError } from '../src/step-engine/step-ownership.js';
 
 const log = logger.child({ module: 'merge-dir-claim-smoke' });
@@ -447,6 +448,52 @@ async function main(): Promise<void> {
       'a Retry and a section writing its step row both complete, with no deadlock',
       both.every((r) => r.status === 'fulfilled') && !deadlocked,
       both.map((r) => (r.status === 'rejected' ? String(r.reason) : 'ok')),
+    );
+
+    // --- a section's merge-state write queued behind a Retry holding the step row is refused ---
+    const h = await makeTask('smoke H');
+    dir = dirs('retry-save');
+    await claimMergeDir(db, owner(h, dir));
+    const resetState = { marker: 'retry reset' };
+    let retryHasRow!: () => void;
+    const rowHeld = new Promise<void>((resolve) => (retryHasRow = resolve));
+    const retryTx = (async () => {
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.taskSteps)
+          .set({ status: 'pending', mergeResolveState: resetState as never })
+          .where(eq(schema.taskSteps.id, h.stepId));
+        retryHasRow();
+        await sleep(1500);
+        await tx
+          .update(schema.tasks)
+          .set({ orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1` })
+          .where(eq(schema.tasks.id, h.taskId));
+      });
+    })();
+    await rowHeld;
+    const queuedSave = withMergeDirSection(db, owner(h, dir), (tx) =>
+      saveMergeState(tx, h.stepId, { marker: 'stale pass' } as never),
+    ).catch(outcome);
+    await retryTx;
+    const saved = await queuedSave;
+    const [afterRetry] = await db
+      .select({
+        status: schema.taskSteps.status,
+        state: schema.taskSteps.mergeResolveState,
+      })
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.id, h.stepId));
+    check(
+      "a section's merge-state write queued behind a Retry is refused",
+      saved === 'superseded',
+      saved,
+    );
+    check(
+      "...and the row keeps the Retry's reset state",
+      afterRetry?.status === 'pending' &&
+        (afterRetry.state as { marker?: string } | null)?.marker === 'retry reset',
+      afterRetry,
     );
 
     // --- waiters hold no pooled connection: 12 on one dir with a pool of 10 all complete ---

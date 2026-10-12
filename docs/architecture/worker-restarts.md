@@ -133,7 +133,8 @@ job, so its route sets a failed task `running` itself before it queues the advan
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. A task Retry's START, which only a task that never reached a step still takes, runs its first
 step itself rather than through an advance, so it takes that step's hold as well. Every write step-runner makes to a pass's row, and every status the DAG executor and the
-merge resolver set on it, goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
+merge resolver set on it, and every merge-state write of the merge resolver (`saveMergeState`, in a dir section or out of one: a section's
+epoch check is made once, and a Retry writes its row before the epoch), goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
 while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
 Stop, which fails the row without moving the task's epoch). A run a pass records for its row goes
 the same way (`insertOwnedRun`, at every insert site in step-runner, the merge resolver and the DAG
