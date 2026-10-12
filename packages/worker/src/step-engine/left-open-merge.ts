@@ -252,12 +252,13 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
     );
     if (!target) return;
     const recorded = (await recordedMerges(db, taskId)).find((m) => m.dir === dir);
+    const recordedBaseline = recorded?.fixBaseline ?? null;
+    // An unrecordable baseline is passed on, so the leftovers report says the changes went unchecked.
     const baseline =
-      recorded?.fixBaseline &&
-      'tree' in recorded.fixBaseline &&
-      recorded.fixBaseline.head === target.head &&
-      recorded.fixBaseline.mergeHead === target.mergeHead
-        ? recorded.fixBaseline
+      recordedBaseline !== null &&
+      ('unavailable' in recordedBaseline ||
+        (recordedBaseline.head === target.head && recordedBaseline.mergeHead === target.mergeHead))
+        ? recordedBaseline
         : null;
     const maskSource = await maskSourceOnce(db, taskId);
 
@@ -310,9 +311,10 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
       const aborted = await abortMerge(dir);
       if (!aborted.ok) return { outcome: 'refused', reason: abortFailureNote(aborted), leftovers };
       changed = true;
-      const unchecked = baseline
-        ? ''
-        : ' Files the fixer changed outside the conflict were not checked: no record of the tree it was sent into remains.';
+      const unchecked =
+        baseline !== null && 'tree' in baseline
+          ? ''
+          : ' Files the fixer changed outside the conflict were not checked: no record of the tree it was sent into remains.';
       return {
         outcome: 'aborted',
         reason: `The checkout is back to how it was before the merge.${unchecked}`,

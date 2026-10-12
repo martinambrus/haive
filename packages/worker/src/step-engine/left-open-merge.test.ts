@@ -201,6 +201,35 @@ describe('abortLeftMerge', () => {
     ]);
   });
 
+  it('reports the changes as unchecked when the fixer baseline could not be recorded', async () => {
+    const unchecked = { moved: [], interrupted: [], unchecked: 'nothing was recorded' };
+    git.relocateFixerChanges.mockResolvedValue(unchecked);
+    const step = [
+      {
+        id: 'step-1',
+        state: { ...fixerStep()[0]!.state, fixBaseline: { unavailable: 'index read failed' } },
+      },
+    ];
+    const { db } = chainDb([reportedOpen(), step, [{ worktreePath: null }]], {
+      status: 'cancelled',
+    });
+    await abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo', mergeHead: 'm1' });
+    expect(git.relocateFixerChanges).toHaveBeenCalledWith(
+      '/repo',
+      { unavailable: 'index read failed' },
+      expect.anything(),
+      expect.any(Function),
+    );
+    expect(git.recordFixerLeftovers).toHaveBeenCalledWith(
+      db,
+      'task-1',
+      'step-1',
+      'feat/a',
+      unchecked,
+    );
+    expect(git.abortMerge).toHaveBeenCalled();
+  });
+
   it('is retried, not settled as refused, when reporting fails after the abort went through', async () => {
     git.relocateFixerChanges.mockResolvedValue({ moved: ['a.txt'], interrupted: [] });
     git.recordFixerLeftovers.mockRejectedValue(new Error('connection lost'));
