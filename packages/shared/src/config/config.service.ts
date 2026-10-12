@@ -909,6 +909,13 @@ export class ConfigService {
     this.localCache.delete(key);
   }
 
+  async setIfAbsent(key: string, value: string): Promise<boolean> {
+    this.ensureInitialized();
+    const written = (await this.redis!.set(key, value, 'NX')) === 'OK';
+    this.localCache.delete(key);
+    return written;
+  }
+
   clearCache(): void {
     this.localCache.clear();
   }

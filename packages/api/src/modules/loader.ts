@@ -1,0 +1,150 @@
+import { Hono } from 'hono';
+import { z } from 'zod';
+import { configService, validateFormValues } from '@haive/shared';
+import { moduleManifestSchema, type ModuleManifest } from '@haive/shared/modularity';
+import { HttpError, type AppEnv } from '../context.js';
+import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import { moduleRegistry } from '../modules.generated.js';
+
+export type ApiModuleEntry = {
+  packageName: string;
+  manifest: unknown;
+  routes?: () => Hono<AppEnv>;
+};
+
+export type LoadedApiModule = {
+  packageName: string;
+  manifest: ModuleManifest;
+};
+
+type SettingsKind = 'global' | 'admin';
+
+const putBodySchema = z.object({ values: z.record(z.string(), z.unknown()) });
+
+const settingsKey = (id: string, kind: SettingsKind, field: string) =>
+  `config:module:${id}:${kind}:${field}`;
+
+function settingsOf(manifest: ModuleManifest, kind: SettingsKind) {
+  return kind === 'global' ? manifest.globalSettings : manifest.adminSettings;
+}
+
+function parseKind(raw: string): SettingsKind {
+  if (raw === 'global' || raw === 'admin') return raw;
+  throw new HttpError(404, 'Unknown settings kind');
+}
+
+export async function mountModules(
+  app: Hono<AppEnv>,
+  entries: readonly ApiModuleEntry[],
+): Promise<LoadedApiModule[]> {
+  const loaded: LoadedApiModule[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const parsed = moduleManifestSchema.safeParse(entry.manifest);
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid manifest in module ${entry.packageName}: ${parsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; ')}`,
+      );
+    }
+    const manifest = parsed.data;
+    if (seen.has(manifest.id)) {
+      throw new Error(`Duplicate module id "${manifest.id}" (${entry.packageName})`);
+    }
+    seen.add(manifest.id);
+    loaded.push({ packageName: entry.packageName, manifest });
+  }
+
+  for (const [index, entry] of entries.entries()) {
+    const { manifest } = loaded[index]!;
+    if (entry.routes) {
+      const sub = new Hono<AppEnv>();
+      sub.use('*', requireAuth);
+      if (manifest.apiRequiresAdmin === true) sub.use('*', requireAdmin);
+      sub.route('/', entry.routes());
+      app.route(`/m/${manifest.id}`, sub);
+    }
+    for (const kind of ['global', 'admin'] as const) {
+      const defaults = settingsOf(manifest, kind)?.defaults ?? {};
+      for (const [field, value] of Object.entries(defaults)) {
+        await configService.setIfAbsent(
+          settingsKey(manifest.id, kind, field),
+          JSON.stringify(value),
+        );
+      }
+    }
+  }
+  return loaded;
+}
+
+function fieldIds(form: NonNullable<ModuleManifest['globalSettings']>['form']): string[] {
+  return form.fields.flatMap((field) =>
+    field.type === 'accordion'
+      ? field.items.flatMap((item) => item.fields.map((inner) => inner.id))
+      : [field.id],
+  );
+}
+
+export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
+  const routes = new Hono<AppEnv>();
+  routes.use('*', requireAuth);
+
+  const settingsFor = (id: string, kind: SettingsKind) => {
+    const module = loaded.find((m) => m.manifest.id === id);
+    const settings = module ? settingsOf(module.manifest, kind) : undefined;
+    if (!module || !settings) throw new HttpError(404, 'Module settings not found');
+    return settings;
+  };
+
+  routes.get('/', (c) => {
+    const isAdmin = c.get('userRole') === 'admin';
+    return c.json({
+      modules: loaded.map(({ manifest }) => ({
+        id: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        nav: (manifest.nav ?? []).filter((item) => isAdmin || item.adminOnly !== true),
+        pages: manifest.pages ?? {},
+        hasGlobalSettings: manifest.globalSettings !== undefined,
+        hasAdminSettings: manifest.adminSettings !== undefined,
+      })),
+    });
+  });
+
+  routes.get('/:id/settings/:kind', async (c) => {
+    const id = c.req.param('id');
+    const kind = parseKind(c.req.param('kind'));
+    const settings = settingsFor(id, kind);
+    if (kind === 'admin' && c.get('userRole') !== 'admin') {
+      throw new HttpError(403, 'Admin access required');
+    }
+    const values: Record<string, unknown> = { ...settings.defaults };
+    for (const field of new Set([...Object.keys(settings.defaults), ...fieldIds(settings.form)])) {
+      const stored = await configService.getFresh(settingsKey(id, kind, field));
+      if (stored !== null) values[field] = JSON.parse(stored);
+    }
+    return c.json({ form: settings.form, values });
+  });
+
+  routes.put('/:id/settings/:kind', async (c) => {
+    if (c.get('userRole') !== 'admin') throw new HttpError(403, 'Admin access required');
+    const id = c.req.param('id');
+    const kind = parseKind(c.req.param('kind'));
+    const settings = settingsFor(id, kind);
+    const body = putBodySchema.parse(await c.req.json());
+    const result = validateFormValues(settings.form, body.values);
+    if (!result.success) throw new HttpError(400, result.issues.join('; '));
+    for (const [field, value] of Object.entries(result.data)) {
+      await configService.set(settingsKey(id, kind, field), JSON.stringify(value));
+    }
+    return c.json({ values: result.data });
+  });
+
+  return routes;
+}
+
+export async function installModules(app: Hono<AppEnv>): Promise<void> {
+  const loaded = await mountModules(app, moduleRegistry);
+  app.route('/modules', moduleRoutes(loaded));
+}

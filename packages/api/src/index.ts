@@ -46,6 +46,7 @@ import { toolingRoutes } from './routes/tooling.js';
 import { versionRoutes } from './routes/version.js';
 import { maintenanceGate } from './middleware/maintenance.js';
 import { maintenanceRoutes } from './routes/maintenance.js';
+import { installModules } from './modules/loader.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -125,6 +126,7 @@ async function main(): Promise<void> {
   const { apiPort, webOrigin } = await bootstrap();
 
   const app = createApiApp(webOrigin);
+  await installModules(app);
 
   const server = serve({ fetch: app.fetch, port: apiPort }, (info) => {
     logger.info({ port: info.port }, 'haive-api listening');
