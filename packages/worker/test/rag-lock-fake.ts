@@ -20,11 +20,12 @@ export function createFakeRagLock(actual: typeof RagModule) {
     handles: [] as FakeLockHandle[],
     timeoutNow: false,
     redisDown: false,
+    loseOnTake: false,
   };
   const take = (repositoryId: string): FakeLockHandle => {
     state.held.add(repositoryId);
     const handle: FakeLockHandle = {
-      lost: false,
+      lost: state.loseOnTake,
       released: 0,
       release: async () => {
         handle.released += 1;
@@ -42,6 +43,7 @@ export function createFakeRagLock(actual: typeof RagModule) {
       state.handles.length = 0;
       state.timeoutNow = false;
       state.redisDown = false;
+      state.loseOnTake = false;
     },
     acquireRagSyncLock: async (
       _redis: unknown,

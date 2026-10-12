@@ -977,6 +977,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           useOllama &&
           hashed.realEmbedding &&
           health.degradedAt &&
+          !lock?.lost &&
           !(await ragStoreAwaitsReembed(conn, repositoryId ?? null, ctx.logger))
         ) {
           await clearRagEmbedDegraded(ctx.db, repositoryId ?? null, ctx.logger);

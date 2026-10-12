@@ -273,6 +273,13 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
+  it('keeps the flag when the sync lock was lost during the run', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    fakeLock.state.loseOnTake = true;
+    await populate(detected({ ollamaReachable: true }));
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
   it('clears the flag when the store holds no NULL-hash row', async () => {
     repo.ragEmbedDegradedAt = new Date(0);
     await populate(detected({ ollamaReachable: true }));
