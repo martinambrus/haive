@@ -616,10 +616,48 @@ async function execSlot(
   };
 }
 
-/** A declared command the shell could not start is a repository setting to correct, not a defect a fix round can repair. */
-function declaredNotRunnable(cmd: SlotCommand, slot: string, run: SlotRun): SlotRun {
+const PROGRAM_WORD = /^[A-Za-z0-9._/+-]+$/;
+
+const PROBE_SCRIPT =
+  'command -v -- "$1" >/dev/null 2>&1 && case $1 in */*) [ -x "$1" ] && [ ! -d "$1" ] ;; esac';
+
+/** An aggregate shell status cannot say the outer program never started, so its first word is probed. */
+function probeCommand(cmd: SlotCommand): SlotCommand | null {
+  const match = /^(\S+)(\s|$)/.exec(cmd.label.trimStart());
+  const word = match?.[1];
+  if (!word || !PROGRAM_WORD.test(word)) return null;
+  if (cmd.kind === 'ddev')
+    return {
+      kind: 'ddev',
+      label: cmd.label,
+      argv: [
+        'exec',
+        '--raw',
+        '--',
+        'bash',
+        '-c',
+        shellQuote(PROBE_SCRIPT),
+        shellQuote('probe'),
+        shellQuote(word),
+      ],
+    };
+  return { kind: 'host', label: cmd.label, argv: ['sh', '-c', PROBE_SCRIPT, 'sh', word] };
+}
+
+/** A declared command whose program cannot start is a repository setting to correct, not a defect a fix round can repair. */
+async function declaredNotRunnable(
+  cmd: SlotCommand,
+  slot: string,
+  run: SlotRun,
+  ctx: StepContext,
+  handle: DdevRunnerHandle | null,
+): Promise<SlotRun> {
   if (cmd.source !== 'declared' || !run.ran) return run;
   if (run.exitCode !== NOT_FOUND_EXIT && run.exitCode !== NOT_EXECUTABLE_EXIT) return run;
+  const probe = probeCommand(cmd);
+  if (!probe) return run;
+  const probed = await execSlot(probe, ctx, handle);
+  if (!probed.ran || probed.exitCode === 0) return run;
   const note = `the declared ${slot} command was not run — command not found / not executable (exit ${run.exitCode})`;
   return { ran: false, note, exitCode: run.exitCode, output: note, raw: run.raw };
 }
@@ -630,7 +668,7 @@ async function runSlotRaw(
   ctx: StepContext,
   handle: DdevRunnerHandle | null,
 ): Promise<{ check: CheckResult; raw: string }> {
-  const run = declaredNotRunnable(cmd, slot, await execSlot(cmd, ctx, handle));
+  const run = await declaredNotRunnable(cmd, slot, await execSlot(cmd, ctx, handle), ctx, handle);
   const check = {
     ran: run.ran,
     passed: run.ran && run.exitCode === 0,

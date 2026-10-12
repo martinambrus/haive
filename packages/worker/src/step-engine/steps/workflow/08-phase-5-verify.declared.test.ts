@@ -211,14 +211,15 @@ describe('08 apply with a declared command', () => {
     recordLedgerEntry.mockReset().mockResolvedValue(undefined);
   });
 
+  const PROBE =
+    'command -v -- "$1" >/dev/null 2>&1 && case $1 in */*) [ -x "$1" ] && [ ! -d "$1" ] ;; esac';
+
   it.each([127, 126])(
-    'exit %i of a declared command is NOT RUN and sends no fix round',
+    'exit %i of a declared command whose program cannot start is NOT RUN and sends no fix round',
     async (code) => {
-      runStepCommandInSandbox.mockResolvedValue({
-        ran: true,
-        exitCode: code,
-        output: 'sh: 1: x: not found',
-      });
+      runStepCommandInSandbox
+        .mockResolvedValueOnce({ ran: true, exitCode: code, output: 'sh: 1: x: not found' })
+        .mockResolvedValueOnce({ ran: true, exitCode: 1, output: '' });
 
       const out = await run({ test: declared('x --all', false) }, { runTest: true });
 
@@ -230,6 +231,66 @@ describe('08 apply with a declared command', () => {
       expect(out.degradedNote).toContain('command not found / not executable');
     },
   );
+
+  it('exit 127 from a program that starts is an ordinary failure', async () => {
+    runStepCommandInSandbox
+      .mockResolvedValueOnce({ ran: true, exitCode: 127, output: 'helper: not found' })
+      .mockResolvedValueOnce({ ran: true, exitCode: 0, output: '' });
+
+    const out = await run({ test: declared('npm test', false) }, { runTest: true });
+
+    expect(out.test.ran).toBe(true);
+    expect(out.test.passed).toBe(false);
+    expect(phase5VerifyStep.fixLoop!.evaluate(out)).not.toBeNull();
+  });
+
+  it('probes the first word of a compound command', async () => {
+    runStepCommandInSandbox
+      .mockResolvedValueOnce({ ran: true, exitCode: 127, output: 'x: not found' })
+      .mockResolvedValueOnce({ ran: true, exitCode: 0, output: '' });
+
+    const out = await run({ test: declared('cd a && x', false) }, { runTest: true });
+
+    expect(runStepCommandInSandbox.mock.calls[1]![1].argv).toEqual(['sh', '-c', PROBE, 'sh', 'cd']);
+    expect(out.test.ran).toBe(true);
+    expect(phase5VerifyStep.fixLoop!.evaluate(out)).not.toBeNull();
+  });
+
+  it('proves nothing about a first word that is not a plain program name', async () => {
+    runStepCommandInSandbox.mockResolvedValue({ ran: true, exitCode: 127, output: 'not found' });
+
+    const out = await run({ test: declared('$(x) --all', false) }, { runTest: true });
+
+    expect(runStepCommandInSandbox).toHaveBeenCalledTimes(1);
+    expect(out.test.ran).toBe(true);
+    expect(phase5VerifyStep.fixLoop!.evaluate(out)).not.toBeNull();
+  });
+
+  it('probes a host command with the word as a separate argument', async () => {
+    runStepCommandInSandbox
+      .mockResolvedValueOnce({ ran: true, exitCode: 127, output: 'x: not found' })
+      .mockResolvedValueOnce({ ran: true, exitCode: 1, output: '' });
+
+    await run({ test: declared('x', false) }, { runTest: true });
+
+    expect(runStepCommandInSandbox.mock.calls[1]![1].argv).toEqual(['sh', '-c', PROBE, 'sh', 'x']);
+  });
+
+  it('probes a DDEV command through one quoted bash -c word', async () => {
+    ensureAppServing.mockResolvedValue({ mode: 'ddev', url: 'http://x', handle: RUNNER });
+    ddevExec.mockImplementation(async (_h: unknown, args: string) => {
+      if (args.includes('curl')) return { exitCode: 0, output: 'HAIVE_HTTP_CODE=200' };
+      return args.includes(shellQuote(PROBE))
+        ? { exitCode: 1, output: '' }
+        : { exitCode: 127, output: 'x: not found' };
+    });
+
+    const out = await run({ ddevMode: true, test: declared('x', true) }, { runTest: true });
+
+    const probe = ddevExec.mock.calls.find((c) => String(c[1]).includes(shellQuote(PROBE)))!;
+    expect(probe[1]).toBe(`exec --raw -- bash -c ${shellQuote(PROBE)} 'probe' 'x'`);
+    expect(out.test.ran).toBe(false);
+  });
 
   it('exit 127 of a detected (not declared) command still fails the check', async () => {
     runStepCommandInSandbox.mockResolvedValue({ ran: true, exitCode: 127, output: 'nope' });
