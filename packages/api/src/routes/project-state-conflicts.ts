@@ -47,6 +47,25 @@ projectStateConflictRoutes.get('/:id/project-state/conflicts', requireAuth, asyn
   });
 });
 
+projectStateConflictRoutes.get(
+  '/:id/project-state/conflicts/:conflictId',
+  requireAuth,
+  async (c) => {
+    const repositoryId = c.req.param('id');
+    const conflictId = c.req.param('conflictId');
+    await requireOwnedRepository(c.get('userId'), repositoryId);
+    if (!UUID_RE.test(conflictId)) throw new HttpError(404, 'Question not found');
+    const row = await getDb().query.projectStateConflicts.findFirst({
+      where: and(
+        eq(schema.projectStateConflicts.id, conflictId),
+        eq(schema.projectStateConflicts.repositoryId, repositoryId),
+      ),
+    });
+    if (!row || !isRenderUnit(row.unit)) throw new HttpError(404, 'Question not found');
+    return c.json({ conflict: conflictBody(row) });
+  },
+);
+
 function refusal(result: Exclude<ProjectStateResolveResult, { kind: 'resolved' }>): HttpError {
   switch (result.kind) {
     case 'not_found':

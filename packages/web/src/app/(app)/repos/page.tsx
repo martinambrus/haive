@@ -23,6 +23,7 @@ import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
+import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
 import { ToolingUpgradeBanner } from '@/components/tooling-upgrade-banner';
 import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 import { ActionMenu } from '@/components/action-menu';
@@ -561,6 +562,7 @@ function RepoCard(props: RepoCardProps) {
             ))}
         </div>
       )}
+      {repo.status === 'ready' && <ProjectStateConflictsBanner repositoryId={repo.id} />}
       {repo.status === 'ready' && (
         <UpgradeAvailableBanner repositoryId={repo.id} repositoryName={repo.name} />
       )}

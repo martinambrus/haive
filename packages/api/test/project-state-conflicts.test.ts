@@ -115,6 +115,29 @@ describe('GET /repos/:id/project-state/conflicts', () => {
   });
 });
 
+describe('GET /repos/:id/project-state/conflicts/:conflictId', () => {
+  beforeEach(seed);
+
+  it('returns one question, answered or not, with its resolution', async () => {
+    const closed = await app.request(`/repos/${REPO}/project-state/conflicts/${CLOSED}`);
+    expect(closed.status).toBe(200);
+    const closedBody = (await closed.json()) as { conflict: unknown };
+    expect(closedBody.conflict).toMatchObject({ id: CLOSED, resolution: 'keep_mine' });
+    const open = await app.request(`/repos/${REPO}/project-state/conflicts/${PENDING}`);
+    const openBody = (await open.json()) as { conflict: unknown };
+    expect(openBody.conflict).toMatchObject({ id: PENDING, resolution: null });
+  });
+
+  it('is a 404 for a row of another repository, and for another user’s repository', async () => {
+    const other = await app.request(`/repos/${REPO}/project-state/conflicts/${OTHER_REPO_ROW}`);
+    expect(other.status).toBe(404);
+    const foreign = await app.request(
+      `/repos/${FOREIGN_REPO}/project-state/conflicts/${OTHER_REPO_ROW}`,
+    );
+    expect(foreign.status).toBe(404);
+  });
+});
+
 describe('POST /repos/:id/project-state/conflicts/:conflictId', () => {
   const closed = {
     id: PENDING,

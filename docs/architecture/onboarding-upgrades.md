@@ -423,7 +423,9 @@ reset deletes the repository's rows with its sync row.
 
 **A conflict is answered by the worker, one key at a time.** `GET /repos/:id/project-state/conflicts`
 lists the pending rows (a side is `{present: true, value}` or `{present: false}`, so a JSON null is a
-value and an absent side is marked; `key` is the render key, null for the whole file) and
+value and an absent side is marked; `key` is the render key, null for the whole file),
+`GET .../conflicts/:conflictId` returns one row answered or not, with its `resolution` (how the
+banner tells, after a 202, whether the answer it sent is the one that closed the row), and
 `POST .../conflicts/:conflictId` takes `{answer: 'keep_mine' | 'take_theirs'}`. The api never touches
 the checkout: it enqueues `RESOLVE_PROJECT_STATE` on the plan-mirror queue and waits for the result
 (`resolveProjectStateConflict`, `project-state/resolve.ts`), because the worker owns every write to
