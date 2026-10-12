@@ -18,7 +18,10 @@
  *
  * Env:
  *   RAG_TREE           repository tree to index (required)
- *   RAG_EXCLUDE        JSON array of anchored directory prefixes to leave out (default [])
+ *   RAG_EXCLUDE        JSON array of anchored directory prefixes to leave out, as a saved scope
+ *                      does: an own path never overrides it (default [])
+ *   RAG_HEURISTIC_EXCLUDE  the same, as 01-env-detect's customCodePaths.exclude: an own path
+ *                      in RAG_OWN_PATHS is still collected under it (default [])
  *   RAG_EXTENSION_SET  JSON array of code extensions, as 09_7 saved them (default: all)
  *   RAG_SELECTED_DIRS  JSON array of directories, as 09_7 saved them (default: all)
  *   RAG_OWN_PATHS      JSON array of the repository's own code paths, as 01-env-detect's
@@ -182,6 +185,7 @@ export function validateEmbeddings(
 interface Options {
   tree: string;
   exclude: string[];
+  heuristicExclude: string[];
   extensionSet?: string[];
   selectedDirs?: string[];
   ownPaths: string[];
@@ -215,6 +219,7 @@ function parseOptions(): Options {
   const tree = process.env.RAG_TREE;
   if (!tree) fail('RAG_TREE is required');
   const exclude = stringArrayEnv('RAG_EXCLUDE') ?? [];
+  const heuristicExclude = stringArrayEnv('RAG_HEURISTIC_EXCLUDE') ?? [];
   const extensionSet = stringArrayEnv('RAG_EXTENSION_SET');
   const selectedDirs = stringArrayEnv('RAG_SELECTED_DIRS');
   const ownPaths = stringArrayEnv('RAG_OWN_PATHS') ?? [];
@@ -243,6 +248,7 @@ function parseOptions(): Options {
   return {
     tree,
     exclude,
+    heuristicExclude,
     extensionSet,
     selectedDirs,
     ownPaths,
@@ -270,6 +276,8 @@ async function collectKbFiles(tree: string): Promise<string[]> {
 async function collectCodeFilesSorted(opts: Options): Promise<string[]> {
   const rels = await collectCodeFiles(opts.tree, {
     exclude: opts.exclude,
+    heuristicExclude: opts.heuristicExclude,
+    ownPaths: opts.ownPaths,
     extensionSet: opts.extensionSet,
     selectedDirs: opts.selectedDirs,
   });
