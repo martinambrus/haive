@@ -310,6 +310,17 @@ export async function syncProjectStateFromCheckout(
 
   return db.transaction(async (tx): Promise<ProjectStateSyncResult> => {
     await lockProjectState(tx, repositoryId);
+    // The row lock first: an upgrade's insert holds it, so the live-task read below sees that task.
+    const [repo] = await tx
+      .select({
+        renderContext: schema.repositories.renderContext,
+        userId: schema.repositories.userId,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .for('update');
+    // Deleted since the files were read: its sync row went with it, and nothing is left to write to.
+    if (!repo) return { outcome: 'superseded' };
     const live = await tx
       .select({ id: schema.tasks.id })
       .from(schema.tasks)
@@ -339,16 +350,6 @@ export async function syncProjectStateFromCheckout(
     };
     if (checkout.kind === 'refused') return refuse(checkout.reason);
 
-    const [repo] = await tx
-      .select({
-        renderContext: schema.repositories.renderContext,
-        userId: schema.repositories.userId,
-      })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
-    // Deleted since the files were read: its sync row went with it, and nothing is left to write to.
-    if (!repo) return { outcome: 'superseded' };
     const column = (repo.renderContext ?? null) as Record<string, unknown> | null;
 
     const rebuilt =

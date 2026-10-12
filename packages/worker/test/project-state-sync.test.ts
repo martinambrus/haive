@@ -1544,6 +1544,19 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
     expect(s.lockKeys).toEqual([LOCK_KEY]);
   });
 
+  it('locks the repository row before it reads for a live onboarding or upgrade', async () => {
+    const s = await setup();
+    await s.putRecord(record(BASE));
+
+    const { trace } = await s.run();
+
+    const txn = transactions(trace).inside[0]!;
+    const forUpdate = txn.indexOf('select repositories for update');
+    const liveRead = txn.findIndex((e) => e.startsWith('select tasks'));
+    expect(forUpdate).toBeGreaterThan(0);
+    expect(liveRead).toBeGreaterThan(forUpdate);
+  });
+
   it('takes the same lock key as the writer, and its own repository key for another repository', async () => {
     const s = await setup();
     await s.putRecord(record(BASE));
