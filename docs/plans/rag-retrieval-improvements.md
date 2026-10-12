@@ -331,7 +331,17 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   the planner picks the HNSW index by default for all 296 golden queries, and the forced index path
   returned exactly 40 rows for every one. Against an exact search's top 50 those 40 overlap 0.749 on
   average (0.8 is the ceiling, so ~94% of the 40 are true top-50 neighbours), but 20 queries fall
-  below 0.5 and 3 share no row with the exact top 50; why those do is unmeasured. → P0, P3.
+  below 0.5 and 3 share no row with the exact top 50. On those 20 the default search settles in the
+  wrong region of the graph: its best hit can sit at cosine distance 0.50 where the exact nearest
+  is 0.15. A fresh bulk-built index gives identical results, so this is not an artefact of building
+  row by row, and `hnsw.iterative_scan` does not help, because it widens the same region.
+  `ef_search` 200 recovers 45-50 of the exact 50 on 19 of the 20, at ~6 ms warm against ~3 ms at
+  40. What the approximation costs end to end, measured with exact dense search: recall@8 0.681 →
+  0.727 overall, 0.590 → 0.700 on paraphrased questions, 0.554 → 0.575 on real ones, recall@50
+  0.809 → 0.866. The planner will not take that path by itself: with `ef_search` 100 or more set,
+  it switches to a sequential scan or the `repository_id` btree plus a sort (590-830 ms), so a fix
+  must raise `ef_search` and force the index path inside the dense read's transaction, as
+  `denseRead` does for the global store. → P0, P3.
 - **F15. Deleted vectors keep their index space.** The dev install's shared project store holds 0
   rows and a 0-byte heap, yet 312 MB, 275 MB of it the HNSW index; the vectors of the repositories
   deleted since stay allocated in it. A full re-embed churns the index the same way. → P1.
