@@ -51,7 +51,12 @@ import {
   type FixBaselineUnavailable,
   type MergeAbort,
 } from './git-merge.js';
-import { noteAbortedByNext, peekOpenMerge, type OpenMerge } from './left-open-merge.js';
+import {
+  noteAbortedByNext,
+  peekOpenMerge,
+  relocateLeftOpenFixers,
+  type OpenMerge,
+} from './left-open-merge.js';
 import {
   addStepWarning,
   assertOwnsStep,
@@ -660,6 +665,13 @@ async function startConflictFix(
   // No fixer is in flight here (the ingest runs first, and a step's advances run one at a time),
   // so a merge still open is an earlier attempt's, and a fixer must start from a fresh one.
   const staleOpen = await peekOpenMerge(m.integration.path);
+  const held = staleOpen
+    ? await relocateLeftOpenFixers(m.db, m.params.taskId, m.integration.path, staleOpen)
+    : null;
+  if (held) {
+    await clearAiFix(m.db, m.current.id);
+    return haltMerge(m, `Merge halted on ${target.branchName!}. ${held}`);
+  }
   const stale = await abortMerge(m.integration.path);
   if (!stale.ok) {
     await clearAiFix(m.db, m.current.id);
@@ -928,6 +940,11 @@ async function runLevelMerge(
     if (issue.mergeStatus !== null) continue; // clean | resolved | conflict already decided
     const wasOpen = await peekOpenMerge(integration.path);
     const ours = wasOpen !== null && (await mergeOpenFor(integration.path, issue.branchName!));
+    const held =
+      wasOpen && !ours
+        ? await relocateLeftOpenFixers(db, m.params.taskId, integration.path, wasOpen)
+        : null;
+    if (held) return haltMerge(m, `Merge halted on ${issue.branchName!}. ${held}`);
     const cleared = await abortOtherMerge(integration.path, issue.branchName!);
     if (!cleared.ok) return haltUnaborted(m, issue.branchName!, cleared);
     if (wasOpen && !ours) await noteStaleMergeAborted(m, wasOpen);

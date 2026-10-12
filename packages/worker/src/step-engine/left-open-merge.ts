@@ -351,6 +351,64 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
   }
 }
 
+/** Before a resolver clears a merge another (cancelled) task left open, that task's fixer changes
+ *  outside the conflict are moved aside under its own report, as its own abort would have done.
+ *  Returns why the clear must not go ahead: the index still holds what the fixer staged. */
+export async function relocateLeftOpenFixers(
+  db: Database,
+  taskId: string,
+  dir: string,
+  open: OpenMerge,
+): Promise<string | null> {
+  for (const owner of await leftOpenOwners(db, taskId, dir, open)) {
+    const merge = (await taskLeftOpen(db, owner.taskId)).find(
+      (m) => m.dir === dir && m.mergeHead === open.mergeHead && m.settled === null,
+    );
+    if (!merge) continue;
+    const recorded = (await recordedMerges(db, owner.taskId)).find((m) => m.dir === dir);
+    const baseline = recorded?.fixBaseline ?? null;
+    const usable =
+      baseline !== null &&
+      ('unavailable' in baseline ||
+        (baseline.head === open.head && baseline.mergeHead === open.mergeHead));
+    if (!recorded || !usable) continue;
+    const leftovers = await relocateFixerChanges(
+      dir,
+      baseline,
+      { taskId: owner.taskId, runId: recorded.fixInvocationId ?? randomUUID() },
+      await maskSourceOnce(db, owner.taskId),
+    );
+    if (leftovers) {
+      await recordFixerLeftovers(db, owner.taskId, recorded.stepId, merge.ref, leftovers);
+    }
+    if (leftovers?.indexHeld) {
+      return `A merge the cancelled task "${owner.title}" (${owner.taskId}) left open here has fixer changes staged outside the conflict that could not be taken back out of the index (${leftovers.indexHeld}), so it was not cleared; abort it from that task once the index is free.`;
+    }
+  }
+  return null;
+}
+
+async function leftOpenOwners(
+  db: Database,
+  taskId: string,
+  dir: string,
+  open: OpenMerge,
+): Promise<{ taskId: string; title: string }[]> {
+  return db
+    .selectDistinct({ taskId: schema.taskEvents.taskId, title: schema.tasks.title })
+    .from(schema.taskEvents)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskEvents.taskId))
+    .where(
+      and(
+        eq(schema.taskEvents.eventType, MERGE_LEFT_OPEN_EVENT),
+        ne(schema.taskEvents.taskId, taskId),
+        sql`${schema.taskEvents.payload}->>'dir' = ${dir}`,
+        sql`${schema.taskEvents.payload}->>'head' = ${open.head}`,
+        sql`${schema.taskEvents.payload}->>'mergeHead' = ${open.mergeHead}`,
+      ),
+    );
+}
+
 /** A resolver cleared the merge `before` it was about to open its own. If that was one a cancelled
  *  task left open, the report is settled and the step says so. */
 export async function noteAbortedByNext(
@@ -360,19 +418,7 @@ export async function noteAbortedByNext(
   dir: string,
   before: OpenMerge,
 ): Promise<TaskStepRow> {
-  const owners = await db
-    .selectDistinct({ taskId: schema.taskEvents.taskId, title: schema.tasks.title })
-    .from(schema.taskEvents)
-    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskEvents.taskId))
-    .where(
-      and(
-        eq(schema.taskEvents.eventType, MERGE_LEFT_OPEN_EVENT),
-        ne(schema.taskEvents.taskId, taskId),
-        sql`${schema.taskEvents.payload}->>'dir' = ${dir}`,
-        sql`${schema.taskEvents.payload}->>'head' = ${before.head}`,
-        sql`${schema.taskEvents.payload}->>'mergeHead' = ${before.mergeHead}`,
-      ),
-    );
+  const owners = await leftOpenOwners(db, taskId, dir, before);
   let current = row;
   for (const owner of owners) {
     const merge = (await taskLeftOpen(db, owner.taskId)).find(

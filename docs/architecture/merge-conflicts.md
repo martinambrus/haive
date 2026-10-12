@@ -180,7 +180,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   offered again; `moved`, `aborted` and `aborted-by-next` close it. A failure while recording a
   report throws, so the cancel is re-driven before `task.cancel_finished`; the page polls until that
   event is in and no abort it sent is still waiting. A resolver that clears a stale
-  merge before opening its own (`peekOpenMerge` before the abort, `noteAbortedByNext` after) settles
+  merge before opening its own first moves that task's fixer changes aside under its report
+  (`relocateLeftOpenFixers`, halting instead while the index still holds what the fixer staged),
+  then (`peekOpenMerge` before the abort, `noteAbortedByNext` after) settles
   the report of the same directory, head and merge head with `aborted-by-next` and warns on its step.
   A cancelled plan merge is the exception (`discardPlanMerge`, from `handleCancelTask`): the worker
   moves aside what the recorded fixers left, aborts the merge and removes the scratch worktree,

@@ -35,7 +35,12 @@ vi.mock('./step-ownership.js', () => ({
   addStepWarning: async (_db: unknown, row: unknown) => row,
 }));
 
-import { abortLeftMerge, noteAbortedByNext, recordLeftOpenMerges } from './left-open-merge.js';
+import {
+  abortLeftMerge,
+  noteAbortedByNext,
+  recordLeftOpenMerges,
+  relocateLeftOpenFixers,
+} from './left-open-merge.js';
 import type { TaskStepRow } from './step-runner.js';
 
 /** A query builder whose every chained call resolves to the next queued result, in call order. */
@@ -286,5 +291,66 @@ describe('noteAbortedByNext', () => {
     await expect(
       noteAbortedByNext(db, row, 'task-2', '/repo', { head: 'h1', mergeHead: 'm1' }),
     ).resolves.toBe(row);
+  });
+});
+
+describe('relocateLeftOpenFixers', () => {
+  const owners = [{ taskId: 'cancelled-1', title: 'old' }];
+  const report = [
+    {
+      eventType: 'merge.left_open',
+      payload: { dir: '/repo', ref: 'feat/a', head: 'h1', mergeHead: 'm1' },
+    },
+  ];
+  const ownerStep = [
+    {
+      id: 'owner-step',
+      state: {
+        phase: 'resolving',
+        mergeDir: '/repo',
+        featureBranch: 'feat/a',
+        fixInvocationId: 'inv-9',
+        fixBaseline: { head: 'h1', mergeHead: 'm1', tree: 't1' },
+      },
+    },
+  ];
+
+  beforeEach(() => {
+    git.relocateFixerChanges.mockReset();
+    git.recordFixerLeftovers.mockReset().mockResolvedValue(undefined);
+  });
+
+  it('moves the cancelled task’s fixer changes aside under its own report before the clear', async () => {
+    const leftovers = { moved: ['x.txt'], interrupted: [] };
+    git.relocateFixerChanges.mockResolvedValue(leftovers);
+    const { db } = chainDb([owners, report, ownerStep, [{ worktreePath: null }]]);
+    const held = await relocateLeftOpenFixers(db, 'next-task', '/repo', {
+      head: 'h1',
+      mergeHead: 'm1',
+    });
+    expect(held).toBeNull();
+    expect(git.relocateFixerChanges).toHaveBeenCalledWith(
+      '/repo',
+      { head: 'h1', mergeHead: 'm1', tree: 't1' },
+      expect.objectContaining({ taskId: 'cancelled-1', runId: 'inv-9' }),
+      expect.any(Function),
+    );
+    expect(git.recordFixerLeftovers).toHaveBeenCalledWith(
+      db,
+      'cancelled-1',
+      'owner-step',
+      'feat/a',
+      leftovers,
+    );
+  });
+
+  it('says why the clear must not go ahead while the index still holds what the fixer staged', async () => {
+    git.relocateFixerChanges.mockResolvedValue({ moved: [], interrupted: [], indexHeld: 'locked' });
+    const { db } = chainDb([owners, report, ownerStep, [{ worktreePath: null }]]);
+    const held = await relocateLeftOpenFixers(db, 'next-task', '/repo', {
+      head: 'h1',
+      mergeHead: 'm1',
+    });
+    expect(held).toContain('locked');
   });
 });

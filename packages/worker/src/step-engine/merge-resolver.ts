@@ -35,7 +35,7 @@ import {
   withMergeDirSection,
   type DbHandle,
 } from './merge-dir-claim.js';
-import { noteAbortedByNext, peekOpenMerge } from './left-open-merge.js';
+import { noteAbortedByNext, peekOpenMerge, relocateLeftOpenFixers } from './left-open-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import {
   addStepWarning,
@@ -860,6 +860,10 @@ export async function resolveMergePhase(
       }
       // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
       const staleOpen = await peekOpenMerge(armed.mergeDir);
+      const held = staleOpen
+        ? await relocateLeftOpenFixers(db, params.taskId, armed.mergeDir, staleOpen)
+        : null;
+      if (held) return { kind: 'held' as const, held, armed };
       const cleared = await abortOtherMerge(armed.mergeDir, armed.featureBranch);
       const stale = cleared.ok ? await abortMerge(armed.mergeDir) : cleared;
       if (!stale.ok) return { kind: 'unaborted' as const, stale, armed };
@@ -879,6 +883,7 @@ export async function resolveMergePhase(
     if (attempt.kind === 'unaborted') {
       return haltUnaborted(db, current, params.taskId, state, attempt.stale);
     }
+    if (attempt.kind === 'held') return haltFailed(db, current, attempt.held, 'merge index held');
     if (attempt.staleOpen) {
       current = await noteAbortedByNext(
         db,
@@ -1064,6 +1069,9 @@ export async function resolveMergePhase(
     const reopened = await section(dir, async () => {
       const wasOpen = await peekOpenMerge(dir);
       const ours = wasOpen !== null && (await mergeOpenFor(dir, feature));
+      const held =
+        wasOpen && !ours ? await relocateLeftOpenFixers(db, params.taskId, dir, wasOpen) : null;
+      if (held) return { kind: 'held' as const, held };
       const cleared = await abortOtherMerge(dir, feature);
       if (!cleared.ok) return { kind: 'unaborted' as const, cleared };
       const staleOpen = ours ? null : wasOpen;
@@ -1083,6 +1091,7 @@ export async function resolveMergePhase(
     if (reopened.kind === 'unaborted') {
       return haltUnaborted(db, current, params.taskId, state, reopened.cleared);
     }
+    if (reopened.kind === 'held') return haltFailed(db, current, reopened.held, 'merge index held');
     if (reopened.staleOpen) {
       current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
     }

@@ -191,7 +191,11 @@ function makeDb(
      *  when a concurrent advance already dispatched one. */
     insertRejects?: unknown;
     /** A cancelled task's `merge.left_open` report, as the lookup for the merge this pass clears finds it. */
-    leftOpen?: { owner: { taskId: string; title: string }; events: unknown[] };
+    leftOpen?: {
+      owner: { taskId: string; title: string };
+      events: unknown[];
+      ownerSteps?: unknown[];
+    };
   } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
@@ -259,6 +263,9 @@ function makeDb(
     // by its columns argument, and honours the same ownership guard as the update mock above.
     select: (cols?: unknown) => ({
       from: (table?: unknown) => {
+        if (table === schema.taskSteps && cols && typeof cols === 'object' && 'state' in cols) {
+          return { where: async () => opts.leftOpen?.ownerSteps ?? [] };
+        }
         if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
           return {
             where: () => ({
@@ -268,6 +275,9 @@ function makeDb(
                   : [{ id: 'step1' }],
             }),
           };
+        }
+        if (table === schema.tasks && cols && typeof cols === 'object' && 'worktreePath' in cols) {
+          return { where: async () => [{ worktreePath: null }] };
         }
         if (
           table === schema.taskEvents &&
