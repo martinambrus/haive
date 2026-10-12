@@ -78,8 +78,9 @@ describe('ProjectStateConflictsView', () => {
   });
 
   it('keeps showing a notice after the last conflict is answered', () => {
-    const html = view({ notice: 'Commit and push the record file.' });
-    expect(html).toContain('Commit and push the record file.');
+    const html = view({ notice: 'Commit and push `render.json`.' });
+    expect(html).toContain('Commit and push');
+    expect(html).toContain('<code>render.json</code>');
   });
 
   it('keeps both answers disabled while an answer to that conflict is still being applied', () => {

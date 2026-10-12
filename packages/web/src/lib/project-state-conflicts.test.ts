@@ -3,6 +3,7 @@ import {
   answerConfirmation,
   conflictKeyLabel,
   conflictSideMarkdown,
+  resolutionNotice,
   stillListed,
   submitConflictAnswer,
   type ProjectStateConflictBody,
@@ -100,5 +101,24 @@ describe('stillListed', () => {
 
   it('drops a pending conflict once the list no longer holds it', () => {
     expect(stillListed([ROW], [listed(REPO)])).toEqual([]);
+  });
+});
+
+describe('resolutionNotice', () => {
+  it('says nothing before any answer lands', () => {
+    expect(resolutionNotice([])).toBeNull();
+  });
+
+  it('asks for a commit once any kept value was written, whatever came after', () => {
+    expect(resolutionNotice(['keep_mine', 'take_theirs'])).toContain('Commit and push');
+    expect(resolutionNotice(['take_theirs', 'keep_mine'])).toContain('Commit and push');
+  });
+
+  it('names the record file as code', () => {
+    expect(resolutionNotice(['keep_mine'])).toContain('`.haive-data/state/project/render.json`');
+  });
+
+  it("reports the teammate's value when nothing was kept", () => {
+    expect(resolutionNotice(['take_theirs'])).toBe("This install now uses your teammate's value.");
   });
 });

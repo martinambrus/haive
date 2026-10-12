@@ -10,8 +10,8 @@ import {
   PENDING_GAVE_UP_MESSAGE,
   PENDING_REFETCH_LIMIT,
   PENDING_REFETCH_MS,
-  RECORD_FILE,
   answerConfirmation,
+  resolutionNotice,
   conflictKeyLabel,
   conflictSideMarkdown,
   stillListed,
@@ -66,7 +66,7 @@ export function ProjectStateConflictsView({
           </span>
         </div>
       )}
-      {notice && <p className="text-xs text-emerald-400">{notice}</p>}
+      {notice && <InlineMarkdown body={notice} className="text-xs text-emerald-400" />}
       {conflicts.map((c) => {
         const message = messages[c.id];
         const busy = busyId === c.id || pendingIds.includes(c.id);
@@ -121,7 +121,7 @@ export interface ProjectStateConflictsBannerProps {
 export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConflictsBannerProps) {
   const [conflicts, setConflicts] = useState<ProjectStateConflictBody[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [answered, setAnswered] = useState<ProjectStateAnswer[]>([]);
   const [messages, setMessages] = useState<Record<string, ConflictMessage>>({});
   const [confirming, setConfirming] = useState<{
     conflict: ProjectStateConflictBody;
@@ -130,6 +130,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const [busyId, setBusyId] = useState<string | null>(null);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
   const pendingRef = useRef<string[]>([]);
+  const pendingAnswers = useRef<Record<string, ProjectStateAnswer>>({});
   const refetchCount = useRef(0);
   const alive = useRef(true);
   const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -159,6 +160,11 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     const listed = await load();
     if (!alive.current || listed === null) return;
     const remaining = stillListed(pendingRef.current, listed);
+    const done = pendingRef.current.filter((id) => !remaining.includes(id));
+    if (done.length > 0) {
+      setAnswered((prev) => [...prev, ...done.map((id) => pendingAnswers.current[id]!)]);
+      for (const id of done) delete pendingAnswers.current[id];
+    }
     setPending(remaining);
     if (remaining.length === 0) return;
     refetchCount.current += 1;
@@ -197,14 +203,9 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       if (out.kind === 'error') next[conflict.id] = { tone: 'error', text: out.message };
       return next;
     });
-    if (out.kind === 'resolved') {
-      setNotice(
-        answer === 'keep_mine'
-          ? `Kept this install's value. Commit and push ${RECORD_FILE} so your teammate gets it.`
-          : "This install now uses your teammate's value.",
-      );
-    }
+    if (out.kind === 'resolved') setAnswered((prev) => [...prev, answer]);
     if (out.kind === 'pending') {
+      pendingAnswers.current[conflict.id] = answer;
       setPending([...pendingRef.current.filter((id) => id !== conflict.id), conflict.id]);
       refetchCount.current = 0;
       if (refetchTimer.current) clearTimeout(refetchTimer.current);
@@ -226,7 +227,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     <>
       <ProjectStateConflictsView
         conflicts={conflicts}
-        notice={notice}
+        notice={resolutionNotice(answered)}
         messages={messages}
         busyId={busyId}
         pendingIds={pendingIds}

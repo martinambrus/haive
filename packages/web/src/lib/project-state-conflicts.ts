@@ -60,6 +60,14 @@ export function answerConfirmation(
   };
 }
 
+export function resolutionNotice(answered: readonly ProjectStateAnswer[]): string | null {
+  if (answered.includes('keep_mine')) {
+    return `This install's value is written into \`${RECORD_FILE}\`. Commit and push that file so your teammate gets it.`;
+  }
+  if (answered.includes('take_theirs')) return "This install now uses your teammate's value.";
+  return null;
+}
+
 export type ConflictAnswerOutcome =
   { kind: 'resolved' } | { kind: 'pending'; message: string } | { kind: 'error'; message: string };
 
