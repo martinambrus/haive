@@ -17,6 +17,7 @@ import { createDatabase, schema, type Database } from '@haive/database';
 import { logger, normalizeContent, sha256Hex, type FormSchema } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
+  bundleFileName,
   claimFileName,
   emptyProjectState,
   normalizeProjectState,
@@ -265,6 +266,8 @@ const recordOf = (context: Record<string, unknown>) => ({
     lspLanguages: context.lspLanguages,
   } as never,
 });
+
+const BUNDLE_DESCRIPTOR = { source: 'zip:smoke-kit', name: 'smoke-kit' };
 
 const asJson = (value: unknown): unknown => JSON.parse(JSON.stringify(value)) as unknown;
 
@@ -564,6 +567,13 @@ async function main(): Promise<void> {
         wroteFiles: generated.output.wroteFiles,
       },
     );
+    await a.db.insert(schema.customBundles).values({
+      userId: a.userId,
+      repositoryId: a.repositoryId,
+      name: 'smoke-kit',
+      sourceType: 'zip',
+      storageRoot: path.join(tmp, 'bundles', 'smoke-kit'),
+    });
     const posted = await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep), {
       commit: true,
     });
@@ -594,7 +604,8 @@ async function main(): Promise<void> {
         (contextA.acceptedAgentIds as string[]).includes(LLM_CUSTOM_ID),
       contextA?.customAgentSpecs,
     );
-    const wantRecord = contextA === null ? null : recordOf(contextA);
+    const wantRecord =
+      contextA === null ? null : { ...recordOf(contextA), bundles: [BUNDLE_DESCRIPTOR] };
     const wantFiles = wantRecord === null ? null : renderProjectState(wantRecord);
     const recordOnDisk = (rel: string) =>
       readFile(path.join(a.repoPath, rel), 'utf8').then(
@@ -644,6 +655,16 @@ async function main(): Promise<void> {
       "A's commit holds a claim file for every live row it recorded",
       claimFilesWanted.length > 0 && claimFilesWanted.every((rel) => inCommit.includes(rel)),
       { wanted: claimFilesWanted.length, inCommit },
+    );
+    const descriptorFile = `.haive-data/state/${bundleFileName(BUNDLE_DESCRIPTOR.source)}`;
+    check(
+      "A's commit holds the descriptor of its bundle's source",
+      inCommit.includes(descriptorFile) &&
+        (await recordOnDisk(descriptorFile)) ===
+          renderProjectState({ ...emptyProjectState(), bundles: [BUNDLE_DESCRIPTOR] }).get(
+            bundleFileName(BUNDLE_DESCRIPTOR.source),
+          ),
+      inCommit,
     );
     const onDisk = {
       format: await recordOnDisk(RECORD_FORMAT),
@@ -920,6 +941,15 @@ async function main(): Promise<void> {
           liveRowsA.map((r) => r.diskPath).sort(),
         ) &&
         syncB.rows[0]!.last_error === null,
+      syncB,
+    );
+    check(
+      "B's sync base holds the descriptor A committed",
+      'rows' in syncB &&
+        isDeepStrictEqual(
+          asJson((syncB.rows[0]?.base_snapshot as { bundles?: unknown } | undefined)?.bundles),
+          [BUNDLE_DESCRIPTOR],
+        ),
       syncB,
     );
     // A rescan reads the same record again: nothing differs, so nothing is written, whatever order

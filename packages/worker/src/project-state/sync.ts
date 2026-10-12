@@ -19,6 +19,7 @@ import {
   renderProjectState,
   sameValue,
   type ProjectRender,
+  type ProjectStateBundle,
   type ProjectStateClaim,
   type ProjectStateConflict,
   type ProjectStateRecord,
@@ -124,7 +125,12 @@ async function readStateFiles(repoPath: string): Promise<Map<string, string> | n
 type Checkout =
   | { kind: 'absent' }
   | { kind: 'refused'; reason: string }
-  | { kind: 'record'; render: ProjectRender; claims: ProjectStateClaim[] };
+  | {
+      kind: 'record';
+      render: ProjectRender;
+      claims: ProjectStateClaim[];
+      bundles: ProjectStateBundle[];
+    };
 
 async function readCheckout(repoPath: string): Promise<Checkout> {
   const notRead = (detail: string): Checkout => ({
@@ -141,8 +147,8 @@ async function readCheckout(repoPath: string): Promise<Checkout> {
   if (files === null) return { kind: 'absent' };
   const parsed = parseProjectState(files);
   if (!parsed.ok) return notRead(listed(parsed.problems));
-  const { render, claims } = parsed.record;
-  return render === null ? { kind: 'absent' } : { kind: 'record', render, claims };
+  const { render, claims, bundles } = parsed.record;
+  return render === null ? { kind: 'absent' } : { kind: 'record', render, claims, bundles };
 }
 
 const recordOf = (render: ProjectRender | null): ProjectStateRecord => ({
@@ -545,6 +551,8 @@ export async function syncProjectStateFromCheckout(
     const baseSnapshot = normalizeProjectState({
       ...recordOf(keptRender(checkout.render, baseRender, renderConflicts)),
       claims: keptClaims(incomingClaims, baseClaims, claimConflicts),
+      // Never merged: a conflict row on a descriptor could not be answered, and would block upgrades.
+      bundles: checkout.bundles,
     });
     if (row === null || row.lastError !== lastError || !sameValue(row.baseSnapshot, baseSnapshot)) {
       const synced = { baseSnapshot, lastError, updatedAt: new Date() };

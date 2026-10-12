@@ -8,7 +8,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
 import {
+  bundleFileName,
   claimFileName,
+  portableBundleSource,
   emptyProjectState,
   normalizeProjectState,
   renderProjectState,
@@ -1073,5 +1075,128 @@ describe('writeProjectStateRecord: a claim a sync left pending', () => {
 
     const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
     expect(row!.resolution).toBe('converged');
+  });
+});
+
+describe('writeProjectStateRecord: one descriptor per bundle source', () => {
+  const GIT_URL = 'https://example.com/team-kit.git';
+  const SOURCE = portableBundleSource({
+    sourceType: 'git',
+    gitUrl: GIT_URL,
+    gitBranch: 'main',
+    name: 'any',
+  });
+  const descriptorPath = `${STATE_DIR}/${bundleFileName(SOURCE)}`;
+  const bundleFiles = async (root: string) =>
+    (await listFiles(root)).filter((f) => f.startsWith(`${STATE_DIR}/bundles/`));
+  const descriptorOn = (root: string, rel = descriptorPath) =>
+    JSON.parse(readFileSync(join(root, rel), 'utf8')) as unknown;
+  const baseBundles = (s: Awaited<ReturnType<typeof setup>>) =>
+    (s.syncRows()[0]![s.col.baseSnapshot] as { bundles: unknown[] }).bundles;
+  const localBundle = (s: Awaited<ReturnType<typeof setup>>, name: string) =>
+    s.fake.insert(schema.customBundles, {
+      userId: USER,
+      repositoryId: REPO,
+      name,
+      sourceType: 'git',
+      gitUrl: GIT_URL,
+      gitBranch: 'main',
+      storageRoot: `/bundles/${name}`,
+    });
+  const customClaim = (source: string) => ({
+    userId: USER,
+    repositoryId: REPO,
+    taskId: null,
+    diskPath: '.claude/agents/imported.md',
+    templateId: `custom:${encodeURIComponent(source)}:agents%2Fimported.md`,
+    templateKind: 'custom-agent',
+    templateSchemaVersion: 1,
+    templateContentHash: 'a'.repeat(64),
+    writtenHash: 'b'.repeat(64),
+    sourceStepId: 'project-state-import',
+    source: 'backfill',
+    importedAt: new Date(5),
+    supersededAt: null,
+  });
+  const seedDescriptor = async (
+    s: Awaited<ReturnType<typeof setup>>,
+    inBase: boolean,
+    name = 'theirs',
+  ) => {
+    await mkdir(join(s.root, STATE_DIR, 'bundles'), { recursive: true });
+    await writeFile(
+      join(s.root, descriptorPath),
+      renderProjectState({ ...emptyProjectState(), bundles: [{ source: SOURCE, name }] }).get(
+        bundleFileName(SOURCE),
+      )!,
+    );
+    if (inBase) {
+      s.syncSeed({
+        [s.col.baseSnapshot]: json(
+          normalizeProjectState({ ...emptyProjectState(), bundles: [{ source: SOURCE, name }] }),
+        ),
+      });
+    }
+  };
+
+  it('writes a descriptor file for a local bundle, and carries it in the sync base', async () => {
+    const s = await setup();
+    localBundle(s, 'team-kit');
+
+    const { written, removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([]);
+    expect(written).toContain(descriptorPath);
+    expect(await bundleFiles(s.root)).toEqual([descriptorPath]);
+    expect(descriptorOn(s.root)).toEqual({ source: SOURCE, name: 'team-kit' });
+    expect(baseBundles(s)).toEqual([{ source: SOURCE, name: 'team-kit' }]);
+  });
+
+  it('writes one file, under the smallest name, for two bundles at one source', async () => {
+    const s = await setup();
+    localBundle(s, 'zeta-kit');
+    localBundle(s, 'alpha-kit');
+
+    await s.writeFull(context(), true);
+
+    expect(await bundleFiles(s.root)).toEqual([descriptorPath]);
+    expect(descriptorOn(s.root)).toEqual({ source: SOURCE, name: 'alpha-kit' });
+    expect(baseBundles(s)).toEqual([{ source: SOURCE, name: 'alpha-kit' }]);
+    expect(s.columnOf(REPO)).not.toBeNull();
+  });
+
+  it('keeps a teammate’s descriptor while a claim names its source', async () => {
+    const s = await setup();
+    await seedDescriptor(s, true);
+    s.fake.insert(schema.onboardingArtifacts, customClaim(SOURCE));
+
+    const { written, removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([]);
+    expect(written).toContain(descriptorPath);
+    expect(descriptorOn(s.root)).toEqual({ source: SOURCE, name: 'theirs' });
+    expect(baseBundles(s)).toEqual([{ source: SOURCE, name: 'theirs' }]);
+  });
+
+  it('removes a descriptor no bundle holds and no claim names, and reports it as removed', async () => {
+    const s = await setup();
+    await seedDescriptor(s, true);
+
+    const { written, removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([descriptorPath]);
+    expect(written).not.toContain(descriptorPath);
+    expect(await bundleFiles(s.root)).toEqual([]);
+    expect(baseBundles(s)).toEqual([]);
+  });
+
+  it('leaves a descriptor file the previous base never named', async () => {
+    const s = await setup();
+    await seedDescriptor(s, false);
+
+    const { removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([]);
+    expect(descriptorOn(s.root)).toEqual({ source: SOURCE, name: 'theirs' });
   });
 });

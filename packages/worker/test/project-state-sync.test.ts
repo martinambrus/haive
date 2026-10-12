@@ -24,6 +24,7 @@ import {
   claimFileName,
   emptyProjectState,
   normalizeProjectState,
+  portableBundleSource,
   renderContextColumnSchema,
   renderProjectState,
   type ProjectRender,
@@ -1475,7 +1476,7 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
     ...over,
   });
 
-  it('are neither applied nor kept in the base', async () => {
+  it('are neither applied nor kept in the base, bundle descriptors aside', async () => {
     const s = await setup();
     await s.putRecord(full());
     const reposBefore = json(s.fake.rows(schema.repositories)) as Json[];
@@ -1485,11 +1486,11 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
     expect(outcome).toBe('applied');
     expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
     const base = json(s.syncRow()?.baseSnapshot) as Json;
-    expect(base).toEqual(baseOf(BASE));
+    expect(base).toEqual({ ...(baseOf(BASE) as Json), bundles: full().bundles });
     expect(base.environment).toBeNull();
     expect(base.cli).toEqual([]);
     expect(base.claims).toEqual([]);
-    expect(base.bundles).toEqual([]);
+    expect(base.bundles).toEqual(full().bundles);
     expect(base.settings).toEqual({});
     const after = json(s.fake.rows(schema.repositories)) as Json[];
     const without = (rows: Json[]) => rows.map(({ renderContext: _c, ...rest }) => rest);
@@ -1506,7 +1507,6 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
       full({
         environment: { envDetectData: { project: { name: 'renamed' } }, confirmedValues: { a: 1 } },
         cli: ['codex'],
-        bundles: [],
       }),
     );
 
@@ -2190,5 +2190,70 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
       (before as { projectStateSync: unknown }).projectStateSync,
     );
     expect(ledger(s)).toEqual([]);
+  });
+});
+
+describe('syncProjectStateFromCheckout: bundle descriptors', () => {
+  const GIT_URL = 'https://example.com/team-kit.git';
+  const SOURCE = portableBundleSource({
+    sourceType: 'git',
+    gitUrl: GIT_URL,
+    gitBranch: 'main',
+    name: 'any',
+  });
+  const withBundles = (name: string, r: ProjectRender = BASE): ProjectStateRecord => ({
+    ...record(r),
+    bundles: [{ source: SOURCE, name }],
+  });
+  const baseWith = (name: string): unknown => json(normalizeProjectState(withBundles(name)));
+  const localBundle = (s: Setup, name: string) =>
+    s.fake.insert(schema.customBundles, {
+      userId: USER,
+      repositoryId: REPO,
+      name,
+      sourceType: 'git',
+      gitUrl: GIT_URL,
+      gitBranch: 'main',
+      storageRoot: `/bundles/${name}`,
+    });
+
+  it('become the base on a first import, as the checkout holds them', async () => {
+    const s = await setup();
+    await s.putRecord(withBundles('their-kit'));
+
+    await s.run();
+
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseWith('their-kit'));
+  });
+
+  it('follow the checkout in the base when a teammate renames one, with no conflict row', async () => {
+    const s = await setup({
+      column: column(BASE),
+      sync: { base: baseWith('old-kit') },
+    });
+    await s.putRecord(withBundles('their-kit'));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).not.toBe('conflict');
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseWith('their-kit'));
+    expect(s.conflictRows()).toEqual([]);
+  });
+
+  it('are not merged: two sides naming one source differently leave no pending row and no error', async () => {
+    const s = await setup({
+      column: column(BASE),
+      sync: { base: baseWith('old-kit') },
+    });
+    localBundle(s, 'my-kit');
+    await s.putRecord(withBundles('their-kit'));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).not.toBe('conflict');
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows()).toEqual([]);
+    expect(s.syncRow()?.lastError ?? null).toBeNull();
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseWith('their-kit'));
   });
 });

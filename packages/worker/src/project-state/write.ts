@@ -4,6 +4,8 @@ import { removeFileIfNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
   RENDER_UNIT,
+  bundleDescriptors,
+  bundleFileName,
   claimFileName,
   conflictSide,
   conflictSideValue,
@@ -18,8 +20,9 @@ import {
   portableTemplateId,
   renderContextColumnSchema,
   renderProjectState,
-  type LocalBundle,
+  type NamedLocalBundle,
   type ProjectRender,
+  type ProjectStateBundle,
   type ProjectStateClaim,
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
@@ -52,11 +55,12 @@ interface Look {
   pending: PendingRenderConflict[];
   pendingClaims: PendingClaimConflict[];
   claims: ProjectStateClaim[];
+  bundles: ProjectStateBundle[];
   baseFiles: string[];
 }
 
-const CLAIM_FILE_PREFIX = `${PROJECT_STATE_DIR}/artifacts/`;
-const isClaimFile = (path: string): boolean => path.startsWith(CLAIM_FILE_PREFIX);
+const OWNED_FILE_PREFIXES = [`${PROJECT_STATE_DIR}/artifacts/`, `${PROJECT_STATE_DIR}/bundles/`];
+const isOwnedFile = (path: string): boolean => OWNED_FILE_PREFIXES.some((p) => path.startsWith(p));
 
 /** The column moved past what the writer planned against, so its record would undo a newer one. */
 export class ProjectStateMovedError extends Error {
@@ -74,8 +78,8 @@ export interface ProjectStateWriteResult {
 }
 
 /** A write that failed once it had begun. `written` and `removed` name the repository-relative record
- *  files standing on disk, and the claim files gone from it, by then, whatever the database kept, so
- *  that whoever commits the repository commits them. */
+ *  files standing on disk, and the claim and descriptor files gone from it, by then, whatever the
+ *  database kept, so that whoever commits the repository commits them. */
 export class ProjectStateWriteError extends Error {
   readonly written: string[];
   readonly removed: string[];
@@ -201,7 +205,7 @@ export function overlayClaims(
 export async function loadLocalBundles(
   db: Database | Tx,
   repositoryId: string,
-): Promise<LocalBundle[]> {
+): Promise<NamedLocalBundle[]> {
   const bundles = await db
     .select({
       id: schema.customBundles.id,
@@ -228,6 +232,7 @@ export async function loadLocalBundles(
     );
   return bundles.map((b) => ({
     bundleId: b.id,
+    name: b.name,
     source: portableBundleSource(b),
     items: new Map(items.filter((i) => i.bundleId === b.id).map((i) => [i.id, i.sourcePath])),
   }));
@@ -278,28 +283,44 @@ export async function loadRecordClaims(
   return claims;
 }
 
-/** The claim files the sync base names: the ones this install holds, whoever wrote them. */
-async function loadBaseClaimFiles(db: Database | Tx, repositoryId: string): Promise<string[]> {
+/** The files the sync base names, claims and bundle descriptors: the ones this install holds,
+ *  whoever wrote them. */
+async function loadBase(
+  db: Database | Tx,
+  repositoryId: string,
+): Promise<{ files: string[]; bundles: ProjectStateBundle[] }> {
   const [row] = await db
     .select({ baseSnapshot: schema.projectStateSync.baseSnapshot })
     .from(schema.projectStateSync)
     .where(eq(schema.projectStateSync.repositoryId, repositoryId))
     .limit(1);
-  const claims = (row?.baseSnapshot as { claims?: unknown } | null | undefined)?.claims;
-  if (!Array.isArray(claims)) return [];
+  const snapshot = row?.baseSnapshot as { claims?: unknown; bundles?: unknown } | null | undefined;
   const files: string[] = [];
-  for (const claim of claims) {
-    const path = (claim as { path?: unknown } | null)?.path;
-    if (typeof path === 'string' && isClaimablePath(path)) {
-      files.push(`${PROJECT_STATE_DIR}/${claimFileName(path)}`);
+  if (Array.isArray(snapshot?.claims)) {
+    for (const claim of snapshot.claims) {
+      const path = (claim as { path?: unknown } | null)?.path;
+      if (typeof path === 'string' && isClaimablePath(path)) {
+        files.push(`${PROJECT_STATE_DIR}/${claimFileName(path)}`);
+      }
     }
   }
-  return files;
+  const bundles: ProjectStateBundle[] = [];
+  if (Array.isArray(snapshot?.bundles)) {
+    for (const bundle of snapshot.bundles) {
+      const { source, name } = (bundle ?? {}) as { source?: unknown; name?: unknown };
+      if (typeof source === 'string' && source !== '' && typeof name === 'string') {
+        bundles.push({ source, name });
+        files.push(`${PROJECT_STATE_DIR}/${bundleFileName(source)}`);
+      }
+    }
+  }
+  return { files, bundles };
 }
 
-/** Writes the record holding the context's render unit and one claim per live ledger row, then moves
- *  the repository's render context and the sync base to it in one transaction. A claim file the
- *  previous base named and the record no longer holds is removed; one it never named is not touched.
+/** Writes the record holding the context's render unit, one claim per live ledger row and one
+ *  descriptor per bundle source, then moves the repository's render context and the sync base to it in
+ *  one transaction. A claim or descriptor file the previous base named and the record no longer holds
+ *  is removed; one it never named is not touched.
  *  Returns the repository-relative paths written and removed. */
 export async function writeProjectStateRecord(
   db: Database,
@@ -325,22 +346,36 @@ export async function writeProjectStateRecord(
         ...emptyProjectState(),
         render: overlayRender(portable, look.pending, 'incoming'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'incoming'),
+        bundles: look.bundles,
       },
       baseSnapshot: normalizeProjectState({
         ...emptyProjectState(),
         render: overlayRender(portable, look.pending, 'base'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'base'),
+        bundles: look.bundles,
       }),
     });
-    const lookAt = async (reader: Database | Tx): Promise<Look> => ({
-      pending: await loadPendingRenderConflicts(reader, repositoryId),
-      pendingClaims: await loadPendingClaimConflicts(reader, repositoryId),
-      claims: await loadRecordClaims(reader, repositoryId),
-      baseFiles: await loadBaseClaimFiles(reader, repositoryId),
-    });
+    const lookAt = async (reader: Database | Tx): Promise<Look> => {
+      const pendingClaims = await loadPendingClaimConflicts(reader, repositoryId);
+      const claims = await loadRecordClaims(reader, repositoryId);
+      const base = await loadBase(reader, repositoryId);
+      return {
+        pending: await loadPendingRenderConflicts(reader, repositoryId),
+        pendingClaims,
+        claims,
+        bundles: bundleDescriptors(
+          await loadLocalBundles(reader, repositoryId),
+          base.bundles,
+          overlayClaims(claims, pendingClaims, 'incoming'),
+        ),
+        baseFiles: base.files,
+      };
+    };
     // A first look only, so its failure must not clear the column: the files then wait for the locked read.
     let seen: Look | null = expectedColumns ? null : await lookAt(db).catch(() => null);
-    let plan = planFor(seen ?? { pending: [], pendingClaims: [], claims: [], baseFiles: [] });
+    let plan = planFor(
+      seen ?? { pending: [], pendingClaims: [], claims: [], bundles: [], baseFiles: [] },
+    );
     const writeFiles = async (baseFiles: readonly string[]): Promise<void> => {
       const files = renderProjectState(plan.record);
       const produced = new Set<string>();
@@ -352,7 +387,7 @@ export async function writeProjectStateRecord(
         const back = removed.indexOf(path);
         if (back >= 0) removed.splice(back, 1);
       }
-      const owned = new Set([...baseFiles, ...written.filter(isClaimFile)]);
+      const owned = new Set([...baseFiles, ...written.filter(isOwnedFile)]);
       for (const path of owned) {
         if (produced.has(path)) continue;
         const gone = await removeFileIfNoFollow(repoPath, path, () => true);
