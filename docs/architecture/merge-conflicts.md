@@ -30,7 +30,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   asks again. It is released only by the owning pass, in the section that removes the base worktree
   and records `done`; by `handleCancelTask` once a docker listing shows no cli sandbox of the task left (the cancel
   first marks every unended run of the task superseded, so one still queued refuses to create its
-  sandbox after the listing)
+  sandbox after the listing, and the listing counts created sandboxes as well as running ones; a run
+  that read its last superseded check just before the cancel and creates its sandbox just after the
+  listing is still missed, until the superseded poll stops it within 5 s; running-list item #262)
   (`releaseTaskMergeClaims`, each claim deleted under its dir's lock, so a section the old pass is
   inside finishes first), since the cancel commits before the fixer it ran is stopped; a listing that
   fails, times out or still shows one keeps the claims, skips the dir-touching teardown and the
