@@ -295,10 +295,7 @@ async function clearRenderContext(
         .where(eq(schema.repositories.id, repositoryId));
       // The column was this install's side of each pending key; the next sync rebuilds it from the rows.
       if (attempted) {
-        // In a savepoint, so a failure here never undoes the clear above.
-        await tx
-          .transaction((sp) => recordLocalSide(sp, repositoryId, attempted))
-          .catch(() => undefined);
+        await recordLocalSide(tx, repositoryId, attempted);
       }
     });
     return true;

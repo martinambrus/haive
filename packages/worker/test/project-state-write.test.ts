@@ -733,6 +733,24 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
     expect(row!.resolvedAt ?? null).toBeNull();
   });
 
+  it('reports the column stale when it cannot keep the value it wrote for a pending key', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
+    s.fake.hooks.beforeInsert = () => {
+      throw new Error('database refused');
+    };
+    s.fake.hooks.beforeUpdate = (table) => {
+      if (table === schema.projectStateConflicts) throw new Error('rows refused');
+    };
+
+    const err = await s.write(withIds(['security-auditor']), true).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect((err as { columnStale?: boolean }).columnStale).toBe(true);
+  });
+
   it('carries a teammate’s null as a value, not as an absent key', async () => {
     const s = await setup();
     s.pend('project/render.json#framework', { base: 'drupal10', local: 'drupal', incoming: null });

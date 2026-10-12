@@ -248,7 +248,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
       await run({
         execute: async () => [],
         update: () => ({ set: () => ({ where: async () => [] }) }),
-        transaction: async () => undefined,
+        select: () => ({ from: () => ({ where: () => ({ orderBy: async () => [] }) }) }),
       });
     };
     return { select, transaction, query: new Proxy({}, { get: () => none }) };
