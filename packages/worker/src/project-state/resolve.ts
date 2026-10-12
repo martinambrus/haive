@@ -32,6 +32,7 @@ import {
   syncProjectStateFromCheckout,
   writeApplicableTemplateIds,
 } from './sync.js';
+import { lockPlanMerge } from '@haive/shared/plan';
 import { loadPendingRenderConflicts, lockProjectState } from './write.js';
 
 const RENDER_FILE = `${PROJECT_STATE_DIR}/project/render.json`;
@@ -127,6 +128,7 @@ async function putBackIfPending(
       .from(schema.projectStateConflicts)
       .where(eq(schema.projectStateConflicts.id, conflictId));
     if (!row) return;
+    await lockPlanMerge(tx, row.repositoryId);
     await lockProjectState(tx, row.repositoryId);
     const [again] = await tx
       .select({ resolvedAt: schema.projectStateConflicts.resolvedAt })
@@ -146,6 +148,9 @@ async function answerInTransaction(
   after: After,
 ): Promise<ProjectStateResolveResult> {
   return db.transaction(async (tx): Promise<ProjectStateResolveResult> => {
+    // A pull lands the checkout under this lock, so no pull rewrites render.json between the last
+    // check and the commit.
+    await lockPlanMerge(tx, repositoryId);
     await lockProjectState(tx, repositoryId);
     const [repo] = await tx
       .select({

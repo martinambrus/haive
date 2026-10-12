@@ -538,6 +538,18 @@ describe('the whole render file as one question', () => {
   });
 });
 
+describe('serialised with a pull', () => {
+  it('takes the plan-merge lock a pull lands the checkout under, before the project-state lock', async () => {
+    const s = await setup();
+
+    await s.answer('take_theirs');
+
+    const merge = s.locks.indexOf(`plan-merge:${REPO}`);
+    expect(merge).toBeGreaterThanOrEqual(0);
+    expect(merge).toBeLessThan(s.locks.indexOf(`project-state:${REPO}`));
+  });
+});
+
 describe('a render file that changed under the answer', () => {
   it('answers moved and leaves a file someone rewrote after it was read', async () => {
     const s = await setup();
