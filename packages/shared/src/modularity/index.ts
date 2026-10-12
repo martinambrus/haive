@@ -1,0 +1,142 @@
+import { z } from 'zod';
+import { formSchemaSchema } from '../schemas/form.js';
+
+export const CORE_STEP_ID_PATTERN = /^[0-9a-z_-]+$/;
+const MODULE_STEP_ID_PATTERN = /^module\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9_-]*)$/;
+const CUSTOM_STEP_ID_PATTERN = /^custom\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9-]*)$/;
+export const CORE_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+export const PERSONA_ID_PATTERN_SOURCE = '[a-z0-9-]+';
+const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_PATTERN_SOURCE}$`);
+const TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+
+export const CORE_INTEGRATION_CATEGORIES = [
+  'rich-documents',
+  'spreadsheets',
+  'file-storage',
+  'mail',
+  'chat',
+  'issues',
+  'wiki',
+  'forge',
+] as const;
+export type CoreIntegrationCategory = (typeof CORE_INTEGRATION_CATEGORIES)[number];
+
+export type ParsedStepId =
+  | { kind: 'core' }
+  | { kind: 'module'; moduleId: string; localId: string }
+  | { kind: 'custom'; defSlug: string; stepSlug: string };
+
+export type ParsedScopedId = { kind: 'core' } | { kind: 'module'; moduleId: string; id: string };
+
+export function parseStepId(id: string): ParsedStepId | null {
+  if (CORE_STEP_ID_PATTERN.test(id)) return { kind: 'core' };
+  const mod = MODULE_STEP_ID_PATTERN.exec(id);
+  if (mod) return { kind: 'module', moduleId: mod[1]!, localId: mod[2]! };
+  const custom = CUSTOM_STEP_ID_PATTERN.exec(id);
+  if (custom) return { kind: 'custom', defSlug: custom[1]!, stepSlug: custom[2]! };
+  return null;
+}
+
+function parseScopedId(id: string): ParsedScopedId | null {
+  if (CORE_PROVIDER_ID_PATTERN.test(id)) return { kind: 'core' };
+  const mod = MODULE_STEP_ID_PATTERN.exec(id);
+  if (mod) return { kind: 'module', moduleId: mod[1]!, id: mod[2]! };
+  return null;
+}
+
+export function parseProviderId(id: string): ParsedScopedId | null {
+  return parseScopedId(id);
+}
+
+export function parseCategoryId(id: string): ParsedScopedId | null {
+  return parseScopedId(id);
+}
+
+export function isCoreStepId(id: string): boolean {
+  return CORE_STEP_ID_PATTERN.test(id);
+}
+
+export function isModuleStepId(id: string): boolean {
+  return MODULE_STEP_ID_PATTERN.test(id);
+}
+
+export function isCustomStepId(id: string): boolean {
+  return CUSTOM_STEP_ID_PATTERN.test(id);
+}
+
+export function isProviderId(id: string): boolean {
+  return parseProviderId(id) !== null;
+}
+
+export function isCategoryId(id: string): boolean {
+  return parseCategoryId(id) !== null;
+}
+
+export function isPersonaId(id: string): boolean {
+  return PERSONA_ID_PATTERN.test(id);
+}
+
+const stepIdSchema = z.string().refine((id) => parseStepId(id) !== null, 'invalid step id');
+
+export const integrationRequirementSchema = z
+  .object({
+    id: z.string().regex(PERSONA_ID_PATTERN),
+    category: z
+      .string()
+      .refine((id) => isCategoryId(id), 'invalid category id')
+      .optional(),
+    provider: z
+      .string()
+      .refine((id) => isProviderId(id), 'invalid provider id')
+      .optional(),
+    access: z.enum(['read', 'write']),
+    optional: z.boolean().optional(),
+  })
+  .refine((r) => (r.category === undefined) !== (r.provider === undefined), {
+    message: 'exactly one of category or provider is required',
+  });
+export type IntegrationRequirement = z.infer<typeof integrationRequirementSchema>;
+
+export const composableStepEntrySchema = z
+  .object({
+    stepId: stepIdSchema,
+    label: z.string().min(1),
+    group: z.string().min(1),
+    dispatchesCli: z.boolean(),
+    requires: z.array(z.object({ needs: z.string(), reason: z.string() })),
+    provides: z.array(z.string()),
+    paramFormSchema: formSchemaSchema.optional(),
+    loopBudgetEditable: z.boolean().optional(),
+    loopTargetStepId: stepIdSchema.optional(),
+    integrations: z.array(integrationRequirementSchema).optional(),
+  })
+  .refine(
+    (e) => {
+      const ids = (e.integrations ?? []).map((i) => i.id);
+      return new Set(ids).size === ids.length;
+    },
+    { message: 'integration requirement ids must be unique within a step' },
+  );
+export type ComposableStepEntry = z.infer<typeof composableStepEntrySchema>;
+
+export const taskTypeDefinitionSeedSchema = z
+  .object({
+    slug: z.string().regex(TASK_TYPE_SLUG_PATTERN),
+    displayName: z.string().min(1),
+    description: z.string().optional(),
+    runListStrategy: z.enum(['static', 'workflow_paths', 'run_app_modes']),
+    stepIds: z.array(stepIdSchema).nullable(),
+    selectable: z.boolean(),
+    requiresRepository: z.boolean(),
+    preAnswerDefaults: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+    stepLoopLimitDefaults: z.record(z.string(), z.number()).optional(),
+    sortOrder: z.number().optional(),
+  })
+  .refine(
+    (s) =>
+      s.runListStrategy === 'static'
+        ? s.stepIds !== null && s.stepIds.length > 0
+        : s.stepIds === null,
+    { message: 'static needs a non-empty stepIds; dynamic strategies need stepIds null' },
+  );
+export type TaskTypeDefinitionSeed = z.infer<typeof taskTypeDefinitionSeedSchema>;
