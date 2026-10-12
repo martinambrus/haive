@@ -1,10 +1,10 @@
 # RAG retrieval improvements
 
-> **Not started — a findings register and a ranked plan; nothing approved** (2026-09-30). Seven
-> external sources are reviewed so far. The findings were measured read-only on the dev install on
-> 2026-09-30. Keep this file current by editing the section a change belongs to: a new source goes
-> into Sources reviewed, a re-measured number replaces the old one in Findings, a decision moves from
-> Open decisions to Decided. P0 gates every other phase.
+> **P0 baseline measured (2026-10-12); nothing past P0 started or approved.** Seven external
+> sources are reviewed so far. The findings were measured read-only on the dev install on
+> 2026-09-30, and the P0 numbers on 2026-10-12. Keep this file current by editing the section a
+> change belongs to: a new source goes into Sources reviewed, a re-measured number replaces the old
+> one in Findings, a decision moves from Open decisions to Decided. P0 gates every other phase.
 
 ## Context
 
@@ -30,9 +30,10 @@ How retrieval works today (resolve by symbol; line numbers drift):
   `plainto_tsquery` (which ANDs every term; pool 50), and the identifier ranker (IDF-weighted, at
   most 3 candidates). The knowledge reserve holds up to 2 slots for KB rows, `mergeHits` gives the
   global KB up to half the page, and the SQL `LIMIT` is `top_k`.
-- **Telemetry and eval.** `rag_query_log` records counts and score maxima per call, not which
-  chunks came back. `packages/worker/scripts/rag-eval.ts` probes one query and reports where an
-  expected path ranks. No golden set, recall@k or MRR exists.
+- **Telemetry and eval.** `rag_query_log` records counts and score maxima per call, and since
+  0180 the final page (`result_hits`). `packages/worker/scripts/rag-build-store.ts` builds a
+  scratch store the way onboarding does, and `rag-eval.ts` scores a golden set by recall@k and MRR
+  (P0).
 
 ## Sources reviewed
 
@@ -247,7 +248,9 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   `MAX_CHUNKS_PER_FILE` drops 1,968 of 21,813 chunks (9.0%) across 29 files. 8 of them are
   custom-module files (557 chunks), led by `_classes/inspection.class.inc` (331 of 411 dropped) and
   `activit.install` (97 of 177); most of the rest are vendored jQuery copies. By design, and logged.
-  → D1.
+  Before that cap, `MAX_FILE_BYTES` (512,000) keeps a whole file out: three code files in scope, two
+  of them vendored libraries and one a 712 KB custom-module file that real agent queries ask about,
+  which is therefore not indexed at all and is not counted in the 1,968. → D1.
 - **F4. Chunks end mid-line.** `chunkSection` has no single-newline level: 32.5% of non-final
   chunks end mid-line after the cap. Before the cap it is 2,194 (29.8%), 955 of them cut at the
   `'. '` prose heuristic inside code. A single-newline fallback between the paragraph and the
@@ -263,13 +266,16 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   per day from 09-08 to 09-10; the identifier ranker shipped 09-06 (`63378b26`), so the log cannot
   separate its share. A what-if replay of 150 onboarding queries against the chunks with the
   trigger's exact tsvector: 144 match nothing under the AND, and 65 carry an identifier present in
-  the corpus. AGENTS.md already records plain OR and coverage ranking measuring worse. → P2.
+  the corpus. On the P0 golden set the AND matches no row for 269 of 296 queries (63 of 71 real
+  ones), so the hybrid page is in practice dense plus at most 3 identifier candidates. AGENTS.md
+  already records plain OR and coverage ranking measuring worse. → P2.
 - **F7. Queries are embedded raw.** The Qwen3-Embedding model card: "Each query must come with a
   one-sentence instruction that describes the task" (`Instruct: {task}`, a newline, then
   `Query:{query}`), typically worth 1-5%, and no instruction for documents. From neither S1 nor S2.
   → P2.
-- **F8. No hit list is recorded.** `rag_query_log` keeps counts and score maxima, so none of the
-  3,103 calls can be replayed or labelled. → P0.
+- **F8. No hit list is recorded.** `rag_query_log` kept counts and score maxima, so none of the
+  3,103 calls logged before 0180 can be replayed or labelled. 0180 adds the final page
+  (`result_hits`); every row on the dev install is still NULL. → P0.
 - **F9. Context-poor chunks.** 36.2% of chunks carry a path-only header. 32.4% are continuation
   chunks, and 52.4% of those are path-only; the rest keep their `class > function` breadcrumb.
   → P1, then P4.
@@ -284,12 +290,13 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   Calls split 49% onboarding, 50% workflow; 37% fell inside `10_8-plan-build`.
 - **F11. Sizes and costs.** 19,845 chunks after the cap, 21.3M chars (5.3-6.1M tokens). A chunk
   runs to 2,161 chars (median 967, p90 2,041); 25.2% are over 1,800 chars and 34.7% over 1,500. A
-  full re-embed at AGENTS.md's measured 10.5 s (GPU) or 50-69 s (CPU) per batch of 8 takes 7.2 h
-  on GPU and 35-48 h on CPU for 19,845 chunks, or 3.4 h and 16-22 h for 9,197. The global KB holds
-  11 entries, 30,464 chars (~8k tokens); a repository's KB plus learnings is ~0.7 MB (~170-210k
-  tokens). Ollama 0.33.3 answers `/api/rerank` with 404, the same as an unknown route. Every
-  dispatch is a CLI run, and one costs ~22 s and ~34k tokens even for a three-sentence reply
-  (AGENTS.md, step summaries).
+  full batch of 8 embeds in ~2.6 s on the dev host's GPU (an RTX 3050) and 50-69 s on an 8-core
+  CPU. MEASURED end to end on the GPU, embedding per file as onboarding does (~3,870 calls of up to
+  8), the 20,839-chunk P0 store took 81 min, 0.23 s per chunk; at the CPU rate the same corpus is
+  36-50 h. The global KB holds 11 entries, 30,464 chars (~8k tokens); a repository's KB plus
+  learnings is ~0.7 MB (~170-210k tokens). Ollama 0.33.3 answers `/api/rerank` with 404, the same
+  as an unknown route. Every dispatch is a CLI run, and one costs ~22 s and ~34k tokens even for a
+  three-sentence reply (AGENTS.md, step summaries).
 - **F12. Overview questions are rare, and the plan tree is not searchable.** A stable sample of 40
   of the 2,581 distinct logged queries, read by hand (the split is a judgement): 35 are local
   lookups by identifier, field or function; 2 ask for a repository-wide enumeration (committed
@@ -320,7 +327,11 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   the modest table it was measured on, `ef_search` 100 flipped the planner to a 430 ms sequential
   scan against a 5 ms index scan, and iterative scan would need a `SET LOCAL` inside a
   transaction. The GLOBAL store's dense reads now do exactly that (`denseRead`), because its
-  `embed_model` filter runs after the scan; per-repo reads are unchanged. → P0, P3.
+  `embed_model` filter runs after the scan; per-repo reads are unchanged. On the 20,839-row P0 store
+  the planner picks the HNSW index by default for all 296 golden queries, and the forced index path
+  returned exactly 40 rows for every one. Against an exact search's top 50 those 40 overlap 0.749 on
+  average (0.8 is the ceiling, so ~94% of the 40 are true top-50 neighbours), but 20 queries fall
+  below 0.5 and 3 share no row with the exact top 50; why those do is unmeasured. → P0, P3.
 - **F15. Deleted vectors keep their index space.** The dev install's shared project store holds 0
   rows and a 0-byte heap, yet 312 MB, 275 MB of it the HNSW index; the vectors of the repositories
   deleted since stay allocated in it. A full re-embed churns the index the same way. → P1.
@@ -353,6 +364,28 @@ search on the same queries (S7's flat baseline), since the HNSW path keeps 40 ca
 approximation (F14). A nullable `hits` column on `rag_query_log` (source path, section, rank, each
 ranker's rank) makes real calls replayable from then on. Rollback: the column is additive and
 nullable; stop writing it, and drop it in a later change.
+
+**Baseline (2026-10-12).** A scratch store `haive_rag_p0_eval` built by `rag-build-store.ts` from
+the current chunker over the scoped tree plus the repository KB (20,839 chunks, 0 hash vectors).
+The golden set (kept untracked, outside git) holds 296 queries and 438 golds, each gold a source
+path plus a string from the chunk body: 100 synthetic questions that reuse the chunk's identifiers,
+100 that paraphrase without them, 71 real agent queries from `rag_query_log`, and 25 overview
+questions. An agent labelled the golds by search; 20 spot-checked against the tree were all valid,
+and every gold is in the store. Recall@k / MRR@k, hybrid as shipped:
+
+| kind | n | @5 | @8 | @12 | @20 | @50 |
+| --- | --- | --- | --- | --- | --- | --- |
+| synthetic, identifiers | 100 | 0.930 / 0.799 | 0.950 / 0.793 | 0.960 / 0.789 | 0.980 / 0.788 | 0.990 / 0.787 |
+| synthetic, paraphrase | 100 | 0.540 / 0.429 | 0.590 / 0.436 | 0.620 / 0.438 | 0.660 / 0.441 | 0.750 / 0.443 |
+| real | 71 | 0.491 / 0.413 | 0.554 / 0.452 | 0.589 / 0.417 | 0.610 / 0.411 | 0.692 / 0.435 |
+| overview | 25 | 0.234 / 0.438 | 0.334 / 0.432 | 0.415 / 0.444 | 0.535 / 0.469 | 0.657 / 0.449 |
+
+The overview row is recall over several golds each, kept for reference rather than as a target.
+Search takes p50 33 ms, p95 49 ms. The lexical-only branch (no embedding) scores real 0.352 /
+0.383, identifier questions 0.820 / 0.737 and paraphrases 0.010 at every k: with the full-text AND
+empty (F6), its page is the identifier ranker's few candidates. MRR can fall as k grows because the
+knowledge reserve takes `min(2, floor(top_k / 3))` slots, so a smaller page is not a prefix of a
+larger one. The dense pool's numbers are in F14.
 
 ### P1. Chunker corrections, shipped as one reindex
 
@@ -459,3 +492,7 @@ None yet.
   `hnsw.iterative_scan` set. Bind the query vector as a parameter or a scalar subquery: one taken
   from a join cannot use the index.
 - **F15.** Compare `pg_relation_size('idx_rag_vector_hnsw')` with the table's live row count.
+- **P0 baseline.** Build a scratch store with `rag-build-store.ts` (`RAG_DRY_RUN=1` first; it
+  refuses the eval and live stores by name and resumes by `chunk_hash`), then run `rag-eval.ts` in
+  `haive-worker` with `RAG_PROJECT`, `RAG_QUERY_SET`, `RAG_REPOSITORY_ID`, `RAG_DENSE_CHECK=1` and
+  `RAG_OUT`, once as is and once with `RAG_LEXICAL_ONLY=1`.
