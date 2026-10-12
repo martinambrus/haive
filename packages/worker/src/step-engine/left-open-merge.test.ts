@@ -29,7 +29,8 @@ vi.mock('./step-ownership.js', () => ({
   addStepWarning: async (_db: unknown, row: unknown) => row,
 }));
 
-import { abortLeftMerge, recordLeftOpenMerges } from './left-open-merge.js';
+import { abortLeftMerge, noteAbortedByNext, recordLeftOpenMerges } from './left-open-merge.js';
+import type { TaskStepRow } from './step-runner.js';
 
 /** A query builder whose every chained call resolves to the next queued result, in call order. */
 function chainDb(results: unknown[][], findFirst: unknown = null) {
@@ -48,6 +49,7 @@ function chainDb(results: unknown[][], findFirst: unknown = null) {
   const db = {
     query: { tasks: { findFirst: async () => findFirst } },
     select: () => chain(),
+    selectDistinct: () => chain(),
     insert: () => ({
       values: async (v: unknown) => {
         inserted.push(v);
@@ -145,5 +147,28 @@ describe('abortLeftMerge', () => {
     expect(inserted).toEqual([
       expect.objectContaining({ payload: expect.objectContaining({ outcome: 'moved' }) }),
     ]);
+  });
+});
+
+describe('noteAbortedByNext', () => {
+  it('does not fail the resolver when settling the report fails after its merge was aborted', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const owners = [{ taskId: 'cancelled-1', title: 'old' }];
+    const events = [
+      {
+        eventType: 'merge.left_open',
+        payload: { dir: '/repo', ref: 'feat/a', head: 'h1', mergeHead: 'm1' },
+      },
+    ];
+    const { db } = chainDb([owners, events]);
+    (db as unknown as { insert: () => unknown }).insert = () => ({
+      values: async () => {
+        throw new Error('connection lost');
+      },
+    });
+    const row = { id: 'step-2' } as TaskStepRow;
+    await expect(
+      noteAbortedByNext(db, row, 'task-2', '/repo', { head: 'h1', mergeHead: 'm1' }),
+    ).resolves.toBe(row);
   });
 });

@@ -152,24 +152,28 @@ async function settle(
 
 /** Report each merge the cancelled task's rows recorded that is still open in its directory and
  *  names the ref the task was merging. Once per directory and merge head, so a re-driven cancel
- *  adds nothing. Called after the claims are released, once no sandbox of the task is left; a
+ *  adds nothing. Called once no sandbox of the task is left and before its claims are released; a
  *  failure throws, so the cancel is re-driven before `task.cancel_finished` is written. */
 export async function recordLeftOpenMerges(db: Database, taskId: string): Promise<void> {
   const known = await taskLeftOpen(db, taskId);
   for (const recorded of await recordedMerges(db, taskId)) {
     if (isHostCheckout(recorded.dir)) continue;
-    if (!(await mergeOpenFor(recorded.dir, recorded.ref))) continue;
-    const open = await peekOpenMerge(recorded.dir);
-    if (!open) continue;
-    if (known.some((k) => k.dir === recorded.dir && k.mergeHead === open.mergeHead)) continue;
-    const payload = { dir: recorded.dir, ref: recorded.ref, ...open };
-    await db.insert(schema.taskEvents).values({
-      taskId,
-      taskStepId: recorded.stepId,
-      eventType: MERGE_LEFT_OPEN_EVENT,
-      payload,
+    // Under the dir's lock, so nobody clears or replaces the merge between the read and the report.
+    const payload = await inMergeDirLock(db, recorded.dir, async (tx) => {
+      if (!(await mergeOpenFor(recorded.dir, recorded.ref))) return null;
+      const open = await peekOpenMerge(recorded.dir);
+      if (!open) return null;
+      if (known.some((k) => k.dir === recorded.dir && k.mergeHead === open.mergeHead)) return null;
+      const reported = { dir: recorded.dir, ref: recorded.ref, ...open };
+      await tx.insert(schema.taskEvents).values({
+        taskId,
+        taskStepId: recorded.stepId,
+        eventType: MERGE_LEFT_OPEN_EVENT,
+        payload: reported,
+      });
+      return reported;
     });
-    known.push({ ...payload, settled: null, refused: null });
+    if (payload) known.push({ ...payload, settled: null, refused: null });
   }
 }
 
@@ -246,7 +250,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
         return {
           outcome: 'moved',
           reason:
-            'The merge in this directory is no longer the one the cancel left; nothing was changed.',
+            'The merge the cancel left is no longer open in this directory (it was finished or aborted since); nothing was changed.',
           leftovers: unreported,
         };
       }
@@ -335,13 +339,22 @@ export async function noteAbortedByNext(
       (m) => m.dir === dir && m.mergeHead === before.mergeHead && m.settled === null,
     );
     if (!merge) continue;
-    await settle(
+    // The merge is already aborted, so a failure here must not fail this step: the report then
+    // stays open, and the person's abort reads it as moved.
+    const settled = await settle(
       db,
       owner.taskId,
       merge,
       'aborted-by-next',
       `Another task's merge needed the directory and cleared it first.`,
+    ).then(
+      () => true,
+      (err: unknown) => {
+        logger.warn({ err, taskId: owner.taskId, dir }, 'settling a left-open merge report failed');
+        return false;
+      },
     );
+    if (!settled) continue;
     current = await addStepWarning(
       db,
       current,

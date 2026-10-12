@@ -3387,8 +3387,8 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
   const sandboxesGone = (await listCliSandboxesForTask(payload.taskId))?.length === 0;
   if (sandboxesGone) {
-    await releaseTaskMergeClaims(db, payload.taskId);
     await recordLeftOpenMerges(db, payload.taskId);
+    await releaseTaskMergeClaims(db, payload.taskId);
     await discardPlanMerge(db, payload.taskId);
     try {
       await cleanupTaskScratchWorkspace(db, payload.taskId);
