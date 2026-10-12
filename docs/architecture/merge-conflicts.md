@@ -30,8 +30,11 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   asks again. It is released only by the owning pass, in the section that removes the base worktree
   and records `done`; by `handleCancelTask` after `cleanupTaskContainers` (`releaseTaskMergeClaims`, each claim deleted
   under its dir's lock, so a section the old pass is inside finishes first), since the cancel commits
-  before the fixer it ran is stopped; or by the foreign key when the task goes. A completed task or a
-  skipped step is stale: the next claim takes the row over and its abort cleans the leftover. A
+  before the fixer it ran is stopped; or by the foreign key when the task goes. A completed task, a
+  skipped step, or a cancelled task whose `task.cancel_finished` event exists is stale: the next
+  claim takes the row over and its abort cleans the leftover. The event is written after the
+  release, so it also covers a claim that committed after the release read the task's claims; a
+  cancelled task without it still holds, since its fixer may still be running. A
   failed task keeps the claim, since its Retry resumes the merge it left open, and so does a crashed
   worker's, which boot re-drives. Every host-side write to the dir in `merge-resolver.ts` runs in
   `withMergeDirSection`: one transaction that holds the lock, reads the claim FOR UPDATE and requires

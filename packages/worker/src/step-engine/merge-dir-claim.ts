@@ -57,7 +57,8 @@ async function requireLiveOwner(tx: DbHandle, owner: MergeDirOwner): Promise<voi
 }
 
 /** Take `mergeDir` for the pass's step before its first git write, committed ahead of it. Another
- *  task's claim holds unless that task is completed or that step skipped (a stale merge). */
+ *  task's claim holds unless that task is completed, that step skipped (a stale merge), or the task
+ *  is cancelled with its teardown recorded (`task.cancel_finished`, written after the release). */
 export async function claimMergeDir(db: Database, owner: MergeDirOwner): Promise<MergeDirClaim> {
   return inMergeDirLock(db, owner.mergeDir, async (tx) => {
     await requireLiveOwner(tx, owner);
@@ -85,7 +86,25 @@ export async function claimMergeDir(db: Database, owner: MergeDirOwner): Promise
         .from(schema.taskSteps)
         .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
         .where(eq(schema.taskSteps.id, claim.taskStepId));
-      if (holder && holder.taskStatus !== 'completed' && holder.stepStatus !== 'skipped') {
+      const [tornDown] =
+        holder?.taskStatus === 'cancelled'
+          ? await tx
+              .select({ id: schema.taskEvents.id })
+              .from(schema.taskEvents)
+              .where(
+                and(
+                  eq(schema.taskEvents.taskId, claim.taskId),
+                  eq(schema.taskEvents.eventType, 'task.cancel_finished'),
+                ),
+              )
+              .limit(1)
+          : [];
+      if (
+        holder &&
+        holder.taskStatus !== 'completed' &&
+        holder.stepStatus !== 'skipped' &&
+        !tornDown
+      ) {
         return {
           kind: 'held' as const,
           holder: { id: claim.taskId, title: holder.title },

@@ -515,6 +515,106 @@ async function main(): Promise<void> {
       await rm(dir, { recursive: true, force: true });
     }
   }
+
+  // 12. MERGE DIR CLAIMS — the backfill claims every dir a live task's merge holds, a pending
+  //     base-sync round included (its commit is already in the shared base worktree).
+  {
+    const db = await freshDatabase('merge_dir_claims');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'haive-migrate-'));
+    try {
+      for (const file of (await readdir(MIGRATIONS)).filter((f) => f.endsWith('.sql'))) {
+        if (file < '0186_merge_dir_claims.sql') {
+          await execFileAsync('cp', [path.join(MIGRATIONS, file), dir]);
+        }
+      }
+      const before = await runMigrate(urlFor(db), { HAIVE_MIGRATIONS_DIR: `${dir}/` });
+      check('merge dir claims: the corpus before it applies', before.code === 0, before.stderr);
+      const ids = await withDb(db, async (sql) => {
+        const [user] = await sql<{ id: string }[]>`
+          INSERT INTO users (email_encrypted, email_blind_index, password_hash)
+          VALUES ('mdc', 'mdc-idx', 'x') RETURNING id`;
+        const step = async (
+          mergeDir: string,
+          state: Record<string, unknown>,
+          taskStatus: string,
+          ageMin: number,
+        ) => {
+          const [task] = await sql<{ id: string }[]>`
+            INSERT INTO tasks (user_id, type, title, status)
+            VALUES (${user!.id}, 'workflow', 'smoke', ${taskStatus}::task_status) RETURNING id`;
+          const [row] = await sql<{ id: string }[]>`
+            INSERT INTO task_steps (task_id, step_id, step_index, title, merge_resolve_state, updated_at)
+            VALUES (${task!.id}, '12-worktree-cleanup', 0, 'merge',
+                    ${sql.json({ ...state, mergeDir } as never)},
+                    now() - make_interval(mins => ${ageMin}))
+            RETURNING id`;
+          return row!.id;
+        };
+        return {
+          baseSync: await step(
+            '/mdc/base-sync',
+            { phase: 'pending', mergeStage: 'base-sync' },
+            'running',
+            1,
+          ),
+          feature: await step(
+            '/mdc/feature',
+            { phase: 'pending', mergeStage: 'feature' },
+            'running',
+            1,
+          ),
+          unstaged: await step('/mdc/unstaged', { phase: 'pending' }, 'running', 1),
+          resolving: await step('/mdc/resolving', { phase: 'resolving' }, 'running', 1),
+          doneTask: await step('/mdc/done', { phase: 'pushing' }, 'completed', 1),
+          oldest: await step(
+            '/mdc/shared',
+            { phase: 'pending', mergeStage: 'base-sync' },
+            'running',
+            5,
+          ),
+          newest: await step('/mdc/shared', { phase: 'resolving' }, 'running', 1),
+        };
+      });
+      const run = await runMigrate(urlFor(db));
+      check('merge dir claims: exits 0', run.code === 0, run.stderr);
+      await withDb(db, async (sql) => {
+        const rows = await sql<{ merge_dir: string; task_step_id: string }[]>`
+          SELECT merge_dir, task_step_id FROM merge_dir_claims`;
+        const owner = (d: string) => rows.find((r) => r.merge_dir === d)?.task_step_id;
+        check(
+          'merge dir claims: a pending base-sync round is claimed',
+          owner('/mdc/base-sync') === ids.baseSync,
+          rows,
+        );
+        check(
+          'merge dir claims: a resolving merge is claimed',
+          owner('/mdc/resolving') === ids.resolving,
+          rows,
+        );
+        check(
+          'merge dir claims: a pending feature merge is not',
+          owner('/mdc/feature') === undefined,
+          rows,
+        );
+        check(
+          'merge dir claims: a pending merge with no stage is not',
+          owner('/mdc/unstaged') === undefined,
+          rows,
+        );
+        check('merge dir claims: a completed task is not', owner('/mdc/done') === undefined, rows);
+        check(
+          'merge dir claims: a shared dir goes to the oldest step',
+          owner('/mdc/shared') === ids.oldest,
+          rows,
+        );
+        check('merge dir claims: one row per dir', rows.length === 3, rows);
+      });
+      const again = await runMigrate(urlFor(db));
+      check('merge dir claims: a second run applies nothing', again.code === 0, again.stderr);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
 }
 
 try {

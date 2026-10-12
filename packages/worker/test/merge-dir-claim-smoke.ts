@@ -146,6 +146,37 @@ async function main(): Promise<void> {
     check('...for another task', (await claimMergeDir(db, owner(b, dir))).kind === 'claimed');
     await setTask(a.taskId, 'running');
 
+    dir = dirs('late-claim');
+    const late = await makeTask('smoke late');
+    await claimMergeDir(db, owner(late, dir));
+    await setTask(late.taskId, 'cancelled');
+    check(
+      'a cancelled task without task.cancel_finished still holds',
+      (await claimMergeDir(db, owner(b, dir))).kind === 'held',
+    );
+    await db.insert(schema.taskEvents).values({
+      taskId: late.taskId,
+      eventType: 'task.cancel_finished',
+      payload: { source: 'worker' },
+    });
+    check(
+      'a cancelled task with task.cancel_finished is stale: its dir is taken over',
+      (await claimMergeDir(db, owner(b, dir))).kind === 'claimed',
+    );
+    check("...and the claim is the new owner's", (await claimRow(dir))?.taskId === b.taskId);
+    dir = dirs('event-only');
+    const evt = await makeTask('smoke event only');
+    await claimMergeDir(db, owner(evt, dir));
+    await db.insert(schema.taskEvents).values({
+      taskId: evt.taskId,
+      eventType: 'task.cancel_finished',
+      payload: { source: 'worker' },
+    });
+    check(
+      'a running task with the event (a stale one) still holds',
+      (await claimMergeDir(db, owner(b, dir))).kind === 'held',
+    );
+
     dir = dirs('completed');
     await claimMergeDir(db, owner(a, dir));
     await setTask(a.taskId, 'completed');

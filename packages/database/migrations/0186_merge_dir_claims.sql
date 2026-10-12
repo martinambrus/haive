@@ -4,8 +4,8 @@
 -- the gaps between phases (a base-sync round, a cancelled task's teardown) unowned. One row per dir
 -- makes the ownership a fact the claim and every host-side write to the dir are checked against.
 --
--- Backfill: each dir a live task's merge already holds (an open merge, or a landed one the squash or
--- the push has yet to finish) is claimed by the oldest such step.
+-- Backfill: each dir a live task's merge already holds (an open merge, a base-sync round, or a
+-- landed one the squash or the push has yet to finish) is claimed by the oldest such step.
 --
 -- Additive and idempotent. Rollback: revert `schema/merge-dir-claims.ts` and the worker, then
 --   DROP TABLE IF EXISTS "merge_dir_claims";
@@ -39,7 +39,11 @@ SELECT DISTINCT ON (ts."merge_resolve_state" ->> 'mergeDir')
   ts."merge_resolve_state" ->> 'mergeDir', ts."task_id", ts."id"
 FROM "task_steps" ts
 JOIN "tasks" t ON t."id" = ts."task_id"
-WHERE ts."merge_resolve_state" ->> 'phase' IN ('resolving', 'awaiting-guidance', 'squashing', 'pushing')
+WHERE (
+    ts."merge_resolve_state" ->> 'phase' IN ('resolving', 'awaiting-guidance', 'squashing', 'pushing')
+    OR (ts."merge_resolve_state" ->> 'phase' = 'pending'
+        AND ts."merge_resolve_state" ->> 'mergeStage' = 'base-sync')
+  )
   AND ts."merge_resolve_state" ->> 'mergeDir' IS NOT NULL
   AND t."status" NOT IN ('completed', 'cancelled')
 ORDER BY ts."merge_resolve_state" ->> 'mergeDir', ts."updated_at"
