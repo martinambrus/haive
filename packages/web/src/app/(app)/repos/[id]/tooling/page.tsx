@@ -865,6 +865,7 @@ export default function RepoToolingPage() {
                             name={`verify-${key}`}
                             className="h-4 w-4 border-neutral-700 bg-neutral-900 text-indigo-500"
                             checked={slot.mode === mode}
+                            disabled={verifySaving}
                             onChange={() => setVerifySlot(key, { mode })}
                           />
                           {modeLabel}
@@ -878,6 +879,7 @@ export default function RepoToolingPage() {
                         maxLength={VERIFY_COMMAND_MAX}
                         placeholder="vendor/bin/phpunit -c core modules/custom"
                         value={slot.text}
+                        disabled={verifySaving}
                         onChange={(e) => setVerifySlot(key, { text: e.target.value })}
                       />
                     )}
