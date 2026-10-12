@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { ProjectStateConflictBody } from '@haive/shared/project-state';
+import { claimFileName, type ProjectStateConflictBody } from '@haive/shared/project-state';
 import { ProjectStateConflictsView } from './project-state-conflicts-banner';
 
 const conflict = (over: Partial<ProjectStateConflictBody> = {}): ProjectStateConflictBody => ({
@@ -78,6 +78,37 @@ describe('ProjectStateConflictsView', () => {
     expect(html).not.toContain('The whole project record file');
     expect(html).not.toContain('haive-json-tree');
     expect(html).toContain('Off');
+    expect(html).toContain('Keep mine');
+    expect(html).toContain('Take theirs');
+  });
+
+  it('shows a claim question under the file it is about, its sides as readable text', () => {
+    const claim = (writtenHash: string) => ({
+      path: 'docs/guide.md',
+      templateId: 'workflow-config',
+      kind: 'workflow-config',
+      schemaVersion: 1,
+      templateHash: 'c'.repeat(64),
+      writtenHash,
+      haiveVersion: '1.2.3',
+    });
+    const html = view({
+      conflicts: [
+        conflict({
+          unit: claimFileName('docs/guide.md'),
+          key: null,
+          base: { present: true, value: claim('1'.repeat(64)) },
+          local: { present: true, value: claim('2'.repeat(64)) },
+          incoming: { present: false },
+        }),
+      ],
+    });
+    expect(html).toContain('the claim for docs/guide.md');
+    expect(html).toContain('workflow-config');
+    expect(html).toContain('222222222222');
+    expect(html).toContain('Not set.');
+    expect(html).toContain('haive-md');
+    expect(html).not.toContain('The whole project record file');
     expect(html).toContain('Keep mine');
     expect(html).toContain('Take theirs');
   });

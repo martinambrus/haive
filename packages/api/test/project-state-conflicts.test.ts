@@ -17,7 +17,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { RTK_ENABLED_UNIT, conflictSide } from '@haive/shared/project-state';
+import { RTK_ENABLED_UNIT, claimFileName, conflictSide } from '@haive/shared/project-state';
 import { projectStateConflictRoutes } from '../src/routes/project-state-conflicts.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -30,6 +30,18 @@ const PENDING_WHOLE = '00000000-0000-4000-8000-0000000000d2';
 const CLOSED = '00000000-0000-4000-8000-0000000000d3';
 const OTHER_REPO_ROW = '00000000-0000-4000-8000-0000000000d4';
 const RTK_ROW = '00000000-0000-4000-8000-0000000000d5';
+const CLAIM_ROW = '00000000-0000-4000-8000-0000000000d6';
+const STRAY_ROW = '00000000-0000-4000-8000-0000000000d7';
+const CLAIM_UNIT = claimFileName('docs/guide.md');
+const claim = (writtenHash: string) => ({
+  path: 'docs/guide.md',
+  templateId: 'workflow-config',
+  kind: 'workflow-config',
+  schemaVersion: 1,
+  templateHash: 'c'.repeat(64),
+  writtenHash,
+  haiveVersion: '1.2.3',
+});
 
 const app = new Hono<AppEnv>();
 app.route('/repos', projectStateConflictRoutes);
@@ -73,6 +85,15 @@ function seed() {
     incoming: conflictSide(false),
     detectedAt: new Date('2026-10-01T12:00:00Z'),
   });
+  row(CLAIM_ROW, REPO, CLAIM_UNIT, {
+    base: conflictSide(claim('1'.repeat(64))),
+    local: conflictSide(claim('2'.repeat(64))),
+    incoming: null,
+    detectedAt: new Date('2026-10-01T13:00:00Z'),
+  });
+  row(STRAY_ROW, REPO, 'artifacts/not-a-claim.json', {
+    detectedAt: new Date('2026-10-01T14:00:00Z'),
+  });
   row(OTHER_REPO_ROW, FOREIGN_REPO, 'project/render.json#acceptedAgentIds', {});
   h.db = fake.db;
 }
@@ -96,7 +117,7 @@ describe('GET /repos/:id/project-state/conflicts', () => {
 
     expect(res.status).toBe(200);
     const { conflicts } = (await res.json()) as { conflicts: Record<string, unknown>[] };
-    expect(conflicts.map((c) => c.id)).toEqual([PENDING, PENDING_WHOLE, RTK_ROW]);
+    expect(conflicts.map((c) => c.id)).toEqual([PENDING, PENDING_WHOLE, RTK_ROW, CLAIM_ROW]);
     expect(conflicts[0]).toEqual({
       id: PENDING,
       unit: 'project/render.json#acceptedAgentIds',
@@ -130,6 +151,26 @@ describe('GET /repos/:id/project-state/conflicts', () => {
     });
   });
 
+  it('lists a claim question with the claim as each side holds it, and no render key', async () => {
+    const { conflicts } = (await (await get()).json()) as { conflicts: Record<string, unknown>[] };
+    expect(conflicts.find((c) => c.id === CLAIM_ROW)).toEqual({
+      id: CLAIM_ROW,
+      unit: CLAIM_UNIT,
+      key: null,
+      base: { present: true, value: claim('1'.repeat(64)) },
+      local: { present: true, value: claim('2'.repeat(64)) },
+      incoming: { present: false },
+      detectedAt: '2026-10-01T13:00:00.000Z',
+      resolution: null,
+      resolvedAt: null,
+    });
+  });
+
+  it('leaves out a row whose unit is no unit it can answer', async () => {
+    const { conflicts } = (await (await get()).json()) as { conflicts: Record<string, unknown>[] };
+    expect(conflicts.map((c) => c.id)).not.toContain(STRAY_ROW);
+  });
+
   it('is a 404 for another user’s repository, and for an id that is no repository', async () => {
     expect((await get(FOREIGN_REPO)).status).toBe(404);
     expect((await get('00000000-0000-4000-8000-0000000000ff')).status).toBe(404);
@@ -155,6 +196,18 @@ describe('GET /repos/:id/project-state/conflicts/:conflictId', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { conflict: unknown };
     expect(body.conflict).toMatchObject({ id: RTK_ROW, unit: RTK_ENABLED_UNIT, resolution: null });
+  });
+
+  it('returns a claim question', async () => {
+    const res = await app.request(`/repos/${REPO}/project-state/conflicts/${CLAIM_ROW}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { conflict: unknown };
+    expect(body.conflict).toMatchObject({ id: CLAIM_ROW, unit: CLAIM_UNIT, key: null });
+  });
+
+  it('is a 404 for a row whose unit is no unit it can answer', async () => {
+    const res = await app.request(`/repos/${REPO}/project-state/conflicts/${STRAY_ROW}`);
+    expect(res.status).toBe(404);
   });
 
   it('is a 404 for a row of another repository, and for another user’s repository', async () => {

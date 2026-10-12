@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import { claimFileName } from '@haive/shared/project-state';
 import {
   answerAndConfirm,
   answerConfirmation,
+  conflictClaimPath,
   conflictKeyLabel,
   conflictSideMarkdown,
   isRtkConflict,
@@ -97,6 +99,77 @@ describe('conflictSideMarkdown', () => {
     const md = conflictSideMarkdown({ present: true, value: '```\n# heading' });
     expect(md.startsWith('````json\n')).toBe(true);
     expect(md.endsWith('\n````')).toBe(true);
+  });
+});
+
+describe('a claim question', () => {
+  const PATH = '.claude/agents/code-reviewer.md';
+  const UNIT = claimFileName(PATH);
+  const CLAIM = {
+    path: PATH,
+    templateId: 'agent.code-reviewer',
+    kind: 'agent',
+    schemaVersion: 2,
+    templateHash: 'a'.repeat(64),
+    writtenHash: 'b0c1d2e3f4a5'.padEnd(64, '0'),
+    haiveVersion: '1.2.3',
+  };
+  const present = (value: unknown) => ({ present: true as const, value });
+  const absent = { present: false as const };
+
+  it('is labelled by the file its claim names, from whichever side holds one', () => {
+    const sides = { unit: UNIT, base: absent, local: absent, incoming: present(CLAIM) };
+    expect(conflictClaimPath(sides)).toBe(PATH);
+    expect(conflictKeyLabel(null, UNIT, conflictClaimPath(sides))).toBe(`the claim for ${PATH}`);
+    expect(conflictClaimPath({ ...sides, incoming: absent })).toBeNull();
+    expect(
+      conflictClaimPath({ ...sides, unit: 'project/render.json', local: present(CLAIM) }),
+    ).toBe(null);
+  });
+
+  it('shows a side as its template, kind, Haive version and written hash in a wrapping list', () => {
+    expect(conflictSideMarkdown(present(CLAIM), UNIT)).toBe(
+      [
+        '- Template: `agent.code-reviewer`',
+        '- Kind: `agent`',
+        '- Haive version: `1.2.3`',
+        '- Written hash: `b0c1d2e3f4a5`',
+      ].join('\n'),
+    );
+    expect(conflictSideMarkdown(present({ ...CLAIM, haiveVersion: '' }), UNIT)).toContain(
+      'Haive version: not recorded',
+    );
+    expect(conflictSideMarkdown(present({ ...CLAIM, templateId: 'a`b' }), UNIT)).toContain(
+      '- Template: `` a`b ``',
+    );
+    expect(conflictSideMarkdown(absent, UNIT)).toBe('Not set.');
+  });
+
+  it('keeps a value that is no claim as plain json', () => {
+    expect(conflictSideMarkdown(present(['a']), UNIT)).toBe('```json\n[\n  "a"\n]\n```');
+  });
+
+  it('keeps a template id from leaving its block', () => {
+    const md = conflictSideMarkdown(present({ ...CLAIM, templateId: '```\n# heading' }), UNIT);
+    expect(md.split('\n')).toHaveLength(4);
+    expect(md.split('\n')[0]).toBe('- Template: ```` ``` # heading ````');
+  });
+
+  it('keep mine names the claim file it writes, take theirs writes none', () => {
+    const keep = answerConfirmation('keep_mine', null, UNIT, PATH);
+    expect(keep.body).toContain(`the claim for ${PATH}`);
+    expect(keep.body).toContain(`.haive-data/state/${UNIT}`);
+    expect(keep.body).not.toContain('render.json');
+    expect(keep.body).toContain('Commit and push');
+    const take = answerConfirmation('take_theirs', null, UNIT, PATH);
+    expect(take.body).toContain(`the claim for ${PATH}`);
+    expect(take.body).toContain('No repository file is written');
+  });
+
+  it('reports each answer as what happened to the claim, not to render.json', () => {
+    expect(resolutionNotice([], [], ['keep_mine'])).toContain('Commit and push');
+    expect(resolutionNotice([], [], ['keep_mine'])).not.toContain('render.json');
+    expect(resolutionNotice([], [], ['take_theirs'])).toContain('now records the file');
   });
 });
 

@@ -8,6 +8,8 @@ import {
   ProjectStateError,
   conflictSide,
   emptyProjectState,
+  conflictSideValue,
+  isClaimUnit,
   isRenderUnit,
   mergeProjectState,
   normalizeProjectState,
@@ -17,6 +19,7 @@ import {
   renderProjectState,
   sameValue,
   type ProjectRender,
+  type ProjectStateClaim,
   type ProjectStateConflict,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
@@ -26,7 +29,13 @@ import {
   unionExpandedFor,
 } from '../step-engine/_upgrade-render.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
-import { loadPendingRenderConflicts, lockProjectState, overlayRender } from './write.js';
+import { claimDiskHash } from './claim-disk.js';
+import {
+  loadPendingRenderConflicts,
+  loadRecordClaims,
+  lockProjectState,
+  overlayRender,
+} from './write.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
@@ -114,7 +123,7 @@ async function readStateFiles(repoPath: string): Promise<Map<string, string> | n
 type Checkout =
   | { kind: 'absent' }
   | { kind: 'refused'; reason: string }
-  | { kind: 'record'; render: ProjectRender };
+  | { kind: 'record'; render: ProjectRender; claims: ProjectStateClaim[] };
 
 async function readCheckout(repoPath: string): Promise<Checkout> {
   const notRead = (detail: string): Checkout => ({
@@ -131,8 +140,8 @@ async function readCheckout(repoPath: string): Promise<Checkout> {
   if (files === null) return { kind: 'absent' };
   const parsed = parseProjectState(files);
   if (!parsed.ok) return notRead(listed(parsed.problems));
-  const { render } = parsed.record;
-  return render === null ? { kind: 'absent' } : { kind: 'record', render };
+  const { render, claims } = parsed.record;
+  return render === null ? { kind: 'absent' } : { kind: 'record', render, claims };
 }
 
 const recordOf = (render: ProjectRender | null): ProjectStateRecord => ({
@@ -221,6 +230,65 @@ async function recordConflicts(
       .update(schema.projectStateConflicts)
       .set({ resolution: 'converged', resolvedAt: new Date() })
       .where(eq(schema.projectStateConflicts.id, row.id));
+  }
+}
+
+/** A pending claim row stays while the claim still changed on both installs and the disk holds
+ *  neither side's bytes; a repeat of it follows the sides. One that no longer conflicts converged. */
+async function settleClaimConflicts(
+  tx: Tx,
+  repositoryId: string,
+  repoPath: string,
+  incomingClaims: readonly ProjectStateClaim[],
+): Promise<void> {
+  const pending = (
+    await tx
+      .select()
+      .from(schema.projectStateConflicts)
+      .where(
+        and(
+          eq(schema.projectStateConflicts.repositoryId, repositoryId),
+          isNull(schema.projectStateConflicts.resolvedAt),
+        ),
+      )
+  ).filter((row) => isClaimUnit(row.unit));
+  if (pending.length === 0) return;
+  const localClaims = await loadRecordClaims(tx, repositoryId);
+  for (const row of pending) {
+    const base = conflictSideValue(row.base) as ProjectStateClaim | undefined;
+    const known = [base, conflictSideValue(row.local), conflictSideValue(row.incoming)].find(
+      (side) => side !== undefined,
+    ) as ProjectStateClaim | undefined;
+    const path = known?.path;
+    const local = localClaims.find((c) => c.path === path);
+    const incoming = incomingClaims.find((c) => c.path === path);
+    const held = new Map<string, string | null>();
+    const claim = local ?? incoming ?? base;
+    if (claim !== undefined) held.set(claim.path, await claimDiskHash(repoPath, claim));
+    const of = (c: ProjectStateClaim | undefined): ProjectStateRecord => ({
+      ...emptyProjectState(),
+      claims: c === undefined ? [] : [c],
+    });
+    const merge = mergeProjectState({
+      base: of(base),
+      local: of(local),
+      incoming: of(incoming),
+      diskHash: (p) => held.get(p) ?? null,
+    });
+    if (!merge.conflicts.some(({ unit }) => unit === row.unit)) {
+      await tx
+        .update(schema.projectStateConflicts)
+        .set({ resolution: 'converged', resolvedAt: new Date() })
+        .where(eq(schema.projectStateConflicts.id, row.id));
+      continue;
+    }
+    const sides = { local: conflictSide(local), incoming: conflictSide(incoming) };
+    if (!sameValue(row.local, sides.local) || !sameValue(row.incoming, sides.incoming)) {
+      await tx
+        .update(schema.projectStateConflicts)
+        .set(sides)
+        .where(eq(schema.projectStateConflicts.id, row.id));
+    }
   }
 }
 
@@ -398,6 +466,7 @@ export async function syncProjectStateFromCheckout(
     }
 
     await recordConflicts(tx, repositoryId, merge.conflicts);
+    await settleClaimConflicts(tx, repositoryId, repoPath, checkout.claims);
 
     const lastError =
       merge.conflicts.length === 0

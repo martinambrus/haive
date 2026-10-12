@@ -9,6 +9,7 @@ import {
   conflictSideValue,
   emptyProjectState,
   isClaimablePath,
+  isClaimUnit,
   isRenderUnit,
   sameValue,
   normalizeProjectState,
@@ -49,6 +50,7 @@ export interface ProjectStateRecordInput {
 
 interface Look {
   pending: PendingRenderConflict[];
+  pendingClaims: PendingClaimConflict[];
   claims: ProjectStateClaim[];
   baseFiles: string[];
 }
@@ -108,11 +110,8 @@ export interface PendingRenderConflict {
   incoming: unknown;
 }
 
-export async function loadPendingRenderConflicts(
-  db: Database | Tx,
-  repositoryId: string,
-): Promise<PendingRenderConflict[]> {
-  const rows = await db
+async function loadPendingRows(db: Database | Tx, repositoryId: string) {
+  return db
     .select({
       unit: schema.projectStateConflicts.unit,
       base: schema.projectStateConflicts.base,
@@ -127,14 +126,40 @@ export async function loadPendingRenderConflicts(
       ),
     )
     .orderBy(asc(schema.projectStateConflicts.unit));
-  return rows
+}
+
+const sidesOf = (row: Awaited<ReturnType<typeof loadPendingRows>>[number]) => ({
+  unit: row.unit,
+  base: conflictSideValue(row.base),
+  local: conflictSideValue(row.local),
+  incoming: conflictSideValue(row.incoming),
+});
+
+export async function loadPendingRenderConflicts(
+  db: Database | Tx,
+  repositoryId: string,
+): Promise<PendingRenderConflict[]> {
+  return (await loadPendingRows(db, repositoryId))
     .filter((row) => isRenderUnit(row.unit))
-    .map((row) => ({
-      unit: row.unit,
-      base: conflictSideValue(row.base),
-      local: conflictSideValue(row.local),
-      incoming: conflictSideValue(row.incoming),
-    }));
+    .map(sidesOf);
+}
+
+/** A pending conflict of one artifact claim: its sides are the claim, `undefined` where a side
+ *  holds none. */
+export interface PendingClaimConflict {
+  unit: string;
+  base: unknown;
+  local: unknown;
+  incoming: unknown;
+}
+
+export async function loadPendingClaimConflicts(
+  db: Database | Tx,
+  repositoryId: string,
+): Promise<PendingClaimConflict[]> {
+  return (await loadPendingRows(db, repositoryId))
+    .filter((row) => isClaimUnit(row.unit))
+    .map(sidesOf);
 }
 
 /** The render unit with every contested key at `side`'s value, the whole unit first. A writer renders
@@ -158,7 +183,25 @@ export function overlayRender(
   return out as ProjectRender | null;
 }
 
-async function loadLocalBundles(db: Database | Tx, repositoryId: string): Promise<LocalBundle[]> {
+/** The claims with every contested one at `side`'s value: a side that holds none leaves the claim out.
+ *  The writer's record takes `incoming` and its sync base `base`, as for the render unit. */
+export function overlayClaims(
+  claims: readonly ProjectStateClaim[],
+  pending: readonly PendingClaimConflict[],
+  side: 'base' | 'local' | 'incoming',
+): ProjectStateClaim[] {
+  const contested = new Set(pending.map((row) => row.unit));
+  const out = claims.filter((claim) => !contested.has(claimFileName(claim.path)));
+  for (const row of pending) {
+    if (row[side] !== undefined) out.push(row[side] as ProjectStateClaim);
+  }
+  return out;
+}
+
+export async function loadLocalBundles(
+  db: Database | Tx,
+  repositoryId: string,
+): Promise<LocalBundle[]> {
   const bundles = await db
     .select({
       id: schema.customBundles.id,
@@ -281,22 +324,23 @@ export async function writeProjectStateRecord(
       record: {
         ...emptyProjectState(),
         render: overlayRender(portable, look.pending, 'incoming'),
-        claims: look.claims,
+        claims: overlayClaims(look.claims, look.pendingClaims, 'incoming'),
       },
       baseSnapshot: normalizeProjectState({
         ...emptyProjectState(),
         render: overlayRender(portable, look.pending, 'base'),
-        claims: look.claims,
+        claims: overlayClaims(look.claims, look.pendingClaims, 'base'),
       }),
     });
     const lookAt = async (reader: Database | Tx): Promise<Look> => ({
       pending: await loadPendingRenderConflicts(reader, repositoryId),
+      pendingClaims: await loadPendingClaimConflicts(reader, repositoryId),
       claims: await loadRecordClaims(reader, repositoryId),
       baseFiles: await loadBaseClaimFiles(reader, repositoryId),
     });
     // A first look only, so its failure must not clear the column: the files then wait for the locked read.
     let seen: Look | null = expectedColumns ? null : await lookAt(db).catch(() => null);
-    let plan = planFor(seen ?? { pending: [], claims: [], baseFiles: [] });
+    let plan = planFor(seen ?? { pending: [], pendingClaims: [], claims: [], baseFiles: [] });
     const writeFiles = async (baseFiles: readonly string[]): Promise<void> => {
       const files = renderProjectState(plan.record);
       const produced = new Set<string>();
@@ -337,7 +381,7 @@ export async function writeProjectStateRecord(
         .update(schema.repositories)
         .set({ renderContext: column })
         .where(eq(schema.repositories.id, repositoryId));
-      await recordLocalSide(tx, repositoryId, portable);
+      await recordLocalSide(tx, repositoryId, portable, now.claims);
       await tx
         .insert(schema.projectStateSync)
         .values({ repositoryId, ...synced })
@@ -387,18 +431,16 @@ export async function refuseMovedColumn(
  *  is cleared and every reader falls back to those rows' snapshot. One a sync moved past `expected`
  *  meanwhile is newer than both and stays. */
 /** The value this install now holds for each pending key becomes the row's local side; a key that
- *  now holds what the other side has is no longer contested. */
+ *  now holds what the other side has is no longer contested. `claims` are the live claims, when the
+ *  caller has read them: without them a pending claim is left as it was. */
 async function recordLocalSide(
   tx: Tx,
   repositoryId: string,
   rendered: ProjectRender | null,
+  claims?: readonly ProjectStateClaim[],
 ): Promise<void> {
-  for (const row of await loadPendingRenderConflicts(tx, repositoryId)) {
-    const local =
-      row.unit === RENDER_UNIT
-        ? rendered
-        : (rendered as Record<string, unknown> | null)?.[row.unit.slice(RENDER_UNIT.length + 1)];
-    if (sameValue(local, row.local)) continue;
+  const settle = async (row: PendingRenderConflict, local: unknown): Promise<void> => {
+    if (sameValue(local, row.local)) return;
     const agreed = sameValue(local, row.incoming);
     await tx
       .update(schema.projectStateConflicts)
@@ -414,6 +456,21 @@ async function recordLocalSide(
           isNull(schema.projectStateConflicts.resolvedAt),
         ),
       );
+  };
+  for (const row of await loadPendingRenderConflicts(tx, repositoryId)) {
+    await settle(
+      row,
+      row.unit === RENDER_UNIT
+        ? rendered
+        : (rendered as Record<string, unknown> | null)?.[row.unit.slice(RENDER_UNIT.length + 1)],
+    );
+  }
+  if (claims === undefined) return;
+  for (const row of await loadPendingClaimConflicts(tx, repositoryId)) {
+    await settle(
+      row,
+      claims.find((claim) => claimFileName(claim.path) === row.unit),
+    );
   }
 }
 
