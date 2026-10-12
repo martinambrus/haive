@@ -3396,7 +3396,7 @@ async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload
   } catch (err) {
     if (err instanceof RagCleanupDeferredError) {
       logger.warn({ repositoryId: payload.repositoryId, err }, 'repo rag cleanup deferred');
-      await refundRepoCleanupAttempt(db, payload.cleanupId);
+      await refundRepoCleanupAttempt(db, payload.cleanupId, payload.claimStamp);
     }
     throw err;
   }
@@ -3415,13 +3415,21 @@ async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload
 async function refundRepoCleanupAttempt(
   db: Database,
   cleanupId: string | undefined,
+  claimStamp: string | undefined,
 ): Promise<void> {
-  if (!cleanupId) return;
+  if (!cleanupId || !claimStamp) return;
+  const claimed = new Date(claimStamp);
   try {
+    // Moving the stamp consumes the claim, so a redelivered job cannot refund it twice.
     await db
       .update(schema.repoCleanups)
-      .set({ attempts: sql`greatest(${schema.repoCleanups.attempts} - 1, 0)` })
-      .where(eq(schema.repoCleanups.id, cleanupId));
+      .set({
+        attempts: sql`greatest(${schema.repoCleanups.attempts} - 1, 0)`,
+        lastEnqueuedAt: new Date(claimed.getTime() + 1),
+      })
+      .where(
+        and(eq(schema.repoCleanups.id, cleanupId), eq(schema.repoCleanups.lastEnqueuedAt, claimed)),
+      );
   } catch (refundErr) {
     logger.warn({ cleanupId, err: refundErr }, 'repo cleanup attempt refund failed');
   }

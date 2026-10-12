@@ -571,6 +571,7 @@ export async function redriveRepoCleanups(
           {
             ...(row.payload as RepoRagCleanupPayload | RepoResourceCleanupPayload),
             cleanupId: row.id,
+            claimStamp: stamp.toISOString(),
           },
           // The stamp keeps ids unique when a refunded attempt is counted again.
           `repo-cleanup-${row.id}-${attempt}-${stamp.getTime()}`,

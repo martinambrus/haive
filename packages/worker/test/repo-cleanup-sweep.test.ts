@@ -210,7 +210,8 @@ describe('redriveRepoCleanups', () => {
 describe('the rag cleanup job', () => {
   beforeEach(() => h.ragCleanup.mockClear());
 
-  const run = (cleanupId?: string) =>
+  const CLAIM = new Date('2026-10-12T08:00:00.000Z');
+  const run = (cleanupId?: string, claimStamp: string | null = CLAIM.toISOString()) =>
     processTaskJob({
       name: TASK_JOB_NAMES.CLEANUP_REPO_RAG,
       data: {
@@ -218,6 +219,7 @@ describe('the rag cleanup job', () => {
         repositoryId: REPO,
         projectNames: ['p'],
         ...(cleanupId ? { cleanupId } : {}),
+        ...(claimStamp ? { claimStamp } : {}),
       },
     } as unknown as Job);
 
@@ -260,12 +262,40 @@ describe('the rag cleanup job', () => {
 
     it('refunds the attempt it was queued with, floored at zero, and keeps the row', async () => {
       const { fake, add } = setup();
-      add(1, { kind: 'rag', attempts: 3 });
+      add(1, { kind: 'rag', attempts: 3, lastEnqueuedAt: CLAIM });
       h.db = fake.db;
       h.ragCleanup.mockRejectedValueOnce(new RagCleanupDeferredError(REPO, 'a sync holds it'));
       await expect(run(ROW(1))).rejects.toBeInstanceOf(RagCleanupDeferredError);
       expect(fake.rows(schema.repoCleanups)).toHaveLength(1);
       expect(renderedAttempts(fake)).toBe('greatest("repo_cleanups"."attempts" - 1, 0)');
+      expect(fake.rows(schema.repoCleanups)[0]!.lastEnqueuedAt).toEqual(
+        new Date(CLAIM.getTime() + 1),
+      );
+    });
+
+    it('refunds a claim once, however often the job is delivered', async () => {
+      const { fake, add } = setup();
+      add(1, { kind: 'rag', attempts: 3, lastEnqueuedAt: CLAIM });
+      h.db = fake.db;
+      h.ragCleanup.mockRejectedValue(new RagCleanupDeferredError(REPO, 'a sync holds it'));
+      await expect(run(ROW(1))).rejects.toBeInstanceOf(RagCleanupDeferredError);
+      // The fake keeps the refund as SQL; a plain number shows whether a second refund lands.
+      await fake.db
+        .update(schema.repoCleanups)
+        .set({ attempts: 2 })
+        .where(eq(schema.repoCleanups.id, ROW(1)));
+      await expect(run(ROW(1))).rejects.toBeInstanceOf(RagCleanupDeferredError);
+      h.ragCleanup.mockReset();
+      expect(fake.rows(schema.repoCleanups)[0]!.attempts).toBe(2);
+    });
+
+    it('refunds nothing for a job no sweep counted', async () => {
+      const { fake, add } = setup();
+      add(1, { kind: 'rag', attempts: 3, lastEnqueuedAt: CLAIM });
+      h.db = fake.db;
+      h.ragCleanup.mockRejectedValueOnce(new RagCleanupDeferredError(REPO, 'a sync holds it'));
+      await expect(run(ROW(1), null)).rejects.toBeInstanceOf(RagCleanupDeferredError);
+      expect(fake.rows(schema.repoCleanups)[0]!.attempts).toBe(3);
     });
 
     it('leaves attempts alone when the job carries no cleanupId', async () => {
