@@ -1,4 +1,4 @@
-import { RAG_TABLE, type RagConnection } from '@haive/shared/rag';
+import { RAG_TABLE, TASK_SOURCE_TYPE, type RagConnection } from '@haive/shared/rag';
 
 export interface DensePoolCheck {
   indexRows: number;
@@ -20,7 +20,7 @@ export async function checkDensePool(
   limit: number,
   repositoryId?: string,
 ): Promise<DensePoolCheck> {
-  const where = repositoryId ? 'WHERE repository_id = $3' : '';
+  const where = `WHERE source_type <> '${TASK_SOURCE_TYPE}'${repositoryId ? ' AND repository_id = $3' : ''}`;
   const sql = `SELECT id FROM ${RAG_TABLE} ${where}
     ORDER BY (vector::halfvec(${dims})) <=> ($1::vector)::halfvec(${dims}) LIMIT $2`;
   const params = repositoryId ? [vectorLiteral, limit, repositoryId] : [vectorLiteral, limit];

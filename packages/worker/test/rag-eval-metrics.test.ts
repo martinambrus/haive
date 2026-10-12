@@ -8,6 +8,7 @@ import {
   scoreQuery,
   summarizeScores,
 } from '../scripts/rag-eval-metrics.js';
+import { checkDensePool } from '../scripts/rag-eval-dense.js';
 
 describe('rankOfExpected', () => {
   it('is the 1-based rank of the first source path holding the substring', () => {
@@ -152,5 +153,17 @@ describe('parseQuerySet gold entries', () => {
 
   it('rejects an entry with neither gold nor expected', () => {
     expect(() => parseQuerySet([{ query: 'q' }], 's.json')).toThrow('s.json[0]');
+  });
+});
+
+describe('checkDensePool', () => {
+  it('leaves per-task embeddings out of both pools, as the production dense query does', async () => {
+    const sent: string[] = [];
+    const tx = { unsafe: async (q: string) => (sent.push(q), []) };
+    const pg = { begin: async (_mode: string, fn: (t: typeof tx) => unknown) => fn(tx) };
+    await checkDensePool(pg as never, '[0.1]', 2, 50, 'repo-1');
+    const reads = sent.filter((q) => q.includes('ORDER BY'));
+    expect(reads.length).toBeGreaterThan(0);
+    for (const q of reads) expect(q).toContain("source_type <> 'task'");
   });
 });
