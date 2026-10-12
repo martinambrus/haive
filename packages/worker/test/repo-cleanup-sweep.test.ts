@@ -106,6 +106,23 @@ describe('redriveRepoCleanups', () => {
     expect(queued[0]!.jobId).not.toBe(queued[1]!.jobId);
   });
 
+  it('rolls back only its own claim when a later sweep claimed the row meanwhile', async () => {
+    const { fake, db, add } = setup();
+    add(1, { attempts: 1, lastEnqueuedAt: ago(REPO_CLEANUP_STALE_MS + 60_000) });
+    const later = new Date(Date.now() + 60_000);
+    const deps: RepoCleanupDeps = {
+      enqueueRepoCleanup: async () => {
+        await db
+          .update(schema.repoCleanups)
+          .set({ lastEnqueuedAt: later, attempts: 3 })
+          .where(eq(schema.repoCleanups.id, ROW(1)));
+        throw new Error('queue refused');
+      },
+    };
+    await redriveRepoCleanups(db, deps);
+    expect(fake.rows(schema.repoCleanups)[0]).toMatchObject({ attempts: 3, lastEnqueuedAt: later });
+  });
+
   it('leaves a just-written row to the api that is queuing it', async () => {
     const { db, add, queued, deps } = setup();
     add(1, { createdAt: new Date() });

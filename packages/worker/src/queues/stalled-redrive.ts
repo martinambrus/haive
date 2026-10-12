@@ -579,7 +579,9 @@ export async function redriveRepoCleanups(
         await db
           .update(schema.repoCleanups)
           .set({ lastEnqueuedAt: row.lastEnqueuedAt, attempts: row.attempts })
-          .where(eq(schema.repoCleanups.id, row.id));
+          .where(
+            and(eq(schema.repoCleanups.id, row.id), eq(schema.repoCleanups.lastEnqueuedAt, stamp)),
+          );
         throw err;
       }
       queued++;
