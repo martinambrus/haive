@@ -19,6 +19,25 @@ function runDocker(args: string[], timeoutMs: number): Promise<string> {
   });
 }
 
+/** A task's cli sandboxes that are running or about to: the runner creates, connects networks, then
+ *  starts, and `docker ps` alone lists only running ones. */
+function cliSandboxListArgs(taskId: string): string[] {
+  return [
+    'ps',
+    '-aq',
+    '--filter',
+    `label=haive.task.id=${taskId}`,
+    '--filter',
+    `name=^${containerPrefix(CONTAINER_FAMILY.cli)}`,
+    '--filter',
+    'status=created',
+    '--filter',
+    'status=running',
+    '--filter',
+    'status=restarting',
+  ];
+}
+
 /** Force-remove the per-task cli-exec sandbox containers (named `haive-cli-…`,
  *  docker-runner.ts) for a task, WITHOUT touching the DDEV runtime (`haive-ddev-…`)
  *  or the app runner. The cli sandboxes carry only `haive.task.id`, the SAME label
@@ -31,17 +50,7 @@ function runDocker(args: string[], timeoutMs: number): Promise<string> {
  *  sandbox caught alongside is harmless (those runs are non-essential). Best-effort:
  *  docker errors are swallowed. Returns the number of containers removed. */
 export async function killCliSandboxesForTask(taskId: string): Promise<number> {
-  const list = await runDocker(
-    [
-      'ps',
-      '-q',
-      '--filter',
-      `label=haive.task.id=${taskId}`,
-      '--filter',
-      `name=^${containerPrefix(CONTAINER_FAMILY.cli)}`,
-    ],
-    10_000,
-  );
+  const list = await runDocker(cliSandboxListArgs(taskId), 10_000);
   const ids = list.split(/\s+/).filter((s) => s.length > 0);
   if (ids.length === 0) return 0;
   await runDocker(['rm', '-f', ...ids], 30_000);
@@ -53,14 +62,7 @@ export async function killCliSandboxesForTask(taskId: string): Promise<number> {
 export async function listCliSandboxesForTask(taskId: string): Promise<string[] | null> {
   return new Promise<string[] | null>((resolve) => {
     let stdout = '';
-    const child = spawn('docker', [
-      'ps',
-      '-q',
-      '--filter',
-      `label=haive.task.id=${taskId}`,
-      '--filter',
-      `name=^${containerPrefix(CONTAINER_FAMILY.cli)}`,
-    ]);
+    const child = spawn('docker', cliSandboxListArgs(taskId));
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       resolve(null);

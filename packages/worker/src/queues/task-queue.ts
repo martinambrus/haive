@@ -86,7 +86,7 @@ import {
   syncRefreshedAuthToUserVolumes,
 } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
-import { listCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
+import { killCliSandboxesForTask, listCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers, killRepoIdeRunner } from '../sandbox/ide-runner.js';
 import {
@@ -3384,6 +3384,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
       ),
     );
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  await killCliSandboxesForTask(payload.taskId);
   // The cleanup above swallows docker failures, so the claims and the finish record wait for a
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
   const sandboxesGone = (await listCliSandboxesForTask(payload.taskId))?.length === 0;

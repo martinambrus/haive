@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -270,10 +271,14 @@ async function main(): Promise<void> {
         'case "$1" in',
         '  ps)',
         '    [ "$FAKE_DOCKER_MODE" = fail ] && exit 1',
+        '    if [ "$FAKE_DOCKER_MODE" = created ]; then',
+        '      case "$*" in *name=*status=created*) [ -e "$FAKE_DOCKER_DIR/removed" ] || echo fake0001;; esac',
+        '      exit 0',
+        '    fi',
         '    if [ "$FAKE_DOCKER_MODE" = stuck ] || [ ! -e "$FAKE_DOCKER_DIR/removed" ]; then echo fake0001; fi',
         '    exit 0;;',
         '  rm)',
-        '    [ "$FAKE_DOCKER_MODE" = stuck ] || : > "$FAKE_DOCKER_DIR/removed"',
+        '    case "$*" in *fake0001*) [ "$FAKE_DOCKER_MODE" = stuck ] || : > "$FAKE_DOCKER_DIR/removed";; esac',
         '    exit 0;;',
         'esac',
         'exit 0',
@@ -285,7 +290,7 @@ async function main(): Promise<void> {
     process.env.PATH = `${fakeDir}:${realPath}`;
     process.env.FAKE_DOCKER_DIR = fakeDir;
     try {
-      for (const mode of ['stuck', 'fail', 'removed'] as const) {
+      for (const mode of ['stuck', 'fail', 'removed', 'created'] as const) {
         await rm(path.join(fakeDir, 'removed'), { force: true });
         process.env.FAKE_DOCKER_MODE = mode;
         const [t] = await db
@@ -340,7 +345,10 @@ async function main(): Promise<void> {
         const status = (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, t.id) }))
           ?.status;
         if (status !== 'cancelled') throw new Error(`${mode}: expected cancelled, got ${status}`);
-        if (mode === 'removed') {
+        if (mode === 'created' && !existsSync(path.join(fakeDir, 'removed'))) {
+          throw new Error('created: expected the created-but-not-started sandbox removed');
+        }
+        if (mode === 'removed' || mode === 'created') {
           if (!isFinished || claimsLeft !== 0) {
             throw new Error(
               `${mode}: expected the claim released and the finish recorded, got finished=${isFinished} claims=${claimsLeft}`,
