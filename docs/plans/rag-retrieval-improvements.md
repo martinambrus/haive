@@ -342,14 +342,16 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   it switches to a sequential scan or the `repository_id` btree plus a sort (590-830 ms), so a fix
   must raise `ef_search` and force the index path inside the dense read's transaction, as
   `denseRead` does for the global store. DECIDED and built (user, 2026-10-12): a per-repo dense read
-  sets `hnsw.ef_search` 200 and `cpu_operator_cost` 0.1 for its own transaction. The cost knob is
-  what keeps the planner on HNSW for a repository that fills its store, while a repository holding
-  5% or less of a shared store keeps its exact btree/bitmap sort; `enable_sort = off` also reached
-  HNSW but cut a 5% repository's pool to 8 rows. On the P0 store: recall@8 0.681 → 0.719 overall,
-  0.590 → 0.680 paraphrased, 0.554 → 0.568 real; search p95 at k=8 48 → 59 ms. On a simulated shared
-  store a repository holding 20% of the rows gets 50 and 22 dense candidates where it got 8 before:
-  a filtered HNSW scan still runs short there, which `hnsw.iterative_scan` would fill at ~6 ms more
-  per read (unmeasured on a shared store). → P3.
+  sets `hnsw.ef_search` 200, `cpu_operator_cost` 0.1 and `hnsw.iterative_scan` `relaxed_order` for
+  its own statement, and puts the prior values back afterwards, because the api runs the search
+  inside its own transaction and `SET LOCAL` would otherwise reach the knowledge-reserve query. The
+  cost knob is what keeps the planner on HNSW for a repository that fills its store, while a
+  repository holding 5% or less of a shared store keeps its exact btree/bitmap sort; `enable_sort =
+  off` also reached HNSW but cut a 5% repository's pool to 8 rows. The iterative scan fills a shared
+  store's pool: on a simulated 5-repository copy of the P0 store, a repository holding 20% of the
+  rows got 34-39 of 50 candidates with the wider search alone and 50 on all 41 queries with it
+  (overlap with an exact top 50 0.829 → 0.988). On the P0 store: recall@8 0.681 → 0.719 overall,
+  0.590 → 0.680 paraphrased, 0.554 → 0.568 real; search p95 at k=8 48 → 65 ms. → P3.
 - **F15. Deleted vectors keep their index space.** The dev install's shared project store holds 0
   rows and a 0-byte heap, yet 312 MB, 275 MB of it the HNSW index; the vectors of the repositories
   deleted since stay allocated in it. A full re-embed churns the index the same way. → P1.
