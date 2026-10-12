@@ -5,6 +5,7 @@ import {
   SKIPPABLE_STEP_IDS,
 } from '@haive/shared';
 import type { StepRegistry } from '../registry.js';
+import type { StepDefinition } from '../step-definition.js';
 import { PATH_STEP_SETS, PATH_REQUIRED_TARGETS } from '../../orchestrator/execution-paths.js';
 import { registerEnvReplicateSteps } from './env-replicate/index.js';
 import { registerOnboardingSteps } from './onboarding/index.js';
@@ -23,6 +24,10 @@ export {
   registerRunAppSteps,
   registerPlanSteps,
 };
+
+export function dispatchesCli(def: StepDefinition): boolean {
+  return Boolean(def.llm || def.agentMining || def.dagExecute);
+}
 
 export function registerAllSteps(registry: StepRegistry): void {
   registerOnboardingSteps(registry);
@@ -131,7 +136,7 @@ function assertCliDispatchListInSync(registry: StepRegistry): void {
   const actual = new Set(
     registry
       .all()
-      .filter((d) => Boolean(d.llm || d.agentMining || d.dagExecute))
+      .filter(dispatchesCli)
       .map((d) => d.metadata.id),
   );
   const declared = new Set(CLI_DISPATCH_STEP_IDS);
