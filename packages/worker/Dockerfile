@@ -62,17 +62,20 @@ COPY packages/database/package.json ./packages/database/
 COPY packages/api/package.json ./packages/api/
 COPY packages/worker/package.json ./packages/worker/
 COPY packages/web/package.json ./packages/web/
+COPY modules ./modules
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
 COPY packages/shared ./packages/shared
 COPY packages/database ./packages/database
 COPY packages/worker ./packages/worker
+COPY scripts/gen-modules.mjs ./scripts/gen-modules.mjs
 # @haive/shared imports @haive/database, so database's dist must exist before
 # shared (and worker) build; build it first (deps before dependents). See the
 # matching .dockerignore **/node_modules fix and packages/web/Dockerfile.
 RUN pnpm --filter @haive/database build \
  && pnpm --filter @haive/shared build \
+ && pnpm --filter './modules/*' build \
  && pnpm --filter @haive/worker build
 
 FROM base AS production
@@ -94,6 +97,8 @@ COPY --from=builder /app/packages/database/dist ./packages/database/dist
 # reason the worker image already copies sandbox-image/ and docker/.
 COPY --from=builder /app/packages/database/migrations ./packages/database/migrations
 COPY --from=builder /app/packages/database/node_modules ./packages/database/node_modules
+# Each module ships whole: package.json, dist and its own node_modules (symlinks into /app/node_modules).
+COPY --from=builder /app/modules ./modules
 COPY --from=builder /app/packages/worker/package.json ./packages/worker/
 COPY --from=builder /app/packages/worker/dist ./packages/worker/dist
 COPY --from=builder /app/packages/worker/node_modules ./packages/worker/node_modules
