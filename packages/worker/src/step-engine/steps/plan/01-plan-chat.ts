@@ -85,7 +85,7 @@ function buildChatPrompt(d: PlanChatDetect): string {
   // cannot be grouped the way `loadPriorFixContext` groups rounds — and the user's turns are
   // the operator speaking, which must never be fenced. What YOU said earlier is your own
   // output, and an earlier turn may have quoted a repository file it read.
-  const history = recentTurns(d.transcript, PLAN_CHAT_HISTORY_MAX_CHARS);
+  const history = recentTurns(d.transcript, PLAN_CHAT_HISTORY_MAX_CHARS, { keepNewest: true });
   return [
     'You are editing a project plan through conversation.',
     '',

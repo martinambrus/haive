@@ -186,7 +186,7 @@ export function priorResolutionLines(
   transcript: { role: string; body: string }[],
   prior: PriorResolution,
 ): string[] {
-  const history = recentTurns(transcript, PRIOR_HISTORY_MAX_CHARS);
+  const history = recentTurns(transcript, PRIOR_HISTORY_MAX_CHARS, { keepNewest: false });
   const shown = prior.entries.filter((e) => isListableName(e.path));
   const unlisted = prior.more + (prior.entries.length - shown.length);
   return [

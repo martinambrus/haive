@@ -1,11 +1,12 @@
 import { fencedAgentBlock } from '../step-engine/steps/_untrusted-repo.js';
 
-/** A conversation for a prompt: the newest whole turns within `maxChars` (the newest always, since it
- *  may be the request being answered), with a count of the earlier ones left out. The user's turns
+/** A conversation for a prompt: the newest whole turns within `maxChars`, with a count of the earlier
+ *  ones left out. `keepNewest` keeps the newest past the budget, for a prompt that states it nowhere else. The user's turns
  *  are the operator speaking and never fenced; the agent's own may have quoted a repository file. */
 export function recentTurns(
   transcript: { role: string; body: string }[],
   maxChars: number,
+  opts: { keepNewest: boolean },
 ): string {
   const turns = transcript.map((m) =>
     m.role === 'user' ? `User: ${m.body}` : `You:\n${fencedAgentBlock(m.body)}`,
@@ -14,7 +15,7 @@ export function recentTurns(
   let size = 0;
   while (kept < turns.length) {
     const next = turns[turns.length - 1 - kept]!.length;
-    if (kept > 0 && size + next > maxChars) break;
+    if ((kept > 0 || !opts.keepNewest) && size + next > maxChars) break;
     size += next;
     kept += 1;
   }
