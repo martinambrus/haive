@@ -18,9 +18,11 @@ export const SECRET_KEYS = {
   GLOBAL_KB_CONNECTION_STRING: 'global_kb_connection_string',
 } as const;
 
+const CACHE_TTL_MS = 30_000;
+
 export class SecretsService {
   private encryptionKey: string | null = null;
-  private cache = new Map<string, string>();
+  private cache = new Map<string, { value: string; expiresAt: number }>();
   private initialized = false;
   private db: DbClient | null = null;
 
@@ -34,9 +36,8 @@ export class SecretsService {
 
   async get(key: string): Promise<string | null> {
     this.ensureInitialized();
-    if (this.cache.has(key)) {
-      return this.cache.get(key)!;
-    }
+    const cached = this.cache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
     const row = await this.db!.query.systemSecrets.findFirst({
       where: eq(schema.systemSecrets.key, key),
       columns: { encryptedValue: true },
@@ -44,7 +45,7 @@ export class SecretsService {
     if (!row) return null;
     try {
       const plaintext = decrypt(row.encryptedValue, this.encryptionKey!);
-      this.cache.set(key, plaintext);
+      this.cache.set(key, { value: plaintext, expiresAt: Date.now() + CACHE_TTL_MS });
       return plaintext;
     } catch (err) {
       logger.error({ key, err }, 'Failed to decrypt secret');
@@ -79,7 +80,7 @@ export class SecretsService {
           updatedAt: new Date(),
         },
       });
-    this.cache.set(key, value);
+    this.cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
   }
 
   async delete(key: string): Promise<void> {
