@@ -183,7 +183,11 @@ describe('commit steps stage only the paths their step outputs record', () => {
     }
   }
 
-  const fakeDb = (artifactPaths: string[] = [], repositoryRow?: Record<string, unknown>) => {
+  const fakeDb = (
+    artifactPaths: string[] = [],
+    repositoryRow?: Record<string, unknown>,
+    planNodes?: unknown[],
+  ) => {
     const rowsFor = (table: unknown): unknown[] => {
       if (table === schema.tasks) return [{ repositoryId: 'r1' }];
       if (table === schema.repositories && repositoryRow) return [repositoryRow];
@@ -210,7 +214,36 @@ describe('commit steps stage only the paths their step outputs record', () => {
     const none = { findFirst: async () => undefined, findMany: async () => [] };
     // The first transaction (the record's own) is refused; the clearing one after it goes through.
     let transactions = 0;
+    const planTx = () => {
+      const planRows = (table: unknown): unknown[] => {
+        if (table === schema.planMirrorState) return [{ revision: 1, writtenRevision: 0 }];
+        if (table === schema.planNodes) return planNodes ?? [];
+        return [];
+      };
+      const tx = {
+        execute: async () => [],
+        update: () => ({ set: () => ({ where: async () => [] }) }),
+        select: () => {
+          let table: unknown;
+          const chain: Record<string, unknown> = {};
+          Object.assign(chain, {
+            from: (t: unknown) => {
+              table = t;
+              return chain;
+            },
+            where: () => chain,
+            orderBy: () => chain,
+            limit: async () => planRows(table),
+            then: (resolve: (rows: unknown[]) => unknown, reject: (err: unknown) => unknown) =>
+              Promise.resolve(planRows(table)).then(resolve, reject),
+          });
+          return chain;
+        },
+      };
+      return tx;
+    };
     const transaction = async (run: (tx: unknown) => Promise<unknown>) => {
+      if (planNodes) return run(planTx());
       if (++transactions === 1) throw new Error('database refused');
       await run({
         execute: async () => [],
@@ -224,6 +257,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
     repo: string,
     artifactPaths?: string[],
     repositoryRow?: Record<string, unknown>,
+    planNodes?: unknown[],
   ): StepContext =>
     ({
       repoPath: repo,
@@ -232,7 +266,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
       taskId: 't1',
       taskStepId: 's1',
       logger,
-      db: fakeDb(artifactPaths, repositoryRow),
+      db: fakeDb(artifactPaths, repositoryRow, planNodes),
     }) as unknown as StepContext;
 
   async function twelve(
@@ -240,9 +274,10 @@ describe('commit steps stage only the paths their step outputs record', () => {
     outputs: Outputs,
     artifactPaths: string[] = [],
     repositoryRow?: Record<string, unknown>,
+    planNodes?: unknown[],
   ) {
     stepOutputs.current = outputs;
-    return postOnboardingStep.apply(ctxFor(repo, artifactPaths, repositoryRow), {
+    return postOnboardingStep.apply(ctxFor(repo, artifactPaths, repositoryRow, planNodes), {
       detected: { hasGit: true, currentBranch: 'main' } as never,
       formValues: { commit: true, commitMessage: 'chore: onboard' },
       iteration: 0,
@@ -608,6 +643,103 @@ describe('commit steps stage only the paths their step outputs record', () => {
         '.haive-data/knowledge_base/moved.md',
       ].sort(),
     );
+  });
+
+  const planNode = {
+    id: '00000000-0000-4000-8000-0000000000c1',
+    parentId: null,
+    path: 'c1',
+    ordinal: 0,
+    title: 'Shop',
+    kind: 'component',
+    body: null,
+    status: 'todo',
+    taskable: false,
+    version: 1,
+    createdBy: 'user',
+    sourceTaskId: null,
+    lastReviewedAt: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  };
+  const emptyMirrorRow = {
+    onboardingEnvironment: null,
+    onboardingTooling: null,
+    scopeExcludeGlobs: null,
+  };
+
+  it('12: the plan file the mirror wrote is committed and the symlink it refused is not', async () => {
+    const repo = await seeded();
+    await put(repo, { '.claude/agents/a.md': 'a\n' });
+    const outside = await mkdtemp(path.join(tmpdir(), 'commit-scope-out-'));
+    dirs.push(outside);
+    await mkdir(path.join(repo, '.haive-data'), { recursive: true });
+    await symlink(path.join(outside, 'elsewhere.md'), path.join(repo, '.haive-data/plan.md'));
+    const out = await twelve(
+      repo,
+      {
+        '07-generate-files': { output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] } },
+      },
+      [],
+      emptyMirrorRow,
+      [planNode],
+    );
+    expect(out.warnings.some((w) => w.includes('plan mirror failed'))).toBe(true);
+    expect(out.commitPerformed).toBe(true);
+    const files = await tracked(repo);
+    expect(files).toContain('.haive-data/plan.json');
+    expect(files).not.toContain('.haive-data/plan.md');
+  });
+
+  it('13: a tracked plan file missing after a failed mirror refresh is not committed as a deletion', async () => {
+    const repo = await seeded({ '.haive-data/plan.json': '{}\n', '.haive-data/plan.md': 'p\n' });
+    await rm(path.join(repo, '.haive-data/plan.json'));
+    await rm(path.join(repo, '.haive-data/plan.md'));
+    await put(repo, { '.claude/agents/a.md': 'a\n' });
+    const out = await twelve(
+      repo,
+      {
+        '07-generate-files': { output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] } },
+      },
+      [],
+      emptyMirrorRow,
+    );
+    expect(out.warnings.some((w) => w.includes('plan mirror failed'))).toBe(true);
+    expect(out.commitPerformed).toBe(true);
+    const files = await tracked(repo);
+    expect(files).toContain('.haive-data/plan.json');
+    expect(files).toContain('.haive-data/plan.md');
+  });
+
+  it('13b: a plan with no nodes still commits the removal of the mirror files it removed', async () => {
+    const repo = await seeded({ '.haive-data/plan.json': '{}\n', '.haive-data/plan.md': 'p\n' });
+    await put(repo, { '.claude/agents/a.md': 'a\n' });
+    const out = await twelve(
+      repo,
+      {
+        '07-generate-files': { output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] } },
+      },
+      [],
+      emptyMirrorRow,
+      [],
+    );
+    expect(out.commitPerformed).toBe(true);
+    const files = await tracked(repo);
+    expect(files).not.toContain('.haive-data/plan.json');
+    expect(files).not.toContain('.haive-data/plan.md');
+  });
+
+  it('14: a canonical legacy move is committed although legacy/<rel> already exists', async () => {
+    const repo = await seeded({ '.claude/knowledge_base/A.md': 'a\n' });
+    const kb = path.join(repo, '.haive-data', 'knowledge_base');
+    await mkdir(path.join(kb, 'legacy'), { recursive: true });
+    await writeFile(path.join(kb, 'legacy', 'A.md'), 'imported earlier\n');
+    await rename(path.join(repo, '.claude/knowledge_base/A.md'), path.join(kb, 'A.md'));
+    const out = await twelve(repo, { '08-knowledge-acquisition': { output: { written: [] } } });
+    expect(out.commitPerformed).toBe(true);
+    const files = await tracked(repo);
+    expect(files).toContain('.haive-data/knowledge_base/A.md');
+    expect(files).not.toContain('.claude/knowledge_base/A.md');
   });
 
   it('8: 12 stages a file 07 skipped on a Retry that has a manifest row', async () => {

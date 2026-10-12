@@ -75,16 +75,9 @@ const INIT_COMMIT_MESSAGE = [
   `${HAIVE_DATA_DIR}/ (knowledge base, learnings, onboarding metadata).`,
 ].join('\n');
 
-// Removed when the plan has no nodes, so the mirror files can leave a committed tree.
-const PLAN_MIRROR_PATHS = [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown];
-
-// Fixed names an earlier step (04, 12 itself) writes, staged whenever they exist: a mirror write
-// that failed part way leaves files the call never returned. Everything else comes from the step outputs.
-const FIXED_STAGE_PATHS = [
-  '.claude/mcp_settings.json',
-  '.haive/install.json',
-  ...PLAN_MIRROR_PATHS,
-];
+// Fixed names an earlier step (04, 12 itself) writes, staged whenever they exist.
+// Everything else comes from the step outputs.
+const FIXED_STAGE_PATHS = ['.claude/mcp_settings.json', '.haive/install.json'];
 
 // Rules files onboarding writes that are NOT tracked as onboarding_artifacts, so
 // the artifact union below would miss them: the import stubs (CLAUDE.md/GEMINI.md).
@@ -98,6 +91,7 @@ async function resolveStagePlan(
   ctx: StepContext,
   repositoryId: string | null,
   ownFiles: readonly string[],
+  ownRemoved: readonly string[],
 ): Promise<{ add: string[]; remove: string[] }> {
   const recorded = await collectOnboardingStagePaths(ctx.repoPath, ctx.db, ctx.taskId);
   const add = new Set<string>([
@@ -121,7 +115,7 @@ async function resolveStagePlan(
       );
     for (const r of artifactRows) add.add(r.diskPath);
   }
-  return { add: [...add], remove: [...recorded.remove, ...PLAN_MIRROR_PATHS] };
+  return { add: [...add], remove: [...recorded.remove, ...ownRemoved] };
 }
 
 /** Used only when neither the repo's bound credential nor the user carries an identity,
@@ -375,6 +369,7 @@ async function writeHaiveDataMirror(
   ctx: StepContext,
   repositoryId: string,
   filesWritten: string[],
+  filesRemoved: string[],
 ): Promise<{ warnings: string[] }> {
   const warnings: string[] = [];
 
@@ -427,12 +422,16 @@ async function writeHaiveDataMirror(
   // The plan canvas mirrors into the same dir. Best-effort and independent of the
   // onboarding columns above: a repo with no plan simply writes nothing, and a
   // plan-mirror failure must not cost the user their onboarding commit.
+  const changes = { written: [] as string[], removed: [] as string[] };
   try {
-    filesWritten.push(...(await writePlanMirror(ctx.db, repositoryId, ctx.repoPath)));
+    await writePlanMirror(ctx.db, repositoryId, ctx.repoPath, changes);
   } catch (err) {
     warnings.push(
       `haive-data mirror: plan mirror failed (${err instanceof Error ? err.message : String(err)})`,
     );
+  } finally {
+    filesWritten.push(...changes.written);
+    filesRemoved.push(...changes.removed);
   }
 
   if (filesWritten.length > 0) {
@@ -641,6 +640,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
 
     // The files this step writes itself, which it stages by name below.
     const ownFiles: string[] = [];
+    const ownRemoved: string[] = [];
 
     const result = (): PostOnboardingOutput => ({
       commitPerformed,
@@ -666,7 +666,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     const mirrorRepositoryId = mirrorTaskRow[0]?.repositoryId ?? null;
     if (mirrorRepositoryId) {
       try {
-        const res = await writeHaiveDataMirror(ctx, mirrorRepositoryId, ownFiles);
+        const res = await writeHaiveDataMirror(ctx, mirrorRepositoryId, ownFiles, ownRemoved);
         warnings.push(...res.warnings);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -704,7 +704,12 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     // A person's own file 07 left untouched is theirs to commit, however a template names it.
     const generated = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
     const leftAsIs = new Set((generated?.output as GenerateFilesApply | null)?.leftAsIs ?? []);
-    const plan = await resolveStagePlan(ctx, taskRow[0]?.repositoryId ?? null, ownFiles);
+    const plan = await resolveStagePlan(
+      ctx,
+      taskRow[0]?.repositoryId ?? null,
+      ownFiles,
+      ownRemoved,
+    );
     const existingPaths: string[] = [];
     for (const rel of plan.add) {
       if (leftAsIs.has(rel)) continue;

@@ -70,9 +70,7 @@ async function collectLegacyMoves(repoPath: string, plan: StagePlan): Promise<vo
       plan.remove.push(src);
       const rel = src.slice(from.length + 1);
       for (const dest of [`${to}/${LEGACY_IMPORT_SUBDIR}/${rel}`, `${to}/${rel}`]) {
-        if ((await lstatNoFollow(repoPath, dest))?.kind !== 'file') continue;
-        plan.add.push(dest);
-        break;
+        if ((await lstatNoFollow(repoPath, dest))?.kind === 'file') plan.add.push(dest);
       }
     }
   }

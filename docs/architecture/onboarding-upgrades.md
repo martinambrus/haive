@@ -96,7 +96,10 @@ live artifact rows and `quarantinedAgentFiles`; 08's `written`, `removedPaths` a
 removals come from git (every file HEAD tracks under a repaired skill's directory that is gone from
 disk, since the repair clears the whole directory); and the
 files 12 writes itself (the `.haive-data` mirror, the project state, `.haive/install.json`), kept
-even when a write threw after some of the files landed. A
+even when a write threw after some of the files landed. The plan mirror reports what it wrote and
+removed through an accumulator (`writePlanMirror`'s `changes`), also on a throw, so a plan file the
+refresh never reached (a symlink it refused) is not staged, and a mirror that failed before it knew
+the plan was empty removes nothing. A
 quarantine target under `<agents>-legacy/` is staged only when its source is in HEAD, together with
 the source's deletion: an agent git never tracked is the person's file, and its move is theirs to
 commit. A removal is staged with `git rm --cached --ignore-unmatch` from a record, and only while the
@@ -104,7 +107,8 @@ path is still absent from disk, never with `add -u <dir>`. The legacy knowledge
 move (`.claude/knowledge_base` and `.claude/learnings` into `.haive-data/`, done by 08's `detect`) has
 no record, so a Retry of 08 cannot lose it: 12 reads it from git and the disk. A file tracked in HEAD
 under a legacy directory and gone from disk has its deletion staged, and so is the file now at
-`legacy/<rel>` or `<rel>` under the destination (`LEGACY_KNOWLEDGE_MIGRATIONS`). A legacy file git
+`legacy/<rel>` and `<rel>` under the destination (`LEGACY_KNOWLEDGE_MIGRATIONS`), whichever exist: the
+migration moves to `<rel>` whenever that slot was free, whatever sits at `legacy/<rel>`. A legacy file git
 never tracked is the person's, so its destination is not staged, as with 07's quarantine. A file an
 agent writes without reporting it stays uncommitted. The commit is built in a private index, not
 with `git commit --only` (which re-reads the named paths from the worktree) and not from the real
