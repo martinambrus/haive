@@ -192,6 +192,7 @@ export async function writeProjectStateRecord(
         .update(schema.repositories)
         .set({ renderContext: column })
         .where(eq(schema.repositories.id, repositoryId));
+      await recordLocalSide(tx, repositoryId, portable);
       await tx
         .insert(schema.projectStateSync)
         .values({ repositoryId, ...synced })
@@ -235,6 +236,37 @@ export async function refuseMovedColumn(
 /** A column this write could not move would read as newer than the rows its writer just wrote, so it
  *  is cleared and every reader falls back to those rows' snapshot. One a sync moved past `expected`
  *  meanwhile is newer than both and stays. */
+/** The value this install now holds for each pending key becomes the row's local side; a key that
+ *  now holds what the other side has is no longer contested. */
+async function recordLocalSide(
+  tx: Tx,
+  repositoryId: string,
+  rendered: ProjectRender | null,
+): Promise<void> {
+  for (const row of await loadPendingRenderConflicts(tx, repositoryId)) {
+    const local =
+      row.unit === RENDER_UNIT
+        ? rendered
+        : (rendered as Record<string, unknown> | null)?.[row.unit.slice(RENDER_UNIT.length + 1)];
+    if (sameValue(local, row.local)) continue;
+    const agreed = sameValue(local, row.incoming);
+    await tx
+      .update(schema.projectStateConflicts)
+      .set(
+        agreed
+          ? { local: conflictSide(local), resolution: 'converged', resolvedAt: new Date() }
+          : { local: conflictSide(local) },
+      )
+      .where(
+        and(
+          eq(schema.projectStateConflicts.repositoryId, repositoryId),
+          eq(schema.projectStateConflicts.unit, row.unit),
+          isNull(schema.projectStateConflicts.resolvedAt),
+        ),
+      );
+  }
+}
+
 async function clearRenderContext(
   db: Database,
   repositoryId: string,
@@ -258,22 +290,10 @@ async function clearRenderContext(
         .where(eq(schema.repositories.id, repositoryId));
       // The column was this install's side of each pending key; the next sync rebuilds it from the rows.
       if (attempted) {
-        for (const row of await loadPendingRenderConflicts(tx, repositoryId)) {
-          const local =
-            row.unit === RENDER_UNIT
-              ? attempted
-              : (attempted as Record<string, unknown>)[row.unit.slice(RENDER_UNIT.length + 1)];
-          await tx
-            .update(schema.projectStateConflicts)
-            .set({ local: conflictSide(local) })
-            .where(
-              and(
-                eq(schema.projectStateConflicts.repositoryId, repositoryId),
-                eq(schema.projectStateConflicts.unit, row.unit),
-                isNull(schema.projectStateConflicts.resolvedAt),
-              ),
-            );
-        }
+        // In a savepoint, so a failure here never undoes the clear above.
+        await tx
+          .transaction((sp) => recordLocalSide(sp, repositoryId, attempted))
+          .catch(() => undefined);
       }
     });
     return true;

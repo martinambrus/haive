@@ -124,6 +124,7 @@ describe('02 and a rules file that is not UTF-8', () => {
       customBundleItems: schema.customBundleItems,
       cliProviders: schema.cliProviders,
       projectStateSync: schema.projectStateSync,
+      projectStateConflicts: schema.projectStateConflicts,
     });
     fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
     const plan = {

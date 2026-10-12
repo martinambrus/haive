@@ -40,6 +40,7 @@ describe('R1: a rollback and the applicable set', () => {
       repositories: schema.repositories,
       onboardingArtifacts: schema.onboardingArtifacts,
       projectStateSync: schema.projectStateSync,
+      projectStateConflicts: schema.projectStateConflicts,
       taskSteps: schema.taskSteps,
     });
     fake.insert(schema.repositories, {
