@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
 
+const lock = vi.hoisted(() => ({ txResults: [[]] as unknown[][], inserted: [] as unknown[] }));
 const git = vi.hoisted(() => ({
   abortMerge: vi.fn(),
   recordFixerLeftovers: vi.fn(),
@@ -19,8 +20,12 @@ vi.mock('./git-merge.js', () => ({
   revParse: git.revParse,
 }));
 vi.mock('./merge-dir-claim.js', () => ({
-  inMergeDirLock: async (_db: unknown, _dir: string, fn: (tx: unknown) => unknown) =>
-    fn(chainDb([[]]).db),
+  inMergeDirLock: async (_db: unknown, _dir: string, fn: (tx: unknown) => unknown) => {
+    const tx = chainDb(lock.txResults);
+    const value = await fn(tx.db);
+    lock.inserted.push(...tx.inserted);
+    return value;
+  },
   liveClaimHolder: async () => null,
 }));
 vi.mock('../repo/worktree-claims.js', () => ({ findWorktreePathClaimant: async () => null }));
@@ -70,8 +75,46 @@ describe('recordLeftOpenMerges', () => {
   });
 });
 
+describe('recordLeftOpenMerges on a re-driven cancel', () => {
+  const steps = [
+    {
+      id: 'step-1',
+      state: {
+        phase: 'resolving',
+        mergeDir: '/repo',
+        featureBranch: 'origin/main',
+        fixInvocationId: null,
+      },
+    },
+  ];
+
+  beforeEach(() => {
+    lock.inserted = [];
+    git.revParse.mockImplementation(async (_dir: string, ref: string) =>
+      ref === 'MERGE_HEAD' ? 'm1' : 'h1',
+    );
+  });
+
+  it('reports nothing for a directory another task now holds the claim on', async () => {
+    lock.txResults = [[{ taskId: 'other-task' }]];
+    const { db } = chainDb([[], steps, [{ worktreePath: null }]]);
+    await recordLeftOpenMerges(db, 'task-1');
+    expect(lock.inserted).toEqual([]);
+  });
+
+  it('reports the open merge while the claim is still this task’s', async () => {
+    lock.txResults = [[{ taskId: 'task-1' }]];
+    const { db } = chainDb([[], steps, [{ worktreePath: null }]]);
+    await recordLeftOpenMerges(db, 'task-1');
+    expect(lock.inserted).toEqual([
+      expect.objectContaining({ eventType: 'merge.left_open', taskStepId: 'step-1' }),
+    ]);
+  });
+});
+
 describe('abortLeftMerge', () => {
   beforeEach(() => {
+    lock.txResults = [[]];
     vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     git.abortMerge.mockReset().mockResolvedValue({ ok: true });
     git.recordFixerLeftovers.mockReset().mockResolvedValue(undefined);

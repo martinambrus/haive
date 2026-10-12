@@ -160,6 +160,14 @@ export async function recordLeftOpenMerges(db: Database, taskId: string): Promis
     if (isHostCheckout(recorded.dir)) continue;
     // Under the dir's lock, so nobody clears or replaces the merge between the read and the report.
     const payload = await inMergeDirLock(db, recorded.dir, async (tx) => {
+      // On a re-driven cancel the claims may already be gone: a merge open under another task's
+      // claim, or in a worktree a live task shares, is that task's, not this one's.
+      const [claim] = await tx
+        .select({ taskId: schema.mergeDirClaims.taskId })
+        .from(schema.mergeDirClaims)
+        .where(eq(schema.mergeDirClaims.mergeDir, recorded.dir));
+      if (claim && claim.taskId !== taskId) return null;
+      if (await findWorktreePathClaimant(db, { worktreePath: recorded.dir, taskId })) return null;
       if (!(await mergeOpenFor(recorded.dir, recorded.ref))) return null;
       const open = await peekOpenMerge(recorded.dir);
       if (!open) return null;
