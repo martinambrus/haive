@@ -121,6 +121,8 @@ export const CONFIG_KEYS = {
   // itself is untouched, since removing a registered step would break the
   // forward walk for tasks already mid-flight.
   PLAN_CANVAS_ENABLED: 'config:plan:canvasEnabled',
+  CUSTOM_TASK_TYPES_ENABLED: 'config:taskTypes:customEnabled',
+  MODULE_TASK_TYPES_ENABLED: 'config:taskTypes:moduleEnabled',
   /** Who may create an account once this install HAS one. Defaults to `closed` — the secure
    *  default for a self-hosted product, and the first registration is exempt from it, so a fresh
    *  install still works. Read per request off the ~30s config cache, so a flip needs no redeploy
@@ -672,6 +674,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
   [CONFIG_KEYS.PLAN_CANVAS_ENABLED]: 'true',
+  [CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED]: 'false',
+  [CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED]: 'false',
   [CONFIG_KEYS.REGISTRATION_MODE]: 'closed',
   [CONFIG_KEYS.EXTERNAL_SYNC_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
