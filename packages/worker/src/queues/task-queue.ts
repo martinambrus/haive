@@ -58,7 +58,7 @@ import {
   advanceStep,
   computeGlobalStepIndex,
   stepRegistry,
-  registerAllSteps,
+  bootStepEngine,
   dagTimeoutInfo,
   finishedStepResult,
   isFreshStepEntry,
@@ -150,14 +150,7 @@ import {
 } from './cli-park-timing.js';
 import { unloadTaskOllamaCliModels } from '../sandbox/ollama-provision.js';
 
-let registered = false;
 let taskQueueInstance: Queue<TaskJobPayload> | null = null;
-
-function ensureRegistered(): void {
-  if (registered) return;
-  registerAllSteps(stepRegistry);
-  registered = true;
-}
 
 export function getTaskQueue(): Queue<TaskJobPayload> {
   if (!taskQueueInstance) {
@@ -3681,7 +3674,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
 }
 
 export function startTaskWorker(): Worker<TaskWorkerPayload> {
-  ensureRegistered();
+  bootStepEngine();
   const worker = new Worker<TaskWorkerPayload>(QUEUE_NAMES.TASK, processTaskJob, {
     connection: getBullRedis(),
     concurrency: 5,
