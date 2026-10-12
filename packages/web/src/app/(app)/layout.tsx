@@ -5,6 +5,7 @@ import { KeyRound } from 'lucide-react';
 import { AdminGuard } from '@/components/admin-guard';
 import { ForcedPasswordGuard } from '@/components/forced-password-guard';
 import { SidebarNav } from '@/components/sidebar-nav';
+import type { ModuleSummary } from '@/lib/api-client';
 import {
   SIDEBAR_DEFAULT_PX,
   SIDEBAR_WIDTH_VAR,
@@ -115,6 +116,21 @@ async function fetchSidebarPrefs(cookie: string): Promise<UiPrefsBlob> {
   }
 }
 
+/** Installed modules' sidebar items. Any failure means no module items and never blocks the page. */
+async function fetchModules(cookie: string): Promise<ModuleSummary[]> {
+  try {
+    const res = await fetch(`${apiBaseUrl()}/modules`, {
+      headers: { Cookie: cookie },
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { modules?: ModuleSummary[] };
+    return Array.isArray(body.modules) ? body.modules : [];
+  } catch {
+    return [];
+  }
+}
+
 export default async function AppLayout({ children }: { children: ReactNode }) {
   const session = await fetchMe();
   // `?session=expired`, not a bare `/login`: this layout has just asked the api and been refused,
@@ -124,7 +140,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   if (!session) redirect('/login?session=expired');
   const data = session.data;
 
-  const prefs = await fetchSidebarPrefs(session.cookie);
+  const [prefs, modules] = await Promise.all([
+    fetchSidebarPrefs(session.cookie),
+    fetchModules(session.cookie),
+  ]);
 
   // A password an administrator minted is a shared secret until its holder replaces it. Read from
   // the /auth/me call above, so the guard below costs no extra request.
@@ -156,6 +175,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           initialFilters={
             Array.isArray(prefs.sidebarFilters) ? prefs.sidebarFilters.filter(isTaskToneFilter) : []
           }
+          modules={modules}
         />
         <main className="flex-1 overflow-y-auto p-4 md:p-8">
           {/* Renders nothing unless the admin global pause switch is on. Role comes from the

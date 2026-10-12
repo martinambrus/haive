@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { LogOut, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
-import { api, patchUiPrefs } from '@/lib/api-client';
+import { api, patchUiPrefs, type ModuleSummary } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
 import {
   PHONE_MEDIA_QUERY,
@@ -36,6 +36,7 @@ interface SidebarNavProps {
   initialCollapsed: boolean;
   initialTree: SidebarTree;
   initialFilters: TaskToneFilter[];
+  modules: ModuleSummary[];
 }
 
 export function SidebarNav({
@@ -45,8 +46,9 @@ export function SidebarNav({
   initialCollapsed,
   initialTree,
   initialFilters,
+  modules,
 }: SidebarNavProps) {
-  const navItems = useMemo(() => navItemsFor(role), [role]);
+  const navItems = useMemo(() => navItemsFor(role, modules), [role, modules]);
   const pathname = usePathname();
   const router = useRouter();
 
