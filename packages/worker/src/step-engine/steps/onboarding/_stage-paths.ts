@@ -75,6 +75,35 @@ async function collectLegacyMoves(repoPath: string, plan: StagePlan): Promise<vo
   }
 }
 
+/** The repair clears a skill's whole directory, so every file HEAD tracks under it that is gone
+ *  from the disk was dropped by it, whichever step wrote it. */
+async function collectRepairRemovals(
+  repoPath: string,
+  dirs: readonly string[],
+  ids: readonly string[],
+  plan: StagePlan,
+): Promise<void> {
+  for (const dir of dirs) {
+    for (const id of ids) {
+      const tree = await gitRun(repoPath, [
+        'ls-tree',
+        '-r',
+        '-z',
+        '--name-only',
+        'HEAD',
+        '--',
+        ...literal([`${dir}/${id}/`]),
+      ]);
+      if (tree.code !== 0) continue;
+      for (const srcRel of tree.stdout.split('\0')) {
+        const src = repoRel(srcRel);
+        if (src === null || !src.startsWith(`${dir}/${id}/`)) continue;
+        if ((await lstatNoFollow(repoPath, src)) === null) plan.remove.push(src);
+      }
+    }
+  }
+}
+
 /** The paths this task's own onboarding steps recorded writing or removing. A directory is never
  *  named: a person's untracked or ignored file beside Haive's is not in any record. */
 export async function collectOnboardingStagePaths(
@@ -132,14 +161,12 @@ export async function collectOnboardingStagePaths(
     if (safe?.ok) add.add(`${KB_DIR}/${safe.normalized}`);
   }
 
-  const skillSlugs = new Map<string, string[]>();
   const skills = await stepOutput('09_5-skill-generation');
   const skillDirs = new Set<string>();
   for (const w of list(field(skills, 'written'))) {
     const id = field(w, 'id');
     if (typeof id !== 'string') continue;
     const slugs = strings(field(w, 'subSkillSlugs'));
-    skillSlugs.set(id, slugs);
     for (const dir of rels(field(w, 'mirroredDirs'))) {
       skillDirs.add(dir);
       add.add(`${dir}/${id}/SKILL.md`);
@@ -150,18 +177,16 @@ export async function collectOnboardingStagePaths(
 
   const repair = await loadPreviousStepOutput(db, taskId, '09_5b-skill-repair');
   const repaired = strings(field(repair?.output, 'repaired'));
+  let repairDirs: string[] = [];
   if (repaired.length > 0) {
     const targets = rels(field(repair?.detect, 'skillTargetDirs'));
-    for (const dir of targets.length > 0 ? targets : [DEFAULT_SKILLS_DIR]) {
+    repairDirs = targets.length > 0 ? targets : [DEFAULT_SKILLS_DIR];
+    for (const dir of repairDirs) {
       add.add(`${dir}/README.md`);
       for (const id of repaired) {
         const slugs = strings(field(field(repair?.output, 'repairedSubSkillSlugs'), id));
         add.add(`${dir}/${id}/SKILL.md`);
         for (const s of slugs) add.add(`${dir}/${id}/sub-skills/${s}.md`);
-        // The repair clears the skill's directory, so a sub-skill 09_5 wrote and it did not is gone.
-        for (const s of skillSlugs.get(id) ?? []) {
-          if (!slugs.includes(s)) remove.add(`${dir}/${id}/sub-skills/${s}.md`);
-        }
       }
     }
   }
@@ -170,6 +195,7 @@ export async function collectOnboardingStagePaths(
   const clean = (paths: Set<string>): string[] => [...paths].filter((p) => repoRel(p) === p);
   const plan = { add: clean(add), remove: clean(remove) };
   if (knowledge) await collectLegacyMoves(repoPath, plan);
+  await collectRepairRemovals(repoPath, repairDirs, repaired, plan);
   return plan;
 }
 

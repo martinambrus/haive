@@ -92,8 +92,11 @@ git-ignored file beside Haive's. 12 stages (`collectOnboardingStagePaths`,
 `steps/onboarding/_stage-paths.ts`) what this task's own step outputs record: 07's `wroteFiles`, its
 live artifact rows and `quarantinedAgentFiles`; 08's `written`, `removedPaths` and
 `mergedRemoved`, plus the KB `INDEX.md` it rewrites; 09_3's `kbWritten`; 09_5's `written` for each
-`mirroredDirs` entry (SKILL.md, the `subSkillSlugs`, the dir's README) and 09_5b's repairs; and the
-files 12 writes itself (the `.haive-data` mirror, the project state, `.haive/install.json`). A
+`mirroredDirs` entry (SKILL.md, the `subSkillSlugs`, the dir's README) and 09_5b's repairs, whose
+removals come from git (every file HEAD tracks under a repaired skill's directory that is gone from
+disk, since the repair clears the whole directory); and the
+files 12 writes itself (the `.haive-data` mirror, the project state, `.haive/install.json`), kept
+even when a write threw after some of the files landed. A
 quarantine target under `<agents>-legacy/` is staged only when its source is in HEAD, together with
 the source's deletion: an agent git never tracked is the person's file, and its move is theirs to
 commit. A removal is staged with `git rm --cached --ignore-unmatch` from a record, and only while the

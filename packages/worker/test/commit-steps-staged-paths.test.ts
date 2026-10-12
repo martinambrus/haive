@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { appendFile, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import { collectOnboardingStagePaths } from '../src/step-engine/steps/onboarding/_stage-paths.js';
+import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 import { upgradeCommitStep } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
 
 const stepOutputs = vi.hoisted(() => ({
@@ -168,9 +169,10 @@ describe('commit steps stage only the paths their step outputs record', () => {
     }
   }
 
-  const fakeDb = (artifactPaths: string[] = []) => {
+  const fakeDb = (artifactPaths: string[] = [], repositoryRow?: Record<string, unknown>) => {
     const rowsFor = (table: unknown): unknown[] => {
       if (table === schema.tasks) return [{ repositoryId: 'r1' }];
+      if (table === schema.repositories && repositoryRow) return [repositoryRow];
       if (table === schema.onboardingArtifacts)
         return artifactPaths.map((diskPath) => ({ diskPath }));
       return [];
@@ -192,10 +194,23 @@ describe('commit steps stage only the paths their step outputs record', () => {
       return chain;
     };
     const none = { findFirst: async () => undefined, findMany: async () => [] };
-    return { select, query: new Proxy({}, { get: () => none }) };
+    // The first transaction (the record's own) is refused; the clearing one after it goes through.
+    let transactions = 0;
+    const transaction = async (run: (tx: unknown) => Promise<unknown>) => {
+      if (++transactions === 1) throw new Error('database refused');
+      await run({
+        execute: async () => [],
+        update: () => ({ set: () => ({ where: async () => [] }) }),
+      });
+    };
+    return { select, transaction, query: new Proxy({}, { get: () => none }) };
   };
 
-  const ctxFor = (repo: string, artifactPaths?: string[]): StepContext =>
+  const ctxFor = (
+    repo: string,
+    artifactPaths?: string[],
+    repositoryRow?: Record<string, unknown>,
+  ): StepContext =>
     ({
       repoPath: repo,
       workspacePath: repo,
@@ -203,12 +218,17 @@ describe('commit steps stage only the paths their step outputs record', () => {
       taskId: 't1',
       taskStepId: 's1',
       logger,
-      db: fakeDb(artifactPaths),
+      db: fakeDb(artifactPaths, repositoryRow),
     }) as unknown as StepContext;
 
-  async function twelve(repo: string, outputs: Outputs, artifactPaths: string[] = []) {
+  async function twelve(
+    repo: string,
+    outputs: Outputs,
+    artifactPaths: string[] = [],
+    repositoryRow?: Record<string, unknown>,
+  ) {
     stepOutputs.current = outputs;
-    return postOnboardingStep.apply(ctxFor(repo, artifactPaths), {
+    return postOnboardingStep.apply(ctxFor(repo, artifactPaths, repositoryRow), {
       detected: { hasGit: true, currentBranch: 'main' } as never,
       formValues: { commit: true, commitMessage: 'chore: onboard' },
       iteration: 0,
@@ -425,8 +445,79 @@ describe('commit steps stage only the paths their step outputs record', () => {
     expect(await tracked(repo)).not.toContain('src/a.ts');
   });
 
+  it('9: 12 commits the project state files a failed record write left on disk', async () => {
+    const repo = await seeded();
+    await put(repo, { '.claude/agents/a.md': 'a\n' });
+    const out = await twelve(repo, {
+      '07-generate-files': {
+        detect: { ...(REFERENCE_CONTEXT as unknown as Record<string, unknown>) },
+        output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] },
+      },
+    });
+    expect(out.warnings.some((w) => w.startsWith('project state record write failed'))).toBe(true);
+    expect(out.commitPerformed).toBe(true);
+    const files = await tracked(repo);
+    expect(files).toContain('.haive-data/state/format.json');
+    expect(files).toContain('.haive-data/state/project/render.json');
+  });
+
+  it('10: 12 commits the mirror files written before a later mirror file was refused', async () => {
+    const repo = await seeded();
+    await put(repo, { '.claude/agents/a.md': 'a\n' });
+    const outside = await mkdtemp(path.join(tmpdir(), 'commit-scope-out-'));
+    dirs.push(outside);
+    await mkdir(path.join(repo, '.haive-data'), { recursive: true });
+    await symlink(
+      path.join(outside, 'elsewhere.json'),
+      path.join(repo, '.haive-data/tooling.json'),
+    );
+    const out = await twelve(
+      repo,
+      {
+        '07-generate-files': { output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] } },
+      },
+      [],
+      {
+        onboardingEnvironment: { schemaVersion: 1 },
+        onboardingTooling: { schemaVersion: 1, tooling: {} },
+        scopeExcludeGlobs: null,
+      },
+    );
+    expect(out.warnings.some((w) => w.startsWith('haive-data mirror write failed'))).toBe(true);
+    expect(out.commitPerformed).toBe(true);
+    expect(await tracked(repo)).toContain('.haive-data/environment.json');
+  });
+
+  it('11: 12 commits the removal of a tracked sub-skill 09_5b dropped with the repaired directory', async () => {
+    const repo = await seeded({
+      '.claude/skills/a/SKILL.md': 'old\n',
+      '.claude/skills/a/sub-skills/stale.md': 'stale\n',
+      '.claude/skills/a/sub-skills/kept.md': 'kept\n',
+    });
+    await rm(path.join(repo, '.claude/skills/a'), { recursive: true });
+    await put(repo, {
+      '.claude/skills/a/SKILL.md': 'new\n',
+      '.claude/skills/a/sub-skills/kept.md': 'kept2\n',
+    });
+    const out = await twelve(repo, {
+      '09_5b-skill-repair': {
+        detect: { skillTargetDirs: ['.claude/skills'] },
+        output: { repaired: ['a'], repairedSubSkillSlugs: { a: ['kept'] } },
+      },
+    });
+    expect(out.commitPerformed).toBe(true);
+    const files = await tracked(repo);
+    expect(files).not.toContain('.claude/skills/a/sub-skills/stale.md');
+    expect(files).toContain('.claude/skills/a/sub-skills/kept.md');
+    expect(await git(repo, ['show', 'HEAD:.claude/skills/a/SKILL.md'])).toBe('new\n');
+  });
+
   it('collects what each step output records, and nothing wider', async () => {
-    const repo = await seeded({ '.claude/agents/gone.md': 'g\n' });
+    const repo = await seeded({
+      '.claude/agents/gone.md': 'g\n',
+      '.claude/skills/s1/sub-skills/y.md': 'y\n',
+    });
+    await rm(path.join(repo, '.claude/skills/s1'), { recursive: true });
     stepOutputs.current = {
       '07-generate-files': {
         output: {

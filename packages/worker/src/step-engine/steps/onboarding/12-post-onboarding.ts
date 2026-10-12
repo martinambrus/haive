@@ -26,7 +26,11 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
-import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
+import {
+  failIfColumnStale,
+  ProjectStateWriteError,
+  writeProjectStateRecord,
+} from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import {
@@ -71,17 +75,22 @@ const INIT_COMMIT_MESSAGE = [
   `${HAIVE_DATA_DIR}/ (knowledge base, learnings, onboarding metadata).`,
 ].join('\n');
 
-// Fixed names an earlier step (04, 12 itself) writes. Everything else comes from the step outputs.
-const FIXED_STAGE_PATHS = ['.claude/mcp_settings.json', '.haive/install.json'];
+// Removed when the plan has no nodes, so the mirror files can leave a committed tree.
+const PLAN_MIRROR_PATHS = [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown];
+
+// Fixed names an earlier step (04, 12 itself) writes, staged whenever they exist: a mirror write
+// that failed part way leaves files the call never returned. Everything else comes from the step outputs.
+const FIXED_STAGE_PATHS = [
+  '.claude/mcp_settings.json',
+  '.haive/install.json',
+  ...PLAN_MIRROR_PATHS,
+];
 
 // Rules files onboarding writes that are NOT tracked as onboarding_artifacts, so
 // the artifact union below would miss them: the import stubs (CLAUDE.md/GEMINI.md).
 // AGENTS.md is listed too as a fallback for the no-provider-rules case, where it
 // holds only the project-info block and is untracked.
 const EXTRA_RULES_STAGE_PATHS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
-
-// Removed when the plan has no nodes, so the mirror files can leave a committed tree.
-const PLAN_MIRROR_PATHS = [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown];
 
 /** The paths this commit may touch: what the task's own step outputs and artifact rows record,
  *  plus `ownFiles`, the files this step wrote. Never a directory. */
@@ -358,16 +367,16 @@ async function recordOnboardingArtifacts(
  *  onboarding_* columns (already populated by steps 02/04/06_7). A fresh clone
  *  on another machine restores its onboarding-derived DB state from these files
  *  via persistDetection, since the onboarding task's rows never travel. Runs
- *  always (independent of the commit checkbox); the files it returns are staged
- *  when the user opts into a commit. The
+ *  always (independent of the commit checkbox); the files it lists in `filesWritten`,
+ *  which survives a throw, are staged when the user opts into a commit. The
  *  tooling file drops the machine-specific infra keys (ollamaUrl,
  *  ragConnectionString) — those do not move between machines. */
 async function writeHaiveDataMirror(
   ctx: StepContext,
   repositoryId: string,
-): Promise<{ filesWritten: string[]; warnings: string[] }> {
+  filesWritten: string[],
+): Promise<{ warnings: string[] }> {
   const warnings: string[] = [];
-  const filesWritten: string[] = [];
 
   const [repo] = await ctx.db
     .select({
@@ -380,7 +389,7 @@ async function writeHaiveDataMirror(
     .limit(1);
   if (!repo) {
     warnings.push('haive-data mirror: repository row not found, skipping');
-    return { filesWritten, warnings };
+    return { warnings };
   }
 
   const writeJson = async (rel: string, value: unknown): Promise<void> => {
@@ -429,7 +438,7 @@ async function writeHaiveDataMirror(
   if (filesWritten.length > 0) {
     ctx.logger.info({ filesWritten }, 'haive-data onboarding mirror written');
   }
-  return { filesWritten, warnings };
+  return { warnings };
 }
 
 export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboardingOutput> = {
@@ -657,9 +666,8 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     const mirrorRepositoryId = mirrorTaskRow[0]?.repositoryId ?? null;
     if (mirrorRepositoryId) {
       try {
-        const res = await writeHaiveDataMirror(ctx, mirrorRepositoryId);
+        const res = await writeHaiveDataMirror(ctx, mirrorRepositoryId, ownFiles);
         warnings.push(...res.warnings);
-        ownFiles.push(...res.filesWritten);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         warnings.push(`haive-data mirror write failed: ${message}`);
@@ -676,6 +684,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           ownFiles.push(...stateFiles);
         } catch (err) {
           failIfColumnStale(err);
+          if (err instanceof ProjectStateWriteError) ownFiles.push(...err.written);
           const message = err instanceof Error ? err.message : String(err);
           warnings.push(`project state record write failed: ${message}`);
           ctx.logger.warn({ err }, 'project state record write failed');
