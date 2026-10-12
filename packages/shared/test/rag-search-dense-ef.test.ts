@@ -88,7 +88,7 @@ describe('ragHybridSearch per-repository dense read widens the index search', ()
     ['inside a transaction', false],
     ['outside one, where it opens its own', true],
   ])(
-    'sets ef_search and the cost in a savepoint before the dense statement %s',
+    'sets ef_search, the cost and iterative scan in a savepoint before the dense statement %s',
     async (_w, pooled) => {
       const { conn, events } = store({ pooled });
 
@@ -96,13 +96,18 @@ describe('ragHybridSearch per-repository dense read widens the index search', ()
 
       const at = mainIndex(events);
       expect(events[at]!.inTx).toBe(true);
-      expect(events[at - 2]).toMatchObject({ statement: EF_SET, inTx: true, inSavepoint: true });
-      expect(events[at - 1]).toMatchObject({ statement: COST_SET, inTx: true, inSavepoint: true });
+      expect(events[at - 3]).toMatchObject({ statement: EF_SET, inTx: true, inSavepoint: true });
+      expect(events[at - 2]).toMatchObject({ statement: COST_SET, inTx: true, inSavepoint: true });
+      expect(events[at - 1]).toMatchObject({
+        statement: ITERATIVE_SET,
+        inTx: true,
+        inSavepoint: true,
+      });
     },
   );
 
   it('still searches, and warns, when the server refuses the setting', async () => {
-    for (const failing of [EF_SET, COST_SET]) {
+    for (const failing of [EF_SET, COST_SET, ITERATIVE_SET]) {
       h.warn.mockClear();
       const { conn, events } = store({ pooled: false, failing });
 

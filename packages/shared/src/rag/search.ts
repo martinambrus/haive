@@ -455,7 +455,11 @@ function identifierCteSql(
 /** The global HNSW index holds every model row and `embed_model` filters after its scan, so old-model rows can exhaust `ef_search`. */
 const GLOBAL_DENSE_SCAN_SQL = ['SET LOCAL hnsw.iterative_scan = relaxed_order'];
 
-const REPO_DENSE_SCAN_SQL = ['SET LOCAL hnsw.ef_search = 200', 'SET LOCAL cpu_operator_cost = 0.1'];
+const REPO_DENSE_SCAN_SQL = [
+  'SET LOCAL hnsw.ef_search = 200',
+  'SET LOCAL cpu_operator_cost = 0.1',
+  'SET LOCAL hnsw.iterative_scan = relaxed_order',
+];
 
 /** A global or per-repo dense read runs in a transaction with its SETs in a savepoint; any other read is untouched. */
 async function denseRead(
@@ -554,8 +558,8 @@ export async function ragHybridSearch(
     // CTE re-derives d_rank over the returned pool and recomputes dense_sim at full
     // `vector` precision for the relevance gate.
     //
-    // A per-repo read widens hnsw.ef_search to 200 (at 40 the search settles in the wrong region) and
-    // raises cpu_operator_cost so the planner keeps HNSW there and exact sorts on a small subset.
+    // A per-repo read widens hnsw.ef_search to 200 (40 settles in the wrong region), raises
+    // cpu_operator_cost so the planner keeps HNSW, and scans iteratively to fill a shared store's pool.
     // A global row reached only by words reports no dense similarity: its vector was never ranked.
     const denseSimFallback = 'COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))';
     const denseSimSel = filter ? 'd.dense_sim' : denseSimFallback;
