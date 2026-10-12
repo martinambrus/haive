@@ -453,15 +453,18 @@ function identifierCteSql(
 }
 
 /** The global HNSW index holds every model row and `embed_model` filters after its scan, so old-model rows can exhaust `ef_search`. */
-const GLOBAL_DENSE_SCAN_SQL = ['SET LOCAL hnsw.iterative_scan = relaxed_order'];
+const GLOBAL_DENSE_SCAN: DenseScanSettings = [['hnsw.iterative_scan', 'relaxed_order']];
 
-const REPO_DENSE_SCAN_SQL = [
-  'SET LOCAL hnsw.ef_search = 200',
-  'SET LOCAL cpu_operator_cost = 0.1',
-  'SET LOCAL hnsw.iterative_scan = relaxed_order',
+const REPO_DENSE_SCAN: DenseScanSettings = [
+  ['hnsw.ef_search', '200'],
+  ['cpu_operator_cost', '0.1'],
+  ['hnsw.iterative_scan', 'relaxed_order'],
 ];
 
-/** A global or per-repo dense read runs in a transaction with its SETs in a savepoint; any other read is untouched. */
+type DenseScanSettings = ReadonlyArray<readonly [name: string, value: string]>;
+
+/** A global or per-repo dense read runs in a transaction with its SETs in a savepoint, and puts
+ *  the prior values back after the statement, since a caller's transaction outlives it. */
 async function denseRead(
   conn: RagConnection,
   filter: RagFacetFilter | undefined,
@@ -469,14 +472,24 @@ async function denseRead(
   params: unknown[],
   widen = false,
 ): Promise<RawRow[]> {
-  const settings = filter ? GLOBAL_DENSE_SCAN_SQL : widen ? REPO_DENSE_SCAN_SQL : [];
+  const settings = filter ? GLOBAL_DENSE_SCAN : widen ? REPO_DENSE_SCAN : [];
   if (settings.length === 0) {
     return (await conn.pg.unsafe(text, params as never)) as unknown as RawRow[];
   }
   const run = async (pg: RagConnection['pg']): Promise<RawRow[]> => {
+    let prior: Array<readonly [string, string | null]> = [];
     try {
       await (pg as unknown as TransactionSql).savepoint(async (sp) => {
-        for (const setting of settings) await sp.unsafe(setting);
+        const names = settings.map(([name]) => name);
+        const [row] = (await sp.unsafe(
+          `SELECT ${names.map((_, i) => `current_setting($${i + 1}, true) AS s${i}`).join(', ')}`,
+          names,
+        )) as unknown as Array<Record<string, string | null>>;
+        for (const [name, value] of settings) await sp.unsafe(`SET LOCAL ${name} = ${value}`);
+        prior = names.map((name, i) => {
+          const was = row?.[`s${i}`];
+          return [name, typeof was === 'string' ? was : null] as const;
+        });
       });
     } catch (err) {
       const code = (err as { code?: unknown } | null)?.code;
@@ -485,7 +498,17 @@ async function denseRead(
         'dense scan settings unavailable',
       );
     }
-    return (await pg.unsafe(text, params as never)) as unknown as RawRow[];
+    try {
+      return (await pg.unsafe(text, params as never)) as unknown as RawRow[];
+    } finally {
+      for (const [name, was] of prior) {
+        await (
+          was === null
+            ? pg.unsafe(`SET LOCAL ${name} TO DEFAULT`)
+            : pg.unsafe('SELECT set_config($1, $2, true)', [name, was] as never)
+        ).catch(() => undefined);
+      }
+    }
   };
   const inTransaction = typeof (conn.pg as Partial<TransactionSql>).savepoint === 'function';
   return inTransaction ? run(conn.pg) : ((await conn.pg.begin(run as never)) as RawRow[]);

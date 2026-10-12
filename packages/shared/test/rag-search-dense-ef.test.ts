@@ -31,6 +31,7 @@ function store(opts: { pooled: boolean; failing?: string }) {
         throw Object.assign(new Error('unrecognized configuration parameter'), { code: '42704' });
       }
       if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
+      if (statement.includes('current_setting')) return [{ s0: null, s1: '0.0025', s2: 'off' }];
       if (statement.includes('dense_c')) {
         return [
           {
@@ -105,6 +106,19 @@ describe('ragHybridSearch per-repository dense read widens the index search', ()
       });
     },
   );
+
+  it('restores the prior settings right after the dense statement, inside the caller transaction', async () => {
+    const { conn, events } = store({ pooled: false });
+
+    await ragHybridSearch(conn, VEC, 'where is the session cookie set', {}, undefined, 'repo-1');
+
+    const at = mainIndex(events);
+    expect(statements(events).slice(at + 1, at + 4)).toEqual([
+      'SET LOCAL hnsw.ef_search TO DEFAULT',
+      'SELECT set_config($1, $2, true)',
+      'SELECT set_config($1, $2, true)',
+    ]);
+  });
 
   it('still searches, and warns, when the server refuses the setting', async () => {
     for (const failing of [EF_SET, COST_SET, ITERATIVE_SET]) {
