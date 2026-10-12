@@ -117,6 +117,21 @@ on the same CPU host). `RAG_EMBED_TIMEOUT_MS` (240000) and `RAG_QUERY_EMBED_TIME
 is uninitialized, because `worker/scripts/rag-eval.ts` imports the module standalone.
 Lowering `RAG_EMBED_BATCH_SIZE` is the better fix for a slow host than raising the timeout.
 
+**One RAG writer per repository at a time.** The workflow sync (`runRagIndexSync`, steps 02 and 11c),
+onboarding's `10-rag-populate` and the tooling page's RAG embed actions share one Redis lock,
+`haive:rag-sync:<repositoryId>` (`@haive/shared/rag` `acquireRagSyncLock`): an owner token, a 2-minute expiry
+renewed every 30 s, compare-and-delete on release. A second sync WAITS, polling every 5 s for up to 2 hours
+(the longest measured populate ran ~71 minutes), shows that it is waiting, honours Stop, and fails with a
+retryable error at the bound. The api does not wait: a RAG action while a sync runs answers 409, and 503
+when Redis is down, before anything is written. A crashed holder frees the key when its expiry lapses. A
+holder counts its lock lost once a heartbeat finds the key gone or taken over, or once no refresh has been
+confirmed for a whole expiry. Both syncs open their store through `fenceRagStore`, which checks the lock
+before every statement it sends, and they check it again before writing the degraded flag (also after
+the awaited NULL-hash read that gates its clear); the api checks it before each re-embed batch and each
+repository write. A sync that lost it fails with a retryable error, and the api answers 409. A statement
+already in flight when the lock is lost still lands: the store cannot see the lock, so closing that
+window would take a fencing token the store itself checks. A run with no repository id takes no lock.
+
 **Per-repo memory, because a step row does not survive a retry.** `repositories.
 rag_embed_degraded_at` is the STRUCTURAL flag every reader gates on;
 `rag_embed_degraded_reason` beside it is display copy that outlives the state it describes

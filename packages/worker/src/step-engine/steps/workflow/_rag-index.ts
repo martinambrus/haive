@@ -13,7 +13,9 @@ import {
   LEARNINGS_DIR,
 } from '@haive/shared/knowledge-paths';
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
+import { fenceRagStore, type RagSyncLock } from '@haive/shared/rag';
 import type { StepContext } from '../../step-definition.js';
+import { acquireRepoRagSyncLock } from '../_rag-sync-lock.js';
 import { gitRun } from '../../../repo/git-push.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import {
@@ -438,6 +440,33 @@ export async function runRagIndexSync(
   ctx: StepContext,
   opts: RunRagIndexOpts,
 ): Promise<RagSyncResult> {
+  const { repoPath } = opts;
+  const refusal = await scanRootRefusal(repoPath);
+  if (refusal !== null) {
+    ctx.logger.warn({ repoPath, refusal }, 'RAG scan root refused; nothing indexed or swept');
+    return EMPTY_RESULT(`the scan root was refused (${refusal}), so nothing was indexed or swept`);
+  }
+
+  const taskRow = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { repositoryId: true, title: true, description: true },
+  });
+  const repositoryId = taskRow?.repositoryId ?? null;
+  if (!repositoryId) return syncRepositoryIndex(ctx, opts, taskRow, null);
+  const lock = await acquireRepoRagSyncLock(ctx, repositoryId);
+  try {
+    return await syncRepositoryIndex(ctx, opts, taskRow, lock);
+  } finally {
+    await lock.release();
+  }
+}
+
+async function syncRepositoryIndex(
+  ctx: StepContext,
+  opts: RunRagIndexOpts,
+  taskRow: { repositoryId: string | null; title: string; description: string | null } | undefined,
+  lock: RagSyncLock | null,
+): Promise<RagSyncResult> {
   const {
     repoPath,
     prefs,
@@ -447,12 +476,6 @@ export async function runRagIndexSync(
     sweepProtectedPaths,
   } = opts;
   const wa = workspaceAnchor(repoPath);
-
-  const refusal = await scanRootRefusal(repoPath);
-  if (refusal !== null) {
-    ctx.logger.warn({ repoPath, refusal }, 'RAG scan root refused; nothing indexed or swept');
-    return EMPTY_RESULT(`the scan root was refused (${refusal}), so nothing was indexed or swept`);
-  }
 
   const scope = await resolveRagSyncPrefs(ctx);
   if (scope.needsScopeSelection) {
@@ -472,8 +495,9 @@ export async function runRagIndexSync(
   const ingestionPolicy = { ...secretPolicy, tracked: await listTrackedFiles(repoPath) };
 
   await ctx.emitProgress('Connecting to RAG database...');
-  const conn = await resolveRagConnection(prefs, ctx.db, projectName);
-  if (!conn) return EMPTY_RESULT('connection resolved to null');
+  const opened = await resolveRagConnection(prefs, ctx.db, projectName);
+  if (!opened) return EMPTY_RESULT('connection resolved to null');
+  const conn = fenceRagStore(opened, lock);
 
   try {
     await ctx.emitProgress('Ensuring RAG schema...');
@@ -487,10 +511,6 @@ export async function runRagIndexSync(
     // the same content on every task) and for the per-repo embed-health record, and
     // bailing here saves a pointless model warm. Bail with a logged warning rather
     // than silently filling the table.
-    const taskRow = await ctx.db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, ctx.taskId),
-      columns: { repositoryId: true, title: true, description: true },
-    });
     const repositoryId = taskRow?.repositoryId ?? null;
     if (!repositoryId) {
       ctx.logger.warn(
@@ -505,6 +525,7 @@ export async function runRagIndexSync(
     // survive embedding outages and the worktree's untracked-file protections,
     // even when the source file has disappeared since an earlier sync.
     let deleted = 0;
+    lock?.assertHeld();
     const indexedPaths = (await conn.pg.unsafe(
       `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
       [repositoryId, TASK_EMBED_SOURCE_TYPE],
@@ -527,6 +548,7 @@ export async function runRagIndexSync(
     // hash rows (which ranks worse than not using the dense half at all). The existing
     // `useOllama && health.degradedAt` clear below lifts it when this run finishes.
     if (useOllama && opts.ollamaUrlDerived && !health.degradedAt && !health.lexicalOnly) {
+      lock?.assertHeld();
       // Stored before the reset, so a run that dies after it leaves no NULL hash over a hash vector
       // unflagged; a reset that finds nothing leaves the flag for this run's own clear.
       await requireRagEmbedDegraded(
@@ -606,6 +628,7 @@ export async function runRagIndexSync(
       // embed loop runs to completion and the finished 'done' clobbers the stopped
       // state, resuming the task. Mirrors 10-rag-populate.
       ctx.throwIfCancelled();
+      lock?.assertHeld();
       const { relPath, sourceType } = allFiles[fi]!;
       processedPaths.add(relPath);
       // "Scanning", not "Syncing": this fires before the hash comparison, so on a
@@ -728,6 +751,7 @@ export async function runRagIndexSync(
       let fileEmbedFailed = false;
       for (let batchStart = 0; batchStart < toEmbed.length; batchStart += embedBatchSize) {
         ctx.throwIfCancelled();
+        lock?.assertHeld();
         const batch = toEmbed.slice(batchStart, batchStart + embedBatchSize);
         const texts = batch.map((e) => e.chunk.content);
 
@@ -738,6 +762,7 @@ export async function runRagIndexSync(
           useOllama,
           texts,
         });
+        lock?.assertHeld();
         if (outcome.kind === 'failed') {
           fileEmbedFailed = true;
           // Leave these chunks UNINDEXED. An insert simply does not happen; an
@@ -837,6 +862,7 @@ export async function runRagIndexSync(
     // (source_path = a task id, not a repo file), so they are never "orphaned files" and
     // must not be swept here (task-time estimation v2.2). Also EXCLUDE the paths this scan
     // root cannot see (`resolveSweepProtectedPaths`) — absence there is not a deletion.
+    lock?.assertHeld();
     const orphanRows = (await conn.pg.unsafe(
       `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
       [repositoryId, TASK_EMBED_SOURCE_TYPE],
@@ -872,6 +898,7 @@ export async function runRagIndexSync(
     // estimates can semantically retrieve it as a prior-effort anchor (task-time estimation
     // v2.2). pgvector stores only (retrieval is vector-based); best-effort — a failure must
     // not fail the file sync that already succeeded.
+    lock?.assertHeld();
     if (usedPgvector && useOllama && taskRow) {
       try {
         await indexTaskEmbedding(
@@ -908,6 +935,8 @@ export async function runRagIndexSync(
       else if (outcome.kind === 'failed') embedFailureReason = outcome.reason;
     }
 
+    lock?.assertHeld();
+
     // Remember (or forget) the embed failure on the REPO, so the condition outlives
     // this step row — a manual retry nulls task_steps.output — and every later RAG
     // step can say so. Only an actual model run can clear it: a hash-mode sync
@@ -922,6 +951,7 @@ export async function runRagIndexSync(
       health.degradedAt &&
       !(await ragStoreAwaitsReembed(conn, repositoryId, ctx.logger))
     ) {
+      lock?.assertHeld();
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
       health.degradedAt = null;
       health.degradedReason = null;

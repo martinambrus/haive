@@ -6,6 +6,7 @@ import {
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   TOOL_INSTALL_METADATA,
   configService,
+  logger,
   decideImportedMcpServers,
   pendingImportedMcpServers,
   userSecretsService,
@@ -20,7 +21,9 @@ import {
   ragDatabaseName,
   ragRowsAwaitReembed,
   resolveRagConnection,
+  tryAcquireRagSyncLock,
   type RagConnection,
+  type RagSyncLock,
   type RagMode,
 } from '@haive/shared/rag';
 import {
@@ -29,6 +32,7 @@ import {
   normalizeReviewDimensionIds,
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
+import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -355,6 +359,16 @@ async function ragStoreAwaitsReembedBounded(
   }
 }
 
+/** Fences each write of a RAG embed action: once the lock is lost another sync may be writing. */
+function assertRagLockHeld(lock: RagSyncLock | null): void {
+  if (lock?.lost) {
+    throw new HttpError(
+      409,
+      'The RAG sync lock of this repository was lost while this action ran (another sync may have started); run it again when no sync is running',
+    );
+  }
+}
+
 /** Force every chunk of a repository's RAG index to be re-embedded on the next
  *  sync, WITHOUT deleting anything: nulling `chunk_hash` makes the incremental
  *  differ (`_rag-index.ts`) see every chunk as changed, so the rows stay
@@ -371,6 +385,7 @@ async function ragStoreAwaitsReembedBounded(
 async function forceRagReembed(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
+  lock: RagSyncLock | null,
 ): Promise<boolean> {
   const conn = await openRagStore(db, repositoryId);
   if (!conn) return false;
@@ -381,6 +396,7 @@ async function forceRagReembed(
   });
   const resetBatches = async () => {
     for (;;) {
+      assertRagLockHeld(lock);
       const res = await conn.pg.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL statement_timeout = '${RAG_REEMBED_STATEMENT_TIMEOUT_MS}ms'`);
         return tx.unsafe(
@@ -698,140 +714,169 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     return c.json({ repositoryId, ok: true, reembedQueued: false });
   }
 
-  const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
-  if (body.verifyCommands !== undefined) {
-    const parsed = verifyCommandsSchema.safeParse(body.verifyCommands);
-    if (!parsed.success) {
-      throw new HttpError(400, `Invalid verify commands: ${parsed.error.issues[0]?.message}`);
-    }
-    updates.verifyCommands = Object.keys(parsed.data).length > 0 ? parsed.data : null;
-  }
-  if (typeof body.rtkEnabled === 'boolean') updates.rtkEnabled = body.rtkEnabled;
-  if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion?.trim() || null;
-  if (body.chromeDevtoolsMcpVersion !== undefined) {
-    updates.chromeDevtoolsMcpVersion = body.chromeDevtoolsMcpVersion?.trim() || null;
-  }
-  if (Array.isArray(body.lspServers)) {
-    updates.lspServers = [...new Set(body.lspServers.filter((s) => LSP_KEY_SET.has(s)))];
-  }
-  if (body.lspServerVersions && typeof body.lspServerVersions === 'object') {
-    const clean: Record<string, string | null> = {};
-    for (const [k, v] of Object.entries(body.lspServerVersions)) {
-      if (!LSP_KEY_SET.has(k)) continue;
-      const val = typeof v === 'string' ? v.trim() : '';
-      if (val) clean[k] = val;
-    }
-    updates.lspServerVersions = clean;
-  }
-  if (typeof body.secretMaskEnabled === 'boolean') {
-    updates.secretMaskEnabled = body.secretMaskEnabled;
-  }
-  if (Array.isArray(body.secretMaskAllow)) {
-    updates.secretMaskAllow = [
-      ...new Set(body.secretMaskAllow.map((s) => s.trim()).filter(Boolean)),
-    ];
-  }
-  if (Array.isArray(body.secretMaskDenyExtend)) {
-    updates.secretMaskDenyExtend = [
-      ...new Set(body.secretMaskDenyExtend.map((s) => s.trim()).filter(Boolean)),
-    ];
-  }
-  if (typeof body.prWorkflowEnabled === 'boolean') {
-    updates.prWorkflowEnabled = body.prWorkflowEnabled;
-  }
-  if (Array.isArray(body.reviewDimensions)) {
-    const ids = normalizeReviewDimensionIds(body.reviewDimensions);
-    // An empty result is rejected rather than stored: it would mean "review nothing",
-    // which is never what a user means by unticking the last box, and a caller that
-    // sent only unknown ids has a bug worth surfacing.
-    if (ids.length === 0) throw new HttpError(400, 'At least one review dimension is required');
-    updates.reviewDimensions = ids;
-  }
-  if (typeof body.stepGuidanceEnabled === 'boolean') {
-    updates.stepGuidanceEnabled = body.stepGuidanceEnabled;
-  }
-  if (body.appAuth !== undefined) {
-    updates.appAuth = normalizeAppAuth(body.appAuth);
-  }
-  // Credentials go to the encrypted per-user store, keyed per repository. An empty
-  // string is a deliberate clear; `undefined` leaves the stored value alone, so saving
-  // the form without retyping the password does not wipe it.
-  for (const [field, suffix] of [
-    ['appAuthUsername', 'username'],
-    ['appAuthPassword', 'password'],
-  ] as const) {
-    const value = body[field];
-    if (typeof value !== 'string') continue;
-    const key = `app_auth:${repositoryId}:${suffix}`;
-    if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`);
-    else await userSecretsService.delete(userId, key);
-  }
-
-  // RAG embed-health actions. A re-embed is forced only where hash vectors can
-  // actually be on disk: leaving lexical-only mode, or an explicit rebuild. A repo
-  // that merely failed under strict mode has no hash rows — those chunks were left
-  // unindexed — so its next incremental sync picks them up as ordinary inserts and
-  // re-embedding the whole repository would be wasted work.
-  let retryCleared: { ragEmbedDegradedAt: Date; ragEmbedDegradedReason: string | null } | null =
-    null;
-  let reembedQueued = false;
-  let degradationKept = false;
+  let lock: RagSyncLock | null = null;
   if (body.ragEmbedAction) {
-    const current = await db.query.repositories.findFirst({
-      where: eq(schema.repositories.id, repositoryId),
-      columns: {
-        ragEmbedLexicalOnly: true,
-        ragEmbedDegradedAt: true,
-        ragEmbedDegradedReason: true,
-      },
-    });
-    if (!current) throw new HttpError(404, 'Repository not found');
-    if (body.ragEmbedAction === 'accept_lexical_only') {
-      updates.ragEmbedLexicalOnly = true;
-      updates.ragEmbedDegradedAt = null;
-      updates.ragEmbedDegradedReason = null;
-    } else {
-      updates.ragEmbedLexicalOnly = false;
-      // A retry re-embeds nothing, so rows a degraded run left awaiting re-embed keep the dense half off.
-      degradationKept =
-        body.ragEmbedAction !== 'rebuild_index' &&
-        !current.ragEmbedLexicalOnly &&
-        !!current.ragEmbedDegradedAt &&
-        (await ragStoreAwaitsReembedBounded(db, repositoryId));
-      if (!degradationKept) {
+    try {
+      lock = await tryAcquireRagSyncLock(getRedis(), repositoryId);
+    } catch (err) {
+      logger.warn({ err, repositoryId }, 'could not check the RAG sync lock');
+      throw new HttpError(
+        503,
+        'Could not check whether a RAG sync of this repository is running; try again',
+      );
+    }
+    if (!lock) {
+      throw new HttpError(
+        409,
+        'A RAG sync of this repository is running; try again when it finishes',
+      );
+    }
+  }
+  try {
+    const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
+    if (body.verifyCommands !== undefined) {
+      const parsed = verifyCommandsSchema.safeParse(body.verifyCommands);
+      if (!parsed.success) {
+        throw new HttpError(400, `Invalid verify commands: ${parsed.error.issues[0]?.message}`);
+      }
+      updates.verifyCommands = Object.keys(parsed.data).length > 0 ? parsed.data : null;
+    }
+    if (typeof body.rtkEnabled === 'boolean') updates.rtkEnabled = body.rtkEnabled;
+    if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion?.trim() || null;
+    if (body.chromeDevtoolsMcpVersion !== undefined) {
+      updates.chromeDevtoolsMcpVersion = body.chromeDevtoolsMcpVersion?.trim() || null;
+    }
+    if (Array.isArray(body.lspServers)) {
+      updates.lspServers = [...new Set(body.lspServers.filter((s) => LSP_KEY_SET.has(s)))];
+    }
+    if (body.lspServerVersions && typeof body.lspServerVersions === 'object') {
+      const clean: Record<string, string | null> = {};
+      for (const [k, v] of Object.entries(body.lspServerVersions)) {
+        if (!LSP_KEY_SET.has(k)) continue;
+        const val = typeof v === 'string' ? v.trim() : '';
+        if (val) clean[k] = val;
+      }
+      updates.lspServerVersions = clean;
+    }
+    if (typeof body.secretMaskEnabled === 'boolean') {
+      updates.secretMaskEnabled = body.secretMaskEnabled;
+    }
+    if (Array.isArray(body.secretMaskAllow)) {
+      updates.secretMaskAllow = [
+        ...new Set(body.secretMaskAllow.map((s) => s.trim()).filter(Boolean)),
+      ];
+    }
+    if (Array.isArray(body.secretMaskDenyExtend)) {
+      updates.secretMaskDenyExtend = [
+        ...new Set(body.secretMaskDenyExtend.map((s) => s.trim()).filter(Boolean)),
+      ];
+    }
+    if (typeof body.prWorkflowEnabled === 'boolean') {
+      updates.prWorkflowEnabled = body.prWorkflowEnabled;
+    }
+    if (Array.isArray(body.reviewDimensions)) {
+      const ids = normalizeReviewDimensionIds(body.reviewDimensions);
+      // An empty result is rejected rather than stored: it would mean "review nothing",
+      // which is never what a user means by unticking the last box, and a caller that
+      // sent only unknown ids has a bug worth surfacing.
+      if (ids.length === 0) throw new HttpError(400, 'At least one review dimension is required');
+      updates.reviewDimensions = ids;
+    }
+    if (typeof body.stepGuidanceEnabled === 'boolean') {
+      updates.stepGuidanceEnabled = body.stepGuidanceEnabled;
+    }
+    if (body.appAuth !== undefined) {
+      updates.appAuth = normalizeAppAuth(body.appAuth);
+    }
+    // Credentials go to the encrypted per-user store, keyed per repository. An empty
+    // string is a deliberate clear; `undefined` leaves the stored value alone, so saving
+    // the form without retyping the password does not wipe it.
+    for (const [field, suffix] of [
+      ['appAuthUsername', 'username'],
+      ['appAuthPassword', 'password'],
+    ] as const) {
+      const value = body[field];
+      if (typeof value !== 'string') continue;
+      const key = `app_auth:${repositoryId}:${suffix}`;
+      if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`);
+      else await userSecretsService.delete(userId, key);
+    }
+
+    // RAG embed-health actions. A re-embed is forced only where hash vectors can
+    // actually be on disk: leaving lexical-only mode, or an explicit rebuild. A repo
+    // that merely failed under strict mode has no hash rows — those chunks were left
+    // unindexed — so its next incremental sync picks them up as ordinary inserts and
+    // re-embedding the whole repository would be wasted work.
+    let retryCleared: { ragEmbedDegradedAt: Date; ragEmbedDegradedReason: string | null } | null =
+      null;
+    let reembedQueued = false;
+    let degradationKept = false;
+    if (body.ragEmbedAction) {
+      const current = await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, repositoryId),
+        columns: {
+          ragEmbedLexicalOnly: true,
+          ragEmbedDegradedAt: true,
+          ragEmbedDegradedReason: true,
+        },
+      });
+      if (!current) throw new HttpError(404, 'Repository not found');
+      if (body.ragEmbedAction === 'accept_lexical_only') {
+        updates.ragEmbedLexicalOnly = true;
         updates.ragEmbedDegradedAt = null;
         updates.ragEmbedDegradedReason = null;
-        if (body.ragEmbedAction === 'retry' && current.ragEmbedDegradedAt) {
-          retryCleared = {
-            ragEmbedDegradedAt: current.ragEmbedDegradedAt,
-            ragEmbedDegradedReason: current.ragEmbedDegradedReason,
+      } else {
+        updates.ragEmbedLexicalOnly = false;
+        // A retry re-embeds nothing, so rows a degraded run left awaiting re-embed keep the dense half off.
+        degradationKept =
+          body.ragEmbedAction !== 'rebuild_index' &&
+          !current.ragEmbedLexicalOnly &&
+          !!current.ragEmbedDegradedAt &&
+          (await ragStoreAwaitsReembedBounded(db, repositoryId));
+        if (!degradationKept) {
+          updates.ragEmbedDegradedAt = null;
+          updates.ragEmbedDegradedReason = null;
+          if (body.ragEmbedAction === 'retry' && current.ragEmbedDegradedAt) {
+            retryCleared = {
+              ragEmbedDegradedAt: current.ragEmbedDegradedAt,
+              ragEmbedDegradedReason: current.ragEmbedDegradedReason,
+            };
+          }
+        }
+        if (body.ragEmbedAction === 'rebuild_index' || current.ragEmbedLexicalOnly) {
+          const pending = {
+            ragEmbedDegradedAt: new Date(),
+            ragEmbedDegradedReason:
+              'Index rebuild pending: chunks are re-embedded on the next sync.',
           };
+          // Stored before the reset: a reset that fails part-way leaves NULL hashes over the old vectors.
+          assertRagLockHeld(lock);
+          await db
+            .update(schema.repositories)
+            .set(pending)
+            .where(eq(schema.repositories.id, repositoryId));
+          reembedQueued = await forceRagReembed(db, repositoryId, lock);
+          if (reembedQueued) Object.assign(updates, pending);
         }
       }
-      if (body.ragEmbedAction === 'rebuild_index' || current.ragEmbedLexicalOnly) {
-        const pending = {
-          ragEmbedDegradedAt: new Date(),
-          ragEmbedDegradedReason: 'Index rebuild pending: chunks are re-embedded on the next sync.',
-        };
-        // Stored before the reset: a reset that fails part-way leaves NULL hashes over the old vectors.
-        await db
-          .update(schema.repositories)
-          .set(pending)
-          .where(eq(schema.repositories.id, repositoryId));
-        reembedQueued = await forceRagReembed(db, repositoryId);
-        if (reembedQueued) Object.assign(updates, pending);
-      }
     }
-  }
 
-  await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));
-  // A sync can write fallback rows between the probe and the clear; look once more after it.
-  if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
+    assertRagLockHeld(lock);
     await db
       .update(schema.repositories)
-      .set(retryCleared)
+      .set(updates)
       .where(eq(schema.repositories.id, repositoryId));
-    degradationKept = true;
+    // A sync can write fallback rows between the probe and the clear; look once more after it.
+    if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
+      assertRagLockHeld(lock);
+      await db
+        .update(schema.repositories)
+        .set(retryCleared)
+        .where(eq(schema.repositories.id, repositoryId));
+      degradationKept = true;
+    }
+    return c.json({ repositoryId, ok: true, reembedQueued, degradationKept });
+  } finally {
+    await lock?.release();
   }
-  return c.json({ repositoryId, ok: true, reembedQueued, degradationKept });
 });

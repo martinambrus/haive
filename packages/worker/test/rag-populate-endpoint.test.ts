@@ -2,10 +2,16 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { schema } from '@haive/database';
+import { RagSyncLockLostError } from '@haive/shared/rag';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { StepContext } from '../src/step-engine/step-definition.js';
+import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
+import type { createFakeRagLock } from './rag-lock-fake.js';
 
+const lockFake = vi.hoisted(() => ({ value: undefined as unknown }));
 const mocks = vi.hoisted(() => ({
+  connects: 0,
+  gate: null as Promise<void> | null,
+  taskRepositoryId: 'repo-1' as string | null,
   strict: true,
   embedFails: false,
   ollamaEmbed: vi.fn(async (_url: string, _model: string, texts: string[]) => {
@@ -13,21 +19,39 @@ const mocks = vi.hoisted(() => ({
     return texts.map(() => [0.1, 0.2]);
   }),
 }));
-vi.mock('@haive/shared/rag', async (original) => ({
+vi.mock('@haive/shared/rag', async (original) => {
+  const actual = await original<typeof import('@haive/shared/rag')>();
+  const { createFakeRagLock: create } = await import('./rag-lock-fake.js');
+  const fake = create(actual);
+  lockFake.value = fake;
+  return {
+    ...actual,
+    acquireRagSyncLock: fake.acquireRagSyncLock,
+    tryAcquireRagSyncLock: fake.tryAcquireRagSyncLock,
+    ollamaEmbed: mocks.ollamaEmbed,
+    resolveEmbedBudget: async () => ({
+      embedTimeoutMs: 1000,
+      queryTimeoutMs: 1000,
+      warmupTimeoutMs: 1000,
+      batchSize: 8,
+      strict: mocks.strict,
+    }),
+  };
+});
+vi.mock('../src/redis.js', async (original) => ({
   ...(await original<object>()),
-  ollamaEmbed: mocks.ollamaEmbed,
-  resolveEmbedBudget: async () => ({
-    embedTimeoutMs: 1000,
-    queryTimeoutMs: 1000,
-    warmupTimeoutMs: 1000,
-    batchSize: 8,
-    strict: mocks.strict,
-  }),
+  getRedis: () => ({}),
 }));
 vi.mock('../src/step-engine/steps/onboarding/_rag-connection.js', async (original) => ({
   ...(await original<object>()),
-  resolveRagConnection: async () => conn,
-  ensureRagSchema: async () => ({ usedPgvector: false, tableName: 'ai_rag_embeddings' }),
+  resolveRagConnection: async () => {
+    mocks.connects += 1;
+    return conn;
+  },
+  ensureRagSchema: async () => {
+    await mocks.gate;
+    return { usedPgvector: false, tableName: 'ai_rag_embeddings' };
+  },
 }));
 vi.mock('../src/step-engine/steps/onboarding/_rag-embed.js', async (original) => ({
   ...(await original<object>()),
@@ -41,6 +65,7 @@ const { ragPopulateStep, RagEmbedFailureError } =
       .RagEmbedFailureError,
   }));
 
+const fakeLock = lockFake.value as ReturnType<typeof createFakeRagLock>;
 const KB = '.haive-data/knowledge_base/architecture.md';
 let root: string;
 let rows: Map<string, { hash: string | null; params: unknown[] }>;
@@ -49,6 +74,7 @@ let failInsertAt: number | null;
 let failDegradedWrite: boolean;
 let leftoverNullHash: boolean;
 let nullHashProbeFails: boolean;
+let onNullHashProbe: (() => void) | null;
 let nullHashProbes: unknown[][];
 let warnings: Array<string | null>;
 let repo: Record<string, unknown>;
@@ -78,6 +104,10 @@ const populate = (d: ReturnType<typeof detected>) =>
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  fakeLock.reset();
+  mocks.connects = 0;
+  mocks.gate = null;
+  mocks.taskRepositoryId = 'repo-1';
   mocks.strict = true;
   mocks.embedFails = false;
   root = await mkdtemp(join(tmpdir(), 'haive-rag-populate-'));
@@ -92,6 +122,7 @@ beforeEach(async () => {
   failDegradedWrite = false;
   leftoverNullHash = false;
   nullHashProbeFails = false;
+  onNullHashProbe = null;
   nullHashProbes = [];
   warnings = [];
   repo = { ragEmbedDegradedAt: null, ragEmbedDegradedReason: null, ragEmbedLexicalOnly: false };
@@ -110,6 +141,7 @@ beforeEach(async () => {
         }
         if (query.includes('chunk_hash IS NULL') && query.startsWith('SELECT')) {
           nullHashProbes.push(params);
+          onNullHashProbe?.();
           if (nullHashProbeFails) throw new Error('store read failed');
           const stored = [...rows.values()].some((r) => r.hash === null);
           return leftoverNullHash || stored ? [{ found: 1 }] : [];
@@ -128,7 +160,7 @@ beforeEach(async () => {
   ctx = {
     db: {
       query: {
-        tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) },
+        tasks: { findFirst: async () => ({ repositoryId: mocks.taskRepositoryId }) },
         repositories: { findFirst: async () => repo },
       },
       update: (table: unknown) => ({
@@ -245,6 +277,90 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
+  it('fails the step, keeping the flag and writing nothing, when the sync lock was already lost', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    fakeLock.state.loseOnTake = true;
+    await expect(populate(detected({ ollamaReachable: true }))).rejects.toBeInstanceOf(
+      RagSyncLockLostError,
+    );
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(order).not.toContain('insert');
+  });
+
+  it('keeps the flag when the sync lock is lost during the last NULL-hash read', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    onNullHashProbe = () => {
+      if (nullHashProbes.length === 2) fakeLock.state.handles[0]!.lost = true;
+    };
+    await expect(populate(detected({ ollamaReachable: true }))).rejects.toBeInstanceOf(
+      RagSyncLockLostError,
+    );
+    expect(nullHashProbes).toHaveLength(2);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+  });
+
+  it('stops inserting once the lock is lost between two files', async () => {
+    const other = '.haive-data/knowledge_base/other.md';
+    await writeFile(join(root, other), '# Other\n\nA second document about queues.\n');
+    const pg = (conn as { pg: { unsafe: (q: string, p?: unknown[]) => Promise<unknown> } }).pg;
+    const unsafe = pg.unsafe;
+    pg.unsafe = async (query, params) => {
+      const result = await unsafe(query, params);
+      if (query.includes('INSERT INTO')) fakeLock.state.handles[0]!.lost = true;
+      return result;
+    };
+    await expect(
+      populate(
+        detected({
+          ollamaReachable: true,
+          kbFiles: [
+            { relPath: KB, sizeBytes: 60 },
+            { relPath: other, sizeBytes: 40 },
+          ],
+        }),
+      ),
+    ).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(order.filter((event) => event === 'insert')).toHaveLength(1);
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('sends no further statement once the lock is lost between two chunks of one file', async () => {
+    await writeFile(
+      join(root, KB),
+      '# Architecture\n\n## Storage\n\nDocuments live in PostgreSQL.\n\n## Queues\n\nJobs run on BullMQ.\n',
+    );
+    const pg = (conn as { pg: { unsafe: (q: string, p?: unknown[]) => Promise<unknown> } }).pg;
+    const unsafe = pg.unsafe;
+    const afterLoss: string[] = [];
+    pg.unsafe = async (query, params) => {
+      if (fakeLock.state.handles[0]!.lost) afterLoss.push(query);
+      const result = await unsafe(query, params);
+      if (query.includes('INSERT INTO')) fakeLock.state.handles[0]!.lost = true;
+      return result;
+    };
+    await expect(populate(detected({ ollamaReachable: true }))).rejects.toBeInstanceOf(
+      RagSyncLockLostError,
+    );
+    expect(order.filter((event) => event === 'insert')).toHaveLength(1);
+    expect(afterLoss).toEqual([]);
+  });
+
+  it('never stops a populate whose lock is still held', async () => {
+    const other = '.haive-data/knowledge_base/other.md';
+    await writeFile(join(root, other), '# Other\n\nA second document about queues.\n');
+    await populate(
+      detected({
+        ollamaReachable: true,
+        kbFiles: [
+          { relPath: KB, sizeBytes: 60 },
+          { relPath: other, sizeBytes: 40 },
+        ],
+      }),
+    );
+    expect(fakeLock.state.handles[0]!.lost).toBe(false);
+    expect(order.filter((event) => event === 'insert')).toHaveLength(2);
+  });
+
   it('clears the flag when the store holds no NULL-hash row', async () => {
     repo.ragEmbedDegradedAt = new Date(0);
     await populate(detected({ ollamaReachable: true }));
@@ -353,5 +469,77 @@ describe('onboarding populate with an embedding endpoint configured', () => {
       ]
     `);
     expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+});
+
+describe('onboarding populate holds the repository RAG lock', () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('keeps a second populate of one repository off the store until the first released', async () => {
+    let open!: () => void;
+    mocks.gate = new Promise<void>((resolve) => (open = resolve));
+    const first = populate(detected());
+    for (let i = 0; i < 100 && mocks.connects < 1; i += 1) await sleep(5);
+    const progress: string[] = [];
+    const second = ragPopulateStep.apply(
+      { ...ctx, emitProgress: async (m: string) => void progress.push(m) } as StepContext,
+      {
+        detected: detected(),
+        formValues: { populateMode: 'incremental' },
+        iteration: 0,
+        previousIterations: [],
+      },
+    );
+    await sleep(150);
+    expect(mocks.connects).toBe(1);
+    expect(progress.join('\n')).toMatch(/another RAG sync of this repository/i);
+    mocks.gate = null;
+    open();
+    await Promise.all([first, second]);
+    expect(mocks.connects).toBe(2);
+    expect(fakeLock.state.handles.map((h) => h.released)).toEqual([1, 1]);
+    expect(fakeLock.state.tried[0]!.options?.waitMs).toBe(2 * 60 * 60 * 1000);
+  });
+
+  it('fails with a clear message past the bound, before connecting', async () => {
+    fakeLock.state.held.add('repo-1');
+    fakeLock.state.timeoutNow = true;
+    await expect(populate(detected())).rejects.toThrow(/another RAG sync of this repository/i);
+    expect(mocks.connects).toBe(0);
+  });
+
+  it('ends as cancelled when the task is stopped while it waits', async () => {
+    fakeLock.state.held.add('repo-1');
+    const controller = new AbortController();
+    const waiting = ragPopulateStep.apply({ ...ctx, signal: controller.signal } as StepContext, {
+      detected: detected(),
+      formValues: { populateMode: 'incremental' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    const settled = expect(waiting).rejects.toBeInstanceOf(TaskCancelledError);
+    await sleep(40);
+    controller.abort();
+    await settled;
+    expect(mocks.connects).toBe(0);
+  });
+
+  it('releases the lock when the populate fails', async () => {
+    mocks.embedFails = true;
+    await expect(populate(detected({ ollamaReachable: false }))).rejects.toBeInstanceOf(
+      RagEmbedFailureError,
+    );
+    expect(fakeLock.state.handles.map((h) => h.released)).toEqual([1]);
+  });
+
+  it('takes no lock when the task has no repository', async () => {
+    mocks.taskRepositoryId = null;
+    await populate(detected());
+    expect(fakeLock.state.tried).toEqual([]);
+  });
+
+  it('takes no lock when the mode is none', async () => {
+    await populate(detected({ ragMode: 'none' as never }));
+    expect(fakeLock.state.tried).toEqual([]);
   });
 });

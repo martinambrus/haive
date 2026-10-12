@@ -15,9 +15,13 @@ const h = vi.hoisted(() => ({
   existingOpened: [] as string[],
   internalExists: false,
   tableMissing: false,
+  onStatement: null as ((statement: string) => void) | null,
 }));
 
+const lockFake = vi.hoisted(() => ({ value: undefined as unknown }));
+
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/redis.js', () => ({ getRedis: () => ({}) }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
@@ -26,8 +30,12 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 vi.mock('@haive/shared/rag', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/rag')>();
+  const { createFakeRagLock } = await import('./rag-lock-fake.js');
+  const fake = createFakeRagLock(actual);
+  lockFake.value = fake;
   return {
     ...actual,
+    tryAcquireRagSyncLock: fake.tryAcquireRagSyncLock,
     openExistingRagDatabase: async (_db: unknown, dbName: string) => {
       h.existingOpened.push(dbName);
       if (!h.internalExists) return null;
@@ -54,6 +62,7 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
         pg: (() => {
           const unsafe = async (statement: string, params?: unknown[]) => {
             h.statements.push({ statement, params });
+            h.onStatement?.(statement);
             if (statement.startsWith('SELECT')) {
               if (h.probeError) throw new Error('store read failed');
               const awaiting = h.awaitingSeq.length > 0 ? h.awaitingSeq.shift() : h.awaiting;
@@ -82,11 +91,15 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
 import net from 'node:net';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
+import { userSecretsService } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { ONBOARDING_TOOLING_SCHEMA_VERSION } from '@haive/shared';
 import { toolingUpgradeRoutes } from '../src/routes/tooling-upgrades.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
+import type { createFakeRagLock } from './rag-lock-fake.js';
+
+const fakeLock = lockFake.value as ReturnType<typeof createFakeRagLock>;
 
 const REPO = '00000000-0000-4000-8000-0000000000c1';
 
@@ -130,6 +143,7 @@ function setup(
   h.awaiting = false;
   h.awaitingSeq = [];
   h.probeError = false;
+  h.onStatement = null;
   return fake;
 }
 
@@ -150,6 +164,8 @@ const retry = () =>
 const stores: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  fakeLock.reset();
+  vi.restoreAllMocks();
   await Promise.all(stores.splice(0).map((close) => close()));
 });
 
@@ -352,6 +368,21 @@ describe('retrying the embedding of a degraded repository', () => {
     expect(await res.json()).toMatchObject({ degradationKept: true });
   });
 
+  it('restores nothing and answers 409 when the lock is lost during the second probe', async () => {
+    const fake = setup(STORE, true, true);
+    h.awaitingSeq = [false, true];
+    let selects = 0;
+    h.onStatement = (statement) => {
+      if (statement.startsWith('SELECT') && ++selects === 2) fakeLock.state.handles[0]!.lost = true;
+    };
+
+    const res = await retry();
+
+    expect(res.status).toBe(409);
+    expect(selects).toBe(2);
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt).toBeNull();
+  });
+
   it('keeps the degradation when the probe fails', async () => {
     const fake = setup(STORE, true, true);
     h.probeError = true;
@@ -419,5 +450,128 @@ describe('retrying the embedding of a degraded repository', () => {
     await retry();
 
     expect(h.openOptions).toEqual([]);
+  });
+});
+
+describe('a RAG embed action while a sync of the repository runs', () => {
+  const patch = (body: Record<string, unknown>) =>
+    app.request(`/${REPO}/tooling`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it.each(['retry', 'rebuild_index'] as const)(
+    'refuses %s with 409 and writes nothing',
+    async (ragEmbedAction) => {
+      const fake = setup('postgres://rag:rag@127.0.0.1:1/rag', true, true);
+      const before = structuredClone(fake.rows(schema.repositories));
+      const secrets = vi.spyOn(userSecretsService, 'set').mockResolvedValue(undefined as never);
+      fakeLock.state.held.add(REPO);
+
+      const res = await patch({ ragEmbedAction, appAuthPassword: 'pw', rtkEnabled: false });
+
+      expect(res.status).toBe(409);
+      expect((await res.json()) as { error: string }).toMatchObject({
+        error: expect.stringMatching(/RAG sync of this repository is running/i),
+      });
+      expect(fake.rows(schema.repositories)).toEqual(before);
+      expect(h.statements).toEqual([]);
+      expect(secrets).not.toHaveBeenCalled();
+    },
+  );
+
+  it('answers 503 and writes nothing when Redis cannot be reached', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag', true, true);
+    const before = structuredClone(fake.rows(schema.repositories));
+    fakeLock.state.redisDown = true;
+
+    const res = await patch({ ragEmbedAction: 'retry' });
+
+    expect(res.status).toBe(503);
+    expect(fake.rows(schema.repositories)).toEqual(before);
+    expect(h.statements).toEqual([]);
+  });
+
+  it('answers 503 and writes nothing when Redis does not answer the lock command', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag', true, true);
+    const before = structuredClone(fake.rows(schema.repositories));
+    fakeLock.state.stalled = true;
+
+    const res = await patch({ ragEmbedAction: 'retry' });
+
+    expect(res.status).toBe(503);
+    expect(fake.rows(schema.repositories)).toEqual(before);
+    expect(h.statements).toEqual([]);
+  }, 3_000);
+
+  it('holds the lock across the work and releases it after success', async () => {
+    setup('postgres://rag:rag@127.0.0.1:1/rag');
+    h.batches = [500, 0];
+
+    expect((await rebuild()).status).toBe(200);
+
+    expect(fakeLock.state.tried.map((t) => t.repositoryId)).toEqual([REPO]);
+    expect(fakeLock.state.handles.map((handle) => handle.released)).toEqual([1]);
+    expect(fakeLock.state.held.size).toBe(0);
+  });
+
+  it('releases it when the work fails', async () => {
+    setup('postgres://rag:rag@127.0.0.1:1/rag');
+    h.batches = [500, { code: '57014' }];
+
+    expect((await rebuild()).status).toBe(503);
+
+    expect(fakeLock.state.handles.map((handle) => handle.released)).toEqual([1]);
+  });
+
+  it('does not take the lock for a request without a RAG action', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag');
+    fakeLock.state.held.add(REPO);
+
+    const res = await patch({ rtkEnabled: false });
+
+    expect(res.status).toBe(200);
+    expect(fakeLock.state.tried).toEqual([]);
+    expect(fake.rows(schema.repositories)[0]!.rtkEnabled).toBe(false);
+  });
+
+  it('stops resetting and answers 409 once the lock is lost between two batches', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag');
+    h.batches = [500, 500, 0];
+    h.onStatement = (statement) => {
+      if (statement.startsWith('UPDATE')) fakeLock.state.handles[0]!.lost = true;
+    };
+
+    const res = await rebuild();
+
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { error: string }).toMatchObject({
+      error: expect.stringMatching(/lock of this repository was lost/i),
+    });
+    expect(h.statements.filter((s) => s.statement.startsWith('UPDATE'))).toHaveLength(1);
+    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedReason).toMatch(/rebuild pending/i);
+    expect(fakeLock.state.handles.map((handle) => handle.released)).toEqual([1]);
+  });
+
+  it('keeps the degradation and answers 409 when the lock is lost during the retry probe', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag', true, true);
+    const before = structuredClone(fake.rows(schema.repositories));
+    h.onStatement = (statement) => {
+      if (statement.startsWith('SELECT')) fakeLock.state.handles[0]!.lost = true;
+    };
+
+    const res = await retry();
+
+    expect(res.status).toBe(409);
+    expect(fake.rows(schema.repositories)).toEqual(before);
+  });
+
+  it('answers a different repository while another is syncing', async () => {
+    setup('postgres://rag:rag@127.0.0.1:1/rag');
+    fakeLock.state.held.add('00000000-0000-4000-8000-0000000000c2');
+    h.batches = [0];
+
+    expect((await retry()).status).toBe(200);
   });
 });

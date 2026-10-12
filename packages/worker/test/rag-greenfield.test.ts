@@ -11,9 +11,12 @@ import {
   resolveTaskStackContext,
   stackProjectName,
 } from '@haive/shared/global-kb';
+import { RagSyncLockLostError } from '@haive/shared/rag';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { StepContext } from '../src/step-engine/step-definition.js';
+import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
+import type { createFakeRagLock } from './rag-lock-fake.js';
 
+const lockFake = vi.hoisted(() => ({ value: undefined as unknown }));
 const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   ensure: vi.fn(async () => ({ usedPgvector: false, tableName: 'ai_rag_embeddings' })),
@@ -25,6 +28,21 @@ const mocks = vi.hoisted(() => ({
       ) => Promise<import('../src/step-engine/steps/_rag-embed-health.js').EmbedBatchOutcome>
     >(),
   close: vi.fn(async () => {}),
+}));
+vi.mock('@haive/shared/rag', async (original) => {
+  const actual = await original<typeof import('@haive/shared/rag')>();
+  const { createFakeRagLock: create } = await import('./rag-lock-fake.js');
+  const fake = create(actual);
+  lockFake.value = fake;
+  return {
+    ...actual,
+    acquireRagSyncLock: fake.acquireRagSyncLock,
+    tryAcquireRagSyncLock: fake.tryAcquireRagSyncLock,
+  };
+});
+vi.mock('../src/redis.js', async (original) => ({
+  ...(await original<object>()),
+  getRedis: () => ({}),
 }));
 vi.mock('../src/step-engine/steps/onboarding/_rag-connection.js', async (original) => ({
   ...(await original<object>()),
@@ -54,6 +72,7 @@ const { workspaceAnchor } = await import('../src/repo/worktree-paths.js');
 const { resolveRagSyncPrefs, runRagIndexSync } =
   await import('../src/step-engine/steps/workflow/_rag-index.js');
 
+const fakeLock = lockFake.value as ReturnType<typeof createFakeRagLock>;
 const dialect = new PgDialect();
 const exec = promisify(execFile);
 let root: string;
@@ -74,6 +93,8 @@ let indexedChunks: Map<
 let failDegradedWrite: boolean;
 let leftoverNullHash: boolean;
 let nullHashProbeFails: boolean;
+let onNullHashProbe: (() => void) | null;
+let onInsert: (() => void) | null;
 let nullHashProbes: unknown[][];
 let ctx: StepContext;
 let executionPath: 'full_workflow' | 'quick_bugfix';
@@ -81,6 +102,7 @@ let priorSteps: Map<string, { output?: unknown; detectOutput?: unknown }>;
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  fakeLock.reset();
   mocks.probe.mockResolvedValue(true);
   mocks.embed.mockImplementation(async ({ texts }) => ({
     kind: 'embedded',
@@ -119,6 +141,8 @@ beforeEach(async () => {
   failDegradedWrite = false;
   leftoverNullHash = false;
   nullHashProbeFails = false;
+  onNullHashProbe = null;
+  onInsert = null;
   nullHashProbes = [];
   mocks.connect.mockImplementation(async () => ({
     close: mocks.close,
@@ -129,6 +153,7 @@ beforeEach(async () => {
           if (failInsertAt !== null && order.filter((e) => e === 'insert').length === failInsertAt)
             throw new Error('store went away');
           inserts.push(params);
+          onInsert?.();
           const rows = indexedChunks.get(params[3] as string) ?? [];
           const row = {
             section_id: params[4] as string,
@@ -147,6 +172,7 @@ beforeEach(async () => {
           return indexedChunks.get(params[1] as string) ?? [];
         if (query.includes('chunk_hash IS NULL') && query.startsWith('SELECT')) {
           nullHashProbes.push(params);
+          onNullHashProbe?.();
           if (nullHashProbeFails) throw new Error('store read failed');
           const stored = [...indexedChunks.values()].some((rows) =>
             rows.some((row) => row.chunk_hash === null),
@@ -1537,6 +1563,195 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
         ],
       ]
     `);
+    expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+});
+
+describe('one RAG sync per repository at a time', () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  };
+  const syncOf = async (c: StepContext = ctx) => {
+    const detected = await ragReindexStep.detect!(ctx);
+    return runRagIndexSync(c, {
+      repoPath: root,
+      prefs: detected.ragToolingPrefs!,
+      projectName: detected.projectName,
+      ollamaReachable: false,
+      codeCollect: detected.codeCollect,
+    });
+  };
+  const ctxFor = (repositoryId: string | null, extra: Partial<StepContext> = {}) =>
+    ({
+      ...ctx,
+      ...extra,
+      db: {
+        ...ctx.db,
+        query: {
+          ...ctx.db.query,
+          tasks: { findFirst: async () => ({ repositoryId, executionPath }) },
+        },
+      },
+    }) as unknown as StepContext;
+  const gateStore = () => {
+    const gate = deferred();
+    mocks.ensure.mockImplementationOnce(async () => {
+      await gate.promise;
+      return { usedPgvector: false, tableName: 'ai_rag_embeddings' };
+    });
+    return gate;
+  };
+
+  it('keeps the second sync of one repository from touching the store until the first released', async () => {
+    const gate = gateStore();
+    const first = syncOf();
+    for (let i = 0; i < 100 && mocks.connect.mock.calls.length < 1; i += 1) await sleep(5);
+    const progress: string[] = [];
+    const second = syncOf(
+      ctxFor('repo-1', { emitProgress: async (m: string) => void progress.push(m) }),
+    );
+    await sleep(150);
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(progress.join('\n')).toMatch(/another RAG sync of this repository/i);
+    gate.resolve();
+    await Promise.all([first, second]);
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
+    expect(fakeLock.state.handles.map((h) => h.released)).toEqual([1, 1]);
+    expect(fakeLock.state.held.size).toBe(0);
+  });
+
+  it('waits for 2 hours at most', async () => {
+    await syncOf();
+    expect(fakeLock.state.tried).toHaveLength(1);
+    expect(fakeLock.state.tried[0]!.repositoryId).toBe('repo-1');
+    expect(fakeLock.state.tried[0]!.options?.waitMs).toBe(2 * 60 * 60 * 1000);
+  });
+
+  it('does not make a different repository wait', async () => {
+    const gate = gateStore();
+    const first = syncOf();
+    for (let i = 0; i < 100 && mocks.connect.mock.calls.length < 1; i += 1) await sleep(5);
+    await syncOf(ctxFor('repo-2'));
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
+    gate.resolve();
+    await first;
+  });
+
+  it('fails the step with a clear message past the bound, touching nothing', async () => {
+    fakeLock.state.held.add('repo-1');
+    fakeLock.state.timeoutNow = true;
+    await expect(syncOf()).rejects.toThrow(/another RAG sync of this repository/i);
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  it('ends as cancelled when the task is stopped while it waits', async () => {
+    fakeLock.state.held.add('repo-1');
+    const controller = new AbortController();
+    const waiting = syncOf(ctxFor('repo-1', { signal: controller.signal }));
+    const settled = expect(waiting).rejects.toBeInstanceOf(TaskCancelledError);
+    await sleep(40);
+    controller.abort();
+    await settled;
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(fakeLock.state.held.has('repo-1')).toBe(true);
+  });
+
+  it('takes no lock when the task has no repository', async () => {
+    await expect(syncOf(ctxFor(null))).rejects.toThrow('RAG secret-mask policy has no repository');
+    expect(fakeLock.state.tried).toEqual([]);
+  });
+
+  it('releases the lock when the sync fails', async () => {
+    mocks.connect.mockRejectedValueOnce(new Error('store unreachable'));
+    await expect(syncOf()).rejects.toThrow('store unreachable');
+    expect(fakeLock.state.handles.map((h) => h.released)).toEqual([1]);
+  });
+
+  const syncWorktree = async () => {
+    const detected = await ragReindexStep.detect!(ctx);
+    return runRagIndexSync(ctx, {
+      repoPath: worktree,
+      prefs: detected.ragToolingPrefs!,
+      projectName: detected.projectName,
+      ollamaReachable: false,
+      codeCollect: detected.codeCollect,
+    });
+  };
+
+  it('fails the step and keeps the degraded flag when the lock was lost during the run', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    mocks.embed.mockImplementation(async ({ texts }) => {
+      fakeLock.state.handles[0]!.lost = true;
+      return { kind: 'embedded', embeddings: texts.map(() => [0.1, 0.2]) };
+    });
+    await expect(syncOf()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('keeps the degraded flag when the lock is lost during the last NULL-hash read', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    onNullHashProbe = () => {
+      if (nullHashProbes.length === 2) fakeLock.state.handles[0]!.lost = true;
+    };
+    await expect(syncOf()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(nullHashProbes).toHaveLength(2);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('stops inserting and sweeping once the lock is lost between two files', async () => {
+    stalePaths = ['gone.ts'];
+    let embedCalls = 0;
+    let insertedAtLoss = -1;
+    mocks.embed.mockImplementation(async ({ texts }) => {
+      embedCalls += 1;
+      if (embedCalls === 2) {
+        insertedAtLoss = inserts.length;
+        fakeLock.state.handles[0]!.lost = true;
+      }
+      return { kind: 'embedded', embeddings: texts.map(() => [0.1, 0.2]) };
+    });
+    await expect(syncWorktree()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(insertedAtLoss).toBeGreaterThan(0);
+    expect(inserts).toHaveLength(insertedAtLoss);
+    expect(deletedPaths).not.toContain('gone.ts');
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('sends no further statement once the lock is lost between two chunks of one batch', async () => {
+    stalePaths = ['gone.ts'];
+    await writeFile(
+      join(worktree, '.haive-data/knowledge_base/architecture.md'),
+      '# Architecture\n\n## Storage\n\nDocuments live in PostgreSQL.\n\n## Queues\n\nJobs run on BullMQ.\n',
+    );
+    onInsert = () => {
+      fakeLock.state.handles[0]!.lost = true;
+    };
+    await expect(syncWorktree()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(inserts).toHaveLength(1);
+    expect(deletedPaths).not.toContain('gone.ts');
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('never stops a sync whose lock is still held', async () => {
+    stalePaths = ['gone.ts'];
+    await syncWorktree();
+    expect(fakeLock.state.handles[0]!.lost).toBe(false);
+    expect(inserts.length).toBeGreaterThan(1);
+    expect(deletedPaths).toContain('gone.ts');
+  });
+
+  it('clears the degraded flag as before when the lock is still held at the end', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    await syncOf();
     expect(repo.ragEmbedDegradedAt).toBeNull();
   });
 });

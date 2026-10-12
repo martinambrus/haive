@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { fenceRagStore, type RagSyncLock } from '@haive/shared/rag';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import { loadScopeExcludeGlobs } from './_scope.js';
@@ -26,6 +27,7 @@ import {
 } from './_rag-chunkers.js';
 import { probeOllama, warmOllamaModel, vectorLiteral } from './_rag-embed.js';
 import { detectEmbedDevice, embedDeviceWarning, type EmbedDevice } from '../_embed-device.js';
+import { acquireRepoRagSyncLock } from '../_rag-sync-lock.js';
 import {
   clearRagEmbedDegraded,
   composeRagWarning,
@@ -387,6 +389,7 @@ async function embedAndStore(opts: {
   embeddingDimensions: number;
   sync: IncrementalSync | null;
   hashed: { chunks: number; realEmbedding: boolean };
+  lock: RagSyncLock | null;
 }): Promise<{ embedded: number; skipped: number }> {
   const { sync } = opts;
   const toEmbed: RagChunk[] = [];
@@ -407,6 +410,7 @@ async function embedAndStore(opts: {
   const batchSize = await resolveEmbedBatchSize();
   for (let batchStart = 0; batchStart < toEmbed.length; batchStart += batchSize) {
     opts.ctx.throwIfCancelled();
+    opts.lock?.assertHeld();
     const batch = toEmbed.slice(batchStart, batchStart + batchSize);
     const texts = batch.map((c) => c.content);
     const outcome = await embedBatch({
@@ -416,6 +420,7 @@ async function embedAndStore(opts: {
       useOllama: opts.useOllama,
       texts,
     });
+    opts.lock?.assertHeld();
     if (outcome.kind === 'failed') {
       // Fail the step rather than storing hash vectors beside real ones. This step
       // exists to produce a usable index, so a partial one it reports as done is
@@ -663,336 +668,353 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       embeddingDimensions: detected.embeddingDimensions,
     };
 
-    await ctx.emitProgress('Connecting to RAG database...');
-    const conn = await resolveRagConnection(prefs, ctx.db, detected.projectName);
-    if (!conn) {
-      ctx.logger.warn('rag connection resolved to null');
-      return {
-        kbChunkCount: 0,
-        codeChunkCount: 0,
-        kbFileCount: 0,
-        codeFileCount: 0,
-        embeddingDimensions: detected.embeddingDimensions,
-        tableName: RAG_TABLE,
-        usedPgvector: false,
-        ragMode: detected.ragMode,
-        usedOllama: false,
-        embeddingDevice: 'unknown',
-        mode: 'full',
-        chunksEmbedded: 0,
-        chunksSkipped: 0,
-        chunksDeleted: 0,
-      };
-    }
-
+    // Resolve repository_id first — the truncate path scopes by repo so
+    // re-onboarding the same repo actually wipes its prior chunks
+    // (pre-fix scoped by task_id, which always-empty for the current task
+    // before the insert started; the wipe was a no-op).
+    // NB: a prior raw ctx.db.execute({sql,params}) call here failed at runtime
+    // (wrong postgres-js driver shape, swallowed by catch) and left
+    // repository_id NULL on every inserted row — which broke the truncate
+    // path AND left rows unscoped so the workflow RAG sync (02-pre-rag-sync)
+    // could not dedup against them and re-ingested duplicates. Use the same
+    // drizzle query the rest of the codebase uses.
+    const taskRow = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { repositoryId: true },
+    });
+    const repositoryId = taskRow?.repositoryId ?? null;
+    const lock = repositoryId ? await acquireRepoRagSyncLock(ctx, repositoryId) : null;
     try {
-      await ctx.emitProgress('Creating RAG schema and indexes...');
-      const { usedPgvector } = await ensureRagSchema(conn);
-
-      // Resolve repository_id first — the truncate path scopes by repo so
-      // re-onboarding the same repo actually wipes its prior chunks
-      // (pre-fix scoped by task_id, which always-empty for the current task
-      // before the insert started; the wipe was a no-op).
-      // NB: a prior raw ctx.db.execute({sql,params}) call here failed at runtime
-      // (wrong postgres-js driver shape, swallowed by catch) and left
-      // repository_id NULL on every inserted row — which broke the truncate
-      // path AND left rows unscoped so the workflow RAG sync (02-pre-rag-sync)
-      // could not dedup against them and re-ingested duplicates. Use the same
-      // drizzle query the rest of the codebase uses.
-      const taskRow = await ctx.db.query.tasks.findFirst({
-        where: eq(schema.tasks.id, ctx.taskId),
-        columns: { repositoryId: true },
-      });
-      const repositoryId = taskRow?.repositoryId ?? null;
-
-      // Resolve populate mode. Incremental (default) skips re-embedding chunks
-      // whose content is unchanged; full rebuilds from scratch. Legacy
-      // truncateExisting:true maps to full; a changed embedding dimension also
-      // forces full (mixing dims would corrupt search).
-      let mode = resolvePopulateMode(args.formValues, repositoryId);
-      if (mode === 'incremental' && repositoryId) {
-        const existingDims = await existingVectorDims(conn, usedPgvector, repositoryId);
-        if (existingDims !== null && existingDims !== detected.embeddingDimensions) {
-          ctx.logger.warn(
-            { existingDims, requested: detected.embeddingDimensions },
-            'rag embedding dimensions changed — forcing full rebuild',
-          );
-          mode = 'full';
-        }
-      }
-
-      let sync: IncrementalSync | null = null;
-      if (mode === 'full') {
-        await ctx.emitProgress('Clearing existing RAG data...');
-        if (repositoryId) {
-          await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE repository_id = $1`, [repositoryId]);
-        } else {
-          // Fallback for repo-less tasks: legacy task_id scope.
-          await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE task_id = $1`, [ctx.taskId]);
-        }
-      } else {
-        await ctx.emitProgress('Loading existing RAG index for incremental update...');
-        sync = { existing: await loadExistingChunkHashes(conn, repositoryId!), seen: new Set() };
-      }
-
-      const useOllama = !!detected.ollamaUrl && !!detected.embeddingModel;
-
-      // Warm the embedding model ONCE before the per-file loop. A cold model (esp.
-      // a multi-billion-parameter embedding model on CPU) can take longer to load
-      // than a single embed's timeout, so otherwise every batch aborts → slow hash
-      // fallback. keep_alive (set in ollamaEmbed) then keeps it resident all run.
-      let embedDevice: EmbedDevice = 'unknown';
-      if (useOllama) {
-        await ctx.emitProgress('Warming embedding model (first load can take a minute)...');
-        const warmed = await warmOllamaModel(detected.ollamaUrl!, detected.embeddingModel!);
-        ctx.logger.info(
-          { model: detected.embeddingModel, warmed },
-          warmed ? 'embedding model warmed' : 'embedding model warmup failed (will hash-fallback)',
-        );
-        // After warm the model is resident, so /api/ps reports GPU vs CPU placement.
-        // detectEmbedDevice warns loudly if it fell back to CPU under GPU mode.
-        if (warmed) {
-          embedDevice = await detectEmbedDevice(
-            ctx.logger,
-            detected.ollamaUrl!,
-            detected.embeddingModel!,
-          );
-        }
-      }
-      // Surface a CPU fallback and any carried-over embed degradation as a standalone
-      // amber banner on the step (set once; a per-file progress line would otherwise
-      // bury it). Clears to null on a healthy/unknown run so a stale warning from a
-      // prior pass does not linger.
-      const health = await loadRagEmbedHealth(ctx.db, repositoryId ?? null);
-      const awaitingReembed = await startBannerAwaitsReembed(
-        conn,
-        health,
-        repositoryId ?? null,
-        ctx.logger,
-      );
-      await ctx.db
-        .update(schema.taskSteps)
-        .set({
-          warningMessage: composeRagWarning(
-            embedDeviceWarning(embedDevice),
-            ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
-          ),
-        })
-        .where(eq(schema.taskSteps.id, ctx.taskStepId));
-
-      let kbChunkCount = 0;
-      let codeChunkCount = 0;
-      let kbFileCount = 0;
-      let codeFileCount = 0;
-      let chunksEmbedded = 0;
-      let chunksSkipped = 0;
-      const hashed = { chunks: 0, realEmbedding: false };
-
-      // --- KB files ---
-      const totalKb = detected.kbFiles.length;
-      for (let fi = 0; fi < totalKb; fi += 1) {
-        ctx.throwIfCancelled();
-        const file = detected.kbFiles[fi]!;
-        await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}`);
-
-        let text: string;
-        try {
-          const read = await readTextNoFollow(ctx.repoPath, file.relPath);
-          if (read === null) throw new Error('unreadable or reached through a link');
-          text = read;
-        } catch (err) {
-          ctx.logger.warn({ err, file: file.relPath }, 'failed to read KB file; skipping');
-          continue;
-        }
-
-        const kbBytes = Buffer.byteLength(text, 'utf8');
-        if (kbBytes > MAX_FILE_BYTES) {
-          ctx.logger.warn(
-            { file: file.relPath, bytes: kbBytes, max: MAX_FILE_BYTES },
-            'KB file exceeds the RAG size limit; skipped',
-          );
-          continue;
-        }
-
-        const sections = extractMarkdownSections(text, file.relPath);
-        const built: RagChunk[] = [];
-        for (const section of sections) {
-          built.push(
-            ...chunkSection(section, { header: contextHeader(file.relPath, section.breadcrumb) }),
-          );
-        }
-        const { chunks, dropped } = capChunks(built);
-        if (dropped > 0) {
-          ctx.logger.warn(
-            { file: file.relPath, kept: chunks.length, dropped },
-            'KB file exceeded the per-file RAG chunk budget; tail not indexed',
-          );
-        }
-        if (chunks.length === 0) continue;
-        kbFileCount += 1;
-        kbChunkCount += chunks.length;
-        const kbRes = await embedAndStore({
-          ctx,
-          conn,
-          usedPgvector,
-          taskId: ctx.taskId,
-          repositoryId,
-          sourceType: 'kb',
-          filePath: file.relPath,
-          chunks,
-          useOllama,
-          ollamaUrl: detected.ollamaUrl,
-          embeddingModel: detected.embeddingModel,
+      await ctx.emitProgress('Connecting to RAG database...');
+      const opened = await resolveRagConnection(prefs, ctx.db, detected.projectName);
+      const conn = opened && fenceRagStore(opened, lock);
+      if (!conn) {
+        ctx.logger.warn('rag connection resolved to null');
+        return {
+          kbChunkCount: 0,
+          codeChunkCount: 0,
+          kbFileCount: 0,
+          codeFileCount: 0,
           embeddingDimensions: detected.embeddingDimensions,
-          sync,
-          hashed,
-        });
-        chunksEmbedded += kbRes.embedded;
-        chunksSkipped += kbRes.skipped;
-      }
-
-      // --- Code files ---
-      const totalCode = detected.codeFiles.length;
-      for (let fi = 0; fi < totalCode; fi += 1) {
-        ctx.throwIfCancelled();
-        const file = detected.codeFiles[fi]!;
-        await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}`);
-
-        let text: string;
-        try {
-          const read = await readTextNoFollow(ctx.repoPath, file.relPath);
-          if (read === null) throw new Error('unreadable or reached through a link');
-          text = read;
-        } catch (err) {
-          ctx.logger.warn({ err, file: file.relPath }, 'failed to read code file; skipping');
-          continue;
-        }
-
-        const codeBytes = Buffer.byteLength(text, 'utf8');
-        if (codeBytes > MAX_FILE_BYTES) {
-          ctx.logger.warn(
-            { file: file.relPath, bytes: codeBytes, max: MAX_FILE_BYTES },
-            'code file exceeds the RAG size limit; skipped',
-          );
-          continue;
-        }
-
-        const sections = extractCodeSections(text, file.relPath);
-        const built: RagChunk[] = [];
-        for (const section of sections) {
-          built.push(
-            ...chunkSection(section, { header: contextHeader(file.relPath, section.breadcrumb) }),
-          );
-        }
-        const { chunks, dropped } = capChunks(built);
-        if (dropped > 0) {
-          ctx.logger.warn(
-            { file: file.relPath, kept: chunks.length, dropped },
-            'code file exceeded the per-file RAG chunk budget; tail not indexed',
-          );
-        }
-        if (chunks.length === 0) continue;
-        codeFileCount += 1;
-        codeChunkCount += chunks.length;
-        const codeRes = await embedAndStore({
-          ctx,
-          conn,
-          usedPgvector,
-          taskId: ctx.taskId,
-          repositoryId,
-          sourceType: 'code',
-          filePath: file.relPath,
-          chunks,
-          useOllama,
-          ollamaUrl: detected.ollamaUrl,
-          embeddingModel: detected.embeddingModel,
-          embeddingDimensions: detected.embeddingDimensions,
-          sync,
-          hashed,
-        });
-        chunksEmbedded += codeRes.embedded;
-        chunksSkipped += codeRes.skipped;
-      }
-
-      let chunksDeleted = 0;
-      if (sync) {
-        const staleKeys = computeStaleKeys(sync.existing.keys(), sync.seen);
-        if (staleKeys.length > 0) {
-          await ctx.emitProgress(`Removing ${staleKeys.length} stale chunk(s)...`);
-          chunksDeleted = await deleteStaleChunks(
-            conn,
-            repositoryId!,
-            staleKeys.map((k) => sync!.existing.get(k)!),
-          );
-        }
-      }
-
-      await ctx.emitProgress(
-        `RAG ${mode} complete: embedded ${chunksEmbedded}, skipped ${chunksSkipped}, deleted ${chunksDeleted} ` +
-          `(${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files).`,
-      );
-
-      ctx.logger.info(
-        {
-          mode,
-          kbChunkCount,
-          codeChunkCount,
-          kbFileCount,
-          codeFileCount,
-          chunksEmbedded,
-          chunksSkipped,
-          chunksDeleted,
-          usedPgvector,
-          usedOllama: useOllama,
+          tableName: RAG_TABLE,
+          usedPgvector: false,
           ragMode: detected.ragMode,
-        },
-        'rag populate apply complete',
-      );
-      // A completed run with real embeddings is the only evidence that clears the
-      // degradation — a hash-mode run proves nothing about whether embeddings work.
-      if (hashed.chunks > 0) {
+          usedOllama: false,
+          embeddingDevice: 'unknown',
+          mode: 'full',
+          chunksEmbedded: 0,
+          chunksSkipped: 0,
+          chunksDeleted: 0,
+        };
+      }
+
+      try {
+        await ctx.emitProgress('Creating RAG schema and indexes...');
+        const { usedPgvector } = await ensureRagSchema(conn);
+
+        // Resolve populate mode. Incremental (default) skips re-embedding chunks
+        // whose content is unchanged; full rebuilds from scratch. Legacy
+        // truncateExisting:true maps to full; a changed embedding dimension also
+        // forces full (mixing dims would corrupt search).
+        let mode = resolvePopulateMode(args.formValues, repositoryId);
+        if (mode === 'incremental' && repositoryId) {
+          const existingDims = await existingVectorDims(conn, usedPgvector, repositoryId);
+          if (existingDims !== null && existingDims !== detected.embeddingDimensions) {
+            ctx.logger.warn(
+              { existingDims, requested: detected.embeddingDimensions },
+              'rag embedding dimensions changed — forcing full rebuild',
+            );
+            mode = 'full';
+          }
+        }
+
+        let sync: IncrementalSync | null = null;
+        if (mode === 'full') {
+          await ctx.emitProgress('Clearing existing RAG data...');
+          lock?.assertHeld();
+          if (repositoryId) {
+            await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE repository_id = $1`, [
+              repositoryId,
+            ]);
+          } else {
+            // Fallback for repo-less tasks: legacy task_id scope.
+            await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE task_id = $1`, [ctx.taskId]);
+          }
+        } else {
+          await ctx.emitProgress('Loading existing RAG index for incremental update...');
+          sync = { existing: await loadExistingChunkHashes(conn, repositoryId!), seen: new Set() };
+        }
+
+        const useOllama = !!detected.ollamaUrl && !!detected.embeddingModel;
+
+        // Warm the embedding model ONCE before the per-file loop. A cold model (esp.
+        // a multi-billion-parameter embedding model on CPU) can take longer to load
+        // than a single embed's timeout, so otherwise every batch aborts → slow hash
+        // fallback. keep_alive (set in ollamaEmbed) then keeps it resident all run.
+        let embedDevice: EmbedDevice = 'unknown';
+        if (useOllama) {
+          await ctx.emitProgress('Warming embedding model (first load can take a minute)...');
+          const warmed = await warmOllamaModel(detected.ollamaUrl!, detected.embeddingModel!);
+          ctx.logger.info(
+            { model: detected.embeddingModel, warmed },
+            warmed
+              ? 'embedding model warmed'
+              : 'embedding model warmup failed (will hash-fallback)',
+          );
+          // After warm the model is resident, so /api/ps reports GPU vs CPU placement.
+          // detectEmbedDevice warns loudly if it fell back to CPU under GPU mode.
+          if (warmed) {
+            embedDevice = await detectEmbedDevice(
+              ctx.logger,
+              detected.ollamaUrl!,
+              detected.embeddingModel!,
+            );
+          }
+        }
+        // Surface a CPU fallback and any carried-over embed degradation as a standalone
+        // amber banner on the step (set once; a per-file progress line would otherwise
+        // bury it). Clears to null on a healthy/unknown run so a stale warning from a
+        // prior pass does not linger.
+        const health = await loadRagEmbedHealth(ctx.db, repositoryId ?? null);
+        const awaitingReembed = await startBannerAwaitsReembed(
+          conn,
+          health,
+          repositoryId ?? null,
+          ctx.logger,
+        );
         await ctx.db
           .update(schema.taskSteps)
           .set({
             warningMessage: composeRagWarning(
               embedDeviceWarning(embedDevice),
-              ragEmbedWarning(
-                {
-                  degradedAt: health.degradedAt ?? new Date(),
-                  degradedReason: HASH_WITH_ENDPOINT_REASON,
-                  lexicalOnly: false,
-                },
-                { skippedChunks: 0, hashedChunks: hashed.chunks },
-              ),
+              ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
             ),
           })
           .where(eq(schema.taskSteps.id, ctx.taskStepId));
-      } else if (
-        useOllama &&
-        hashed.realEmbedding &&
-        health.degradedAt &&
-        !(await ragStoreAwaitsReembed(conn, repositoryId ?? null, ctx.logger))
-      ) {
-        await clearRagEmbedDegraded(ctx.db, repositoryId ?? null, ctx.logger);
+
+        let kbChunkCount = 0;
+        let codeChunkCount = 0;
+        let kbFileCount = 0;
+        let codeFileCount = 0;
+        let chunksEmbedded = 0;
+        let chunksSkipped = 0;
+        const hashed = { chunks: 0, realEmbedding: false };
+
+        // --- KB files ---
+        const totalKb = detected.kbFiles.length;
+        for (let fi = 0; fi < totalKb; fi += 1) {
+          ctx.throwIfCancelled();
+          lock?.assertHeld();
+          const file = detected.kbFiles[fi]!;
+          await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}`);
+
+          let text: string;
+          try {
+            const read = await readTextNoFollow(ctx.repoPath, file.relPath);
+            if (read === null) throw new Error('unreadable or reached through a link');
+            text = read;
+          } catch (err) {
+            ctx.logger.warn({ err, file: file.relPath }, 'failed to read KB file; skipping');
+            continue;
+          }
+
+          const kbBytes = Buffer.byteLength(text, 'utf8');
+          if (kbBytes > MAX_FILE_BYTES) {
+            ctx.logger.warn(
+              { file: file.relPath, bytes: kbBytes, max: MAX_FILE_BYTES },
+              'KB file exceeds the RAG size limit; skipped',
+            );
+            continue;
+          }
+
+          const sections = extractMarkdownSections(text, file.relPath);
+          const built: RagChunk[] = [];
+          for (const section of sections) {
+            built.push(
+              ...chunkSection(section, { header: contextHeader(file.relPath, section.breadcrumb) }),
+            );
+          }
+          const { chunks, dropped } = capChunks(built);
+          if (dropped > 0) {
+            ctx.logger.warn(
+              { file: file.relPath, kept: chunks.length, dropped },
+              'KB file exceeded the per-file RAG chunk budget; tail not indexed',
+            );
+          }
+          if (chunks.length === 0) continue;
+          kbFileCount += 1;
+          kbChunkCount += chunks.length;
+          const kbRes = await embedAndStore({
+            ctx,
+            conn,
+            usedPgvector,
+            taskId: ctx.taskId,
+            repositoryId,
+            sourceType: 'kb',
+            filePath: file.relPath,
+            chunks,
+            useOllama,
+            ollamaUrl: detected.ollamaUrl,
+            embeddingModel: detected.embeddingModel,
+            embeddingDimensions: detected.embeddingDimensions,
+            sync,
+            hashed,
+            lock,
+          });
+          chunksEmbedded += kbRes.embedded;
+          chunksSkipped += kbRes.skipped;
+        }
+
+        // --- Code files ---
+        const totalCode = detected.codeFiles.length;
+        for (let fi = 0; fi < totalCode; fi += 1) {
+          ctx.throwIfCancelled();
+          lock?.assertHeld();
+          const file = detected.codeFiles[fi]!;
+          await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}`);
+
+          let text: string;
+          try {
+            const read = await readTextNoFollow(ctx.repoPath, file.relPath);
+            if (read === null) throw new Error('unreadable or reached through a link');
+            text = read;
+          } catch (err) {
+            ctx.logger.warn({ err, file: file.relPath }, 'failed to read code file; skipping');
+            continue;
+          }
+
+          const codeBytes = Buffer.byteLength(text, 'utf8');
+          if (codeBytes > MAX_FILE_BYTES) {
+            ctx.logger.warn(
+              { file: file.relPath, bytes: codeBytes, max: MAX_FILE_BYTES },
+              'code file exceeds the RAG size limit; skipped',
+            );
+            continue;
+          }
+
+          const sections = extractCodeSections(text, file.relPath);
+          const built: RagChunk[] = [];
+          for (const section of sections) {
+            built.push(
+              ...chunkSection(section, { header: contextHeader(file.relPath, section.breadcrumb) }),
+            );
+          }
+          const { chunks, dropped } = capChunks(built);
+          if (dropped > 0) {
+            ctx.logger.warn(
+              { file: file.relPath, kept: chunks.length, dropped },
+              'code file exceeded the per-file RAG chunk budget; tail not indexed',
+            );
+          }
+          if (chunks.length === 0) continue;
+          codeFileCount += 1;
+          codeChunkCount += chunks.length;
+          const codeRes = await embedAndStore({
+            ctx,
+            conn,
+            usedPgvector,
+            taskId: ctx.taskId,
+            repositoryId,
+            sourceType: 'code',
+            filePath: file.relPath,
+            chunks,
+            useOllama,
+            ollamaUrl: detected.ollamaUrl,
+            embeddingModel: detected.embeddingModel,
+            embeddingDimensions: detected.embeddingDimensions,
+            sync,
+            hashed,
+            lock,
+          });
+          chunksEmbedded += codeRes.embedded;
+          chunksSkipped += codeRes.skipped;
+        }
+
+        let chunksDeleted = 0;
+        if (sync) {
+          const staleKeys = computeStaleKeys(sync.existing.keys(), sync.seen);
+          if (staleKeys.length > 0) {
+            await ctx.emitProgress(`Removing ${staleKeys.length} stale chunk(s)...`);
+            lock?.assertHeld();
+            chunksDeleted = await deleteStaleChunks(
+              conn,
+              repositoryId!,
+              staleKeys.map((k) => sync!.existing.get(k)!),
+            );
+          }
+        }
+
+        await ctx.emitProgress(
+          `RAG ${mode} complete: embedded ${chunksEmbedded}, skipped ${chunksSkipped}, deleted ${chunksDeleted} ` +
+            `(${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files).`,
+        );
+
+        ctx.logger.info(
+          {
+            mode,
+            kbChunkCount,
+            codeChunkCount,
+            kbFileCount,
+            codeFileCount,
+            chunksEmbedded,
+            chunksSkipped,
+            chunksDeleted,
+            usedPgvector,
+            usedOllama: useOllama,
+            ragMode: detected.ragMode,
+          },
+          'rag populate apply complete',
+        );
+        lock?.assertHeld();
+        // A completed run with real embeddings is the only evidence that clears the
+        // degradation — a hash-mode run proves nothing about whether embeddings work.
+        if (hashed.chunks > 0) {
+          await ctx.db
+            .update(schema.taskSteps)
+            .set({
+              warningMessage: composeRagWarning(
+                embedDeviceWarning(embedDevice),
+                ragEmbedWarning(
+                  {
+                    degradedAt: health.degradedAt ?? new Date(),
+                    degradedReason: HASH_WITH_ENDPOINT_REASON,
+                    lexicalOnly: false,
+                  },
+                  { skippedChunks: 0, hashedChunks: hashed.chunks },
+                ),
+              ),
+            })
+            .where(eq(schema.taskSteps.id, ctx.taskStepId));
+        } else if (
+          useOllama &&
+          hashed.realEmbedding &&
+          health.degradedAt &&
+          !(await ragStoreAwaitsReembed(conn, repositoryId ?? null, ctx.logger))
+        ) {
+          lock?.assertHeld();
+          await clearRagEmbedDegraded(ctx.db, repositoryId ?? null, ctx.logger);
+        }
+        return {
+          kbChunkCount,
+          codeChunkCount,
+          kbFileCount,
+          codeFileCount,
+          embeddingDimensions: detected.embeddingDimensions,
+          tableName: RAG_TABLE,
+          usedPgvector,
+          ragMode: detected.ragMode,
+          usedOllama: useOllama,
+          embeddingDevice: embedDevice,
+          mode,
+          chunksEmbedded,
+          chunksSkipped,
+          chunksDeleted,
+        };
+      } finally {
+        await conn.close();
       }
-      return {
-        kbChunkCount,
-        codeChunkCount,
-        kbFileCount,
-        codeFileCount,
-        embeddingDimensions: detected.embeddingDimensions,
-        tableName: RAG_TABLE,
-        usedPgvector,
-        ragMode: detected.ragMode,
-        usedOllama: useOllama,
-        embeddingDevice: embedDevice,
-        mode,
-        chunksEmbedded,
-        chunksSkipped,
-        chunksDeleted,
-      };
     } finally {
-      await conn.close();
+      await lock?.release();
     }
   },
 };
