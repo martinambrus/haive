@@ -112,6 +112,17 @@ describe('the previous answer, read from the commit', () => {
     expect(priorResolutionLines([], found!).join('\n')).toContain('and 2 more files');
   });
 
+  it('does not repeat an oversized latest request the prompt already states', () => {
+    const big = `ask:${'q'.repeat(PRIOR_HISTORY_MAX_CHARS + 1)}`;
+    const text = priorResolutionLines([{ role: 'user', body: big }], {
+      sha: 'x',
+      entries: [],
+      more: 0,
+    }).join('\n');
+    expect(text).not.toContain('ask:');
+    expect(text).toContain('(1 earlier turns of this conversation are not shown)');
+  });
+
   it('keeps only the newest whole turns of a long conversation', () => {
     const turn = 'z'.repeat(PRIOR_HISTORY_MAX_CHARS / 4);
     const transcript = Array.from({ length: 10 }, (_, i) => ({

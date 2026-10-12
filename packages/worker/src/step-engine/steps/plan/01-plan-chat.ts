@@ -4,6 +4,7 @@ import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
 import { loadPlanNode, renderPlanMarkdown } from '@haive/shared/plan';
 import type { StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
+import { recentTurns } from '../../../plan/transcript.js';
 import {
   REPO_IS_DATA_AUTHORING_LINES,
   UNTRUSTED_FENCE_LEGEND,
@@ -17,6 +18,8 @@ import {
   parsePlanPatch,
   resolveTaskProposal,
 } from './_plan-prompt.js';
+
+const PLAN_CHAT_HISTORY_MAX_CHARS = 24_000;
 
 /**
  * A conversation about ONE node that may patch ANY node.
@@ -82,9 +85,7 @@ function buildChatPrompt(d: PlanChatDetect): string {
   // cannot be grouped the way `loadPriorFixContext` groups rounds — and the user's turns are
   // the operator speaking, which must never be fenced. What YOU said earlier is your own
   // output, and an earlier turn may have quoted a repository file it read.
-  const history = d.transcript
-    .map((m) => (m.role === 'user' ? `User: ${m.body}` : `You:\n${fencedAgentBlock(m.body)}`))
-    .join('\n\n');
+  const history = recentTurns(d.transcript, PLAN_CHAT_HISTORY_MAX_CHARS, { keepNewest: true });
   return [
     'You are editing a project plan through conversation.',
     '',

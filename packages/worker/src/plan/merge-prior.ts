@@ -2,6 +2,7 @@ import { isUtf8 } from 'node:buffer';
 import { gitRun } from '../repo/git-push.js';
 import { UNTRUSTED_FENCE_LEGEND, fencedAgentBlock } from '../step-engine/steps/_untrusted-repo.js';
 import { isListableName } from '../step-engine/steps/workflow/_impl-changes.js';
+import { recentTurns } from './transcript.js';
 
 /** Beside the transcript, for the reason the fix baseline is: the revise loop resets the step row and
  *  the reopen resets the worktree, so neither can hold the answer the reopen takes back. */
@@ -185,25 +186,7 @@ export function priorResolutionLines(
   transcript: { role: string; body: string }[],
   prior: PriorResolution,
 ): string[] {
-  // The user's turns are the operator speaking and never fenced; the agent's own may have quoted a file.
-  const turns = transcript.map((m) =>
-    m.role === 'user' ? `User: ${m.body}` : `You:\n${fencedAgentBlock(m.body)}`,
-  );
-  // The newest whole turns that fit; the latest request is also stated in full above.
-  let kept = 0;
-  let size = 0;
-  while (
-    kept < turns.length &&
-    size + turns[turns.length - 1 - kept]!.length <= PRIOR_HISTORY_MAX_CHARS
-  ) {
-    size += turns[turns.length - 1 - kept]!.length;
-    kept += 1;
-  }
-  const dropped = turns.length - kept;
-  const history = [
-    ...(dropped > 0 ? [`(${dropped} earlier turns of this conversation are not shown)`] : []),
-    ...turns.slice(turns.length - kept),
-  ].join('\n\n');
+  const history = recentTurns(transcript, PRIOR_HISTORY_MAX_CHARS, { keepNewest: false });
   const shown = prior.entries.filter((e) => isListableName(e.path));
   const unlisted = prior.more + (prior.entries.length - shown.length);
   return [
