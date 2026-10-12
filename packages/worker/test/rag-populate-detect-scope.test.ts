@@ -9,6 +9,7 @@ import { ragPopulateStep } from '../src/step-engine/steps/onboarding/10-rag-popu
 let root: string;
 let scope: string[] | null;
 let envDetect: unknown;
+let ragSource: unknown;
 
 async function write(rel: string): Promise<void> {
   const abs = join(root, rel);
@@ -27,7 +28,7 @@ function context(): StepContext {
           orderBy: () => ({
             limit: async () =>
               table === schema.taskSteps && envDetect
-                ? [{ detectOutput: envDetect, round: 0 }]
+                ? [{ detectOutput: envDetect, output: ragSource, round: 0 }]
                 : [],
           }),
           limit: async () => [],
@@ -51,6 +52,7 @@ const codePaths = async () =>
   (await ragPopulateStep.detect!(context())).codeFiles.map((f) => f.relPath);
 
 beforeEach(async () => {
+  ragSource = null;
   root = await mkdtemp(join(tmpdir(), 'haive-rag-detect-scope-'));
   envDetect = {
     data: {
@@ -93,6 +95,14 @@ describe('10-rag-populate detect scope', () => {
       'wp-content/plugins/acme/acme.php',
       'wp-content/plugins/other/o.php',
     ]);
+  });
+
+  it('drops the 09_7 folder pick once a scope is saved, as the workflow sync does', async () => {
+    ragSource = { selectedDirs: ['src'] };
+    scope = null;
+    expect(await codePaths()).toEqual(['src/a.php']);
+    scope = ['docs'];
+    expect(await codePaths()).toContain('wp-content/plugins/acme/acme.php');
   });
 
   it('keeps a user-denied own path out', async () => {

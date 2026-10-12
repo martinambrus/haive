@@ -534,7 +534,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       selectedDirs?: string[];
       extensionSet?: string[];
     } | null;
-    const selectedDirs = ragSourceOutput?.selectedDirs;
+    const selectedDirs = savedScope == null ? ragSourceOutput?.selectedDirs : undefined;
     const resolvedExtSet = ragSourceOutput?.extensionSet;
 
     // Collect KB files
