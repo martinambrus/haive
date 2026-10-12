@@ -1644,7 +1644,7 @@ describe('syncProjectStateFromCheckout: a writer failed after it rendered a pend
   const mine = render({ acceptedAgentIds: ['code-reviewer'] });
   const theirs = render({ acceptedAgentIds: ['code-reviewer', 'qa-lead'] });
 
-  async function failedWriter() {
+  async function failedWriter(writes_ = mine) {
     const s = await setup({ column: column(mine), sync: { base: baseOf(BASE) } });
     await s.putRecord(record(theirs));
     expect((await s.run()).outcome).toBe('conflict');
@@ -1653,7 +1653,7 @@ describe('syncProjectStateFromCheckout: a writer failed after it rendered a pend
       writes += 1;
       if (writes === 2) throw new Error('database refused');
     };
-    await s.write({ ...mine, ...PER_INSTALL }, true).then(
+    await s.write({ ...writes_, ...PER_INSTALL }, true).then(
       () => {
         throw new Error('the writer should have failed');
       },
@@ -1681,6 +1681,17 @@ describe('syncProjectStateFromCheckout: a writer failed after it rendered a pend
     expect(json(s.columnOf())).toMatchObject({ acceptedAgentIds: mine.acceptedAgentIds });
     expect(s.syncRow()?.lastError).toContain('acceptedAgentIds');
     expect(s.syncRow()?.lastError).not.toContain(AGENTS);
+  });
+
+  it('keeps the value a failed writer chose for the contested key, not the row’s older one', async () => {
+    const chosen = render({ acceptedAgentIds: ['security-auditor'] });
+    const s = await failedWriter(chosen);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(json(s.pending()[0]!.local)).toEqual({ v: chosen.acceptedAgentIds });
+    expect(json(s.columnOf())).toMatchObject({ acceptedAgentIds: chosen.acceptedAgentIds });
   });
 
   it('writes nothing on the sync after that', async () => {

@@ -4,6 +4,7 @@ import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
   RENDER_UNIT,
+  conflictSide,
   conflictSideValue,
   emptyProjectState,
   isRenderUnit,
@@ -146,10 +147,12 @@ export async function writeProjectStateRecord(
   }: ProjectStateRecordInput,
 ): Promise<string[]> {
   const written: string[] = [];
+  let attempted: ProjectRender | null = null;
   try {
     // Refused before anything is written, so the column only ever holds what reads back.
     const column = renderContextColumnFor(context, rtkChoiceRecorded);
     const portable = portableRender(column);
+    attempted = portable;
     const planFor = (pending: readonly PendingRenderConflict[]) => ({
       record: { ...emptyProjectState(), render: overlayRender(portable, pending, 'incoming') },
       baseSnapshot: normalizeProjectState({
@@ -196,7 +199,7 @@ export async function writeProjectStateRecord(
     });
   } catch (err) {
     if (err instanceof ProjectStateMovedError) throw err;
-    const cleared = await clearRenderContext(db, repositoryId, expectedColumns);
+    const cleared = await clearRenderContext(db, repositoryId, expectedColumns, attempted);
     throw new ProjectStateWriteError(err, written, !cleared);
   }
   return written;
@@ -235,7 +238,8 @@ export async function refuseMovedColumn(
 async function clearRenderContext(
   db: Database,
   repositoryId: string,
-  expected?: unknown[],
+  expected: unknown[] | undefined,
+  attempted: ProjectRender | null,
 ): Promise<boolean> {
   try {
     await db.transaction(async (tx) => {
@@ -252,6 +256,25 @@ async function clearRenderContext(
         .update(schema.repositories)
         .set({ renderContext: null })
         .where(eq(schema.repositories.id, repositoryId));
+      // The column was this install's side of each pending key; the next sync rebuilds it from the rows.
+      if (attempted) {
+        for (const row of await loadPendingRenderConflicts(tx, repositoryId)) {
+          const local =
+            row.unit === RENDER_UNIT
+              ? attempted
+              : (attempted as Record<string, unknown>)[row.unit.slice(RENDER_UNIT.length + 1)];
+          await tx
+            .update(schema.projectStateConflicts)
+            .set({ local: conflictSide(local) })
+            .where(
+              and(
+                eq(schema.projectStateConflicts.repositoryId, repositoryId),
+                eq(schema.projectStateConflicts.unit, row.unit),
+                isNull(schema.projectStateConflicts.resolvedAt),
+              ),
+            );
+        }
+      }
     });
     return true;
   } catch {
