@@ -289,8 +289,14 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       renderCtx,
       logger: ctx.logger,
     });
+    const foreignContext: ForeignContext = {
+      haiveVersion: getHaiveVersion(),
+      agentTargets: renderCtx.agentTargets,
+      skillDirs: await resolveSkillTargetDirs(ctx.db, ctx.userId),
+    };
+    const ownRows = liveRows.filter((r) => foreignReason(r, foreignContext) === null);
     const installedTemplateSetHash =
-      liveRows.length > 0 ? computeInstalledSetHashFromRows(liveRows) : null;
+      ownRows.length > 0 ? computeInstalledSetHashFromRows(ownRows) : null;
 
     const byPath = new Map<string, ExpandedRendering>();
     for (const r of expanded) byPath.set(r.diskPath, r);
@@ -301,11 +307,6 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const entries: UpgradePlanEntry[] = [];
     let counterByBucket = 0;
     const cliRulesRenderHashes = await loadCliRulesRenderHashes(ctx.db, repositoryId);
-    const foreignContext: ForeignContext = {
-      haiveVersion: getHaiveVersion(),
-      agentTargets: renderCtx.agentTargets,
-      skillDirs: await resolveSkillTargetDirs(ctx.db, ctx.userId),
-    };
 
     for (const diskPath of allPaths) {
       const current = byPath.get(diskPath) ?? null;

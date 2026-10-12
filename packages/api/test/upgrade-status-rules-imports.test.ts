@@ -720,6 +720,35 @@ describe('upgrade-status and a clone holding a render context column', () => {
     expect(body.firstUpgradeOnThisInstall).toBeUndefined();
   });
 
+  it('U13d: offers no first upgrade while the ledger holds only claims from a newer release', async () => {
+    process.env.HAIVE_VERSION = '1.4.0';
+    try {
+      state.rows.set(schema.onboardingArtifacts, [
+        {
+          id: 'marker-1',
+          templateId: 'agent.x',
+          templateKind: 'agent',
+          templateSchemaVersion: 1,
+          templateContentHash: 'h-newer',
+          diskPath: '.claude/agents/x.md',
+          writtenHash: 'h-newer',
+          bundleItemId: null,
+          haiveVersion: '1.5.0',
+          source: 'backfill',
+          sourceStepId: 'project-state-import',
+          repositoryId: 'repo-1',
+          generatedAt: new Date(1),
+        },
+      ]);
+
+      const body = await status();
+
+      expect(body.firstUpgradeOnThisInstall).toBeUndefined();
+    } finally {
+      delete process.env.HAIVE_VERSION;
+    }
+  });
+
   // U2: the banner's half of what 01 offers on the same repository (upgrade-plan-render-context.test.ts, W2)
   it('U2: offers the RTK settings file it finds for removal once RTK is off, as the plan does', async () => {
     await mkdir(path.join(repo, '.claude'), { recursive: true });
