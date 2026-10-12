@@ -253,6 +253,28 @@ describe('08 apply with a declared command', () => {
     expect(phase5VerifyStep.fixLoop!.evaluate(out)).not.toBeNull();
   });
 
+  it("reads Playwright's missing-browser error from a declared test whatever 08b detected", async () => {
+    const missing = "browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/x";
+    runStepCommandInSandbox.mockResolvedValue({ ran: true, exitCode: 1, output: missing });
+
+    const out = await run(
+      { testFramework: 'phpunit', test: declared('cd e2e && npx playwright test', false) },
+      { runTest: true },
+    );
+    expect(out.test.ran).toBe(false);
+    expect(phase5VerifyStep.fixLoop!.evaluate(out)).toBeNull();
+
+    const detected = await run(
+      {
+        testFramework: 'phpunit',
+        test: { kind: 'host', label: 'npm run test', argv: ['npm', 'run', 'test'] },
+      },
+      { runTest: true },
+    );
+    expect(detected.test.ran).toBe(true);
+    expect(detected.passed).toBe(false);
+  });
+
   it('runs a declared host command as one sh -c string', async () => {
     await run({ test: declared('cd a && make test', false) }, { runTest: true });
 

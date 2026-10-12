@@ -1048,8 +1048,10 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     // burns a whole round on something no agent can repair, which is the exact failure 08b's
     // own guard exists for. `ran: false` keeps it out of `passed` the same way a skipped slot
     // is kept out, and the note below says so rather than letting it read as green.
+    // A declared command may drive Playwright wherever 08b looked; its own error IDs decide then.
+    const envFramework = testCmd?.source === 'declared' ? 'playwright' : (testFramework ?? null);
     const testEnvBlocker =
-      test.ran && !test.passed ? classifyTestEnvFailure(testFramework ?? null, testRun.raw) : null;
+      test.ran && !test.passed ? classifyTestEnvFailure(envFramework, testRun.raw) : null;
     if (testEnvBlocker) {
       test = {
         ...test,

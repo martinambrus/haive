@@ -95,7 +95,9 @@ replaces both lint slots, `phpLint` included. A declared command runs as one she
 on the host and `ddev exec --raw -- bash -c` with the string quoted once in DDEV, so nothing in it
 expands in the runner's own shell. Its verdict is unscoped, like a project script's. A declared
 command the shell cannot start (exit 127 or 126) reads as NOT RUN with a note, since it is a
-repository setting to correct, not a defect a fix round can repair. Gate 2 lists a turned-off slot
+repository setting to correct, not a defect a fix round can repair. A failed declared test is checked for
+Playwright's own missing-browser errors whatever 08b detected, since it may drive Playwright from a
+directory 08b never looked in; browser provisioning still follows 08b's detection. Gate 2 lists a turned-off slot
 as off, never as a missing runner, so it raises no "Tooling below the root" row, and every
 root-only notice ends by pointing at the Tooling page. `06-run-config` shows the declared commands.
 
