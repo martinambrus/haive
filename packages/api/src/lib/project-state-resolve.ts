@@ -6,16 +6,23 @@ import type {
 import { getPlanMirrorQueue, getPlanMirrorQueueEvents } from '../queues.js';
 
 /** The worker answers the question, since it owns every write to the checkout's record files, and
- *  the answer is waited for: a person who clicked it wants to see what it did. */
+ *  the answer is waited for: a person who clicked it wants to see what it did. A job still queued or
+ *  running when the wait ends is `pending`, never a failure: it can still apply the answer. */
 export async function resolveProjectStateConflict(
   payload: ProjectStateResolvePayload,
-): Promise<ProjectStateResolveResult> {
+): Promise<ProjectStateResolveResult | { kind: 'pending' }> {
   const job = await getPlanMirrorQueue().add(PLAN_MIRROR_JOB_NAMES.RESOLVE_PROJECT_STATE, payload, {
     removeOnComplete: 100,
     removeOnFail: 100,
   });
-  return job.waitUntilFinished(
-    getPlanMirrorQueueEvents(),
-    60_000,
-  ) as Promise<ProjectStateResolveResult>;
+  try {
+    return (await job.waitUntilFinished(
+      getPlanMirrorQueueEvents(),
+      60_000,
+    )) as ProjectStateResolveResult;
+  } catch (err) {
+    const state = await job.getState().catch(() => 'unknown');
+    if (state === 'failed') throw err;
+    return { kind: 'pending' };
+  }
 }

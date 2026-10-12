@@ -71,14 +71,12 @@ export async function resolveProjectStateConflict(
     result = await answerInTransaction(db, payload, after);
   } catch (err) {
     if (after.putBack !== null) {
-      await writeFileNoFollow(after.putBack.repoPath, RENDER_FILE, after.putBack.raw).catch(
-        (putBackErr: unknown) => {
-          throw new AggregateError(
-            [err, putBackErr],
-            `${err}; putting the render file's bytes back failed too: ${putBackErr}`,
-          );
-        },
-      );
+      await putBackIfPending(db, payload.conflictId, after.putBack).catch((putBackErr: unknown) => {
+        throw new AggregateError(
+          [err, putBackErr],
+          `${err}; putting the render file's bytes back failed too: ${putBackErr}`,
+        );
+      });
     }
     throw err;
   }
@@ -94,6 +92,29 @@ export async function resolveProjectStateConflict(
     );
   }
   return result;
+}
+
+/** Under the lock, so no sync reads in between; only an answer still pending is undone, since a
+ *  commit whose acknowledgement was lost may have landed. */
+async function putBackIfPending(
+  db: Database,
+  conflictId: string,
+  putBack: { repoPath: string; raw: Buffer },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ repositoryId: schema.projectStateConflicts.repositoryId })
+      .from(schema.projectStateConflicts)
+      .where(eq(schema.projectStateConflicts.id, conflictId));
+    if (!row) return;
+    await lockProjectState(tx, row.repositoryId);
+    const [again] = await tx
+      .select({ resolvedAt: schema.projectStateConflicts.resolvedAt })
+      .from(schema.projectStateConflicts)
+      .where(eq(schema.projectStateConflicts.id, conflictId));
+    if (again?.resolvedAt !== null) return;
+    await writeFileNoFollow(putBack.repoPath, RENDER_FILE, putBack.raw);
+  });
 }
 
 async function answerInTransaction(

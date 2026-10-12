@@ -96,7 +96,7 @@ projectStateConflictRoutes.post(
     await requireOwnedRepository(userId, repositoryId);
     if (!UUID_RE.test(conflictId)) throw new HttpError(404, 'Question not found');
     const { answer } = answerSchema.parse(await c.req.json().catch(() => ({})));
-    let result: ProjectStateResolveResult;
+    let result: ProjectStateResolveResult | { kind: 'pending' };
     try {
       result = await resolveProjectStateConflict({ repositoryId, userId, conflictId, answer });
     } catch (err) {
@@ -105,6 +105,15 @@ projectStateConflictRoutes.post(
         502,
         'Could not apply the answer. Nothing was changed; try again in a moment.',
         'project_state_conflict_failed',
+      );
+    }
+    if (result.kind === 'pending') {
+      return c.json(
+        {
+          pending: true,
+          message: 'The answer is still being applied. Reload in a moment to see it.',
+        },
+        202,
       );
     }
     if (result.kind !== 'resolved') throw refusal(result);

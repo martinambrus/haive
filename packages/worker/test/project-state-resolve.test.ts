@@ -583,6 +583,23 @@ describe('a failure after the file would be rewritten', () => {
     },
   );
 
+  it('leaves the answer in place when the commit landed but its acknowledgement was lost', async () => {
+    const s = await setup();
+    const db = s.fake.db as unknown as { transaction: (fn: unknown) => Promise<unknown> };
+    const commit = db.transaction.bind(db);
+    let first = true;
+    db.transaction = async (fn) => {
+      const out = await commit(fn);
+      if (!first) return out;
+      first = false;
+      throw new Error('connection lost after COMMIT');
+    };
+
+    await expect(s.answer('keep_mine')).rejects.toThrow();
+
+    expect(await s.fileText()).toBe(renderText(MINE));
+  });
+
   it('answers once the failure is gone, and the next sync finds nothing to ask', async () => {
     const s = await setup();
     s.fake.hooks.beforeCommit = () => {

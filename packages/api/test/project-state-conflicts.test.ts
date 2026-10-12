@@ -173,6 +173,13 @@ describe('POST /repos/:id/project-state/conflicts/:conflictId', () => {
     });
   }
 
+  it('is a 202 saying the answer is still being applied when the wait ends first', async () => {
+    h.resolve.mockResolvedValue({ kind: 'pending' });
+    const res = await post(PENDING, { answer: 'keep_mine' });
+    expect(res.status).toBe(202);
+    expect(((await res.json()) as { pending: boolean }).pending).toBe(true);
+  });
+
   it('is a 502 with nothing said of the cause when the job fails', async () => {
     h.resolve.mockRejectedValue(new Error('connect ECONNREFUSED 10.0.0.5:6379'));
     const res = await post(PENDING, { answer: 'keep_mine' });
