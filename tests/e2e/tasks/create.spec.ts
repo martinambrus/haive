@@ -217,11 +217,11 @@ test.describe('tasks list and create', () => {
     const envRes = await page.request.post(`${API_BASE}/tasks`, {
       data: { type: 'env_replicate', title: 'e2e deprecated type' },
     });
-    expect(envRes.status()).toBe(400);
+    expect(envRes.status(), 'a built-in that is not selectable is refused').toBe(403);
 
     const badRes = await page.request.post(`${API_BASE}/tasks`, {
       data: { type: 'not_a_real_type', title: 'e2e bad type' },
     });
-    expect(badRes.status()).toBe(400);
+    expect(badRes.status(), 'a type with no definition is unknown').toBe(404);
   });
 });
