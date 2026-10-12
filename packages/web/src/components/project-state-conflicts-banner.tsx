@@ -237,6 +237,10 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       return next;
     });
     if (out.kind === 'resolved') setAnswered((prev) => [...prev, answer]);
+    if (out.kind === 'error' && out.landed) {
+      const landed = out.landed;
+      setAnswered((prev) => [...prev, landed]);
+    }
     if (out.kind === 'pending') {
       pendingAnswers.current[conflict.id] = answer;
       setPending([...pendingRef.current.filter((id) => id !== conflict.id), conflict.id]);

@@ -169,6 +169,17 @@ describe('answerAndConfirm', () => {
     expect(out.kind).toBe('error');
   });
 
+  it('carries the answer that landed when another request already settled the row', async () => {
+    const settled = async () => {
+      throw Object.assign(new Error('This question was already answered the other way.'), {
+        status: 409,
+        code: 'project_state_conflict_settled',
+      });
+    };
+    const out = await answerAndConfirm(settled, rowWith('keep_mine'), REPO, ROW, 'take_theirs');
+    expect(out).toMatchObject({ kind: 'error', landed: 'keep_mine' });
+  });
+
   it('lets a refusal stand without asking the row', async () => {
     const get = vi.fn();
     const out = await answerAndConfirm(failing(409), get, REPO, ROW, 'keep_mine');
