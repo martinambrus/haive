@@ -64,7 +64,11 @@ import {
   MAX_FILE_BYTES,
   type RagChunk,
 } from '../src/step-engine/steps/onboarding/_rag-chunkers.js';
-import { ensureRagSchema, RAG_TABLE } from '../src/step-engine/steps/onboarding/_rag-connection.js';
+import {
+  ensureRagSchema,
+  isRagDatabaseClaimed,
+  RAG_TABLE,
+} from '../src/step-engine/steps/onboarding/_rag-connection.js';
 import {
   chunkKey,
   computeStaleKeys,
@@ -403,6 +407,9 @@ async function preflightStore(
 ): Promise<'record' | 'resume'> {
   const repositoryId = opts.repositoryId!;
   assertNotLiveRepository(await realRepositoryIds(db, [repositoryId]), repositoryId, []);
+  if (await isRagDatabaseClaimed(db, dbName)) {
+    throw new StoreRefusedError(`database ${dbName} is a repository's RAG store`);
+  }
   const existing = await openExistingRagDatabase(db, dbName, opts.dims);
   if (!existing) return 'record';
   let storeIds: string[] = [];
