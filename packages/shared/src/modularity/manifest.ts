@@ -119,7 +119,7 @@ export const moduleSettingsSchema = z.object({
 });
 export type ModuleSettings = z.infer<typeof moduleSettingsSchema>;
 
-function collectFieldIds(form: FormSchema): Set<string> {
+export function collectFieldIds(form: FormSchema): Set<string> {
   const ids = new Set<string>();
   for (const field of form.fields) {
     ids.add(field.id);

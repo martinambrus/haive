@@ -1,7 +1,9 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { TabNav } from '@/components/tabs';
+import { getModules } from '@/lib/api-client';
 
 const SETTINGS_TABS = [
   { label: 'Account', href: '/settings/account' },
@@ -16,9 +18,19 @@ const SETTINGS_TABS = [
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [hasModuleSettings, setHasModuleSettings] = useState(false);
+  useEffect(() => {
+    getModules()
+      .then((modules) =>
+        setHasModuleSettings(modules.some((m) => m.hasGlobalSettings || m.hasAdminSettings)),
+      )
+      .catch(() => setHasModuleSettings(false));
+  }, []);
+  const tabs = hasModuleSettings
+    ? [...SETTINGS_TABS, { label: 'Modules', href: '/settings/m' }]
+    : SETTINGS_TABS;
   const active =
-    SETTINGS_TABS.find((tab) => pathname === tab.href || pathname.startsWith(`${tab.href}/`))
-      ?.href ?? '';
+    tabs.find((tab) => pathname === tab.href || pathname.startsWith(`${tab.href}/`))?.href ?? '';
 
   return (
     <div className="flex flex-col gap-6">
@@ -28,7 +40,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
           Manage your account, editor, and git integrations.
         </p>
       </div>
-      <TabNav items={SETTINGS_TABS} active={active} />
+      <TabNav items={tabs} active={active} />
       {children}
     </div>
   );

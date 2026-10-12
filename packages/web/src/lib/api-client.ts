@@ -3,6 +3,7 @@
 import type { CostDisplay } from './format-cost';
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
+import type { FormSchema } from '@haive/shared';
 
 // A real runtime import, unlike the type-only ones above. `api-origin` has no imports of its own,
 // so it introduces no cycle — the same reasoning that lets `format-cost` be imported for its type.
@@ -2266,6 +2267,58 @@ export function patchUiPrefs(partial: UiPrefs): Promise<void> {
   return api
     .patch('/user-settings/ui-prefs', { settingsJson: JSON.stringify(partial) })
     .then(() => undefined);
+}
+
+// --- Modules --------------------------------------------------------------
+// Local mirrors of the /modules responses. Keep in sync with packages/api/src/modules/loader.ts.
+
+export interface ModuleNavEntry {
+  href: string;
+  label: string;
+  icon?: string;
+  adminOnly?: boolean;
+  order?: number;
+}
+
+export interface ModuleSummary {
+  id: string;
+  name: string;
+  version: string;
+  nav: ModuleNavEntry[];
+  pages: Record<string, unknown>;
+  hasGlobalSettings: boolean;
+  hasAdminSettings: boolean;
+}
+
+export type ModuleSettingsKind = 'global' | 'admin';
+
+export interface ModuleSettingsPayload {
+  form: FormSchema;
+  values: Record<string, unknown>;
+}
+
+export function getModules(): Promise<ModuleSummary[]> {
+  return api.get<{ modules: ModuleSummary[] }>('/modules').then((res) => res.modules);
+}
+
+export function getModuleSettings(
+  moduleId: string,
+  kind: ModuleSettingsKind,
+): Promise<ModuleSettingsPayload> {
+  return api.get<ModuleSettingsPayload>(
+    `/modules/${encodeURIComponent(moduleId)}/settings/${kind}`,
+  );
+}
+
+export function putModuleSettings(
+  moduleId: string,
+  kind: ModuleSettingsKind,
+  values: Record<string, unknown>,
+): Promise<{ values: Record<string, unknown> }> {
+  return api.put<{ values: Record<string, unknown> }>(
+    `/modules/${encodeURIComponent(moduleId)}/settings/${kind}`,
+    { values },
+  );
 }
 
 // --- Statistics -----------------------------------------------------------
