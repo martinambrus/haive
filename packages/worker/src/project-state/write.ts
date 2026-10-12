@@ -200,7 +200,12 @@ export async function writeProjectStateRecord(
     });
   } catch (err) {
     if (err instanceof ProjectStateMovedError) throw err;
-    const cleared = await clearRenderContext(db, repositoryId, expectedColumns, attempted);
+    const cleared = await clearRenderContext(
+      db,
+      repositoryId,
+      expectedColumns,
+      written.length > 0 ? attempted : null,
+    );
     throw new ProjectStateWriteError(err, written, !cleared);
   }
   return written;

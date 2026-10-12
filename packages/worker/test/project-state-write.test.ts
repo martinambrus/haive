@@ -720,6 +720,19 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
     expect(row!.resolvedAt).not.toBeNull();
   });
 
+  it('records nothing as the local side when the write failed before any file', async () => {
+    const s = await setup();
+    const local = ['security-auditor', 'code-reviewer'];
+    s.pend(UNIT, { base, local, incoming });
+    s.hook.failNextSelect = 2;
+
+    await expect(s.write(withIds(incoming), true)).rejects.toThrow();
+
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(json(row!.local)).toEqual({ v: local });
+    expect(row!.resolvedAt ?? null).toBeNull();
+  });
+
   it('carries a teammate’s null as a value, not as an absent key', async () => {
     const s = await setup();
     s.pend('project/render.json#framework', { base: 'drupal10', local: 'drupal', incoming: null });
