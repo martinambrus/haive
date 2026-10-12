@@ -1069,8 +1069,7 @@ export async function resolveMergePhase(
     const reopened = await section(dir, async () => {
       const wasOpen = await peekOpenMerge(dir);
       const ours = wasOpen !== null && (await mergeOpenFor(dir, feature));
-      const held =
-        wasOpen && !ours ? await relocateLeftOpenFixers(db, params.taskId, dir, wasOpen) : null;
+      const held = wasOpen ? await relocateLeftOpenFixers(db, params.taskId, dir, wasOpen) : null;
       if (held) return { kind: 'held' as const, held };
       const cleared = await abortOtherMerge(dir, feature);
       if (!cleared.ok) return { kind: 'unaborted' as const, cleared };

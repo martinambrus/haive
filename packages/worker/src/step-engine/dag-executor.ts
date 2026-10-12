@@ -940,10 +940,10 @@ async function runLevelMerge(
     if (issue.mergeStatus !== null) continue; // clean | resolved | conflict already decided
     const wasOpen = await peekOpenMerge(integration.path);
     const ours = wasOpen !== null && (await mergeOpenFor(integration.path, issue.branchName!));
-    const held =
-      wasOpen && !ours
-        ? await relocateLeftOpenFixers(db, m.params.taskId, integration.path, wasOpen)
-        : null;
+    // Even a merge of this same branch may be a cancelled task's, with its fixer's edits in the tree.
+    const held = wasOpen
+      ? await relocateLeftOpenFixers(db, m.params.taskId, integration.path, wasOpen)
+      : null;
     if (held) return haltMerge(m, `Merge halted on ${issue.branchName!}. ${held}`);
     const cleared = await abortOtherMerge(integration.path, issue.branchName!);
     if (!cleared.ok) return haltUnaborted(m, issue.branchName!, cleared);
