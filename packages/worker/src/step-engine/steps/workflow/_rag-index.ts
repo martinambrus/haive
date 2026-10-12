@@ -935,12 +935,6 @@ async function syncRepositoryIndex(
     }
 
     lock?.assertHeld();
-    if (lock?.lost) {
-      ctx.logger.warn(
-        { repositoryId },
-        'RAG sync lock was lost during the run; not clearing the degraded flag',
-      );
-    }
 
     // Remember (or forget) the embed failure on the REPO, so the condition outlives
     // this step row — a manual retry nulls task_steps.output — and every later RAG
@@ -954,9 +948,9 @@ async function syncRepositoryIndex(
       hashedChunks === 0 &&
       realEmbeddingSucceeded &&
       health.degradedAt &&
-      !lock?.lost &&
       !(await ragStoreAwaitsReembed(conn, repositoryId, ctx.logger))
     ) {
+      lock?.assertHeld();
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
       health.degradedAt = null;
       health.degradedReason = null;

@@ -93,6 +93,7 @@ let indexedChunks: Map<
 let failDegradedWrite: boolean;
 let leftoverNullHash: boolean;
 let nullHashProbeFails: boolean;
+let onNullHashProbe: (() => void) | null;
 let nullHashProbes: unknown[][];
 let ctx: StepContext;
 let executionPath: 'full_workflow' | 'quick_bugfix';
@@ -139,6 +140,7 @@ beforeEach(async () => {
   failDegradedWrite = false;
   leftoverNullHash = false;
   nullHashProbeFails = false;
+  onNullHashProbe = null;
   nullHashProbes = [];
   mocks.connect.mockImplementation(async () => ({
     close: mocks.close,
@@ -167,6 +169,7 @@ beforeEach(async () => {
           return indexedChunks.get(params[1] as string) ?? [];
         if (query.includes('chunk_hash IS NULL') && query.startsWith('SELECT')) {
           nullHashProbes.push(params);
+          onNullHashProbe?.();
           if (nullHashProbeFails) throw new Error('store read failed');
           const stored = [...indexedChunks.values()].some((rows) =>
             rows.some((row) => row.chunk_hash === null),
@@ -1684,6 +1687,18 @@ describe('one RAG sync per repository at a time', () => {
       return { kind: 'embedded', embeddings: texts.map(() => [0.1, 0.2]) };
     });
     await expect(syncOf()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('keeps the degraded flag when the lock is lost during the last NULL-hash read', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    repo.ragEmbedDegradedReason = 'earlier outage';
+    onNullHashProbe = () => {
+      if (nullHashProbes.length === 2) fakeLock.state.handles[0]!.lost = true;
+    };
+    await expect(syncOf()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(nullHashProbes).toHaveLength(2);
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
     expect(fakeLock.state.handles[0]!.released).toBe(1);
   });

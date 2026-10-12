@@ -74,6 +74,7 @@ let failInsertAt: number | null;
 let failDegradedWrite: boolean;
 let leftoverNullHash: boolean;
 let nullHashProbeFails: boolean;
+let onNullHashProbe: (() => void) | null;
 let nullHashProbes: unknown[][];
 let warnings: Array<string | null>;
 let repo: Record<string, unknown>;
@@ -121,6 +122,7 @@ beforeEach(async () => {
   failDegradedWrite = false;
   leftoverNullHash = false;
   nullHashProbeFails = false;
+  onNullHashProbe = null;
   nullHashProbes = [];
   warnings = [];
   repo = { ragEmbedDegradedAt: null, ragEmbedDegradedReason: null, ragEmbedLexicalOnly: false };
@@ -139,6 +141,7 @@ beforeEach(async () => {
         }
         if (query.includes('chunk_hash IS NULL') && query.startsWith('SELECT')) {
           nullHashProbes.push(params);
+          onNullHashProbe?.();
           if (nullHashProbeFails) throw new Error('store read failed');
           const stored = [...rows.values()].some((r) => r.hash === null);
           return leftoverNullHash || stored ? [{ found: 1 }] : [];
@@ -282,6 +285,18 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     );
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
     expect(order).not.toContain('insert');
+  });
+
+  it('keeps the flag when the sync lock is lost during the last NULL-hash read', async () => {
+    repo.ragEmbedDegradedAt = new Date(0);
+    onNullHashProbe = () => {
+      if (nullHashProbes.length === 2) fakeLock.state.handles[0]!.lost = true;
+    };
+    await expect(populate(detected({ ollamaReachable: true }))).rejects.toBeInstanceOf(
+      RagSyncLockLostError,
+    );
+    expect(nullHashProbes).toHaveLength(2);
+    expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
   it('stops inserting once the lock is lost between two files', async () => {
