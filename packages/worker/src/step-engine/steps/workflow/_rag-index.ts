@@ -28,8 +28,13 @@ import {
   type SecretMaskPolicy,
 } from '../../../queues/cli-exec/secret-mask-policy.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { isDeniedFile, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
-import { collectCodeFiles, type CodeCollectOptions } from '../onboarding/_rag-collect.js';
+import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
+import {
+  collectCodeFiles,
+  isCollectExcluded,
+  ownPathList,
+  type CodeCollectOptions,
+} from '../onboarding/_rag-collect.js';
 import {
   resolveRagConnection,
   resolveToolingOllamaUrl,
@@ -227,6 +232,7 @@ export async function resolveRagSyncPrefs(
   // The per-repo scope deny list is authoritative and lives on the repository
   // row, so it is available even when no onboarding task survives.
   const exclude: string[] = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
+  const heuristicExclude: string[] = [];
   let selectedDirs: string[] | undefined;
   let extensionSet: string[] | undefined;
   let ownPaths: string[] = [];
@@ -266,10 +272,7 @@ export async function resolveRagSyncPrefs(
         | undefined;
       projectName = data?.project?.name ?? 'default';
       // The mirror can be imported from a committed .haive-data file: keep only string entries.
-      const include = data?.paths?.customCodePaths?.include;
-      ownPaths = Array.isArray(include)
-        ? include.filter((p): p is string => typeof p === 'string')
-        : [];
+      ownPaths = ownPathList(data?.paths?.customCodePaths?.include);
     }
 
     // The onboarding task is always read: it is the ONLY source of 09_7's
@@ -299,7 +302,7 @@ export async function resolveRagSyncPrefs(
         envPrev?.detect as {
           data?: {
             project?: { name?: string };
-            paths?: { customCodePaths?: { exclude?: string[]; include?: string[] } };
+            paths?: { customCodePaths?: { exclude?: string[]; include?: unknown } };
           };
         } | null
       )?.data;
@@ -309,8 +312,9 @@ export async function resolveRagSyncPrefs(
       // A saved deny list is the user's current RAG decision. An old onboarding
       // heuristic must not veto folders explicitly re-enabled by a later picker.
       if (repo?.scopeExcludeGlobs == null)
-        exclude.push(...(envData?.paths?.customCodePaths?.exclude ?? []));
-      ownPaths = envData?.paths?.customCodePaths?.include ?? ownPaths;
+        heuristicExclude.push(...(envData?.paths?.customCodePaths?.exclude ?? []));
+      const taskOwnPaths = envData?.paths?.customCodePaths?.include;
+      if (taskOwnPaths !== undefined) ownPaths = ownPathList(taskOwnPaths);
 
       const ragSourcePrev = await loadPreviousStepOutput(
         ctx.db,
@@ -354,7 +358,7 @@ export async function resolveRagSyncPrefs(
     ragMode: ragPrefs?.ragMode ?? 'none',
     ragToolingPrefs: ragPrefs,
     projectName,
-    codeCollect: { exclude, selectedDirs, extensionSet },
+    codeCollect: { exclude, heuristicExclude, ownPaths, selectedDirs, extensionSet },
     ownPaths,
     ollamaUrlDerived,
     needsInitialization,
@@ -541,7 +545,12 @@ async function syncRepositoryIndex(
   }
   // A form's detect output can predate a repository scope edit. Use the current
   // deny list at apply time so cached forms cannot re-ingest newly excluded code.
-  const codeCollect = { ...detectedCodeCollect, exclude: scope.codeCollect.exclude };
+  const codeCollect = {
+    ...detectedCodeCollect,
+    exclude: scope.codeCollect.exclude,
+    heuristicExclude: scope.codeCollect.heuristicExclude,
+    ownPaths: scope.codeCollect.ownPaths,
+  };
 
   const ingestionPolicy = await resolveRagIngestionPolicy(ctx, repoPath);
 
@@ -918,7 +927,7 @@ async function syncRepositoryIndex(
       if (secretMaskDeniesPath(ingestionPolicy, row.source_path)) continue;
       if (
         sweepProtectedPaths?.has(row.source_path) &&
-        !isDeniedFile(row.source_path, false, codeCollect.exclude ?? [])
+        !isCollectExcluded(row.source_path, false, codeCollect)
       )
         continue;
       if (!processedPaths.has(row.source_path)) {
@@ -927,7 +936,7 @@ async function syncRepositoryIndex(
         // Existing files excluded by scope/limits still need to leave the index.
         if (
           embedSkippedChunks > 0 &&
-          !isDeniedFile(row.source_path, false, codeCollect.exclude ?? []) &&
+          !isCollectExcluded(row.source_path, false, codeCollect) &&
           (await lstatNoFollow(wa.anchor, `${wa.prefix}${row.source_path}`)) === null
         ) {
           continue;

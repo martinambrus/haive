@@ -1,8 +1,8 @@
 import path from 'node:path';
 import { HAIVE_DATA_DIR } from '@haive/shared';
 import { listFilesMatching } from './_helpers.js';
-import { isDeniedFile } from './_scope.js';
-import { CODE_EXTENSIONS, isMinifiedPath } from './_rag-chunkers.js';
+import { isDeniedFile, isDeniedPath } from './_scope.js';
+import { CODE_EXTENSIONS, isMinifiedPath, isOwnPath } from './_rag-chunkers.js';
 
 /* ------------------------------------------------------------------ */
 /* Shared RAG code-file collection                                     */
@@ -48,9 +48,15 @@ export const CODE_IGNORE_DIRS = new Set([
 
 export interface CodeCollectOptions {
   /** Anchored directory deny list: the per-repo onboarding scope globs (06_7 /
-   *  09_7), unioned with 01-env-detect's custom-code exclude heuristic. Also
-   *  carries the ROOT_FILES_SCOPE token, which `isDeniedFile` resolves. */
+   *  09_7). Authoritative: an own path never overrides it. Also carries the
+   *  ROOT_FILES_SCOPE token, which `isDeniedFile` resolves. */
   exclude?: readonly string[];
+  /** 01-env-detect's custom-code exclude heuristic, applied only while no scope is
+   *  saved. An entry of `ownPaths` overrides it. */
+  heuristicExclude?: readonly string[];
+  /** 01-env-detect's `customCodePaths.include`: the repository's own directories or
+   *  files, which are collected even under a `heuristicExclude` entry. */
+  ownPaths?: readonly string[];
   /** Folders picked in 09_7. Empty or absent means the whole repo is in scope. */
   selectedDirs?: readonly string[];
   /** Extensions picked in 09_7. Absent falls back to every known code
@@ -62,6 +68,33 @@ export interface CodeCollectOptions {
   extensionSet?: readonly string[];
 }
 
+const stripTrailingSlash = (p: string): string => p.replace(/\/$/, '');
+
+/** `customCodePaths.include` as read from a step output or an imported mirror: string entries only. */
+export function ownPathList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((p): p is string => typeof p === 'string') : [];
+}
+
+/** The one "is this path left out of the index" decision, for the collector and the sync's
+ *  orphan sweep. The scope deny list always wins; a heuristic entry is overridden by an own
+ *  path, by anything under one, and (for a directory) by an ancestor of one so the walk
+ *  can reach it. */
+export function isCollectExcluded(
+  rel: string,
+  isDir: boolean,
+  opts: Pick<CodeCollectOptions, 'exclude' | 'heuristicExclude' | 'ownPaths'>,
+): boolean {
+  // FRAMEWORK_PATTERNS.excludePaths — the 01-env-detect half of this list — are
+  // written WITH a trailing slash ('core/', 'vendor/', 'wp-admin/'), while
+  // isDeniedPath anchors on `rel === g || rel.startsWith(g + '/')`. Left as-is,
+  // 'core/' matches nothing and a Drupal repo indexes all of core.
+  if (isDeniedFile(rel, isDir, (opts.exclude ?? []).map(stripTrailingSlash))) return true;
+  if (!isDeniedPath(rel, (opts.heuristicExclude ?? []).map(stripTrailingSlash))) return false;
+  return !(opts.ownPaths ?? []).some(
+    (entry) => isOwnPath(rel, entry) || (isDir && isOwnPath(entry, rel)),
+  );
+}
+
 /** Repo-relative code files to index, sorted. Every caller must pass the SAME
  *  options it used at detect time, or the form's file count and the reconcile's
  *  `processedPaths` disagree and the orphan sweep deletes the difference. */
@@ -70,11 +103,6 @@ export async function collectCodeFiles(
   opts: CodeCollectOptions = {},
 ): Promise<string[]> {
   const codeExts = new Set(opts.extensionSet ?? Object.keys(CODE_EXTENSIONS));
-  // FRAMEWORK_PATTERNS.excludePaths — the 01-env-detect half of this list — are
-  // written WITH a trailing slash ('core/', 'vendor/', 'wp-admin/'), while
-  // isDeniedPath anchors on `rel === g || rel.startsWith(g + '/')`. Left as-is,
-  // 'core/' matches nothing and a Drupal repo indexes all of core.
-  const exclude = (opts.exclude ?? []).map((p) => p.replace(/\/$/, ''));
   const dirFilter =
     opts.selectedDirs && opts.selectedDirs.length > 0 ? new Set(opts.selectedDirs) : null;
 
@@ -83,7 +111,7 @@ export async function collectCodeFiles(
     (rel, isDir) => {
       const parts = rel.split('/');
       if (parts.some((p) => CODE_IGNORE_DIRS.has(p))) return false;
-      if (isDeniedFile(rel, isDir, exclude)) return false;
+      if (isCollectExcluded(rel, isDir, opts)) return false;
       if (isDir) return false;
       if (dirFilter) {
         const topDir = parts.length === 1 ? '.' : parts[0]!;

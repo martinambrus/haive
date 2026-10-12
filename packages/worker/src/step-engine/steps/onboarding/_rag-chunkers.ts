@@ -89,17 +89,19 @@ export const MAX_OWN_FILE_BYTES = 2_000_000;
  *  repository's own code and KB, see `fileBudget`. */
 export const MAX_CHUNKS_PER_FILE = 80;
 
+/** True when `relPath` is the own entry (a directory, with or without a trailing slash, or a
+ *  single file) or lives under it. */
+export function isOwnPath(relPath: string, entry: string): boolean {
+  const base = entry.replace(/\/+$/, '');
+  return relPath === base || relPath.startsWith(`${base}/`);
+}
+
 export function fileBudget(
   relPath: string,
   kind: 'kb' | 'code',
   ownPaths: readonly string[],
 ): { maxBytes: number; maxChunks: number } {
-  const own =
-    kind === 'kb' ||
-    ownPaths.some((entry) => {
-      const base = entry.replace(/\/+$/, '');
-      return relPath === base || relPath.startsWith(`${base}/`);
-    });
+  const own = kind === 'kb' || ownPaths.some((entry) => isOwnPath(relPath, entry));
   return own
     ? { maxBytes: MAX_OWN_FILE_BYTES, maxChunks: Infinity }
     : { maxBytes: MAX_FILE_BYTES, maxChunks: MAX_CHUNKS_PER_FILE };

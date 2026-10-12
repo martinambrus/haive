@@ -6,8 +6,12 @@ import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { fenceRagStore, type RagSyncLock } from '@haive/shared/rag';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
-import { loadScopeExcludeGlobs } from './_scope.js';
-import { collectCodeFiles as collectCodeFilePaths } from './_rag-collect.js';
+import { loadRepoScopeExcludeGlobs } from './_scope.js';
+import {
+  collectCodeFiles as collectCodeFilePaths,
+  ownPathList,
+  type CodeCollectOptions,
+} from './_rag-collect.js';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -137,17 +141,8 @@ async function collectKbFiles(repo: string): Promise<RagSourceFile[]> {
  *  form reports. The predicate itself is NOT duplicated here: 02-pre-rag-sync
  *  and 11c-rag-reindex reconcile against whatever this collects, so a second
  *  copy is a silent drift the orphan sweep turns into deletions. */
-async function collectCodeFiles(
-  repo: string,
-  excludePaths: readonly string[],
-  selectedDirs?: readonly string[],
-  extensionSet?: readonly string[],
-): Promise<RagSourceFile[]> {
-  const rels = await collectCodeFilePaths(repo, {
-    exclude: excludePaths,
-    selectedDirs,
-    extensionSet,
-  });
+async function collectCodeFiles(repo: string, opts: CodeCollectOptions): Promise<RagSourceFile[]> {
+  const rels = await collectCodeFilePaths(repo, opts);
 
   const out: RagSourceFile[] = [];
   for (const rel of rels) {
@@ -516,17 +511,18 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       envPrev?.detect as {
         data?: {
           project?: { name?: string };
-          paths?: { customCodePaths?: { exclude?: string[]; include?: string[] } };
+          paths?: { customCodePaths?: { exclude?: string[]; include?: unknown } };
         };
       } | null
     )?.data;
     const projectName = envData?.project?.name ?? 'default';
-    // Union the legacy 01-env-detect exclude heuristic with the authoritative
-    // per-repo onboarding scope deny list (06_7). The deny list is the single
-    // source of truth for what stays out of mining AND RAG; when it is empty
-    // (06_7 skipped / pre-feature repo) this reduces to the old behavior.
-    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
-    const excludePaths = [...(envData?.paths?.customCodePaths?.exclude ?? []), ...scopeExclude];
+    // The saved per-repo scope deny list is the single source of truth for what
+    // stays out of RAG. The 01-env-detect exclude heuristic applies only while no
+    // scope is saved, the same rule the workflow sync follows.
+    const savedScope = await loadRepoScopeExcludeGlobs(ctx.db, ctx.taskId);
+    const ownPaths = ownPathList(envData?.paths?.customCodePaths?.include);
+    const heuristicExclude =
+      savedScope == null ? (envData?.paths?.customCodePaths?.exclude ?? []) : [];
 
     // Load selected folders and extension set from step 09_7
     const ragSourcePrev = await loadPreviousStepOutput(
@@ -538,7 +534,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       selectedDirs?: string[];
       extensionSet?: string[];
     } | null;
-    const selectedDirs = ragSourceOutput?.selectedDirs;
+    const selectedDirs = savedScope == null ? ragSourceOutput?.selectedDirs : undefined;
     const resolvedExtSet = ragSourceOutput?.extensionSet;
 
     // Collect KB files
@@ -547,12 +543,13 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
     // Collect code files (filtered to user-selected directories if available)
     await ctx.emitProgress('Scanning for code files...');
-    let codeFiles = await collectCodeFiles(
-      ctx.repoPath,
-      excludePaths,
+    let codeFiles = await collectCodeFiles(ctx.repoPath, {
+      exclude: savedScope ?? [],
+      heuristicExclude,
+      ownPaths,
       selectedDirs,
-      resolvedExtSet,
-    );
+      extensionSet: resolvedExtSet,
+    });
 
     // apply is the fail-closed point; an unresolved policy only leaves the counts unfiltered here.
     const detectPolicy = await resolveRagIngestionPolicy(ctx, ctx.repoPath).catch(() => null);
@@ -584,7 +581,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     return {
       kbFiles,
       codeFiles,
-      ownPaths: envData?.paths?.customCodePaths?.include ?? [],
+      ownPaths,
       ollamaReachable,
       ollamaUrl: prefs.ollamaUrl,
       embeddingModel: prefs.embeddingModel,

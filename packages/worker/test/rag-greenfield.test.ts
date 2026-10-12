@@ -1164,8 +1164,68 @@ describe('workflow RAG source scope before each ingestion', () => {
     // Unsaved legacy repos still receive their original onboarding restrictions.
     repo.scopeExcludeGlobs = null;
     expect((await resolveRagSyncPrefs(ctx)).codeCollect).toMatchObject({
-      exclude: ['outside'],
+      exclude: [],
+      heuristicExclude: ['outside'],
       selectedDirs: ['src'],
+    });
+  });
+
+  describe('own path under a heuristic exclude', () => {
+    const OWN_FILE = 'wp-content/plugins/acme/acme.php';
+    const OTHER_FILE = 'wp-content/plugins/other/o.php';
+
+    beforeEach(() => {
+      onboarding = { id: 'onboarding-1' };
+      repo.source = 'git_https';
+      repo.scopeExcludeGlobs = null;
+      repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
+      priorSteps.set('01-env-detect', {
+        detectOutput: {
+          data: {
+            paths: {
+              customCodePaths: {
+                exclude: ['wp-content/plugins/'],
+                include: ['wp-content/plugins/acme/'],
+              },
+            },
+          },
+        },
+      });
+      stalePaths = [OWN_FILE, OTHER_FILE];
+      for (const rel of stalePaths)
+        indexedChunks.set(rel, [
+          { section_id: 'legacy', chunk_index: 0, chunk_hash: 'old', content: 'old code' },
+        ]);
+    });
+
+    it('keeps the own file in the index and sweeps the other plugin (root scan)', async () => {
+      await writeSource(OWN_FILE, undefined, root);
+      await writeSource(OTHER_FILE, undefined, root);
+      const detected = await preRagSyncStep.detect!(ctx);
+      expect(detected.codeFileCount).toBe(1);
+      await preRagSyncStep.apply(ctx, {
+        detected,
+        formValues: { runSync: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(indexedChunks.get(OWN_FILE)!.map((row) => row.content)).toEqual([
+        expect.stringContaining('project code'),
+      ]);
+      expect(indexedChunks.get(OTHER_FILE)).toEqual([]);
+    });
+
+    it('protects an untracked own file the worktree cannot see from the sweep', async () => {
+      await writeSource(OWN_FILE, undefined, root);
+      await writeSource(OTHER_FILE, undefined, root);
+      await ragReindexStep.apply(ctx, {
+        detected: await ragReindexStep.detect!(ctx),
+        formValues: { runReindex: true },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(indexedChunks.get(OWN_FILE)).toHaveLength(1);
+      expect(indexedChunks.get(OTHER_FILE)).toEqual([]);
     });
   });
 
