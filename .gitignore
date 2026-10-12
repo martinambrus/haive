@@ -9,6 +9,10 @@ build/
 .turbo/
 *.tsbuildinfo
 
+# Generated module registries
+packages/api/src/modules.generated.ts
+packages/worker/src/modules.generated.ts
+
 # Environment
 .env
 .env.local
