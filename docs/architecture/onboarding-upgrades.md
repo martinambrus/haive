@@ -116,8 +116,11 @@ index (another writer, the plan-mirror save or a Terminal `git add`, can stage a
 between our own steps). `commitRecorded` (`_stage-paths.ts`) reads `HEAD` into a private
 `GIT_INDEX_FILE`, runs `git add -f` for the recorded files and links and `git rm --cached` for the
 removals against it, takes the names that differ from `HEAD` there, and commits them with
-`write-tree`, `commit-tree` and a compare-and-swap `update-ref HEAD`. It then runs `git reset -q`
-on exactly those names so the real index agrees with the new `HEAD`; every other real-index entry,
+`write-tree`, `commit-tree` and a compare-and-swap `update-ref HEAD`. It then sets exactly those
+names in the real index to their entries in the CURRENT `HEAD` (`update-index --cacheinfo`), so the
+index agrees with the newest commit even when another writer committed on top in between; a `HEAD`
+moved to something that does not contain the commit is left alone, and a `HEAD` that moves during
+the sync is retried. Every other real-index entry,
 a file the person staged included, is neither committed nor unstaged (a blob they staged at one of
 those very names is not committed and is reset to `HEAD`). A pathspec is `:(literal)`
 and the changed list is read with `--no-renames`, since a detected rename would name only the new

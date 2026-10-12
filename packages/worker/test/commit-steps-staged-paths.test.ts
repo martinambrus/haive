@@ -879,6 +879,35 @@ describe('commitRecorded commits what it staged in a private index', () => {
     expect(await git(repo, ['status', '--porcelain', '--', 'a.md'])).toBe('');
   });
 
+  it('a commit landing on top while the index is locked is not reverted in the index', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    const lock = path.join(repo, '.git', 'index.lock');
+    await writeFile(lock, '');
+    const other = (async () => {
+      while ((await git(repo, ['log', '-1', '--format=%s'])).trim() !== 'chore: onboard') {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const env = { ...GIT_ENV, GIT_INDEX_FILE: path.join(repo, '.git', 'other.index') };
+      const newer = path.join(repo, '.git', 'newer.txt');
+      await writeFile(newer, 'newer\n');
+      const blob = (await git(repo, ['hash-object', '-w', newer])).trim();
+      await exec('git', ['read-tree', 'HEAD'], { cwd: repo, env });
+      await exec('git', ['update-index', '--cacheinfo', `100644,${blob},a.md`], { cwd: repo, env });
+      const tree = (await exec('git', ['write-tree'], { cwd: repo, env })).stdout.trim();
+      const next = (
+        await git(repo, ['commit-tree', tree, '-p', 'HEAD', '-m', 'chore: newer'])
+      ).trim();
+      await git(repo, ['update-ref', 'HEAD', next]);
+      await rm(lock, { force: true });
+    })();
+    const warnings: string[] = [];
+    await commitRecorded(repo, { add: ['a.md'], remove: [] }, 'chore: onboard', GIT_ENV, warnings);
+    await other;
+    expect(warnings).toEqual([]);
+    expect(await git(repo, ['diff', '--cached', '--name-only', '--', 'a.md'])).toBe('');
+  });
+
   it('a real index that stays locked leaves the commit and reports which names to reset', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n' });
     await writeFile(path.join(repo, 'a.md'), 'a\n');

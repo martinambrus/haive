@@ -270,7 +270,18 @@ async function syncRealIndex(
   commit: string,
   paths: readonly string[],
 ): Promise<void> {
-  const listed = await run(['ls-tree', '-z', commit, '--', ...literal(paths)]);
+  // Another writer may have committed on top since; sync to the HEAD that is current, never behind it.
+  const readHead = async () =>
+    (await run(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim();
+  const head = await readHead();
+  if (head !== commit) {
+    const descends = await run(['merge-base', '--is-ancestor', commit, head]).then(
+      () => true,
+      () => false,
+    );
+    if (!descends) return;
+  }
+  const listed = await run(['ls-tree', '-z', head, '--', ...literal(paths)]);
   const entries = new Map<string, string>();
   for (const line of listed.stdout.split('\0')) {
     const tab = line.indexOf('\t');
@@ -288,6 +299,7 @@ async function syncRealIndex(
     ]);
   }
   if (gone.length > 0) await run(['update-index', '--force-remove', '--', ...gone]);
+  if ((await readHead()) !== head) throw new Error('HEAD moved while the index was synced');
 }
 
 export async function commitRecorded(
@@ -352,7 +364,7 @@ export async function commitRecorded(
     }
     if (!synced) {
       warnings?.push(
-        `committed, but the git index was locked by another process, so these files may show as staged changes until you run \`git reset -- <file>\`: ${changed.join(', ')}`,
+        `committed, but the git index could not be synced (locked, or HEAD kept moving), so these files may show as staged changes until you run \`git reset -- <file>\`: ${changed.join(', ')}`,
       );
     }
     return changed;
