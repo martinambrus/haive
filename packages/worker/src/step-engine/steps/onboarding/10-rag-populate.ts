@@ -28,7 +28,7 @@ import {
 import { probeOllama, warmOllamaModel, vectorLiteral } from './_rag-embed.js';
 import { detectEmbedDevice, embedDeviceWarning, type EmbedDevice } from '../_embed-device.js';
 import { acquireRepoRagSyncLock } from '../_rag-sync-lock.js';
-import { listTrackedFiles } from '../../../queues/cli-exec/secret-mask.js';
+import { listTrackedFiles, SecretMaskError } from '../../../queues/cli-exec/secret-mask.js';
 import {
   secretMaskDeniesPath,
   secretMaskPolicy,
@@ -695,7 +695,8 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       where: eq(schema.tasks.id, ctx.taskId),
       columns: { repositoryId: true },
     });
-    const repositoryId = taskRow?.repositoryId ?? null;
+    if (!taskRow) throw new SecretMaskError(`secret-mask: task ${ctx.taskId} not found`);
+    const repositoryId = taskRow.repositoryId ?? null;
     const lock = repositoryId ? await acquireRepoRagSyncLock(ctx, repositoryId) : null;
     try {
       // A repo-less task has no repository rules to read; the default deny globs still apply.
@@ -960,7 +961,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           if (staleKeys.length > 0) {
             await ctx.emitProgress(`Removing ${staleKeys.length} stale chunk(s)...`);
             lock?.assertHeld();
-            chunksDeleted = await deleteStaleChunks(
+            chunksDeleted += await deleteStaleChunks(
               conn,
               repositoryId!,
               staleKeys.map((k) => sync!.existing.get(k)!),

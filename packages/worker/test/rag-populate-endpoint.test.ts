@@ -162,6 +162,16 @@ beforeEach(async () => {
           const stored = [...rows.values()].some((r) => r.hash === null);
           return leftoverNullHash || stored ? [{ found: 1 }] : [];
         }
+        if (
+          query.startsWith('DELETE') &&
+          query.includes('(source_path, section_id, chunk_index) IN')
+        ) {
+          let count = 0;
+          for (let i = 1; i + 2 < params.length; i += 3) {
+            if (rows.delete(JSON.stringify([params[i], params[i + 1], params[i + 2]]))) count += 1;
+          }
+          return Object.assign([], { count });
+        }
         if (query.includes('SELECT source_path, section_id, chunk_index, chunk_hash'))
           return [...rows.values()].map((r) => ({
             source_path: r.params[3],
@@ -619,6 +629,28 @@ describe('onboarding populate applies the repository secret-mask policy', () => 
     const result = await populate(withCode([OK]));
     expect(result.chunksDeleted).toBe(1);
     expect(storedPaths()).toEqual([OK]);
+  });
+
+  it('adds the purged rows to the stale rows it deletes', async () => {
+    rows.set(JSON.stringify([SETTINGS, 's', 0]), {
+      hash: 'h',
+      params: ['t', 'repo-1', 'code', SETTINGS, 's', 0, 'h', 'x', '[0.1]'],
+    });
+    rows.set(JSON.stringify(['src/gone.ts', 's', 0]), {
+      hash: 'h',
+      params: ['t', 'repo-1', 'code', 'src/gone.ts', 's', 0, 'h', 'x', '[0.1]'],
+    });
+    const result = await populate(withCode([OK]));
+    expect(result.chunksDeleted).toBe(2);
+    expect(storedPaths()).toEqual([OK]);
+  });
+
+  it('throws SecretMaskError and writes nothing when the task row is missing', async () => {
+    (ctx.db.query.tasks as { findFirst: () => Promise<undefined> }).findFirst = async () =>
+      undefined;
+    await expect(populate(withCode([SETTINGS, OK]))).rejects.toBeInstanceOf(SecretMaskError);
+    expect(mocks.connects).toBe(0);
+    expect(rows.size).toBe(0);
   });
 
   it('applies the default deny globs to a task with no repository', async () => {
