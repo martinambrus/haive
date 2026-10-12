@@ -5,8 +5,10 @@
  * chunkers, header, hash, schema and insert) into a NEW named database haive_rag_<RAG_STORE>, so a
  * retrieval eval can run against a store built from the current chunker. It never stores a
  * hash-fallback vector: an embed error, or a vector of the wrong length, aborts the run (exit 1).
- * It refuses (exit 2, before any store connection) the live store names and any existing database
- * whose rows carry a different repository_id. Resumable: a chunk whose (source_path, section_id,
+ * It refuses (exit 2, before any store connection) the live store names, a RAG_REPOSITORY_ID or a
+ * store row that belongs to a repositories row, any existing database whose rows carry a different
+ * repository_id, and a store built with another embedding model or width (kept in rag_build_store_meta,
+ * which this script owns). Resumable: a chunk whose (source_path, section_id,
  * chunk_index, chunk_hash) is already stored for the repository is skipped.
  *
  * Run inside the worker container (has DATABASE_URL + ollama reachable):
@@ -30,7 +32,7 @@
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { createDatabase, schema } from '@haive/database';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
@@ -70,6 +72,7 @@ import {
 const REFUSED_STORE_NAMES = ['elmont_rs', 'rs_final', 'kb_global'] as const;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PROGRESS_EVERY_BATCHES = 50;
+const META_TABLE = 'rag_build_store_meta';
 
 type SourceType = 'kb' | 'code';
 
@@ -84,6 +87,54 @@ export function storeDatabaseName(store: string): string {
     }
   }
   return dbName;
+}
+
+export function assertNotLiveRepository(
+  realRepositoryIds: ReadonlySet<string>,
+  repositoryId: string,
+  storeRepositoryIds: Iterable<string>,
+): void {
+  const real = new Set([...realRepositoryIds].map((id) => id.toLowerCase()));
+  if (real.has(repositoryId.toLowerCase())) {
+    throw new StoreRefusedError(`repository ${repositoryId} is a row of repositories: a live id`);
+  }
+  for (const id of storeRepositoryIds) {
+    if (real.has(id.toLowerCase())) {
+      throw new StoreRefusedError(
+        `the store holds rows of repository ${id}, a row of repositories`,
+      );
+    }
+  }
+}
+
+export interface BuildMeta {
+  model: string;
+  dims: number;
+}
+
+export type BuildMetaDecision =
+  { action: 'record' | 'resume' } | { action: 'refuse'; reason: string };
+
+export function decideBuildMeta(
+  recorded: BuildMeta | null,
+  storeHasRows: boolean,
+  requested: BuildMeta,
+): BuildMetaDecision {
+  if (!recorded) {
+    return storeHasRows
+      ? {
+          action: 'refuse',
+          reason: `the store holds rows but no ${META_TABLE} row, so its embedding model is unknown: use a fresh store`,
+        }
+      : { action: 'record' };
+  }
+  if (recorded.model !== requested.model || recorded.dims !== requested.dims) {
+    return {
+      action: 'refuse',
+      reason: `the store was built with model ${recorded.model} (${recorded.dims} dims), this run asks for model ${requested.model} (${requested.dims} dims)`,
+    };
+  }
+  return { action: 'resume' };
 }
 
 export function validateEmbeddings(
@@ -318,30 +369,79 @@ function printTally(tally: Tally): void {
   console.log(`unreadable files: ${tally.unreadable}, over the size limit: ${tally.oversize}`);
 }
 
-async function refuseForeignRows(
+async function realRepositoryIds(
+  db: ReturnType<typeof createDatabase>,
+  candidates: string[],
+): Promise<Set<string>> {
+  if (candidates.length === 0) return new Set();
+  const rows = await db
+    .select({ id: schema.repositories.id })
+    .from(schema.repositories)
+    .where(inArray(schema.repositories.id, candidates));
+  return new Set(rows.map((r) => r.id));
+}
+
+async function preflightStore(
   opts: Options,
   db: ReturnType<typeof createDatabase>,
   dbName: string,
-): Promise<void> {
+): Promise<'record' | 'resume'> {
+  const repositoryId = opts.repositoryId!;
+  assertNotLiveRepository(await realRepositoryIds(db, [repositoryId]), repositoryId, []);
   const existing = await openExistingRagDatabase(db, dbName, opts.dims);
-  if (!existing) return;
+  if (!existing) return 'record';
+  let storeIds: string[] = [];
+  let storeHasRows = false;
+  let recorded: BuildMeta | null = null;
   try {
     const present = (await existing.pg.unsafe(`SELECT to_regclass($1) AS rel`, [
       RAG_TABLE,
     ])) as unknown as Array<{ rel: string | null }>;
-    if (!present[0]?.rel) return;
-    const foreign = (await existing.pg.unsafe(
-      `SELECT count(*)::int AS n FROM ${RAG_TABLE} WHERE repository_id IS DISTINCT FROM $1`,
-      [opts.repositoryId],
-    )) as unknown as Array<{ n: number }>;
-    if (foreign[0]!.n > 0) {
-      throw new StoreRefusedError(
-        `database ${dbName} already holds ${foreign[0]!.n} rows with a repository_id other than ${opts.repositoryId}`,
-      );
+    if (present[0]?.rel) {
+      const foreign = (await existing.pg.unsafe(
+        `SELECT count(*)::int AS n FROM ${RAG_TABLE} WHERE repository_id IS DISTINCT FROM $1`,
+        [repositoryId],
+      )) as unknown as Array<{ n: number }>;
+      if (foreign[0]!.n > 0) {
+        throw new StoreRefusedError(
+          `database ${dbName} already holds ${foreign[0]!.n} rows with a repository_id other than ${repositoryId}`,
+        );
+      }
+      const ids = (await existing.pg.unsafe(
+        `SELECT DISTINCT repository_id::text AS id FROM ${RAG_TABLE} WHERE repository_id IS NOT NULL`,
+      )) as unknown as Array<{ id: string }>;
+      storeIds = ids.map((r) => r.id);
+      const total = (await existing.pg.unsafe(
+        `SELECT count(*)::int AS n FROM ${RAG_TABLE}`,
+      )) as unknown as Array<{ n: number }>;
+      storeHasRows = total[0]!.n > 0;
+    }
+    const metaPresent = (await existing.pg.unsafe(`SELECT to_regclass($1) AS rel`, [
+      META_TABLE,
+    ])) as unknown as Array<{ rel: string | null }>;
+    if (metaPresent[0]?.rel) {
+      const meta = (await existing.pg.unsafe(
+        `SELECT model, dims FROM ${META_TABLE} LIMIT 1`,
+      )) as unknown as Array<BuildMeta>;
+      recorded = meta[0] ? { model: meta[0].model, dims: Number(meta[0].dims) } : null;
     }
   } finally {
     await existing.close();
   }
+  assertNotLiveRepository(await realRepositoryIds(db, storeIds), repositoryId, storeIds);
+  const decision = decideBuildMeta(recorded, storeHasRows, { model: opts.model, dims: opts.dims });
+  if (decision.action === 'refuse') throw new StoreRefusedError(decision.reason);
+  return decision.action;
+}
+
+async function recordBuildMeta(conn: RagConnection, opts: Options): Promise<void> {
+  await conn.pg.unsafe(
+    `CREATE TABLE IF NOT EXISTS ${META_TABLE} (model text NOT NULL, dims int NOT NULL)`,
+  );
+  await conn.pg.unsafe(
+    `INSERT INTO ${META_TABLE} (model, dims) SELECT $1::text, $2::int WHERE NOT EXISTS (SELECT 1 FROM ${META_TABLE})`,
+    [opts.model, opts.dims],
+  );
 }
 
 async function loadExistingHashes(
@@ -367,11 +467,13 @@ async function build(
   conn: RagConnection,
   kbFiles: string[],
   codeFiles: string[],
+  metaAction: 'record' | 'resume',
 ): Promise<void> {
   const repositoryId = opts.repositoryId!;
   const started = Date.now();
   const { usedPgvector } = await ensureRagSchema(conn);
   if (!usedPgvector) throw new Error('pgvector is unavailable: refusing to write jsonb embeddings');
+  if (metaAction === 'record') await recordBuildMeta(conn, opts);
   const existing = await loadExistingHashes(conn, repositoryId);
   console.log(`store holds ${existing.size} rows for ${repositoryId} before this run`);
   const produced = new Set<string>();
@@ -501,8 +603,9 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  let metaAction: 'record' | 'resume';
   try {
-    await refuseForeignRows(opts, db!, dbName!);
+    metaAction = await preflightStore(opts, db!, dbName!);
   } catch (err) {
     if (err instanceof StoreRefusedError) fail(`refused: ${err.message}`, 2);
     throw err;
@@ -522,7 +625,7 @@ async function main(): Promise<void> {
   );
   if (!conn) fail('could not open the store');
   try {
-    await build(opts, conn, kbFiles, codeFiles);
+    await build(opts, conn, kbFiles, codeFiles, metaAction);
   } finally {
     await conn.close();
   }

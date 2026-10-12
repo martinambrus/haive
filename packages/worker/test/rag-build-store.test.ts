@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { secretMaskPolicy } from '../src/queues/cli-exec/secret-mask-policy.js';
 import { chunkKey } from '../src/step-engine/steps/onboarding/10-rag-populate.js';
 import {
+  assertNotLiveRepository,
+  decideBuildMeta,
   dropMaskedPaths,
   staleChunks,
   StoreRefusedError,
@@ -79,5 +81,59 @@ describe('dropMaskedPaths', () => {
   it('treats an unlistable tree as all untracked', () => {
     const policy = secretMaskPolicy({ tracked: null });
     expect(dropMaskedPaths(policy, ['.env']).masked).toEqual(['.env']);
+  });
+});
+
+describe('assertNotLiveRepository', () => {
+  const synthetic = '11111111-2222-4333-8444-555555555555';
+  const real = '0e72847d-0dd8-4486-824d-c046a5d2f420';
+
+  it('allows a synthetic id over a store holding only synthetic ids', () => {
+    expect(() => assertNotLiveRepository(new Set(), synthetic, [synthetic])).not.toThrow();
+    expect(() => assertNotLiveRepository(new Set(), synthetic, [])).not.toThrow();
+  });
+
+  it('refuses a RAG_REPOSITORY_ID that is a real repository', () => {
+    expect(() => assertNotLiveRepository(new Set([real]), real, [])).toThrow(StoreRefusedError);
+    expect(() => assertNotLiveRepository(new Set([real]), real.toUpperCase(), [])).toThrow(
+      /repositories/,
+    );
+  });
+
+  it('refuses a store whose rows belong to a real repository', () => {
+    expect(() => assertNotLiveRepository(new Set([real]), synthetic, [synthetic, real])).toThrow(
+      StoreRefusedError,
+    );
+  });
+});
+
+describe('decideBuildMeta', () => {
+  const requested = { model: 'qwen3-embedding:4b', dims: 2560 };
+
+  it('records the config in an empty or new store', () => {
+    expect(decideBuildMeta(null, false, requested)).toEqual({ action: 'record' });
+  });
+
+  it('refuses a store with rows and no meta row', () => {
+    const decision = decideBuildMeta(null, true, requested);
+    expect(decision.action).toBe('refuse');
+  });
+
+  it('resumes a store built with the same model and width', () => {
+    expect(decideBuildMeta({ ...requested }, true, requested)).toEqual({ action: 'resume' });
+  });
+
+  it('refuses a different model, naming both', () => {
+    const decision = decideBuildMeta({ model: 'old-model', dims: 2560 }, true, requested);
+    expect(decision).toMatchObject({ action: 'refuse' });
+    expect(JSON.stringify(decision)).toContain('old-model');
+    expect(JSON.stringify(decision)).toContain('qwen3-embedding:4b');
+  });
+
+  it('refuses a different width, naming both', () => {
+    const decision = decideBuildMeta({ model: requested.model, dims: 1024 }, true, requested);
+    expect(decision).toMatchObject({ action: 'refuse' });
+    expect(JSON.stringify(decision)).toContain('1024');
+    expect(JSON.stringify(decision)).toContain('2560');
   });
 });
