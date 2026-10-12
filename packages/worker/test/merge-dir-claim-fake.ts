@@ -1,0 +1,66 @@
+import { StepSupersededError } from '../src/step-engine/step-ownership.js';
+
+/** The merge-dir claim as an in-memory table, for tests that drive the merge resolver against a
+ *  stub db. The SQL itself (stale rules, the task fence, the lock waits) is covered against a real
+ *  database by `merge-dir-claim-smoke.ts`. */
+export interface MergeDirClaimFake {
+  claims: Map<string, { taskId: string; stepId: string; title: string }>;
+  /** Sections and claims refuse, as they do once the pass's task is cancelled or past its epoch. */
+  fenced: boolean;
+  /** Where each release happened, and whether a section was open around it. */
+  released: { mergeDir: string; inSection: boolean }[];
+  sections: number;
+  reset(): void;
+}
+
+export function createMergeDirClaimFake(): MergeDirClaimFake {
+  return {
+    claims: new Map(),
+    fenced: false,
+    released: [],
+    sections: 0,
+    reset() {
+      this.claims.clear();
+      this.fenced = false;
+      this.released = [];
+      this.sections = 0;
+    },
+  };
+}
+
+type Owner = { mergeDir: string; stepId: string; taskId: string };
+
+export const claimFake = createMergeDirClaimFake();
+
+export function mergeDirClaimOverrides(fake: MergeDirClaimFake = claimFake) {
+  let open = false;
+  return {
+    claimMergeDir: async (_db: unknown, owner: Owner) => {
+      if (fake.fenced) throw new StepSupersededError(owner.stepId);
+      const held = fake.claims.get(owner.mergeDir);
+      if (held && held.taskId !== owner.taskId) {
+        return { kind: 'held' as const, holder: { id: held.taskId, title: held.title } };
+      }
+      fake.claims.set(owner.mergeDir, { taskId: owner.taskId, stepId: owner.stepId, title: '' });
+      return { kind: 'claimed' as const };
+    },
+    withMergeDirSection: async <T>(db: unknown, owner: Owner, fn: (tx: unknown) => Promise<T>) => {
+      const claim = fake.claims.get(owner.mergeDir);
+      if (fake.fenced || claim?.stepId !== owner.stepId)
+        throw new StepSupersededError(owner.stepId);
+      fake.sections += 1;
+      open = true;
+      try {
+        return await fn(db);
+      } finally {
+        open = false;
+      }
+    },
+    releaseMergeDir: async (_tx: unknown, owner: { mergeDir: string; stepId: string }) => {
+      fake.released.push({ mergeDir: owner.mergeDir, inSection: open });
+      if (fake.claims.get(owner.mergeDir)?.stepId === owner.stepId) {
+        fake.claims.delete(owner.mergeDir);
+      }
+    },
+  };
+}

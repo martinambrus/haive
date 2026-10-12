@@ -86,6 +86,7 @@ import {
   syncRefreshedAuthToUserVolumes,
 } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
+import { killCliSandboxesForTask, listCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers, killRepoIdeRunner } from '../sandbox/ide-runner.js';
 import {
@@ -127,6 +128,7 @@ import {
   HUMAN_REJECT_SOURCES,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
+import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import {
   StepSupersededError,
   TERMINAL_TASK_STATUSES,
@@ -3370,18 +3372,41 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
       ),
     );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
+  // Before the kill and the listing: a run still queued reads this right before it creates its sandbox.
+  await db
+    .update(schema.cliInvocations)
+    .set({ supersededAt: new Date() })
+    .where(
+      and(
+        eq(schema.cliInvocations.taskId, payload.taskId),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
-  await discardPlanMerge(db, payload.taskId);
-  try {
-    await cleanupTaskScratchWorkspace(db, payload.taskId);
-  } catch (err) {
-    logger.warn({ err, taskId: payload.taskId }, 'cleanup-scratch-workspace failed');
+  await killCliSandboxesForTask(payload.taskId);
+  // The cleanup above swallows docker failures, so the claims and the finish record wait for a
+  // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
+  const sandboxesGone = (await listCliSandboxesForTask(payload.taskId))?.length === 0;
+  if (sandboxesGone) {
+    await releaseTaskMergeClaims(db, payload.taskId);
+    await discardPlanMerge(db, payload.taskId);
+    try {
+      await cleanupTaskScratchWorkspace(db, payload.taskId);
+    } catch (err) {
+      logger.warn({ err, taskId: payload.taskId }, 'cleanup-scratch-workspace failed');
+    }
   }
   await maybeUnloadTaskEmbedModel(db, payload.taskId);
   await unloadTaskOllamaCliModels(db, payload.taskId);
   // A cancelled kb_author enrich should not leave an orphan global KB entry behind;
   // delete the still-enriching row so it disappears from the KB view too.
   await reconcileKbAuthorEntryOnTaskEnd(db, payload.taskId, 'cancelled', logger);
+  if (!sandboxesGone) {
+    throw new Error(
+      'the cancelled task still has a sandbox container or docker could not list them; its merge dir claims are kept and the stalled re-drive repeats the cancel',
+    );
+  }
   // The teardown above reads this task's rows, so whoever deletes them waits for this record.
   await appendEvent(db, payload.taskId, null, 'task.cancel_finished', { source: 'worker' });
 }

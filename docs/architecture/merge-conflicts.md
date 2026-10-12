@@ -3,7 +3,7 @@
 The DAG's level merge and the merge resolver (`12-worktree-cleanup`, `00a-sync-base`,
 `13-onboarding-push`) share the git core in `git-merge.ts`. Each fix agent edits the conflicted
 files, and the host verifies, stages and commits, so a fixer must never start from what an earlier one
-left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
+left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
 
 - **Unmerged paths are read with `-z`** (`unmergedPaths`). Without it git quotes a name holding a quote
   or a non-ASCII byte, the quoted name reads as a deleted file, and its conflict markers were committed.
@@ -19,6 +19,52 @@ left. Five rules keep it that way, each MEASURED on git 2.43 and 2.54:
 - **A person's own checkout is never written to.** The worker's `/host-fs` mount is read-write, so under
   `HOST_REPO_ROOT` nothing is put back from the index and a merge open for another ref is left alone:
   both halt and name what blocks them.
+- **A merge dir holds one task's merge at a time, by a claim and fenced sections.** A cross-branch
+  merge runs in a worktree named from the base branch alone (`main--base`), shared by every task
+  merging into that base, since git allows the branch in one worktree. A step takes the dir in
+  `merge_dir_claims` (one row per dir, `claimMergeDir`) before its first git write there, under
+  the dir's advisory lock (`inMergeDirLock`, key `hashtextextended('merge-dir:<mergeDir>', 0)`), in
+  a transaction of its own so the claim is committed ahead of the writes it covers. The claim is the
+  same step's again on a re-entry, a Retry or a base-sync round, and the same task's from an earlier
+  step. Another task's claim halts the step, naming that task, without touching its merge; the Retry
+  asks again. It is released only by the owning pass, in the section that removes the base worktree
+  and records `done`; by `handleCancelTask` once a docker listing shows no cli sandbox of the task left (the cancel
+  first marks every unended run of the task superseded, so one still queued refuses to create its
+  sandbox after the listing, and the listing counts created sandboxes as well as running ones; a run
+  that read its last superseded check just before the cancel and creates its sandbox just after the
+  listing is still missed, until the superseded poll stops it within 5 s; running-list item #262)
+  (`releaseTaskMergeClaims`, each claim deleted under its dir's lock, so a section the old pass is
+  inside finishes first), since the cancel commits before the fixer it ran is stopped; a listing that
+  fails, times out or still shows one keeps the claims, skips the dir-touching teardown and the
+  finish record, and fails the CANCEL job for the stalled re-drive; or by the foreign key when the
+  task goes. A completed task, a
+  skipped step, or a cancelled task whose `task.cancel_finished` event exists is stale: the next
+  claim takes the row over and its abort cleans the leftover. The event is written after the
+  release, so it also covers a claim that committed after the release read the task's claims; a
+  cancelled task without it still holds, since its fixer may still be running. A
+  failed task keeps the claim, since its Retry resumes the merge it left open, and so does a crashed
+  worker's, which boot re-drives. Every host-side write to the dir in `merge-resolver.ts` runs in
+  `withMergeDirSection`: one transaction that holds the lock, reads the claim FOR UPDATE and requires
+  it to be this step's, checks with a plain read (`taskWriteTarget`: the pass's epoch, and not
+  failed, cancelled or completed) that the task is still live, and refuses with `StepSupersededError`
+  before `fn` runs. The task row is not locked: a lock there deadlocked with a Retry, which writes
+  its step rows before the task row. A Cancel, Retry, Skip or Stop lands on the task row at once and does not
+  interrupt a section in flight; every section that starts after it, including one already queued
+  on the lock, reads the task as moved on and is refused, and the cancel's release waits for the
+  section in flight. Waiters poll
+  `pg_try_advisory_xact_lock` in a fresh short transaction per attempt (100 ms doubling to 1 s), so
+  none holds a pooled connection between attempts (the pool is 10; blocking waiters starved it and
+  the holder's own pool write). `fn` writes the database through its `tx` only: a pool write waits
+  on a row the section holds, and the step row is never locked (a pass's own `updateOwnedStep` would
+  wait on it). Reads a section needs (the secret-mask
+  policy, the squash message, a fetch credential) are made before it. The squash saves `squashing` in
+  a section of its own ahead of the reset, so a crash between the reset and the commit re-enters it.
+  The push runs outside a section, since it is network-bound, and sends the commit a section read
+  from the base ref (`<sha>:refs/heads/<base>`, with the upstream set afterwards; a failed upstream setup does not fail the push, it is logged and
+  added to the step's warning), so a pass that
+  lost the dir can push only what it merged. The directory is keyed rather than the repository
+  because two repository rows can share one local path. The DAG executor needs none: its integration
+  worktree is the task's own feature worktree, which `findBranchClaimant` keeps to one task.
 - **What a fixer changes outside the conflicted files is moved aside, never committed or lost.**
   Before a fixer is sent in, the merge dir is recorded as one git tree built in a scratch index,
   untracked files included, with what the merge staged (a tree built from

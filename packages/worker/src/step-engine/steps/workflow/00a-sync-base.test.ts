@@ -3,11 +3,18 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FormSchema } from '@haive/shared';
 import { syncBaseStep } from './00a-sync-base.js';
 import { resolveMergePhase } from '../../merge-resolver.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { claimFake } from '../../../../test/merge-dir-claim-fake.js';
+
+vi.mock('../../merge-dir-claim.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../merge-dir-claim.js')>()),
+  ...(await import('../../../../test/merge-dir-claim-fake.js')).mergeDirClaimOverrides(),
+}));
+beforeEach(() => claimFake.reset());
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -149,6 +156,7 @@ function makeMergeDb() {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState;
   };
   const db = {
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     // resolveGitEnv walks tasks -> repositories before users; an unlinked task means
     // the merge commit uses merge-resolver's FALLBACK_GIT_IDENTITY, as before.
     query: {

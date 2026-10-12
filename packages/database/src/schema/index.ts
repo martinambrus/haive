@@ -20,3 +20,4 @@ export * from './usage-window.js';
 export * from './pricing.js';
 export * from './step-guidance.js';
 export * from './plan.js';
+export * from './merge-dir-claims.js';

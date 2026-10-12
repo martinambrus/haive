@@ -97,6 +97,55 @@ describe('git-push helpers', () => {
     }
   });
 
+  it('pushBranch with a sha pushes that commit, not where the branch has moved to, and sets upstream', async () => {
+    const { work, bare } = await setupRepoWithBareOrigin();
+    try {
+      await git(work, ['remote', 'add', 'origin', `file://${bare}`]);
+      const sha = (await git(work, ['rev-parse', 'main'])).trim();
+      await writeFile(path.join(work, 'f.txt'), 'two\n', 'utf8');
+      await git(work, ['commit', '-am', 'two']);
+      const res = await pushBranch({
+        cwd: work,
+        branch: 'main',
+        sha,
+        setUpstream: true,
+        db: stubDb,
+        userId: 'u1',
+      });
+      expect(res).toEqual({ pushed: true, remote: 'origin', branch: 'main' });
+      expect((await git(bare, ['rev-parse', 'main'])).trim()).toBe(sha);
+      expect((await git(work, ['rev-parse', '--abbrev-ref', 'main@{upstream}'])).trim()).toBe(
+        'origin/main',
+      );
+    } finally {
+      await rm(work, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('pushBranch with a sha reports a failed upstream setup, and still resolves as pushed', async () => {
+    const { work, bare } = await setupRepoWithBareOrigin();
+    try {
+      await git(work, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(work, ['config', '--unset-all', 'remote.origin.fetch']);
+      const sha = (await git(work, ['rev-parse', 'main'])).trim();
+      const res = await pushBranch({
+        cwd: work,
+        branch: 'main',
+        sha,
+        setUpstream: true,
+        db: stubDb,
+        userId: 'u1',
+      });
+      expect(res).toMatchObject({ pushed: true, remote: 'origin', branch: 'main' });
+      expect(res.upstreamError).toMatch(/origin\/main/);
+      expect((await git(bare, ['rev-parse', 'main'])).trim()).toBe(sha);
+    } finally {
+      await rm(work, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
   it('pushBranch throws on a rejected (non-fast-forward) push', async () => {
     const { work, bare } = await setupRepoWithBareOrigin();
     const other = await mkdtemp(path.join(tmpdir(), 'gp-other-'));
