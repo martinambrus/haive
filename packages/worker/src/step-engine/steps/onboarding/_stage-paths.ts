@@ -285,7 +285,21 @@ export async function commitRecorded(
   try {
     if (parent !== '') await run(['read-tree', parent], temp);
     await stageNamed(repoPath, plan.add, plan.remove, { ...env, ...temp });
-    const changed = await stagedChanges(repoPath, [...plan.add, ...plan.remove], {
+    // A name that became a directory after its check is added whole; put whatever lies under it back.
+    const named = new Set([...plan.add, ...plan.remove]);
+    const listed = await run(['ls-files', '-z', '--', ...literal([...named])], temp);
+    const children = listed.stdout.split('\0').filter((p) => p.length > 0 && !named.has(p));
+    const turned = [...named].filter((n) => children.some((c) => c.startsWith(`${n}/`)));
+    const strays = [...children, ...turned];
+    if (strays.length > 0) {
+      await run(
+        parent !== ''
+          ? ['reset', '-q', parent, '--', ...literal(strays)]
+          : ['rm', '--cached', '-q', '--ignore-unmatch', '--', ...literal(strays)],
+        temp,
+      );
+    }
+    const changed = await stagedChanges(repoPath, [...named], {
       ...env,
       ...temp,
     });

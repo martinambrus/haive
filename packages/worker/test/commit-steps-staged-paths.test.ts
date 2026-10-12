@@ -17,6 +17,17 @@ import { upgradeCommitStep } from '../src/step-engine/steps/onboarding-upgrade/0
 const stepOutputs = vi.hoisted(() => ({
   current: null as Record<string, { detect?: unknown; output?: unknown }> | null,
 }));
+const lstatSaysFile = vi.hoisted(() => new Set<string>());
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...original,
+    lstatNoFollow: async (...args: Parameters<typeof original.lstatNoFollow>) => {
+      const entry = await original.lstatNoFollow(...args);
+      return entry && lstatSaysFile.has(args[1]) ? { ...entry, kind: 'file' as const } : entry;
+    },
+  };
+});
 vi.mock('../src/step-engine/steps/onboarding/_helpers.js', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('../src/step-engine/steps/onboarding/_helpers.js')>();
@@ -645,6 +656,29 @@ describe('commitRecorded commits what it staged in a private index', () => {
     expect(done).toEqual(['.haive-data/plan.json']);
     expect(await git(repo, ['show', 'HEAD:.haive-data/plan.json'])).toBe('ours\n');
     expect(await git(repo, ['log', '-1', '--format=%s'])).toBe('chore: onboard\n');
+  });
+
+  it('a name that became a directory after its check commits nothing under it', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n', '.haive/install.json': '{}\n' });
+    await rm(path.join(repo, '.haive', 'install.json'));
+    await mkdir(path.join(repo, '.haive', 'install.json'), { recursive: true });
+    await writeFile(path.join(repo, '.haive', 'install.json', 'private.md'), 'p\n');
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    lstatSaysFile.add('.haive/install.json');
+    try {
+      const done = await commitRecorded(
+        repo,
+        { add: ['.haive/install.json', 'a.md'], remove: [] },
+        'chore: onboard',
+        GIT_ENV,
+      );
+      expect(done).toEqual(['a.md']);
+    } finally {
+      lstatSaysFile.clear();
+    }
+    const files = await git(repo, ['ls-tree', '-r', '--name-only', 'HEAD']);
+    expect(files).not.toContain('private.md');
+    expect(await git(repo, ['show', 'HEAD:.haive/install.json'])).toBe('{}\n');
   });
 
   it('R7-2: the committed names are clean afterwards and the person staged work stays staged', async () => {
