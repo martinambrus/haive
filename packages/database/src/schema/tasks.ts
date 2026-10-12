@@ -439,6 +439,7 @@ export const tasks = pgTable(
      *  picked. Declared last so drizzle-kit push and the migration agree on column order.
      *  Migration 0158. */
     summaryCliChoiceAt: timestamp('summary_cli_choice_at'),
+    runListSnapshot: jsonb('run_list_snapshot').$type<string[]>(),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),
