@@ -932,6 +932,24 @@ describe('per-file RAG budgets in the workflow sync', () => {
     expect(rowsOf(`${OWN}big.ts`)).toBe(150);
   });
 
+  it.each([
+    ['a string', 'sites/all/modules/activit/', 80],
+    ['non-string entries', [null, 7, 'sites/all/modules/activit/'], 150],
+  ])(
+    'keeps only string own paths from an imported environment mirror (%s)',
+    async (_, include, rows) => {
+      onboarding = null;
+      repo.onboardingEnvironment = {
+        schemaVersion: 1,
+        envDetectData: { paths: { customCodePaths: { include } } },
+        confirmedValues: {},
+      };
+      await writeSource(`${OWN}big.ts`, fns(150), root);
+      await sync();
+      expect(rowsOf(`${OWN}big.ts`)).toBe(rows);
+    },
+  );
+
   it('indexes an own-path code file of about 600 KB', async () => {
     await writeSource(`${OWN}wide.ts`, fns(5500, 70), root);
     await sync();

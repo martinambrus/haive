@@ -257,11 +257,15 @@ export async function resolveRagSyncPrefs(
       const data = envMirror.envDetectData as
         | {
             project?: { name?: string };
-            paths?: { customCodePaths?: { include?: string[] } };
+            paths?: { customCodePaths?: { include?: unknown } };
           }
         | undefined;
       projectName = data?.project?.name ?? 'default';
-      ownPaths = data?.paths?.customCodePaths?.include ?? [];
+      // The mirror can be imported from a committed .haive-data file: keep only string entries.
+      const include = data?.paths?.customCodePaths?.include;
+      ownPaths = Array.isArray(include)
+        ? include.filter((p): p is string => typeof p === 'string')
+        : [];
     }
 
     // The onboarding task is always read: it is the ONLY source of 09_7's
