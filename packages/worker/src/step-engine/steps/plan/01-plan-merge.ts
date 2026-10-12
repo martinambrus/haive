@@ -36,8 +36,16 @@ import {
   planMergeWorktreePath,
   removePlanMergeWorktree,
   reopenResolvedMerge,
+  unlandedResolvedMerge,
   type ConflictedPaths,
 } from '../../../plan/merge.js';
+import {
+  PLAN_MERGE_PRIOR_EVENT,
+  priorResolutionLines,
+  readPriorResolution,
+  type PriorRef,
+  type PriorResolution,
+} from '../../../plan/merge-prior.js';
 import {
   flushPlanMirrorForRepository,
   reconcilePlanMirror,
@@ -113,6 +121,8 @@ interface PlanMergeDetect {
   pendingGuidance: string | null;
   /** True while the merge is live in the worktree. */
   mergeOpen: boolean;
+  /** The answer a reopen took back, read for the conflicts still open; absent unless this merge is that reopen's. */
+  priorResolution?: PriorResolution;
   /** The tree the agent is sent into on an answer pass; absent on a collect pass. */
   fixBaseline?: FixBaseline | FixBaselineUnavailable | null;
   /** Set when that tree came from an earlier pass, whose fixer may have changed it since. */
@@ -147,24 +157,35 @@ async function recordMessage(
   });
 }
 
-async function loadTranscript(
+async function loadConversation(
   db: Database,
   taskId: string,
-): Promise<{ role: string; body: string }[]> {
+): Promise<{ transcript: { role: string; body: string }[]; prior: PriorRef | null }> {
   const rows = await db
-    .select({ payload: schema.taskEvents.payload })
+    .select({ eventType: schema.taskEvents.eventType, payload: schema.taskEvents.payload })
     .from(schema.taskEvents)
     .where(
       and(
         eq(schema.taskEvents.taskId, taskId),
-        eq(schema.taskEvents.eventType, PLAN_MERGE_MESSAGE_EVENT),
+        inArray(schema.taskEvents.eventType, [PLAN_MERGE_MESSAGE_EVENT, PLAN_MERGE_PRIOR_EVENT]),
       ),
     )
     .orderBy(asc(schema.taskEvents.createdAt));
-  return rows.map((r) => {
+  const transcript: { role: string; body: string }[] = [];
+  let prior: PriorRef | null = null;
+  for (const r of rows) {
+    if (r.eventType === PLAN_MERGE_PRIOR_EVENT) {
+      const p = (r.payload ?? {}) as { sha?: unknown; head?: unknown };
+      prior =
+        typeof p.sha === 'string' && typeof p.head === 'string'
+          ? { sha: p.sha, head: p.head }
+          : null;
+      continue;
+    }
     const p = (r.payload ?? {}) as { role?: string; body?: string };
-    return { role: p.role ?? 'assistant', body: p.body ?? '' };
-  });
+    transcript.push({ role: p.role ?? 'assistant', body: p.body ?? '' });
+  }
+  return { transcript, prior };
 }
 
 async function currentBranch(repoPath: string): Promise<string> {
@@ -225,6 +246,7 @@ function buildPrompt(d: PlanMergeDetect): string {
         ]
       : []),
     '',
+    ...(d.priorResolution ? [...priorResolutionLines(d.transcript, d.priorResolution), ''] : []),
     'Resolve EVERY conflict by EDITING those files: remove the <<<<<<< / ======= / >>>>>>>',
     'markers and leave the content you want to keep. Change no other file: only the conflicted',
     'files are committed.',
@@ -261,7 +283,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     const branch = await currentBranch(ctx.repoPath);
     const worktreePath = planMergeWorktreePath(ctx.repoPath);
     const worktreeRelPath = `${WORKTREE_SUBDIR}/${PLAN_MERGE_DIR_NAME}`;
-    const transcript = await loadTranscript(ctx.db, ctx.taskId);
+    const { transcript, prior: recordedPrior } = await loadConversation(ctx.db, ctx.taskId);
     const last = transcript.at(-1);
     // Passes since the last thing the USER said. A new instruction is a new problem.
     const sinceUser = [...transcript].reverse().findIndex((m) => m.role === 'user');
@@ -295,6 +317,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     let open = await mergeIsOpen(worktreePath);
     let opened = false;
     let unrelated = false;
+    let priorRef = recordedPrior;
     if (!open) {
       await fetchOrigin({
         repoPath: ctx.repoPath,
@@ -306,16 +329,29 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       const gap = await divergence(ctx.repoPath, branch);
       unrelated = gap.unrelated;
       if (gap.behind > 0) {
-        const reopened =
+        const unlanded =
           last?.role === 'user'
-            ? await reopenResolvedMerge({
-                repoPath: ctx.repoPath,
-                worktreePath,
-                branch,
-                unrelated: gap.unrelated,
-                gitEnv: identity,
-              })
+            ? await unlandedResolvedMerge({ repoPath: ctx.repoPath, worktreePath, branch })
             : null;
+        // Before the reset takes the answer back, and not twice for one that a crash left half taken.
+        if (unlanded && unlanded.sha !== priorRef?.sha) {
+          await ctx.db.insert(schema.taskEvents).values({
+            taskId: ctx.taskId,
+            taskStepId: ctx.taskStepId,
+            eventType: PLAN_MERGE_PRIOR_EVENT,
+            payload: unlanded,
+          });
+          priorRef = unlanded;
+        }
+        const reopened = unlanded
+          ? await reopenResolvedMerge({
+              worktreePath,
+              branch,
+              unrelated: gap.unrelated,
+              gitEnv: identity,
+              prior: unlanded.sha,
+            })
+          : null;
         const attempt =
           reopened ?? (await mergeOriginInto(worktreePath, branch, gap.unrelated, identity));
         open = !attempt.clean;
@@ -350,8 +386,12 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       opened,
     );
     if (!needsAgentPass(found)) return found;
+    const priorResolution = priorRef
+      ? await readPriorResolution(worktreePath, priorRef, found.conflicts)
+      : null;
     return {
       ...found,
+      ...(priorResolution ? { priorResolution } : {}),
       fixBaseline,
       ...(reused ? { fixBaselineReused: true } : {}),
       ...(ownerTaskId ? { fixBaselineOwner: ownerTaskId } : {}),
