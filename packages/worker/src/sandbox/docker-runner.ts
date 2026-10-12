@@ -508,7 +508,8 @@ export const defaultDockerRunner: DockerRunner = {
       stdinPrompt: opts.stdinPrompt,
       onStdinWritable: opts.onStdinWritable,
     });
-    if (result.timedOut || result.exitCode === null) await forceRemove();
+    // An aborted `start --attach` client exits 0 while the container keeps running.
+    if (result.timedOut || result.exitCode === null || opts.signal?.aborted) await forceRemove();
     return result;
   },
 
