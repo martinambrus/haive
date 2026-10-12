@@ -539,11 +539,19 @@ export async function redriveRepoCleanups(
   let queued = 0;
   for (const row of rows) {
     try {
+      // Every write below is a compare-and-swap on the stamp this sweep read.
+      const sameStamp = row.lastEnqueuedAt
+        ? eq(schema.repoCleanups.lastEnqueuedAt, row.lastEnqueuedAt)
+        : isNull(schema.repoCleanups.lastEnqueuedAt);
       if (row.attempts >= REPO_CLEANUP_MAX_ATTEMPTS) {
         await db
           .delete(schema.repoCleanups)
           .where(
-            and(eq(schema.repoCleanups.id, row.id), eq(schema.repoCleanups.attempts, row.attempts)),
+            and(
+              eq(schema.repoCleanups.id, row.id),
+              eq(schema.repoCleanups.attempts, row.attempts),
+              sameStamp,
+            ),
           );
         log.warn(
           { cleanupId: row.id, repositoryId: row.repositoryId, kind: row.kind },
@@ -553,9 +561,6 @@ export async function redriveRepoCleanups(
       }
       // Claimed on the stamp, so two sweeps never both queue it. The attempt is counted with the
       // claim, before the job can run and refund it, and given back if the queue refuses the job.
-      const sameStamp = row.lastEnqueuedAt
-        ? eq(schema.repoCleanups.lastEnqueuedAt, row.lastEnqueuedAt)
-        : isNull(schema.repoCleanups.lastEnqueuedAt);
       const stamp = new Date();
       const claimed = await db
         .update(schema.repoCleanups)

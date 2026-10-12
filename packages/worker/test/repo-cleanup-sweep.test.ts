@@ -123,6 +123,26 @@ describe('redriveRepoCleanups', () => {
     expect(fake.rows(schema.repoCleanups)[0]).toMatchObject({ attempts: 3, lastEnqueuedAt: later });
   });
 
+  it('drops a capped row only while it still holds the stamp the sweep read', async () => {
+    const { fake, db, add } = setup();
+    add(1, {
+      attempts: REPO_CLEANUP_MAX_ATTEMPTS,
+      lastEnqueuedAt: ago(REPO_CLEANUP_STALE_MS + 60_000),
+    });
+    const conditions: SQL[] = [];
+    const del = db.delete.bind(db);
+    db.delete = ((table: Parameters<typeof db.delete>[0]) => {
+      const builder = del(table);
+      const where = builder.where.bind(builder);
+      return Object.assign(builder, {
+        where: (cond: SQL) => (conditions.push(cond), where(cond)),
+      });
+    }) as typeof db.delete;
+    await redriveRepoCleanups(db, { enqueueRepoCleanup: async () => undefined });
+    expect(fake.rows(schema.repoCleanups)).toHaveLength(0);
+    expect(new PgDialect().sqlToQuery(conditions[0]!).sql).toContain('"last_enqueued_at" =');
+  });
+
   it('leaves a just-written row to the api that is queuing it', async () => {
     const { db, add, queued, deps } = setup();
     add(1, { createdAt: new Date() });
