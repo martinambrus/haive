@@ -158,6 +158,59 @@ describe('a RAG store fenced by its sync lock', () => {
     expect(fenced.mode).toBe('external');
   });
 
+  describe('transactions', () => {
+    const withBegin = () => {
+      const sent: unknown[][] = [];
+      const txUnsafe = (...args: unknown[]) => (sent.push(args), Promise.resolve([]));
+      const begins: unknown[][] = [];
+      const conn = {
+        pg: {
+          unsafe: () => Promise.resolve([]),
+          begin: (...args: unknown[]) => {
+            begins.push(args);
+            const run = args[args.length - 1] as (tx: unknown) => unknown;
+            return run({ unsafe: txUnsafe, other: 'kept' });
+          },
+        },
+      };
+      return { conn, sent, begins };
+    };
+
+    it.each([[[]], [['isolation level serializable']]])(
+      'fences the statements of begin(%j, cb) once the lock is lost',
+      async (leading) => {
+        const { conn, sent, begins } = withBegin();
+        const state = { lost: false };
+        const fenced = fenceRagStore(conn, lockWith(state));
+        const failures: unknown[] = [];
+        await (fenced.pg.begin as (...args: unknown[]) => Promise<unknown>)(
+          ...leading,
+          async (tx: { unsafe: (q: string, p?: unknown[]) => Promise<unknown>; other: string }) => {
+            expect(tx.other).toBe('kept');
+            await tx.unsafe('STMT 1', [1]);
+            state.lost = true;
+            try {
+              await tx.unsafe('STMT 2', [2]);
+            } catch (err) {
+              failures.push(err);
+            }
+          },
+        );
+        expect(failures).toHaveLength(1);
+        expect(failures[0]).toBeInstanceOf(RagSyncLockLostError);
+        expect(sent).toEqual([['STMT 1', [1]]]);
+        expect(begins[0]!.slice(0, -1)).toEqual(leading);
+      },
+    );
+
+    it('throws from begin itself when the lock is already lost', () => {
+      const { conn, begins } = withBegin();
+      const fenced = fenceRagStore(conn, lockWith({ lost: true }));
+      expect(() => fenced.pg.begin(() => undefined)).toThrow(RagSyncLockLostError);
+      expect(begins).toEqual([]);
+    });
+  });
+
   it('returns the connection itself when there is no lock', () => {
     const conn = { pg: { unsafe: () => undefined } };
     expect(fenceRagStore(conn, null)).toBe(conn);

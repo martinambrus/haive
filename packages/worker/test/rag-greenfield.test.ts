@@ -1790,6 +1790,36 @@ describe('one RAG sync per repository at a time', () => {
     expect(fakeLock.state.handles[0]!.released).toBe(1);
   });
 
+  it('sends none of the three claim statements when the lock is lost after the advisory-lock statement', async () => {
+    const connect = mocks.connect.getMockImplementation()!;
+    mocks.connect.mockImplementation(async (...args: unknown[]) => {
+      const conn = (await connect(...args)) as {
+        pg: { begin: (run: (tx: unknown) => Promise<unknown>) => Promise<unknown> };
+      };
+      const begin = conn.pg.begin;
+      conn.pg.begin = (run) =>
+        begin((tx) =>
+          run({
+            unsafe: async (query: string, params?: unknown[]) => {
+              const result = await (
+                tx as { unsafe: (q: string, p?: unknown[]) => Promise<unknown> }
+              ).unsafe(query, params);
+              if (query.includes('pg_advisory_xact_lock')) fakeLock.state.handles[0]!.lost = true;
+              return result;
+            },
+          }),
+        );
+      return conn;
+    });
+    await expect(syncWorktree()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(claimLog.filter((entry) => entry.via === 'tx')).toHaveLength(1);
+    expect(claimLog.filter((entry) => entry.via === 'tx')[0]!.query).toContain(
+      'pg_advisory_xact_lock',
+    );
+    expect(inserts).toHaveLength(0);
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
   it('never stops a sync whose lock is still held', async () => {
     stalePaths = ['gone.ts'];
     await syncWorktree();
