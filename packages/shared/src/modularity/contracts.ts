@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { formSchemaSchema } from '../schemas/form.js';
 
+export const MODULES_LOADED_WORKER_KEY = 'haive:modules:loaded:worker';
+
 export const CORE_STEP_ID_PATTERN = /^[0-9a-z_-]+$/;
 const MODULE_STEP_ID_PATTERN = /^module\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9_-]*)$/;
 const CUSTOM_STEP_ID_PATTERN = /^custom\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9-]*)$/;

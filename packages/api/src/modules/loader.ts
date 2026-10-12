@@ -3,11 +3,13 @@ import { z } from 'zod';
 import { configService, validateFormValues } from '@haive/shared';
 import {
   collectFieldIds,
+  MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   type ModuleManifest,
 } from '@haive/shared/modularity';
 import { HttpError, type AppEnv } from '../context.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import { getRedis } from '../redis.js';
 
 export type ApiModuleEntry = {
   packageName: string;
@@ -18,6 +20,7 @@ export type ApiModuleEntry = {
 export type LoadedApiModule = {
   packageName: string;
   manifest: ModuleManifest;
+  hasRoutes: boolean;
 };
 
 type SettingsKind = 'global' | 'admin';
@@ -56,7 +59,11 @@ export async function mountModules(
       throw new Error(`Duplicate module id "${manifest.id}" (${entry.packageName})`);
     }
     seen.add(manifest.id);
-    loaded.push({ packageName: entry.packageName, manifest });
+    loaded.push({
+      packageName: entry.packageName,
+      manifest,
+      hasRoutes: entry.routes !== undefined,
+    });
   }
 
   for (const [index, entry] of entries.entries()) {
@@ -104,6 +111,30 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         hasGlobalSettings: manifest.globalSettings !== undefined,
         hasAdminSettings: isAdmin && manifest.adminSettings !== undefined,
       })),
+    });
+  });
+
+  routes.get('/loaded', async (c) => {
+    if (c.get('userRole') !== 'admin') throw new HttpError(403, 'Admin access required');
+    let worker: unknown = null;
+    const raw = await getRedis().get(MODULES_LOADED_WORKER_KEY);
+    if (raw !== null) {
+      try {
+        worker = JSON.parse(raw);
+      } catch {
+        worker = null;
+      }
+    }
+    return c.json({
+      api: {
+        modules: loaded.map(({ packageName, manifest, hasRoutes }) => ({
+          id: manifest.id,
+          packageName,
+          version: manifest.version,
+          hasRoutes,
+        })),
+      },
+      worker,
     });
   });
 
