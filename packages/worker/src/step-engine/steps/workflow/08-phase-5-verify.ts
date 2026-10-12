@@ -7,7 +7,7 @@ import {
 } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
-import type { FormSchema } from '@haive/shared';
+import type { FormSchema, VerifyCommands } from '@haive/shared';
 import {
   AdvisedStepError,
   TaskCancelledError,
@@ -17,7 +17,7 @@ import {
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { resolveDdevWorkspace } from './_task-meta.js';
+import { loadDeclaredVerifyCommands, resolveDdevWorkspace } from './_task-meta.js';
 import {
   DDEV_PROJECT_MOUNT,
   ddevExec,
@@ -65,7 +65,11 @@ export interface SlotCommand {
   kind: 'host' | 'ddev';
   label: string;
   argv: string[];
+  /** Set when the repository declared this command; `label` is then the declared text. */
+  source?: 'declared';
 }
+
+export type VerifySlotName = 'test' | 'lint' | 'typecheck';
 
 type SlotRunner = 'pm' | 'composer' | 'phpunit' | 'pytest' | 'phpcs' | 'phpstan';
 
@@ -86,6 +90,9 @@ interface VerifyDetect {
   /** Tooling configs one level below the root that were seen and not used, each with its reason.
    *  Optional because detect_output is persisted and replayed; absent when nothing was declined. */
   declinedConfigs?: string[];
+  /** Slots the repository turned off: no runner, whatever the workspace holds. Optional because
+   *  detect_output is persisted and replayed; absent when no slot is off. */
+  offSlots?: VerifySlotName[];
 }
 
 interface CheckResult {
@@ -305,6 +312,50 @@ export function buildVerifyCommand(
   }
 }
 
+/** One shell string. DDEV runs it raw, so the runner's shell sees exactly one quoted word. */
+export function buildDeclaredCommand(command: string, ddevMode: boolean): SlotCommand {
+  if (ddevMode) {
+    return {
+      kind: 'ddev',
+      label: command,
+      argv: ['exec', '--raw', '--', 'bash', '-c', shellQuote(command)],
+      source: 'declared',
+    };
+  }
+  return { kind: 'host', label: command, argv: ['sh', '-c', command], source: 'declared' };
+}
+
+interface ResolvedSlots {
+  test: SlotCommand | null;
+  lint: SlotCommand | null;
+  phpLint?: SlotCommand | null;
+  typecheck: SlotCommand | null;
+}
+
+/** Overlay the repository's declared commands on the detected slots: a command replaces the slot,
+ *  null empties it, an absent key leaves detection alone. A declared or off lint drops phpLint too. */
+export function applyDeclaredCommands(
+  slots: ResolvedSlots,
+  declared: VerifyCommands | null,
+  ddevMode: boolean,
+): { slots: ResolvedSlots; offSlots: VerifySlotName[] } {
+  if (!declared) return { slots, offSlots: [] };
+  const out = { ...slots };
+  const offSlots: VerifySlotName[] = [];
+  for (const name of ['test', 'lint', 'typecheck'] as const) {
+    const value = declared[name];
+    if (value === undefined) continue;
+    if (value === null) {
+      out[name] = null;
+      offSlots.push(name);
+    } else {
+      out[name] = buildDeclaredCommand(value, ddevMode);
+    }
+    if (name === 'lint') delete out.phpLint;
+  }
+  return { slots: out, offSlots };
+}
+
 async function readJsonScripts(workspace: string, file: string): Promise<Record<string, string>> {
   // One lenient read for the probe and the read together: `null` is absent, unreadable or refused,
   // and all three already meant "no scripts" here.
@@ -468,6 +519,9 @@ interface SlotRun {
 /** A shell reports a missing command as 127. */
 const NOT_FOUND_EXIT = 127;
 
+/** A shell reports a command it found but could not execute as 126. */
+const NOT_EXECUTABLE_EXIT = 126;
+
 const SLOT_TIMEOUT_MS = 600_000;
 
 /** Whether the runner went away or started again during a run; unknown either side says no. */
@@ -544,13 +598,21 @@ async function execSlot(
   };
 }
 
+/** A declared command the shell could not start is a repository setting to correct, not a defect a fix round can repair. */
+function declaredNotRunnable(cmd: SlotCommand, slot: string, run: SlotRun): SlotRun {
+  if (cmd.source !== 'declared' || !run.ran) return run;
+  if (run.exitCode !== NOT_FOUND_EXIT && run.exitCode !== NOT_EXECUTABLE_EXIT) return run;
+  const note = `the declared ${slot} command was not run — command not found / not executable (exit ${run.exitCode})`;
+  return { ran: false, note, exitCode: run.exitCode, output: note, raw: run.raw };
+}
+
 async function runSlotRaw(
   slot: 'test' | 'lint' | 'typecheck',
   cmd: SlotCommand,
   ctx: StepContext,
   handle: DdevRunnerHandle | null,
 ): Promise<{ check: CheckResult; raw: string }> {
-  const run = await execSlot(cmd, ctx, handle);
+  const run = declaredNotRunnable(cmd, slot, await execSlot(cmd, ctx, handle));
   const check = {
     ran: run.ran,
     passed: run.ran && run.exitCode === 0,
@@ -577,7 +639,8 @@ const PHPCS_TIMED_OUT = 'phpcs reached its time limit — lint not verified';
 /** A kill timer can fire a little before the clock this step reads agrees. */
 const TIME_LIMIT_SLACK_MS = 5_000;
 
-const isDirectPhpcs = (cmd: SlotCommand): boolean => cmd.argv.at(-1) === 'vendor/bin/phpcs';
+const isDirectPhpcs = (cmd: SlotCommand): boolean =>
+  cmd.source !== 'declared' && cmd.argv.at(-1) === 'vendor/bin/phpcs';
 
 const unscoped = (check: CheckResult, reason: string): CheckResult =>
   check.ran && !check.passed ? { ...check, note: `lint verdict unscoped: ${reason}` } : check;
@@ -665,7 +728,10 @@ async function runLint(
   handle: DdevRunnerHandle | null,
 ): Promise<CheckResult> {
   if (!isDirectPhpcs(cmd)) {
-    return unscoped(await runSlot('lint', cmd, ctx, handle), 'project script');
+    return unscoped(
+      await runSlot('lint', cmd, ctx, handle),
+      cmd.source === 'declared' ? 'declared command' : 'project script',
+    );
   }
   if (cmd.kind === 'ddev' && !handle) return runSlot('lint', cmd, ctx, handle);
   const changed = await collectChangedLineMap(ctx, workspace);
@@ -869,7 +935,12 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     const infra = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08b-test-management');
     const testFramework =
       ((infra?.detect ?? null) as { primary?: TestFramework | null } | null)?.primary ?? null;
-    const slots = await resolveSlots(workspace, ddevMode);
+    const declared = await loadDeclaredVerifyCommands(ctx.db, ctx.taskId, ctx.logger);
+    const { slots, offSlots } = applyDeclaredCommands(
+      await resolveSlots(workspace, ddevMode),
+      declared,
+      ddevMode,
+    );
     const declinedConfigs = await findDeclinedConfigs(workspace);
     return {
       workspacePath: workspace,
@@ -877,6 +948,7 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       testFramework,
       ...slots,
       ...(declinedConfigs.length > 0 ? { declinedConfigs } : {}),
+      ...(offSlots.length > 0 ? { offSlots } : {}),
     };
   },
 
