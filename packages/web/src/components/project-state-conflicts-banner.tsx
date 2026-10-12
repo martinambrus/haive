@@ -163,24 +163,33 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     const listed = await load(true);
     if (!alive.current) return;
     const remaining =
-      listed === null ? pendingRef.current : stillListed(pendingRef.current, listed);
+      listed === null ? [...pendingRef.current] : stillListed(pendingRef.current, listed);
     const done = pendingRef.current.filter((id) => !remaining.includes(id));
-    for (const id of done) delete pendingAnswers.current[id];
+    const unconfirmed: string[] = [];
     if (done.length > 0) {
-      const landed = await Promise.all(
+      const looked = await Promise.all(
         done.map((id) =>
           api
             .get<{ conflict: ProjectStateConflictBody }>(
               `/repos/${repositoryId}/project-state/conflicts/${id}`,
             )
-            .then((res) => landedAnswer(res.conflict.resolution))
-            .catch(() => null),
+            .then((res) => ({ id, ok: true, answer: landedAnswer(res.conflict.resolution) }))
+            .catch(() => ({ id, ok: false, answer: null })),
         ),
       );
       if (!alive.current) return;
-      const answers = landed.filter((a): a is ProjectStateAnswer => a !== null);
+      const answers: ProjectStateAnswer[] = [];
+      for (const l of looked) {
+        if (!l.ok) {
+          unconfirmed.push(l.id);
+          continue;
+        }
+        delete pendingAnswers.current[l.id];
+        if (l.answer) answers.push(l.answer);
+      }
       if (answers.length > 0) setAnswered((prev) => [...prev, ...answers]);
     }
+    remaining.push(...unconfirmed);
     setPending(remaining);
     if (remaining.length === 0) return;
     refetchCount.current += 1;

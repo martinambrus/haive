@@ -121,9 +121,11 @@ describe('GET /repos/:id/project-state/conflicts/:conflictId', () => {
   it('returns one question, answered or not, with its resolution', async () => {
     const closed = await app.request(`/repos/${REPO}/project-state/conflicts/${CLOSED}`);
     expect(closed.status).toBe(200);
-    expect((await closed.json()).conflict).toMatchObject({ id: CLOSED, resolution: 'keep_mine' });
+    const closedBody = (await closed.json()) as { conflict: unknown };
+    expect(closedBody.conflict).toMatchObject({ id: CLOSED, resolution: 'keep_mine' });
     const open = await app.request(`/repos/${REPO}/project-state/conflicts/${PENDING}`);
-    expect((await open.json()).conflict).toMatchObject({ id: PENDING, resolution: null });
+    const openBody = (await open.json()) as { conflict: unknown };
+    expect(openBody.conflict).toMatchObject({ id: PENDING, resolution: null });
   });
 
   it('is a 404 for a row of another repository, and for another user’s repository', async () => {
