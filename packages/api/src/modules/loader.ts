@@ -4,7 +4,6 @@ import { configService, validateFormValues } from '@haive/shared';
 import { moduleManifestSchema, type ModuleManifest } from '@haive/shared/modularity';
 import { HttpError, type AppEnv } from '../context.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
-import { moduleRegistry } from '../modules.generated.js';
 
 export type ApiModuleEntry = {
   packageName: string;
@@ -145,6 +144,8 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
 }
 
 export async function installModules(app: Hono<AppEnv>): Promise<void> {
+  // Loaded at boot only: the generated file exists after codegen, not on every path that imports this.
+  const { moduleRegistry } = await import('../modules.generated.js');
   const loaded = await mountModules(app, moduleRegistry);
   app.route('/modules', moduleRoutes(loaded));
 }
