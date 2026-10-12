@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import type { RagSyncLock } from '@haive/shared/rag';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import { loadScopeExcludeGlobs } from './_scope.js';
@@ -388,6 +389,7 @@ async function embedAndStore(opts: {
   embeddingDimensions: number;
   sync: IncrementalSync | null;
   hashed: { chunks: number; realEmbedding: boolean };
+  lock: RagSyncLock | null;
 }): Promise<{ embedded: number; skipped: number }> {
   const { sync } = opts;
   const toEmbed: RagChunk[] = [];
@@ -408,6 +410,7 @@ async function embedAndStore(opts: {
   const batchSize = await resolveEmbedBatchSize();
   for (let batchStart = 0; batchStart < toEmbed.length; batchStart += batchSize) {
     opts.ctx.throwIfCancelled();
+    opts.lock?.assertHeld();
     const batch = toEmbed.slice(batchStart, batchStart + batchSize);
     const texts = batch.map((c) => c.content);
     const outcome = await embedBatch({
@@ -417,6 +420,7 @@ async function embedAndStore(opts: {
       useOllama: opts.useOllama,
       texts,
     });
+    opts.lock?.assertHeld();
     if (outcome.kind === 'failed') {
       // Fail the step rather than storing hash vectors beside real ones. This step
       // exists to produce a usable index, so a partial one it reports as done is
@@ -726,6 +730,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         let sync: IncrementalSync | null = null;
         if (mode === 'full') {
           await ctx.emitProgress('Clearing existing RAG data...');
+          lock?.assertHeld();
           if (repositoryId) {
             await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE repository_id = $1`, [
               repositoryId,
@@ -798,6 +803,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         const totalKb = detected.kbFiles.length;
         for (let fi = 0; fi < totalKb; fi += 1) {
           ctx.throwIfCancelled();
+          lock?.assertHeld();
           const file = detected.kbFiles[fi]!;
           await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}`);
 
@@ -852,6 +858,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
             embeddingDimensions: detected.embeddingDimensions,
             sync,
             hashed,
+            lock,
           });
           chunksEmbedded += kbRes.embedded;
           chunksSkipped += kbRes.skipped;
@@ -861,6 +868,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         const totalCode = detected.codeFiles.length;
         for (let fi = 0; fi < totalCode; fi += 1) {
           ctx.throwIfCancelled();
+          lock?.assertHeld();
           const file = detected.codeFiles[fi]!;
           await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}`);
 
@@ -915,6 +923,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
             embeddingDimensions: detected.embeddingDimensions,
             sync,
             hashed,
+            lock,
           });
           chunksEmbedded += codeRes.embedded;
           chunksSkipped += codeRes.skipped;
@@ -925,6 +934,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           const staleKeys = computeStaleKeys(sync.existing.keys(), sync.seen);
           if (staleKeys.length > 0) {
             await ctx.emitProgress(`Removing ${staleKeys.length} stale chunk(s)...`);
+            lock?.assertHeld();
             chunksDeleted = await deleteStaleChunks(
               conn,
               repositoryId!,
@@ -954,6 +964,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           },
           'rag populate apply complete',
         );
+        lock?.assertHeld();
         // A completed run with real embeddings is the only evidence that clears the
         // degradation — a hash-mode run proves nothing about whether embeddings work.
         if (hashed.chunks > 0) {

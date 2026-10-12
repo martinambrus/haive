@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { schema } from '@haive/database';
+import { RagSyncLockLostError } from '@haive/shared/rag';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
 import type { createFakeRagLock } from './rag-lock-fake.js';
@@ -273,11 +274,55 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
   });
 
-  it('keeps the flag when the sync lock was lost during the run', async () => {
+  it('fails the step, keeping the flag and writing nothing, when the sync lock was already lost', async () => {
     repo.ragEmbedDegradedAt = new Date(0);
     fakeLock.state.loseOnTake = true;
-    await populate(detected({ ollamaReachable: true }));
+    await expect(populate(detected({ ollamaReachable: true }))).rejects.toBeInstanceOf(
+      RagSyncLockLostError,
+    );
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(order).not.toContain('insert');
+  });
+
+  it('stops inserting once the lock is lost between two files', async () => {
+    const other = '.haive-data/knowledge_base/other.md';
+    await writeFile(join(root, other), '# Other\n\nA second document about queues.\n');
+    const pg = (conn as { pg: { unsafe: (q: string, p?: unknown[]) => Promise<unknown> } }).pg;
+    const unsafe = pg.unsafe;
+    pg.unsafe = async (query, params) => {
+      const result = await unsafe(query, params);
+      if (query.includes('INSERT INTO')) fakeLock.state.handles[0]!.lost = true;
+      return result;
+    };
+    await expect(
+      populate(
+        detected({
+          ollamaReachable: true,
+          kbFiles: [
+            { relPath: KB, sizeBytes: 60 },
+            { relPath: other, sizeBytes: 40 },
+          ],
+        }),
+      ),
+    ).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(order.filter((event) => event === 'insert')).toHaveLength(1);
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('never stops a populate whose lock is still held', async () => {
+    const other = '.haive-data/knowledge_base/other.md';
+    await writeFile(join(root, other), '# Other\n\nA second document about queues.\n');
+    await populate(
+      detected({
+        ollamaReachable: true,
+        kbFiles: [
+          { relPath: KB, sizeBytes: 60 },
+          { relPath: other, sizeBytes: 40 },
+        ],
+      }),
+    );
+    expect(fakeLock.state.handles[0]!.lost).toBe(false);
+    expect(order.filter((event) => event === 'insert')).toHaveLength(2);
   });
 
   it('clears the flag when the store holds no NULL-hash row', async () => {

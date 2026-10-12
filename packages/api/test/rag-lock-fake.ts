@@ -3,6 +3,7 @@ import type * as RagModule from '@haive/shared/rag';
 export interface FakeLockHandle {
   lost: boolean;
   released: number;
+  assertHeld(): void;
   release(): Promise<void>;
 }
 
@@ -27,6 +28,9 @@ export function createFakeRagLock(actual: typeof RagModule) {
     const handle: FakeLockHandle = {
       lost: false,
       released: 0,
+      assertHeld: () => {
+        if (handle.lost) throw new actual.RagSyncLockLostError();
+      },
       release: async () => {
         handle.released += 1;
         if (handle.released === 1) state.held.delete(repositoryId);

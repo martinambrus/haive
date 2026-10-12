@@ -47,9 +47,20 @@ export class RagSyncLockCommandTimeoutError extends Error {
   }
 }
 
+export class RagSyncLockLostError extends Error {
+  constructor() {
+    super(
+      'the RAG sync lock of this repository was lost (it expired or another sync took it), so this sync stopped writing. Retry this step once the other sync has finished.',
+    );
+    this.name = 'RagSyncLockLostError';
+  }
+}
+
 export interface RagSyncLock {
   /** True once a heartbeat found the key gone or owned by another holder. */
   readonly lost: boolean;
+  /** Throws RagSyncLockLostError once `lost`; a holder calls it before it writes. */
+  assertHeld(): void;
   /** Idempotent; stops the heartbeat and deletes the key only while this holder still owns it. */
   release(): Promise<void>;
 }
@@ -131,6 +142,9 @@ async function attempt(
   return {
     get lost() {
       return lost;
+    },
+    assertHeld: () => {
+      if (lost) throw new RagSyncLockLostError();
     },
     release: async () => {
       if (released) return;

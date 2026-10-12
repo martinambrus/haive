@@ -524,6 +524,7 @@ async function syncRepositoryIndex(
     // survive embedding outages and the worktree's untracked-file protections,
     // even when the source file has disappeared since an earlier sync.
     let deleted = 0;
+    lock?.assertHeld();
     const indexedPaths = (await conn.pg.unsafe(
       `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
       [repositoryId, TASK_EMBED_SOURCE_TYPE],
@@ -546,6 +547,7 @@ async function syncRepositoryIndex(
     // hash rows (which ranks worse than not using the dense half at all). The existing
     // `useOllama && health.degradedAt` clear below lifts it when this run finishes.
     if (useOllama && opts.ollamaUrlDerived && !health.degradedAt && !health.lexicalOnly) {
+      lock?.assertHeld();
       // Stored before the reset, so a run that dies after it leaves no NULL hash over a hash vector
       // unflagged; a reset that finds nothing leaves the flag for this run's own clear.
       await requireRagEmbedDegraded(
@@ -625,6 +627,7 @@ async function syncRepositoryIndex(
       // embed loop runs to completion and the finished 'done' clobbers the stopped
       // state, resuming the task. Mirrors 10-rag-populate.
       ctx.throwIfCancelled();
+      lock?.assertHeld();
       const { relPath, sourceType } = allFiles[fi]!;
       processedPaths.add(relPath);
       // "Scanning", not "Syncing": this fires before the hash comparison, so on a
@@ -747,6 +750,7 @@ async function syncRepositoryIndex(
       let fileEmbedFailed = false;
       for (let batchStart = 0; batchStart < toEmbed.length; batchStart += embedBatchSize) {
         ctx.throwIfCancelled();
+        lock?.assertHeld();
         const batch = toEmbed.slice(batchStart, batchStart + embedBatchSize);
         const texts = batch.map((e) => e.chunk.content);
 
@@ -757,6 +761,7 @@ async function syncRepositoryIndex(
           useOllama,
           texts,
         });
+        lock?.assertHeld();
         if (outcome.kind === 'failed') {
           fileEmbedFailed = true;
           // Leave these chunks UNINDEXED. An insert simply does not happen; an
@@ -856,6 +861,7 @@ async function syncRepositoryIndex(
     // (source_path = a task id, not a repo file), so they are never "orphaned files" and
     // must not be swept here (task-time estimation v2.2). Also EXCLUDE the paths this scan
     // root cannot see (`resolveSweepProtectedPaths`) — absence there is not a deletion.
+    lock?.assertHeld();
     const orphanRows = (await conn.pg.unsafe(
       `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
       [repositoryId, TASK_EMBED_SOURCE_TYPE],
@@ -891,6 +897,7 @@ async function syncRepositoryIndex(
     // estimates can semantically retrieve it as a prior-effort anchor (task-time estimation
     // v2.2). pgvector stores only (retrieval is vector-based); best-effort — a failure must
     // not fail the file sync that already succeeded.
+    lock?.assertHeld();
     if (usedPgvector && useOllama && taskRow) {
       try {
         await indexTaskEmbedding(
@@ -927,6 +934,7 @@ async function syncRepositoryIndex(
       else if (outcome.kind === 'failed') embedFailureReason = outcome.reason;
     }
 
+    lock?.assertHeld();
     if (lock?.lost) {
       ctx.logger.warn(
         { repositoryId },

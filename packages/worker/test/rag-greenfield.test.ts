@@ -11,6 +11,7 @@ import {
   resolveTaskStackContext,
   stackProjectName,
 } from '@haive/shared/global-kb';
+import { RagSyncLockLostError } from '@haive/shared/rag';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
 import type { createFakeRagLock } from './rag-lock-fake.js';
@@ -1664,16 +1665,54 @@ describe('one RAG sync per repository at a time', () => {
     expect(fakeLock.state.handles.map((h) => h.released)).toEqual([1]);
   });
 
-  it('skips the degraded-flag clear when the lock was lost during the run', async () => {
+  const syncWorktree = async () => {
+    const detected = await ragReindexStep.detect!(ctx);
+    return runRagIndexSync(ctx, {
+      repoPath: worktree,
+      prefs: detected.ragToolingPrefs!,
+      projectName: detected.projectName,
+      ollamaReachable: false,
+      codeCollect: detected.codeCollect,
+    });
+  };
+
+  it('fails the step and keeps the degraded flag when the lock was lost during the run', async () => {
     repo.ragEmbedDegradedAt = new Date(0);
     repo.ragEmbedDegradedReason = 'earlier outage';
     mocks.embed.mockImplementation(async ({ texts }) => {
       fakeLock.state.handles[0]!.lost = true;
       return { kind: 'embedded', embeddings: texts.map(() => [0.1, 0.2]) };
     });
-    await syncOf();
+    await expect(syncOf()).rejects.toBeInstanceOf(RagSyncLockLostError);
     expect(repo.ragEmbedDegradedAt).toBeInstanceOf(Date);
     expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('stops inserting and sweeping once the lock is lost between two files', async () => {
+    stalePaths = ['gone.ts'];
+    let embedCalls = 0;
+    let insertedAtLoss = -1;
+    mocks.embed.mockImplementation(async ({ texts }) => {
+      embedCalls += 1;
+      if (embedCalls === 2) {
+        insertedAtLoss = inserts.length;
+        fakeLock.state.handles[0]!.lost = true;
+      }
+      return { kind: 'embedded', embeddings: texts.map(() => [0.1, 0.2]) };
+    });
+    await expect(syncWorktree()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(insertedAtLoss).toBeGreaterThan(0);
+    expect(inserts).toHaveLength(insertedAtLoss);
+    expect(deletedPaths).not.toContain('gone.ts');
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('never stops a sync whose lock is still held', async () => {
+    stalePaths = ['gone.ts'];
+    await syncWorktree();
+    expect(fakeLock.state.handles[0]!.lost).toBe(false);
+    expect(inserts.length).toBeGreaterThan(1);
+    expect(deletedPaths).toContain('gone.ts');
   });
 
   it('clears the degraded flag as before when the lock is still held at the end', async () => {
