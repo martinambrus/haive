@@ -16,6 +16,7 @@ import { bundleRoutes } from './routes/bundles.js';
 import { cliProviderRoutes } from './routes/cli-providers.js';
 import { envDepPresetRoutes } from './routes/env-dep-presets.js';
 import { repoRoutes } from './routes/repos.js';
+import { projectStateConflictRoutes } from './routes/project-state-conflicts.js';
 import { dbDumpRoutes } from './routes/db-dumps.js';
 import { repoCredentialsRoutes } from './routes/repo-credentials.js';
 import { githubOauthRoutes } from './routes/github-oauth.js';
@@ -91,6 +92,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/cli-pricing', cliPricingRoutes);
   app.route('/env-dep-presets', envDepPresetRoutes);
   app.route('/repos', repoIdeAccessRoutes);
+  app.route('/repos', projectStateConflictRoutes);
   app.route('/repos', repoRoutes);
   app.route('/db-dumps', dbDumpRoutes);
   app.route('/repo-credentials', repoCredentialsRoutes);

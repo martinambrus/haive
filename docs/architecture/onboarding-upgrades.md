@@ -419,8 +419,35 @@ became the local value, so the next sync saw no difference and a teammate's valu
 `upgradeAdmission` refuses (`contested`, with the units) while any row is pending, so POST /tasks,
 the rollback, the banner, and every revival in the api and the worker hold, and upgrade-status
 returns `contestedUnits` and offers nothing. Workflow tasks keep running on the local value. The
-reset deletes the repository's rows with its sync row. Answering a row (the API, the apply, the
-file rewrite) and the UI arrive in the PRs after the hold.
+reset deletes the repository's rows with its sync row.
+
+**A conflict is answered by the worker, one key at a time.** `GET /repos/:id/project-state/conflicts`
+lists the pending rows (a side is `{present: true, value}` or `{present: false}`, so a JSON null is a
+value and an absent side is marked; `key` is the render key, null for the whole file) and
+`POST .../conflicts/:conflictId` takes `{answer: 'keep_mine' | 'take_theirs'}`. The api never touches
+the checkout: it enqueues `RESOLVE_PROJECT_STATE` on the plan-mirror queue and waits for the result
+(`resolveProjectStateConflict`, `project-state/resolve.ts`), because the worker owns every write to
+the record files. One transaction takes `lockProjectState`, the repository row and the conflict row
+`FOR UPDATE`, then: a closed row answered the same way returns itself (200), answered otherwise is
+`settled` (409); a live onboarding or upgrade (the sync's own `CHECKOUT_HOLDING_TASK_STATUSES` query)
+is `busy`; the key is read from `project/render.json` with strict fs-safe reads, and a file that no
+longer holds the row's `incoming` is `moved`, which re-syncs the checkout (the row then carries the
+new value) and refuses the answer. Keep mine leaves the column, writes this install's value into the
+file and into the base for that key; take theirs sets that key in the column (validated by
+`renderContextColumnSchema`), recomputes the applicable template ids (`writeApplicableTemplateIds`)
+and sets the base for the key to the incoming value, leaving the file as it is. Only the answered key
+moves in the file and the base, so every other pending key stays at the teammate's value and at its
+old base, and still holds the upgrade. The row is stamped `resolution`, `resolved_at`,
+`resolved_by`, and `last_error` is recomputed from what is still pending (a refusal reason there is
+left alone). A cleared column with a per-key row is rebuilt as the sync rebuilds it
+(`rebuildLocalRender`); a whole-file row has no local value, so only take theirs applies and keep
+mine is refused (`no_local`). Keeping mine rewrites a tracked file: it stays uncommitted until the
+person commits and pushes it, as with any record change. The file is rewritten after every database
+write, so only the commit follows it; the bytes read for the `moved` check are put back
+(`writeFileNoFollow`) if the transaction then fails, and the row stays pending. A render file
+the checkout deleted never makes a conflict: the sync returns `absent` before its transaction when
+`project/render.json` or the state directory is gone (`readCheckout`), so no row has an absent
+`incoming`, and the one a deleted file leaves pending stays `moved` until the file is back.
 
 **An upgrade offers the RTK block back, unticked.** 07 is the only writer of the block, so once an
 upgrade took it out, only a re-onboarding used to restore it. 01 now lists `AGENTS.md` in
