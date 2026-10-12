@@ -157,11 +157,11 @@ export async function writeProjectStateRecord(
         render: overlayRender(portable, pending, 'base'),
       }),
     });
-    // A first look only: the locked read below is the one that counts, so its failure must not clear the column.
-    let seen = expectedColumns
+    // A first look only, so its failure must not clear the column: the files then wait for the locked read.
+    let seen: PendingRenderConflict[] | null = expectedColumns
       ? []
-      : await loadPendingRenderConflicts(db, repositoryId).catch((): PendingRenderConflict[] => []);
-    let plan = planFor(seen);
+      : await loadPendingRenderConflicts(db, repositoryId).catch(() => null);
+    let plan = planFor(seen ?? []);
     const writeFiles = async (): Promise<void> => {
       for (const [rel, text] of renderProjectState(plan.record)) {
         const path = `${PROJECT_STATE_DIR}/${rel}`;
@@ -171,7 +171,7 @@ export async function writeProjectStateRecord(
     };
     // A fenced write keeps the lock from its check to its last write, files included, so no sync
     // lands between them; an unfenced one writes its files first, before any database write.
-    if (!expectedColumns) await writeFiles();
+    if (!expectedColumns && seen !== null) await writeFiles();
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
       if (expectedColumns) {
@@ -179,7 +179,7 @@ export async function writeProjectStateRecord(
         if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId);
       }
       const pending = await loadPendingRenderConflicts(tx, repositoryId);
-      if (expectedColumns || !sameValue(pending, seen)) {
+      if (expectedColumns || seen === null || !sameValue(pending, seen)) {
         seen = pending;
         plan = planFor(pending);
         await writeFiles();
