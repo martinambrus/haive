@@ -5,6 +5,7 @@ import { logger } from '@haive/shared';
 const lock = vi.hoisted(() => ({ txResults: [[]] as unknown[][], inserted: [] as unknown[] }));
 const git = vi.hoisted(() => ({
   abortMerge: vi.fn(),
+  mergeOpenFor: vi.fn(async (..._args: unknown[]) => true),
   recordFixerLeftovers: vi.fn(),
   relocateFixerChanges: vi.fn(),
   revParse: vi.fn(),
@@ -14,7 +15,7 @@ vi.mock('./git-merge.js', () => ({
   abortFailureNote: () => 'abort failed',
   abortMerge: git.abortMerge,
   isHostCheckout: () => false,
-  mergeOpenFor: async () => true,
+  mergeOpenFor: (...args: unknown[]) => git.mergeOpenFor(...args),
   recordFixerLeftovers: git.recordFixerLeftovers,
   relocateFixerChanges: git.relocateFixerChanges,
   revParse: git.revParse,
@@ -90,6 +91,7 @@ describe('recordLeftOpenMerges on a re-driven cancel', () => {
 
   beforeEach(() => {
     lock.inserted = [];
+    git.mergeOpenFor.mockReset().mockResolvedValue(true);
     git.revParse.mockImplementation(async (_dir: string, ref: string) =>
       ref === 'MERGE_HEAD' ? 'm1' : 'h1',
     );
@@ -100,6 +102,35 @@ describe('recordLeftOpenMerges on a re-driven cancel', () => {
     const { db } = chainDb([[], steps, [{ worktreePath: null }]]);
     await recordLeftOpenMerges(db, 'task-1');
     expect(lock.inserted).toEqual([]);
+  });
+
+  it('reports a merge whose ref moved since, when the fixer baseline names its commits', async () => {
+    lock.txResults = [[{ taskId: 'task-1' }]];
+    git.mergeOpenFor.mockResolvedValue(false);
+    const moved = [
+      {
+        id: 'step-1',
+        state: {
+          ...steps[0]!.state,
+          fixBaseline: {
+            head: 'h1',
+            mergeHead: 'm1',
+            tree: 't',
+            index: 'i',
+            ignored: '',
+            resolving: [],
+          },
+        },
+      },
+    ];
+    const { db } = chainDb([[], moved, [{ worktreePath: null }]]);
+    await recordLeftOpenMerges(db, 'task-1');
+    expect(lock.inserted).toEqual([
+      expect.objectContaining({
+        eventType: 'merge.left_open',
+        payload: expect.objectContaining({ mergeHead: 'm1' }),
+      }),
+    ]);
   });
 
   it('reports the open merge while the claim is still this task’s', async () => {

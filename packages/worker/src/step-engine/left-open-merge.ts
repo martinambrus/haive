@@ -192,9 +192,16 @@ export async function recordLeftOpenMerges(db: Database, taskId: string): Promis
         .where(eq(schema.mergeDirClaims.mergeDir, recorded.dir));
       if (claim && claim.taskId !== taskId) return null;
       if (await worktreeSharer(db, recorded.dir, taskId)) return null;
-      if (!(await mergeOpenFor(recorded.dir, recorded.ref))) return null;
       const open = await peekOpenMerge(recorded.dir);
       if (!open) return null;
+      // A fetch may have moved a mutable ref (origin/<base>) since: the baseline names the commit.
+      const baseline = recorded.fixBaseline;
+      const fromBaseline =
+        baseline !== null &&
+        'mergeHead' in baseline &&
+        baseline.mergeHead === open.mergeHead &&
+        baseline.head === open.head;
+      if (!fromBaseline && !(await mergeOpenFor(recorded.dir, recorded.ref))) return null;
       if (known.some((k) => k.dir === recorded.dir && k.mergeHead === open.mergeHead)) return null;
       const reported = { dir: recorded.dir, ref: recorded.ref, ...open };
       await tx.insert(schema.taskEvents).values({
