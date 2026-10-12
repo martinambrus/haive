@@ -11,9 +11,7 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import {
-  FOREIGN_TEMPLATE,
   PROJECT_STATE_DIR,
-  PROJECT_STATE_IMPORT_STEP_ID,
   ProjectStateError,
   RENDER_UNIT,
   RTK_ENABLED_UNIT,
@@ -24,9 +22,7 @@ import {
   emptyProjectState,
   isClaimUnit,
   isConflictUnit,
-  localTemplateId,
   normalizeProjectState,
-  readRenderContextColumn,
   renderContextColumnSchema,
   renderProjectState,
   renderSchema,
@@ -46,16 +42,8 @@ import {
   writeApplicableTemplateIds,
 } from './sync.js';
 import { lockPlanMerge } from '@haive/shared/plan';
-import { extractBundleItemId } from '../step-engine/_custom-bundle-loader.js';
-import { renderContextFromColumn } from '../step-engine/_render-targets.js';
-import { recordableContext } from '../step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
-import { readClaimedBytes } from './claim-disk.js';
-import {
-  loadLocalBundles,
-  loadPendingRenderConflicts,
-  loadRecordClaims,
-  lockProjectState,
-} from './write.js';
+import { insertImportMarker, loadMarkerContext } from './import-marker.js';
+import { loadPendingRenderConflicts, loadRecordClaims, lockProjectState } from './write.js';
 
 const RENDER_FILE = `${PROJECT_STATE_DIR}/project/render.json`;
 const MAX_RENDER_BYTES = 1024 * 1024;
@@ -332,7 +320,13 @@ async function answerClaimQuestion(
         .where(eq(schema.onboardingArtifacts.id, live.id));
     }
     if (incoming !== undefined) {
-      await insertImportMarker(tx, { repositoryId, repo, repoPath, claim: incoming, now });
+      await insertImportMarker(tx, {
+        repositoryId,
+        repoPath,
+        claim: incoming,
+        now,
+        context: await loadMarkerContext(tx, repositoryId, repo),
+      });
     }
     await writeApplicableTemplateIds(tx, {
       repositoryId,
@@ -404,65 +398,6 @@ async function answerClaimQuestion(
     conflict: conflictBody(closed ?? { ...row, resolution: answer, resolvedAt: now }),
     written,
   };
-}
-
-/** The ledger row an import leaves for a claim it adopted: a `backfill` row of no task, dated by
- *  the import. The bytes are kept only when they are the claim's own. */
-async function insertImportMarker(
-  tx: Tx,
-  {
-    repositoryId,
-    repo,
-    repoPath,
-    claim,
-    now,
-  }: {
-    repositoryId: string;
-    repo: { userId: string; renderContext: unknown };
-    repoPath: string;
-    claim: ProjectStateClaim;
-    now: Date;
-  },
-): Promise<void> {
-  const mapped = localTemplateId(claim.templateId, await loadLocalBundles(tx, repositoryId));
-  const foreign = mapped === FOREIGN_TEMPLATE;
-  const disk = await readClaimedBytes(repoPath, claim);
-  const read = disk === 'unread' ? null : disk;
-  const column = readRenderContextColumn(repo.renderContext);
-  const providers =
-    column.kind === 'column'
-      ? await tx
-          .select({ name: schema.cliProviders.name, enabled: schema.cliProviders.enabled })
-          .from(schema.cliProviders)
-          .where(eq(schema.cliProviders.userId, repo.userId))
-      : [];
-  await tx.insert(schema.onboardingArtifacts).values({
-    userId: repo.userId,
-    repositoryId,
-    taskId: null,
-    diskPath: claim.path,
-    templateId: foreign ? claim.templateId : mapped,
-    templateKind: claim.kind,
-    templateSchemaVersion: claim.schemaVersion,
-    templateContentHash: claim.templateHash,
-    writtenHash: claim.writtenHash,
-    writtenContent: read !== null && read.hash === claim.writtenHash ? read.content : null,
-    lastObservedDiskHash: read?.hash ?? null,
-    userModified: false,
-    formValuesSnapshot:
-      column.kind === 'column'
-        ? (recordableContext(
-            renderContextFromColumn(column.column, providers),
-            column.column.rtkChoiceRecorded,
-          ) as unknown as Record<string, unknown>)
-        : null,
-    sourceStepId: PROJECT_STATE_IMPORT_STEP_ID,
-    source: 'backfill',
-    haiveVersion: claim.haiveVersion === '' ? null : claim.haiveVersion,
-    generatedAt: now,
-    importedAt: now,
-    bundleItemId: foreign ? null : extractBundleItemId(mapped),
-  });
 }
 
 async function answerInTransaction(

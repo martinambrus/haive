@@ -34,7 +34,8 @@ export interface ProjectStateMergeInput {
   local: ProjectStateRecord;
   incoming: ProjectStateRecord;
   /** The normalised hash of the bytes at a claimed path, null when nothing is there. A claim both
-   *  sides changed is settled by the bytes: the side whose `writtenHash` they hold wins. */
+   *  sides changed is settled by the bytes: the side whose `writtenHash` they hold wins, incoming when
+   *  they hold both. */
   diskHash?: (path: string) => string | null;
 }
 
@@ -224,8 +225,8 @@ export function mergeProjectState(input: ProjectStateMergeInput): ProjectStateMe
     diskHash
       ? (path, l, i) => {
           const bytes = diskHash(path);
-          if (holds(l, bytes) && !holds(i, bytes)) return l;
-          if (holds(i, bytes) && !holds(l, bytes)) return i;
+          if (holds(i, bytes)) return i;
+          if (holds(l, bytes)) return l;
           return null;
         }
       : undefined,

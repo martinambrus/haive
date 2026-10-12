@@ -8,7 +8,12 @@ for every other CLI and the next run wrote on top of them. It takes back the pro
 12 writes too: its files under `.haive-data/state/` go by name like `.haive/install.json`, their
 directories only once empty, and the same transaction that clears `onboarded_at` nulls
 `repositories.render_context` and deletes the `project_state_sync` row, so no later sync can
-import the context onboarding was reset from.
+import the context onboarding was reset from. The ledger goes the same way: the reset supersedes
+every live row of the repository, import markers included (they carry no task, and the supersede
+filters on none), and removes `artifacts/<claimFileName(path)>` for each, with `artifacts/` before
+`state/` in the empty-directory sweep. A sync that read the checkout before the reset stands down
+(`superseded`, by `onboarding_reset_at`) and one that meets a reset holding the root claim defers,
+so neither writes the column, the ledger or a base back.
 
 **The catalog is the CANDIDATE set, never the removal set.** 07 writes agents to the ENABLED
 providers' dirs alone (`agentTargetsByDir`, from `providerRows.filter(p => p.enabled)`) and
