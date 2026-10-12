@@ -103,6 +103,14 @@ describe('the previous answer, read from the commit', () => {
     expect(found!.more).toBeGreaterThan(0);
   });
 
+  it('counts a conflicted name no prompt line can hold among the files not shown', async () => {
+    const { dir, ref } = await standingOnFirst(async () => {});
+    const found = await readPriorResolution(dir, ref, ['two\nlines.txt', 'a\u0007b.txt']);
+    expect(found!.entries).toHaveLength(0);
+    expect(found!.more).toBe(2);
+    expect(priorResolutionLines([], found!).join('\n')).toContain('and 2 more files');
+  });
+
   it('reads no more paths than the path cap', async () => {
     const { dir, ref } = await standingOnFirst(async () => {});
     const names = Array.from({ length: PRIOR_MAX_PATHS + 5 }, (_, i) => `missing${i}.txt`);

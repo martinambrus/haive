@@ -138,7 +138,7 @@ export async function readPriorResolution(
     if (budget.left <= 0) break;
     entries.push(await describePath(worktreePath, ref.sha, path, budget));
   }
-  return { sha: ref.sha, entries, more: named.length - entries.length };
+  return { sha: ref.sha, entries, more: conflicts.length - entries.length };
 }
 
 const SHAPE_NAME: Record<Shape, string> = {
