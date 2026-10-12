@@ -18,6 +18,7 @@ import {
   portableBundleSource,
   portableRender,
   portableTemplateId,
+  recordReadable,
   renderContextColumnSchema,
   renderProjectState,
   type NamedLocalBundle,
@@ -67,6 +68,14 @@ export class ProjectStateMovedError extends Error {
   constructor() {
     super("The repository's project settings changed while this write was pending");
     this.name = 'ProjectStateMovedError';
+  }
+}
+
+/** The record's files are more than a reader of the directory accepts, so none is written. */
+export class ProjectStateUnreadableError extends Error {
+  constructor(reason: string) {
+    super(`the project state record would not be read back: ${reason}`);
+    this.name = 'ProjectStateUnreadableError';
   }
 }
 
@@ -378,6 +387,8 @@ export async function writeProjectStateRecord(
     );
     const writeFiles = async (baseFiles: readonly string[]): Promise<void> => {
       const files = renderProjectState(plan.record);
+      const readable = recordReadable(files);
+      if (!readable.readable) throw new ProjectStateUnreadableError(readable.reason);
       const produced = new Set<string>();
       for (const [rel, text] of files) {
         const path = `${PROJECT_STATE_DIR}/${rel}`;

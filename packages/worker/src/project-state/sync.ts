@@ -5,6 +5,7 @@ import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
+  PROJECT_STATE_LIMITS,
   ProjectStateError,
   claimFileName,
   conflictSide,
@@ -51,9 +52,11 @@ export interface ProjectStateSyncResult {
 }
 
 const MIB = 1024 * 1024;
-const MAX_ENTRIES = 4096;
-const MAX_FILE_BYTES = MIB;
-const MAX_TOTAL_BYTES = 16 * MIB;
+const {
+  maxEntries: MAX_ENTRIES,
+  maxFileBytes: MAX_FILE_BYTES,
+  maxTotalBytes: MAX_TOTAL_BYTES,
+} = PROJECT_STATE_LIMITS;
 
 class Refusal extends Error {}
 
