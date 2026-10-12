@@ -553,6 +553,19 @@ describe('a render file that changed under the answer', () => {
     expect(s.rowOf(s.ids[KEY]!).resolvedAt).toBeNull();
   });
 
+  it('answers moved when take theirs finds the file changed before it commits', async () => {
+    const s = await setup();
+    const newer = JSON.stringify({ ...THEIRS, framework: 'laravel' }, null, 2);
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.projectStateSync) await writeFile(join(s.root, RENDER_REL), newer);
+    };
+
+    const result = await s.answer('take_theirs');
+
+    expect(result.kind).toBe('moved');
+    expect(s.rowOf(s.ids[KEY]!).resolvedAt).toBeNull();
+  });
+
   it('answers moved for a render file that is not valid UTF-8', async () => {
     const s = await setup();
     const bytes = Buffer.from(JSON.stringify(THEIRS, null, 2), 'utf8');

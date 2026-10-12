@@ -307,6 +307,9 @@ async function answerInTransaction(
       if (outcome !== 'rewritten') throw new RenderFileMovedError(repoPath);
       after.putBack = { repoPath, raw: read.raw, wrote: Buffer.from(fileText, 'utf8') };
       written.push(RENDER_FILE);
+    } else {
+      const now = await readRenderFile(repoPath);
+      if (now === null || !now.raw.equals(read.raw)) throw new RenderFileMovedError(repoPath);
     }
 
     return {
