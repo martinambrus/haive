@@ -113,6 +113,7 @@ async function attempt(
   const token = randomUUID();
   const ttlMs = tuning.ttlMs ?? LOCK_TTL_MS;
   const commandTimeoutMs = tuning.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
+  const startedAt = Date.now();
   const taking = redis.set(key, token, 'PX', ttlMs, 'NX');
   let taken: string | null;
   try {
@@ -126,9 +127,13 @@ async function attempt(
   if (taken !== 'OK') return null;
   let lost = false;
   let released = false;
+  // Measured from when each command was SENT, so it never outlasts the key's real expiry.
+  let heldUntil = startedAt + ttlMs;
   const beat = setInterval(() => {
+    const sentAt = Date.now();
     bounded(redis.eval(REFRESH_SCRIPT, 1, key, token, ttlMs), commandTimeoutMs)
       .then((kept) => {
+        if (kept === 1) heldUntil = sentAt + ttlMs;
         if (kept === 1 || lost) return;
         lost = true;
         clearInterval(beat);
@@ -140,11 +145,12 @@ async function attempt(
   }, tuning.heartbeatMs ?? HEARTBEAT_MS);
   beat.unref();
   return {
+    // Unconfirmed past the TTL (refreshes timing out) counts as lost: the key may have expired.
     get lost() {
-      return lost;
+      return lost || Date.now() >= heldUntil;
     },
     assertHeld: () => {
-      if (lost) throw new RagSyncLockLostError();
+      if (lost || Date.now() >= heldUntil) throw new RagSyncLockLostError();
     },
     release: async () => {
       if (released) return;

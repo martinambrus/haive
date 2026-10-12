@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   RagSyncLockAbortedError,
   RagSyncLockCommandTimeoutError,
+  RagSyncLockLostError,
   RagSyncLockTimeoutError,
   acquireRagSyncLock,
   tryAcquireRagSyncLock,
@@ -91,6 +92,28 @@ describe('RAG sync lock against a Redis that does not answer', () => {
     const startedAt = Date.now();
     await held!.release();
     expect(Date.now() - startedAt).toBeLessThan(1_000);
+  }, 3_000);
+
+  it('counts a holder lost once no refresh has been confirmed for a whole TTL', async () => {
+    const redis = asRedis({ set: () => Promise.resolve('OK'), eval: never });
+    const held = await tryAcquireRagSyncLock(redis, 'repo', {
+      ttlMs: 100,
+      heartbeatMs: 20,
+      commandTimeoutMs: 30,
+    });
+    expect(held!.lost).toBe(false);
+    await sleep(200);
+    expect(held!.lost).toBe(true);
+    expect(() => held!.assertHeld()).toThrow(RagSyncLockLostError);
+    await held!.release();
+  }, 3_000);
+
+  it('keeps a holder whose refreshes are confirmed past its first TTL', async () => {
+    const redis = asRedis({ set: () => Promise.resolve('OK'), eval: () => Promise.resolve(1) });
+    const held = await tryAcquireRagSyncLock(redis, 'repo', { ttlMs: 100, heartbeatMs: 20 });
+    await sleep(300);
+    expect(held!.lost).toBe(false);
+    await held!.release();
   }, 3_000);
 
   it('marks a holder lost when a refresh answers that the key is not its own', async () => {
