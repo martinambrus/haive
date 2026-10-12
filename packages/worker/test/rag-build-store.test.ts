@@ -9,6 +9,7 @@ import {
   StoreRefusedError,
   storeDatabaseName,
   validateEmbeddings,
+  readBuildMeta,
   stringArrayEnv,
 } from '../scripts/rag-build-store.js';
 
@@ -145,5 +146,20 @@ describe('stringArrayEnv', () => {
     expect(stringArrayEnv('RAG_T_ARR')).toEqual(['.inc', '.php']);
     delete process.env.RAG_T_ARR;
     expect(stringArrayEnv('RAG_T_ARR')).toBeUndefined();
+  });
+});
+
+describe('readBuildMeta', () => {
+  const pgWith = (rel: string | null, rows: unknown[]) => ({
+    unsafe: async (q: string) => (q.includes('to_regclass') ? [{ rel }] : rows),
+  });
+
+  it('is null when the store has no meta table', async () => {
+    expect(await readBuildMeta(pgWith(null, []) as never)).toBeNull();
+  });
+
+  it('reads the recorded model and width', async () => {
+    const pg = pgWith('rag_build_store_meta', [{ model: 'm', dims: '2560' }]);
+    expect(await readBuildMeta(pg as never)).toEqual({ model: 'm', dims: 2560 });
   });
 });

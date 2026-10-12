@@ -118,6 +118,17 @@ export interface BuildMeta {
   dims: number;
 }
 
+export async function readBuildMeta(pg: RagConnection['pg']): Promise<BuildMeta | null> {
+  const present = (await pg.unsafe(`SELECT to_regclass($1) AS rel`, [
+    META_TABLE,
+  ])) as unknown as Array<{ rel: string | null }>;
+  if (!present[0]?.rel) return null;
+  const meta = (await pg.unsafe(
+    `SELECT model, dims FROM ${META_TABLE} LIMIT 1`,
+  )) as unknown as Array<BuildMeta>;
+  return meta[0] ? { model: meta[0].model, dims: Number(meta[0].dims) } : null;
+}
+
 export type BuildMetaDecision =
   { action: 'record' | 'resume' } | { action: 'refuse'; reason: string };
 
@@ -438,15 +449,7 @@ async function preflightStore(
       )) as unknown as Array<{ n: number }>;
       storeHasRows = total[0]!.n > 0;
     }
-    const metaPresent = (await existing.pg.unsafe(`SELECT to_regclass($1) AS rel`, [
-      META_TABLE,
-    ])) as unknown as Array<{ rel: string | null }>;
-    if (metaPresent[0]?.rel) {
-      const meta = (await existing.pg.unsafe(
-        `SELECT model, dims FROM ${META_TABLE} LIMIT 1`,
-      )) as unknown as Array<BuildMeta>;
-      recorded = meta[0] ? { model: meta[0].model, dims: Number(meta[0].dims) } : null;
-    }
+    recorded = await readBuildMeta(existing.pg);
   } finally {
     await existing.close();
   }

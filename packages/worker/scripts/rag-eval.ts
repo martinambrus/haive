@@ -54,6 +54,7 @@ import {
   type RagToolingPrefs,
   vectorLiteral,
 } from '@haive/shared/rag';
+import { decideBuildMeta, readBuildMeta } from './rag-build-store.js';
 import { checkDensePool, type DensePoolCheck } from './rag-eval-dense.js';
 import {
   chunkBody,
@@ -213,6 +214,17 @@ async function main(): Promise<void> {
       )
     ).length > 0;
   const runLexicalOnly = forceLexicalOnly || !storeHasVector;
+  const recorded = forceLexicalOnly ? null : await readBuildMeta(openConn.pg);
+  if (recorded) {
+    const decision = decideBuildMeta(recorded, true, {
+      model: prefs.embeddingModel ?? '',
+      dims: prefs.embeddingDimensions,
+    });
+    if (decision.action === 'refuse') {
+      console.error(`refused: ${decision.reason}`);
+      process.exit(1);
+    }
+  }
 
   async function embed(text: string): Promise<number[] | null> {
     if (forceLexicalOnly) return null;
