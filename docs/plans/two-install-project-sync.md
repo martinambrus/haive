@@ -413,10 +413,11 @@ Phase 1 (the record):
   removals and upgrade-status agree. `smoke:mirror-import`, `smoke:mcp-import-consent` and
   `smoke:repo-refresh` stay green unchanged.
 - **B1.5 feat: pending conflicts, asked, never chosen for the person** [B1.4]. **As built, B1.5a:**
-  the table (migration 0188), the sync's rows, the writer overlay and the `contested` hold; the
-  answering API, the RTK detector and the banner follow as B1.5b-d.
-  `project_state_conflicts`, the hold rules, `GET/POST /repos/:id/project-state/conflicts`, and
-  the panel/banner resolution UI (browser check at 375/768/1280). Control (smoke): two installs
+  the table (migration 0188), the sync's rows, the writer overlay and the `contested` hold.
+  **B1.5b:** `GET/POST /repos/:id/project-state/conflicts` and the `RESOLVE_PROJECT_STATE` worker
+  job (see onboarding-upgrades.md); the RTK detector and the banner follow as B1.5c-d.
+  `project_state_conflicts`, the hold rules, and the panel/banner resolution UI (browser check at
+  375/768/1280). Control (smoke): two installs
   change one setting differently → a pending conflict, the local value still in effect and that
   setting's file left as incoming (today the second import silently keeps one side); a contested
   render-context key refuses an upgrade; answering applies, rewrites the file and clears the row.

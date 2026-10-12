@@ -74,7 +74,7 @@ vector with no semantic content, so once an index holds real vectors a hash row 
 in the dense half of the RRF fusion — it can outrank a genuine lexical hit, and nothing
 downstream can tell the two apart. Every ingest loop used to `catch` any embed error and
 substitute one, logging a `warn`. MEASURED on an 8-core CPU-only host with
-`qwen3-embedding:4b`: a batch of 8 real code chunks takes 50-69s (10.5s on GPU) against
+`qwen3-embedding:4b`: a batch of 8 real code chunks takes 50-69s (2.6s on an RTX 3050) against
 the old hard 60s budget, so on a CPU host that substitution was the DEFAULT outcome, not
 an edge case — and the index it produced looked healthy.
 

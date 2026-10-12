@@ -11,6 +11,11 @@ import {
   type PlanMirrorJobResult,
 } from '@haive/shared';
 import { lockPlanMerge } from '@haive/shared/plan';
+import type {
+  ProjectStateResolvePayload,
+  ProjectStateResolveResult,
+} from '@haive/shared/project-state';
+import { resolveProjectStateConflict } from '../project-state/resolve.js';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
@@ -430,20 +435,27 @@ export async function schedulePlanMirrorSweep(): Promise<void> {
 }
 
 export function startPlanMirrorWorker(): Worker<
-  PlanMirrorJobPayload,
-  PlanMirrorJobResult | number
+  PlanMirrorJobPayload | ProjectStateResolvePayload,
+  PlanMirrorJobResult | ProjectStateResolveResult | number
 > {
-  const worker = new Worker<PlanMirrorJobPayload, PlanMirrorJobResult | number>(
+  const worker = new Worker<
+    PlanMirrorJobPayload | ProjectStateResolvePayload,
+    PlanMirrorJobResult | ProjectStateResolveResult | number
+  >(
     QUEUE_NAMES.PLAN_MIRROR,
-    async (job: Job<PlanMirrorJobPayload>) => {
+    async (job: Job<PlanMirrorJobPayload | ProjectStateResolvePayload>) => {
+      if (job.name === PLAN_MIRROR_JOB_NAMES.RESOLVE_PROJECT_STATE) {
+        return resolveProjectStateConflict(getDb(), job.data as ProjectStateResolvePayload);
+      }
+      const data = job.data as PlanMirrorJobPayload;
       switch (job.name) {
         case PLAN_MIRROR_JOB_NAMES.REFRESH:
-          if (!job.data.repositoryId) throw new Error('repositoryId required');
-          return refresh(job.data.repositoryId, job.data.userId);
+          if (!data.repositoryId) throw new Error('repositoryId required');
+          return refresh(data.repositoryId, data.userId);
         case PLAN_MIRROR_JOB_NAMES.SAVE:
-          return save(job.data);
+          return save(data);
         case PLAN_MIRROR_JOB_NAMES.PULL:
-          return pull(job.data);
+          return pull(data);
         case PLAN_MIRROR_JOB_NAMES.SWEEP:
           return sweepDirtyPlanMirrors();
         default:

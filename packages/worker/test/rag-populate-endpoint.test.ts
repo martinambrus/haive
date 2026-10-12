@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { schema } from '@haive/database';
 import { RagSyncLockLostError } from '@haive/shared/rag';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -666,5 +666,71 @@ describe('onboarding populate applies the repository secret-mask policy', () => 
     expect(mocks.connects).toBe(0);
     expect(order).toEqual([]);
     expect(rows.size).toBe(0);
+  });
+});
+
+describe('onboarding populate per-file budgets', () => {
+  const OWN = 'sites/all/modules/activit/';
+  const fns = (count: number, pad = 0) =>
+    Array.from(
+      { length: count },
+      (_, i) => `export function fn${i}() { return '${'p'.repeat(pad)}${i}'; }\n`,
+    ).join('\n');
+  const sections = (count: number) =>
+    Array.from({ length: count }, (_, i) => `# Section ${i}\n\nBody of section ${i}.\n`).join('\n');
+  const put = async (rel: string, body: string) => {
+    await mkdir(join(root, dirname(rel)), { recursive: true });
+    await writeFile(join(root, rel), body);
+  };
+  const rowsOf = (rel: string) => [...rows.values()].filter((r) => r.params[3] === rel).length;
+  const run = (over: { code?: string[]; kb?: string[]; ownPaths?: string[] }) =>
+    populate(
+      detected({
+        kbFiles: (over.kb ?? []).map((relPath) => ({ relPath, sizeBytes: 0 })),
+        codeFiles: (over.code ?? []).map((relPath) => ({ relPath, sizeBytes: 0 })),
+        ownPaths: over.ownPaths ?? [OWN],
+      }),
+    );
+
+  it('indexes every chunk of an own-path code file over the chunk budget', async () => {
+    await put(`${OWN}big.ts`, fns(150));
+    await run({ code: [`${OWN}big.ts`] });
+    expect(rowsOf(`${OWN}big.ts`)).toBe(150);
+  });
+
+  it('indexes an own-path code file of about 600 KB', async () => {
+    await put(`${OWN}wide.ts`, fns(5500, 70));
+    await run({ code: [`${OWN}wide.ts`] });
+    expect(rowsOf(`${OWN}wide.ts`)).toBe(5500);
+  });
+
+  it('keeps the chunk budget for code outside the own paths', async () => {
+    await put('sites/all/modules/views/big.ts', fns(150));
+    await run({ code: ['sites/all/modules/views/big.ts'] });
+    expect(rowsOf('sites/all/modules/views/big.ts')).toBe(80);
+  });
+
+  it('keeps skipping code outside the own paths over 512 KB', async () => {
+    await put('sites/all/modules/views/wide.ts', fns(5500, 70));
+    await run({ code: ['sites/all/modules/views/wide.ts'] });
+    expect(rowsOf('sites/all/modules/views/wide.ts')).toBe(0);
+  });
+
+  it('skips an own-path file over 2 MB and reports that limit', async () => {
+    const warn = vi.fn();
+    ctx.logger.warn = warn;
+    await put(`${OWN}gen.ts`, `// ${'g'.repeat(2_000_100)}\n`);
+    await run({ code: [`${OWN}gen.ts`] });
+    expect(rowsOf(`${OWN}gen.ts`)).toBe(0);
+    expect(
+      warn.mock.calls.some(([bindings]) => (bindings as { max?: number }).max === 2_000_000),
+    ).toBe(true);
+  });
+
+  it('indexes every chunk of a knowledge base file over the chunk budget', async () => {
+    const kb = '.haive-data/knowledge_base/big.md';
+    await put(kb, sections(150));
+    await run({ kb: [kb], ownPaths: [] });
+    expect(rowsOf(kb)).toBe(150);
   });
 });

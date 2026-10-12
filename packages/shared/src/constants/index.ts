@@ -115,6 +115,9 @@ export const PLAN_MIRROR_JOB_NAMES = {
    *  checkout from origin, then reconciles the committed plan mirror onto the
    *  local plan. Everything else here writes DB -> files -> commit -> remote. */
   PULL: 'pull-plan-mirror',
+  /** Answers one project-state conflict. It shares this queue because it writes the checkout's
+   *  record files, like the rest of the jobs here, and the worker owns every write to them. */
+  RESOLVE_PROJECT_STATE: 'resolve-project-state',
 } as const;
 
 export interface PlanMirrorJobPayload {

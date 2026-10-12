@@ -16,6 +16,9 @@ shown separately from the original response.
 
 Migration 0180 adds `rag_query_log.result_hits`, saved after merging and expansion.
 NULL means the response was not captured; `[]` means a captured zero-hit response.
+Each hit carries `ranks` (`dense`, `fts`, `ident`): its rank in each ranker's
+candidate pool, null where that ranker did not place it, so all three are null for
+a knowledge-reserve promotion. `formatRagHits` does not print them.
 Old responses cannot be reconstructed from their counts. The UI states that
 limitation and allows a current rerun. `formatRagHits` is shared by the API and the
 dependency-free MCP script (embedded using its self-contained function body), so

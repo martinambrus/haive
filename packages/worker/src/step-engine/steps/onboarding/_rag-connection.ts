@@ -462,7 +462,7 @@ async function cleanupRagLocked(
  *  parser so a repo restored from `.haive-data/` (which has no onboarding task at all) is
  *  visible here; a repo with no mirror falls back to its onboarding task's step rows.
  *  Comparison is on `ragDatabaseName`, because that is what the DROP targets. */
-async function isRagDatabaseClaimed(haiveDb: Database, dbName: string): Promise<boolean> {
+export async function isRagDatabaseClaimed(haiveDb: Database, dbName: string): Promise<boolean> {
   const repos = await haiveDb.query.repositories.findMany({
     columns: { id: true, onboardingTooling: true, onboardingEnvironment: true },
   });

@@ -44,8 +44,8 @@ import {
   extractCodeSections,
   chunkSection,
   capChunks,
+  fileBudget,
   contextHeader,
-  MAX_FILE_BYTES,
   type RagChunk,
 } from '../onboarding/_rag-chunkers.js';
 import { warmOllamaModel, vectorLiteral } from '../onboarding/_rag-embed.js';
@@ -170,6 +170,7 @@ export interface RagSyncResolved {
   /** The SAME collector inputs onboarding's 10-rag-populate used, so a workflow
    *  re-index collects the set onboarding indexed rather than its own. */
   codeCollect: CodeCollectOptions;
+  ownPaths?: string[];
   /** The embedding endpoint was re-derived from `ollamaMode` because the tooling this
    *  resolved from carries none — see `resolveToolingOllamaUrl`. */
   ollamaUrlDerived: boolean;
@@ -228,6 +229,7 @@ export async function resolveRagSyncPrefs(
   const exclude: string[] = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
   let selectedDirs: string[] | undefined;
   let extensionSet: string[] | undefined;
+  let ownPaths: string[] = [];
   let needsInitialization = false;
   let needsScopeSelection = false;
 
@@ -256,8 +258,18 @@ export async function resolveRagSyncPrefs(
       ollamaUrlDerived = ragOllamaUrlWasDerived(toolingMirror.tooling);
     }
     if (envMirror?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION) {
-      const p = (envMirror.envDetectData as { project?: { name?: string } } | undefined)?.project;
-      projectName = p?.name ?? 'default';
+      const data = envMirror.envDetectData as
+        | {
+            project?: { name?: string };
+            paths?: { customCodePaths?: { include?: unknown } };
+          }
+        | undefined;
+      projectName = data?.project?.name ?? 'default';
+      // The mirror can be imported from a committed .haive-data file: keep only string entries.
+      const include = data?.paths?.customCodePaths?.include;
+      ownPaths = Array.isArray(include)
+        ? include.filter((p): p is string => typeof p === 'string')
+        : [];
     }
 
     // The onboarding task is always read: it is the ONLY source of 09_7's
@@ -287,7 +299,7 @@ export async function resolveRagSyncPrefs(
         envPrev?.detect as {
           data?: {
             project?: { name?: string };
-            paths?: { customCodePaths?: { exclude?: string[] } };
+            paths?: { customCodePaths?: { exclude?: string[]; include?: string[] } };
           };
         } | null
       )?.data;
@@ -298,6 +310,7 @@ export async function resolveRagSyncPrefs(
       // heuristic must not veto folders explicitly re-enabled by a later picker.
       if (repo?.scopeExcludeGlobs == null)
         exclude.push(...(envData?.paths?.customCodePaths?.exclude ?? []));
+      ownPaths = envData?.paths?.customCodePaths?.include ?? ownPaths;
 
       const ragSourcePrev = await loadPreviousStepOutput(
         ctx.db,
@@ -342,6 +355,7 @@ export async function resolveRagSyncPrefs(
     ragToolingPrefs: ragPrefs,
     projectName,
     codeCollect: { exclude, selectedDirs, extensionSet },
+    ownPaths,
     ollamaUrlDerived,
     needsInitialization,
     needsScopeSelection,
@@ -668,14 +682,19 @@ async function syncRepositoryIndex(
         continue;
       }
 
+      const budget = fileBudget(
+        relPath,
+        sourceType === 'code' ? 'code' : 'kb',
+        scope.ownPaths ?? [],
+      );
       const bytes = Buffer.byteLength(text, 'utf8');
-      if (bytes > MAX_FILE_BYTES) {
+      if (bytes > budget.maxBytes) {
         // Drop it from processedPaths so the orphan sweep below deletes whatever
         // this file had indexed before it grew past the limit — otherwise stale
         // chunks of a no-longer-indexed file would linger forever.
         processedPaths.delete(relPath);
         ctx.logger.warn(
-          { relPath, bytes, max: MAX_FILE_BYTES },
+          { relPath, bytes, max: budget.maxBytes },
           'file exceeds the RAG size limit; skipped',
         );
         continue;
@@ -691,7 +710,7 @@ async function syncRepositoryIndex(
           ...chunkSection(section, { header: contextHeader(relPath, section.breadcrumb) }),
         );
       }
-      const { chunks, dropped } = capChunks(built);
+      const { chunks, dropped } = capChunks(built, budget.maxChunks);
       if (dropped > 0) {
         ctx.logger.warn(
           { relPath, kept: chunks.length, dropped },
