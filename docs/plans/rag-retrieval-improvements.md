@@ -471,10 +471,13 @@ file's chunks at the next sync.
 - **D1** (2026-10-12, user). F3: a repository's own code and its KB are exempt from both per-file
   budgets. Files under `01-env-detect`'s `customCodePaths.include` and KB files get no chunk cap
   and a 2 MB backstop against a generated file (`fileBudget`, `MAX_OWN_FILE_BYTES`); vendored and
-  contrib code keep 512 KB and 80 chunks. Raising the caps for every file was rejected: it would
-  index vendored bundles (1,829 chunks from two JS libraries on the eval repository) as distractors.
-  A per-repository budget was rejected as more mechanism for the same outcome. Cost on the eval
-  repository: +1,118 chunks (+5.4%).
+  contrib code keep 512 KB and 80 chunks. Raising the caps for every file was rejected, because it
+  would index vendored bundles as distractors; a per-repository budget was rejected as more
+  mechanism for the same outcome. MEASURED with `rag-build-store.ts` (`RAG_OWN_PATHS`) on the eval
+  repository: KB 994 → 1,076 chunks, code 19,845 → 22,067 (+2,304 in all, +11%). 1,197 of those
+  are `datatables.js`, a vendored library bundled inside the custom module, which the exemption
+  treats as own code; `ckeditor.js` (632) stays out. Whether that bundle costs retrieval is for
+  P1's before/after eval to show.
 
 ## Critical files
 
