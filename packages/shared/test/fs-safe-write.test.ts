@@ -10,6 +10,7 @@ import {
   rm,
   stat,
   symlink,
+  truncate,
   utimes,
   writeFile,
 } from 'node:fs/promises';
@@ -746,6 +747,29 @@ describe('fs-safe write primitives', () => {
       expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).toBe('inplace');
     });
 
+    it.skipIf(process.getuid?.() === 0)(
+      'overwrite-in-place leaves the old bytes when the owner it was asked for is refused',
+      async () => {
+        await expect(
+          writeFileNoFollow(root, 'src/a.txt', 'never', {
+            mode: 'overwrite-in-place',
+            owner: { uid: 0, gid: 0 },
+          }),
+        ).rejects.toMatchObject({ code: 'EPERM' });
+        expect(await readFile(path.join(root, 'src', 'a.txt'), 'utf8')).not.toBe('never');
+      },
+    );
+
+    it('overwrite-in-place refuses a file too large to hold for the put-back, untouched', async () => {
+      const big = path.join(root, 'src', 'big.bin');
+      await writeFile(big, '');
+      await truncate(big, 64 * 1024 * 1024 + 1);
+      await expect(
+        writeFileNoFollow(root, 'src/big.bin', 'x', { mode: 'overwrite-in-place' }),
+      ).rejects.toThrow(RangeError);
+      expect((await stat(big)).size).toBe(64 * 1024 * 1024 + 1);
+    });
+
     it('refuses a link at the leaf in every mode, target untouched', async () => {
       await symlink(path.join(outside, 'secret.txt'), path.join(root, 'live.txt'));
       for (const mode of ['replace-atomic', 'overwrite-in-place'] as const) {
@@ -801,6 +825,25 @@ describe('fs-safe write primitives', () => {
       afterEach(() => {
         unlinkBlock.name = null;
       });
+
+      it('reaches stale temps past the first window of a large directory over later writes', async () => {
+        const dir = path.join(root, 'src');
+        await Promise.all(
+          Array.from({ length: 12_000 }, (_, i) => writeFile(path.join(dir, `f${i}`), '')),
+        );
+        const temps = Array.from(
+          { length: 10 },
+          (_, i) =>
+            `.a.txt.haive-tmp-${i + 1}-00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+        );
+        for (const name of temps) {
+          await writeFile(path.join(dir, name), 'orphan', 'utf8');
+          await ageBy(path.join(dir, name), HOURS_2);
+        }
+        for (let i = 0; i < 4; i += 1) await writeFileNoFollow(root, 'src/a.txt', `next ${i}`);
+        const left = (await readdir(dir)).filter((n) => n.includes('.haive-tmp-'));
+        expect(left).toEqual([]);
+      }, 30_000);
 
       it('removes a stale temp of the same leaf after a write', async () => {
         const stale = path.join(

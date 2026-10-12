@@ -762,6 +762,9 @@ const APPLY_TREE_CONCURRENCY = 32;
 const STALE_TEMP_MS = 60 * 60 * 1000;
 const SWEEP_MAX_TEMPS = 32;
 const SWEEP_MAX_ENTRIES = 4096;
+/** Where each directory's next sweep starts, so one larger than the window is covered across writes. */
+const sweepCursors = new Map<string, number>();
+const SWEEP_CURSORS_MAX = 1024;
 /** Linux's PID_MAX_LIMIT: pid_max wraps there, so every process.pid is below it. */
 const PID_MAX = 4_194_304;
 const TEMP_SUFFIX =
@@ -1549,6 +1552,9 @@ export async function replaceHeldBytes(
 
 export type WriteMode = 'create-exclusive' | 'overwrite-in-place' | 'replace-atomic';
 
+/** An in-place rewrite holds the old bytes to put back on a failed write, so it caps their size. */
+const OVERWRITE_IN_PLACE_MAX_BYTES = 64 * 1024 * 1024;
+
 export interface WriteFileOptions {
   /** Default `replace-atomic`. */
   mode?: WriteMode;
@@ -1606,10 +1612,24 @@ export async function writeFileNoFollow(
     // rewrite below cannot reach anything but the file this call resolved.
     const fh = await openVerified(anchor, safe, 'read-write');
     try {
-      await replaceHeldBytes(fh, bytes, await fh.readFile());
-      if (opts.durable) await fh.sync();
-      if (opts.fileMode !== undefined) await fh.chmod(opts.fileMode);
+      const before = await fh.stat();
+      if (before.size > OVERWRITE_IN_PLACE_MAX_BYTES) {
+        throw new RangeError(
+          `${rel} is ${before.size} bytes, over the ${OVERWRITE_IN_PLACE_MAX_BYTES} an in-place rewrite holds to put back`,
+        );
+      }
+      const original = await fh.readFile();
+      // Owner and mode first: a refusal then leaves the old bytes, and a failed write puts them back.
       if (opts.owner) await fh.chown(opts.owner.uid, opts.owner.gid);
+      if (opts.fileMode !== undefined) await fh.chmod(opts.fileMode);
+      try {
+        await replaceHeldBytes(fh, bytes, original);
+      } catch (err) {
+        await fh.chown(before.uid, before.gid).catch(() => undefined);
+        await fh.chmod(before.mode & 0o7777).catch(() => undefined);
+        throw err;
+      }
+      if (opts.durable) await fh.sync();
     } finally {
       await closeQuietly(fh);
     }
@@ -1664,25 +1684,24 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
   try {
     const dir = await walkDir(anchor, toSafeRel(dirSegs.join('/')), [...dirSegs]);
     try {
-      let left = SWEEP_MAX_TEMPS;
-      let seen = 0;
-      // Streamed and capped: the directory is the repository's, so its size is not ours to choose.
-      for await (const entry of await opendir(fdPath(dir.fh.fd), { bufferSize: 32 })) {
-        if (++seen > SWEEP_MAX_ENTRIES) break;
-        const name = entry.name;
-        if (!name.startsWith(prefix)) continue;
+      const dirStat = await dir.fh.stat({ bigint: true });
+      const key = `${dirStat.dev}:${dirStat.ino}`;
+      const start = sweepCursors.get(key) ?? 0;
+      const budget = { entries: SWEEP_MAX_ENTRIES, temps: SWEEP_MAX_TEMPS };
+      const sweepOne = async (name: string): Promise<void> => {
+        if (!name.startsWith(prefix)) return;
         const suffix = name.slice(prefix.length);
         if (!TEMP_SUFFIX.test(suffix) || Number(suffix.slice(0, suffix.indexOf('-'))) >= PID_MAX) {
-          continue;
+          return;
         }
         // Held until its removal is done, so its inode cannot be reused by a replacement. O_PATH
         // stats a FIFO or device without opening it as one.
         const fh = await open(at(dir.fh.fd, name), O_PATH | O_NOFOLLOW).catch(() => null);
-        if (fh === null) continue;
+        if (fh === null) return;
         try {
           const st = await fh.stat({ bigint: true });
           if (st.isFile() && Date.now() - Number(st.mtimeMs) > STALE_TEMP_MS) {
-            if (left-- === 0) break;
+            if (budget.temps-- <= 0) return;
             await removeFileIfIdentityNoFollow(anchor, [...dirSegs, name].join('/'), {
               dev: st.dev,
               ino: st.ino,
@@ -1692,6 +1711,30 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
           // best effort: a sweep never fails the write it follows
         } finally {
           await closeQuietly(fh);
+        }
+      };
+      // Streamed and capped: the directory is the repository's, so its size is not ours to choose.
+      // Each write examines the next window, wrapping at the end, so every temp is reached in time.
+      const pass = async (skip: number, stopAt: number): Promise<number> => {
+        let index = 0;
+        for await (const entry of await opendir(fdPath(dir.fh.fd), { bufferSize: 32 })) {
+          index += 1;
+          if (index <= skip) continue;
+          if (index > stopAt) return 0;
+          if (budget.entries <= 0 || budget.temps <= 0) return index - 1;
+          budget.entries -= 1;
+          await sweepOne(entry.name);
+        }
+        return 0;
+      };
+      let next = await pass(start, Number.POSITIVE_INFINITY);
+      if (next === 0 && start > 0) next = await pass(0, start);
+      sweepCursors.delete(key);
+      if (next > 0) {
+        sweepCursors.set(key, next);
+        if (sweepCursors.size > SWEEP_CURSORS_MAX) {
+          const oldest = sweepCursors.keys().next().value;
+          if (oldest !== undefined) sweepCursors.delete(oldest);
         }
       }
     } finally {
