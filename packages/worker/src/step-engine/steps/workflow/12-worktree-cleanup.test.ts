@@ -187,7 +187,14 @@ function makeDb(
     insertRejects?: unknown;
     /** A merge another task's step has recorded; the claim query only returns it while that
      *  task is live, is not the caller, and the bound merge dir and phase list match. */
-    mergeSharer?: { id: string; title: string; status: string; mergeDir: string; phase: string };
+    mergeSharer?: {
+      id: string;
+      title: string;
+      status: string;
+      mergeDir: string;
+      phase: string;
+      cancelFinished?: boolean;
+    };
   } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
@@ -258,12 +265,15 @@ function makeDb(
                 limit: async () => {
                   const bound = new PgDialect().sqlToQuery(cond as SQL).params;
                   const s = opts.mergeSharer;
+                  const released =
+                    s?.status === 'completed' ||
+                    (s?.status === 'cancelled' && s.cancelFinished === true);
                   const matches =
                     s &&
+                    !released &&
                     bound.includes(s.mergeDir) &&
                     bound.includes(s.phase) &&
-                    !bound.includes(s.id) &&
-                    !bound.includes(s.status);
+                    !bound.includes(s.id);
                   return matches ? [{ id: s.id, title: s.title, status: s.status }] : [];
                 },
               }),
@@ -456,7 +466,10 @@ describe('12 merge phase + apply (real git)', () => {
       expect(await gitCode(base, ['merge', '--no-ff', 'feature/other', '-m', 'other'])).not.toBe(0);
       return base;
     }
-    const sharer = (over: { id?: string; status?: string }, mergeDir: string) => ({
+    const sharer = (
+      over: { id?: string; status?: string; cancelFinished?: boolean },
+      mergeDir: string,
+    ) => ({
       id: 'other-task',
       title: 'Other feature',
       status: 'running',
@@ -512,11 +525,30 @@ describe('12 merge phase + apply (real git)', () => {
       }
     });
 
-    it('a cancelled task there is cleaned up as before: its merge is aborted and this one proceeds', async () => {
+    it('a cancelled task still holds its merge until its teardown finished', async () => {
       const { parent, wt } = await setupWorktree();
       try {
         const base = await openOtherMerge(parent, wt);
         const { merge } = await runB(parent, wt, sharer({ status: 'cancelled' }, base));
+        expect(merge.resolved).toBe(false);
+        if (!merge.resolved) {
+          expect((merge.result as { error: string }).error).toContain('retry once it finishes');
+        }
+        expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a cancelled task whose teardown finished is cleaned up as before: its merge is aborted', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const base = await openOtherMerge(parent, wt);
+        const { merge } = await runB(
+          parent,
+          wt,
+          sharer({ status: 'cancelled', cancelFinished: true }, base),
+        );
         expect(merge.resolved).toBe(false);
         if (!merge.resolved) {
           expect((merge.result as { error: string }).error).not.toContain('retry once it finishes');

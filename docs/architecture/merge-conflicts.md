@@ -23,18 +23,20 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   the base branch alone (`main--base`), shared by every task merging into that base, since git allows
   the branch in one worktree. Before the `pending` phase aborts what is open and opens its own merge,
   it takes `pg_advisory_xact_lock(hashtextextended('merge-dir:<mergeDir>', 0))` (`lockMergeDir`) and
-  looks for another task, not `completed` or `cancelled`, whose
-  `task_steps.merge_resolve_state` names the same `mergeDir` in phase `resolving`,
-  `awaiting-guidance`, `squashing` or `pushing` (`findOtherMergeHolder`). The record is durable, so it
-  holds across the parks and restarts of a merge. A holder halts the step, naming the task, without
-  touching its merge; the Retry runs the check again. The directory is keyed rather than the
-  repository because two repository rows can share one local path. The lock covers the check, the
-  abort, the open and the save of `resolving`, which is also written for a merge that landed clean,
-  so the squash's reset cannot meet another task's merge. A failed task still holds: its Retry resumes the
-  merge it left open, so the person retries or cancels it. A merge of a completed or cancelled task is
-  still aborted, which is how its leftovers are cleaned, and a task's own earlier attempt is never a holder. The DAG
-  executor needs none: its integration worktree is the task's own feature worktree, which
-  `findBranchClaimant` keeps to one task.
+  looks for another task whose `task_steps.merge_resolve_state` names the same `mergeDir` in phase
+  `resolving`, `awaiting-guidance`, `squashing` or `pushing` (`findOtherMergeHolder`). The record is
+  durable, so it holds across the parks and restarts of a merge. A holder halts the step, naming the
+  task, without touching its merge; the Retry runs the check again. A completed task never holds. A
+  failed one does, since its Retry resumes the merge it left open, so the person retries or cancels
+  it. A cancelled one holds until its `task.cancel_finished` event: the cancel commits the status
+  before the CANCEL job stops the fixer it ran. Past those, its merge is aborted, which is how its
+  leftovers are cleaned, and a task's own earlier attempt is never a holder. The directory is keyed
+  rather than the repository because two repository rows can share one local path. Only the locked
+  section creates the base worktree, measures the base tip and aborts, opens and records the merge
+  (its state is saved through the lock's own transaction, so a full pool cannot deadlock it), and
+  `resolving` is also written for a merge that landed clean, so the squash's reset cannot meet another
+  task's merge. The DAG executor needs none: its integration worktree is the task's own feature
+  worktree, which `findBranchClaimant` keeps to one task.
 - **What a fixer changes outside the conflicted files is moved aside, never committed or lost.**
   Before a fixer is sent in, the merge dir is recorded as one git tree built in a scratch index,
   untracked files included, with what the merge staged (a tree built from

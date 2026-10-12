@@ -1,4 +1,4 @@
-import { and, eq, inArray, ne, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 
 export type DbHandle = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -7,9 +7,10 @@ export type DbHandle = Database | Parameters<Parameters<Database['transaction']>
  *  the push has yet to finish. `pending` has opened nothing, and `done` has released the dir. */
 const HELD_MERGE_PHASES = ['resolving', 'awaiting-guidance', 'squashing', 'pushing'] as const;
 
-/** A merge left by a task in one of these is stale, and is cleaned up by the next merge there. A
- *  failed task is not among them: its Retry resumes the merge it left open. */
-const ENDED_TASK_STATUSES = ['completed', 'cancelled'] as const;
+/** A merge left by a completed task is stale, and is cleaned up by the next merge there. A failed
+ *  task still holds (its Retry resumes the merge it left open), and so does a cancelled one until
+ *  its teardown finished: the cancel commits before the fixer it ran is stopped. */
+const CANCEL_FINISHED_EVENT = 'task.cancel_finished';
 
 export interface MergeDirHolder {
   id: string;
@@ -37,7 +38,11 @@ export async function findOtherMergeHolder(
     .where(
       and(
         ne(schema.taskSteps.taskId, params.taskId),
-        notInArray(schema.tasks.status, [...ENDED_TASK_STATUSES]),
+        ne(schema.tasks.status, 'completed'),
+        or(
+          ne(schema.tasks.status, 'cancelled'),
+          sql`not exists (select 1 from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = ${CANCEL_FINISHED_EVENT})`,
+        ),
         sql`${schema.taskSteps.mergeResolveState} ->> 'mergeDir' = ${params.mergeDir}`,
         inArray(sql<string>`${schema.taskSteps.mergeResolveState} ->> 'phase'`, [
           ...HELD_MERGE_PHASES,
