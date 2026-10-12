@@ -751,6 +751,20 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
     expect((err as { columnStale?: boolean }).columnStale).toBe(true);
   });
 
+  it('records nothing as the local side when the render file itself was never written', async () => {
+    const s = await setup();
+    const local = ['security-auditor', 'code-reviewer'];
+    s.pend(UNIT, { base, local, incoming });
+    await mkdir(join(s.root, STATE_DIR), { recursive: true });
+    await writeFile(join(s.root, STATE_DIR, 'project'), 'a file where the directory should be');
+
+    await expect(s.write(withIds(incoming), true)).rejects.toThrow();
+
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(json(row!.local)).toEqual({ v: local });
+    expect(row!.resolvedAt ?? null).toBeNull();
+  });
+
   it('carries a teammate’s null as a value, not as an absent key', async () => {
     const s = await setup();
     s.pend('project/render.json#framework', { base: 'drupal10', local: 'drupal', incoming: null });

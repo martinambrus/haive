@@ -204,7 +204,7 @@ export async function writeProjectStateRecord(
       db,
       repositoryId,
       expectedColumns,
-      written.length > 0 ? attempted : null,
+      written.includes(`${PROJECT_STATE_DIR}/${RENDER_UNIT}`) ? attempted : null,
     );
     throw new ProjectStateWriteError(err, written, !cleared);
   }
