@@ -315,8 +315,10 @@ async function main(): Promise<void> {
         .join(', ');
       console.log(`[${q.kind}] ${shown} (page ${SET_KS[SET_KS.length - 1]})  <- ${q.query}`);
       if (denseCheck) {
-        if (vec === null) {
-          console.error('RAG_DENSE_CHECK skipped for a query with no embedding');
+        if (vec === null || !storeHasVector) {
+          console.error(
+            'RAG_DENSE_CHECK skipped for a query with no embedding or a store with no vector',
+          );
         } else {
           result.dense = await checkDensePool(
             openConn.pg,
