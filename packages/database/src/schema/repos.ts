@@ -268,6 +268,8 @@ export const repositories = pgTable(
     /** The context the templates were last written from, with the RTK choice flag beside it.
      *  NULL until onboarding, an upgrade or a rollback records one. */
     renderContext: jsonb('render_context'),
+    /** `{ test?, lint?, typecheck? }`: a key absent is Auto, `null` is Off, a string is a custom command. */
+    verifyCommands: jsonb('verify_commands'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

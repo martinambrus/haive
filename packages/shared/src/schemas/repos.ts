@@ -171,3 +171,23 @@ export const filesystemListResponseSchema = z.object({
 
 export type FilesystemEntry = z.infer<typeof filesystemEntrySchema>;
 export type FilesystemListResponse = z.infer<typeof filesystemListResponseSchema>;
+
+const verifyCommandSlot = z
+  .string()
+  .refine((v) => !/[\n\r\u0000]/.test(v), 'A command is one line without NUL')
+  .trim()
+  .min(1)
+  .max(2000)
+  .nullable()
+  .optional();
+
+/** Per slot: key absent is Auto, `null` is Off, a string is a custom command. */
+export const verifyCommandsSchema = z
+  .object({
+    test: verifyCommandSlot,
+    lint: verifyCommandSlot,
+    typecheck: verifyCommandSlot,
+  })
+  .strict();
+
+export type VerifyCommands = z.infer<typeof verifyCommandsSchema>;

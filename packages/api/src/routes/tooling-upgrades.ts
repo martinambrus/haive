@@ -9,6 +9,7 @@ import {
   decideImportedMcpServers,
   pendingImportedMcpServers,
   userSecretsService,
+  verifyCommandsSchema,
   type OnboardingEnvironmentMirror,
   type OnboardingToolingMirror,
   type ToolName,
@@ -440,6 +441,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       ragEmbedDegradedReason: true,
       ragEmbedLexicalOnly: true,
       onboardingTooling: true,
+      verifyCommands: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -501,6 +503,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     // null (never configured) is sent as the full set: that is what the reviewers
     // actually score, so the page shows the effective policy rather than an empty
     // list the user would read as "nothing is reviewed".
+    verifyCommands: repo.verifyCommands ?? {},
     reviewDimensions: repo.reviewDimensions ?? [...ALL_REVIEW_DIMENSION_IDS],
     reviewDimensionOptions: REVIEW_DIMENSIONS.map((d) => ({
       value: d.id,
@@ -640,6 +643,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     prWorkflowEnabled?: boolean;
     stepGuidanceEnabled?: boolean;
     reviewDimensions?: string[];
+    verifyCommands?: unknown;
     /** RAG embed-health action. Not a settable field — each one is a decision with
      *  a side effect, so it is expressed as a verb rather than as three booleans a
      *  caller could combine into a meaningless state. */
@@ -695,6 +699,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   }
 
   const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
+  if (body.verifyCommands !== undefined) {
+    const parsed = verifyCommandsSchema.safeParse(body.verifyCommands);
+    if (!parsed.success) {
+      throw new HttpError(400, `Invalid verify commands: ${parsed.error.issues[0]?.message}`);
+    }
+    updates.verifyCommands = Object.keys(parsed.data).length > 0 ? parsed.data : null;
+  }
   if (typeof body.rtkEnabled === 'boolean') updates.rtkEnabled = body.rtkEnabled;
   if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion?.trim() || null;
   if (body.chromeDevtoolsMcpVersion !== undefined) {
