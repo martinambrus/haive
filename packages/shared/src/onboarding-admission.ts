@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, max } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, max, or } from 'drizzle-orm';
 import {
   checkRevive,
   LIVE_TASK_STATUSES,
@@ -12,14 +12,20 @@ import { CLI_PROVIDER_LIST } from './cli-providers/index.js';
 import { lstatNoFollow } from './fs-safe.js';
 import { lockPlanMerge } from './plan/merge-lock.js';
 import { KB_DIR } from './knowledge-paths.js';
-import { readRenderContextColumn } from './project-state/index.js';
+import {
+  isImportMarker,
+  PROJECT_STATE_IMPORT_STEP_ID,
+  readRenderContextColumn,
+} from './project-state/index.js';
 
 /**
- * The newest `generated_at` among the LIVE `onboarding_artifacts` rows of each repository.
+ * The newest date among the LIVE `onboarding_artifacts` rows of each repository that stand for a
+ * run of step 12: an onboarding row's `generated_at`, or an import marker's `imported_at`.
  *
- * Only `12-post-onboarding` inserts those rows, so this dates the last time a run reached step 12
- * of 27 — the evidence `mark-onboarded` needs and a completion date cannot give it, since the run
- * that route exists for failed at a LATER step and has no `completed_at` at all.
+ * `12-post-onboarding` inserts the onboarding rows, so this dates the last time a run reached step
+ * 12 of 27 — the evidence `mark-onboarded` needs and a completion date cannot give it, since the run
+ * that route exists for failed at a LATER step and has no `completed_at` at all. An import marker is
+ * another install's step-12 output arriving through the project state, which is the same evidence.
  *
  * A LIVE row is NOT on its own evidence of a run since the reset, which is the trap here: a
  * PARTIAL reset deliberately preserves the rows for paths it could not remove
@@ -37,13 +43,35 @@ export async function loadNewestLiveArtifactAt(
   userId: string,
   repositoryIds: string[],
 ): Promise<Map<string, Date>> {
+  return newestLive(db, userId, repositoryIds, false);
+}
+
+/** The newest `imported_at` among the LIVE import markers of each repository: the one reading of a
+ *  marker that answers a reset without a task. Compare it with `importedSinceReset`. */
+export async function loadNewestLiveImportAt(
+  db: Database | DbTx,
+  userId: string,
+  repositoryIds: string[],
+): Promise<Map<string, Date>> {
+  return newestLive(db, userId, repositoryIds, true);
+}
+
+async function newestLive(
+  db: Database | DbTx,
+  userId: string,
+  repositoryIds: string[],
+  markersOnly: boolean,
+): Promise<Map<string, Date>> {
   const newest = new Map<string, Date>();
   if (repositoryIds.length === 0) return newest;
 
   const rows = await db
     .select({
       repositoryId: schema.onboardingArtifacts.repositoryId,
+      source: schema.onboardingArtifacts.source,
+      sourceStepId: schema.onboardingArtifacts.sourceStepId,
       generatedAt: schema.onboardingArtifacts.generatedAt,
+      importedAt: schema.onboardingArtifacts.importedAt,
     })
     .from(schema.onboardingArtifacts)
     .where(
@@ -51,21 +79,62 @@ export async function loadNewestLiveArtifactAt(
         eq(schema.onboardingArtifacts.userId, userId),
         inArray(schema.onboardingArtifacts.repositoryId, repositoryIds),
         isNull(schema.onboardingArtifacts.supersededAt),
-        // ONBOARDING writes only. `02-upgrade-apply` and the rollback path write through these
-        // same rows with `source` 'upgrade'/'rollback', and an upgrade is reachable on a repo
-        // that was reset: its gate accepts a COMPLETED onboarding task, and that row outlives
+        // ONBOARDING writes and import markers only. `02-upgrade-apply` and the rollback path write
+        // through these same rows with `source` 'upgrade'/'rollback', and an upgrade is reachable on
+        // a repo that was reset: its gate accepts a COMPLETED onboarding task, and that row outlives
         // the reset. Such a row proves an upgrade ran, never that onboarding reached step 12 —
         // and taking it as proof would restore the stamp with no onboarding run behind it.
-        eq(schema.onboardingArtifacts.source, 'onboarding'),
+        or(
+          eq(schema.onboardingArtifacts.source, 'onboarding'),
+          and(
+            eq(schema.onboardingArtifacts.source, 'backfill'),
+            eq(schema.onboardingArtifacts.sourceStepId, PROJECT_STATE_IMPORT_STEP_ID),
+          ),
+        ),
       ),
     );
 
   for (const row of rows) {
-    if (!row.repositoryId || row.generatedAt === null) continue;
+    const marker = isImportMarker(row);
+    if (markersOnly && !marker) continue;
+    const at = marker ? row.importedAt : row.generatedAt;
+    if (!row.repositoryId || at === null) continue;
     const seen = newest.get(row.repositoryId);
-    if (seen === undefined || row.generatedAt > seen) newest.set(row.repositoryId, row.generatedAt);
+    if (seen === undefined || at > seen) newest.set(row.repositoryId, at);
   }
   return newest;
+}
+
+/** Whether a live import marker is dated after the reset epoch: the project state of another
+ *  install answered the reset, with no task here. False with no epoch, where nothing was taken back. */
+export function importedSinceReset(
+  newestImportAt: Date | undefined,
+  onboardingResetAt: Date | null,
+): boolean {
+  return (
+    newestImportAt !== undefined && onboardingResetAt !== null && newestImportAt > onboardingResetAt
+  );
+}
+
+/** Whether any ledger row of the repository, live or superseded, was written by an import after
+ *  `since`. An upgrade completed before that import no longer describes the files, so it cannot be
+ *  rolled back. */
+export async function ledgerImportedSince(
+  db: Database | DbTx,
+  repositoryId: string,
+  since: Date,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.onboardingArtifacts.id })
+    .from(schema.onboardingArtifacts)
+    .where(
+      and(
+        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+        gt(schema.onboardingArtifacts.importedAt, since),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
 }
 
 /** Whether a repository holds artifact rows written AFTER its reset epoch — the one reading of
@@ -278,7 +347,8 @@ export function hasCompletedSinceReset(
  *
  *   onboarded = markers present
  *               AND no live onboarding run
- *               AND (onboarded_at set OR a completed run OR no run was ever started here)
+ *               AND (onboarded_at set OR a completed run OR no run was ever started here
+ *                    OR an import marker dated after the reset)
  *
  * A repository created blank with no onboarding history or reset can instead use a completed
  * workflow, with no marker requirement. A setup-only task can generate none of
@@ -310,11 +380,17 @@ export function resolveOnboardingVerdict(input: {
    *  dated after the epoch is proof a run reached step 12 of 27 since the reset. Omitted defaults
    *  to false, which is exactly the behaviour before this existed. */
   hasArtifactsSinceReset?: boolean;
+  /** A live import marker is dated after the reset epoch (`importedSinceReset`): another install's
+   *  finished onboarding arrived through the project state, with no task here to say so. Unlike
+   *  `hasArtifactsSinceReset` it makes the repository onboarded, since the work was done elsewhere
+   *  and finished; an ordinary row written since the reset only offers the button. */
+  importedSinceReset?: boolean;
   facts: OnboardingTaskFacts;
 }): OnboardingVerdict {
   const { missing, onboardedAt, facts } = input;
   const onboardingResetAt = input.onboardingResetAt ?? null;
   const hasArtifactsSinceReset = input.hasArtifactsSinceReset ?? false;
+  const importedSinceReset = input.importedSinceReset ?? false;
   const markersPresent = missing.length === 0;
   const inProgressTaskId = facts.liveTaskId;
 
@@ -333,7 +409,8 @@ export function resolveOnboardingVerdict(input: {
   const onboarded =
     inProgressTaskId === null &&
     (greenfieldCompleted ||
-      (markersPresent && (onboardedAt !== null || completedSinceReset || neverStarted)));
+      (markersPresent &&
+        (onboardedAt !== null || completedSinceReset || neverStarted || importedSinceReset)));
 
   // Marking by hand must not undo a reset — but it must still WORK for the case it exists for.
   //
@@ -388,6 +465,10 @@ export async function renderContextAdmitsUpgrade(
     missing,
     onboardedAt: repo.onboardedAt,
     onboardingResetAt: repo.onboardingResetAt,
+    importedSinceReset: importedSinceReset(
+      (await loadNewestLiveImportAt(db, userId, [repo.id])).get(repo.id),
+      repo.onboardingResetAt,
+    ),
     facts,
   }).onboarded;
 }

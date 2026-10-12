@@ -58,6 +58,7 @@ import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
+  ledgerImportedSince,
   LIVE_TASK_STATUSES,
   liveOnboardingMessage,
   renderContextAdmitsUpgrade,
@@ -823,13 +824,26 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
 
 /** The upgrade a rollback would undo now: the most recent completed one, unless that was itself a
  *  rollback. The rollback step reverts the newest completed upgrade, so one started after a rollback
- *  would undo the same upgrade a second time. */
+ *  would undo the same upgrade a second time. Null too once an import of another install's record
+ *  has rewritten the ledger since that upgrade finished. */
 export async function latestUpgradeToRollBack(
   db: ReturnType<typeof getDb> | DbTx,
   repositoryId: string,
 ): Promise<string | null> {
+  const found = await findUpgradeToRollBack(db, repositoryId);
+  return found && 'id' in found ? found.id : null;
+}
+
+async function findUpgradeToRollBack(
+  db: ReturnType<typeof getDb> | DbTx,
+  repositoryId: string,
+): Promise<{ id: string } | { refused: 'imported' } | null> {
   const [latest] = await db
-    .select({ id: schema.tasks.id, metadata: schema.tasks.metadata })
+    .select({
+      id: schema.tasks.id,
+      metadata: schema.tasks.metadata,
+      completedAt: schema.tasks.completedAt,
+    })
     .from(schema.tasks)
     .where(
       and(
@@ -841,7 +855,10 @@ export async function latestUpgradeToRollBack(
     .orderBy(desc(schema.tasks.completedAt))
     .limit(1);
   if (!latest || (latest.metadata as { mode?: unknown } | null)?.mode === 'rollback') return null;
-  return latest.id;
+  if (latest.completedAt && (await ledgerImportedSince(db, repositoryId, latest.completedAt))) {
+    return { refused: 'imported' };
+  }
+  return { id: latest.id };
 }
 
 /** Refuse with 409, naming the live task, while an upgrade or rollback of the repository runs. */
@@ -1001,13 +1018,20 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
     repositoryId,
     'rolled back',
     async (tx) => {
-      const priorUpgrade = await latestUpgradeToRollBack(tx, repositoryId);
-      if (!priorUpgrade) {
+      const found = await findUpgradeToRollBack(tx, repositoryId);
+      if (found && 'refused' in found) {
+        throw new HttpError(
+          409,
+          "Files were updated from another install's record since that upgrade, so it can no longer be rolled back",
+        );
+      }
+      if (!found) {
         throw new HttpError(
           409,
           'No completed upgrade to roll back: none has completed, or the last one was rolled back',
         );
       }
+      const priorUpgrade = found.id;
       const [row] = await tx
         .insert(schema.tasks)
         .values({

@@ -19,7 +19,12 @@ import {
   upsertRegion,
   type InstallManifest,
 } from '@haive/shared';
-import { isRenderContextSnapshot } from '@haive/shared/project-state';
+import { ledgerImportedSince } from '@haive/shared/onboarding-admission';
+import {
+  isImportMarker,
+  isRenderContextSnapshot,
+  PROJECT_STATE_IMPORT_STEP_ID,
+} from '@haive/shared/project-state';
 import { readUpgradeFile, RTK_BLOCK_FILES, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
@@ -51,6 +56,15 @@ import {
   type RtkBlockStrip,
   type UpgradeApplyOutput,
 } from './02-upgrade-apply.js';
+
+export class UpgradeRollbackImportedError extends Error {
+  constructor() {
+    super(
+      "upgrade-rollback: files were updated from another install's record since that upgrade, so it can no longer be rolled back",
+    );
+    this.name = 'UpgradeRollbackImportedError';
+  }
+}
 
 function isRollback(ctx: StepContext): Promise<boolean> {
   return ctx.db
@@ -256,6 +270,9 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     const priorCompletedAt = priorUpgrade[0]?.completedAt ?? null;
     if (!priorTaskId) {
       throw new Error('upgrade-rollback: no prior completed onboarding_upgrade task to revert');
+    }
+    if (priorCompletedAt && (await ledgerImportedSince(ctx.db, repositoryId, priorCompletedAt))) {
+      throw new UpgradeRollbackImportedError();
     }
 
     // Live rows that prior upgrade task WROTE. Its backfill rows record what was already there,
@@ -520,6 +537,38 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       for (const row of found) liveBundleItemIds.add(row.id);
     }
 
+    const restoredRow = (
+      row: typeof schema.onboardingArtifacts.$inferSelect,
+    ): typeof schema.onboardingArtifacts.$inferInsert => ({
+      userId: ctx.userId,
+      repositoryId: detected.repositoryId,
+      diskPath: row.diskPath,
+      templateId: row.templateId,
+      templateKind: row.templateKind,
+      templateSchemaVersion: row.templateSchemaVersion,
+      templateContentHash: row.templateContentHash,
+      writtenHash: row.writtenHash,
+      writtenContent: row.writtenContent,
+      lastObservedDiskHash: row.lastObservedDiskHash,
+      userModified: row.userModified,
+      formValuesSnapshot: row.formValuesSnapshot,
+      bundleItemId: resolveBundleItemId(row.templateId, liveBundleItemIds),
+      ...(isImportMarker(row)
+        ? {
+            taskId: null,
+            sourceStepId: PROJECT_STATE_IMPORT_STEP_ID,
+            source: 'backfill' as const,
+            importedAt: row.importedAt,
+            haiveVersion: row.haiveVersion,
+          }
+        : {
+            taskId: ctx.taskId,
+            sourceStepId: '04-upgrade-rollback',
+            source: 'rollback' as const,
+            haiveVersion,
+          }),
+    });
+
     // What each upgrade row left at its path: the bytes a rollback may replace, and no others.
     const judgedIds = detected.targets.flatMap((t) =>
       t.upgradeArtifactId && !t.removed ? [t.upgradeArtifactId] : [],
@@ -780,25 +829,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         // before: deleted by the person, or never installed.
         const retired = retiredRows.find((r) => r.id === item.retiredRowId);
         if (retired) {
-          rowsToInsert.push({
-            userId: ctx.userId,
-            repositoryId: detected.repositoryId,
-            taskId: ctx.taskId,
-            diskPath: retired.diskPath,
-            templateId: retired.templateId,
-            templateKind: retired.templateKind,
-            templateSchemaVersion: retired.templateSchemaVersion,
-            templateContentHash: retired.templateContentHash,
-            writtenHash: retired.writtenHash,
-            writtenContent: retired.writtenContent,
-            lastObservedDiskHash: retired.lastObservedDiskHash,
-            userModified: retired.userModified,
-            formValuesSnapshot: retired.formValuesSnapshot,
-            sourceStepId: '04-upgrade-rollback',
-            source: 'rollback' as const,
-            haiveVersion,
-            bundleItemId: resolveBundleItemId(retired.templateId, liveBundleItemIds),
-          });
+          rowsToInsert.push(restoredRow(retired));
         }
         if (removal.outcome === 'kept') {
           // The upgrade's row is still undone; what stands there now stays.
@@ -845,25 +876,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           );
           continue;
         }
-        rowsToInsert.push({
-          userId: ctx.userId,
-          repositoryId: detected.repositoryId,
-          taskId: ctx.taskId,
-          diskPath: row.diskPath,
-          templateId: row.templateId,
-          templateKind: row.templateKind,
-          templateSchemaVersion: row.templateSchemaVersion,
-          templateContentHash: row.templateContentHash,
-          writtenHash: row.writtenHash,
-          writtenContent: row.writtenContent,
-          lastObservedDiskHash: row.lastObservedDiskHash,
-          userModified: row.userModified,
-          formValuesSnapshot: row.formValuesSnapshot,
-          sourceStepId: '04-upgrade-rollback',
-          source: 'rollback' as const,
-          haiveVersion,
-          bundleItemId: resolveBundleItemId(row.templateId, liveBundleItemIds),
-        });
+        rowsToInsert.push(restoredRow(row));
         revertedCount += 1;
       }
     }

@@ -438,7 +438,7 @@ async function main(): Promise<void> {
           writtenHash: 'f'.repeat(64),
           sourceStepId: PROJECT_STATE_IMPORT_STEP_ID,
           source: 'backfill',
-          importedAt: new Date(),
+          importedAt: new Date(Date.now() - 3_600_000),
         })
         .returning({ id: schema.onboardingArtifacts.id });
       const failure3m = await w3m.rollback();
@@ -450,6 +450,47 @@ async function main(): Promise<void> {
           standingM[0]!.id === marker!.id &&
           w3m.warnings().some((w) => w.startsWith(`did not put back the row for ${KEPT.diskPath}`)),
         { failure3m, standingM, warnings: w3m.warnings() },
+      );
+    }
+
+    // ---- O5g: a rollback puts back an untracked marker AS a marker -------------------------------
+    const w3g = await world('o5g', [KEPT]);
+    const importedAt3g = new Date(Date.now() - 3_600_000);
+    await db
+      .update(schema.onboardingArtifacts)
+      .set({
+        taskId: null,
+        source: 'backfill',
+        sourceStepId: PROJECT_STATE_IMPORT_STEP_ID,
+        importedAt: importedAt3g,
+        haiveVersion: '0.0.1-other',
+      })
+      .where(eq(schema.onboardingArtifacts.repositoryId, w3g.repositoryId));
+    await w3g.upgrade({ selectedObsoleteUntracks: [w3g.entryOf(KEPT.diskPath)] });
+    const untracked3g = (await w3g.liveAt(KEPT.diskPath)).length === 0;
+    check('O5g: the marker is untracked first', untracked3g, await w3g.rowsAt(KEPT.diskPath));
+    if (untracked3g) {
+      const failure3g = await w3g.rollback();
+      const [back] = await db
+        .select()
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, w3g.repositoryId),
+            eq(schema.onboardingArtifacts.diskPath, KEPT.diskPath),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
+      check(
+        'O5g: and comes back live with no task, the import step and its own import date and version',
+        failure3g === null &&
+          back !== undefined &&
+          back.taskId === null &&
+          back.source === 'backfill' &&
+          back.sourceStepId === PROJECT_STATE_IMPORT_STEP_ID &&
+          back.importedAt?.getTime() === importedAt3g.getTime() &&
+          back.haiveVersion === '0.0.1-other',
+        { failure3g, back },
       );
     }
 

@@ -18,6 +18,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
+import { PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
 import { createFakeDb } from '@haive/database/testing';
 import { lastUpgradeRemovedContent, upgradeRoutes } from '../src/routes/upgrades.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -28,8 +29,14 @@ const REPO = '00000000-0000-4000-8000-0000000000c1';
 
 function upgrades(
   tasks: { mode?: string; completedAt: number; applied?: Record<string, unknown> }[],
+  importedAt?: number,
 ) {
-  const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    onboardingArtifacts: schema.onboardingArtifacts,
+  });
+  if (importedAt !== undefined) insertMarker(fake, importedAt);
   for (const t of tasks) {
     const task = fake.insert(schema.tasks, {
       repositoryId: REPO,
@@ -48,6 +55,23 @@ function upgrades(
     }
   }
   return lastUpgradeRemovedContent(fake.db as never, REPO);
+}
+
+function insertMarker(fake: ReturnType<typeof createFakeDb>, importedAt: number) {
+  fake.insert(schema.onboardingArtifacts, {
+    userId: USER,
+    repositoryId: REPO,
+    taskId: null,
+    diskPath: '.claude/agents/a.md',
+    templateId: 'agent:a',
+    templateKind: 'agent',
+    templateSchemaVersion: 1,
+    templateContentHash: 'h',
+    writtenHash: 'h',
+    sourceStepId: PROJECT_STATE_IMPORT_STEP_ID,
+    source: 'backfill',
+    importedAt: new Date(importedAt),
+  });
 }
 
 const removed = { removedPaths: ['.claude/settings.json'] };
@@ -76,6 +100,14 @@ describe('offering the rollback of an upgrade that only removed things', () => {
     ).toBe(false);
   });
 
+  it('stops offering it once an import rewrote the ledger after that upgrade', async () => {
+    expect(await upgrades([{ completedAt: 1, applied: removed }], 2)).toBe(false);
+  });
+
+  it('keeps offering it for an import that predates that upgrade', async () => {
+    expect(await upgrades([{ completedAt: 3, applied: removed }], 2)).toBe(true);
+  });
+
   it('does not offer it for an upgrade that removed nothing, or with no upgrade at all', async () => {
     expect(
       await upgrades([{ completedAt: 1, applied: { removedPaths: [], rtkBlockStrips: [] } }]),
@@ -101,7 +133,10 @@ beforeEach(() => {
 
 type TaskSeed = { mode?: string; status: string; completedAt?: number };
 
-function repoWith(tasks: TaskSeed[], opts: { resetAt?: number; liveOnboarding?: boolean } = {}) {
+function repoWith(
+  tasks: TaskSeed[],
+  opts: { resetAt?: number; liveOnboarding?: boolean; importedAt?: number } = {},
+) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
@@ -116,6 +151,7 @@ function repoWith(tasks: TaskSeed[], opts: { resetAt?: number; liveOnboarding?: 
     status: 'ready',
     onboardingResetAt: opts.resetAt === undefined ? null : new Date(opts.resetAt),
   });
+  if (opts.importedAt !== undefined) insertMarker(fake, opts.importedAt);
   const liveOnboardingId = opts.liveOnboarding
     ? (fake.insert(schema.tasks, {
         userId: USER,
@@ -212,6 +248,22 @@ describe('rolling back an upgrade', () => {
     const t = repoWith([{ mode: 'rollback', status: 'completed', completedAt: 1 }]);
     expect((await rollBack()).status).toBe(409);
     expect(t.upgradeTasks()).toEqual([]);
+  });
+
+  it('is refused with its own message once an import rewrote the ledger after that upgrade', async () => {
+    const t = repoWith([{ status: 'completed', completedAt: 1 }], { importedAt: 2 });
+    const res = await rollBack();
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "Files were updated from another install's record since that upgrade, so it can no longer be rolled back",
+    );
+    expect(t.upgradeTasks()).toEqual([]);
+  });
+
+  it('is allowed after an import that predates that upgrade', async () => {
+    const t = repoWith([{ status: 'completed', completedAt: 3 }], { importedAt: 2 });
+    expect((await rollBack()).status).toBe(201);
+    expect(t.upgradeTasks()).toHaveLength(1);
   });
 
   it('is refused while an upgrade is parked on its form', async () => {
