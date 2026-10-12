@@ -210,12 +210,17 @@ export async function acquireRagSyncLock(
   }
 }
 
-/** `conn` with each `pg.unsafe`, and each `unsafe` of a `pg.begin` transaction, asserting the lock first. */
+/** `conn` whose every statement, through `pg` or a `pg.begin` transaction, called or `unsafe`, asserts the lock first. */
 export function fenceRagStore<C extends { pg: object }>(conn: C, lock: RagSyncLock | null): C {
   if (!lock) return conn;
   type Args = (args: unknown[]) => unknown[];
   const fenced = <T extends object>(target: T, methods: Record<string, Args>): T =>
     new Proxy(target, {
+      // postgres.js's sql and tx are callable: a tagged-template statement goes through apply.
+      apply(obj, thisArg, args) {
+        lock.assertHeld();
+        return Reflect.apply(obj as (...a: unknown[]) => unknown, thisArg, args);
+      },
       get(obj, prop, receiver) {
         const mapArgs = typeof prop === 'string' && Object.hasOwn(methods, prop) && methods[prop];
         if (!mapArgs) return Reflect.get(obj, prop, receiver);

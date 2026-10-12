@@ -211,6 +211,31 @@ describe('a RAG store fenced by its sync lock', () => {
     });
   });
 
+  it('fences tagged-template statements on the store and on a transaction', async () => {
+    const sent: string[] = [];
+    const tag = (label: string) =>
+      Object.assign(
+        (strings: TemplateStringsArray) => (sent.push(`${label}:${strings.join('?')}`), []),
+        {
+          unsafe: () => [],
+        },
+      );
+    const tx = tag('tx');
+    const pg = Object.assign(tag('pg'), {
+      begin: async (cb: (t: typeof tx) => unknown) => cb(tx),
+    });
+    const state = { lost: false };
+    const fenced = fenceRagStore({ pg }, lockWith(state));
+    fenced.pg`SELECT 1`;
+    await fenced.pg.begin(async (t) => {
+      t`SELECT pg_advisory_xact_lock(1)`;
+      state.lost = true;
+      expect(() => t`CREATE TABLE x ()`).toThrow(RagSyncLockLostError);
+    });
+    expect(() => fenced.pg`SELECT 2`).toThrow(RagSyncLockLostError);
+    expect(sent).toEqual(['pg:SELECT 1', 'tx:SELECT pg_advisory_xact_lock(1)']);
+  });
+
   it('returns the connection itself when there is no lock', () => {
     const conn = { pg: { unsafe: () => undefined } };
     expect(fenceRagStore(conn, null)).toBe(conn);
