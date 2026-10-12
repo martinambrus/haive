@@ -1,14 +1,5 @@
 import { execFile } from 'node:child_process';
-import {
-  appendFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rename,
-  rm,
-  symlink,
-  writeFile,
-} from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -18,9 +9,7 @@ import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import {
   collectOnboardingStagePaths,
-  commitOnly,
-  stageNamed,
-  stagedChanges,
+  commitRecorded,
 } from '../src/step-engine/steps/onboarding/_stage-paths.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 import { upgradeCommitStep } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
@@ -625,7 +614,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
   });
 });
 
-describe('commitOnly commits the entries that were staged, not the worktree', () => {
+describe('commitRecorded commits what it staged in a private index', () => {
   async function seededRepo(files: Record<string, string>): Promise<string> {
     const repo = await mkdtemp(path.join(tmpdir(), 'commit-index-'));
     dirs.push(repo);
@@ -642,25 +631,39 @@ describe('commitOnly commits the entries that were staged, not the worktree', ()
     return repo;
   }
 
-  it('R2-1: a named file that changes after staging is committed as it was staged', async () => {
+  it('R7-1: a newer blob staged in the real index at a named path is not what is committed', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n', '.haive-data/plan.json': 'v0\n' });
-    await writeFile(path.join(repo, '.haive-data', 'plan.json'), 'staged\n');
+    await writeFile(path.join(repo, '.haive-data', 'plan.json'), 'newer\n');
+    await git(repo, ['add', '.haive-data/plan.json']);
+    await writeFile(path.join(repo, '.haive-data', 'plan.json'), 'ours\n');
+    const done = await commitRecorded(
+      repo,
+      { add: ['.haive-data/plan.json'], remove: [] },
+      'chore: onboard',
+      GIT_ENV,
+    );
+    expect(done).toEqual(['.haive-data/plan.json']);
+    expect(await git(repo, ['show', 'HEAD:.haive-data/plan.json'])).toBe('ours\n');
+    expect(await git(repo, ['log', '-1', '--format=%s'])).toBe('chore: onboard\n');
+  });
+
+  it('R7-2: the committed names are clean afterwards and the person staged work stays staged', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n', 'gone.md': 'g\n', 'keep.md': 'k\n' });
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    await rm(path.join(repo, 'gone.md'));
     await writeFile(path.join(repo, 'mine.ts'), 'mine\n');
     await git(repo, ['add', 'mine.ts']);
-    const named = ['.haive-data/plan.json'];
-    await stageNamed(repo, named, []);
-    await writeFile(path.join(repo, '.haive-data', 'plan.json'), 'swept\n');
-    await commitOnly(repo, await stagedChanges(repo, named), 'chore: onboard', GIT_ENV);
-    expect(await git(repo, ['show', 'HEAD:.haive-data/plan.json'])).toBe('staged\n');
-    expect((await git(repo, ['show', '--name-only', '--format=', 'HEAD'])).trim()).toBe(
-      '.haive-data/plan.json',
+    const done = await commitRecorded(
+      repo,
+      { add: ['a.md', 'keep.md'], remove: ['gone.md'] },
+      'chore: onboard',
+      GIT_ENV,
     );
-    expect(await git(repo, ['log', '-1', '--format=%s'])).toBe('chore: onboard\n');
-    expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('mine.ts');
-    expect(await git(repo, ['status', '--porcelain', '--', '.haive-data/plan.json'])).toBe(
-      ' M .haive-data/plan.json\n',
-    );
-    expect(await readFile(path.join(repo, '.haive-data', 'plan.json'), 'utf8')).toBe('swept\n');
+    expect(done.sort()).toEqual(['a.md', 'gone.md']);
+    expect(
+      (await git(repo, ['show', '--name-only', '--format=', 'HEAD'])).trim().split('\n'),
+    ).toEqual(['a.md', 'gone.md']);
+    expect(await git(repo, ['status', '--porcelain'])).toBe('A  mine.ts\n');
   });
 
   it('a directory standing at a recorded file path is never staged', async () => {
@@ -668,8 +671,14 @@ describe('commitOnly commits the entries that were staged, not the worktree', ()
     await mkdir(path.join(repo, '.haive-data', 'plan.json'), { recursive: true });
     await writeFile(path.join(repo, '.haive-data', 'plan.json', 'private.md'), 'p\n');
     await writeFile(path.join(repo, 'a.md'), 'a\n');
-    await stageNamed(repo, ['.haive-data/plan.json', 'a.md'], []);
-    expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('a.md');
+    const done = await commitRecorded(
+      repo,
+      { add: ['.haive-data/plan.json', 'a.md'], remove: [] },
+      'chore: onboard',
+      GIT_ENV,
+    );
+    expect(done).toEqual(['a.md']);
+    expect((await git(repo, ['show', '--name-only', '--format=', 'HEAD'])).trim()).toBe('a.md');
   });
 
   it('a file the person staged under a directory standing at a named path is not committed', async () => {
@@ -678,43 +687,59 @@ describe('commitOnly commits the entries that were staged, not the worktree', ()
     await writeFile(path.join(repo, '.haive', 'install.json', 'private.md'), 'p\n');
     await git(repo, ['add', '-f', '.haive/install.json/private.md']);
     await writeFile(path.join(repo, 'a.md'), 'a\n');
-    const named = ['.haive/install.json', 'a.md'];
-    await stageNamed(repo, named, []);
-    const staged = await stagedChanges(repo, named);
-    expect(staged).toEqual(['a.md']);
-    await commitOnly(repo, staged, 'chore: onboard', GIT_ENV);
+    const done = await commitRecorded(
+      repo,
+      { add: ['.haive/install.json', 'a.md'], remove: [] },
+      'chore: onboard',
+      GIT_ENV,
+    );
+    expect(done).toEqual(['a.md']);
     expect((await git(repo, ['show', '--name-only', '--format=', 'HEAD'])).trim()).toBe('a.md');
     expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe(
       '.haive/install.json/private.md',
     );
   });
 
-  it('R2-2: a staged removal is committed even when the file is back on disk', async () => {
+  it('R2-2: a removal is committed and the person staged file is left', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n', 'gone.md': 'g\n', 'keep.md': 'k\n' });
     await rm(path.join(repo, 'gone.md'));
     await writeFile(path.join(repo, 'src.ts'), 's\n');
     await git(repo, ['add', 'src.ts']);
-    await stageNamed(repo, [], ['gone.md']);
-    const named = ['gone.md'];
-    await writeFile(path.join(repo, 'gone.md'), 'back\n');
-    await commitOnly(repo, await stagedChanges(repo, named), 'chore: drop', GIT_ENV);
+    const done = await commitRecorded(
+      repo,
+      { add: [], remove: ['gone.md'] },
+      'chore: drop',
+      GIT_ENV,
+    );
+    expect(done).toEqual(['gone.md']);
     expect(await git(repo, ['ls-tree', '-r', '--name-only', 'HEAD'])).not.toContain('gone.md');
     expect(await git(repo, ['ls-tree', '-r', '--name-only', 'HEAD'])).toContain('keep.md');
     expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('src.ts');
   });
 
-  it('R2-3: the first commit of a repository with no commit holds the staged entry only', async () => {
+  it('R2-3: the first commit of a repository with no commit holds the named entry only', async () => {
     const repo = await seededRepo({});
-    await writeFile(path.join(repo, 'a.md'), 'staged\n');
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
     await writeFile(path.join(repo, 'mine.ts'), 'mine\n');
     await git(repo, ['add', 'mine.ts']);
-    await stageNamed(repo, ['a.md'], []);
-    await writeFile(path.join(repo, 'a.md'), 'later\n');
-    await commitOnly(repo, await stagedChanges(repo, ['a.md']), 'chore: first', GIT_ENV);
-    expect(await git(repo, ['show', 'HEAD:a.md'])).toBe('staged\n');
+    const done = await commitRecorded(repo, { add: ['a.md'], remove: [] }, 'chore: first', GIT_ENV);
+    expect(done).toEqual(['a.md']);
     expect(await git(repo, ['ls-tree', '-r', '--name-only', 'HEAD'])).toBe('a.md\n');
-    expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('mine.ts');
+    expect(await git(repo, ['status', '--porcelain'])).toBe('A  mine.ts\n');
     expect(await git(repo, ['symbolic-ref', '--short', 'HEAD'])).toBe('main\n');
+  });
+
+  it('commits nothing when the named files already match HEAD', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    const before = await git(repo, ['rev-parse', 'HEAD']);
+    const done = await commitRecorded(
+      repo,
+      { add: ['README.md'], remove: ['absent.md'] },
+      'chore: none',
+      GIT_ENV,
+    );
+    expect(done).toEqual([]);
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(before);
   });
 
   it('R2-4: a commit during a merge is still refused', async () => {
@@ -729,7 +754,8 @@ describe('commitOnly commits the entries that were staged, not the worktree', ()
     await git(repo, ['commit', '-q', '-m', 'main']);
     await git(repo, ['merge', '--no-commit', '--no-ff', 'side']);
     await writeFile(path.join(repo, 'a.md'), 'a\n');
-    await stageNamed(repo, ['a.md'], []);
-    await expect(commitOnly(repo, ['a.md'], 'chore: x', GIT_ENV)).rejects.toThrow(/merge/);
+    await expect(
+      commitRecorded(repo, { add: ['a.md'], remove: [] }, 'chore: x', GIT_ENV),
+    ).rejects.toThrow(/merge/);
   });
 });

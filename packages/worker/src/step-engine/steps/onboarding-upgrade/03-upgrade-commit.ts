@@ -15,7 +15,7 @@ import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { commitOnly, stageNamed, stagedChanges } from '../onboarding/_stage-paths.js';
+import { commitRecorded, stageNamed, stagedChanges } from '../onboarding/_stage-paths.js';
 import {
   RULES_IMPORT_LINE,
   dropIgnoredRulesFiles,
@@ -341,25 +341,6 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
         ]),
       );
       warnings.push(...ignored);
-      // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via
-      // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
-      // aborts the whole stage. Same fix as 12-post-onboarding.
-      await stageNamed(ctx.repoPath, toStage, removedPaths);
-      // The first commit of a new repository holds the whole index on purpose; any other one holds
-      // only the paths named here, so what the person had staged is theirs to commit.
-      const named = [...toStage, ...removedPaths];
-      const staged = didInit
-        ? await stagedChanges(ctx.repoPath)
-        : named.length > 0
-          ? await stagedChanges(ctx.repoPath, named)
-          : [];
-      stagedPaths.push(...staged);
-
-      if (staged.length === 0) {
-        warnings.push('no changes to commit (files already committed or identical)');
-        return { commitPerformed, commitSha, stagedPaths, warnings };
-      }
-
       const message =
         typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
           ? values.commitMessage
@@ -369,15 +350,30 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
       const commitEnv = { ...process.env, ...identity };
+      let staged: string[];
       if (didInit) {
-        await gitExec(['commit', '-m', message], {
-          cwd: ctx.repoPath,
-          env: commitEnv,
-          maxBuffer: GIT_MAX_BUFFER,
-        });
+        // The first commit of a new repository holds the whole index on purpose.
+        await stageNamed(ctx.repoPath, toStage, removedPaths);
+        staged = await stagedChanges(ctx.repoPath);
+        if (staged.length > 0) {
+          await gitExec(['commit', '-m', message], {
+            cwd: ctx.repoPath,
+            env: commitEnv,
+            maxBuffer: GIT_MAX_BUFFER,
+          });
+        }
       } else {
-        await commitOnly(ctx.repoPath, staged, message, commitEnv);
+        // Any other commit is built in a private index, so what the person staged stays theirs.
+        const plan = { add: toStage, remove: removedPaths };
+        staged = await commitRecorded(ctx.repoPath, plan, message, commitEnv);
       }
+      stagedPaths.push(...staged);
+
+      if (staged.length === 0) {
+        warnings.push('no changes to commit (files already committed or identical)');
+        return { commitPerformed, commitSha, stagedPaths, warnings };
+      }
+
       const { stdout } = await gitExec(['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;

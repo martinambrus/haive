@@ -106,15 +106,19 @@ no record, so a Retry of 08 cannot lose it: 12 reads it from git and the disk. A
 under a legacy directory and gone from disk has its deletion staged, and so is the file now at
 `legacy/<rel>` or `<rel>` under the destination (`LEGACY_KNOWLEDGE_MIGRATIONS`). A legacy file git
 never tracked is the person's, so its destination is not staged, as with 07's quarantine. A file an
-agent writes without reporting it stays uncommitted. The commit is built from the index entries of
-the staged names, not from `git commit --only`, which re-reads the named paths from the worktree: a
-file that changed after it was staged (the plan-mirror sweep, a save from the Terminal tab) would be
-committed with content Haive never staged. `commitOnly` (`_stage-paths.ts`) copies `HEAD` and those
-entries into a private `GIT_INDEX_FILE`, then `write-tree`, `commit-tree` and a compare-and-swap
-`update-ref HEAD`, so a file the person had already staged is neither committed nor unstaged and
-the real index is never written. A pathspec is `:(literal)` and the staged list is read with
-`--no-renames`, since a detected rename would name only the new path and leave the deletion out. A
-merge or cherry-pick in progress is refused, which fails the step loudly, as `--only` did. The first commit of a
+agent writes without reporting it stays uncommitted. The commit is built in a private index, not
+with `git commit --only` (which re-reads the named paths from the worktree) and not from the real
+index (another writer, the plan-mirror save or a Terminal `git add`, can stage a newer blob there
+between our own steps). `commitRecorded` (`_stage-paths.ts`) reads `HEAD` into a private
+`GIT_INDEX_FILE`, runs `git add -f` for the recorded files and links and `git rm --cached` for the
+removals against it, takes the names that differ from `HEAD` there, and commits them with
+`write-tree`, `commit-tree` and a compare-and-swap `update-ref HEAD`. It then runs `git reset -q`
+on exactly those names so the real index agrees with the new `HEAD`; every other real-index entry,
+a file the person staged included, is neither committed nor unstaged (a blob they staged at one of
+those very names is not committed and is reset to `HEAD`). A pathspec is `:(literal)`
+and the changed list is read with `--no-renames`, since a detected rename would name only the new
+path and leave the deletion out. A merge or cherry-pick in progress is refused, which fails the
+step loudly, as `--only` did. The first commit of a
 repository 12 or 03 had to `git init` is the one exception, as above.
 
 **The cli-rules row records the region on disk, not the render.** 07 leaves an existing region

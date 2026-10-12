@@ -35,7 +35,7 @@ import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspac
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
 import {
   collectOnboardingStagePaths,
-  commitOnly,
+  commitRecorded,
   stageNamed,
   stagedChanges,
 } from './_stage-paths.js';
@@ -749,27 +749,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         new Set([...EXTRA_RULES_STAGE_PATHS, ...RTK_SETTINGS_PATHS]),
       );
       warnings.push(...ignored);
-      // -f: .haive/install.json lives under .haive/, which 01-worktree-setup adds to
-      // .git/info/exclude on repos that ran a workflow task. A plain `git add` of an
-      // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
-      // staged but uncommitted). Every path here is a curated deliverable, so force it.
-      await stageNamed(ctx.repoPath, keep, removedPaths);
-      // The first commit of a new repository holds the whole index on purpose; any other one holds
-      // only the paths named here, so what the person had staged is theirs to commit.
-      const named = [...keep, ...removedPaths];
-      const staged = didInit
-        ? await stagedChanges(ctx.repoPath)
-        : named.length > 0
-          ? await stagedChanges(ctx.repoPath, named)
-          : [];
-      stagedPaths.push(...staged);
-
-      if (staged.length === 0) {
-        warnings.push('no changes to commit (files already committed or identical)');
-        ctx.logger.info('post-onboarding: nothing staged after git add');
-        return result();
-      }
-
       const message =
         typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
           ? values.commitMessage
@@ -779,15 +758,31 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
       const commitEnv = { ...process.env, ...identity };
+      let staged: string[];
       if (didInit) {
-        await gitExec(['commit', '-m', message], {
-          cwd: ctx.repoPath,
-          env: commitEnv,
-          maxBuffer: GIT_MAX_BUFFER,
-        });
+        // The first commit of a new repository holds the whole index on purpose.
+        await stageNamed(ctx.repoPath, keep, removedPaths);
+        staged = await stagedChanges(ctx.repoPath);
+        if (staged.length > 0) {
+          await gitExec(['commit', '-m', message], {
+            cwd: ctx.repoPath,
+            env: commitEnv,
+            maxBuffer: GIT_MAX_BUFFER,
+          });
+        }
       } else {
-        await commitOnly(ctx.repoPath, staged, message, commitEnv);
+        // Any other commit is built in a private index, so what the person staged stays theirs.
+        const plan = { add: keep, remove: removedPaths };
+        staged = await commitRecorded(ctx.repoPath, plan, message, commitEnv);
       }
+      stagedPaths.push(...staged);
+
+      if (staged.length === 0) {
+        warnings.push('no changes to commit (files already committed or identical)');
+        ctx.logger.info('post-onboarding: nothing staged after git add');
+        return result();
+      }
+
       const { stdout } = await gitExec(['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;

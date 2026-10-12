@@ -213,6 +213,7 @@ export async function stageNamed(
   repoPath: string,
   add: readonly string[],
   remove: readonly string[],
+  env?: NodeJS.ProcessEnv,
 ): Promise<void> {
   // Only a file or a link is named: a directory standing at a recorded path would be added whole.
   const files: string[] = [];
@@ -223,19 +224,25 @@ export async function stageNamed(
   if (files.length > 0) {
     await gitExec(['add', '-f', '--', ...literal(files)], {
       cwd: repoPath,
+      env,
       maxBuffer: GIT_MAX_BUFFER,
     });
   }
   if (remove.length > 0) {
     await gitExec(['rm', '--cached', '--ignore-unmatch', '-q', '--', ...literal(remove)], {
       cwd: repoPath,
+      env,
       maxBuffer: GIT_MAX_BUFFER,
     });
   }
 }
 
 /** The paths the index changes against HEAD: those among `only`, or every one without it. */
-export async function stagedChanges(repoPath: string, only?: readonly string[]): Promise<string[]> {
+export async function stagedChanges(
+  repoPath: string,
+  only?: readonly string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<string[]> {
   const { stdout } = await gitExec(
     [
       'diff',
@@ -245,7 +252,7 @@ export async function stagedChanges(repoPath: string, only?: readonly string[]):
       '-z',
       ...(only ? ['--', ...literal(only)] : []),
     ],
-    { cwd: repoPath, maxBuffer: GIT_MAX_BUFFER },
+    { cwd: repoPath, env, maxBuffer: GIT_MAX_BUFFER },
   );
   const changed = stdout.split('\0').filter((s) => s.length > 0);
   if (!only) return changed;
@@ -254,14 +261,16 @@ export async function stagedChanges(repoPath: string, only?: readonly string[]):
   return changed.filter((p) => named.has(p));
 }
 
-/** Commit exactly the index entries of `paths`, as staged now: `git commit --only` would re-read
- *  them from the worktree. Anything else the person staged stays in the real index, uncommitted. */
-export async function commitOnly(
+/** Stage `add` and `remove` into a private index built from HEAD and commit what that changes among
+ *  those names. The real index is never read for them, so a blob another writer stages there in the
+ *  meantime cannot enter the commit; afterwards the real index agrees with HEAD for the committed
+ *  names only, and keeps whatever else the person staged. Returns the committed names. */
+export async function commitRecorded(
   repoPath: string,
-  paths: readonly string[],
+  plan: StagePlan,
   message: string,
   env: NodeJS.ProcessEnv,
-): Promise<void> {
+): Promise<string[]> {
   const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
     gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
   for (const mark of ['MERGE_HEAD', 'CHERRY_PICK_HEAD']) {
@@ -271,29 +280,25 @@ export async function commitOnly(
   }
   const head = await gitRun(repoPath, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
   const parent = head.code === 0 ? head.stdout.trim() : '';
-  const entries = new Map<string, string>();
-  const listed = await run(['ls-files', '-s', '-z', '--', ...literal(paths)]);
-  for (const line of listed.stdout.split('\0')) {
-    const m = /^(\d+) ([0-9a-f]+) 0\t([\s\S]*)$/.exec(line);
-    if (m) entries.set(m[3]!, `${m[1]},${m[2]},${m[3]}`);
-  }
-  const absent = paths.filter((p) => !entries.has(p));
   const indexFile = path.join(tmpdir(), `${randomUUID()}.index`);
   const temp = { GIT_INDEX_FILE: indexFile };
   try {
     if (parent !== '') await run(['read-tree', parent], temp);
-    for (const entry of entries.values()) {
-      await run(['update-index', '--add', '--cacheinfo', entry], temp);
-    }
-    if (absent.length > 0) {
-      await run(['update-index', '--force-remove', '--', ...absent], temp);
-    }
+    await stageNamed(repoPath, plan.add, plan.remove, { ...env, ...temp });
+    const changed = await stagedChanges(repoPath, [...plan.add, ...plan.remove], {
+      ...env,
+      ...temp,
+    });
+    if (changed.length === 0) return [];
     const tree = (await run(['write-tree'], temp)).stdout.trim();
     const commit = (
       await run(['commit-tree', tree, ...(parent !== '' ? ['-p', parent] : []), '-m', message])
     ).stdout.trim();
     const subject = message.split('\n')[0]!;
     await run(['update-ref', '-m', `commit: ${subject}`, 'HEAD', commit, parent]);
+    // The commit has landed; a real index locked by another writer only leaves these names stale there.
+    await run(['reset', '-q', '--', ...literal(changed)]).catch(() => undefined);
+    return changed;
   } finally {
     await rm(indexFile, { force: true });
   }
