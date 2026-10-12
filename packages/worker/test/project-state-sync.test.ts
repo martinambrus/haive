@@ -18,9 +18,10 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
-import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
+import { CHECKOUT_HOLDING_TASK_STATUSES, normalizeContent, sha256Hex } from '@haive/shared';
 import {
   canonicalJson,
+  claimFileName,
   emptyProjectState,
   normalizeProjectState,
   renderContextColumnSchema,
@@ -1703,6 +1704,128 @@ describe('syncProjectStateFromCheckout: a writer failed after it rendered a pend
     const { outcome, trace } = await s.run();
 
     expect(outcome).toBe('conflict');
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
+  });
+});
+
+describe('syncProjectStateFromCheckout: a pending claim question', () => {
+  const PATH = 'docs/guide.md';
+  const UNIT = claimFileName(PATH);
+  const TEXT = 'the guide\n';
+  const claim = (writtenHash: string) => ({
+    path: PATH,
+    templateId: 'workflow-config',
+    kind: 'workflow-config',
+    schemaVersion: 1,
+    templateHash: 'c'.repeat(64),
+    writtenHash,
+    haiveVersion: '1.2.3',
+  });
+  const CBASE = claim('1'.repeat(64));
+  const CMINE = claim('2'.repeat(64));
+  const CTHEIRS = claim('3'.repeat(64));
+  const withClaims = (...claims: ReturnType<typeof claim>[]): ProjectStateRecord => ({
+    ...record(BASE),
+    claims,
+  });
+
+  async function claimSetup(local: ReturnType<typeof claim>, incoming: ReturnType<typeof claim>) {
+    const s = await setup(synced(BASE));
+    s.fake.insert(schema.onboardingArtifacts, {
+      userId: USER,
+      repositoryId: REPO,
+      taskId: null,
+      diskPath: local.path,
+      templateId: local.templateId,
+      templateKind: local.kind,
+      templateSchemaVersion: local.schemaVersion,
+      templateContentHash: local.templateHash,
+      writtenHash: local.writtenHash,
+      sourceStepId: 'project-state-import',
+      source: 'backfill',
+      importedAt: new Date(5),
+      haiveVersion: local.haiveVersion,
+      supersededAt: null,
+    });
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit: UNIT,
+      base: { v: CBASE },
+      local: { v: CMINE },
+      incoming: { v: CTHEIRS },
+    });
+    await s.putRecord(withClaims(incoming));
+    return s;
+  }
+
+  it('is kept while the claim still differs on both installs and the disk holds neither', async () => {
+    const s = await claimSetup(CMINE, CTHEIRS);
+
+    await s.run();
+
+    expect(s.pending().map((r) => r.unit)).toEqual([UNIT]);
+  });
+
+  it('follows the claim the checkout holds now, on the same row', async () => {
+    const newer = claim('4'.repeat(64));
+    const s = await claimSetup(CMINE, newer);
+    const id = s.pending()[0]!.id;
+
+    await s.run();
+
+    expect(s.pending()[0]!.id).toBe(id);
+    expect(json(s.pending()[0]!.incoming)).toEqual({ v: newer });
+    expect(json(s.pending()[0]!.local)).toEqual({ v: CMINE });
+  });
+
+  it('converges once both installs hold the same claim', async () => {
+    const s = await claimSetup(CMINE, CMINE);
+
+    await s.run();
+
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows()[0]).toMatchObject({ resolution: 'converged' });
+    expect(s.conflictRows()[0]!.resolvedAt).toBeInstanceOf(Date);
+  });
+
+  it('converges once the teammate is back at the base', async () => {
+    const s = await claimSetup(CMINE, CBASE);
+
+    await s.run();
+
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('converges once the disk holds the bytes of one side only', async () => {
+    const mine = claim(sha256Hex(normalizeContent(TEXT)));
+    const s = await claimSetup(mine, CTHEIRS);
+    s.fake.patch(schema.projectStateConflicts, s.pending()[0]!.id as string, {
+      local: { v: mine },
+    });
+    await s.put(PATH, TEXT);
+
+    await s.run();
+
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('is kept while the disk holds the bytes of neither side', async () => {
+    const s = await claimSetup(CMINE, CTHEIRS);
+    await s.put(PATH, TEXT);
+
+    await s.run();
+
+    expect(s.pending()).toHaveLength(1);
+  });
+
+  it('writes nothing on a second sync of the same files', async () => {
+    const s = await claimSetup(CMINE, CTHEIRS);
+    await s.run();
+    const before = s.dump();
+
+    const { trace } = await s.run();
+
     expect(trace.filter(isWrite)).toEqual([]);
     expect(s.dump()).toEqual(before);
   });

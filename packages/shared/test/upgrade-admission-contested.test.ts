@@ -6,7 +6,7 @@ import {
   upgradeAdmission,
   type RepositoryForUpgrade,
 } from '../src/onboarding-admission.js';
-import { RTK_ENABLED_UNIT } from '../src/project-state/index.js';
+import { RTK_ENABLED_UNIT, claimFileName } from '../src/project-state/index.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -83,6 +83,14 @@ describe('upgradeAdmission: a pending project state conflict', () => {
       reason: 'contested',
       units: [RTK_ENABLED_UNIT],
     });
+  });
+
+  it('holds on a pending claim row, the unit being the claim file name', async () => {
+    const s = setup();
+    const unit = claimFileName('.claude/agents/code-reviewer.md');
+    s.pend(unit);
+
+    expect(await s.admission()).toEqual({ admitted: false, reason: 'contested', units: [unit] });
   });
 
   it('admits again once the row is resolved, and ignores another repository’s row', async () => {

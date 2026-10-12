@@ -990,3 +990,88 @@ describe('writeProjectStateRecord: one claim per live ledger row', () => {
     expect(await claimFiles(s.root)).toContain(stray);
   });
 });
+
+describe('writeProjectStateRecord: a claim a sync left pending', () => {
+  const TASK = '00000000-0000-4000-8000-0000000000c1';
+  const PATH = '.claude/agents/code-reviewer.md';
+  const UNIT = claimFileName(PATH);
+  const claim = (hash: string) => ({
+    path: PATH,
+    templateId: 'agent.code-reviewer',
+    kind: 'agent',
+    schemaVersion: 2,
+    templateHash: 'a'.repeat(64),
+    writtenHash: hash.repeat(64),
+    haiveVersion: '1.2.3',
+  });
+  const BASE = claim('1');
+  const MINE = claim('2');
+  const THEIRS = claim('3');
+  const liveRow = (writtenHash: string) => ({
+    userId: USER,
+    repositoryId: REPO,
+    taskId: TASK,
+    diskPath: PATH,
+    templateId: 'agent.code-reviewer',
+    templateKind: 'agent',
+    templateSchemaVersion: 2,
+    templateContentHash: 'a'.repeat(64),
+    writtenHash,
+    sourceStepId: '12-post-onboarding',
+    source: 'onboarding',
+    haiveVersion: '1.2.3',
+    supersededAt: null,
+  });
+  const claimFile = (root: string) => join(root, STATE_DIR, UNIT);
+  const baseClaims = (s: Awaited<ReturnType<typeof setup>>) =>
+    (s.syncRows()[0]![s.col.baseSnapshot] as { claims: unknown[] }).claims;
+
+  it('writes the claim file as the teammate has it, keeps the old base for it, and keeps the local row', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, liveRow(MINE.writtenHash));
+    s.pend(UNIT, { base: BASE, local: MINE, incoming: THEIRS });
+
+    await s.write(context(), true);
+
+    expect(JSON.parse(readFileSync(claimFile(s.root), 'utf8'))).toEqual(THEIRS);
+    expect(json(baseClaims(s))).toEqual([BASE]);
+    const [live] = s.fake.rows(schema.onboardingArtifacts) as Record<string, unknown>[];
+    expect(live).toMatchObject({ writtenHash: MINE.writtenHash, supersededAt: null });
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(row!.resolvedAt ?? null).toBeNull();
+  });
+
+  it('writes no claim file where the teammate removed it, and keeps the base side', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, liveRow(MINE.writtenHash));
+    s.pend(UNIT, { base: BASE, local: MINE });
+
+    await s.write(context(), true);
+
+    expect(existsSync(claimFile(s.root))).toBe(false);
+    expect(json(baseClaims(s))).toEqual([BASE]);
+  });
+
+  it('records the claim it holds as the row’s local side', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, liveRow(BASE.writtenHash));
+    s.pend(UNIT, { base: BASE, local: MINE, incoming: THEIRS });
+
+    await s.write(context(), true);
+
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(json(row!.local)).toEqual({ v: BASE });
+    expect(row!.resolvedAt ?? null).toBeNull();
+  });
+
+  it('settles the row once the claim it holds is the one the teammate has', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, liveRow(THEIRS.writtenHash));
+    s.pend(UNIT, { base: BASE, local: MINE, incoming: THEIRS });
+
+    await s.write(context(), true);
+
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(row!.resolution).toBe('converged');
+  });
+});

@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { rtkEnabledUpdate } from '@haive/shared/rtk-enabled';
@@ -6,23 +6,33 @@ import { isUtf8 } from 'node:buffer';
 import {
   isPathContainmentError,
   readFileNoFollow,
+  removeFileIfNoFollow,
   rewriteFileIfNoFollow,
+  writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import {
+  FOREIGN_TEMPLATE,
   PROJECT_STATE_DIR,
+  PROJECT_STATE_IMPORT_STEP_ID,
   ProjectStateError,
   RENDER_UNIT,
   RTK_ENABLED_UNIT,
+  claimFileName,
+  claimSchema,
   conflictBody,
   conflictSideValue,
   emptyProjectState,
+  isClaimUnit,
   isConflictUnit,
+  localTemplateId,
   normalizeProjectState,
+  readRenderContextColumn,
   renderContextColumnSchema,
   renderProjectState,
   renderSchema,
   sameValue,
   type ProjectRender,
+  type ProjectStateClaim,
   type ProjectStateRecord,
   type ProjectStateAnswer,
   type ProjectStateResolvePayload,
@@ -36,7 +46,16 @@ import {
   writeApplicableTemplateIds,
 } from './sync.js';
 import { lockPlanMerge } from '@haive/shared/plan';
-import { loadPendingRenderConflicts, lockProjectState } from './write.js';
+import { extractBundleItemId } from '../step-engine/_custom-bundle-loader.js';
+import { renderContextFromColumn } from '../step-engine/_render-targets.js';
+import { recordableContext } from '../step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import { readClaimedBytes } from './claim-disk.js';
+import {
+  loadLocalBundles,
+  loadPendingRenderConflicts,
+  loadRecordClaims,
+  lockProjectState,
+} from './write.js';
 
 const RENDER_FILE = `${PROJECT_STATE_DIR}/project/render.json`;
 const MAX_RENDER_BYTES = 1024 * 1024;
@@ -71,9 +90,17 @@ class RenderFileMovedError extends Error {
   }
 }
 
+interface PutBack {
+  repoPath: string;
+  rel: string;
+  /** The bytes the file held before the answer; null where the answer created it. */
+  raw: Buffer | null;
+  wrote: Buffer;
+}
+
 interface After {
   resync: string | null;
-  putBack: { repoPath: string; raw: Buffer; wrote: Buffer } | null;
+  putBack: PutBack | null;
 }
 
 /** Answers one pending conflict of the render unit, so that the file, the sync base and the column
@@ -121,11 +148,7 @@ export async function resolveProjectStateConflict(
 
 /** Under the lock, so no sync reads in between; only an answer still pending is undone, since a
  *  commit whose acknowledgement was lost may have landed. */
-async function putBackIfPending(
-  db: Database,
-  conflictId: string,
-  putBack: { repoPath: string; raw: Buffer; wrote: Buffer },
-): Promise<void> {
+async function putBackIfPending(db: Database, conflictId: string, putBack: PutBack): Promise<void> {
   await db.transaction(async (tx) => {
     const [row] = await tx
       .select({ repositoryId: schema.projectStateConflicts.repositoryId })
@@ -140,9 +163,12 @@ async function putBackIfPending(
       .where(eq(schema.projectStateConflicts.id, conflictId));
     if (again?.resolvedAt !== null) return;
     // Only over the bytes the failed answer wrote: a file someone changed since is theirs.
-    await rewriteFileIfNoFollow(putBack.repoPath, RENDER_FILE, (data) =>
-      data.equals(putBack.wrote) ? putBack.raw : null,
-    );
+    const { repoPath, rel, raw, wrote } = putBack;
+    if (raw === null) {
+      await removeFileIfNoFollow(repoPath, rel, (data) => data.equals(wrote));
+    } else {
+      await rewriteFileIfNoFollow(repoPath, rel, (data) => (data.equals(wrote) ? raw : null));
+    }
   });
 }
 
@@ -181,6 +207,262 @@ async function answerRtkQuestion(
     conflict: conflictBody(closed ?? { ...row, resolution: answer, resolvedAt: now }),
     written: [],
   };
+}
+
+async function loadSyncRow(tx: Tx, repositoryId: string) {
+  const [sync] = await tx
+    .select({
+      baseSnapshot: schema.projectStateSync.baseSnapshot,
+      lastError: schema.projectStateSync.lastError,
+    })
+    .from(schema.projectStateSync)
+    .where(eq(schema.projectStateSync.repositoryId, repositoryId))
+    .limit(1);
+  return sync;
+}
+
+type ClaimFile =
+  | { kind: 'absent' }
+  | { kind: 'unreadable' }
+  | { kind: 'file'; claim: ProjectStateClaim; raw: Buffer };
+
+async function readClaimFile(repoPath: string, rel: string): Promise<ClaimFile> {
+  try {
+    const read = await readFileNoFollow(repoPath, rel, {
+      strict: true,
+      maxBytes: MAX_RENDER_BYTES,
+    });
+    if (read === null) return { kind: 'absent' };
+    if (read.truncated || !isUtf8(read.data)) return { kind: 'unreadable' };
+    const parsed = claimSchema.safeParse(JSON.parse(read.data.toString('utf8')));
+    return parsed.success
+      ? { kind: 'file', claim: parsed.data, raw: read.data }
+      : { kind: 'unreadable' };
+  } catch (err) {
+    if (err instanceof SyntaxError || isPathContainmentError(err)) return { kind: 'unreadable' };
+    throw err;
+  }
+}
+
+/** A claim side as the row holds it: the claim, `undefined` where the side has none, `null` where
+ *  what it holds is not a claim. */
+function claimSide(side: unknown): ProjectStateClaim | undefined | null {
+  const value = conflictSideValue(side);
+  if (value === undefined) return undefined;
+  const parsed = claimSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Answers a question about one artifact claim: keep mine writes the claim file and the base at the
+ *  local row, take theirs retires that row and records their claim as an import marker. */
+async function answerClaimQuestion(
+  tx: Tx,
+  {
+    repositoryId,
+    userId,
+    answer,
+    row,
+    repo,
+    repoPath,
+    after,
+    moved,
+  }: {
+    repositoryId: string;
+    userId: string;
+    answer: ProjectStateAnswer;
+    row: typeof schema.projectStateConflicts.$inferSelect;
+    repo: { userId: string; renderContext: unknown };
+    repoPath: string;
+    after: After;
+    moved: () => ProjectStateResolveResult;
+  },
+): Promise<ProjectStateResolveResult> {
+  const rel = `${PROJECT_STATE_DIR}/${row.unit}`;
+  const base = claimSide(row.base);
+  const incoming = claimSide(row.incoming);
+  const named = incoming ?? base ?? claimSide(row.local);
+  if (base === null || incoming === null || named === null || named === undefined) {
+    return { kind: 'invalid' };
+  }
+  const path = named.path;
+  if (claimFileName(path) !== row.unit) return { kind: 'invalid' };
+
+  const file = await readClaimFile(repoPath, rel);
+  if (file.kind === 'unreadable') return moved();
+  if (incoming === undefined ? file.kind !== 'absent' : file.kind !== 'file') return moved();
+  if (incoming !== undefined && file.kind === 'file' && !sameValue(file.claim, incoming)) {
+    return moved();
+  }
+
+  const mine = (await loadRecordClaims(tx, repositoryId)).find((claim) => claim.path === path);
+  if (answer === 'keep_mine' && mine === undefined) return { kind: 'no_local' };
+  const chosen = answer === 'keep_mine' ? mine : incoming;
+
+  let fileText: string | null = null;
+  if (answer === 'keep_mine' && !(file.kind === 'file' && sameValue(file.claim, mine))) {
+    try {
+      fileText = renderProjectState({ ...emptyProjectState(), claims: [mine!] }).get(row.unit)!;
+    } catch (err) {
+      if (err instanceof ProjectStateError) return { kind: 'invalid' };
+      throw err;
+    }
+  }
+
+  const sync = await loadSyncRow(tx, repositoryId);
+  const snapshot = (sync?.baseSnapshot ?? {}) as Partial<ProjectStateRecord>;
+  const baseClaims = Array.isArray(snapshot.claims) ? snapshot.claims : [];
+  const now = new Date();
+
+  if (answer === 'take_theirs') {
+    const [live] = await tx
+      .select({ id: schema.onboardingArtifacts.id })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, path),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      )
+      .limit(1);
+    if (live) {
+      await tx
+        .update(schema.onboardingArtifacts)
+        .set({ supersededAt: now, importedAt: now })
+        .where(eq(schema.onboardingArtifacts.id, live.id));
+    }
+    if (incoming !== undefined) {
+      await insertImportMarker(tx, { repositoryId, repo, repoPath, claim: incoming, now });
+    }
+    await writeApplicableTemplateIds(tx, {
+      repositoryId,
+      userId: repo.userId,
+      requireResolved: repo.renderContext !== null,
+    });
+  }
+
+  const [closed] = await tx
+    .update(schema.projectStateConflicts)
+    .set({ resolution: answer, resolvedAt: now, resolvedBy: userId })
+    .where(eq(schema.projectStateConflicts.id, row.id))
+    .returning();
+
+  const synced = {
+    baseSnapshot: normalizeProjectState({
+      ...emptyProjectState(),
+      ...snapshot,
+      claims: [
+        ...baseClaims.filter((claim) => claim.path !== path),
+        ...(chosen === undefined ? [] : [chosen]),
+      ],
+    }),
+    lastError: sync?.lastError ?? null,
+    updatedAt: now,
+  };
+  await tx
+    .insert(schema.projectStateSync)
+    .values({ repositoryId, ...synced })
+    .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
+
+  const written: string[] = [];
+  if (fileText !== null) {
+    const bytes = Buffer.from(fileText, 'utf8');
+    if (file.kind === 'file') {
+      const outcome = await rewriteFileIfNoFollow(repoPath, rel, (data) =>
+        data.equals(file.raw) ? bytes : null,
+      );
+      if (outcome !== 'rewritten') throw new RenderFileMovedError(repoPath);
+    } else {
+      try {
+        await writeFileNoFollow(repoPath, rel, bytes, {
+          mode: 'create-exclusive',
+          createParents: true,
+        });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST')
+          throw new RenderFileMovedError(repoPath);
+        throw err;
+      }
+    }
+    after.putBack = {
+      repoPath,
+      rel,
+      raw: file.kind === 'file' ? file.raw : null,
+      wrote: bytes,
+    };
+    written.push(rel);
+  } else {
+    const again = await readClaimFile(repoPath, rel);
+    const unchanged =
+      again.kind === file.kind &&
+      (again.kind !== 'file' || (file.kind === 'file' && again.raw.equals(file.raw)));
+    if (!unchanged) throw new RenderFileMovedError(repoPath);
+  }
+
+  return {
+    kind: 'resolved',
+    conflict: conflictBody(closed ?? { ...row, resolution: answer, resolvedAt: now }),
+    written,
+  };
+}
+
+/** The ledger row an import leaves for a claim it adopted: a `backfill` row of no task, dated by
+ *  the import. The bytes are kept only when they are the claim's own. */
+async function insertImportMarker(
+  tx: Tx,
+  {
+    repositoryId,
+    repo,
+    repoPath,
+    claim,
+    now,
+  }: {
+    repositoryId: string;
+    repo: { userId: string; renderContext: unknown };
+    repoPath: string;
+    claim: ProjectStateClaim;
+    now: Date;
+  },
+): Promise<void> {
+  const mapped = localTemplateId(claim.templateId, await loadLocalBundles(tx, repositoryId));
+  const foreign = mapped === FOREIGN_TEMPLATE;
+  const disk = await readClaimedBytes(repoPath, claim);
+  const read = disk === 'unread' ? null : disk;
+  const column = readRenderContextColumn(repo.renderContext);
+  const providers =
+    column.kind === 'column'
+      ? await tx
+          .select({ name: schema.cliProviders.name, enabled: schema.cliProviders.enabled })
+          .from(schema.cliProviders)
+          .where(eq(schema.cliProviders.userId, repo.userId))
+      : [];
+  await tx.insert(schema.onboardingArtifacts).values({
+    userId: repo.userId,
+    repositoryId,
+    taskId: null,
+    diskPath: claim.path,
+    templateId: foreign ? claim.templateId : mapped,
+    templateKind: claim.kind,
+    templateSchemaVersion: claim.schemaVersion,
+    templateContentHash: claim.templateHash,
+    writtenHash: claim.writtenHash,
+    writtenContent: read !== null && read.hash === claim.writtenHash ? read.content : null,
+    lastObservedDiskHash: read?.hash ?? null,
+    userModified: false,
+    formValuesSnapshot:
+      column.kind === 'column'
+        ? (recordableContext(
+            renderContextFromColumn(column.column, providers),
+            column.column.rtkChoiceRecorded,
+          ) as unknown as Record<string, unknown>)
+        : null,
+    sourceStepId: PROJECT_STATE_IMPORT_STEP_ID,
+    source: 'backfill',
+    haiveVersion: claim.haiveVersion === '' ? null : claim.haiveVersion,
+    generatedAt: now,
+    importedAt: now,
+    bundleItemId: foreign ? null : extractBundleItemId(mapped),
+  });
 }
 
 async function answerInTransaction(
@@ -245,6 +527,19 @@ async function answerInTransaction(
       return { kind: 'moved' };
     };
 
+    if (isClaimUnit(row.unit)) {
+      return answerClaimQuestion(tx, {
+        repositoryId,
+        userId,
+        answer,
+        row,
+        repo,
+        repoPath,
+        after,
+        moved,
+      });
+    }
+
     const whole = row.unit === RENDER_UNIT;
     const key = keyOf(row.unit);
     const incoming = conflictSideValue(row.incoming);
@@ -294,14 +589,7 @@ async function answerInTransaction(
       }
     }
 
-    const [sync] = await tx
-      .select({
-        baseSnapshot: schema.projectStateSync.baseSnapshot,
-        lastError: schema.projectStateSync.lastError,
-      })
-      .from(schema.projectStateSync)
-      .where(eq(schema.projectStateSync.repositoryId, repositoryId))
-      .limit(1);
+    const sync = await loadSyncRow(tx, repositoryId);
     const snapshot = (sync?.baseSnapshot ?? {}) as Partial<ProjectStateRecord>;
     const baseRender = (snapshot.render ?? null) as Json | null;
     const baseNext = whole
@@ -355,7 +643,12 @@ async function answerInTransaction(
         data.equals(read.raw) ? Buffer.from(fileText, 'utf8') : null,
       );
       if (outcome !== 'rewritten') throw new RenderFileMovedError(repoPath);
-      after.putBack = { repoPath, raw: read.raw, wrote: Buffer.from(fileText, 'utf8') };
+      after.putBack = {
+        repoPath,
+        rel: RENDER_FILE,
+        raw: read.raw,
+        wrote: Buffer.from(fileText, 'utf8'),
+      };
       written.push(RENDER_FILE);
     } else {
       const now = await readRenderFile(repoPath);

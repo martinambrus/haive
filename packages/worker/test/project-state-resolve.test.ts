@@ -1,13 +1,17 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { normalizeContent, sha256Hex } from '@haive/shared';
 import {
+  claimFileName,
   conflictSide,
   emptyProjectState,
+  isImportMarker,
   normalizeProjectState,
   renderProjectState,
   type ProjectRender,
@@ -680,5 +684,278 @@ describe('a failure after the file would be rewritten', () => {
     expect((await s.answer('keep_mine')).kind).toBe('resolved');
     expect(await s.fileText()).toBe(renderText(MINE));
     expect((await sync(s)).outcome).toBe('unchanged');
+  });
+});
+
+describe('a claim question', () => {
+  const CPATH = 'docs/guide.md';
+  const CUNIT = claimFileName(CPATH);
+  const CREL = `${STATE_DIR}/${CUNIT}`;
+  const DISK_TEXT = 'the guide as the teammate wrote it\n';
+  const DISK_HASH = sha256Hex(normalizeContent(DISK_TEXT));
+  const claim = (writtenHash: string, over: Json = {}) => ({
+    path: CPATH,
+    templateId: 'workflow-config',
+    kind: 'workflow-config',
+    schemaVersion: 1,
+    templateHash: 'c'.repeat(64),
+    writtenHash,
+    haiveVersion: '1.2.3',
+    ...over,
+  });
+  const CBASE = claim('1'.repeat(64));
+  const CMINE = claim('2'.repeat(64));
+  const CTHEIRS = claim(DISK_HASH);
+  const claimText = (c: unknown): string =>
+    renderProjectState({ ...emptyProjectState(), claims: [c as never] }).get(CUNIT)!;
+
+  async function claimSetup(
+    over: {
+      local?: unknown;
+      incoming?: unknown;
+      file?: string | null;
+      disk?: string | null;
+    } = {},
+  ) {
+    const s = await setup({ rows: {} });
+    const incoming = 'incoming' in over ? over.incoming : CTHEIRS;
+    const local = 'local' in over ? over.local : CMINE;
+    const id = randomUUID();
+    s.fake.insert(schema.projectStateConflicts, {
+      id,
+      repositoryId: REPO,
+      unit: CUNIT,
+      base: conflictSide(CBASE),
+      local: conflictSide(local),
+      incoming: conflictSide(incoming),
+      detectedAt: new Date(2000),
+      resolution: null,
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+    if (local !== undefined) {
+      const c = local as ReturnType<typeof claim>;
+      s.fake.insert(schema.onboardingArtifacts, {
+        id: randomUUID(),
+        userId: OWNER,
+        repositoryId: REPO,
+        taskId: ONBOARDING,
+        diskPath: c.path,
+        templateId: c.templateId,
+        templateKind: c.kind,
+        templateSchemaVersion: c.schemaVersion,
+        templateContentHash: c.templateHash,
+        writtenHash: c.writtenHash,
+        userModified: false,
+        sourceStepId: '12-post-onboarding',
+        source: 'onboarding',
+        haiveVersion: c.haiveVersion,
+        generatedAt: new Date(5000),
+        supersededAt: null,
+      });
+    }
+    const file = 'file' in over ? over.file : claimText(incoming);
+    if (file !== null && file !== undefined) {
+      await mkdir(dirname(join(s.root, CREL)), { recursive: true });
+      await writeFile(join(s.root, CREL), file);
+    }
+    if (over.disk !== undefined && over.disk !== null) {
+      await mkdir(dirname(join(s.root, CPATH)), { recursive: true });
+      await writeFile(join(s.root, CPATH), over.disk);
+    }
+    const ledger = () => s.fake.rows(schema.onboardingArtifacts) as Record<string, unknown>[];
+    const claimFileText = () => readFile(join(s.root, CREL), 'utf8');
+    const baseClaims = () => (s.syncRow().baseSnapshot as { claims: unknown[] }).claims;
+    return { ...s, id, ledger, claimFileText, baseClaims };
+  }
+
+  it('keep mine writes my claim to the file and the base and leaves the ledger as it is', async () => {
+    const s = await claimSetup();
+    const ledgerBefore = json(s.ledger());
+    const columnBefore = json(s.repoRow().renderContext);
+
+    const result = await s.answer('keep_mine', s.id);
+
+    expect(result).toMatchObject({ kind: 'resolved', written: [CREL] });
+    expect(await s.claimFileText()).toBe(claimText(CMINE));
+    expect(s.baseClaims()).toEqual([CMINE]);
+    expect(json(s.ledger())).toEqual(ledgerBefore);
+    expect(json(s.repoRow().renderContext)).toEqual(columnBefore);
+    expect(s.rowOf(s.id)).toMatchObject({ resolution: 'keep_mine', resolvedBy: OWNER });
+  });
+
+  it('keep mine writes the file anew where the teammate removed the claim', async () => {
+    const s = await claimSetup({ incoming: undefined, file: null });
+
+    const result = await s.answer('keep_mine', s.id);
+
+    expect(result).toMatchObject({ kind: 'resolved', written: [CREL] });
+    expect(await s.claimFileText()).toBe(claimText(CMINE));
+  });
+
+  it('keep mine has nothing to keep where this install holds no such claim', async () => {
+    const s = await claimSetup({ local: undefined });
+    expect(await s.answer('keep_mine', s.id)).toEqual({ kind: 'no_local' });
+    expect(s.rowOf(s.id).resolvedAt).toBeNull();
+  });
+
+  it('take theirs retires my row and records their claim as an import marker', async () => {
+    const s = await claimSetup({ disk: DISK_TEXT });
+    const fileBefore = await s.claimFileText();
+
+    const result = await s.answer('take_theirs', s.id);
+
+    expect(result).toMatchObject({ kind: 'resolved', written: [] });
+    const rows = s.ledger();
+    const mine = rows.find((r) => r.taskId === ONBOARDING)!;
+    expect(mine.supersededAt).toBeInstanceOf(Date);
+    expect(mine.importedAt).toBeInstanceOf(Date);
+    const live = rows.filter((r) => r.supersededAt == null);
+    expect(live).toHaveLength(1);
+    const marker = live[0]!;
+    expect(isImportMarker(marker as never)).toBe(true);
+    expect(marker.taskId == null).toBe(true);
+    expect(marker.importedAt).toBeInstanceOf(Date);
+    expect(marker.importedAt).toEqual(marker.generatedAt);
+    expect(marker).toMatchObject({
+      userId: OWNER,
+      repositoryId: REPO,
+      diskPath: CPATH,
+      templateId: 'workflow-config',
+      templateKind: 'workflow-config',
+      templateSchemaVersion: 1,
+      templateContentHash: CTHEIRS.templateHash,
+      writtenHash: DISK_HASH,
+      writtenContent: DISK_TEXT,
+      lastObservedDiskHash: DISK_HASH,
+      userModified: false,
+      source: 'backfill',
+      sourceStepId: 'project-state-import',
+      haiveVersion: '1.2.3',
+      bundleItemId: null,
+    });
+    expect(marker.formValuesSnapshot).toMatchObject({ framework: 'drupal' });
+    expect(marker.formValuesSnapshot).not.toHaveProperty('rtkChoiceRecorded');
+    expect(s.baseClaims()).toEqual([CTHEIRS]);
+    expect(await s.claimFileText()).toBe(fileBefore);
+    expect(s.repoRow().applicableTemplateIds).toEqual(expect.any(Array));
+    expect(s.rowOf(s.id)).toMatchObject({ resolution: 'take_theirs', resolvedBy: OWNER });
+  });
+
+  it('keeps no bytes in the marker when the disk does not hold their claim', async () => {
+    const s = await claimSetup({ disk: 'something else\n' });
+
+    await s.answer('take_theirs', s.id);
+
+    const marker = s.ledger().find((r) => r.taskId == null)!;
+    expect(marker.writtenContent).toBeNull();
+    expect(marker.lastObservedDiskHash).toBe(sha256Hex(normalizeContent('something else\n')));
+  });
+
+  it('keeps no observed hash in the marker when the path is absent', async () => {
+    const s = await claimSetup();
+
+    await s.answer('take_theirs', s.id);
+
+    const marker = s.ledger().find((r) => r.taskId == null)!;
+    expect(marker.writtenContent).toBeNull();
+    expect(marker.lastObservedDiskHash).toBeNull();
+  });
+
+  it('records a custom template this install cannot map under the portable id it was sent', async () => {
+    const portable = 'custom:zip%3Aacme-kit:agents%2Fbilling.md';
+    const theirs = claim(DISK_HASH, { templateId: portable, kind: 'custom-agent' });
+    const s = await claimSetup({ incoming: theirs });
+
+    await s.answer('take_theirs', s.id);
+
+    const marker = s.ledger().find((r) => r.taskId == null)!;
+    expect(marker).toMatchObject({ templateId: portable, bundleItemId: null });
+  });
+
+  it('take theirs retires my row and adds no marker where the teammate removed the claim', async () => {
+    const s = await claimSetup({ incoming: undefined, file: null });
+
+    const result = await s.answer('take_theirs', s.id);
+
+    expect(result).toMatchObject({ kind: 'resolved', written: [] });
+    const rows = s.ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.supersededAt).toBeInstanceOf(Date);
+    expect(rows[0]!.importedAt).toBeInstanceOf(Date);
+    expect(s.baseClaims()).toEqual([]);
+    expect(existsSync(join(s.root, CREL))).toBe(false);
+  });
+
+  it('is moved, and re-asked against the file, when it no longer holds their claim', async () => {
+    const newer = claim('9'.repeat(64));
+    const s = await claimSetup({ file: claimText(newer) });
+    const ledgerBefore = json(s.ledger());
+
+    expect(await s.answer('take_theirs', s.id)).toEqual({ kind: 'moved' });
+
+    expect(json(s.ledger())).toEqual(ledgerBefore);
+    expect(s.rowOf(s.id).resolvedAt).toBeNull();
+    expect(s.rowOf(s.id).incoming).toEqual({ v: newer });
+    expect(await s.claimFileText()).toBe(claimText(newer));
+  });
+
+  it('is moved for keep mine too, and writes nothing', async () => {
+    const s = await claimSetup({ file: claimText(claim('9'.repeat(64))) });
+    const fileBefore = await s.claimFileText();
+
+    expect(await s.answer('keep_mine', s.id)).toEqual({ kind: 'moved' });
+
+    expect(await s.claimFileText()).toBe(fileBefore);
+    expect(s.rowOf(s.id).resolvedAt).toBeNull();
+  });
+
+  it('is moved when their claim was a removal and the file is back', async () => {
+    const s = await claimSetup({ incoming: undefined, file: claimText(CTHEIRS) });
+    expect(await s.answer('take_theirs', s.id)).toEqual({ kind: 'moved' });
+    expect(s.rowOf(s.id).resolvedAt).toBeNull();
+  });
+
+  it('is moved for a claim file that is gone', async () => {
+    const s = await claimSetup({ file: null });
+    expect(await s.answer('keep_mine', s.id)).toEqual({ kind: 'moved' });
+  });
+
+  it('leaves a claim file someone rewrote after it was read, and answers moved', async () => {
+    const s = await claimSetup();
+    const edited = claimText(claim('8'.repeat(64)));
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.projectStateSync) await writeFile(join(s.root, CREL), edited);
+    };
+
+    expect((await s.answer('keep_mine', s.id)).kind).toBe('moved');
+    expect(await s.claimFileText()).toBe(edited);
+    expect(s.rowOf(s.id).resolvedAt).toBeNull();
+  });
+
+  it('puts the previous bytes back when a later step of the answer fails', async () => {
+    const s = await claimSetup();
+    const before = await s.claimFileText();
+    s.fake.hooks.beforeCommit = () => {
+      throw new Error('commit failed');
+    };
+
+    await expect(s.answer('keep_mine', s.id)).rejects.toThrow();
+
+    expect(await s.claimFileText()).toBe(before);
+    expect(s.rowOf(s.id).resolvedAt).toBeNull();
+  });
+
+  it('answering twice returns the closed row again and writes nothing', async () => {
+    const s = await claimSetup();
+    await s.answer('take_theirs', s.id);
+    const before = s.dump();
+
+    expect(await s.answer('take_theirs', s.id)).toMatchObject({ kind: 'resolved', written: [] });
+    expect(await s.answer('keep_mine', s.id)).toEqual({
+      kind: 'settled',
+      resolution: 'take_theirs',
+    });
+    expect(s.dump()).toEqual(before);
   });
 });

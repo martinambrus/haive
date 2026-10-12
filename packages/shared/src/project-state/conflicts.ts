@@ -8,8 +8,12 @@ export const isRenderUnit = (unit: string): boolean =>
  *  exist, it only names the setting. */
 export const RTK_ENABLED_UNIT = 'settings/rtk-enabled.json';
 
+/** The unit of one artifact claim: `claimFileName(path)`, the claim's file in the record. */
+export const isClaimUnit = (unit: string): boolean =>
+  /^artifacts\/[^/]+~[0-9a-f]{32}\.json$/.test(unit);
+
 export const isConflictUnit = (unit: string): boolean =>
-  isRenderUnit(unit) || unit === RTK_ENABLED_UNIT;
+  isRenderUnit(unit) || isClaimUnit(unit) || unit === RTK_ENABLED_UNIT;
 
 /** A conflict side as the `project_state_conflicts` columns hold it: `{ v }`, so a JSON null is a
  *  value, and NULL for a side that has no such unit. */
@@ -20,9 +24,11 @@ export const CONFLICT_KEY_LABELS: Readonly<Record<string, string>> = {
   customAgentSpecs: 'Custom agents',
 };
 
-/** What a person calls the setting a conflict unit holds, rather than its storage path. */
-export function conflictUnitLabel(unit: string): string {
+/** What a person calls the setting a conflict unit holds, rather than its storage path. A claim
+ *  unit names no path itself, so `claimPath` (read from a side) says which file it is about. */
+export function conflictUnitLabel(unit: string, claimPath?: string | null): string {
   if (unit === RTK_ENABLED_UNIT) return 'RTK command compression';
+  if (isClaimUnit(unit)) return `the claim for ${claimPath ?? 'a generated file'}`;
   if (unit === RENDER_UNIT) return 'The whole project record file';
   const key = unit.startsWith(`${RENDER_UNIT}#`) ? unit.slice(RENDER_UNIT.length + 1) : unit;
   return CONFLICT_KEY_LABELS[key] ?? key;
@@ -71,7 +77,10 @@ export function conflictBody(row: {
   return {
     id: row.id,
     unit: row.unit,
-    key: row.unit.includes('#') ? row.unit.slice(row.unit.indexOf('#') + 1) : null,
+    key:
+      row.unit.includes('#') && !isClaimUnit(row.unit)
+        ? row.unit.slice(row.unit.indexOf('#') + 1)
+        : null,
     base: sideBody(row.base),
     local: sideBody(row.local),
     incoming: sideBody(row.incoming),

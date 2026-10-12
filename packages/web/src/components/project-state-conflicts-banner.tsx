@@ -13,8 +13,10 @@ import {
   answerConfirmation,
   landedAnswer,
   resolutionNotice,
+  conflictClaimPath,
   conflictKeyLabel,
   conflictSideMarkdown,
+  isClaimConflict,
   isRtkConflict,
   stillListed,
   answerAndConfirm,
@@ -78,7 +80,7 @@ export function ProjectStateConflictsView({
             className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2"
           >
             <p className="text-sm font-semibold text-neutral-100">
-              {conflictKeyLabel(c.key, c.unit)}
+              {conflictKeyLabel(c.key, c.unit, conflictClaimPath(c))}
             </p>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               <Side title="This install" markdown={conflictSideMarkdown(c.local, c.unit)} />
@@ -129,6 +131,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const [loadError, setLoadError] = useState<string | null>(null);
   const [answered, setAnswered] = useState<ProjectStateAnswer[]>([]);
   const [rtkAnswered, setRtkAnswered] = useState<ProjectStateAnswer[]>([]);
+  const [claimAnswered, setClaimAnswered] = useState<ProjectStateAnswer[]>([]);
   const [messages, setMessages] = useState<Record<string, ConflictMessage>>({});
   const [confirming, setConfirming] = useState<{
     conflict: ProjectStateConflictBody;
@@ -140,9 +143,11 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const pendingAnswers = useRef<Record<string, ProjectStateAnswer>>({});
   const recordAnswers = useCallback((items: { answer: ProjectStateAnswer; unit: string }[]) => {
     const rtk = items.filter(isRtkConflict).map((i) => i.answer);
-    const rest = items.filter((i) => !isRtkConflict(i)).map((i) => i.answer);
+    const claims = items.filter(isClaimConflict).map((i) => i.answer);
+    const rest = items.filter((i) => !isRtkConflict(i) && !isClaimConflict(i)).map((i) => i.answer);
     if (rest.length > 0) setAnswered((prev) => [...prev, ...rest]);
     if (rtk.length > 0) setRtkAnswered((prev) => [...prev, ...rtk]);
+    if (claims.length > 0) setClaimAnswered((prev) => [...prev, ...claims]);
   }, []);
   const refetchCount = useRef(0);
   const pollLoop = useRef(false);
@@ -272,7 +277,12 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   }
 
   const confirmation = confirming
-    ? answerConfirmation(confirming.answer, confirming.conflict.key, confirming.conflict.unit)
+    ? answerConfirmation(
+        confirming.answer,
+        confirming.conflict.key,
+        confirming.conflict.unit,
+        conflictClaimPath(confirming.conflict),
+      )
     : null;
 
   return (
@@ -285,7 +295,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       )}
       <ProjectStateConflictsView
         conflicts={conflicts}
-        notice={resolutionNotice(answered, rtkAnswered)}
+        notice={resolutionNotice(answered, rtkAnswered, claimAnswered)}
         messages={messages}
         busyId={busyId}
         pendingIds={pendingIds}

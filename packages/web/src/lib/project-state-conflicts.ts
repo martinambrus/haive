@@ -7,12 +7,23 @@ import {
   CONFLICT_KEY_LABELS,
   RTK_ENABLED_UNIT,
   conflictUnitLabel,
+  isClaimUnit,
 } from '@haive/shared/project-state-conflicts';
 import { fencedCode } from '../components/markdown/fenced-code';
 
 export type { ProjectStateAnswer, ProjectStateConflictBody };
 
 export const RECORD_FILE = '.haive-data/state/project/render.json';
+
+function inlineCode(raw: string): string {
+  const text = raw.replace(/[\r\n]+/g, ' ');
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
+}
+
+const recordFileOf = (unit?: string): string =>
+  unit !== undefined && isClaimUnit(unit) ? `.haive-data/state/${unit}` : RECORD_FILE;
 
 export const PENDING_REFETCH_MS = 3000;
 
@@ -32,8 +43,26 @@ export function stillListed(
 export const isRtkConflict = (conflict: { unit: string }): boolean =>
   conflict.unit === RTK_ENABLED_UNIT;
 
-export function conflictKeyLabel(key: string | null, unit?: string): string {
-  if (unit !== undefined) return conflictUnitLabel(unit);
+export const isClaimConflict = (conflict: { unit: string }): boolean => isClaimUnit(conflict.unit);
+
+/** The file a claim question is about: a claim unit names its file only through the claim its sides hold. */
+export function conflictClaimPath(
+  conflict: Pick<ProjectStateConflictBody, 'unit' | 'base' | 'local' | 'incoming'>,
+): string | null {
+  if (!isClaimUnit(conflict.unit)) return null;
+  for (const side of [conflict.local, conflict.incoming, conflict.base]) {
+    const path = side.present ? (side.value as { path?: unknown } | null)?.path : undefined;
+    if (typeof path === 'string') return path;
+  }
+  return null;
+}
+
+export function conflictKeyLabel(
+  key: string | null,
+  unit?: string,
+  claimPath?: string | null,
+): string {
+  if (unit !== undefined) return conflictUnitLabel(unit, claimPath);
   if (key === null) return 'The whole project record file';
   return CONFLICT_KEY_LABELS[key] ?? key;
 }
@@ -42,6 +71,18 @@ export function conflictSideMarkdown(side: ConflictSideBody, unit?: string): str
   if (!side.present) return 'Not set.';
   if (unit === RTK_ENABLED_UNIT && typeof side.value === 'boolean')
     return side.value ? 'On' : 'Off';
+  if (unit !== undefined && isClaimUnit(unit)) {
+    const claim = side.value as Record<string, unknown> | null;
+    if (claim !== null && typeof claim === 'object' && typeof claim.templateId === 'string') {
+      const version = typeof claim.haiveVersion === 'string' && claim.haiveVersion !== '';
+      return [
+        `- Template: ${inlineCode(claim.templateId)}`,
+        `- Kind: ${inlineCode(String(claim.kind))}`,
+        `- Haive version: ${version ? inlineCode(String(claim.haiveVersion)) : 'not recorded'}`,
+        `- Written hash: ${inlineCode(String(claim.writtenHash).slice(0, 12))}`,
+      ].join('\n');
+    }
+  }
   return fencedCode(JSON.stringify(side.value, null, 2) ?? 'null', 'json');
 }
 
@@ -49,8 +90,9 @@ export function answerConfirmation(
   answer: ProjectStateAnswer,
   key: string | null,
   unit?: string,
+  claimPath?: string | null,
 ): { title: string; body: string; confirmLabel: string } {
-  const label = conflictKeyLabel(key, unit);
+  const label = conflictKeyLabel(key, unit, claimPath);
   if (unit === RTK_ENABLED_UNIT) {
     return answer === 'keep_mine'
       ? {
@@ -68,7 +110,7 @@ export function answerConfirmation(
     return {
       title: "Keep this install's value",
       confirmLabel: 'Keep mine',
-      body: `This install's value for ${label} is written into the project's record file, ${RECORD_FILE}. Commit and push that file so your teammate gets it. Until then the other install keeps asking.`,
+      body: `This install's value for ${label} is written into the project's record file, ${recordFileOf(unit)}. Commit and push that file so your teammate gets it. Until then the other install keeps asking.`,
     };
   }
   return {
@@ -85,6 +127,7 @@ export function landedAnswer(resolution: string | null | undefined): ProjectStat
 export function resolutionNotice(
   answered: readonly ProjectStateAnswer[],
   rtkAnswered: readonly ProjectStateAnswer[] = [],
+  claimAnswered: readonly ProjectStateAnswer[] = [],
 ): string | null {
   const notices: string[] = [];
   if (answered.includes('keep_mine')) {
@@ -93,6 +136,13 @@ export function resolutionNotice(
     );
   } else if (answered.includes('take_theirs')) {
     notices.push("This install now uses your teammate's value.");
+  }
+  if (claimAnswered.includes('keep_mine')) {
+    notices.push(
+      "This install's record of the file is written into the project's record. Commit and push it so your teammate gets it.",
+    );
+  } else if (claimAnswered.includes('take_theirs')) {
+    notices.push("This install now records the file as your teammate's install does.");
   }
   if (rtkAnswered.includes('take_theirs')) {
     notices.push('RTK command compression is switched off in this install.');

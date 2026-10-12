@@ -57,7 +57,10 @@ export function upgradeRefusalMessage(
     return `Onboarding is still running for this repository (task ${refusal.taskId}), so it cannot be ${action} yet`;
   }
   if (refusal.reason === 'contested') {
-    const shown = refusal.units.slice(0, 3).map(conflictUnitLabel).join(', ');
+    const shown = refusal.units
+      .slice(0, 3)
+      .map((unit) => conflictUnitLabel(unit))
+      .join(', ');
     const more = refusal.units.length > 3 ? ` and ${refusal.units.length - 3} more` : '';
     return `The project settings of this repository conflict with another install's (${shown}${more}), so it cannot be ${action} until each is answered`;
   }
