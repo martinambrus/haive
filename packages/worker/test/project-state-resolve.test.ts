@@ -538,6 +538,35 @@ describe('the whole render file as one question', () => {
   });
 });
 
+describe('a render file that changed under the answer', () => {
+  it('answers moved and leaves a file someone rewrote after it was read', async () => {
+    const s = await setup();
+    const theirsEdit = JSON.stringify({ ...THEIRS, framework: 'laravel' }, null, 2);
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.projectStateSync) await writeFile(join(s.root, RENDER_REL), theirsEdit);
+    };
+
+    const result = await s.answer('keep_mine');
+
+    expect(result.kind).toBe('moved');
+    expect(await s.fileText()).toBe(theirsEdit);
+    expect(s.rowOf(s.ids[KEY]!).resolvedAt).toBeNull();
+  });
+
+  it('answers moved for a render file that is not valid UTF-8', async () => {
+    const s = await setup();
+    const bytes = Buffer.from(JSON.stringify(THEIRS, null, 2), 'utf8');
+    const at = bytes.indexOf('"framework"') + 1;
+    const bad = Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at)]);
+    await writeFile(join(s.root, RENDER_REL), bad);
+
+    const result = await s.answer('keep_mine');
+
+    expect(result.kind).toBe('moved');
+    expect(Buffer.compare(await readFile(join(s.root, RENDER_REL)), bad)).toBe(0);
+  });
+});
+
 describe('a failure after the file would be rewritten', () => {
   const failures: [string, (s: Awaited<ReturnType<typeof setup>>) => void][] = [
     [

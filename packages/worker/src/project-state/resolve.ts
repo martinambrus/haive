@@ -1,7 +1,13 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
-import { isPathContainmentError, readFileNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { isUtf8 } from 'node:buffer';
+import {
+  isPathContainmentError,
+  readFileNoFollow,
+  rewriteFileIfNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
   ProjectStateError,
@@ -44,12 +50,20 @@ async function readRenderFile(
       strict: true,
       maxBytes: MAX_RENDER_BYTES,
     });
-    if (read === null || read.truncated) return null;
+    if (read === null || read.truncated || !isUtf8(read.data)) return null;
     const parsed = renderSchema.safeParse(JSON.parse(read.data.toString('utf8')));
     return parsed.success ? { render: parsed.data, raw: read.data } : null;
   } catch (err) {
     if (err instanceof SyntaxError || isPathContainmentError(err)) return null;
     throw err;
+  }
+}
+
+/** The render file changed on disk after it was read, so the answer was asked against bytes that
+ *  are gone; the transaction rolls back and the question reads as moved. */
+class RenderFileMovedError extends Error {
+  constructor(readonly repoPath: string) {
+    super('the render file changed while the answer was applied');
   }
 }
 
@@ -70,15 +84,22 @@ export async function resolveProjectStateConflict(
   try {
     result = await answerInTransaction(db, payload, after);
   } catch (err) {
-    if (after.putBack !== null) {
-      await putBackIfPending(db, payload.conflictId, after.putBack).catch((putBackErr: unknown) => {
-        throw new AggregateError(
-          [err, putBackErr],
-          `${err}; putting the render file's bytes back failed too: ${putBackErr}`,
+    if (err instanceof RenderFileMovedError) {
+      result = { kind: 'moved' };
+      after.resync = err.repoPath;
+    } else {
+      if (after.putBack !== null) {
+        await putBackIfPending(db, payload.conflictId, after.putBack).catch(
+          (putBackErr: unknown) => {
+            throw new AggregateError(
+              [err, putBackErr],
+              `${err}; putting the render file's bytes back failed too: ${putBackErr}`,
+            );
+          },
         );
-      });
+      }
+      throw err;
     }
-    throw err;
   }
   if (after.resync !== null) {
     await syncProjectStateFromCheckout(db, {
@@ -278,8 +299,11 @@ async function answerInTransaction(
     // Last, so only the commit follows it; a failure from here on puts the previous bytes back.
     const written: string[] = [];
     if (fileText !== null) {
+      const outcome = await rewriteFileIfNoFollow(repoPath, RENDER_FILE, (data) =>
+        data.equals(read.raw) ? Buffer.from(fileText, 'utf8') : null,
+      );
+      if (outcome !== 'rewritten') throw new RenderFileMovedError(repoPath);
       after.putBack = { repoPath, raw: read.raw };
-      await writeFileNoFollow(repoPath, RENDER_FILE, fileText, { createParents: true });
       written.push(RENDER_FILE);
     }
 
