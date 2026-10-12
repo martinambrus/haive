@@ -12,7 +12,13 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
-import { rtkBlockToRestore, rtkLeftoversToRemove } from '@haive/shared/project-state';
+import {
+  foreignReason,
+  isImportMarker,
+  rtkBlockToRestore,
+  rtkLeftoversToRemove,
+  type ForeignContext,
+} from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandManifestFor,
@@ -37,6 +43,7 @@ import {
   readAgentsRulesRegion,
   restorableRtkBlockFiles,
 } from '../onboarding/_rules-files.js';
+import { resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import { computeLineDelta } from './_diff.js';
 
 export { loadLiveArtifacts, pickRenderSnapshot, type LiveArtifactRow };
@@ -48,7 +55,8 @@ export type UpgradePlanBucket =
   | 'conflict'
   | 'new_artifact'
   | 'user_deleted'
-  | 'obsolete';
+  | 'obsolete'
+  | 'foreign';
 
 export interface UpgradePlanEntry {
   /** Stable per-row identifier used by step 02's form to refer to this entry. */
@@ -176,14 +184,22 @@ export function backfillRecord(
   };
 }
 
+const UNJUDGED_CONTEXT: ForeignContext = { haiveVersion: '', agentTargets: null, skillDirs: [] };
+
 export function classifyEntry(args: {
   live: LiveArtifactRow | null;
   current: ExpandedRendering | null;
   diskHash: string | null;
   /** Hashes of what Haive rendered at this path before; a file holding one is Haive's to replace. */
   recordedRenderHashes?: ReadonlySet<string>;
+  /** Judges the live row against this install; without it only a bundle item it does not hold is foreign. */
+  foreignContext?: ForeignContext;
 }): UpgradePlanBucket {
   const { live, current, diskHash } = args;
+
+  if (live && foreignReason(live, args.foreignContext ?? UNJUDGED_CONTEXT) !== null) {
+    return 'foreign';
+  }
 
   if (live && !current) return 'obsolete';
   if (!live && current) {
@@ -214,7 +230,13 @@ export function classifyEntry(args: {
     (live.templateId.startsWith('custom.') || current.templateId.startsWith('custom.'));
 
   if (templateUnchanged && !customTemplateIdShifted) return 'unchanged';
-  if (diskMatchesBaseline) return 'clean_update';
+  if (diskMatchesBaseline) {
+    // The region renders from this user's providers, so an imported baseline is no proof that its
+    // bytes are this install's to replace.
+    return isImportMarker(live) && live.templateKind === CLI_RULES_TEMPLATE_KIND
+      ? 'conflict'
+      : 'clean_update';
+  }
   // The file already holds what this upgrade would write, such as one another install upgraded.
   if (diskHash === current.writtenHash) return 'adopt';
   return 'conflict';
@@ -279,6 +301,11 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const entries: UpgradePlanEntry[] = [];
     let counterByBucket = 0;
     const cliRulesRenderHashes = await loadCliRulesRenderHashes(ctx.db, repositoryId);
+    const foreignContext: ForeignContext = {
+      haiveVersion: getHaiveVersion(),
+      agentTargets: renderCtx.agentTargets,
+      skillDirs: await resolveSkillTargetDirs(ctx.db, ctx.userId),
+    };
 
     for (const diskPath of allPaths) {
       const current = byPath.get(diskPath) ?? null;
@@ -306,6 +333,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         current,
         diskHash,
         recordedRenderHashes: isCliRules ? cliRulesRenderHashes : undefined,
+        foreignContext,
       });
       let newContent = current?.content ?? null;
       if (isCliRules && newContent) newContent = normalizeContent(newContent);
@@ -395,6 +423,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       new_artifact: 0,
       user_deleted: 0,
       obsolete: 0,
+      foreign: 0,
     };
     for (const e of entries) counts[e.bucket] += 1;
 

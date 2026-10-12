@@ -786,4 +786,76 @@ describe('the banner and the plan agree on the paths a template renders to', () 
     expect(got.changedTemplateIds).toEqual([]);
     expect(got.hasUpgradeAvailable).toBe(false);
   });
+
+  describe('a row imported from another install', () => {
+    const imported = (r: Record<string, unknown>, haiveVersion: string | null = null) => ({
+      ...r,
+      source: 'backfill',
+      sourceStepId: 'project-state-import',
+      haiveVersion,
+    });
+
+    it('leaves the banner down for a claim at a path this install does not render to', async () => {
+      world({
+        providers: CLAUDE_ONLY,
+        column: portable,
+        applicable: [agent.templateId],
+        rows: [
+          row(agent.templateId, 'agent', '.claude/agents/x.md', agent.contentHash),
+          imported(row(agent.templateId, 'agent', '.codex/agents/x.toml', agent.contentHash)),
+        ],
+      });
+      const got = await body();
+      expect(got.changedTemplateIds).toEqual([]);
+      expect(got.hasUpgradeAvailable).toBe(false);
+    });
+
+    it('leaves the banner down for a claim from a newer release, whatever its hashes say', async () => {
+      process.env.HAIVE_VERSION = '1.4.0';
+      try {
+        world({
+          providers: CLAUDE_ONLY,
+          column: portable,
+          applicable: [agent.templateId],
+          rows: [
+            imported(row(agent.templateId, 'agent', '.claude/agents/x.md', 'h-newer'), '1.5.0'),
+          ],
+        });
+        const got = await body();
+        expect(got.changedTemplateIds).toEqual([]);
+        expect(got.hasUpgradeAvailable).toBe(false);
+      } finally {
+        delete process.env.HAIVE_VERSION;
+      }
+    });
+
+    it('leaves the banner down for a bundle item this install does not hold', async () => {
+      world({
+        providers: CLAUDE_ONLY,
+        column: portable,
+        applicable: [agent.templateId],
+        rows: [
+          row(agent.templateId, 'agent', '.claude/agents/x.md', agent.contentHash),
+          imported(
+            row('custom:git@host/a/b:items/y', 'custom-agent', '.claude/agents/y.md', 'h-c'),
+          ),
+        ],
+      });
+      const got = await body();
+      expect(got.changedTemplateIds).toEqual([]);
+      expect(got.hasUpgradeAvailable).toBe(false);
+    });
+
+    it('still raises the banner for a claim this install renders and can update', async () => {
+      world({
+        providers: CLAUDE_ONLY,
+        column: portable,
+        applicable: [agent.templateId],
+        rows: [imported(row(agent.templateId, 'agent', '.claude/agents/x.md', 'h-old'))],
+      });
+      const got = await body();
+      expect(got.changedTemplateIds).toEqual([agent.templateId]);
+      expect(got.hasUpgradeAvailable).toBe(true);
+    });
+  });
 });

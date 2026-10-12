@@ -74,6 +74,7 @@ async function setup(agents: string | Buffer = AGENTS) {
       new_artifact: 0,
       user_deleted: 0,
       obsolete: 0,
+      foreign: 0,
     },
     installedTemplateSetHash: null,
     currentTemplateSetHash: 'set',

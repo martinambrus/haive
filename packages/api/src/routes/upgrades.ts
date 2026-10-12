@@ -32,6 +32,7 @@ import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   agentTargetSchema,
   bundleItemRenders,
+  foreignReason,
   historyOrigin,
   isRenderContextSnapshot,
   originAgentTargets,
@@ -376,6 +377,8 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       writtenHash: schema.onboardingArtifacts.writtenHash,
       bundleItemId: schema.onboardingArtifacts.bundleItemId,
       haiveVersion: schema.onboardingArtifacts.haiveVersion,
+      source: schema.onboardingArtifacts.source,
+      sourceStepId: schema.onboardingArtifacts.sourceStepId,
       generatedAt: schema.onboardingArtifacts.generatedAt,
       hasSnapshot: sql<
         boolean | null
@@ -394,6 +397,33 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
         isNull(schema.onboardingArtifacts.supersededAt),
       ),
     );
+
+  const refusedSnapshots = await undecodableSnapshotRows(db, repositoryId);
+  const origin = renderContextOrigin({
+    column: readRenderContextColumn(repo.renderContext),
+    rows: liveArtifacts.map((a) =>
+      refusedSnapshots.has(a.id) ? { ...a, hasSnapshot: false, rtkRecorded: false } : a,
+    ),
+  });
+  const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
+  const history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
+  const agentTargets = renderedAgentTargets(origin, history, repo.source, ruleProviderRows);
+  const skillDirs = skillTargetDirs(enabledNames);
+
+  // A row this install does not manage, which no upgrade offers anything for, stays out of every
+  // comparison below.
+  const foreignReasons = new Map(
+    liveArtifacts.flatMap((a) => {
+      const reason = foreignReason(a, {
+        haiveVersion: getHaiveVersion(),
+        agentTargets,
+        skillDirs,
+      });
+      return reason === null ? [] : [[a.id, reason] as const];
+    }),
+  );
+  const foreignIds = new Set(foreignReasons.keys());
+  const ownArtifacts = liveArtifacts.filter((a) => !foreignIds.has(a.id));
 
   // Pick the most recently-written version stamp among live rows. Rows
   // written before migration 0011 have null haive_version — return null in
@@ -469,7 +499,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       contentHash: string;
     }
   >();
-  for (const a of liveArtifacts) {
+  for (const a of ownArtifacts) {
     if (
       a.templateId.startsWith('custom.') &&
       a.bundleItemId === null &&
@@ -491,17 +521,6 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const applicableSet = new Set<string>(
     repo.applicableTemplateIds ?? Array.from(distinctInstalled.keys()),
   );
-  const refusedSnapshots = await undecodableSnapshotRows(db, repositoryId);
-  const origin = renderContextOrigin({
-    column: readRenderContextColumn(repo.renderContext),
-    rows: liveArtifacts.map((a) =>
-      refusedSnapshots.has(a.id) ? { ...a, hasSnapshot: false, rtkRecorded: false } : a,
-    ),
-  });
-  const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
-  const history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
-  const agentTargets = renderedAgentTargets(origin, history, repo.source, ruleProviderRows);
-  const skillDirs = skillTargetDirs(enabledNames);
   // An item 01 skips renders to no file: an agent with no agent target, a skill with no skills directory.
   const rendersNothing = new Set(
     customCurrent
@@ -562,7 +581,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const root = repo.storagePath ?? repo.localPath;
   const outsideRemovable = new Set<string>();
   if (root) {
-    for (const a of liveArtifacts) {
+    for (const a of ownArtifacts) {
       const id = a.templateId;
       if (claimed(id) || outsideRemovable.has(id)) continue;
       if (removableClaim(await readUpgradeFile(root, a.diskPath), a)) outsideRemovable.add(id);
@@ -575,7 +594,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   );
   // One row stands for every rendering of a template, so a rendering that is not current (a
   // skipped conflict, a restored edit) has to be the one that stands, or its siblings hide it.
-  for (const a of liveArtifacts) {
+  for (const a of ownArtifacts) {
     const current = currentByTemplate.get(a.templateId);
     if (!current || !filteredInstalled.has(a.templateId)) continue;
     if (
@@ -596,7 +615,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const strandedTemplateIds = new Set<string>();
   const strandedObsolete = new Set<string>();
   if (root && agentTargets !== null) {
-    for (const a of liveArtifacts) {
+    for (const a of ownArtifacts) {
       const id = a.templateId;
       if (!currentByTemplate.has(id) || !filteredInstalled.has(id)) continue;
       const rendered = rendersAt(
@@ -632,7 +651,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // 02 deletes a file only while it holds the bytes its row wrote; stripping an RTK hook is no deletion.
   const removableRow = async (id: string) => {
     if (!root) return false;
-    for (const a of liveArtifacts) {
+    for (const a of ownArtifacts) {
       if (a.templateId === id && deletableClaim(await readUpgradeFile(root, a.diskPath), a)) {
         return true;
       }
@@ -654,8 +673,18 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       changedTemplateIds.push(id);
     }
   }
+  // A newer release's claim stands for its template: 01 offers nothing at that path.
+  const heldByNewerRelease = new Set(
+    liveArtifacts
+      .filter((a) => foreignReasons.get(a.id) === 'newer-release')
+      .map((a) => a.templateId),
+  );
   for (const id of currentByTemplate.keys()) {
-    if (!filteredInstalled.has(id) && !changedTemplateIds.includes(id)) {
+    if (
+      !filteredInstalled.has(id) &&
+      !heldByNewerRelease.has(id) &&
+      !changedTemplateIds.includes(id)
+    ) {
       changedTemplateIds.push(id);
     }
   }

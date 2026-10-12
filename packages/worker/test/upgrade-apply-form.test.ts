@@ -46,6 +46,7 @@ function plan(entries: UpgradePlanEntry[]): UpgradePlanOutput {
     new_artifact: 0,
     user_deleted: 0,
     obsolete: 0,
+    foreign: 0,
   };
   for (const e of entries) counts[e.bucket] += 1;
   return {
@@ -365,6 +366,31 @@ describe('upgradeApplyStep.form() — files already holding the new render', () 
     expect((note as { body: string }).body).toContain('`.claude/agents/current.md`');
     expect(
       schema.fields.some((f) => 'options' in f && JSON.stringify(f).includes('current.md')),
+    ).toBe(false);
+  });
+});
+
+describe('upgradeApplyStep.form() — rows from another install', () => {
+  it('asks nothing when they are all there is', () => {
+    expect(callFormOrNull(plan([entry('foreign', '.codex/agents/x.toml')]))).toBeNull();
+  });
+
+  it('names them in one note beside the questions it does ask, offering no option for them', () => {
+    const schema = callForm(
+      plan([
+        entry('foreign', '.codex/agents/x.toml'),
+        entry('foreign', '.gemini/agents/y.md', { unread: 'oversized' }),
+        entry('clean_update', '.claude/agents/old.md'),
+      ]),
+    );
+    const notes = schema.fields.filter((f) => f.id === 'foreignNote');
+    expect(notes).toHaveLength(1);
+    const body = (notes[0] as { body: string }).body;
+    expect(body).toContain('`.codex/agents/x.toml`');
+    expect(body).toContain('`.gemini/agents/y.md`');
+    expect(schema.fields.some((f) => f.id === 'unreadNote')).toBe(false);
+    expect(
+      schema.fields.some((f) => 'options' in f && /x\.toml|y\.md/.test(JSON.stringify(f))),
     ).toBe(false);
   });
 });

@@ -72,6 +72,7 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
       new_artifact: 0,
       user_deleted: 0,
       obsolete: 0,
+      foreign: 0,
     },
     installedTemplateSetHash: null,
     currentTemplateSetHash: 'set',

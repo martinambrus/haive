@@ -120,6 +120,7 @@ export function classifyApplyAction(
   allEntries: ReadonlyArray<UpgradePlanEntry>,
   selections: ApplySelections,
 ): ApplyAction {
+  if (entry.bucket === 'foreign') return 'skip';
   if (entry.bucket === 'adopt') return 'adopt';
   // What the plan did not read is never written, kept or removed; only its row may be untracked.
   const read = entry.unread === undefined;
@@ -476,6 +477,7 @@ function groupEntriesForForm(entries: UpgradePlanEntry[]): {
   userDeleted: UpgradePlanEntry[];
   conflicts: UpgradePlanEntry[];
   obsolete: UpgradePlanEntry[];
+  foreign: UpgradePlanEntry[];
   unread: UpgradePlanEntry[];
 } {
   const read = entries.filter((e) => e.unread === undefined);
@@ -486,7 +488,10 @@ function groupEntriesForForm(entries: UpgradePlanEntry[]): {
     userDeleted: read.filter((e) => e.bucket === 'user_deleted'),
     conflicts: read.filter((e) => e.bucket === 'conflict'),
     obsolete: read.filter((e) => e.bucket === 'obsolete'),
-    unread: entries.filter((e) => e.unread !== undefined && e.bucket !== 'unchanged'),
+    foreign: entries.filter((e) => e.bucket === 'foreign'),
+    unread: entries.filter(
+      (e) => e.unread !== undefined && e.bucket !== 'unchanged' && e.bucket !== 'foreign',
+    ),
   };
 }
 
@@ -510,8 +515,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
   },
 
   form(_ctx, detected): FormSchema | null {
-    const { adopted, cleanUpdates, newArtifacts, userDeleted, conflicts, obsolete, unread } =
-      groupEntriesForForm(detected.entries);
+    const {
+      adopted,
+      cleanUpdates,
+      newArtifacts,
+      userDeleted,
+      conflicts,
+      obsolete,
+      foreign,
+      unread,
+    } = groupEntriesForForm(detected.entries);
     const fields: FormSchema['fields'] = [];
 
     const toOptions = (
@@ -731,6 +744,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       });
     }
 
+    if (foreign.length > 0) {
+      fields.push({
+        type: 'note',
+        id: 'foreignNote',
+        label: 'Left as they are',
+        body:
+          "These came from another install's record and this install cannot manage them, so " +
+          `the upgrade changes nothing there:\n\n${foreign.map((e) => `- \`${e.diskPath}\``).join('\n')}`,
+        variant: 'info',
+      });
+    }
+
     return {
       title: 'Upgrade selections',
       description: 'Pick which template changes to apply. Unselected items are skipped.',
@@ -889,7 +914,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     }
     // The rows the plan saw live: a path still holding what its row records is recorded as that row.
     const planLiveIds = plan.entries.flatMap((e) =>
-      e.liveArtifactId && e.bucket !== 'unchanged' ? [e.liveArtifactId] : [],
+      e.liveArtifactId && e.bucket !== 'unchanged' && e.bucket !== 'foreign'
+        ? [e.liveArtifactId]
+        : [],
     );
     const planLive = new Map<
       string,

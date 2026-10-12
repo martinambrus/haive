@@ -14,6 +14,7 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
 import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import {
   backfillRecord,
@@ -23,7 +24,11 @@ import {
   UNREAD_HASH,
   type LiveArtifactRow,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
-import { keptRowUpdate } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import {
+  classifyApplyAction,
+  keptRowUpdate,
+  type ApplySelections,
+} from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { cliRulesRegionRecord } from '../src/step-engine/steps/onboarding/_rules-files.js';
 import { REFERENCE_CONTEXT, type ExpandedRendering } from '../src/step-engine/template-manifest.js';
 
@@ -37,7 +42,9 @@ function live(partial: Partial<LiveArtifactRow> = {}): LiveArtifactRow {
     templateSchemaVersion: 1,
     writtenHash: 'wh-A',
     formValuesSnapshot: null,
+    source: 'onboarding',
     sourceStepId: '12-post-onboarding',
+    haiveVersion: null,
     bundleItemId: null,
     generatedAt: null,
     ...partial,
@@ -449,5 +456,106 @@ describe('a path the plan did not read', () => {
     expect(classifyEntry({ live: live(), current: current(), ...unread })).toBe('unchanged');
     expect(classifyEntry({ live: null, current: current(), ...unread })).toBe('conflict');
     expect(classifyEntry({ live: live(), current: null, ...unread })).toBe('obsolete');
+  });
+});
+
+describe('rows imported from another install', () => {
+  const marker = (partial: Partial<LiveArtifactRow> = {}) =>
+    live({ source: 'backfill', sourceStepId: PROJECT_STATE_IMPORT_STEP_ID, ...partial });
+  const claudeOnly = {
+    haiveVersion: '1.4.0',
+    agentTargets: [{ dir: '.claude/agents', format: 'markdown' as const, supportsLsp: false }],
+    skillDirs: ['.claude/skills'],
+  };
+
+  it('reads a bundle item this install does not hold as foreign, not obsolete', () => {
+    const row = live({ templateId: 'custom:git@host/a/b:items/x', templateKind: 'custom-agent' });
+    expect(classifyEntry({ live: row, current: null, diskHash: 'wh-A' })).toBe('foreign');
+  });
+
+  it('reads a claim from a newer release as foreign, not a clean update', () => {
+    const moved = current({ templateContentHash: 'hash-B', writtenHash: 'wh-B' });
+    const newer = marker({ haiveVersion: '1.5.0' });
+    const args = { current: moved, diskHash: 'wh-A', foreignContext: claudeOnly };
+    expect(classifyEntry({ live: marker({ haiveVersion: '1.3.0' }), ...args })).toBe(
+      'clean_update',
+    );
+    expect(classifyEntry({ live: newer, ...args })).toBe('foreign');
+    expect(
+      classifyEntry({
+        live: newer,
+        ...args,
+        foreignContext: { ...claudeOnly, haiveVersion: '0.0.0-dev' },
+      }),
+    ).toBe('clean_update');
+  });
+
+  it('reads a claim at an agent directory this install has no CLI for as foreign, not obsolete', () => {
+    const codex = marker({ diskPath: '.codex/agents/x.toml' });
+    expect(
+      classifyEntry({ live: codex, current: null, diskHash: 'wh-A', foreignContext: claudeOnly }),
+    ).toBe('foreign');
+    expect(
+      classifyEntry({
+        live: live({ diskPath: '.codex/agents/x.toml' }),
+        current: null,
+        diskHash: 'wh-A',
+        foreignContext: claudeOnly,
+      }),
+    ).toBe('obsolete');
+  });
+
+  it('reads an imported cli-rules row whose template moved as a conflict, not a clean update', () => {
+    const rules = {
+      diskPath: CLI_RULES_DISK_PATH,
+      templateId: CLI_RULES_TEMPLATE_ID,
+      templateKind: CLI_RULES_TEMPLATE_KIND,
+    };
+    const moved = current({ ...rules, templateContentHash: 'hash-B', writtenHash: 'wh-B' });
+    const args = { current: moved, diskHash: 'wh-A', foreignContext: claudeOnly };
+    expect(classifyEntry({ live: live(rules), ...args })).toBe('clean_update');
+    expect(classifyEntry({ live: marker(rules), ...args })).toBe('conflict');
+    expect(classifyEntry({ live: marker(rules), ...args, diskHash: 'wh-B' })).toBe('adopt');
+    expect(
+      classifyEntry({
+        live: marker({ ...rules, templateContentHash: 'hash-B', templateSchemaVersion: 1 }),
+        current: moved,
+        diskHash: 'wh-A',
+        foreignContext: claudeOnly,
+      }),
+    ).toBe('unchanged');
+  });
+
+  it('never deletes a foreign row, whichever removal the form sent', () => {
+    const row = live({ templateId: 'custom:git@host/a/b:items/x', templateKind: 'custom-agent' });
+    const bucket = classifyEntry({ live: row, current: null, diskHash: 'wh-A' });
+    const entry = {
+      entryId: 'e0',
+      bucket,
+      templateId: row.templateId,
+      templateKind: row.templateKind,
+      diskPath: row.diskPath,
+      liveArtifactId: row.id,
+      currentContent: 'BODY',
+      newContent: null,
+      baselineContent: 'BODY',
+      currentHash: 'wh-A',
+      baselineWrittenHash: 'wh-A',
+      newContentHash: null,
+      baselineTemplateContentHash: 'hash-A',
+      currentTemplateContentHash: null,
+      templateSchemaVersion: 1,
+      delta: null,
+    };
+    const selections: ApplySelections = {
+      selectedUpdates: new Set([entry.entryId]),
+      selectedNew: new Set([entry.entryId]),
+      selectedReinstate: new Set([entry.entryId]),
+      selectedObsoleteRemovals: new Set([entry.entryId]),
+      selectedRtkHookStrips: new Set([entry.entryId]),
+      selectedObsoleteUntracks: new Set([entry.entryId]),
+      conflictChoices: new Map([[entry.entryId, 'apply_theirs']]),
+    };
+    expect(classifyApplyAction(entry, [entry], selections)).toBe('skip');
   });
 });
