@@ -414,8 +414,6 @@ file's chunks at the next sync.
 
 ## Open decisions
 
-- **D1.** F3: keep the 80-chunk cap, raise it, budget per repository, or exempt the directories
-  `09_7` selects.
 - **D2.** F2 for JS/TS: extract anonymous and object-literal functions, or leave them as gap chunks.
 - **D3.** P3: a local runtime only, or a hosted reranker accepted as a new processor of repository
   code.
@@ -427,7 +425,13 @@ file's chunks at the next sync.
 
 ## Decided
 
-None yet.
+- **D1** (2026-10-12, user). F3: a repository's own code and its KB are exempt from both per-file
+  budgets. Files under `01-env-detect`'s `customCodePaths.include` and KB files get no chunk cap
+  and a 2 MB backstop against a generated file (`fileBudget`, `MAX_OWN_FILE_BYTES`); vendored and
+  contrib code keep 512 KB and 80 chunks. Raising the caps for every file was rejected: it would
+  index vendored bundles (1,829 chunks from two JS libraries on the eval repository) as distractors.
+  A per-repository budget was rejected as more mechanism for the same outcome. Cost on the eval
+  repository: +1,118 chunks (+5.4%).
 
 ## Critical files
 
