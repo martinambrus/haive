@@ -68,6 +68,7 @@ import {
 } from '../lib/onboarding-state.js';
 import { reviveRefusal } from '@haive/shared/onboarding-admission';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
+import { definitionForCreate } from '../lib/task-type-definition.js';
 
 export const upgradeRoutes = new Hono<AppEnv>();
 
@@ -1032,6 +1033,9 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
         );
       }
       const priorUpgrade = found.id;
+      const { runListSnapshot } = await definitionForCreate(tx, 'onboarding_upgrade', {
+        generic: false,
+      });
       const [row] = await tx
         .insert(schema.tasks)
         .values({
@@ -1041,6 +1045,7 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
           description: 'Revert the most recent onboarding upgrade for this repository.',
           repositoryId,
           metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade },
+          runListSnapshot,
           status: 'created',
         })
         .returning();

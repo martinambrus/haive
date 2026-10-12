@@ -35,6 +35,10 @@ const { db, taskQueue, order, inserted } = vi.hoisted(() => {
 vi.mock('../src/db.js', () => ({ getDb: () => db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => taskQueue }));
 
+vi.mock('../src/lib/task-type-definition.js', () => ({
+  definitionForCreate: async () => ({ runListSnapshot: null }),
+}));
+
 import { spawnPlanTask } from '../src/lib/spawn-plan-task.js';
 
 /**

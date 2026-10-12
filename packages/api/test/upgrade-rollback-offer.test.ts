@@ -16,6 +16,10 @@ vi.mock('../src/middleware/auth.js', () => ({
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
 }));
 
+vi.mock('../src/lib/task-type-definition.js', () => ({
+  definitionForCreate: async () => ({ runListSnapshot: null }),
+}));
+
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';

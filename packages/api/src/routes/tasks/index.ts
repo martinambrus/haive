@@ -77,6 +77,7 @@ import {
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
+import { definitionForCreate } from '../../lib/task-type-definition.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
@@ -628,8 +629,9 @@ taskRoutes.post('/', async (c) => {
   if (body.feature) metadata.feature = body.feature;
   if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
 
-  const insertTask = async (handle: typeof db | DbTx) =>
-    await handle
+  const insertTask = async (handle: typeof db | DbTx) => {
+    const { runListSnapshot } = await definitionForCreate(handle, body.type, { generic: true });
+    return await handle
       .insert(schema.tasks)
       .values({
         userId,
@@ -665,9 +667,11 @@ taskRoutes.post('/', async (c) => {
         ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
         estimatedTimeHours: body.estimatedTimeHours ?? null,
+        runListSnapshot,
         status: 'created',
       })
       .returning();
+  };
   const firstRow = (rows: (typeof schema.tasks.$inferSelect)[]) => {
     const [row] = rows;
     if (!row) throw new HttpError(500, 'Failed to create task');

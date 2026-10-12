@@ -1,6 +1,7 @@
 import { schema, type Database } from '@haive/database';
 import { getDb } from '../db.js';
 import { HttpError } from '../context.js';
+import { definitionForCreate } from './task-type-definition.js';
 import { enqueueStart, markQueuedForStart } from './task-start.js';
 
 /** Insert the task row and enqueue it. Mirrors global-kb's enrich endpoint —
@@ -8,7 +9,7 @@ import { enqueueStart, markQueuedForStart } from './task-start.js';
 export async function spawnPlanTask(args: {
   /** For a caller-owned transaction, use enqueue: false and call enqueuePlanTask
    *  after commit. Allows creation to serialize with a node's other starts. */
-  db?: Pick<Database, 'insert'>;
+  db?: Pick<Database, 'insert' | 'select'>;
   userId: string;
   repositoryId: string;
   type: 'plan_build' | 'plan_chat' | 'advisory' | 'plan_sequence' | 'plan_merge';
@@ -33,6 +34,7 @@ export async function spawnPlanTask(args: {
   enqueue?: boolean;
 }): Promise<string> {
   const db = args.db ?? getDb();
+  const { runListSnapshot } = await definitionForCreate(db, args.type, { generic: false });
   const [task] = await db
     .insert(schema.tasks)
     .values({
@@ -45,6 +47,7 @@ export async function spawnPlanTask(args: {
       ignoreSavedStepClis: args.ignoreSavedStepClis ?? false,
       metadata: args.metadata,
       autoContinue: true,
+      runListSnapshot,
       status: 'created',
     })
     .returning();

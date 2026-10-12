@@ -50,6 +50,7 @@ import {
 import { getDb } from '../db.js';
 import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
+import { definitionForCreate } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -568,6 +569,8 @@ globalKbRoutes.post('/enrich', async (c) => {
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
+  const { runListSnapshot } = await definitionForCreate(db, 'kb_author', { generic: false });
+
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
     const [row] = await gdb
       .insert(globalKbEntries)
@@ -620,6 +623,7 @@ globalKbRoutes.post('/enrich', async (c) => {
           : {}),
       },
       autoContinue: true,
+      runListSnapshot,
       status: 'created',
     })
     .returning();
