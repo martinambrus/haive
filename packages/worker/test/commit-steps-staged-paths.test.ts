@@ -664,6 +664,23 @@ describe('commitOnly commits the entries that were staged, not the worktree', ()
     expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('a.md');
   });
 
+  it('a file the person staged under a directory standing at a named path is not committed', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    await mkdir(path.join(repo, '.haive', 'install.json'), { recursive: true });
+    await writeFile(path.join(repo, '.haive', 'install.json', 'private.md'), 'p\n');
+    await git(repo, ['add', '-f', '.haive/install.json/private.md']);
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    const named = ['.haive/install.json', 'a.md'];
+    await stageNamed(repo, named, []);
+    const staged = await stagedChanges(repo, named);
+    expect(staged).toEqual(['a.md']);
+    await commitOnly(repo, staged, 'chore: onboard', GIT_ENV);
+    expect((await git(repo, ['show', '--name-only', '--format=', 'HEAD'])).trim()).toBe('a.md');
+    expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe(
+      '.haive/install.json/private.md',
+    );
+  });
+
   it('R2-2: a staged removal is committed even when the file is back on disk', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n', 'gone.md': 'g\n', 'keep.md': 'k\n' });
     await rm(path.join(repo, 'gone.md'));

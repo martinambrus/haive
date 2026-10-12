@@ -247,7 +247,11 @@ export async function stagedChanges(repoPath: string, only?: readonly string[]):
     ],
     { cwd: repoPath, maxBuffer: GIT_MAX_BUFFER },
   );
-  return stdout.split('\0').filter((s) => s.length > 0);
+  const changed = stdout.split('\0').filter((s) => s.length > 0);
+  if (!only) return changed;
+  // A pathspec reaches into a directory standing at a named path; only the names themselves count.
+  const named = new Set(only);
+  return changed.filter((p) => named.has(p));
 }
 
 /** Commit exactly the index entries of `paths`, as staged now: `git commit --only` would re-read
