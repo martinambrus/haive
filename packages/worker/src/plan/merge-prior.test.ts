@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  PRIOR_HISTORY_MAX_CHARS,
   PRIOR_MAX_PATHS,
   PRIOR_TOTAL_MAX_CHARS,
   priorResolutionLines,
@@ -109,6 +110,19 @@ describe('the previous answer, read from the commit', () => {
     expect(found!.entries).toHaveLength(0);
     expect(found!.more).toBe(2);
     expect(priorResolutionLines([], found!).join('\n')).toContain('and 2 more files');
+  });
+
+  it('keeps only the newest whole turns of a long conversation', () => {
+    const turn = 'z'.repeat(PRIOR_HISTORY_MAX_CHARS / 4);
+    const transcript = Array.from({ length: 10 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      body: `${i}:${turn}`,
+    }));
+    const text = priorResolutionLines(transcript, { sha: 'x', entries: [], more: 0 }).join('\n');
+    expect(text).toContain('9:');
+    expect(text).not.toContain('0:');
+    expect(text).toMatch(/\(\d+ earlier turns of this conversation are not shown\)/);
+    expect(text.length).toBeLessThan(PRIOR_HISTORY_MAX_CHARS + 4_000);
   });
 
   it('reads no more paths than the path cap', async () => {

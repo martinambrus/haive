@@ -11,6 +11,7 @@ export const PLAN_MERGE_PRIOR_EVENT = 'plan_merge.prior_resolution';
 export const PRIOR_FILE_MAX_CHARS = 6_000;
 export const PRIOR_TOTAL_MAX_CHARS = 30_000;
 export const PRIOR_MAX_PATHS = 40;
+export const PRIOR_HISTORY_MAX_CHARS = 12_000;
 const PRIOR_READ_MAX_BYTES = 1024 * 1024;
 
 /** The merge commit a reopen took back, and the first parent the worktree stands on afterwards. */
@@ -185,9 +186,24 @@ export function priorResolutionLines(
   prior: PriorResolution,
 ): string[] {
   // The user's turns are the operator speaking and never fenced; the agent's own may have quoted a file.
-  const history = transcript
-    .map((m) => (m.role === 'user' ? `User: ${m.body}` : `You:\n${fencedAgentBlock(m.body)}`))
-    .join('\n\n');
+  const turns = transcript.map((m) =>
+    m.role === 'user' ? `User: ${m.body}` : `You:\n${fencedAgentBlock(m.body)}`,
+  );
+  // The newest whole turns that fit; the latest request is also stated in full above.
+  let kept = 0;
+  let size = 0;
+  while (
+    kept < turns.length &&
+    size + turns[turns.length - 1 - kept]!.length <= PRIOR_HISTORY_MAX_CHARS
+  ) {
+    size += turns[turns.length - 1 - kept]!.length;
+    kept += 1;
+  }
+  const dropped = turns.length - kept;
+  const history = [
+    ...(dropped > 0 ? [`(${dropped} earlier turns of this conversation are not shown)`] : []),
+    ...turns.slice(turns.length - kept),
+  ].join('\n\n');
   const shown = prior.entries.filter((e) => isListableName(e.path));
   const unlisted = prior.more + (prior.entries.length - shown.length);
   return [
