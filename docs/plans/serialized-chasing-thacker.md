@@ -1,5 +1,8 @@
 # Haive Module System — Task 1: Extension Infrastructure
 
+> **Merged into `twinkling-frolicking-toast.md` (approved 2026-10-12).** This file stays the design
+> reference for its half; where the two disagree, the merged plan wins.
+
 ## Context
 
 Haive today is fully static and build-time. Every extension point is a hardcoded array or
