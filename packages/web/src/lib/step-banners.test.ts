@@ -261,10 +261,18 @@ describe('leftMergeBanners', () => {
     expect(b?.text).toContain('The merge changed since.');
   });
 
+  it('keeps the abort offered after a refused attempt, saying why it was refused', () => {
+    const [b] = leftMergeBanners([opened, settled('refused', 'Another task is merging here.')], {
+      taskStatus: 'cancelled',
+    });
+    expect(b).toMatchObject({ canAbort: true, refusals: 1 });
+    expect(b?.text).toContain('Another task is merging here.');
+  });
+
   it('words each outcome differently', () => {
     const text = (o: string) =>
       leftMergeBanners([opened, settled(o, 'why')], { taskStatus: 'cancelled' })[0]!.text;
-    expect(new Set(['aborted', 'moved', 'refused', 'aborted-by-next'].map(text)).size).toBe(4);
+    expect(new Set(['aborted', 'moved', 'aborted-by-next'].map(text)).size).toBe(3);
   });
 
   it('shows nothing for a task that is not cancelled, whatever the events say', () => {

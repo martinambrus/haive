@@ -151,27 +151,24 @@ async function settle(
 
 /** Report each merge the cancelled task's rows recorded that is still open in its directory and
  *  names the ref the task was merging. Once per directory and merge head, so a re-driven cancel
- *  adds nothing. Called after the claims are released, once no sandbox of the task is left. */
+ *  adds nothing. Called after the claims are released, once no sandbox of the task is left; a
+ *  failure throws, so the cancel is re-driven before `task.cancel_finished` is written. */
 export async function recordLeftOpenMerges(db: Database, taskId: string): Promise<void> {
-  try {
-    const known = await taskLeftOpen(db, taskId);
-    for (const recorded of await recordedMerges(db, taskId)) {
-      if (isHostCheckout(recorded.dir)) continue;
-      if (!(await mergeOpenFor(recorded.dir, recorded.ref))) continue;
-      const open = await peekOpenMerge(recorded.dir);
-      if (!open) continue;
-      if (known.some((k) => k.dir === recorded.dir && k.mergeHead === open.mergeHead)) continue;
-      const payload = { dir: recorded.dir, ref: recorded.ref, ...open };
-      await db.insert(schema.taskEvents).values({
-        taskId,
-        taskStepId: recorded.stepId,
-        eventType: MERGE_LEFT_OPEN_EVENT,
-        payload,
-      });
-      known.push({ ...payload, settled: null });
-    }
-  } catch (err) {
-    logger.warn({ err, taskId }, 'recording the merges a cancel left open failed');
+  const known = await taskLeftOpen(db, taskId);
+  for (const recorded of await recordedMerges(db, taskId)) {
+    if (isHostCheckout(recorded.dir)) continue;
+    if (!(await mergeOpenFor(recorded.dir, recorded.ref))) continue;
+    const open = await peekOpenMerge(recorded.dir);
+    if (!open) continue;
+    if (known.some((k) => k.dir === recorded.dir && k.mergeHead === open.mergeHead)) continue;
+    const payload = { dir: recorded.dir, ref: recorded.ref, ...open };
+    await db.insert(schema.taskEvents).values({
+      taskId,
+      taskStepId: recorded.stepId,
+      eventType: MERGE_LEFT_OPEN_EVENT,
+      payload,
+    });
+    known.push({ ...payload, settled: null, refused: null });
   }
 }
 

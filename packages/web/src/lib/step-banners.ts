@@ -177,14 +177,15 @@ export interface LeftMergeBanner {
   ref: string;
   /** True while the merge is still reported open: the person may abort it. */
   canAbort: boolean;
+  /** Refused attempts so far; a new one means the last request came back. */
+  refusals: number;
   /** Markdown. */
   text: string;
 }
 
-const LEFT_MERGE_OUTCOME_LABEL: Record<MergeLeftOpenOutcome, string> = {
+const LEFT_MERGE_OUTCOME_LABEL: Record<Exclude<MergeLeftOpenOutcome, 'refused'>, string> = {
   aborted: 'Merge aborted:',
   moved: 'Merge left as it is:',
-  refused: 'Merge not aborted:',
   'aborted-by-next': 'Merge aborted by another task:',
 };
 
@@ -204,18 +205,22 @@ export function leftMergeBanners(
   if (opts.taskStatus !== 'cancelled') return [];
   return leftOpenMerges(events).map((m) => {
     const where = `${codeSpan(m.ref)} in ${codeSpan(m.dir)}`;
+    const refusals = m.refused?.count ?? 0;
     if (m.settled === null) {
+      const last = m.refused ? ` The last attempt was not carried out: ${m.refused.reason}` : '';
       return {
         dir: m.dir,
         ref: m.ref,
         canAbort: true,
-        text: `A merge of ${where} was left open when this task was cancelled. Aborting it puts that checkout back to how it was before the merge started.`,
+        refusals,
+        text: `A merge of ${where} was left open when this task was cancelled. Aborting it puts that checkout back to how it was before the merge started.${last}`,
       };
     }
     return {
       dir: m.dir,
       ref: m.ref,
       canAbort: false,
+      refusals,
       text: `${LEFT_MERGE_OUTCOME_LABEL[m.settled.outcome]} ${where}. ${m.settled.reason}`.trim(),
     };
   });

@@ -17,7 +17,7 @@ const settled = (over: Record<string, unknown> = {}) => ({
 describe('leftOpenMerges', () => {
   it('lists an event with no settled one as unsettled', () => {
     expect(leftOpenMerges([open()])).toEqual([
-      { dir: '/repo', ref: 'feat/a', head: 'h1', mergeHead: 'm1', settled: null },
+      { dir: '/repo', ref: 'feat/a', head: 'h1', mergeHead: 'm1', settled: null, refused: null },
     ]);
   });
 
@@ -46,5 +46,24 @@ describe('leftOpenMerges', () => {
     expect(
       leftOpenMerges([{ eventType: MERGE_LEFT_OPEN_EVENT, payload: null }, open({ dir: 3 })]),
     ).toEqual([]);
+  });
+
+  it('leaves a refused attempt open and counts the refusals', () => {
+    const [m] = leftOpenMerges([
+      open(),
+      settled({ outcome: 'refused', reason: 'busy' }),
+      settled({ outcome: 'refused', reason: 'still busy' }),
+    ]);
+    expect(m?.settled).toBeNull();
+    expect(m?.refused).toEqual({ reason: 'still busy', count: 2 });
+  });
+
+  it('settles after a refusal once a later attempt aborts it', () => {
+    const [m] = leftOpenMerges([
+      open(),
+      settled({ outcome: 'refused', reason: 'busy' }),
+      settled(),
+    ]);
+    expect(m?.settled?.outcome).toBe('aborted');
   });
 });

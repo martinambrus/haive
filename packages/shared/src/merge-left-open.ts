@@ -16,7 +16,9 @@ export interface LeftOpenMerge {
   ref: string;
   head: string;
   mergeHead: string;
-  settled: { outcome: MergeLeftOpenOutcome; reason: string } | null;
+  settled: { outcome: Exclude<MergeLeftOpenOutcome, 'refused'>; reason: string } | null;
+  /** The latest attempt that was refused, and how many were. A refusal leaves the report open. */
+  refused: { reason: string; count: number } | null;
 }
 
 const OUTCOMES: readonly string[] = ['aborted', 'moved', 'refused', 'aborted-by-next'];
@@ -26,7 +28,8 @@ function text(v: unknown): string | null {
 }
 
 /** Every reported merge in event order, once per directory and merge head, with its settled outcome
- *  when one was recorded (the first, if a double click settled it twice). Events not shaped as written are skipped. */
+ *  when one was recorded (the first, if a double click settled it twice). A refused attempt does not
+ *  settle it: the person may try again. Events not shaped as written are skipped. */
 export function leftOpenMerges(events: readonly LeftOpenEventRow[]): LeftOpenMerge[] {
   const merges = new Map<string, LeftOpenMerge>();
   const key = (dir: string, mergeHead: string) => JSON.stringify([dir, mergeHead]);
@@ -38,7 +41,7 @@ export function leftOpenMerges(events: readonly LeftOpenEventRow[]): LeftOpenMer
     const mergeHead = text(e.payload?.mergeHead);
     if (dir === null || ref === null || head === null || mergeHead === null) continue;
     const k = key(dir, mergeHead);
-    if (!merges.has(k)) merges.set(k, { dir, ref, head, mergeHead, settled: null });
+    if (!merges.has(k)) merges.set(k, { dir, ref, head, mergeHead, settled: null, refused: null });
   }
   for (const e of events) {
     if (e.eventType !== MERGE_LEFT_OPEN_SETTLED_EVENT) continue;
@@ -49,11 +52,12 @@ export function leftOpenMerges(events: readonly LeftOpenEventRow[]): LeftOpenMer
       continue;
     }
     const merge = merges.get(key(dir, mergeHead));
-    if (merge && merge.settled === null) {
-      merge.settled = {
-        outcome: outcome as MergeLeftOpenOutcome,
-        reason: text(e.payload?.reason) ?? '',
-      };
+    if (!merge || merge.settled !== null) continue;
+    const reason = text(e.payload?.reason) ?? '';
+    if (outcome === 'refused') {
+      merge.refused = { reason, count: (merge.refused?.count ?? 0) + 1 };
+    } else {
+      merge.settled = { outcome: outcome as Exclude<MergeLeftOpenOutcome, 'refused'>, reason };
     }
   }
   return [...merges.values()];

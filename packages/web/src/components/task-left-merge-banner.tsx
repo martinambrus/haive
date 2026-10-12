@@ -9,7 +9,7 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Button, FormError } from '@/components/ui';
 
 const POLL_MS = 3000;
-const IDLE_POLLS = 20;
+const CANCEL_FINISHED = 'task.cancel_finished';
 
 const ABORT_CONFIRM =
   'The half-finished merge is undone and the checkout goes back to how it was before the merge started. Changes the fixer made outside the conflicting files are moved aside first where Haive still has a record of them. This cannot be undone.';
@@ -25,37 +25,41 @@ export function TaskLeftMergeBanner({
 }) {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [confirming, setConfirming] = useState<string | null>(null);
-  const [requested, setRequested] = useState<ReadonlySet<string>>(new Set());
+  const [requested, setRequested] = useState<ReadonlyMap<string, number>>(new Map());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const banners = leftMergeBanners(events, { taskStatus });
+  const inFlight = (dir: string) => {
+    const b = banners.find((x) => x.dir === dir && x.canAbort);
+    return b !== undefined && requested.get(dir) === b.refusals;
+  };
+  // The cancel records its reports before `task.cancel_finished`, so polling may stop once that is
+  // in and no abort is waiting on its outcome.
+  const polling =
+    !events.some((e) => e.eventType === CANCEL_FINISHED) || banners.some((b) => inFlight(b.dir));
 
   useEffect(() => {
     if (taskStatus !== 'cancelled') return;
     let stop = false;
-    let idle = 0;
     const load = async () => {
       try {
         const data = await api.get<{ events: TaskEvent[] }>(
-          `/tasks/${taskId}/events?type=merge.left_open,merge.left_open_settled`,
+          `/tasks/${taskId}/events?type=merge.left_open,merge.left_open_settled,${CANCEL_FINISHED}`,
         );
-        if (stop) return;
-        setEvents(data.events);
-        const open = leftMergeBanners(data.events, { taskStatus }).some((b) => b.canAbort);
-        idle = open ? 0 : idle + 1;
-        if (idle >= IDLE_POLLS) clearInterval(timer);
+        if (!stop) setEvents(data.events);
       } catch {
         // the next poll tries again
       }
     };
-    const timer = setInterval(() => void load(), POLL_MS);
     void load();
+    const timer = polling ? setInterval(() => void load(), POLL_MS) : null;
     return () => {
       stop = true;
-      clearInterval(timer);
+      if (timer) clearInterval(timer);
     };
-  }, [taskId, taskStatus]);
+  }, [taskId, taskStatus, polling]);
 
-  const banners = leftMergeBanners(events, { taskStatus });
   if (banners.length === 0) return null;
 
   async function abort(dir: string): Promise<void> {
@@ -63,7 +67,8 @@ export function TaskLeftMergeBanner({
     setError(null);
     try {
       await api.post(`/tasks/${taskId}/merges/abort`, { dir });
-      setRequested((prev) => new Set(prev).add(dir));
+      const refusals = banners.find((b) => b.dir === dir)?.refusals ?? 0;
+      setRequested((prev) => new Map(prev).set(dir, refusals));
       setConfirming(null);
     } catch (e) {
       setError((e as Error).message);
@@ -84,7 +89,7 @@ export function TaskLeftMergeBanner({
           <div className="flex min-w-0 flex-1 flex-col gap-2">
             <InlineMarkdown className="text-sm [overflow-wrap:anywhere]" body={b.text} />
             {b.canAbort &&
-              (requested.has(b.dir) ? (
+              (inFlight(b.dir) ? (
                 <span className="text-xs opacity-80">Aborting…</span>
               ) : (
                 <div>

@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   configService,
@@ -95,7 +95,8 @@ async function events(db: Database, taskId: string, type: string) {
   return db
     .select()
     .from(schema.taskEvents)
-    .where(and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, type)));
+    .where(and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, type)))
+    .orderBy(asc(schema.taskEvents.createdAt));
 }
 
 async function main(): Promise<void> {
@@ -288,6 +289,18 @@ async function main(): Promise<void> {
       `expected refused, got ${JSON.stringify(settledC[0]!.payload)}`,
     );
     assert(mergeOpen(dirC), 'a merge another live task holds must not be aborted');
+    // A refusal leaves the report open: once the holder lets go, a second request aborts it.
+    await db.delete(schema.mergeDirClaims).where(eq(schema.mergeDirClaims.mergeDir, dirC));
+    await q.add(TASK_JOB_NAMES.ABORT_LEFT_MERGE, { taskId: c.task.id, userId: uid, dir: dirC });
+    const retriedC = await pollUntil(async () => {
+      const rows = await events(db, c.task.id, SETTLED);
+      return rows.length > 1 ? rows : null;
+    }, 'second settled event for C');
+    assert(
+      (retriedC[1]!.payload as { outcome: string }).outcome === 'aborted',
+      `expected the retry to abort, got ${JSON.stringify(retriedC[1]!.payload)}`,
+    );
+    assert(!mergeOpen(dirC), 'the retried abort must clear the merge');
 
     // 5. The next resolver clearing the stale merge settles it and warns on its step.
     const { peekOpenMerge, noteAbortedByNext } =
