@@ -418,12 +418,12 @@ describe('08 notes and form for declared and turned-off slots', () => {
     );
   });
 
-  it('the form labels a declared command and a turned-off slot, and an old payload is as before', () => {
+  it('the form lists the slots in a code block, labelling a declared command and a turned-off slot', () => {
     const base = { workspacePath: '/w', ddevMode: false, test: cmd, lint: null, typecheck: null };
     const description = (d: Record<string, unknown>) =>
       phase5VerifyStep.form!({} as never, d as never)!.description;
     expect(description(base)).toBe(
-      'Workspace: /w\ntest: npm run test\nlint: none detected\ntypecheck: none detected',
+      '```\nworkspace: /w\ntest: npm run test\nlint: none detected\ntypecheck: none detected\n```',
     );
     expect(
       description({
@@ -432,7 +432,25 @@ describe('08 notes and form for declared and turned-off slots', () => {
         offSlots: ['lint'],
       }),
     ).toBe(
-      'Workspace: /w\ntest: make test (declared)\nlint: turned off for this repository\ntypecheck: none detected',
+      '```\nworkspace: /w\ntest: make test (declared)\nlint: turned off for this repository\ntypecheck: none detected\n```',
     );
+  });
+
+  it('fences a declared command holding markdown so it shows as typed', () => {
+    const typed = 'echo ```x``` `date` && [x](http://e) **y**';
+    const d = phase5VerifyStep.form!(
+      {} as never,
+      {
+        workspacePath: '/w',
+        ddevMode: false,
+        test: { ...cmd, label: typed, source: 'declared' },
+        lint: null,
+        typecheck: null,
+      } as never,
+    )!.description!;
+    const [open, ...rest] = d.split('\n');
+    expect(open).toBe('````');
+    expect(rest.at(-1)).toBe('````');
+    expect(d).toContain(`test: ${typed} (declared)`);
   });
 });

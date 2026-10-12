@@ -1158,6 +1158,7 @@ describe('phase5VerifyStep.apply', () => {
       expect(out.lint.ran).toBe(true);
       expect(out.degradedNote).toContain('sub/phpunit.xml');
       expect(out.degradedNote).toContain('the repository root');
+      expect(out.degradedNote).toContain("Declare commands on the repository's Tooling page.");
       expect(out.degradedNote).not.toContain('No verification check ran');
     });
 

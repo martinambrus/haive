@@ -35,6 +35,7 @@ import {
   killStalePlaywrightRuns,
 } from '../../../sandbox/ddev-playwright.js';
 import { checkOutputExcerpt } from './_fix-loop.js';
+import { codeBlock } from './_plan-ops.js';
 import { classifyTestEnvFailure } from './_test-env-guard.js';
 import { runtimeSmokeVerdict } from './_runtime-smoke-verdict.js';
 import { DRUPAL_CORE_MARKER, type TestFramework } from './08b-test-management.js';
@@ -220,6 +221,11 @@ export function buildUnverifiedNote(
 
 /** Appended to every root-only sentence: declaring commands is how a repo past root-only detection runs. */
 export const TOOLING_PAGE_HINT = "Declare commands on the repository's Tooling page.";
+
+/** The declined-configs sentence with the Tooling page hint, for the notices that carry no root-only sentence. */
+export function withToolingHint(sentence: string): string {
+  return sentence ? `${sentence} ${TOOLING_PAGE_HINT}` : '';
+}
 
 /** What gate 2 and the unverified note say about the configs one level down that were not used. */
 export function declinedConfigsSentence(declined: string[] | undefined): string {
@@ -977,15 +983,21 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     return {
       title: 'Phase 5: Verify',
       description: [
-        `Workspace: ${detected.workspacePath}`,
         detected.ddevMode ? 'PHP/Python checks run inside the DDEV runner.' : '',
-        `test: ${label(detected.test, 'test')}`,
-        `lint: ${label(detected.lint, 'lint')}`,
-        detected.phpLint ? `php lint: ${label(detected.phpLint)}` : '',
-        `typecheck: ${label(detected.typecheck, 'typecheck')}`,
+        codeBlock(
+          [
+            `workspace: ${detected.workspacePath}`,
+            `test: ${label(detected.test, 'test')}`,
+            `lint: ${label(detected.lint, 'lint')}`,
+            detected.phpLint ? `php lint: ${label(detected.phpLint)}` : '',
+            `typecheck: ${label(detected.typecheck, 'typecheck')}`,
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        ),
       ]
         .filter(Boolean)
-        .join('\n'),
+        .join('\n\n'),
       fields: [
         { type: 'checkbox', id: 'runTest', label: 'Run tests', default: detected.test !== null },
         { type: 'checkbox', id: 'runLint', label: 'Run lint', default: detected.lint !== null },
@@ -1155,7 +1167,9 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       lint.note,
       phpLint?.note,
       typecheck.note,
-      anyRan && slotUndetected ? declinedConfigsSentence(args.detected.declinedConfigs) : '',
+      anyRan && slotUndetected
+        ? withToolingHint(declinedConfigsSentence(args.detected.declinedConfigs))
+        : '',
     ]
       .filter(Boolean)
       .join('\n');

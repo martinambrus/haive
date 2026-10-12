@@ -18,6 +18,7 @@ import { checkOutputExcerpt, excerptDiagnosis } from './_fix-loop.js';
 import {
   TOOLING_PAGE_HINT,
   declinedConfigsSentence,
+  withToolingHint,
   type VerifySlotName,
 } from './08-phase-5-verify.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
@@ -1096,7 +1097,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       rows.push({
         label: 'Tooling below the root',
         status: 'warn',
-        body: declinedConfigsSentence(detected.declinedConfigs),
+        body: withToolingHint(declinedConfigsSentence(detected.declinedConfigs)),
         defaultOpen: true,
       });
     }

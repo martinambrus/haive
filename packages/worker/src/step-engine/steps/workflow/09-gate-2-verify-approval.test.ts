@@ -422,6 +422,7 @@ describe('gate-2 status summary', () => {
       expect(r?.status).toBe('warn');
       expect(r?.body).toContain('sub/phpunit.xml');
       expect(r?.body).toContain('the repository root');
+      expect(r?.body).toContain("Declare commands on the repository's Tooling page.");
       expect(row(d, 'Tests / lint / typecheck')).toBeUndefined();
       expect(decisionDefault(d)).toBe('approve');
     });
