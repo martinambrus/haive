@@ -74,15 +74,36 @@ export function isMinifiedPath(rel: string): boolean {
 
 /** Files bigger than this are skipped whole rather than indexed in part. Real
  *  hand-written source never reaches it; past this size the cost is embedding
- *  time, not retrieval value. Callers log the skip — never drop a file quietly. */
+ *  time, not retrieval value. Callers log the skip — never drop a file quietly.
+ *  Applies outside the repository's own code and KB, see `fileBudget`. */
 export const MAX_FILE_BYTES = 512_000;
+
+/** The size limit for a repository's own code and KB: a backstop against a generated file. */
+export const MAX_OWN_FILE_BYTES = 2_000_000;
 
 /** Per-file chunk budget (~160 KB of covered text at DEFAULT_MAX_SIZE). This is
  *  the real constraint the old 3000/5000-char slices were groping at: peak
  *  memory is bounded by the file itself either way, but every extra chunk is
  *  another embedding call. Over-budget files keep the first N chunks and report
- *  the remainder so the loss is logged rather than silent. */
+ *  the remainder so the loss is logged rather than silent. Applies outside the
+ *  repository's own code and KB, see `fileBudget`. */
 export const MAX_CHUNKS_PER_FILE = 80;
+
+export function fileBudget(
+  relPath: string,
+  kind: 'kb' | 'code',
+  ownPaths: readonly string[],
+): { maxBytes: number; maxChunks: number } {
+  const own =
+    kind === 'kb' ||
+    ownPaths.some((entry) => {
+      const base = entry.replace(/\/+$/, '');
+      return relPath === base || relPath.startsWith(`${base}/`);
+    });
+  return own
+    ? { maxBytes: MAX_OWN_FILE_BYTES, maxChunks: Infinity }
+    : { maxBytes: MAX_FILE_BYTES, maxChunks: MAX_CHUNKS_PER_FILE };
+}
 
 /** Uncovered spans with less non-whitespace than this are not worth an embedding
  *  of their own — import blocks, closing braces, blank lines between functions. */
