@@ -71,7 +71,11 @@ async function setup(seedColumn: Context | null = null) {
   dirs.push(root);
   const repositories = schema.repositories;
   const sync = tableNamed('project_state_sync');
-  const fake = createFakeDb({ repositories, projectStateSync: sync });
+  const fake = createFakeDb({
+    repositories,
+    projectStateSync: sync,
+    projectStateConflicts: schema.projectStateConflicts,
+  });
   const column = keyOf(repositories, 'render_context');
   fake.insert(repositories, {
     id: REPO,

@@ -114,6 +114,7 @@ async function setup(root: string) {
     tasks: schema.tasks,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateSync: schema.projectStateSync,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   const context = {
     projectInfo: {},
@@ -137,7 +138,23 @@ async function setup(root: string) {
       renderContext: context,
     });
     fake.insert(schema.projectStateSync, { repositoryId: id, baseSnapshot: { render: context } });
+    fake.insert(schema.projectStateConflicts, {
+      repositoryId: id,
+      unit: 'project/render.json#framework',
+      base: { v: 'a' },
+      local: { v: 'b' },
+      incoming: { v: 'c' },
+    });
   }
+  fake.insert(schema.projectStateConflicts, {
+    repositoryId: REPO,
+    unit: 'project/render.json#acceptedAgentIds',
+    base: { v: [] },
+    local: { v: ['x'] },
+    incoming: { v: ['y'] },
+    resolution: 'keep_mine',
+    resolvedAt: new Date(1),
+  });
   const noRows = (): unknown => {
     const query: Record<string, unknown> = {};
     for (const method of ['innerJoin', 'where', 'orderBy']) query[method] = () => query;
@@ -193,5 +210,15 @@ describe('resetting a repository through the route', () => {
     expect((await reset()).status).toBe(200);
 
     expect(fake.rows(schema.projectStateSync).map((r) => r.repositoryId)).toEqual([OTHER]);
+  });
+});
+
+describe('resetting a repository with project state conflicts', () => {
+  it('deletes its conflict rows, pending and answered alike, and only that repository’s', async () => {
+    const fake = await setup(await repoRoot());
+
+    expect((await reset()).status).toBe(200);
+
+    expect(fake.rows(schema.projectStateConflicts).map((r) => r.repositoryId)).toEqual([OTHER]);
   });
 });

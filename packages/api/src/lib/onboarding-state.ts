@@ -52,6 +52,11 @@ export function upgradeRefusalMessage(
   if (refusal.reason === 'live-onboarding') {
     return `Onboarding is still running for this repository (task ${refusal.taskId}), so it cannot be ${action} yet`;
   }
+  if (refusal.reason === 'contested') {
+    const shown = refusal.units.slice(0, 3).join(', ');
+    const more = refusal.units.length > 3 ? ` and ${refusal.units.length - 3} more` : '';
+    return `The project settings of this repository conflict with another install's (${shown}${more}), so it cannot be ${action} until each is answered`;
+  }
   return refusal.reason === 'reset'
     ? `This repository was reset and no onboarding has finished since, so it cannot be ${action}`
     : `No completed onboarding found for this repository, so it cannot be ${action}`;

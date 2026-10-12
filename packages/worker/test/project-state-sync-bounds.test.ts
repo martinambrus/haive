@@ -75,6 +75,7 @@ async function setup(seed: { column?: unknown; base?: unknown } = {}) {
     projectStateSync: schema.projectStateSync,
     tasks: schema.tasks,
     onboardingArtifacts: schema.onboardingArtifacts,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, {
     id: REPO,

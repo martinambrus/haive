@@ -63,6 +63,9 @@ export const upgradeStatusResponseSchema = z.object({
    *  so nothing here can say what changed. It sets `hasUpgradeAvailable`, also after an upgrade
    *  that recorded nothing. Omitted otherwise. */
   firstUpgradeOnThisInstall: z.boolean().optional(),
+  /** Units of the project state record that this install and the checkout both changed, differently,
+   *  and nobody has answered. No upgrade or rollback starts while there are any. Omitted when none. */
+  contestedUnits: z.array(z.string()).optional(),
 });
 
 export type UpgradeStatusResponse = z.infer<typeof upgradeStatusResponseSchema>;

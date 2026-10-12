@@ -44,6 +44,7 @@ function database(plan: Plan) {
     cliProviders: schema.cliProviders,
     projectStateSync: schema.projectStateSync,
     taskSteps: schema.taskSteps,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, {
     id: REPO,

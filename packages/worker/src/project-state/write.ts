@@ -1,14 +1,19 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
+  RENDER_UNIT,
+  conflictSide,
+  conflictSideValue,
   emptyProjectState,
+  isRenderUnit,
   sameValue,
   normalizeProjectState,
   portableRender,
   renderContextColumnSchema,
   renderProjectState,
+  type ProjectRender,
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
 import type { TemplateRenderContext } from '../step-engine/template-manifest.js';
@@ -70,6 +75,64 @@ export function renderContextColumnFor(context: TemplateRenderContext, rtkChoice
   return renderContextColumnSchema.parse({ ...context, rtkChoiceRecorded });
 }
 
+/** A pending conflict of the render unit, its sides as values (`undefined` where a side has none). */
+export interface PendingRenderConflict {
+  unit: string;
+  base: unknown;
+  local: unknown;
+  incoming: unknown;
+}
+
+export async function loadPendingRenderConflicts(
+  db: Database | Tx,
+  repositoryId: string,
+): Promise<PendingRenderConflict[]> {
+  const rows = await db
+    .select({
+      unit: schema.projectStateConflicts.unit,
+      base: schema.projectStateConflicts.base,
+      local: schema.projectStateConflicts.local,
+      incoming: schema.projectStateConflicts.incoming,
+    })
+    .from(schema.projectStateConflicts)
+    .where(
+      and(
+        eq(schema.projectStateConflicts.repositoryId, repositoryId),
+        isNull(schema.projectStateConflicts.resolvedAt),
+      ),
+    )
+    .orderBy(asc(schema.projectStateConflicts.unit));
+  return rows
+    .filter((row) => isRenderUnit(row.unit))
+    .map((row) => ({
+      unit: row.unit,
+      base: conflictSideValue(row.base),
+      local: conflictSideValue(row.local),
+      incoming: conflictSideValue(row.incoming),
+    }));
+}
+
+/** The render unit with every contested key at `side`'s value, the whole unit first. A writer renders
+ *  the file with `incoming` and the sync base with `base`, so the next sync meets the same conflict
+ *  rather than the writer settling it for the column's side. */
+export function overlayRender(
+  render: ProjectRender | null,
+  pending: readonly PendingRenderConflict[],
+  side: 'base' | 'local' | 'incoming',
+): ProjectRender | null {
+  let out: Record<string, unknown> | null = render;
+  for (const row of pending) {
+    const value = row[side];
+    if (row.unit === RENDER_UNIT) {
+      out = (value ?? null) as Record<string, unknown> | null;
+      continue;
+    }
+    const key = row.unit.slice(RENDER_UNIT.length + 1);
+    out = { ...out, [key]: value };
+  }
+  return out as ProjectRender | null;
+}
+
 /** Writes the record holding the context's render unit, then moves the repository's render context
  *  and the sync base to it in one transaction. Returns the repository-relative paths written. */
 export async function writeProjectStateRecord(
@@ -84,36 +147,52 @@ export async function writeProjectStateRecord(
   }: ProjectStateRecordInput,
 ): Promise<string[]> {
   const written: string[] = [];
+  let attempted: ProjectRender | null = null;
   try {
     // Refused before anything is written, so the column only ever holds what reads back.
     const column = renderContextColumnFor(context, rtkChoiceRecorded);
-    const record = { ...emptyProjectState(), render: portableRender(column) };
-    const synced = {
-      baseSnapshot: normalizeProjectState(record),
-      lastError: null,
-      updatedAt: new Date(),
-    };
+    const portable = portableRender(column);
+    attempted = portable;
+    const planFor = (pending: readonly PendingRenderConflict[]) => ({
+      record: { ...emptyProjectState(), render: overlayRender(portable, pending, 'incoming') },
+      baseSnapshot: normalizeProjectState({
+        ...emptyProjectState(),
+        render: overlayRender(portable, pending, 'base'),
+      }),
+    });
+    // A first look only, so its failure must not clear the column: the files then wait for the locked read.
+    let seen: PendingRenderConflict[] | null = expectedColumns
+      ? []
+      : await loadPendingRenderConflicts(db, repositoryId).catch(() => null);
+    let plan = planFor(seen ?? []);
     const writeFiles = async (): Promise<void> => {
-      for (const [rel, text] of renderProjectState(record)) {
+      for (const [rel, text] of renderProjectState(plan.record)) {
         const path = `${PROJECT_STATE_DIR}/${rel}`;
         await writeFileNoFollow(repoPath, path, text, { createParents: true });
-        written.push(path);
+        if (!written.includes(path)) written.push(path);
       }
     };
     // A fenced write keeps the lock from its check to its last write, files included, so no sync
     // lands between them; an unfenced one writes its files first, before any database write.
-    if (!expectedColumns) await writeFiles();
+    if (!expectedColumns && seen !== null) await writeFiles();
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
       if (expectedColumns) {
         await refuseMovedColumn(tx, repositoryId, expectedColumns);
         if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId);
+      }
+      const pending = await loadPendingRenderConflicts(tx, repositoryId);
+      if (expectedColumns || seen === null || !sameValue(pending, seen)) {
+        seen = pending;
+        plan = planFor(pending);
         await writeFiles();
       }
+      const synced = { baseSnapshot: plan.baseSnapshot, lastError: null, updatedAt: new Date() };
       await tx
         .update(schema.repositories)
         .set({ renderContext: column })
         .where(eq(schema.repositories.id, repositoryId));
+      await recordLocalSide(tx, repositoryId, portable);
       await tx
         .insert(schema.projectStateSync)
         .values({ repositoryId, ...synced })
@@ -121,7 +200,12 @@ export async function writeProjectStateRecord(
     });
   } catch (err) {
     if (err instanceof ProjectStateMovedError) throw err;
-    const cleared = await clearRenderContext(db, repositoryId, expectedColumns);
+    const cleared = await clearRenderContext(
+      db,
+      repositoryId,
+      expectedColumns,
+      written.includes(`${PROJECT_STATE_DIR}/${RENDER_UNIT}`) ? attempted : null,
+    );
     throw new ProjectStateWriteError(err, written, !cleared);
   }
   return written;
@@ -157,10 +241,42 @@ export async function refuseMovedColumn(
 /** A column this write could not move would read as newer than the rows its writer just wrote, so it
  *  is cleared and every reader falls back to those rows' snapshot. One a sync moved past `expected`
  *  meanwhile is newer than both and stays. */
+/** The value this install now holds for each pending key becomes the row's local side; a key that
+ *  now holds what the other side has is no longer contested. */
+async function recordLocalSide(
+  tx: Tx,
+  repositoryId: string,
+  rendered: ProjectRender | null,
+): Promise<void> {
+  for (const row of await loadPendingRenderConflicts(tx, repositoryId)) {
+    const local =
+      row.unit === RENDER_UNIT
+        ? rendered
+        : (rendered as Record<string, unknown> | null)?.[row.unit.slice(RENDER_UNIT.length + 1)];
+    if (sameValue(local, row.local)) continue;
+    const agreed = sameValue(local, row.incoming);
+    await tx
+      .update(schema.projectStateConflicts)
+      .set(
+        agreed
+          ? { local: conflictSide(local), resolution: 'converged', resolvedAt: new Date() }
+          : { local: conflictSide(local) },
+      )
+      .where(
+        and(
+          eq(schema.projectStateConflicts.repositoryId, repositoryId),
+          eq(schema.projectStateConflicts.unit, row.unit),
+          isNull(schema.projectStateConflicts.resolvedAt),
+        ),
+      );
+  }
+}
+
 async function clearRenderContext(
   db: Database,
   repositoryId: string,
-  expected?: unknown[],
+  expected: unknown[] | undefined,
+  attempted: ProjectRender | null,
 ): Promise<boolean> {
   try {
     await db.transaction(async (tx) => {
@@ -177,6 +293,10 @@ async function clearRenderContext(
         .update(schema.repositories)
         .set({ renderContext: null })
         .where(eq(schema.repositories.id, repositoryId));
+      // The column was this install's side of each pending key; the next sync rebuilds it from the rows.
+      if (attempted) {
+        await recordLocalSide(tx, repositoryId, attempted);
+      }
     });
     return true;
   } catch {

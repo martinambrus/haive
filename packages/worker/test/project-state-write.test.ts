@@ -128,7 +128,12 @@ async function setup() {
   dirs.push(root);
   const repositories = schema.repositories;
   const sync = tableNamed('project_state_sync');
-  const fake = createFakeDb({ repositories, projectStateSync: sync, tasks: schema.tasks });
+  const fake = createFakeDb({
+    repositories,
+    projectStateSync: sync,
+    projectStateConflicts: schema.projectStateConflicts,
+    tasks: schema.tasks,
+  });
   fake.insert(repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
   fake.insert(repositories, { id: OTHER, userId: USER, name: 'other', source: 'blank' });
 
@@ -156,6 +161,7 @@ async function setup() {
   const hook = {
     onLock: null as ((key: string) => void) | null,
     onCommit: null as (() => Promise<void>) | null,
+    failNextSelect: 0,
   };
   fake.hooks.beforeLock = (key) => {
     firstWrite();
@@ -195,6 +201,10 @@ async function setup() {
         }
         if (prop === 'select') {
           return (...args: Parameters<FakeDbHandle['select']>) => {
+            if (hook.failNextSelect > 0) {
+              hook.failNextSelect -= 1;
+              throw new Error('read refused');
+            }
             events.push('select');
             return (value as FakeDbHandle['select'])(...args);
           };
@@ -249,10 +259,24 @@ async function setup() {
       [col.updatedAt]: new Date(0),
       ...values,
     });
+  const pend = (
+    unit: string,
+    sides: { base?: unknown; local?: unknown; incoming?: unknown },
+    over: Record<string, unknown> = {},
+  ) =>
+    fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit,
+      base: 'base' in sides ? { v: sides.base } : null,
+      local: 'local' in sides ? { v: sides.local } : null,
+      incoming: 'incoming' in sides ? { v: sides.incoming } : null,
+      ...over,
+    });
   return {
     root,
     fake,
     write,
+    pend,
     col,
     columnOf,
     syncRows,
@@ -630,5 +654,160 @@ describe('writeProjectStateRecord: what a rejection names', () => {
     const err = await rejection(failing.write(context(), true));
 
     expect([...(written(err) ?? [])]).toEqual([...ok]);
+  });
+});
+
+describe('writeProjectStateRecord: a key a sync left pending', () => {
+  const UNIT = 'project/render.json#acceptedAgentIds';
+  const base = ['code-reviewer'];
+  const incoming = ['code-reviewer', 'qa-lead'];
+  const withIds = (ids: string[]) => ({ ...context(), acceptedAgentIds: ids });
+
+  it('writes the key as the teammate has it, keeps the old base for it, and leaves the column the writer’s', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
+
+    await s.write(context(), true);
+
+    expect(s.onDisk().render).toBe(expectedFiles(withIds(incoming)).render);
+    const baseSnapshot = s.syncRows()[0]![s.col.baseSnapshot];
+    expect(json(baseSnapshot)).toEqual(json(normalizeProjectState(recordOf(withIds(base)))));
+    expect(json(s.columnOf(REPO))).toEqual(json({ ...context(), rtkChoiceRecorded: true }));
+    expect(s.fake.rows(schema.projectStateConflicts)).toHaveLength(1);
+  });
+
+  it('keeps the column when only the first look at the pending rows fails', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
+    s.hook.failNextSelect = 1;
+
+    await s.write(context(), true);
+
+    expect(json(s.columnOf(REPO))).toEqual(json({ ...context(), rtkChoiceRecorded: true }));
+    expect(s.onDisk().render).toBe(expectedFiles(withIds(incoming)).render);
+  });
+
+  it('writes no file from an unknown set of pending rows when the locked read fails too', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
+    s.hook.failNextSelect = 2;
+
+    await expect(s.write(context(), true)).rejects.toThrow();
+
+    expect(s.onDisk().render).toBeNull();
+  });
+
+  it('records the value it wrote as the row’s local side', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
+    const chosen = ['security-auditor'];
+
+    await s.write(withIds(chosen), true);
+
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(json(row!.local)).toEqual({ v: chosen });
+    expect(row!.resolvedAt ?? null).toBeNull();
+  });
+
+  it('settles a key once the value it wrote is what the other side has', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
+
+    await s.write(withIds(incoming), true);
+
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(row!.resolution).toBe('converged');
+    expect(row!.resolvedAt).not.toBeNull();
+  });
+
+  it('records nothing as the local side when the write failed before any file', async () => {
+    const s = await setup();
+    const local = ['security-auditor', 'code-reviewer'];
+    s.pend(UNIT, { base, local, incoming });
+    s.hook.failNextSelect = 2;
+
+    await expect(s.write(withIds(incoming), true)).rejects.toThrow();
+
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(json(row!.local)).toEqual({ v: local });
+    expect(row!.resolvedAt ?? null).toBeNull();
+  });
+
+  it('reports the column stale when it cannot keep the value it wrote for a pending key', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
+    s.fake.hooks.beforeInsert = () => {
+      throw new Error('database refused');
+    };
+    s.fake.hooks.beforeUpdate = (table) => {
+      if (table === schema.projectStateConflicts) throw new Error('rows refused');
+    };
+
+    const err = await s.write(withIds(['security-auditor']), true).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect((err as { columnStale?: boolean }).columnStale).toBe(true);
+  });
+
+  it('records nothing as the local side when the render file itself was never written', async () => {
+    const s = await setup();
+    const local = ['security-auditor', 'code-reviewer'];
+    s.pend(UNIT, { base, local, incoming });
+    await mkdir(join(s.root, STATE_DIR), { recursive: true });
+    await writeFile(join(s.root, STATE_DIR, 'project'), 'a file where the directory should be');
+
+    await expect(s.write(withIds(incoming), true)).rejects.toThrow();
+
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(json(row!.local)).toEqual({ v: local });
+    expect(row!.resolvedAt ?? null).toBeNull();
+  });
+
+  it('carries a teammate’s null as a value, not as an absent key', async () => {
+    const s = await setup();
+    s.pend('project/render.json#framework', { base: 'drupal10', local: 'drupal', incoming: null });
+
+    await s.write(context(), true);
+
+    expect((JSON.parse(s.onDisk().render!) as { framework: unknown }).framework).toBeNull();
+  });
+
+  it('ignores a resolved row and a row of another repository', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, incoming }, { resolution: 'keep_mine', resolvedAt: new Date(1) });
+    s.pend(UNIT, { base, incoming }, { repositoryId: OTHER });
+
+    await s.write(context(), true);
+
+    expect(s.onDisk().render).toBe(expectedFiles(context()).render);
+    const baseSnapshot = s.syncRows()[0]![s.col.baseSnapshot];
+    expect(json(baseSnapshot)).toEqual(json(normalizeProjectState(recordOf(context()))));
+  });
+
+  it('holds the whole render file as the teammate has it when the whole unit is pending', async () => {
+    const s = await setup();
+    s.pend('project/render.json', {
+      base: recordOf(withIds(base)).render,
+      incoming: recordOf(withIds(incoming)).render,
+    });
+
+    await s.write(context(), true);
+
+    expect(s.onDisk().render).toBe(expectedFiles(withIds(incoming)).render);
+    const baseRender = (s.syncRows()[0]![s.col.baseSnapshot] as { render: unknown }).render;
+    expect(json(baseRender)).toEqual(json(normalizeProjectState(recordOf(withIds(base))).render));
+  });
+
+  it('reads the rows under the lock, so a sync that landed after the files were planned is seen', async () => {
+    const s = await setup();
+    s.hook.onLock = () => s.pend(UNIT, { base, incoming });
+
+    await s.write(context(), true);
+
+    expect(s.onDisk().render).toBe(expectedFiles(withIds(incoming)).render);
+    const baseSnapshot = s.syncRows()[0]![s.col.baseSnapshot];
+    expect(json(baseSnapshot)).toEqual(json(normalizeProjectState(recordOf(withIds(base)))));
   });
 });

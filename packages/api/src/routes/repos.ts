@@ -2848,6 +2848,9 @@ async function runOnboardingArtifactReset(
       })
       .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
     await tx.delete(schema.projectStateSync).where(eq(schema.projectStateSync.repositoryId, id));
+    await tx
+      .delete(schema.projectStateConflicts)
+      .where(eq(schema.projectStateConflicts.repositoryId, id));
   });
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 }

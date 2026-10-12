@@ -145,6 +145,21 @@ describe('upgrade-status and the rules import', () => {
     expect(body.linkedRulesFiles).toBeUndefined();
   });
 
+  it('offers no upgrade, and names the units, while a project state conflict is pending', async () => {
+    expect((await status()).contestedUnits).toBeUndefined();
+    state.rows.set(schema.projectStateConflicts, [
+      { unit: 'project/render.json#framework' },
+      { unit: 'project/render.json#acceptedAgentIds' },
+    ]);
+    const body = await status();
+    expect(body.hasUpgradeAvailable).toBe(false);
+    expect(body.contestedUnits).toEqual([
+      'project/render.json#acceptedAgentIds',
+      'project/render.json#framework',
+    ]);
+    expect(body.missingRulesImports).toBeUndefined();
+  });
+
   it('offers an upgrade for a rules file that lacks the import', async () => {
     const body = await status();
     expect(body.changedTemplateIds).toEqual([]);

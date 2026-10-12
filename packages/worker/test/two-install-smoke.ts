@@ -22,8 +22,11 @@ import {
   renderProjectState,
 } from '@haive/shared/project-state';
 import { applyPlanPatch } from '@haive/shared/plan';
+import { upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { handleClone, handleScan } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
+import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
+import { writeProjectStateRecord } from '../src/project-state/write.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
 import {
   TaskCancelledError,
@@ -642,6 +645,45 @@ async function main(): Promise<void> {
       { renderColumn, syncColumns, constraints },
     );
 
+    const conflictColumns = await columnsOf(a.db, 'project_state_conflicts');
+    const conflictKeys = await rowsOf<{ conname: string; contype: string; def: string }>(
+      a.db,
+      sql`select conname, contype, pg_get_constraintdef(oid) as def from pg_constraint where conrelid = to_regclass('project_state_conflicts')`,
+    );
+    const conflictIndexes = await rowsOf<{ indexdef: string }>(
+      a.db,
+      sql`select indexdef from pg_indexes where schemaname = current_schema() and tablename = 'project_state_conflicts'`,
+    );
+    const conflictKeyRows = 'rows' in conflictKeys ? conflictKeys.rows : [];
+    check(
+      'migration 0188 creates project_state_conflicts as specified',
+      'rows' in conflictColumns &&
+        conflictColumns.rows.length === 10 &&
+        shapeOf(conflictColumns, 'id') === 'uuid NO' &&
+        shapeOf(conflictColumns, 'repository_id') === 'uuid NO' &&
+        shapeOf(conflictColumns, 'unit') === 'text NO' &&
+        shapeOf(conflictColumns, 'base') === 'jsonb YES' &&
+        shapeOf(conflictColumns, 'local') === 'jsonb YES' &&
+        shapeOf(conflictColumns, 'incoming') === 'jsonb YES' &&
+        shapeOf(conflictColumns, 'detected_at') === 'timestamp without time zone NO' &&
+        shapeOf(conflictColumns, 'resolution') === 'text YES' &&
+        shapeOf(conflictColumns, 'resolved_at') === 'timestamp without time zone YES' &&
+        shapeOf(conflictColumns, 'resolved_by') === 'uuid YES' &&
+        conflictKeyRows.some(
+          (k) =>
+            k.conname === 'project_state_conflicts_repository_id_repositories_id_fk' &&
+            k.def === 'FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE',
+        ) &&
+        conflictKeyRows.some(
+          (k) => k.contype === 'f' && k.def.includes('REFERENCES users(id) ON DELETE SET NULL'),
+        ) &&
+        'rows' in conflictIndexes &&
+        conflictIndexes.rows.some(
+          (i) => /UNIQUE/.test(i.indexdef) && /WHERE \(?resolved_at IS NULL/.test(i.indexdef),
+        ),
+      { conflictColumns, conflictKeys, conflictIndexes },
+    );
+
     await a.db
       .update(schema.tasks)
       .set({ status: 'completed', completedAt: new Date() })
@@ -1006,6 +1048,177 @@ async function main(): Promise<void> {
         (rowB.render_context?.acceptedAgentIds ?? []).includes(newAgent),
       refreshedB,
     );
+
+    // ---- both installs change one setting: a pending conflict, asked and never chosen (B1.5a) ----
+    // A and B each change the accepted agents, differently, from the record both hold. B keeps its
+    // own value in the column, the checkout's file keeps A's, a writer on B does not settle it, and
+    // no upgrade starts until somebody answers.
+    const baseIds = rowB?.render_context?.acceptedAgentIds ?? [];
+    const extraAgent =
+      [...BASELINE_AGENT_SPECS, ...Object.values(FRAMEWORK_AGENT_SPECS).flat()].find(
+        (spec) => !baseIds.includes(spec.id),
+      )?.id ?? null;
+    const cutAgent =
+      BASELINE_AGENT_SPECS.find((spec) => spec.id !== 'code-reviewer' && baseIds.includes(spec.id))
+        ?.id ?? null;
+    check(
+      'an agent is left for B to add and one for A to drop',
+      extraAgent !== null && cutAgent !== null,
+      baseIds,
+    );
+    if (extraAgent !== null && cutAgent !== null) {
+      const idsB = [...baseIds, extraAgent];
+      const idsA = baseIds.filter((id) => id !== cutAgent);
+      const planA = await upgradePlan(a);
+      await a.db
+        .update(schema.tasks)
+        .set({ status: 'cancelled' })
+        .where(eq(schema.tasks.id, planA.taskId));
+      check('A plans from its render context', planA.plan !== null, planA.error);
+      if (planA.plan !== null) {
+        await writeProjectStateRecord(a.db, {
+          repositoryId: a.repositoryId,
+          repoPath: a.repoPath,
+          context: { ...planA.plan.renderCtxSnapshot, acceptedAgentIds: idsA } as never,
+          rtkChoiceRecorded: true,
+        });
+        git(a.repoPath, 'add', '.haive-data/state');
+        git(a.repoPath, 'commit', '-q', '-m', 'A drops an agent');
+        git(a.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+      }
+      await b.db.execute(
+        sql`update repositories set render_context = jsonb_set(render_context, '{acceptedAgentIds}', ${JSON.stringify(idsB)}::jsonb) where id = ${b.repositoryId}`,
+      );
+
+      await refresh(b, 'storage-b');
+
+      const unitsOf = (install: Install) =>
+        rowsOf<{
+          unit: string;
+          base: { v: unknown } | null;
+          local: { v: unknown } | null;
+          incoming: { v: unknown } | null;
+          resolved_at: Date | null;
+        }>(
+          install.db,
+          sql`select unit, base, local, incoming, resolved_at from project_state_conflicts where repository_id = ${install.repositoryId} order by unit`,
+        );
+      const pendingB = await unitsOf(b);
+      const row = 'rows' in pendingB && pendingB.rows.length === 1 ? pendingB.rows[0]! : null;
+      check(
+        'B holds one pending conflict for the setting both changed, with the base, its value and A’s',
+        row !== null &&
+          row.unit === 'project/render.json#acceptedAgentIds' &&
+          row.resolved_at === null &&
+          isDeepStrictEqual(sorted(row.base?.v), sorted(baseIds)) &&
+          isDeepStrictEqual(sorted(row.local?.v), sorted(idsB)) &&
+          isDeepStrictEqual(sorted(row.incoming?.v), sorted(idsA)),
+        pendingB,
+      );
+      const columnNow = await repoStateOf(b);
+      check(
+        "and B's own value stays in its render_context",
+        'rows' in columnNow &&
+          isDeepStrictEqual(
+            sorted(columnNow.rows[0]?.render_context?.acceptedAgentIds),
+            sorted(idsB),
+          ),
+        columnNow,
+      );
+      const onB = async (rel: string) =>
+        readFile(path.join(b.repoPath, rel), 'utf8').then(
+          (text) => text,
+          () => null,
+        );
+      const fileOnB = JSON.parse((await onB(RECORD_RENDER)) ?? 'null') as {
+        acceptedAgentIds?: string[];
+      } | null;
+      check(
+        "B's checkout keeps A's value in project/render.json",
+        isDeepStrictEqual(sorted(fileOnB?.acceptedAgentIds), sorted(idsA)),
+        fileOnB?.acceptedAgentIds,
+      );
+
+      // A writer on B (what 02 does) renders from B's column and must not settle the conflict.
+      const writerPlan = await upgradePlan(b);
+      await b.db
+        .update(schema.tasks)
+        .set({ status: 'cancelled' })
+        .where(eq(schema.tasks.id, writerPlan.taskId));
+      if (writerPlan.plan !== null) {
+        await writeProjectStateRecord(b.db, {
+          repositoryId: b.repositoryId,
+          repoPath: b.repoPath,
+          context: writerPlan.plan.renderCtxSnapshot as never,
+          rtkChoiceRecorded: true,
+        });
+      }
+      const afterWrite = JSON.parse((await onB(RECORD_RENDER)) ?? 'null') as {
+        acceptedAgentIds?: string[];
+      } | null;
+      const baseAfter = await rowsOf<{
+        base_snapshot: { render?: { acceptedAgentIds?: string[] } };
+      }>(
+        b.db,
+        sql`select base_snapshot from project_state_sync where repository_id = ${b.repositoryId}`,
+      );
+      const columnAfter = await repoStateOf(b);
+      check(
+        "a writer on B leaves A's value in the file, the old base for it, and B's value in the column",
+        writerPlan.plan !== null &&
+          isDeepStrictEqual(sorted(afterWrite?.acceptedAgentIds), sorted(idsA)) &&
+          'rows' in baseAfter &&
+          isDeepStrictEqual(
+            sorted(baseAfter.rows[0]?.base_snapshot.render?.acceptedAgentIds),
+            sorted(baseIds),
+          ) &&
+          'rows' in columnAfter &&
+          isDeepStrictEqual(
+            sorted(columnAfter.rows[0]?.render_context?.acceptedAgentIds),
+            sorted(idsB),
+          ),
+        { plan: writerPlan.error, afterWrite, baseAfter, columnAfter },
+      );
+      const again = await syncProjectStateFromCheckout(b.db, {
+        repositoryId: b.repositoryId,
+        repoPath: b.repoPath,
+      });
+      const stillPending = await unitsOf(b);
+      check(
+        'and the next sync meets the same conflict, with no second row',
+        again.outcome === 'conflict' && 'rows' in stillPending && stillPending.rows.length === 1,
+        { again, stillPending },
+      );
+
+      const [repoRowB] = await b.db
+        .select({
+          id: schema.repositories.id,
+          source: schema.repositories.source,
+          renderContext: schema.repositories.renderContext,
+          status: schema.repositories.status,
+          storagePath: schema.repositories.storagePath,
+          localPath: schema.repositories.localPath,
+          onboardedAt: schema.repositories.onboardedAt,
+          onboardingResetAt: schema.repositories.onboardingResetAt,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, b.repositoryId));
+      const admission = repoRowB ? await upgradeAdmission(b.db, b.userId, repoRowB) : null;
+      check(
+        'an upgrade on B is refused while the conflict is pending, naming it',
+        admission !== null &&
+          !admission.admitted &&
+          admission.reason === 'contested' &&
+          isDeepStrictEqual(admission.units, ['project/render.json#acceptedAgentIds']),
+        admission,
+      );
+      const noConflictOnA = await unitsOf(a);
+      check(
+        'and A, whose value stands, holds none',
+        'rows' in noConflictOnA && noConflictOnA.rows.length === 0,
+        noConflictOnA,
+      );
+    }
 
     for (const name of Object.keys(KNOWN_GAPS)) {
       if (gapsChecked.has(name)) continue;

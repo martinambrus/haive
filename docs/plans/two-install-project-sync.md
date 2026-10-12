@@ -412,7 +412,9 @@ Phase 1 (the record):
   01 throws a named error rather than a `TypeError`; on B with RTK off and no rows, 01's RTK
   removals and upgrade-status agree. `smoke:mirror-import`, `smoke:mcp-import-consent` and
   `smoke:repo-refresh` stay green unchanged.
-- **B1.5 feat: pending conflicts, asked, never chosen for the person** [B1.4].
+- **B1.5 feat: pending conflicts, asked, never chosen for the person** [B1.4]. **As built, B1.5a:**
+  the table (migration 0188), the sync's rows, the writer overlay and the `contested` hold; the
+  answering API, the RTK detector and the banner follow as B1.5b-d.
   `project_state_conflicts`, the hold rules, `GET/POST /repos/:id/project-state/conflicts`, and
   the panel/banner resolution UI (browser check at 375/768/1280). Control (smoke): two installs
   change one setting differently → a pending conflict, the local value still in effect and that

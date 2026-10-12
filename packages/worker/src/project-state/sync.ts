@@ -6,7 +6,9 @@ import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haiv
 import {
   PROJECT_STATE_DIR,
   ProjectStateError,
+  conflictSide,
   emptyProjectState,
+  isRenderUnit,
   mergeProjectState,
   normalizeProjectState,
   parseProjectState,
@@ -24,7 +26,7 @@ import {
   unionExpandedFor,
 } from '../step-engine/_upgrade-render.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
-import { lockProjectState } from './write.js';
+import { loadPendingRenderConflicts, lockProjectState, overlayRender } from './write.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
@@ -172,6 +174,68 @@ function keptRender(
   return kept as ProjectRender;
 }
 
+/** Keeps one pending row per conflicted unit, so the writer leaves the other side's value in the file
+ *  and an upgrade waits for an answer. A repeat of the same conflict writes nothing. A pending render
+ *  row whose unit no longer conflicts converged: a side moved to the other's value or back to the base. */
+async function recordConflicts(
+  tx: Tx,
+  repositoryId: string,
+  conflicts: readonly ProjectStateConflict[],
+): Promise<void> {
+  const pending = await tx
+    .select()
+    .from(schema.projectStateConflicts)
+    .where(
+      and(
+        eq(schema.projectStateConflicts.repositoryId, repositoryId),
+        isNull(schema.projectStateConflicts.resolvedAt),
+      ),
+    );
+  const rowOf = new Map(pending.map((row) => [row.unit, row]));
+  for (const { unit, base, local, incoming } of conflicts) {
+    const sides = {
+      base: conflictSide(base),
+      local: conflictSide(local),
+      incoming: conflictSide(incoming),
+    };
+    const row = rowOf.get(unit);
+    if (!row) {
+      await tx.insert(schema.projectStateConflicts).values({ repositoryId, unit, ...sides });
+    } else if (
+      !sameValue(row.base, sides.base) ||
+      !sameValue(row.local, sides.local) ||
+      !sameValue(row.incoming, sides.incoming)
+    ) {
+      await tx
+        .update(schema.projectStateConflicts)
+        .set(sides)
+        .where(eq(schema.projectStateConflicts.id, row.id));
+    }
+  }
+  const open = new Set(conflicts.map(({ unit }) => unit));
+  for (const row of pending) {
+    if (!isRenderUnit(row.unit) || open.has(row.unit)) continue;
+    await tx
+      .update(schema.projectStateConflicts)
+      .set({ resolution: 'converged', resolvedAt: new Date() })
+      .where(eq(schema.projectStateConflicts.id, row.id));
+  }
+}
+
+/** A failed writer's clear leaves no column: the file with each contested key back at its pending row's
+ *  local value stands in, so the conflict stays per key. Null when none is pending or it is no column. */
+async function rebuildLocalRender(
+  tx: Tx,
+  repositoryId: string,
+  onDisk: ProjectRender,
+): Promise<ProjectRender | null> {
+  const pending = await loadPendingRenderConflicts(tx, repositoryId);
+  if (pending.length === 0) return null;
+  const rebuilt = overlayRender(onDisk, pending, 'local');
+  const valid = renderContextColumnSchema.safeParse({ ...rebuilt, rtkChoiceRecorded: true });
+  return rebuilt !== null && valid.success ? rebuilt : null;
+}
+
 /** The set 01's apply writes from the column just written, which upgrade-status compares a
  *  repository's claims against. A repository with no claim keeps its set until 01's first plan. */
 async function writeApplicableTemplateIds(
@@ -246,6 +310,17 @@ export async function syncProjectStateFromCheckout(
 
   return db.transaction(async (tx): Promise<ProjectStateSyncResult> => {
     await lockProjectState(tx, repositoryId);
+    // The row lock first: an upgrade's insert holds it, so the live-task read below sees that task.
+    const [repo] = await tx
+      .select({
+        renderContext: schema.repositories.renderContext,
+        userId: schema.repositories.userId,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .for('update');
+    // Deleted since the files were read: its sync row went with it, and nothing is left to write to.
+    if (!repo) return { outcome: 'superseded' };
     const live = await tx
       .select({ id: schema.tasks.id })
       .from(schema.tasks)
@@ -275,20 +350,12 @@ export async function syncProjectStateFromCheckout(
     };
     if (checkout.kind === 'refused') return refuse(checkout.reason);
 
-    const [repo] = await tx
-      .select({
-        renderContext: schema.repositories.renderContext,
-        userId: schema.repositories.userId,
-      })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
-    // Deleted since the files were read: its sync row went with it, and nothing is left to write to.
-    if (!repo) return { outcome: 'superseded' };
     const column = (repo.renderContext ?? null) as Record<string, unknown> | null;
 
+    const rebuilt =
+      column === null ? await rebuildLocalRender(tx, repositoryId, checkout.render) : null;
     const local = recordOf(
-      column === null ? null : portableRender(column as Parameters<typeof portableRender>[0]),
+      column === null ? rebuilt : portableRender(column as Parameters<typeof portableRender>[0]),
     );
     try {
       renderProjectState(local);
@@ -305,7 +372,10 @@ export async function syncProjectStateFromCheckout(
     });
     const merged = merge.merged.render;
     let wrote = false;
-    if (merged !== null && !sameValue(merged, normalizeProjectState(local).render)) {
+    if (
+      merged !== null &&
+      (rebuilt !== null || !sameValue(merged, normalizeProjectState(local).render))
+    ) {
       const next = renderContextColumnSchema.safeParse({
         ...column,
         ...merged,
@@ -324,6 +394,8 @@ export async function syncProjectStateFromCheckout(
       wrote = true;
       await writeApplicableTemplateIds(tx, { repositoryId, userId: repo.userId });
     }
+
+    await recordConflicts(tx, repositoryId, merge.conflicts);
 
     const lastError =
       merge.conflicts.length === 0

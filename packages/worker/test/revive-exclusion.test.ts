@@ -27,6 +27,7 @@ function setup(
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, {
     id: REPO,

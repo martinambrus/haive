@@ -395,10 +395,30 @@ export async function renderContextAdmitsUpgrade(
 export type UpgradeAdmission =
   | { admitted: true }
   | { admitted: false; reason: 'live-onboarding'; taskId: string }
+  | { admitted: false; reason: 'contested'; units: string[] }
   | { admitted: false; reason: 'reset' | 'none' };
 
-/** The rule the banner and POST /tasks share: no live onboarding, and an onboarding finished, or a
- *  row it wrote, since the reset epoch, or the render context column of a clone. */
+/** The units of the repository's project state that a sync found changed on both installs and that
+ *  nobody has answered yet. */
+export async function pendingConflictUnits(
+  db: Database | DbTx,
+  repositoryId: string,
+): Promise<string[]> {
+  const rows = await db
+    .select({ unit: schema.projectStateConflicts.unit })
+    .from(schema.projectStateConflicts)
+    .where(
+      and(
+        eq(schema.projectStateConflicts.repositoryId, repositoryId),
+        isNull(schema.projectStateConflicts.resolvedAt),
+      ),
+    );
+  return rows.map((r) => r.unit).sort();
+}
+
+/** The rule the banner and POST /tasks share: no live onboarding, no unanswered project state
+ *  conflict, and an onboarding finished, or a row it wrote, since the reset epoch, or the render
+ *  context column of a clone. */
 export async function upgradeAdmission(
   db: Database | DbTx,
   userId: string,
@@ -410,6 +430,8 @@ export async function upgradeAdmission(
   if (facts.liveTaskId) {
     return { admitted: false, reason: 'live-onboarding', taskId: facts.liveTaskId };
   }
+  const units = await pendingConflictUnits(db, repo.id);
+  if (units.length > 0) return { admitted: false, reason: 'contested', units };
   if (hasCompletedSinceReset(facts, resetAt)) return { admitted: true };
   const newestArtifactAt = (await loadNewestLiveArtifactAt(db, userId, [repo.id])).get(repo.id);
   if (

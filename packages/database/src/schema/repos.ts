@@ -9,6 +9,7 @@ import {
   jsonb,
   timestamp,
   index,
+  uniqueIndex,
   check,
   pgEnum,
 } from 'drizzle-orm/pg-core';
@@ -286,6 +287,32 @@ export const projectStateSync = pgTable('project_state_sync', {
   lastError: text('last_error'),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
+
+/** One unit of the project state record that this install and the checkout both changed, differently,
+ *  since the base they shared. `base`, `local` and `incoming` hold `{ "v": <value> }`; NULL is a side
+ *  that has no such unit. A row with no `resolved_at` is pending. */
+export const projectStateConflicts = pgTable(
+  'project_state_conflicts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    repositoryId: uuid('repository_id')
+      .notNull()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    unit: text('unit').notNull(),
+    base: jsonb('base'),
+    local: jsonb('local'),
+    incoming: jsonb('incoming'),
+    detectedAt: timestamp('detected_at').notNull().defaultNow(),
+    resolution: text('resolution'),
+    resolvedAt: timestamp('resolved_at'),
+    resolvedBy: uuid('resolved_by').references(() => users.id, { onDelete: 'set null' }),
+  },
+  (table) => [
+    uniqueIndex('project_state_conflicts_pending_idx')
+      .on(table.repositoryId, table.unit)
+      .where(sql`resolved_at IS NULL`),
+  ],
+);
 
 export const repoUploads = pgTable(
   'repo_uploads',

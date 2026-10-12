@@ -146,6 +146,7 @@ async function upgrade(paths: string[], templateId = 'agent.old') {
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
     projectStateSync: schema.projectStateSync,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
   const entries: UpgradePlanEntry[] = [];

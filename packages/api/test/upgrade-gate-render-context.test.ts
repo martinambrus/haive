@@ -115,6 +115,8 @@ interface World {
   /** A live artifact row, which the existing gate admits on its own. `at` dates it and `source` names
    *  what wrote it. */
   artifact?: boolean | { at: number; source?: 'onboarding' | 'upgrade' };
+  /** Units of the project state record pending in conflict with another install's. */
+  conflicts?: string[];
 }
 
 /** One repository the way POST /tasks finds it, in a database that evaluates its filters. */
@@ -124,6 +126,7 @@ async function world(w: World = {}) {
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   const root = w.root === undefined ? await newRoot() : w.root;
   fake.insert(schema.repositories, {
@@ -174,6 +177,15 @@ async function world(w: World = {}) {
       source: typeof w.artifact === 'object' ? (w.artifact.source ?? 'onboarding') : 'onboarding',
       generatedAt: new Date(typeof w.artifact === 'object' ? w.artifact.at : 0),
       supersededAt: null,
+    });
+  }
+  for (const unit of w.conflicts ?? []) {
+    fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit,
+      base: { v: 1 },
+      local: { v: 2 },
+      incoming: { v: 3 },
     });
   }
   h.db = fake.db;
@@ -584,5 +596,47 @@ describe('renderContextAdmitsUpgrade', () => {
       onboardingResetAt: row.onboardingResetAt,
     };
     expect(await admitsFn()(t.fake.db, USER, needed)).toBe(true);
+  });
+});
+
+describe('POST /tasks holds an upgrade while a project state conflict is pending', () => {
+  const UNIT = 'project/render.json#acceptedAgentIds';
+
+  it('refuses with the conflict named, and starts no task', async () => {
+    const t = await world({ conflicts: [UNIT] });
+
+    const res = await startUpgrade();
+
+    expect(res.status).toBe(409);
+    const error = await refusal(res);
+    expect(error).toContain(UNIT);
+    expect(error).toMatch(/conflict/i);
+    expect(error).toContain('cannot be upgraded');
+    expect(t.upgrades()).toHaveLength(0);
+  });
+
+  it('refuses a repository that onboarding itself admits, not only one the column vouches for', async () => {
+    const t = await world({
+      column: null,
+      onboardedAt: 1_000,
+      tasks: [{ status: 'completed', completedAt: 2_000 }],
+      conflicts: [UNIT],
+    });
+
+    expect((await startUpgrade()).status).toBe(409);
+    expect(t.upgrades()).toHaveLength(0);
+  });
+
+  it('admits again once the row is resolved', async () => {
+    const t = await world({ conflicts: [UNIT] });
+    for (const row of t.fake.rows(schema.projectStateConflicts)) {
+      t.fake.patch(schema.projectStateConflicts, row.id as string, {
+        resolution: 'keep_mine',
+        resolvedAt: new Date(),
+      });
+    }
+
+    expect((await startUpgrade()).status).toBe(201);
+    expect(t.upgrades()).toHaveLength(1);
   });
 });

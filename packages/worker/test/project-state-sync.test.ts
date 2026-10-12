@@ -217,7 +217,14 @@ async function setup(seed: Seed = {}) {
   const root = await mkdtemp(join(tmpdir(), 'project-state-sync-'));
   dirs.push(root);
   const { repositories, projectStateSync: sync, tasks, onboardingArtifacts } = schema;
-  const fake = createFakeDb({ repositories, projectStateSync: sync, tasks, onboardingArtifacts });
+  const conflicts = schema.projectStateConflicts;
+  const fake = createFakeDb({
+    repositories,
+    projectStateSync: sync,
+    projectStateConflicts: conflicts,
+    tasks,
+    onboardingArtifacts,
+  });
   // Columns the sync must leave as they are, set as persistDetection and the mirror import leave them.
   fake.insert(repositories, {
     id: REPO,
@@ -373,8 +380,14 @@ async function setup(seed: Seed = {}) {
     fake.rows(repositories).find((r) => r.id === id)?.renderContext ?? null;
   const syncRows = () => fake.rows(sync);
   const syncRow = () => syncRows().find((r) => r.repositoryId === REPO);
+  const conflictRows = (id = REPO) => fake.rows(conflicts).filter((r) => r.repositoryId === id);
+  const pending = (id = REPO) => conflictRows(id).filter((r) => r.resolvedAt == null);
   const dump = () =>
-    json({ repositories: fake.rows(repositories), projectStateSync: fake.rows(sync) });
+    json({
+      repositories: fake.rows(repositories),
+      projectStateSync: fake.rows(sync),
+      projectStateConflicts: fake.rows(conflicts),
+    });
   /** Test-side changes, as another transaction's commit would make them: no statement is recorded. */
   const patchColumn = (value: unknown) =>
     fake.patch(repositories, REPO, { renderContext: jsonb(value) });
@@ -414,6 +427,8 @@ async function setup(seed: Seed = {}) {
     columnOf,
     syncRows,
     syncRow,
+    conflictRows,
+    pending,
     dump,
     patchColumn,
     patchBase,
@@ -716,6 +731,185 @@ describe('syncProjectStateFromCheckout: both sides changed a key, differently', 
     expect(error).not.toContain('lspLanguages');
     expect(writesTo(trace, 'repositories')).toHaveLength(1);
     expectWritesUnderTheLock(trace);
+  });
+});
+
+describe('syncProjectStateFromCheckout: a conflict is kept as a row until somebody answers it', () => {
+  const ours = render({ framework: 'drupal7' });
+  const theirs = render({ framework: 'drupal10' });
+  const FRAMEWORK = 'project/render.json#framework';
+
+  it('writes exactly one pending row holding the base, the local and the incoming value', async () => {
+    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+
+    const { trace } = await s.run();
+
+    const rows = s.conflictRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ repositoryId: REPO, unit: FRAMEWORK });
+    expect(json(rows[0]!.base)).toEqual({ v: 'drupal' });
+    expect(json(rows[0]!.local)).toEqual({ v: 'drupal7' });
+    expect(json(rows[0]!.incoming)).toEqual({ v: 'drupal10' });
+    expect(rows[0]!.resolvedAt ?? null).toBeNull();
+    expect(rows[0]!.resolution ?? null).toBeNull();
+    expect(writesTo(trace, 'project_state_conflicts')).toHaveLength(1);
+    expectWritesUnderTheLock(trace);
+  });
+
+  it('writes a row for every key that conflicted, and none for a key that merged', async () => {
+    const local = render({ framework: 'drupal7', acceptedAgentIds: ['code-reviewer'] });
+    const incoming = render({
+      framework: 'drupal10',
+      acceptedAgentIds: ['code-reviewer', 'qa-lead'],
+      lspLanguages: ['css', 'twig'],
+    });
+    const s = await setup({ column: column(local), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(incoming));
+
+    await s.run();
+
+    expect(
+      s
+        .pending()
+        .map((r) => r.unit)
+        .sort(),
+    ).toEqual(['project/render.json#acceptedAgentIds', FRAMEWORK]);
+  });
+
+  it('keeps a value the teammate set to null as a value, and a value this side lacks as absent', async () => {
+    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(render({ framework: null })));
+
+    await s.run();
+
+    const [row] = s.pending();
+    expect(json(row!.incoming)).toEqual({ v: null });
+    expect(json(row!.local)).toEqual({ v: 'drupal7' });
+  });
+
+  it('writes the whole render file as one row when this side holds none', async () => {
+    const s = await setup({ sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+
+    await s.run();
+
+    const [row] = s.pending();
+    expect(row).toMatchObject({ unit: 'project/render.json' });
+    expect(row!.local ?? null).toBeNull();
+    expect(json(row!.base)).toEqual({ v: json(BASE) });
+    expect(json(row!.incoming)).toEqual({ v: json(theirs) });
+  });
+
+  it('writes nothing on a second sync of the same files, to any table', async () => {
+    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+    await s.run();
+    const before = s.dump();
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
+  });
+
+  it('moves the same row when the teammate changes the value again, and adds no second one', async () => {
+    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+    await s.run();
+    const first = s.pending()[0]!;
+
+    await s.putRecord(record(render({ framework: 'drupal11' })));
+    await s.run();
+
+    expect(s.conflictRows()).toHaveLength(1);
+    expect(s.pending()[0]!.id).toBe(first.id);
+    expect(json(s.pending()[0]!.incoming)).toEqual({ v: 'drupal11' });
+    expect(s.pending()[0]!.detectedAt).toEqual(first.detectedAt);
+  });
+
+  it('resolves the row as converged when the teammate goes back to the base', async () => {
+    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+    await s.run();
+    const id = s.pending()[0]!.id;
+
+    await s.putRecord(record(BASE));
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('unchanged');
+    expect(s.pending()).toEqual([]);
+    const [row] = s.conflictRows();
+    expect(row).toMatchObject({ id, resolution: 'converged' });
+    expect(row!.resolvedAt).toBeInstanceOf(Date);
+    expect(row!.resolvedBy ?? null).toBeNull();
+    expect(writesTo(trace, 'project_state_conflicts')).toHaveLength(1);
+    expectWritesUnderTheLock(trace);
+  });
+
+  it('resolves the row as converged when the teammate adopts this side’s value', async () => {
+    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+    await s.run();
+
+    await s.putRecord(record(ours));
+    await s.run();
+
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows()[0]).toMatchObject({ resolution: 'converged' });
+  });
+
+  it('opens a new row when the same key conflicts again after one converged', async () => {
+    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+    await s.run();
+    await s.putRecord(record(BASE));
+    await s.run();
+
+    await s.putRecord(record(render({ framework: 'drupal11' })));
+    await s.run();
+
+    expect(s.conflictRows()).toHaveLength(2);
+    expect(s.pending()).toHaveLength(1);
+  });
+
+  it('leaves a row of another repository, and a pending row of another unit kind, as they are', async () => {
+    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    const other = s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: OTHER,
+      unit: FRAMEWORK,
+      base: { v: 'a' },
+      local: { v: 'b' },
+      incoming: { v: 'c' },
+    });
+    const setting = s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit: 'settings/rtk-enabled.json',
+      base: { v: true },
+      local: { v: true },
+      incoming: { v: false },
+    });
+    await s.putRecord(record(BASE));
+
+    await s.run();
+
+    expect(s.pending(OTHER)).toHaveLength(1);
+    expect(s.pending(OTHER)[0]!.id).toBe(other.id);
+    expect(s.pending().map((r) => r.id)).toEqual([setting.id]);
+  });
+
+  it('writes no row when the record is refused or the sync is deferred', async () => {
+    const refused = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await refused.put(`${STATE_DIR}/project/render.json`, '<<<<<<< HEAD\n{}\n>>>>>>> x\n');
+    expect((await refused.run()).outcome).toBe('refused');
+    expect(refused.conflictRows()).toEqual([]);
+
+    const deferred = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    await deferred.putRecord(record(theirs));
+    deferred.addTask('onboarding_upgrade', 'running');
+    expect((await deferred.run()).outcome).toBe('deferred');
+    expect(deferred.conflictRows()).toEqual([]);
   });
 });
 
@@ -1350,6 +1544,19 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
     expect(s.lockKeys).toEqual([LOCK_KEY]);
   });
 
+  it('locks the repository row before it reads for a live onboarding or upgrade', async () => {
+    const s = await setup();
+    await s.putRecord(record(BASE));
+
+    const { trace } = await s.run();
+
+    const txn = transactions(trace).inside[0]!;
+    const forUpdate = txn.indexOf('select repositories for update');
+    const liveRead = txn.findIndex((e) => e.startsWith('select tasks'));
+    expect(forUpdate).toBeGreaterThan(0);
+    expect(liveRead).toBeGreaterThan(forUpdate);
+  });
+
   it('takes the same lock key as the writer, and its own repository key for another repository', async () => {
     const s = await setup();
     await s.putRecord(record(BASE));
@@ -1429,5 +1636,74 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
       agentTargets: codexTargets,
       rtkChoiceRecorded: true,
     });
+  });
+});
+
+describe('syncProjectStateFromCheckout: a writer failed after it rendered a pending conflict into the file', () => {
+  const AGENTS = 'project/render.json#acceptedAgentIds';
+  const mine = render({ acceptedAgentIds: ['code-reviewer'] });
+  const theirs = render({ acceptedAgentIds: ['code-reviewer', 'qa-lead'] });
+
+  async function failedWriter(writes_ = mine) {
+    const s = await setup({ column: column(mine), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+    expect((await s.run()).outcome).toBe('conflict');
+    let writes = 0;
+    s.hook.onWrite = async () => {
+      writes += 1;
+      if (writes === 2) throw new Error('database refused');
+    };
+    await s.write({ ...writes_, ...PER_INSTALL }, true).then(
+      () => {
+        throw new Error('the writer should have failed');
+      },
+      (err: Error) => expect(err.name).toBe('ProjectStateWriteError'),
+    );
+    s.hook.onWrite = null;
+    return s;
+  }
+
+  it('meets the per-key conflict again, with this side its own value, and settles nothing', async () => {
+    const s = await failedWriter();
+    expect(s.columnOf()).toBeNull();
+    const pendingBefore = s.pending().map((r) => ({ ...r }));
+    expect(pendingBefore).toHaveLength(1);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(s.pending()).toEqual(pendingBefore);
+    expect(s.conflictRows()).toHaveLength(1);
+    expect(s.conflictRows().some((r) => r.unit === 'project/render.json')).toBe(false);
+    expect(s.conflictRows().some((r) => r.resolution === 'converged')).toBe(false);
+    expect(json(s.pending()[0]!.local)).toEqual({ v: mine.acceptedAgentIds });
+    expect(json(s.pending()[0]!.incoming)).toEqual({ v: theirs.acceptedAgentIds });
+    expect(json(s.columnOf())).toMatchObject({ acceptedAgentIds: mine.acceptedAgentIds });
+    expect(s.syncRow()?.lastError).toContain('acceptedAgentIds');
+    expect(s.syncRow()?.lastError).not.toContain(AGENTS);
+  });
+
+  it('keeps the value a failed writer chose for the contested key, not the row’s older one', async () => {
+    const chosen = render({ acceptedAgentIds: ['security-auditor'] });
+    const s = await failedWriter(chosen);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(json(s.pending()[0]!.local)).toEqual({ v: chosen.acceptedAgentIds });
+    expect(json(s.columnOf())).toMatchObject({ acceptedAgentIds: chosen.acceptedAgentIds });
+  });
+
+  it('writes nothing on the sync after that', async () => {
+    const s = await failedWriter();
+    await s.run();
+    expect(s.pending().map((r) => r.unit)).toEqual([AGENTS]);
+    const before = s.dump();
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
   });
 });

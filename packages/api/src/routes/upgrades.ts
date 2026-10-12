@@ -709,6 +709,9 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       currentHaiveVersion,
       hasInProgressUpgradeSession: false,
       hasPriorUpgrade: false,
+      ...(!admission.admitted && admission.reason === 'contested'
+        ? { contestedUnits: admission.units }
+        : {}),
     };
     return c.json(res);
   }
