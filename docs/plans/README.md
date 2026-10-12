@@ -51,11 +51,12 @@ as a bare `STATUS:` line (`plan-chat-unread-badges`, `smooth-sleeping-flute`) �
 evidence its verdict rests on rather than asserting a state. A fifteenth went to
 `parsed-churning-yeti`, which is shipped and so wants one under the convention above.
 
-**Five plans carry no blockquote, and that is deliberate rather than an omission:**
-`kind-riding-dream`, `patient-pinning-kernighan`, `purring-marinating-peacock`,
-`serialized-chasing-thacker` and `translator-module` are all not started, so this table is the whole
-record. MEASURED 2026-09-18 by counting blockquote lines in every plan file, so that list is
-complete rather than sampled.
+**Four plans carry no blockquote, and that is deliberate rather than an omission:**
+`kind-riding-dream`, `patient-pinning-kernighan`, `purring-marinating-peacock` and
+`translator-module` are all not started, so this table is the whole record. MEASURED 2026-09-18 by
+counting blockquote lines in every plan file, so that list is complete rather than sampled; the
+fifth it found, `serialized-chasing-thacker`, gained one on 2026-10-12 when it was merged into
+`twinkling-frolicking-toast`.
 
 **One verdict is "landed differently", which is not the same as shipped.** `plan-document-import`
 describes a mechanism that is NOT what reached the tree, so its body must not be implemented as
@@ -94,12 +95,13 @@ unreachable for the input the plan was about.
 | `purring-marinating-peacock` | Multi-model per step (fan-out + consolidator) | Not started; Phases 1-2 BACKLOGGED on a hand-merge measurement that failed its reopening condition. The fan-out unpin is carved out as the one piece worth building |
 | `quiet-reaping-ritchie` | DevTools egress hardening follow-ups | **Shipped** `c094102` (item 1, runner `--init`) and `e066d26` (item 2, MCP body diversion), both verified against real traffic. Two browser defects found while verifying, plus a poisoned-npx-cache defect found with them, are fixed in `b7884e6` / `0580c51` / `507cb84`. Both bandwidth caveats are retired: nothing here passes `--no-cache`, and the apt cost is once per host, not once per template |
 | `replicated-zooming-beacon` | Agent memory + spec handoff optimisation | Not started, but its EVIDENCE is stale and its verdict is unverified. Corrected 2026-09-18: the header's grounds were "no `task-ledger.ts`, `_doc-view.ts` or `_spec-artifact.ts` exists" and all three DO exist, while `REVIEW_FANOUT_DISTILL` and `condenseSpecForReview` — the mechanism its first defect describes — are absent from the whole tree. Whether the three defects still hold needs its own pass; do not read this row either way |
-| `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started |
-| `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; companion to the above, neither supersedes the other |
-| `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it. Integrations (Slices 6-8) added 2026-10-10: decisions 1-4 PROPOSED, write access DECIDED as one switch per user per integration |
+| `rippling-wibbling-puffin` | Modular (user-definable) task types | Not started; **merged into `twinkling-frolicking-toast`** 2026-10-12, kept as the design reference for task types |
+| `rippling-wibbling-puffin-agent-a233cf7f9b59974f6` | Same feature, half A (data model, `buildRunList`, migration, seed) | Not started; **merged into `twinkling-frolicking-toast`** 2026-10-12; companion to the above, neither supersedes the other |
+| `serialized-chasing-thacker` | Haive module system — extension infrastructure | Not started; **merged into `twinkling-frolicking-toast`** 2026-10-12, kept as the design reference for modules and integrations, with integration decisions 1-4 LOCKED that day. Delivery to a published-image install DECIDED 2026-09-07: per-customer api+worker images built by the vendor; `frictionless-bootstrapping-otter`, `kind-riding-dream` and `translator-module` inherit it. Integrations (Slices 6-8) added 2026-10-10: decisions 1-4 PROPOSED, write access DECIDED as one switch per user per integration |
 | `solitary-partitioning-lampson` | Per-install namespacing (two installs on one machine) | Not started; **next priority after `steadfast-committing-gray`**. Containers, networks, six volumes AND the RAG/global-KB databases all carry global names today, so a second install shares them SILENTLY |
 | `steadfast-committing-gray` | Core upgrade — release, transactional apply, maintenance mode | **SHIPPED** 2026-09-08, all five slices. Exercised for real: a published v0.1.0 install was upgraded to v0.1.2, and a deliberately failed health gate rolled back to v0.1.0 with service restored. Four defects were found by running it that reading it did not surface |
 | `toasty-percolating-kernighan` | Per-call agent isolation | **SHIPPED** 2026-09-21 in six PRs — #191 `7deb542d`, #192 `bde5722e`, #193 `fe3148a5`, #194 `16f8be37`, #195 `a66a79de`, #196 `0bb6fe45` (planned 2026-09-14, re-verified twice before starting). An invocation that QUALIFIES no longer loads every repository agent definition and gets the assigned persona pasted instead — and read-only is necessary rather than sufficient: `agentIsolationApplies` (`dispatcher.ts:203`) also requires the switch on, a `prompt` input, no `file_write`, no `subagents`, no `agentPool: '*'` (which `07_7-secret-sweep` declares), and that neither the prompt with marker blocks stripped, nor any persona body verbatim, nor the provider's instruction chain names an agent path — a scan that could not be completed counts as naming one. Pasting additionally needs the SELECTED provider to have a `projectAgentsDir` (`:328`, `:557`); one without keeps its inline protocol. `rippling-wibbling-puffin` Phase 3.1 builds on it. Piece 4 shipped WITHOUT the exec-time recheck Decision 1 requires and was reported as built — #196 closed it, and the lesson is recorded in the plan: one writer and no readers is a shipped no-op. Verification item 2 is COMPLETE (#200, then #202 `842012ff` for the prompt-builder scan: 186 built prompts, 13 deliberate positives, 3 database-bound sources named), and it found a defect the plan had not predicted — `adaptPrompt` appends the MCP surface and the global-KB digest AFTER the rule returns, both carrying repository- or author-written text, so the rule gained a SEVENTH condition in #211 `689f842a`. What remains is items 1 and 4 (capture harness, the live 08c check), parked on the next onboarding run |
+| `twinkling-frolicking-toast` | Modular Haive: module system, data-driven task types and integrations (merges `serialized-chasing-thacker` and `rippling-wibbling-puffin`) | **Approved 2026-10-12, not started.** Shared contracts first, then task types, modules and integrations in parallel, then the joints, then distribution. Integrations are declared per step by category and resolved like a CLI choice (task override > user preference > admin default) |
 | `translator-module` | Translator — resellable module | Not started |
 | `amber-provider-verdict-heron` | Persistent provider-verdict banner below the CLI terminal | **Shipped**, and its own status line said otherwise — corrected 2026-09-18. `failure-class.ts:215` carries `content_filter: 'Provider refused the prompt (content filter)'` with the refusal pattern at `:295` anchored on refusal-specific wording rather than generic words; `describeInvocationStatus` (`web/src/components/terminal/cli-stream-status.ts`) has its own unit test; `StepTerminal.tsx:536-544` renders the persistent amber block, reading the invocation row rather than the stream so it survives the CLI ending and the 600s stream expiry. It landed at `StepTerminal.tsx`, NOT the `CliStreamViewer.tsx` its checklist names |
 | `anointing-gatekeeping-ibex` | First-admin onboarding + registration gating | **Shipped in full** 2026-09-09, verified 2026-09-18: `registration-status` in `api/src/routes/auth.ts`, `CONFIG_KEYS.REGISTRATION_MODE` (`config.service.ts:129`) with `REGISTRATION_MODES` at `:619`, migration `0153_user_invites.sql`, and `/admin/users` |
@@ -138,14 +140,11 @@ unreachable for the input the plan was about.
 - `kind-riding-dream` and `translator-module` both build on the module system in
   `serialized-chasing-thacker`, and both reference `purring-marinating-peacock`'s multi-model
   fan-out as an optional improvement, never a prerequisite.
-- `serialized-chasing-thacker` and `rippling-wibbling-puffin` carry paired rules covering the same
-  joint: a module's steps must reach the composable step catalog.
-- They split integrations the same way: `serialized-chasing-thacker` owns providers (core forges and
-  module-contributed ones such as Google Drive, Gmail, Dropbox, Slack), connections, grants, the
-  OAuth broker and the `haive-integrations` MCP broker (Slices 6-8; decisions 1-4 PROPOSED, decision 5 — write is one switch per user per
-  integration, reads and writes counted apart in the task's usage panel — DECIDED 2026-10-10);
-  `rippling-wibbling-puffin` owns how a task type requires them and how task-create picks the
-  account ("Steps may require integrations"). Slice 6 needs no module and can ship first.
+- `serialized-chasing-thacker` and `rippling-wibbling-puffin` turned out to depend on each other
+  only at their joints (module steps in the step catalog, module-seeded task types, dangling
+  references, dead tasks, step integration requirements), so both are merged into
+  `twinkling-frolicking-toast` (2026-10-12): shared contracts first, both cores and the
+  integrations track in parallel, the joints last. Integration decisions 1-5 are all locked there.
 - `glistening-percolating-snowflake` rides `.haive-data/`, which shipped as slice 2 of
   `amber-fencing-hopper`.
 - `steadfast-committing-gray` and `frictionless-bootstrapping-otter` share one slice exactly:

@@ -1,5 +1,8 @@
 # Modular / user-definable task types — implementation plan (half A: data model, buildRunList, pgEnum, migration, seed)
 
+> **Merged into `twinkling-frolicking-toast.md` (approved 2026-10-12).** This file stays the design
+> reference for its half; where the two disagree, the merged plan wins.
+>
 > **Not started.** This file is **half A** of the feature designed in
 > `rippling-wibbling-puffin.md` — data model, `buildRunList`, pgEnum, migration, seed. It does not
 > supersede that plan and that plan does not supersede it; read both.

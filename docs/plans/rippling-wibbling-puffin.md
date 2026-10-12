@@ -1,5 +1,8 @@
 # Modular (user-definable) task types
 
+> **Merged into `twinkling-frolicking-toast.md` (approved 2026-10-12).** This file stays the design
+> reference for its half; where the two disagree, the merged plan wins.
+>
 > **Not started** — none of `schema/task-types.ts`, `routes/task-types.ts`,
 > `task-type-manifest.ts`, `composable-catalog.ts`, `routes/custom-mcp.ts` or the admin
 > task-types page exists (re-verified 2026-08-21).
