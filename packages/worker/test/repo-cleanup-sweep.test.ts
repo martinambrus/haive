@@ -78,6 +78,20 @@ describe('redriveRepoCleanups', () => {
     expect(row!.lastEnqueuedAt).toBeInstanceOf(Date);
   });
 
+  it('counts the attempt before the job exists, so a job that runs at once refunds a counted one', async () => {
+    const { fake, db, add } = setup();
+    add(1, { attempts: 2, lastEnqueuedAt: ago(REPO_CLEANUP_STALE_MS + 60_000) });
+    const seen: number[] = [];
+    const deps: RepoCleanupDeps = {
+      enqueueRepoCleanup: async () => {
+        seen.push(fake.rows(schema.repoCleanups)[0]!.attempts as number);
+      },
+    };
+    expect(await redriveRepoCleanups(db, deps)).toBe(1);
+    expect(seen).toEqual([3]);
+    expect(fake.rows(schema.repoCleanups)[0]!.attempts).toBe(3);
+  });
+
   it('leaves a just-written row to the api that is queuing it', async () => {
     const { db, add, queued, deps } = setup();
     add(1, { createdAt: new Date() });

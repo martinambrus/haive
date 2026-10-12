@@ -550,14 +550,14 @@ export async function redriveRepoCleanups(
         );
         continue;
       }
-      // Claimed on the stamp, so two sweeps never both queue it; the attempt is counted only once
-      // a queue has taken the job, so a refusing queue spends none of the budget.
+      // Claimed on the stamp, so two sweeps never both queue it. The attempt is counted with the
+      // claim, before the job can run and refund it, and given back if the queue refuses the job.
       const sameStamp = row.lastEnqueuedAt
         ? eq(schema.repoCleanups.lastEnqueuedAt, row.lastEnqueuedAt)
         : isNull(schema.repoCleanups.lastEnqueuedAt);
       const claimed = await db
         .update(schema.repoCleanups)
-        .set({ lastEnqueuedAt: new Date() })
+        .set({ lastEnqueuedAt: new Date(), attempts: row.attempts + 1 })
         .where(and(eq(schema.repoCleanups.id, row.id), sameStamp))
         .returning({ id: schema.repoCleanups.id });
       if (claimed.length === 0) continue;
@@ -575,14 +575,10 @@ export async function redriveRepoCleanups(
       } catch (err) {
         await db
           .update(schema.repoCleanups)
-          .set({ lastEnqueuedAt: row.lastEnqueuedAt })
+          .set({ lastEnqueuedAt: row.lastEnqueuedAt, attempts: row.attempts })
           .where(eq(schema.repoCleanups.id, row.id));
         throw err;
       }
-      await db
-        .update(schema.repoCleanups)
-        .set({ attempts: attempt })
-        .where(eq(schema.repoCleanups.id, row.id));
       queued++;
       log.info({ cleanupId: row.id, kind, attempt }, 'queued the cleanup of a deleted repository');
     } catch (err) {
