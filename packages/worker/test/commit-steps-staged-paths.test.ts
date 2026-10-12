@@ -681,6 +681,39 @@ describe('commitRecorded commits what it staged in a private index', () => {
     expect(await git(repo, ['show', 'HEAD:.haive/install.json'])).toBe('{}\n');
   });
 
+  it('a child the person staged under a removed name that is now a directory stays staged', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n', '.haive/install.json': '{}\n' });
+    await rm(path.join(repo, '.haive', 'install.json'));
+    await mkdir(path.join(repo, '.haive', 'install.json'), { recursive: true });
+    await writeFile(path.join(repo, '.haive', 'install.json', 'private.md'), 'p\n');
+    await git(repo, ['add', '-f', '.haive/install.json/private.md']);
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    await commitRecorded(
+      repo,
+      { add: ['a.md'], remove: ['.haive/install.json'] },
+      'chore: onboard',
+      GIT_ENV,
+    );
+    expect(await git(repo, ['diff', '--cached', '--name-only'])).toContain(
+      '.haive/install.json/private.md',
+    );
+    expect(await git(repo, ['show', 'HEAD:.haive/install.json'])).toBe('{}\n');
+  });
+
+  it('a recorded removal recreated before the commit is not committed as a deletion', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n', 'back.md': 'old\n' });
+    await writeFile(path.join(repo, 'back.md'), 'recreated\n');
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    const done = await commitRecorded(
+      repo,
+      { add: ['a.md'], remove: ['back.md'] },
+      'chore: onboard',
+      GIT_ENV,
+    );
+    expect(done).toEqual(['a.md']);
+    expect(await git(repo, ['show', 'HEAD:back.md'])).toBe('old\n');
+  });
+
   it('R7-2: the committed names are clean afterwards and the person staged work stays staged', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n', 'gone.md': 'g\n', 'keep.md': 'k\n' });
     await writeFile(path.join(repo, 'a.md'), 'a\n');

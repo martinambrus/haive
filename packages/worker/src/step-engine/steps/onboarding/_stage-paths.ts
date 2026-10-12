@@ -265,6 +265,33 @@ export async function stagedChanges(
  *  those names. The real index is never read for them, so a blob another writer stages there in the
  *  meantime cannot enter the commit; afterwards the real index agrees with HEAD for the committed
  *  names only, and keeps whatever else the person staged. Returns the committed names. */
+/** Set exactly the real-index entries of `paths` to the commit's, never a pathspec that would reach
+ *  what the person staged under a name that is now a directory. */
+async function syncRealIndex(
+  run: (args: string[]) => Promise<{ stdout: string }>,
+  commit: string,
+  paths: readonly string[],
+): Promise<void> {
+  const listed = await run(['ls-tree', '-z', commit, '--', ...literal(paths)]);
+  const entries = new Map<string, string>();
+  for (const line of listed.stdout.split('\0')) {
+    const tab = line.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, , oid] = line.slice(0, tab).split(' ');
+    entries.set(line.slice(tab + 1), `${mode},${oid}`);
+  }
+  const kept = paths.filter((p) => entries.has(p));
+  const gone = paths.filter((p) => !entries.has(p));
+  if (kept.length > 0) {
+    await run([
+      'update-index',
+      '--add',
+      ...kept.flatMap((p) => ['--cacheinfo', `${entries.get(p)},${p}`]),
+    ]);
+  }
+  if (gone.length > 0) await run(['update-index', '--force-remove', '--', ...gone]);
+}
+
 export async function commitRecorded(
   repoPath: string,
   plan: StagePlan,
@@ -290,7 +317,12 @@ export async function commitRecorded(
     const listed = await run(['ls-files', '-z', '--', ...literal([...named])], temp);
     const children = listed.stdout.split('\0').filter((p) => p.length > 0 && !named.has(p));
     const turned = [...named].filter((n) => children.some((c) => c.startsWith(`${n}/`)));
-    const strays = [...children, ...turned];
+    // A removal recreated after its check would be committed as a deletion; keep HEAD's entry instead.
+    const recreated: string[] = [];
+    for (const rel of plan.remove) {
+      if ((await lstatNoFollow(repoPath, rel)) !== null) recreated.push(rel);
+    }
+    const strays = [...children, ...turned, ...recreated];
     if (strays.length > 0) {
       await run(
         parent !== ''
@@ -311,7 +343,7 @@ export async function commitRecorded(
     const subject = message.split('\n')[0]!;
     await run(['update-ref', '-m', `commit: ${subject}`, 'HEAD', commit, parent]);
     // The commit has landed; a real index locked by another writer only leaves these names stale there.
-    await run(['reset', '-q', '--', ...literal(changed)]).catch(() => undefined);
+    await syncRealIndex(run, commit, changed).catch(() => undefined);
     return changed;
   } finally {
     await rm(indexFile, { force: true });
