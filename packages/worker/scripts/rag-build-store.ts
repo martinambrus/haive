@@ -19,6 +19,8 @@
  * Env:
  *   RAG_TREE           repository tree to index (required)
  *   RAG_EXCLUDE        JSON array of anchored directory prefixes to leave out (default [])
+ *   RAG_EXTENSION_SET  JSON array of code extensions, as 09_7 saved them (default: all)
+ *   RAG_SELECTED_DIRS  JSON array of directories, as 09_7 saved them (default: all)
  *   RAG_STORE          NAME of the store: database haive_rag_<NAME> (required unless RAG_DRY_RUN=1)
  *   RAG_REPOSITORY_ID  uuid stamped on every row (required unless RAG_DRY_RUN=1)
  *   RAG_SOURCE_REPOSITORY_ID  uuid of the repository whose secret-mask rules apply (default: the default globs)
@@ -163,6 +165,8 @@ export function validateEmbeddings(
 interface Options {
   tree: string;
   exclude: string[];
+  extensionSet?: string[];
+  selectedDirs?: string[];
   store: string | null;
   repositoryId: string | null;
   sourceRepositoryId: string | null;
@@ -179,17 +183,22 @@ function fail(message: string, code = 1): never {
   process.exit(code);
 }
 
+export function stringArrayEnv(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed) || !parsed.every((p) => typeof p === 'string')) {
+    fail(`${name} must be a JSON array of strings`);
+  }
+  return parsed;
+}
+
 function parseOptions(): Options {
   const tree = process.env.RAG_TREE;
   if (!tree) fail('RAG_TREE is required');
-  let exclude: string[] = [];
-  if (process.env.RAG_EXCLUDE) {
-    const parsed: unknown = JSON.parse(process.env.RAG_EXCLUDE);
-    if (!Array.isArray(parsed) || !parsed.every((p) => typeof p === 'string')) {
-      fail('RAG_EXCLUDE must be a JSON array of strings');
-    }
-    exclude = parsed;
-  }
+  const exclude = stringArrayEnv('RAG_EXCLUDE') ?? [];
+  const extensionSet = stringArrayEnv('RAG_EXTENSION_SET');
+  const selectedDirs = stringArrayEnv('RAG_SELECTED_DIRS');
   const dims = Number(process.env.RAG_DIMS || 2560);
   if (!Number.isInteger(dims) || dims <= 0) fail('RAG_DIMS must be a positive integer');
   const limitRaw = process.env.RAG_LIMIT_FILES;
@@ -215,6 +224,8 @@ function parseOptions(): Options {
   return {
     tree,
     exclude,
+    extensionSet,
+    selectedDirs,
     store,
     repositoryId,
     sourceRepositoryId,
@@ -236,8 +247,12 @@ async function collectKbFiles(tree: string): Promise<string[]> {
   return rels.sort((a, b) => a.localeCompare(b));
 }
 
-async function collectCodeFilesSorted(tree: string, exclude: string[]): Promise<string[]> {
-  const rels = await collectCodeFiles(tree, { exclude });
+async function collectCodeFilesSorted(opts: Options): Promise<string[]> {
+  const rels = await collectCodeFiles(opts.tree, {
+    exclude: opts.exclude,
+    extensionSet: opts.extensionSet,
+    selectedDirs: opts.selectedDirs,
+  });
   return rels.sort((a, b) => a.localeCompare(b));
 }
 
@@ -586,7 +601,7 @@ async function main(): Promise<void> {
     !opts.dryRun || opts.sourceRepositoryId ? createDatabase(process.env.DATABASE_URL!) : null;
   const policy = await resolveMaskPolicy(opts, db);
   const keptKb = dropMaskedPaths(policy, await collectKbFiles(opts.tree));
-  const keptCode = dropMaskedPaths(policy, await collectCodeFilesSorted(opts.tree, opts.exclude));
+  const keptCode = dropMaskedPaths(policy, await collectCodeFilesSorted(opts));
   const kbFiles = keptKb.kept;
   const allCode = keptCode.kept;
   console.log(`masked: ${keptKb.masked.length + keptCode.masked.length} files`);

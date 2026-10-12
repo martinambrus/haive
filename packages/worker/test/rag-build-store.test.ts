@@ -9,6 +9,7 @@ import {
   StoreRefusedError,
   storeDatabaseName,
   validateEmbeddings,
+  stringArrayEnv,
 } from '../scripts/rag-build-store.js';
 
 describe('storeDatabaseName', () => {
@@ -135,5 +136,14 @@ describe('decideBuildMeta', () => {
     expect(decision).toMatchObject({ action: 'refuse' });
     expect(JSON.stringify(decision)).toContain('1024');
     expect(JSON.stringify(decision)).toContain('2560');
+  });
+});
+
+describe('stringArrayEnv', () => {
+  it('reads a JSON array of strings and is undefined when unset', () => {
+    process.env.RAG_T_ARR = '[".inc",".php"]';
+    expect(stringArrayEnv('RAG_T_ARR')).toEqual(['.inc', '.php']);
+    delete process.env.RAG_T_ARR;
+    expect(stringArrayEnv('RAG_T_ARR')).toBeUndefined();
   });
 });
