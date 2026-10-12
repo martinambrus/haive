@@ -1,4 +1,4 @@
-import type { Job } from 'bullmq';
+import { UnrecoverableError, type Job } from 'bullmq';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
@@ -211,6 +211,10 @@ describe('the rag cleanup job', () => {
     h.ragCleanup.mockRejectedValueOnce(new RagCleanupDeferredError(REPO, 'a sync holds the lock'));
     await expect(run(ROW(1))).rejects.toBeInstanceOf(RagCleanupDeferredError);
     expect(fake.rows(schema.repoCleanups)).toHaveLength(1);
+  });
+
+  it('makes a deferral unrecoverable, so BullMQ never retries the attempt it refunds', () => {
+    expect(new RagCleanupDeferredError('r', 'held')).toBeInstanceOf(UnrecoverableError);
   });
 
   describe('a deferral', () => {

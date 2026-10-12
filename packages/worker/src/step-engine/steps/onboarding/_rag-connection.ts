@@ -15,6 +15,7 @@ import {
   type RagSyncLock,
 } from '@haive/shared/rag';
 import { repoRagIdentityFromMirror } from '@haive/shared/global-kb';
+import { UnrecoverableError } from 'bullmq';
 import { getRedis } from '../../../redis.js';
 
 // Connection resolution + types moved to @haive/shared/rag so the API query
@@ -273,7 +274,8 @@ async function dedupeAndEnforceRepoUniqueness(conn: RagConnection): Promise<void
 /* Repository cleanup                                                  */
 /* ------------------------------------------------------------------ */
 
-export class RagCleanupDeferredError extends Error {
+/** Unrecoverable for BullMQ: a deferral must not retry within its attempt, since each run refunds it. */
+export class RagCleanupDeferredError extends UnrecoverableError {
   constructor(repositoryId: string, reason: string) {
     super(`RAG cleanup of repository ${repositoryId} deferred: ${reason}`);
     this.name = 'RagCleanupDeferredError';
