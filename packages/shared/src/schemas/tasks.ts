@@ -65,7 +65,7 @@ export type StepLoopLimits = z.infer<typeof stepLoopLimitsSchema>;
 
 export const createTaskRequestSchema = z
   .object({
-    type: workflowTypeSchema,
+    type: z.string().min(1).max(128),
     title: z.string().min(1).max(512),
     description: z.string().optional(),
     /** Developer's estimated completion time in decimal hours (0.25, 0.5, 1, 1.5).

@@ -1,4 +1,5 @@
-export type WorkflowType = 'onboarding' | 'workflow' | 'onboarding_upgrade' | 'run_app';
+export type WorkflowType =
+  'onboarding' | 'workflow' | 'onboarding_upgrade' | 'run_app' | (string & {});
 
 export type TaskStatus =
   | 'created'

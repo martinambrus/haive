@@ -66,6 +66,14 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
     });
   });
 
+  it('refuses an unseeded built-in on the generic route unless it is a generic type', async () => {
+    const err = await refusal(definitionForCreate(db, 'plan_merge', { generic: true }));
+    expect([err.status, err.message]).toEqual([403, 'Task type plan_merge cannot be created here']);
+    await expect(definitionForCreate(db, 'onboarding', { generic: true })).resolves.toEqual({
+      runListSnapshot: null,
+    });
+  });
+
   it('lets a built-in type through with no snapshot before the worker has seeded it', async () => {
     await expect(definitionForCreate(db, 'plan_merge', { generic: false })).resolves.toEqual({
       runListSnapshot: null,

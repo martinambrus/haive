@@ -658,7 +658,8 @@ export type WorkflowType =
   | 'plan_chat'
   | 'advisory'
   | 'plan_sequence'
-  | 'plan_merge';
+  | 'plan_merge'
+  | (string & {});
 
 /** Execution path chosen at the 00-triage step (workflow tasks). Mirrors
  *  ExecutionPath in @haive/shared; redefined here so the browser bundle never
