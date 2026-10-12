@@ -106,11 +106,15 @@ no record, so a Retry of 08 cannot lose it: 12 reads it from git and the disk. A
 under a legacy directory and gone from disk has its deletion staged, and so is the file now at
 `legacy/<rel>` or `<rel>` under the destination (`LEGACY_KNOWLEDGE_MIGRATIONS`). A legacy file git
 never tracked is the person's, so its destination is not staged, as with 07's quarantine. A file an
-agent writes without reporting it stays uncommitted. The commit is `git commit --only -- <staged names>`
-(unborn HEAD and deletions included, MEASURED on git 2.43), so a file the person had already staged is
-neither committed nor unstaged; a pathspec is `:(literal)` and the staged list is read with
-`--no-renames`, since a detected rename would name only the new path and leave the deletion out of
-`--only`. A merge in progress refuses `--only`, which fails the step loudly. The first commit of a
+agent writes without reporting it stays uncommitted. The commit is built from the index entries of
+the staged names, not from `git commit --only`, which re-reads the named paths from the worktree: a
+file that changed after it was staged (the plan-mirror sweep, a save from the Terminal tab) would be
+committed with content Haive never staged. `commitOnly` (`_stage-paths.ts`) copies `HEAD` and those
+entries into a private `GIT_INDEX_FILE`, then `write-tree`, `commit-tree` and a compare-and-swap
+`update-ref HEAD`, so a file the person had already staged is neither committed nor unstaged and
+the real index is never written. A pathspec is `:(literal)` and the staged list is read with
+`--no-renames`, since a detected rename would name only the new path and leave the deletion out. A
+merge or cherry-pick in progress is refused, which fails the step loudly, as `--only` did. The first commit of a
 repository 12 or 03 had to `git init` is the one exception, as above.
 
 **The cli-rules row records the region on disk, not the render.** 07 leaves an existing region

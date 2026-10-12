@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { lstatNoFollow, relUnder, toSafeRel } from '@haive/shared/fs-safe';
 import { KB_DIR, LEGACY_KNOWLEDGE_MIGRATIONS } from '@haive/shared/knowledge-paths';
@@ -241,16 +244,47 @@ export async function stagedChanges(repoPath: string, only?: readonly string[]):
   return stdout.split('\0').filter((s) => s.length > 0);
 }
 
-/** Commit exactly `paths`, so anything else the person had staged stays staged and uncommitted. */
+/** Commit exactly the index entries of `paths`, as staged now: `git commit --only` would re-read
+ *  them from the worktree. Anything else the person staged stays in the real index, uncommitted. */
 export async function commitOnly(
   repoPath: string,
   paths: readonly string[],
   message: string,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
-  await gitExec(['commit', '--only', '-m', message, '--', ...literal(paths)], {
-    cwd: repoPath,
-    env,
-    maxBuffer: GIT_MAX_BUFFER,
-  });
+  const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
+    gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
+  for (const mark of ['MERGE_HEAD', 'CHERRY_PICK_HEAD']) {
+    if ((await gitRun(repoPath, ['rev-parse', '-q', '--verify', mark])).code === 0) {
+      throw new Error(`cannot do a partial commit during a ${mark.split('_')[0]!.toLowerCase()}`);
+    }
+  }
+  const head = await gitRun(repoPath, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
+  const parent = head.code === 0 ? head.stdout.trim() : '';
+  const entries = new Map<string, string>();
+  const listed = await run(['ls-files', '-s', '-z', '--', ...literal(paths)]);
+  for (const line of listed.stdout.split('\0')) {
+    const m = /^(\d+) ([0-9a-f]+) 0\t([\s\S]*)$/.exec(line);
+    if (m) entries.set(m[3]!, `${m[1]},${m[2]},${m[3]}`);
+  }
+  const absent = paths.filter((p) => !entries.has(p));
+  const indexFile = path.join(tmpdir(), `${randomUUID()}.index`);
+  const temp = { GIT_INDEX_FILE: indexFile };
+  try {
+    if (parent !== '') await run(['read-tree', parent], temp);
+    for (const entry of entries.values()) {
+      await run(['update-index', '--add', '--cacheinfo', entry], temp);
+    }
+    if (absent.length > 0) {
+      await run(['update-index', '--force-remove', '--', ...absent], temp);
+    }
+    const tree = (await run(['write-tree'], temp)).stdout.trim();
+    const commit = (
+      await run(['commit-tree', tree, ...(parent !== '' ? ['-p', parent] : []), '-m', message])
+    ).stdout.trim();
+    const subject = message.split('\n')[0]!;
+    await run(['update-ref', '-m', `commit: ${subject}`, 'HEAD', commit, parent]);
+  } finally {
+    await rm(indexFile, { force: true });
+  }
 }

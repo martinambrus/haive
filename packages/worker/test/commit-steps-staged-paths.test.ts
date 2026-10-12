@@ -1,5 +1,14 @@
 import { execFile } from 'node:child_process';
-import { appendFile, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -7,7 +16,12 @@ import { schema } from '@haive/database';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
-import { collectOnboardingStagePaths } from '../src/step-engine/steps/onboarding/_stage-paths.js';
+import {
+  collectOnboardingStagePaths,
+  commitOnly,
+  stageNamed,
+  stagedChanges,
+} from '../src/step-engine/steps/onboarding/_stage-paths.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 import { upgradeCommitStep } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
 
@@ -600,5 +614,88 @@ describe('commit steps stage only the paths their step outputs record', () => {
     );
     expect(out.commitPerformed).toBe(true);
     expect(await tracked(repo)).toContain('.claude/agents/a.md');
+  });
+});
+
+describe('commitOnly commits the entries that were staged, not the worktree', () => {
+  async function seededRepo(files: Record<string, string>): Promise<string> {
+    const repo = await mkdtemp(path.join(tmpdir(), 'commit-index-'));
+    dirs.push(repo);
+    await git(repo, ['init', '-q', '-b', 'main']);
+    await git(repo, ['config', 'gc.auto', '0']);
+    for (const [rel, body] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(repo, rel)), { recursive: true });
+      await writeFile(path.join(repo, rel), body);
+    }
+    if (Object.keys(files).length > 0) {
+      await git(repo, ['add', '-A']);
+      await git(repo, ['commit', '-q', '-m', 'seed']);
+    }
+    return repo;
+  }
+
+  it('R2-1: a named file that changes after staging is committed as it was staged', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n', '.haive-data/plan.json': 'v0\n' });
+    await writeFile(path.join(repo, '.haive-data', 'plan.json'), 'staged\n');
+    await writeFile(path.join(repo, 'mine.ts'), 'mine\n');
+    await git(repo, ['add', 'mine.ts']);
+    const named = ['.haive-data/plan.json'];
+    await stageNamed(repo, named, []);
+    await writeFile(path.join(repo, '.haive-data', 'plan.json'), 'swept\n');
+    await commitOnly(repo, await stagedChanges(repo, named), 'chore: onboard', GIT_ENV);
+    expect(await git(repo, ['show', 'HEAD:.haive-data/plan.json'])).toBe('staged\n');
+    expect((await git(repo, ['show', '--name-only', '--format=', 'HEAD'])).trim()).toBe(
+      '.haive-data/plan.json',
+    );
+    expect(await git(repo, ['log', '-1', '--format=%s'])).toBe('chore: onboard\n');
+    expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('mine.ts');
+    expect(await git(repo, ['status', '--porcelain', '--', '.haive-data/plan.json'])).toBe(
+      ' M .haive-data/plan.json\n',
+    );
+    expect(await readFile(path.join(repo, '.haive-data', 'plan.json'), 'utf8')).toBe('swept\n');
+  });
+
+  it('R2-2: a staged removal is committed even when the file is back on disk', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n', 'gone.md': 'g\n', 'keep.md': 'k\n' });
+    await rm(path.join(repo, 'gone.md'));
+    await writeFile(path.join(repo, 'src.ts'), 's\n');
+    await git(repo, ['add', 'src.ts']);
+    await stageNamed(repo, [], ['gone.md']);
+    const named = ['gone.md'];
+    await writeFile(path.join(repo, 'gone.md'), 'back\n');
+    await commitOnly(repo, await stagedChanges(repo, named), 'chore: drop', GIT_ENV);
+    expect(await git(repo, ['ls-tree', '-r', '--name-only', 'HEAD'])).not.toContain('gone.md');
+    expect(await git(repo, ['ls-tree', '-r', '--name-only', 'HEAD'])).toContain('keep.md');
+    expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('src.ts');
+  });
+
+  it('R2-3: the first commit of a repository with no commit holds the staged entry only', async () => {
+    const repo = await seededRepo({});
+    await writeFile(path.join(repo, 'a.md'), 'staged\n');
+    await writeFile(path.join(repo, 'mine.ts'), 'mine\n');
+    await git(repo, ['add', 'mine.ts']);
+    await stageNamed(repo, ['a.md'], []);
+    await writeFile(path.join(repo, 'a.md'), 'later\n');
+    await commitOnly(repo, await stagedChanges(repo, ['a.md']), 'chore: first', GIT_ENV);
+    expect(await git(repo, ['show', 'HEAD:a.md'])).toBe('staged\n');
+    expect(await git(repo, ['ls-tree', '-r', '--name-only', 'HEAD'])).toBe('a.md\n');
+    expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('mine.ts');
+    expect(await git(repo, ['symbolic-ref', '--short', 'HEAD'])).toBe('main\n');
+  });
+
+  it('R2-4: a commit during a merge is still refused', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    await git(repo, ['checkout', '-q', '-b', 'side']);
+    await writeFile(path.join(repo, 'side.md'), 's\n');
+    await git(repo, ['add', 'side.md']);
+    await git(repo, ['commit', '-q', '-m', 'side']);
+    await git(repo, ['checkout', '-q', 'main']);
+    await writeFile(path.join(repo, 'main.md'), 'm\n');
+    await git(repo, ['add', 'main.md']);
+    await git(repo, ['commit', '-q', '-m', 'main']);
+    await git(repo, ['merge', '--no-commit', '--no-ff', 'side']);
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    await stageNamed(repo, ['a.md'], []);
+    await expect(commitOnly(repo, ['a.md'], 'chore: x', GIT_ENV)).rejects.toThrow(/merge/);
   });
 });
