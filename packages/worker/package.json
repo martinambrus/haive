@@ -11,7 +11,7 @@
     "build": "node ../../scripts/gen-modules.mjs && tsc",
     "start": "node dist/index.js",
     "typecheck": "node ../../scripts/gen-modules.mjs && tsc -p tsconfig.typecheck.json",
-    "test": "vitest run",
+    "test": "node ../../scripts/gen-modules.mjs && vitest run",
     "test:watch": "vitest",
     "smoke:onboarding": "tsx test/onboarding-smoke.ts",
     "smoke:onboarding-full": "tsx test/onboarding-full-smoke.ts",
