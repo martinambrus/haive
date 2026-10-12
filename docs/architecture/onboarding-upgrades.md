@@ -55,14 +55,14 @@ Out of scope of onboarding-upgrades: `.claude/skills/` and agents written from L
 re-creates each currently enabled import-mode provider's `@AGENTS.md` stub (`CLAUDE.md`,
 `GEMINI.md`) through `ensureRulesImportStub` (`steps/onboarding/_rules-files.ts`, the helper 07
 itself calls), and records a refused link per file instead of throwing, since a throw there would
-skip the applicable-template and install-manifest writes after it. Without the stub a
+skip the applicable-template and project state record writes after it. Without the stub a
 claude-family CLI never loads AGENTS.md, rules block included, and nothing else ever wrote it back.
 `GET /repos/:id/upgrade-status` checks the same files through the same module
 (`@haive/shared/rules-files`, with each provider's `rulesFile` in the catalog), so a repository
 whose only gap is a missing import still gets the upgrade banner. A rules file linked anywhere but
 AGENTS.md is reported apart (`linkedRulesFiles`) and never offers an upgrade, since the restore
 refuses to write through a link, and a repository root the api cannot read claims nothing.
-`03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) beside `.haive/install.json`,
+`03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) and removing (`deletedPaths`),
 because a workflow task checks out HEAD: a refreshed block left uncommitted never reaches one. It
 also stages each stub 02 left holding the import whose HEAD copy lacks the line
 (`headLacksImport`), and a `CLAUDE.md -> AGENTS.md` link 02 left alone. It stages AGENTS.md itself when
@@ -79,7 +79,7 @@ granularity AGENTS.md already had. A link is staged through its own check (`isLi
 since `hasWorkspaceEntry` refuses every link. A rules file or an RTK settings file
 (`RTK_SETTINGS_PATHS`) git ignores is left out on every route, AGENTS.md included, and reported
 (`dropIgnoredRulesFiles`), and `12-post-onboarding` applies the same filter to what it stages: the
-stage runs `git add -f` for `.haive/install.json`'s sake, which would otherwise commit a personal
+stage runs `git add -f`, since a curated deliverable may sit under an ignored path, which would otherwise commit a personal
 CLAUDE.md or settings file the repository deliberately keeps out of history. 12 stages a settings
 file only through its live artifact row, never by name, so one Haive did not record stays out. The
 check runs after any `git init`, since before it there is no repository to ask. A person's own file
@@ -98,7 +98,7 @@ live artifact rows and `quarantinedAgentFiles`; 08's `written`, `removedPaths` a
 `mirroredDirs` entry (SKILL.md, the `subSkillSlugs`, the dir's README) and 09_5b's repairs, whose
 removals come from git (every file HEAD tracks under a repaired skill's directory that is gone from
 disk, since the repair clears the whole directory); and the
-files 12 writes itself (the `.haive-data` mirror, the project state, `.haive/install.json`), kept
+files 12 writes itself (the `.haive-data` mirror, the project state, and the `.haive/install.json` it retires), kept
 even when a write threw after some of the files landed. The plan mirror reports what it wrote and
 removed through an accumulator (`writePlanMirror`'s `changes`), also on a throw, so a plan file the
 refresh never reached (a symlink it refused) is not staged, and a mirror that failed before it knew
@@ -523,6 +523,19 @@ previous `base_snapshot` that no local bundle holds is kept while a claim's temp
 descriptor file the base never named is not touched, like a claim file. The sync reads the descriptors
 into the base as the checkout holds them and leaves them out of the merge: a conflict row on one could
 not be answered by anybody, and `upgradeAdmission` would hold every upgrade for it.
+
+**`.haive/install.json` is retired, not written.** Nothing read it, and a second 12 run changed it
+(`appliedAt`, `lastTaskId`) so an identical re-run dirtied a clean checkout. 12, 02 and 04 now delete
+it through `retireInstallManifest` (`_retire-install-manifest.ts`) only after their
+`writeProjectStateRecord` succeeded, so the record always exists before the file that duplicated it
+goes. The delete is judged on the inode removed (`removeFileIfNoFollow`, read capped at 8 MiB): only
+a JSON object with `schemaVersion` 1, a string `templateSetHash` and a `templates` array goes, and
+anything else at that name is the person's, kept and reported in the step's warnings. It returns
+`removed`, `absent` or `kept`, and never throws. 12 lists the path in `ownRemoved` unless it was
+kept, `absent` included, so a Retry after a failed commit still stages a deletion an earlier attempt
+made; 02 lists it in `deletedPaths` only when it removed it, and 03 stages it like any removal.
+04 writes no commit, so a tracked copy is left as an unstaged deletion. A reset still removes the
+file, for installs that hold one.
 
 **A row this install cannot manage is `foreign`.** `foreignReason` (shared) names a `custom:` id (a
 bundle item this install holds no bundle for, stored verbatim, never as `foreign`), a marker from a

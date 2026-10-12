@@ -17,7 +17,6 @@ import {
   normalizeContent,
   sha256Hex,
   upsertRegion,
-  type InstallManifest,
 } from '@haive/shared';
 import { ledgerImportedSince } from '@haive/shared/onboarding-admission';
 import {
@@ -34,6 +33,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
+import { retireInstallManifest } from '../../_retire-install-manifest.js';
 import { resolveRenderContext, unionExpandedFor } from '../../_upgrade-render.js';
 import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -146,7 +146,6 @@ interface RollbackDetect {
 
 interface RollbackOutput extends RollbackDetect {
   revertedCount: number;
-  installManifestWritten: boolean;
 }
 
 interface RollbackRendering {
@@ -955,6 +954,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           rtkChoiceRecorded:
             plan?.rtkFollowsLive === true && typeof recorded.rtkEnabled === 'boolean',
         });
+        await retireInstallManifest(ctx, warnings);
       }
     } catch (err) {
       failIfColumnStale(err);
@@ -962,12 +962,6 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       warnings.push(`project state record write failed: ${message}`);
       ctx.logger.warn({ err }, 'project state record write failed');
     }
-
-    const installManifestWritten = await writeInstallManifest(
-      ctx,
-      detected.repositoryId,
-      manifest.setHash,
-    );
 
     ctx.logger.info(
       { revertedCount, warnings, rolledBackFromTaskId: detected.rolledBackFromTaskId },
@@ -978,7 +972,6 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       ...detected,
       warnings,
       revertedCount,
-      installManifestWritten,
     };
   },
 };
@@ -1132,59 +1125,4 @@ async function restoreRemoved(
   if (result === 'rewritten' || alreadyBack) return 'restored';
   if (undecodable) return 'undecodable';
   return result === 'kept' && !judged ? 'unread' : 'changed';
-}
-
-async function writeInstallManifest(
-  ctx: StepContext,
-  repositoryId: string,
-  currentSetHash: string,
-): Promise<boolean> {
-  const liveRows = await ctx.db
-    .select({
-      diskPath: schema.onboardingArtifacts.diskPath,
-      templateId: schema.onboardingArtifacts.templateId,
-      templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
-      templateContentHash: schema.onboardingArtifacts.templateContentHash,
-    })
-    .from(schema.onboardingArtifacts)
-    .where(
-      and(
-        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
-        isNull(schema.onboardingArtifacts.supersededAt),
-      ),
-    );
-
-  const byTemplate = new Map<
-    string,
-    { id: string; schemaVersion: number; contentHash: string; diskPaths: string[] }
-  >();
-  for (const r of liveRows) {
-    const existing = byTemplate.get(r.templateId);
-    if (existing) {
-      existing.diskPaths.push(r.diskPath);
-      continue;
-    }
-    byTemplate.set(r.templateId, {
-      id: r.templateId,
-      schemaVersion: r.templateSchemaVersion,
-      contentHash: r.templateContentHash,
-      diskPaths: [r.diskPath],
-    });
-  }
-
-  const installManifest: InstallManifest = {
-    schemaVersion: 1,
-    haiveVersion: getHaiveVersion(),
-    appliedAt: new Date().toISOString(),
-    lastTaskId: ctx.taskId,
-    templateSetHash: currentSetHash,
-    templates: Array.from(byTemplate.values())
-      .map((t) => ({ ...t, diskPaths: t.diskPaths.slice().sort() }))
-      .sort((a, b) => a.id.localeCompare(b.id)),
-  };
-
-  const content = normalizeContent(`${JSON.stringify(installManifest, null, 2)}\n`);
-  await writeFileNoFollow(ctx.repoPath, '.haive/install.json', content, { createParents: true });
-
-  return true;
 }

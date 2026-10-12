@@ -1,7 +1,7 @@
 import { updateFileNoFollow } from '@haive/shared/fs-safe';
 import { gitRun } from './git-push.js';
 
-/** Haive-internal per-repo data (`.haive/worktrees/`, `.haive/install.json`) is kept out
+/** Haive-internal per-repo data (`.haive/worktrees/`) is kept out
  *  of the index via `.git/info/exclude` rather than `.gitignore`, so the user's ignore
  *  file stays theirs. Curated deliverables under it are force-added (`git add -f`). */
 export const GIT_EXCLUDE_MARKER = '.haive/';

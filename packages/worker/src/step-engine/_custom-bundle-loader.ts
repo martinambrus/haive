@@ -18,7 +18,7 @@ export interface BundleWithMeta extends BundleForExpansion {
 
 /** Load every active bundle bound to `repositoryId`, decode every item's
  *  `normalized_spec` via the canonical zod schema, and shape it for both the
- *  template-manifest expansion and the install.json bundle summary. Items
+ *  template-manifest expansion. Items
  *  whose spec fails validation are skipped with a warning rather than
  *  throwing — a corrupt row should never block the rest of the onboarding
  *  / upgrade. */

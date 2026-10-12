@@ -307,7 +307,7 @@ describe('discardKbDrafts', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  // `.haive/` is not gitignored and 12-post-onboarding stages `.haive/install.json` by
+  // `.haive/` is not gitignored and 12-post-onboarding stages files by
   // name, so a left-behind draft sits in the user's `git status` for good — and on a repo
   // onboarding has to `git init` itself that step runs `git add -A` and commits them all.
   it('removes the staging dir', async () => {

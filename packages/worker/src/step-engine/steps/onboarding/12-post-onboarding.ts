@@ -54,7 +54,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
-import { writeInstallManifestFromLiveRows } from '../../_install-manifest.js';
+import { INSTALL_MANIFEST_PATH, retireInstallManifest } from '../../_retire-install-manifest.js';
 import type { GenerateFilesApply, GenerateFilesDetect } from './07-generate-files.js';
 import { gitExec } from '../../../repo/git-exec.js';
 
@@ -77,7 +77,7 @@ const INIT_COMMIT_MESSAGE = [
 
 // Fixed names an earlier step (04, 12 itself) writes, staged whenever they exist.
 // Everything else comes from the step outputs.
-const FIXED_STAGE_PATHS = ['.claude/mcp_settings.json', '.haive/install.json'];
+const FIXED_STAGE_PATHS = ['.claude/mcp_settings.json'];
 
 // Rules files onboarding writes that are NOT tracked as onboarding_artifacts, so
 // the artifact union below would miss them: the import stubs (CLAUDE.md/GEMINI.md).
@@ -149,7 +149,6 @@ interface PostOnboardingOutput {
   stagedPaths: string[];
   warnings: string[];
   artifactRowsWritten: number;
-  installManifestWritten: boolean;
   /** Push handoff to 13-onboarding-push: pushRequested is true only after a
    *  successful commit in THIS run; the rest carry the user's push choices. */
   pushRequested: boolean;
@@ -160,7 +159,7 @@ interface PostOnboardingOutput {
 
 /** Build the deterministic render context from step 07's detect output. Used
  *  to expand the template manifest against the real per-repo inputs so the
- *  artifact rows and install.json reflect what was actually rendered. */
+ *  artifact rows reflect what was actually rendered. */
 function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext {
   return {
     projectInfo: detect.projectInfo,
@@ -174,7 +173,7 @@ function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext 
   };
 }
 
-/** Record onboarding_artifacts rows and write `.haive/install.json`. Runs
+/** Record onboarding_artifacts rows. Runs
  *  always (not gated by the commit checkbox) so versioning is in place even
  *  when the user defers committing. Idempotent on re-runs: upstream step
  *  machine guarantees 12-post-onboarding.apply runs once per task. `renderCtx` is
@@ -185,7 +184,6 @@ async function recordOnboardingArtifacts(
   renderCtx: TemplateRenderContext | null,
 ): Promise<{
   rowsWritten: number;
-  installManifestWritten: boolean;
   warnings: string[];
 }> {
   const warnings: string[] = [];
@@ -193,7 +191,7 @@ async function recordOnboardingArtifacts(
   if (!detect || !renderCtx) {
     warnings.push('onboarding-artifacts: 07-generate-files detect output missing, skipping');
     ctx.logger.warn('onboarding-artifacts: cannot record — step 07 detect output missing');
-    return { rowsWritten: 0, installManifestWritten: false, warnings };
+    return { rowsWritten: 0, warnings };
   }
 
   const taskRows = await ctx.db
@@ -205,7 +203,7 @@ async function recordOnboardingArtifacts(
   if (!repositoryId) {
     warnings.push('onboarding-artifacts: task has no repository_id, skipping');
     ctx.logger.warn('onboarding-artifacts: cannot record — task has no repository_id');
-    return { rowsWritten: 0, installManifestWritten: false, warnings };
+    return { rowsWritten: 0, warnings };
   }
 
   const manifest = getTemplateManifest();
@@ -280,7 +278,7 @@ async function recordOnboardingArtifacts(
 
   if (expanded.length === 0) {
     ctx.logger.info('onboarding-artifacts: manifest produced no renderings for this context');
-    return { rowsWritten: 0, installManifestWritten: false, warnings };
+    return { rowsWritten: 0, warnings };
   }
 
   // Snapshot the render context so rollback/upgrade can reconstruct what was
@@ -339,22 +337,12 @@ async function recordOnboardingArtifacts(
   });
   await updateApplicableTemplateIds(ctx.db, repositoryId, expanded);
 
-  const installManifestWritten = await writeInstallManifestFromLiveRows(
-    ctx,
-    repositoryId,
-    manifest.setHash,
-  );
-
   ctx.logger.info(
-    {
-      rowsWritten: rows.length,
-      templateSetHash: manifest.setHash,
-      installPath: '.haive/install.json',
-    },
+    { rowsWritten: rows.length, templateSetHash: manifest.setHash },
     'onboarding-artifacts recorded',
   );
 
-  return { rowsWritten: rows.length, installManifestWritten, warnings };
+  return { rowsWritten: rows.length, warnings };
 }
 
 /** Write the committed `.haive-data/` onboarding mirror from the repo's
@@ -614,11 +602,10 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     let pushCredentialId: string | null = null;
     let pushSetUpstream = true;
 
-    // Always record artifacts + write install.json, independent of the commit
+    // Always record artifacts, independent of the commit
     // checkbox — versioning metadata must be in place whether or not the user
     // opts into an immediate commit here.
     let artifactRowsWritten = 0;
-    let installManifestWritten = false;
     let renderContext: TemplateRenderContext | null = null;
     let rtkChoiceRecorded = false;
     try {
@@ -630,7 +617,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       rtkChoiceRecorded = detect?.rtkEnabled !== undefined;
       const res = await recordOnboardingArtifacts(ctx, detect, renderContext);
       artifactRowsWritten = res.rowsWritten;
-      installManifestWritten = res.installManifestWritten;
       warnings.push(...res.warnings);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -648,7 +634,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       stagedPaths,
       warnings,
       artifactRowsWritten,
-      installManifestWritten,
       pushRequested,
       pushCredentialId,
       pushSetUpstream,
@@ -683,6 +668,9 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           });
           ownFiles.push(...state.written);
           ownRemoved.push(...state.removed);
+          if ((await retireInstallManifest(ctx, warnings)) !== 'kept') {
+            ownRemoved.push(INSTALL_MANIFEST_PATH);
+          }
         } catch (err) {
           failIfColumnStale(err);
           if (err instanceof ProjectStateWriteError) {
@@ -822,7 +810,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         pushRequested,
         warnings,
         artifactRowsWritten,
-        installManifestWritten,
       },
       'post-onboarding apply complete',
     );

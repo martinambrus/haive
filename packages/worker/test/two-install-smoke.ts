@@ -64,9 +64,7 @@ const urlA = process.env.DATABASE_URL;
 
 /** What a second install cannot do yet, each with the Track B PR that closes it. A gap that
  *  passes fails the run, so the PR that closes one removes it here. */
-const KNOWN_GAPS: Record<string, string> = {
-  "a second 12 run leaves A's checkout clean": 'B1.7',
-};
+const KNOWN_GAPS: Record<string, string> = {};
 const gapsChecked = new Set<string>();
 
 let failures = 0;
@@ -1149,7 +1147,7 @@ async function main(): Promise<void> {
     // ---- a teammate's render change reaches a repository with claims (B1.4d) ----------------
     // The seed clone pulls A's commit and commits a record that adds an agent A did not accept and
     // drops one it did, and each install refreshes onto it. It goes last: the checkout moves, which
-    // the B1.7 check above must not see.
+    // the clean-checkout check above must not see.
     const acceptedA = (contextA?.acceptedAgentIds ?? []) as string[];
     const newAgent =
       [...BASELINE_AGENT_SPECS, ...Object.values(FRAMEWORK_AGENT_SPECS).flat()].find(

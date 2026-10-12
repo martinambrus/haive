@@ -155,31 +155,3 @@ export function buildManifest<TCtx>(
     setHash: computeSetHash(withHashes),
   };
 }
-
-/** Shape of the `.haive/install.json` manifest written into a user's repo.
- *  Secondary source of truth — DB is authoritative; install.json is the
- *  portable/visible reflection committed alongside other onboarding output. */
-export interface InstallManifest {
-  schemaVersion: 1;
-  haiveVersion: string;
-  appliedAt: string;
-  lastTaskId: string;
-  templateSetHash: string;
-  templates: Array<{
-    id: string;
-    schemaVersion: number;
-    contentHash: string;
-    diskPaths: string[];
-  }>;
-  /** Custom bundles installed for this repo. Optional — older install.json
-   *  files written before bundle support shipped omit it; consumers must
-   *  treat `undefined` as "no bundles installed" and not as a schema version
-   *  bump. */
-  bundles?: Array<{
-    id: string;
-    name: string;
-    sourceType: 'zip' | 'git';
-    lastSyncCommit: string | null;
-    itemCount: number;
-  }>;
-}

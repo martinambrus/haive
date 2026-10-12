@@ -37,19 +37,10 @@ const DETECT = {
 };
 
 /** Step 12 on a repository onboarded with the DETECT above, whose artifact recording is made to fail
- *  after the render context exists: either the install manifest cannot be written (a link stands where
- *  it goes), or the database refuses the artifact rows. */
-async function setup(
-  failure: 'none' | 'manifest-link' | 'artifact-rows',
-  detect: Record<string, unknown> = DETECT,
-) {
+ *  after the render context exists: the database refuses the artifact rows. */
+async function setup(failure: 'none' | 'artifact-rows', detect: Record<string, unknown> = DETECT) {
   const root = await mkdtemp(join(tmpdir(), 'post-onboarding-record-'));
-  const outside = await mkdtemp(join(tmpdir(), 'post-onboarding-record-out-'));
-  dirs.push(root, outside);
-  if (failure === 'manifest-link') {
-    await mkdir(join(root, '.haive'), { recursive: true });
-    await symlink(join(outside, 'elsewhere.json'), join(root, '.haive', 'install.json'));
-  }
+  dirs.push(root);
   // No plan tables: the plan mirror warns and the record does not depend on it.
   const fake = createFakeDb({
     tasks: schema.tasks,
@@ -106,6 +97,7 @@ async function setup(
     } as never);
   return {
     root,
+    fake,
     apply,
     applyCommit,
     liveRows: () => fake.rows(schema.onboardingArtifacts).filter((r) => r.supersededAt == null),
@@ -122,7 +114,6 @@ describe('12 writes the project state record whatever the artifact recording did
 
     expect(out.warnings.filter((w) => w.includes('onboarding-artifacts'))).toEqual([]);
     expect(out.artifactRowsWritten).toBeGreaterThan(0);
-    expect(out.installManifestWritten).toBe(true);
     expect(existsSync(join(s.root, RECORD_FORMAT))).toBe(true);
     expect(existsSync(join(s.root, RECORD_RENDER))).toBe(true);
     expect(s.column()).toMatchObject({
@@ -133,21 +124,13 @@ describe('12 writes the project state record whatever the artifact recording did
     expect(s.syncRows()).toHaveLength(1);
   });
 
-  it.each([
-    [
-      'a link stands where the install manifest goes',
-      'manifest-link',
-      'a symlink in the path: .haive/install.json',
-    ],
-    ['the database refuses the artifact rows', 'artifact-rows', 'database refused'],
-  ] as const)('writes it when %s', async (_what, failure, reason) => {
-    const s = await setup(failure);
+  it('writes it when the database refuses the artifact rows', async () => {
+    const s = await setup('artifact-rows');
 
     const out = await s.apply();
 
     // The recording failed, after the context it derives from 07's output existed.
-    expect(out.warnings).toContain(`onboarding-artifacts recording failed: ${reason}`);
-    expect(out.installManifestWritten).toBe(false);
+    expect(out.warnings).toContain('onboarding-artifacts recording failed: database refused');
     // Soft, so that a run which skipped the record shows everything it left out.
     for (const rel of [RECORD_FORMAT, RECORD_RENDER]) {
       expect.soft(existsSync(join(s.root, rel)), rel).toBe(true);
@@ -195,5 +178,121 @@ describe('12 commits the artifact claims it wrote into the record', () => {
     expect(s.liveRows().length).toBeGreaterThan(0);
     expect(claims).toHaveLength(s.liveRows().length);
     expect(tree).toContain(RECORD_RENDER);
+  });
+});
+
+describe('12 retires .haive/install.json', () => {
+  const git = promisify(execFile);
+  const HAIVE_SHAPED = JSON.stringify({
+    schemaVersion: 1,
+    haiveVersion: '0.1.0',
+    templateSetHash: 'abc',
+    templates: [],
+  });
+
+  const gitOut = async (root: string, ...args: string[]): Promise<string> =>
+    (await git('git', ['-C', root, ...args])).stdout;
+
+  /** A repository with one commit, and `.haive/install.json` tracked in it when `installJson` is given. */
+  async function seededSetup(installJson?: string) {
+    const s = await setup('none');
+    await git('git', ['-C', s.root, 'init', '-q', '-b', 'main']);
+    await git('git', ['-C', s.root, 'config', 'user.email', 't@example.com']);
+    await git('git', ['-C', s.root, 'config', 'user.name', 'T']);
+    await git('git', ['-C', s.root, 'config', 'gc.auto', '0']);
+    await writeFile(join(s.root, 'README.md'), 'hi\n');
+    await git('git', ['-C', s.root, 'add', 'README.md']);
+    if (installJson !== undefined) {
+      await mkdir(join(s.root, '.haive'), { recursive: true });
+      await writeFile(join(s.root, '.haive', 'install.json'), installJson);
+      await git('git', ['-C', s.root, 'add', '-f', '.haive/install.json']);
+    }
+    await git('git', ['-C', s.root, 'commit', '-qm', 'seed']);
+    return s;
+  }
+
+  const trackedFiles = async (root: string): Promise<string[]> =>
+    (await gitOut(root, 'ls-tree', '-r', '--name-only', 'HEAD')).split('\n').filter(Boolean);
+
+  it('leaves the checkout clean after two identical runs', async () => {
+    const s = await seededSetup();
+
+    const first = await s.applyCommit();
+    expect(first.commitPerformed).toBe(true);
+    expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+    const head = await gitOut(s.root, 'rev-parse', 'HEAD');
+
+    const second = await s.applyCommit();
+
+    expect(second.commitPerformed).toBe(false);
+    expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+    expect(await gitOut(s.root, 'rev-parse', 'HEAD')).toBe(head);
+    expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(false);
+  });
+
+  it('drops a tracked Haive-shaped file from the commit and the disk', async () => {
+    const s = await seededSetup(HAIVE_SHAPED);
+    expect(await trackedFiles(s.root)).toContain('.haive/install.json');
+
+    const out = await s.applyCommit();
+
+    expect(out.commitPerformed).toBe(true);
+    expect(await trackedFiles(s.root)).not.toContain('.haive/install.json');
+    expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(false);
+    expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+  });
+
+  it('stages the deletion on a retry that finds the file already gone', async () => {
+    const s = await seededSetup(HAIVE_SHAPED);
+    await rm(join(s.root, '.haive', 'install.json'));
+
+    await s.applyCommit();
+
+    expect(await trackedFiles(s.root)).not.toContain('.haive/install.json');
+  });
+
+  it("keeps a file that is not Haive's, and says so", async () => {
+    const s = await seededSetup('{"keep":true}');
+
+    const out = await s.applyCommit();
+
+    expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(true);
+    expect(await trackedFiles(s.root)).toContain('.haive/install.json');
+    expect(out.warnings.some((w) => w.startsWith('.haive/install.json was left in place'))).toBe(
+      true,
+    );
+  });
+
+  it('keeps a link standing there and still writes the record', async () => {
+    const s = await seededSetup();
+    const outside = await mkdtemp(join(tmpdir(), 'post-onboarding-record-out-'));
+    dirs.push(outside);
+    await writeFile(join(outside, 'elsewhere.json'), HAIVE_SHAPED);
+    await mkdir(join(s.root, '.haive'), { recursive: true });
+    await symlink(join(outside, 'elsewhere.json'), join(s.root, '.haive', 'install.json'));
+
+    const out = await s.apply();
+
+    expect(out.warnings.some((w) => w.startsWith('.haive/install.json was left in place'))).toBe(
+      true,
+    );
+    expect(existsSync(join(outside, 'elsewhere.json'))).toBe(true);
+    expect(existsSync(join(s.root, RECORD_RENDER))).toBe(true);
+  });
+
+  it('leaves the file alone when the record write failed', async () => {
+    const s = await seededSetup(HAIVE_SHAPED);
+    let refused = false;
+    s.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContain('project state record write failed: database refused');
+    expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(true);
   });
 });

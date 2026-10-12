@@ -41,9 +41,6 @@ const INIT_COMMIT_MESSAGE = [
   'template updates from the onboarding-upgrade workflow.',
 ].join('\n');
 
-// 02 writes install.json under a fixed name and does not report it; every other path is 02's record.
-const FIXED_STAGE_PATHS = ['.haive/install.json'];
-
 /** The paths 02 reports writing, as repository-relative ones. They come from a persisted step
  *  output — one written before the field existed has none — so each is validated again. */
 export function appliedWrittenPaths(applyOutput: unknown): string[] {
@@ -288,7 +285,6 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     }
     const stagePaths = [
       ...new Set([
-        ...FIXED_STAGE_PATHS,
         ...appliedWrittenPaths(applied?.output),
         ...stubPaths,
         ...(agentsRules.verdict === 'stage' ? [CLI_RULES_DISK_PATH] : []),

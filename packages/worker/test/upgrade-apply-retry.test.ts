@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -96,8 +96,7 @@ async function setup({
   regionEdited = false,
 }: { region?: boolean; regionEdited?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-retry-'));
-  const outside = await mkdtemp(join(tmpdir(), 'upgrade-apply-retry-out-'));
-  dirs.push(root, outside);
+  dirs.push(root);
   await mkdir(join(root, '.claude', 'agents'), { recursive: true });
   await writeFile(join(root, EDITED), MINE, 'utf8');
   await writeFile(join(root, CLEAN), OLD, 'utf8');
@@ -232,7 +231,6 @@ async function setup({
   };
   return {
     root,
-    outside,
     fake,
     ctx,
     apply,
@@ -293,9 +291,9 @@ describe('an upgrade apply retried after it failed part-way', () => {
 
   it('still records it when the first attempt failed after its transaction', async () => {
     const s = await setup();
-    await symlink(s.outside, join(s.root, '.haive'));
+    jamRecordWrite(s);
     await expect(s.apply()).rejects.toThrow();
-    await rm(join(s.root, '.haive'));
+    s.fake.hooks.beforeLock = null;
     const out = await s.apply();
     expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(NEW);
     expectRecordsWhatStoodBefore(out, s);
@@ -310,9 +308,9 @@ describe('an upgrade apply retried after it failed part-way', () => {
 
   it('records a rules region an attempt created in a file that stood without one', async () => {
     const s = await setup({ region: false });
-    await symlink(s.outside, join(s.root, '.haive'));
+    jamRecordWrite(s);
     await expect(s.apply()).rejects.toThrow();
-    await rm(join(s.root, '.haive'));
+    s.fake.hooks.beforeLock = null;
     const out = await s.apply();
     expect(out.createdPaths).toContainEqual({
       diskPath: 'AGENTS.md',
@@ -423,9 +421,9 @@ describe('an upgrade apply retried after it failed part-way', () => {
 
   it("keeps the plan's row live with the person's bytes when the failed attempt had committed", async () => {
     const s = await setup();
-    await symlink(s.outside, join(s.root, '.haive'));
+    jamRecordWrite(s);
     await expect(s.apply()).rejects.toThrow();
-    await rm(join(s.root, '.haive'));
+    s.fake.hooks.beforeLock = null;
 
     s.answerConflicts('keep_ours');
     await s.apply();
@@ -440,12 +438,12 @@ describe('an upgrade apply retried after it failed part-way', () => {
 
   it('restores a pre-image once: a later retry after the Keep committed leaves a save alone', async () => {
     const s = await setup();
-    await symlink(s.outside, join(s.root, '.haive'));
+    jamRecordWrite(s);
     await expect(s.apply()).rejects.toThrow();
     s.answerConflicts('keep_ours');
     await expect(s.apply()).rejects.toThrow();
     expect(await readFile(join(s.root, EDITED), 'utf8')).toBe(MINE);
-    await rm(join(s.root, '.haive'));
+    s.fake.hooks.beforeLock = null;
     await writeFile(join(s.root, EDITED), NEW, 'utf8');
 
     await s.apply();
@@ -455,12 +453,12 @@ describe('an upgrade apply retried after it failed part-way', () => {
 
   it('consumes the pre-image even when a Keep found the path edited and restored nothing', async () => {
     const s = await setup();
-    await symlink(s.outside, join(s.root, '.haive'));
+    jamRecordWrite(s);
     await expect(s.apply()).rejects.toThrow();
     await writeFile(join(s.root, EDITED), 'SAVED SINCE\n', 'utf8');
     s.answerConflicts('keep_ours');
     await expect(s.apply()).rejects.toThrow();
-    await rm(join(s.root, '.haive'));
+    s.fake.hooks.beforeLock = null;
     await writeFile(join(s.root, EDITED), NEW, 'utf8');
 
     await s.apply();
@@ -629,6 +627,12 @@ describe('an upgrade apply retried after it failed part-way', () => {
     expect(out.retiredRowIds).not.toContain(s.reinstatedRow);
   });
 });
+
+function jamRecordWrite({ fake }: Setup) {
+  fake.hooks.beforeLock = (key) => {
+    if (key.includes('project-state')) throw new Error('database refused');
+  };
+}
 
 function failOneCommit({ fake }: Setup) {
   let failed = false;

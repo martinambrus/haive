@@ -90,8 +90,9 @@ moving a project between installs "must work and be synced correctly and fully".
 - **Repo-level content:** `render_context.cliTargets` is a union (07 adds the onboarding user's
   CLIs, upgrade offers adding the upgrader's, removal explicit); the cli-rules region renders from
   `agent_rules_override ?? DEFAULT_AGENT_RULES`.
-- **Legacy:** `.haive/install.json` retired (stop writing and staging; the first commit carrying
-  the record also `git rm --cached` it); `environment/tooling/exclusions.json` no longer written,
+- **Legacy:** `.haive/install.json` retired (12, 02 and 04 stop writing it and delete a file of
+  Haive's own shape once the record is written; 12 and 03 stage the deletion, never
+  `git rm --cached`); `environment/tooling/exclusions.json` no longer written,
   still read as the fallback when no record exists. **Version skew:** a newer `format.json`
   refuses import and write; claims from a newer Haive release block upgrades on the older install
   with a banner. **Kill switch:** `CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED` (default on).
@@ -174,8 +175,8 @@ Phase 1 (the record):
   rendering an empty context (Codex round 1; MEASURED without those steps: framework null, no LSP,
   no agents, 7 files), against which every later check would pass empty. Passing today: the round
   trip, the mirror (environment, tooling without its machine-local keys, exclusions, the RTK switch)
-  and the plan. One known gap remains: a second 12 run leaves A's checkout clean (B1.7; today
-  `.haive/install.json` differs). B1.4c closed the gap of B's upgrade plan resolving a render
+  and the plan. No known gap remains: B1.7b closed the last, a second 12 run leaving A's checkout
+  clean (it differed only in `.haive/install.json`). B1.4c closed the gap of B's upgrade plan resolving a render
   context naming A's framework, agents and LSP languages, and B1.6 those of B holding A's claims and
   reading every claimed path `unchanged`.
   A listed gap no check names fails the run too. The scenarios that need machinery not built yet (a
@@ -460,9 +461,19 @@ Phase 1 (the record):
   the set A's sync wrote (A's own 02 writes the set without the cli-rules id, which 01 and the sync
   include).
 - **B1.7 feat(worker): write the record at onboarding, upgrade and rollback; retire install.json**
-  [B1.6]. The writer collapses local bundles to one descriptor per portable source, since the codec
-  refuses a source listed twice. Control: two identical 12 runs leave `git diff` empty (today
-  install.json differs).
+  [B1.6]. Built as two PRs. **B1.7a** (bundle descriptors): the writer collapses local bundles to
+  one descriptor per portable source (smallest name by code-unit order), since the codec refuses a
+  source listed twice; a base descriptor is kept while a claim names its source; the sync keeps
+  bundles in the base and out of the merge, so a descriptor can never become an unanswerable
+  conflict row; the reset removes them. **B1.7b** (retire install.json): nothing read the file and a
+  second 12 run changed it (`appliedAt`, `lastTaskId`), so 12, 02 and 04 stopped writing it and
+  `retireInstallManifest` deletes it only after their `writeProjectStateRecord` succeeded, judged on
+  the inode removed (JSON object, `schemaVersion` 1, string `templateSetHash`, `templates` array;
+  anything else is the person's and is kept with a warning). 12 lists the path in `ownRemoved`, 02
+  in `deletedPaths` for 03 to stage; 04 commits nothing, so a tracked copy stays an unstaged
+  deletion. `_install-manifest.ts` and the shared `InstallManifest` type are gone, and the reset
+  still removes the file for installs that hold one. Controls: `smoke:two-install` ends with 0
+  known gaps, and two identical 12 runs leave `git status --porcelain` empty on a real repository.
 - **B1.8 feat(api,worker): keep the record current on every settings edit** [B1.7]
   (`markProjectStateDirty` in PATCH exclusions/tooling, the reset, bundle changes, 02-detection,
   04-tooling, 06_7, bundle resync). Control: PATCH exclusions then a sweep tick updates
