@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api-client';
 import { Button, Card, FormError, Label } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
 import { usePageTitle } from '@/lib/use-page-title';
 import type { VerifyCommands } from '@haive/shared/schemas';
 import {
@@ -344,6 +345,8 @@ export default function RepoToolingPage() {
           take effect when the repository&apos;s next task rebuilds its environment image.
         </p>
       </div>
+
+      <ProjectStateConflictsBanner repositoryId={repositoryId} />
 
       <FormError message={error} />
 
