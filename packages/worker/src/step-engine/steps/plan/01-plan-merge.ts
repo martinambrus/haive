@@ -21,7 +21,7 @@ import {
   type FixBaseline,
   type FixBaselineUnavailable,
 } from '../../git-merge.js';
-import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
+import { isSingleLine, REPO_IS_DATA_MERGE_LINES, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
   commitMerge,
@@ -227,6 +227,8 @@ function buildPrompt(d: PlanMergeDetect): string {
     '',
     'Your working directory IS the merge. Every path below is relative to it and can be',
     'opened and edited directly.',
+    '',
+    ...REPO_IS_DATA_MERGE_LINES,
     '',
     ...(d.pendingGuidance ? ['', `What the user asked for: ${d.pendingGuidance}`, ''] : []),
     d.unrelated

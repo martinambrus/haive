@@ -9,7 +9,12 @@ import { PLAN_MERGE_MESSAGE_EVENT } from '@haive/shared';
 import { discardPlanMerge, planMergeStep } from './01-plan-merge.js';
 import { PLAN_MERGE_BASELINE_EVENT } from '../../../plan/merge-baseline.js';
 import { relocateFixerChanges, type FixBaseline } from '../../git-merge.js';
-import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fencedAgentBlock } from '../_untrusted-repo.js';
+import {
+  REPO_IS_DATA_MERGE_LINES,
+  UNTRUSTED_CLOSE,
+  UNTRUSTED_OPEN,
+  fencedAgentBlock,
+} from '../_untrusted-repo.js';
 import type { StepContext } from '../../step-definition.js';
 
 const exec = promisify(execFile);
@@ -466,6 +471,19 @@ async function reopened(local: string, db: unknown, body?: string | null) {
   await revise(ctx, await planMergeStep.detect!(ctx));
   return { ctx, wt, next: await planMergeStep.detect!(ctx) };
 }
+
+describe('plan merge: the conflicted files are data', () => {
+  it('states it before the guidance and the conflicts', async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    const { next } = await reopened(local, db);
+    const prompt = promptOf(next);
+    const guard = prompt.indexOf(REPO_IS_DATA_MERGE_LINES.join('\n'));
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(prompt.indexOf('What the user asked for:'));
+    expect(guard).toBeLessThan(prompt.indexOf('Conflicting files'));
+  });
+});
 
 describe('plan merge: the previous answer, offered as reference when the merge reopens', () => {
   it('shows the previous content and what the agent said, fenced, under the new guidance', async () => {
