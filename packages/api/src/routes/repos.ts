@@ -95,6 +95,8 @@ import {
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
   loadNewestLiveArtifactAt,
+  loadNewestLiveImportAt,
+  importedSinceReset,
   hasArtifactsSinceReset,
 } from '../lib/onboarding-state.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
@@ -250,6 +252,11 @@ repoRoutes.get('/', async (c) => {
     userId,
     rows.map((r) => r.id),
   );
+  const newestImportAt = await loadNewestLiveImportAt(
+    db,
+    userId,
+    rows.map((r) => r.id),
+  );
 
   const countsByRepo = new Map<string, { open: number; active: number }>();
   for (const row of taskCounts) {
@@ -279,6 +286,10 @@ repoRoutes.get('/', async (c) => {
             onboardingResetAt: repo.onboardingResetAt,
             hasArtifactsSinceReset: hasArtifactsSinceReset(
               newestArtifactAt.get(repo.id),
+              repo.onboardingResetAt,
+            ),
+            importedSinceReset: importedSinceReset(
+              newestImportAt.get(repo.id),
               repo.onboardingResetAt,
             ),
             facts: onboardingFacts.get(repo.id) ?? NO_ONBOARDING_TASKS,
@@ -2527,6 +2538,10 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
     onboardingResetAt: repo.onboardingResetAt,
     hasArtifactsSinceReset: hasArtifactsSinceReset(
       (await loadNewestLiveArtifactAt(db, userId, [id])).get(id),
+      repo.onboardingResetAt,
+    ),
+    importedSinceReset: importedSinceReset(
+      (await loadNewestLiveImportAt(db, userId, [id])).get(id),
       repo.onboardingResetAt,
     ),
     facts,

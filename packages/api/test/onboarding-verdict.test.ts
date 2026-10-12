@@ -5,6 +5,7 @@ import {
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
   hasArtifactsSinceReset,
+  importedSinceReset,
   upgradeRefusalMessage,
   type OnboardingTaskFacts,
 } from '../src/lib/onboarding-state.js';
@@ -299,6 +300,56 @@ describe('resolveOnboardingVerdict across a reset', () => {
       facts: facts({ hasAny: true }),
     });
     expect(v.canMarkOnboarded).toBe(false);
+  });
+
+  it('reads onboarded after a reset once an import marker is dated after it', () => {
+    const verdict = (importedAt: Date | undefined) =>
+      resolveOnboardingVerdict({
+        missing: ALL_PRESENT,
+        onboardedAt: null,
+        onboardingResetAt: RESET_AT,
+        hasArtifactsSinceReset: hasArtifactsSinceReset(importedAt, RESET_AT),
+        importedSinceReset: importedSinceReset(importedAt, RESET_AT),
+        facts: facts({ hasAny: true }),
+      });
+    expect(verdict(AFTER).onboarded).toBe(true);
+    expect(verdict(BEFORE)).toMatchObject({ onboarded: false, canMarkOnboarded: false });
+    expect(verdict(undefined).onboarded).toBe(false);
+  });
+
+  it('keeps an ordinary row written since the reset a button, not a verdict', () => {
+    const v = resolveOnboardingVerdict({
+      missing: ALL_PRESENT,
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      hasArtifactsSinceReset: true,
+      importedSinceReset: importedSinceReset(undefined, RESET_AT),
+      facts: facts({ hasAny: true }),
+    });
+    expect(v).toMatchObject({ onboarded: false, canMarkOnboarded: true });
+  });
+
+  it('still waits for a live run and for the markers on disk after an import', () => {
+    const base = {
+      onboardedAt: null,
+      onboardingResetAt: RESET_AT,
+      importedSinceReset: true,
+    };
+    expect(
+      resolveOnboardingVerdict({
+        ...base,
+        missing: ALL_PRESENT,
+        facts: facts({ hasAny: true, liveTaskId: 'task-1' }),
+      }).onboarded,
+    ).toBe(false);
+    expect(
+      resolveOnboardingVerdict({ ...base, missing: SOME_MISSING, facts: facts({ hasAny: true }) })
+        .onboarded,
+    ).toBe(false);
+  });
+
+  it('never reads an import as answering a reset that did not happen', () => {
+    expect(importedSinceReset(AFTER, null)).toBe(false);
   });
 
   it('is byte-identical to the old verdict on every repo nobody has reset', () => {
