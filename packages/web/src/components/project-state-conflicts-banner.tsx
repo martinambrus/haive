@@ -15,6 +15,7 @@ import {
   resolutionNotice,
   conflictKeyLabel,
   conflictSideMarkdown,
+  isRtkConflict,
   stillListed,
   answerAndConfirm,
   type ProjectStateAnswer,
@@ -76,11 +77,16 @@ export function ProjectStateConflictsView({
             key={c.id}
             className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2"
           >
-            <p className="text-sm font-semibold text-neutral-100">{conflictKeyLabel(c.key)}</p>
+            <p className="text-sm font-semibold text-neutral-100">
+              {conflictKeyLabel(c.key, c.unit)}
+            </p>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-              <Side title="This install" markdown={conflictSideMarkdown(c.local)} />
-              <Side title="The other install" markdown={conflictSideMarkdown(c.incoming)} />
-              <Side title="Before either changed it" markdown={conflictSideMarkdown(c.base)} />
+              <Side title="This install" markdown={conflictSideMarkdown(c.local, c.unit)} />
+              <Side title="The other install" markdown={conflictSideMarkdown(c.incoming, c.unit)} />
+              <Side
+                title="Before either changed it"
+                markdown={conflictSideMarkdown(c.base, c.unit)}
+              />
             </div>
             {message && (
               <InlineMarkdown
@@ -122,6 +128,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const [conflicts, setConflicts] = useState<ProjectStateConflictBody[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [answered, setAnswered] = useState<ProjectStateAnswer[]>([]);
+  const [rtkAnswered, setRtkAnswered] = useState<ProjectStateAnswer[]>([]);
   const [messages, setMessages] = useState<Record<string, ConflictMessage>>({});
   const [confirming, setConfirming] = useState<{
     conflict: ProjectStateConflictBody;
@@ -131,6 +138,12 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const [pendingIds, setPendingIds] = useState<string[]>([]);
   const pendingRef = useRef<string[]>([]);
   const pendingAnswers = useRef<Record<string, ProjectStateAnswer>>({});
+  const recordAnswers = useCallback((items: { answer: ProjectStateAnswer; unit: string }[]) => {
+    const rtk = items.filter(isRtkConflict).map((i) => i.answer);
+    const rest = items.filter((i) => !isRtkConflict(i)).map((i) => i.answer);
+    if (rest.length > 0) setAnswered((prev) => [...prev, ...rest]);
+    if (rtk.length > 0) setRtkAnswered((prev) => [...prev, ...rtk]);
+  }, []);
   const refetchCount = useRef(0);
   const pollLoop = useRef(false);
   const alive = useRef(true);
@@ -174,21 +187,26 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
             .get<{ conflict: ProjectStateConflictBody }>(
               `/repos/${repositoryId}/project-state/conflicts/${id}`,
             )
-            .then((res) => ({ id, ok: true, answer: landedAnswer(res.conflict.resolution) }))
-            .catch(() => ({ id, ok: false, answer: null })),
+            .then((res) => ({
+              id,
+              ok: true,
+              answer: landedAnswer(res.conflict.resolution),
+              unit: res.conflict.unit,
+            }))
+            .catch(() => ({ id, ok: false, answer: null, unit: '' })),
         ),
       );
       if (!alive.current) return;
-      const answers: ProjectStateAnswer[] = [];
+      const answers: { answer: ProjectStateAnswer; unit: string }[] = [];
       for (const l of looked) {
         if (!l.ok) {
           unconfirmed.push(l.id);
           continue;
         }
         delete pendingAnswers.current[l.id];
-        if (l.answer) answers.push(l.answer);
+        if (l.answer) answers.push({ answer: l.answer, unit: l.unit });
       }
-      if (answers.length > 0) setAnswered((prev) => [...prev, ...answers]);
+      recordAnswers(answers);
     }
     remaining.push(...unconfirmed);
     remaining.push(...pendingRef.current.filter((id) => !before.includes(id)));
@@ -208,7 +226,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       for (const id of remaining) next[id] = { tone: 'info', text: PENDING_GAVE_UP_MESSAGE };
       return next;
     });
-  }, [load, setPending, repositoryId]);
+  }, [load, setPending, recordAnswers, repositoryId]);
 
   useEffect(() => {
     alive.current = true;
@@ -236,10 +254,9 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       if (out.kind === 'error') next[conflict.id] = { tone: 'error', text: out.message };
       return next;
     });
-    if (out.kind === 'resolved') setAnswered((prev) => [...prev, answer]);
+    if (out.kind === 'resolved') recordAnswers([{ answer, unit: conflict.unit }]);
     if (out.kind === 'error' && out.landed) {
-      const landed = out.landed;
-      setAnswered((prev) => [...prev, landed]);
+      recordAnswers([{ answer: out.landed, unit: conflict.unit }]);
     }
     if (out.kind === 'pending') {
       pendingAnswers.current[conflict.id] = answer;
@@ -255,7 +272,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   }
 
   const confirmation = confirming
-    ? answerConfirmation(confirming.answer, confirming.conflict.key)
+    ? answerConfirmation(confirming.answer, confirming.conflict.key, confirming.conflict.unit)
     : null;
 
   return (
@@ -268,7 +285,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       )}
       <ProjectStateConflictsView
         conflicts={conflicts}
-        notice={resolutionNotice(answered)}
+        notice={resolutionNotice(answered, rtkAnswered)}
         messages={messages}
         busyId={busyId}
         pendingIds={pendingIds}

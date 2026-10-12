@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { RTK_ENABLED_UNIT } from '@haive/shared/project-state';
 import {
   NO_ONBOARDING_TASKS,
   resolveOnboardingVerdict,
   hasArtifactsSinceReset,
+  upgradeRefusalMessage,
   type OnboardingTaskFacts,
 } from '../src/lib/onboarding-state.js';
 
@@ -319,5 +321,19 @@ describe('resolveOnboardingVerdict across a reset', () => {
       });
       expect(withColumn).toEqual(withoutColumn);
     }
+  });
+});
+
+describe('upgradeRefusalMessage for the RTK question', () => {
+  it('names the unit and says each question must be answered first', () => {
+    const refusal = {
+      admitted: false as const,
+      reason: 'contested' as const,
+      units: [RTK_ENABLED_UNIT],
+    };
+    expect(upgradeRefusalMessage(refusal, 'upgraded')).toBe(
+      "The project settings of this repository conflict with another install's (RTK command compression), so it cannot be upgraded until each is answered",
+    );
+    expect(upgradeRefusalMessage(refusal, 'rolled back')).toContain('cannot be rolled back until');
   });
 });

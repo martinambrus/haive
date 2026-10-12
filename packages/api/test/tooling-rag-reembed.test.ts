@@ -117,7 +117,10 @@ function setup(
     embeddingDimensions: 8,
   },
 ) {
-  const fake = createFakeDb({ repositories: schema.repositories });
+  const fake = createFakeDb({
+    repositories: schema.repositories,
+    projectStateConflicts: schema.projectStateConflicts,
+  });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,

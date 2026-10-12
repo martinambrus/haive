@@ -67,6 +67,14 @@
       "types": "./dist/project-state/index.d.ts",
       "import": "./dist/project-state/index.js"
     },
+    "./rtk-enabled": {
+      "types": "./dist/tooling/rtk-enabled.d.ts",
+      "import": "./dist/tooling/rtk-enabled.js"
+    },
+    "./project-state-conflicts": {
+      "types": "./dist/project-state/conflicts.d.ts",
+      "import": "./dist/project-state/conflicts.js"
+    },
     "./plan-describe": {
       "types": "./dist/plan/describe.d.ts",
       "import": "./dist/plan/describe.js"

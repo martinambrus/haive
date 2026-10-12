@@ -4,6 +4,7 @@ import {
   answerConfirmation,
   conflictKeyLabel,
   conflictSideMarkdown,
+  isRtkConflict,
   landedAnswer,
   resolutionNotice,
   stillListed,
@@ -28,6 +29,49 @@ describe('conflictKeyLabel', () => {
   });
 });
 
+describe('the RTK question', () => {
+  const UNIT = 'settings/rtk-enabled.json';
+
+  it('is labelled by its unit, since its key is null like the whole file', () => {
+    expect(conflictKeyLabel(null, UNIT)).toBe('RTK command compression');
+    expect(conflictKeyLabel(null)).toBe('The whole project record file');
+    expect(isRtkConflict({ unit: UNIT })).toBe(true);
+    expect(isRtkConflict({ unit: 'project/render.json' })).toBe(false);
+  });
+
+  it('keep mine says RTK stays on here and no file is written', () => {
+    const c = answerConfirmation('keep_mine', null, UNIT);
+    expect(c.confirmLabel).toBe('Keep mine');
+    expect(c.body).toBe(
+      'RTK command compression stays on in this install. No repository file is written.',
+    );
+    expect(c.body).not.toContain('Commit and push');
+  });
+
+  it('take theirs says RTK is switched off here as the other install has it', () => {
+    const c = answerConfirmation('take_theirs', null, UNIT);
+    expect(c.confirmLabel).toBe('Take theirs');
+    expect(c.body).toContain('switched off in this install, as the other install has it');
+    expect(c.body).toContain('No repository file is written');
+  });
+
+  it('reports each answer as what happened to RTK, never as a record file written', () => {
+    expect(resolutionNotice([], ['keep_mine'])).toBe(
+      'RTK command compression stays on in this install.',
+    );
+    expect(resolutionNotice([], ['take_theirs'])).toBe(
+      'RTK command compression is switched off in this install.',
+    );
+    expect(resolutionNotice([], ['keep_mine'])).not.toContain('Commit and push');
+  });
+
+  it('adds the record file notice only for a render answer beside it', () => {
+    const both = resolutionNotice(['keep_mine'], ['take_theirs'])!;
+    expect(both).toContain('Commit and push');
+    expect(both).toContain('switched off in this install');
+  });
+});
+
 describe('conflictSideMarkdown', () => {
   it('fences a present value as json', () => {
     expect(conflictSideMarkdown({ present: true, value: ['a', 'b'] })).toBe(
@@ -41,6 +85,12 @@ describe('conflictSideMarkdown', () => {
 
   it('says so when the side holds nothing', () => {
     expect(conflictSideMarkdown({ present: false })).toBe('Not set.');
+  });
+
+  it('shows the RTK switch as On or Off', () => {
+    const unit = 'settings/rtk-enabled.json';
+    expect(conflictSideMarkdown({ present: true, value: true }, unit)).toBe('On');
+    expect(conflictSideMarkdown({ present: true, value: false }, unit)).toBe('Off');
   });
 
   it('outruns a backtick run inside a string so the value cannot leave its block', () => {

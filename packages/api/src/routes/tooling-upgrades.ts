@@ -15,6 +15,7 @@ import {
   type OnboardingToolingMirror,
   type ToolName,
 } from '@haive/shared';
+import { rtkEnabledUpdate, convergeRtkQuestion } from '@haive/shared/rtk-enabled';
 import {
   RAG_TABLE,
   openExistingRagDatabase,
@@ -741,7 +742,8 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       }
       updates.verifyCommands = Object.keys(parsed.data).length > 0 ? parsed.data : null;
     }
-    if (typeof body.rtkEnabled === 'boolean') updates.rtkEnabled = body.rtkEnabled;
+    if (typeof body.rtkEnabled === 'boolean')
+      Object.assign(updates, rtkEnabledUpdate(body.rtkEnabled));
     if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion?.trim() || null;
     if (body.chromeDevtoolsMcpVersion !== undefined) {
       updates.chromeDevtoolsMcpVersion = body.chromeDevtoolsMcpVersion?.trim() || null;
@@ -862,10 +864,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     }
 
     assertRagLockHeld(lock);
-    await db
-      .update(schema.repositories)
-      .set(updates)
-      .where(eq(schema.repositories.id, repositoryId));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.repositories)
+        .set(updates)
+        .where(eq(schema.repositories.id, repositoryId));
+      if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, userId);
+    });
     // A sync can write fallback rows between the probe and the clear; look once more after it.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
       assertRagLockHeld(lock);

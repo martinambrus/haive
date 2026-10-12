@@ -3,6 +3,11 @@ import type {
   ProjectStateAnswer,
   ProjectStateConflictBody,
 } from '@haive/shared/project-state';
+import {
+  CONFLICT_KEY_LABELS,
+  RTK_ENABLED_UNIT,
+  conflictUnitLabel,
+} from '@haive/shared/project-state-conflicts';
 import { fencedCode } from '../components/markdown/fenced-code';
 
 export type { ProjectStateAnswer, ProjectStateConflictBody };
@@ -24,28 +29,41 @@ export function stillListed(
   return ids.filter((id) => listed.has(id));
 }
 
-const KEY_LABELS: Record<string, string> = {
-  projectInfo: 'Project details',
-  framework: 'Framework',
-  acceptedAgentIds: 'Accepted agents',
-  customAgentSpecs: 'Custom agents',
-};
+export const isRtkConflict = (conflict: { unit: string }): boolean =>
+  conflict.unit === RTK_ENABLED_UNIT;
 
-export function conflictKeyLabel(key: string | null): string {
+export function conflictKeyLabel(key: string | null, unit?: string): string {
+  if (unit !== undefined) return conflictUnitLabel(unit);
   if (key === null) return 'The whole project record file';
-  return KEY_LABELS[key] ?? key;
+  return CONFLICT_KEY_LABELS[key] ?? key;
 }
 
-export function conflictSideMarkdown(side: ConflictSideBody): string {
+export function conflictSideMarkdown(side: ConflictSideBody, unit?: string): string {
   if (!side.present) return 'Not set.';
+  if (unit === RTK_ENABLED_UNIT && typeof side.value === 'boolean')
+    return side.value ? 'On' : 'Off';
   return fencedCode(JSON.stringify(side.value, null, 2) ?? 'null', 'json');
 }
 
 export function answerConfirmation(
   answer: ProjectStateAnswer,
   key: string | null,
+  unit?: string,
 ): { title: string; body: string; confirmLabel: string } {
-  const label = conflictKeyLabel(key);
+  const label = conflictKeyLabel(key, unit);
+  if (unit === RTK_ENABLED_UNIT) {
+    return answer === 'keep_mine'
+      ? {
+          title: "Keep this install's value",
+          confirmLabel: 'Keep mine',
+          body: `${label} stays on in this install. No repository file is written.`,
+        }
+      : {
+          title: "Take the other install's value",
+          confirmLabel: 'Take theirs',
+          body: `${label} is switched off in this install, as the other install has it. This is the same as unticking it on the tooling page, and the next upgrade offers to remove its files. No repository file is written.`,
+        };
+  }
   if (answer === 'keep_mine') {
     return {
       title: "Keep this install's value",
@@ -64,12 +82,24 @@ export function landedAnswer(resolution: string | null | undefined): ProjectStat
   return resolution === 'keep_mine' || resolution === 'take_theirs' ? resolution : null;
 }
 
-export function resolutionNotice(answered: readonly ProjectStateAnswer[]): string | null {
+export function resolutionNotice(
+  answered: readonly ProjectStateAnswer[],
+  rtkAnswered: readonly ProjectStateAnswer[] = [],
+): string | null {
+  const notices: string[] = [];
   if (answered.includes('keep_mine')) {
-    return `This install's value is written into \`${RECORD_FILE}\`. Commit and push that file so your teammate gets it.`;
+    notices.push(
+      `This install's value is written into \`${RECORD_FILE}\`. Commit and push that file so your teammate gets it.`,
+    );
+  } else if (answered.includes('take_theirs')) {
+    notices.push("This install now uses your teammate's value.");
   }
-  if (answered.includes('take_theirs')) return "This install now uses your teammate's value.";
-  return null;
+  if (rtkAnswered.includes('take_theirs')) {
+    notices.push('RTK command compression is switched off in this install.');
+  } else if (rtkAnswered.includes('keep_mine')) {
+    notices.push('RTK command compression stays on in this install.');
+  }
+  return notices.length > 0 ? notices.join(' ') : null;
 }
 
 export type ConflictAnswerOutcome =

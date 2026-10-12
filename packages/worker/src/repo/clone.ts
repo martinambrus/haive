@@ -37,10 +37,12 @@ import {
   type OnboardingToolingMirror,
   type RepoJobPayload,
 } from '@haive/shared';
+import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
 import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
 import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
 import { syncProjectStateFromCheckout } from '../project-state/sync.js';
+import { raiseRtkQuestion } from '../project-state/rtk-conflict.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper } from './git-push.js';
 import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
@@ -203,10 +205,13 @@ async function importHaiveDataMirror(
   }
 
   if (Object.keys(updates).length === 0) return;
-  await db
-    .update(schema.repositories)
-    .set({ ...updates, updatedAt: new Date() })
-    .where(eq(schema.repositories.id, repositoryId));
+  await db.transaction(async (tx) => {
+    await tx
+      .update(schema.repositories)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(schema.repositories.id, repositoryId));
+    if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, null);
+  });
   logger.info(
     { repositoryId, imported: Object.keys(updates) },
     'restored onboarding state from .haive-data mirror',
@@ -251,6 +256,12 @@ export async function persistDetection(
     await importHaiveDataMirror(db, repositoryId, storagePath);
   } catch (err) {
     logger.warn({ err, repositoryId }, 'haive-data mirror import failed (non-fatal)');
+  }
+
+  try {
+    await raiseRtkQuestion(db, repositoryId);
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'RTK question not raised (non-fatal)');
   }
 
   try {

@@ -451,6 +451,32 @@ the checkout deleted never makes a conflict: the sync returns `absent` before it
 `project/render.json` or the state directory is gone (`readCheckout`), so no row has an absent
 `incoming`, and the one a deleted file leaves pending stays `moved` until the file is back.
 
+**One question is not a render key: an imported RTK-off this install never applied.** A repository
+imported before the mirror import set `rtk_enabled` from the tooling it read holds the column's
+default `true` beside imported tooling that says `rtkEnabled: false`. The tooling page writes the
+column alone, so nothing says whether a person switched RTK back on since, and a migration would
+have to choose. `needsRtkQuestion` (`project-state/rtk-conflict.ts`, pure) asks exactly when the
+stored tooling says off, the column says on, no local `04-tooling-infrastructure` output equals that
+tooling (the test `holdImportedMcpServerLists` uses) and no row of the unit exists in any state, so
+an answered question is never asked again. `persistDetection` calls it after the mirror import and
+the boot entry `raiseRtkQuestions` (convergent) calls it for every repository; each writes one
+pending row of unit `settings/rtk-enabled.json` (`RTK_ENABLED_UNIT`; base and local `{"v": true}`,
+incoming `{"v": false}`) under `lockProjectState`, `ON CONFLICT DO NOTHING` on the pending index, and
+there is no migration. The unit is no render unit: the writer overlay, the sync's converge pass and
+`loadPendingRenderConflicts` skip it, while the api list and one-row reads, the `RESOLVE_PROJECT_STATE`
+job and `upgradeAdmission` (any pending row holds) take it (`isConflictUnit`). The worker answers it
+under the same locks and the same busy, closed-row and different-answer rules, and writes no file:
+keep mine stamps the row and leaves the column; take theirs sets `rtk_enabled = false` through
+`rtkEnabledUpdate` (the columns the tooling page's PATCH writes, `rtk_enabled` and `updated_at`,
+which that route uses too) and stamps the row. Neither recomputes the applicable ids nor touches the
+rules files, since the PATCH does not: the next upgrade, which the answer releases, removes the RTK
+settings files and block as it does after any switch off. A pending row stops asking once RTK is off
+here by any route: every writer of `rtk_enabled = false` (the tooling page's PATCH, 04's save, the
+mirror import) stamps it `converged` in the transaction that writes the column
+(`convergeRtkQuestion`), and `raiseRtkQuestion` and the boot entry do the same for a column that is
+already off. The banner words it from the unit, since its
+key is null like the whole render file's (`isRtkConflict`).
+
 **An upgrade offers the RTK block back, unticked.** 07 is the only writer of the block, so once an
 upgrade took it out, only a re-onboarding used to restore it. 01 now lists `AGENTS.md` in
 `rtkBlockRestorable` when ALL hold: the context recorded an RTK choice and RTK is on
