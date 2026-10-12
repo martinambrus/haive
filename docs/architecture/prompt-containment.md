@@ -79,7 +79,7 @@ task ledger — needs no balancing, because nothing can cut one in half.
 **NEVER FENCE THE OPERATOR.** A fence tells the agent not to follow what is inside it, which is
 containment for AGENT prose and sabotage for a person's. `REPO_IS_DATA_MERGE_LINES` exists
 because reusing the coder guard in the merge prompt pitted it against the operator's own
-conflict guidance. `fixIsHuman` keeps a gate-2 rejection out of the fence; `HUMAN_REJECT_SOURCES`
+conflict guidance; the git merge fixer and the plan merge (`01-plan-merge`) both carry it. `fixIsHuman` keeps a gate-2 rejection out of the fence; `HUMAN_REJECT_SOURCES`
 splits the prior-round block; plan chat fences its own turns and never the user's. The ASSIGNMENT
 itself is never fenced — a coder must follow it — so hostile text entering one is stopped
 upstream, at the writer, which is what the authoring variant is for.
