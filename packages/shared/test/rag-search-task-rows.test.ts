@@ -6,7 +6,7 @@ import { TASK_SOURCE_TYPE, type RagConnection } from '../src/rag/connection.js';
  *  information_schema first, so `withVector` selects which branch is exercised. */
 function capturingConn(withVector: boolean): { conn: RagConnection; statements: string[] } {
   const statements: string[] = [];
-  const pg = {
+  const pg: Record<string, unknown> = {
     unsafe: async (q: string) => {
       statements.push(q);
       if (q.includes('information_schema.columns')) {
@@ -14,6 +14,7 @@ function capturingConn(withVector: boolean): { conn: RagConnection; statements: 
       }
       return [];
     },
+    savepoint: async (run: (sp: unknown) => unknown) => run(pg),
   };
   return {
     conn: {

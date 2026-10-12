@@ -24,7 +24,8 @@ const EXCLUDE_TASK_ROWS = `source_type <> '${TASK_SOURCE_TYPE}'`;
 export interface RagSearchConfig {
   /** Candidate pool size pulled from each of the dense and lexical rankers
    *  before fusion. On the HNSW path the dense half ends after `hnsw.ef_search`
-   *  candidates (40 by default, identical vectors sharing one), so it can return fewer. */
+   *  candidates (200 for a per-repo read, else the default 40; identical vectors share one),
+   *  so it can return fewer. */
   candidatePool: number;
   /** RRF constant k. Larger = flatter rank weighting. 60 is the common default. */
   rrfK: number;
@@ -452,22 +453,33 @@ function identifierCteSql(
 }
 
 /** The global HNSW index holds every model row and `embed_model` filters after its scan, so old-model rows can exhaust `ef_search`. */
-const GLOBAL_DENSE_SCAN_SQL = 'SET LOCAL hnsw.iterative_scan = relaxed_order';
+const GLOBAL_DENSE_SCAN_SQL = ['SET LOCAL hnsw.iterative_scan = relaxed_order'];
 
-/** A global dense read runs in a transaction with iterative scan on, the SET in a savepoint; a per-repo read is untouched. */
+const REPO_DENSE_SCAN_SQL = ['SET LOCAL hnsw.ef_search = 200', 'SET LOCAL cpu_operator_cost = 0.1'];
+
+/** A global or per-repo dense read runs in a transaction with its SETs in a savepoint; any other read is untouched. */
 async function denseRead(
   conn: RagConnection,
   filter: RagFacetFilter | undefined,
   text: string,
   params: unknown[],
+  widen = false,
 ): Promise<RawRow[]> {
-  if (!filter) return (await conn.pg.unsafe(text, params as never)) as unknown as RawRow[];
+  const settings = filter ? GLOBAL_DENSE_SCAN_SQL : widen ? REPO_DENSE_SCAN_SQL : [];
+  if (settings.length === 0) {
+    return (await conn.pg.unsafe(text, params as never)) as unknown as RawRow[];
+  }
   const run = async (pg: RagConnection['pg']): Promise<RawRow[]> => {
     try {
-      await (pg as unknown as TransactionSql).savepoint((sp) => sp.unsafe(GLOBAL_DENSE_SCAN_SQL));
+      await (pg as unknown as TransactionSql).savepoint(async (sp) => {
+        for (const setting of settings) await sp.unsafe(setting);
+      });
     } catch (err) {
       const code = (err as { code?: unknown } | null)?.code;
-      log.warn({ code: typeof code === 'string' ? code : undefined }, 'iterative scan unavailable');
+      log.warn(
+        { code: typeof code === 'string' ? code : undefined },
+        'dense scan settings unavailable',
+      );
     }
     return (await pg.unsafe(text, params as never)) as unknown as RawRow[];
   };
@@ -542,14 +554,8 @@ export async function ragHybridSearch(
     // CTE re-derives d_rank over the returned pool and recomputes dense_sim at full
     // `vector` precision for the relevance gate.
     //
-    // We deliberately do NOT raise hnsw.ef_search: on modest tables that inflates
-    // the planner's estimated HNSW cost past a plain seq-scan+sort and reverts the
-    // dense CTE to a full scan (measured: ef_search=100 -> 430ms seq scan vs the
-    // default's 5ms index scan). At the default ef_search the planner keeps the
-    // index, which ends the dense half after 40 candidates (see `candidatePool`). A selective
-    // repo/facet filter is served by a bitmap index scan + exact sort (the planner's
-    // own choice) — fast and exact — so no iterative_scan GUC (and thus no
-    // transaction wrapper) is needed.
+    // A per-repo read widens hnsw.ef_search to 200 (at 40 the search settles in the wrong region) and
+    // raises cpu_operator_cost so the planner keeps HNSW there and exact sorts on a small subset.
     // A global row reached only by words reports no dense similarity: its vector was never ranked.
     const denseSimFallback = 'COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))';
     const denseSimSel = filter ? 'd.dense_sim' : denseSimFallback;
@@ -644,7 +650,7 @@ export async function ragHybridSearch(
         ? [pgTextArrayLiteral(ident.terms), pgFloatArrayLiteral(ident.idfs), ident.query as string]
         : []),
     ];
-    rows = await denseRead(conn, filter, sqlText, params);
+    rows = await denseRead(conn, filter, sqlText, params, Boolean(repositoryId));
   } else {
     // No usable dense half — either a jsonb-fallback store with no vector column,
     // or `lexicalOnly` for a repo whose vectors cannot be trusted. Lexical ranking.

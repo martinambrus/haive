@@ -687,14 +687,15 @@ describe('ragHybridSearch global dense reads widen the index scan', () => {
   it.each([
     ['inside a transaction', false],
     ['outside one', true],
-  ])('leaves a per-repo read as it was %s', async (_w, pooled) => {
+  ])('gives a per-repo read the wider search, not iterative scan %s', async (_w, pooled) => {
     const { conn, events } = scanStore({ pooled });
 
     await ragHybridSearch(conn, VEC, QUERY, {}, undefined, 'repo-1');
 
-    expect(events.map((e) => e.statement)).not.toContain(ITERATIVE_SET);
-    expect(events.some((e) => e.inSavepoint)).toBe(false);
-    expect(events.every((e) => e.inTx === !pooled)).toBe(true);
+    const statements = events.map((e) => e.statement);
+    expect(statements).not.toContain(ITERATIVE_SET);
+    expect(statements).toContain('SET LOCAL hnsw.ef_search = 200');
+    expect(events.find((e) => e.statement.includes('dense_c'))!.inTx).toBe(true);
   });
 });
 
