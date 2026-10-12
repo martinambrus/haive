@@ -1,4 +1,4 @@
-import type { ForgeProviderName } from '@haive/shared';
+import type { ForgeProviderName } from '../schemas/repos.js';
 import { BitbucketCloudForgeProvider } from './bitbucket-cloud.js';
 import { BitbucketServerForgeProvider } from './bitbucket-server.js';
 import { GiteaForgeProvider } from './gitea.js';

@@ -2,8 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { forgeProviderSchema, type ForgeProviderName } from '@haive/shared';
 import { getDecryptedCredentials } from '../repo/credentials.js';
-import { resolveForgeProvider } from './registry.js';
-import { ForgeError, type ForgeContext } from './types.js';
+import { ForgeError, resolveForgeProvider, type ForgeContext } from '@haive/shared/forge';
 
 /** Public hosts whose forge software is unambiguous, so an unset credential provider can
  *  be inferred. A self-hosted host can't be inferred (a hostname can't reveal the forge),

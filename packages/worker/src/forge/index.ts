@@ -1,3 +1,2 @@
-export * from './types.js';
-export * from './registry.js';
+export * from '@haive/shared/forge';
 export * from './resolve-forge-context.js';

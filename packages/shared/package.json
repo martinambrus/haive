@@ -147,6 +147,10 @@
       "types": "./dist/scheduling/fair-priority.d.ts",
       "import": "./dist/scheduling/fair-priority.js"
     },
+    "./forge": {
+      "types": "./dist/forge/index.d.ts",
+      "import": "./dist/forge/index.js"
+    },
     "./release": {
       "types": "./dist/release/index.d.ts",
       "import": "./dist/release/index.js"

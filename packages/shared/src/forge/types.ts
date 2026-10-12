@@ -1,4 +1,4 @@
-import type { ForgeProviderName } from '@haive/shared';
+import type { ForgeProviderName } from '../schemas/repos.js';
 
 export type { ForgeProviderName };
 
