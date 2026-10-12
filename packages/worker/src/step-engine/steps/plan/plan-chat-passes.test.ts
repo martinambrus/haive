@@ -197,3 +197,20 @@ describe('plan chat reply', () => {
     expect(turns[0]?.patchJson).toMatchObject({ outcome: { applied: 0 } });
   });
 });
+
+describe('plan chat history', () => {
+  it('sends the newest turns that fit, not the whole conversation', () => {
+    const transcript = Array.from({ length: 40 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      body: `turn-${i}-${'z'.repeat(2_000)}`,
+    }));
+    const prompt = planChatStep.llm!.buildPrompt({
+      detected: detected({ transcript, pendingQuestion: 'latest' } as Partial<Detected>),
+      formValues: {},
+      iteration: 0,
+    } as never) as string;
+    expect(prompt).toContain('turn-38-');
+    expect(prompt).not.toContain('turn-0-');
+    expect(prompt).toMatch(/\(\d+ earlier turns of this conversation are not shown\)/);
+  });
+});
