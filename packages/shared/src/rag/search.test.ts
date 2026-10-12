@@ -697,3 +697,145 @@ describe('ragHybridSearch global dense reads widen the index scan', () => {
     expect(events.every((e) => e.inTx === !pooled)).toBe(true);
   });
 });
+
+describe('ragHybridSearch carries each ranker rank onto the hit', () => {
+  const VEC = [0.1, 0.2, 0.3, 0.4];
+  const rankRow = (extra: Record<string, unknown>) => ({
+    source_path: 'src/a.ts',
+    section_id: 's',
+    chunk_index: 0,
+    source_type: 'code',
+    content: '',
+    id: '1',
+    dense_sim: 0.7,
+    ts_norm: 0.2,
+    hybrid: 0.3,
+    rrf: 0.03,
+    ...extra,
+  });
+  const store = (rows: unknown[], candidates: unknown[] = [], df = 1) => {
+    const calls: string[] = [];
+    const pg = {
+      unsafe: async (statement: string) => {
+        calls.push(statement);
+        if (statement.includes('information_schema.columns')) return [{ column_name: 'vector' }];
+        if (statement.includes('AS t(term)')) return [{ term: 'getuserbyid', df, total: 10 }];
+        if (statement.includes('ANY($2::text[])')) return candidates;
+        if (statement.includes('ts_rank_cd')) return rows;
+        return [];
+      },
+    };
+    const conn = { mode: 'external', pg, embeddingDimensions: 4, close: async () => {} } as never;
+    return { conn, calls };
+  };
+  const selectList = (statement: string, from: string) =>
+    statement.slice(statement.indexOf('SELECT\n        e.source_path'), statement.indexOf(from));
+
+  it('selects the dense, full-text and identifier ranks of the hybrid statement', async () => {
+    const { conn, calls } = store([]);
+
+    await ragHybridSearch(conn, VEC, 'getUserById validation');
+
+    const statement = calls.find((c) => c.includes('dense_c'))!;
+    const list = selectList(statement, 'FROM cand c');
+    expect(list).toMatch(/d\.d_rank AS d_rank/);
+    expect(list).toMatch(/l\.l_rank AS l_rank/);
+    expect(list).toMatch(/i\.i_rank AS i_rank/);
+  });
+
+  it('selects no identifier rank from a hybrid statement that has no identifier ranker', async () => {
+    const { conn, calls } = store([], [], 0);
+
+    await ragHybridSearch(conn, VEC, 'getUserById validation');
+
+    const statement = calls.find((c) => c.includes('dense_c'))!;
+    expect(statement).not.toContain('ident AS (');
+    expect(selectList(statement, 'FROM cand c')).toMatch(/NULL::bigint AS i_rank/);
+  });
+
+  it('selects the full-text and identifier ranks of the lexical-only statement, and no dense rank', async () => {
+    const { conn, calls } = store([]);
+
+    await ragHybridSearch(conn, VEC, 'getUserById validation', { lexicalOnly: true });
+
+    const statement = calls.find((c) => c.includes('ident AS ('))!;
+    const list = selectList(statement, 'FROM cand c');
+    expect(list).toMatch(/NULL::bigint AS d_rank/);
+    expect(list).toMatch(/l\.l_rank AS l_rank/);
+    expect(list).toMatch(/i\.i_rank AS i_rank/);
+  });
+
+  it('selects the full-text rank of the lexical-only statement without an identifier ranker', async () => {
+    const { conn, calls } = store([]);
+
+    await ragHybridSearch(conn, VEC, 'how do we validate the form', { lexicalOnly: true });
+
+    const statement = calls.find((c) => c.includes('ts_rank_cd'))!;
+    expect(statement).toMatch(/NULL::bigint AS d_rank/);
+    expect(statement).toMatch(
+      /row_number\(\) OVER \(\s*ORDER BY ts_rank_cd[^\n]*\n\s*\) AS l_rank/,
+    );
+    expect(statement).toMatch(/NULL::bigint AS i_rank/);
+  });
+
+  it('selects all three ranks as NULL from the knowledge candidate statement', async () => {
+    const { conn, calls } = store([rankRow({ source_type: 'code' })], [rankRow({ id: '2' })]);
+
+    await ragHybridSearch(conn, VEC, 'how do we validate the form');
+
+    const statement = calls.find((c) => c.includes('ANY($2::text[])'))!;
+    expect(statement).toMatch(/NULL::bigint AS d_rank/);
+    expect(statement).toMatch(/NULL::bigint AS l_rank/);
+    expect(statement).toMatch(/NULL::bigint AS i_rank/);
+  });
+
+  it('maps the ranks to numbers for a ranker that placed the row, null for one that did not', async () => {
+    const { conn } = store([
+      rankRow({ d_rank: '3', l_rank: 1, i_rank: null }),
+      rankRow({ id: '2', d_rank: null, l_rank: '2', i_rank: '1' }),
+    ]);
+
+    const hits = await ragHybridSearch(conn, VEC, 'how do we validate the form');
+
+    expect(hits.map((x) => x.ranks)).toEqual([
+      { dense: 3, fts: 1, ident: null },
+      { dense: null, fts: 2, ident: 1 },
+    ]);
+  });
+
+  it('leaves a ranker null when the row carries no such column', async () => {
+    const { conn } = store([rankRow({})]);
+
+    const hits = await ragHybridSearch(conn, VEC, 'how do we validate the form');
+
+    expect(hits[0]!.ranks).toEqual({ dense: null, fts: null, ident: null });
+  });
+
+  it('gives a row reached only by the knowledge reserve three null ranks', async () => {
+    const page = Array.from({ length: 8 }, (_, i) =>
+      rankRow({ id: `c${i}`, source_path: `src/${i}.ts`, d_rank: i + 1, l_rank: null, rrf: 0.03 }),
+    );
+    const { conn } = store(page, [
+      rankRow({
+        id: 'k1',
+        source_path: 'docs/ARCHITECTURE.md',
+        source_type: 'kb',
+        dense_sim: 0.69,
+        rrf: 0,
+        d_rank: null,
+        l_rank: null,
+        i_rank: null,
+      }),
+    ]);
+
+    const hits = await ragHybridSearch(conn, VEC, 'where is the session cookie set');
+
+    const promoted = hits.find((x) => x.sourcePath === 'docs/ARCHITECTURE.md')!;
+    expect(promoted.ranks).toEqual({ dense: null, fts: null, ident: null });
+    expect(hits.find((x) => x.sourcePath === 'src/0.ts')!.ranks).toEqual({
+      dense: 1,
+      fts: null,
+      ident: null,
+    });
+  });
+});

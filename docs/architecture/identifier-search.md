@@ -56,8 +56,9 @@ entirely; at a cap of 3 and full weight it surfaces and displaced top-3 code hit
 of 18 to 2. An exact identifier match is worth a couple of slots, not the right to rewrite the
 ranking — the same bargain the knowledge reserve strikes.
 
-**A query with no identifiers omits the CTE entirely**, so the statement is byte-identical to
-the one that shipped before this existed — VERIFIED on the 3 such queries of 18.
+**A query with no identifiers omits the CTE entirely**, so the statement ranks exactly as the
+one that shipped before this existed — VERIFIED byte-identical on the 3 such queries of 18,
+before the hit's `ranks` field added a constant `NULL` identifier-rank column to the select.
 `CONFIG_KEYS.RAG_IDENTIFIER_SEARCH_ENABLED` off restores the previous ranking exactly even
 against a store that already carries the lexemes, because they are then never queried; that is
 the rollback, and no data has to be undone.

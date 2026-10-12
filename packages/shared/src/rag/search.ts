@@ -133,6 +133,7 @@ export interface RagSearchHit {
   hybrid: number;
   /** Reciprocal-rank-fusion score — the actual ranking signal. */
   rrf: number;
+  ranks?: { dense: number | null; fts: number | null; ident: number | null };
   /** Which store the hit came from. Set by the /rag/search route when merging
    *  per-repo (local) and global KB results; undefined for a single-store call. */
   scope?: 'local' | 'global';
@@ -272,6 +273,15 @@ interface RawRow {
   ts_norm: number | string | null;
   hybrid: number | string | null;
   rrf: number | string | null;
+  d_rank?: number | string | null;
+  l_rank?: number | string | null;
+  i_rank?: number | string | null;
+}
+
+function rank(v: number | string | null | undefined): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 function num(v: number | string | null): number {
@@ -599,7 +609,10 @@ export async function ragHybridSearch(
             + CASE WHEN l.l_rank IS NOT NULL THEN 1.0 / ($4 + l.l_rank) ELSE 0 END
             ${useIdent ? `+ CASE WHEN i.i_rank IS NOT NULL THEN 1.0 / ($4 + i.i_rank) ELSE 0 END` : ''}
           ) * (CASE WHEN e.source_type = 'runbook' THEN $${boostParam}::double precision ELSE 1 END)
-        ) AS rrf
+        ) AS rrf,
+        d.d_rank AS d_rank,
+        l.l_rank AS l_rank,
+        ${useIdent ? 'i.i_rank' : 'NULL::bigint'} AS i_rank
       FROM cand c
       JOIN ${RAG_TABLE} e ON e.id = c.id
       LEFT JOIN dense d ON d.id = c.id
@@ -692,7 +705,10 @@ export async function ragHybridSearch(
             CASE WHEN l.l_rank IS NOT NULL THEN 1.0 / ($2 + l.l_rank) ELSE 0 END
             + CASE WHEN i.i_rank IS NOT NULL THEN 1.0 / ($2 + i.i_rank) ELSE 0 END
           ) * (CASE WHEN e.source_type = 'runbook' THEN $${boostParamJ}::double precision ELSE 1 END)
-        ) AS rrf
+        ) AS rrf,
+        NULL::bigint AS d_rank,
+        l.l_rank AS l_rank,
+        i.i_rank AS i_rank
       FROM cand c
       JOIN ${RAG_TABLE} e ON e.id = c.id
       LEFT JOIN lex l ON l.id = c.id
@@ -721,7 +737,12 @@ export async function ragHybridSearch(
           / (ts_rank_cd(content_tsv, (SELECT qq FROM q)) + 1)) AS hybrid,
         (1.0 / ($2 + row_number() OVER (
           ORDER BY ts_rank_cd(content_tsv, (SELECT qq FROM q)) DESC
-        ))) * (CASE WHEN source_type = 'runbook' THEN $${boostParamJ}::double precision ELSE 1 END) AS rrf
+        ))) * (CASE WHEN source_type = 'runbook' THEN $${boostParamJ}::double precision ELSE 1 END) AS rrf,
+        NULL::bigint AS d_rank,
+        row_number() OVER (
+          ORDER BY ts_rank_cd(content_tsv, (SELECT qq FROM q)) DESC
+        ) AS l_rank,
+        NULL::bigint AS i_rank
       FROM ${RAG_TABLE}
       WHERE content_tsv @@ (SELECT qq FROM q)${lexExtra}
       ORDER BY rrf DESC
@@ -767,6 +788,7 @@ function toHit(r: RawRow): RagSearchHit {
     tsNorm: num(r.ts_norm),
     hybrid: num(r.hybrid),
     rrf: num(r.rrf),
+    ranks: { dense: rank(r.d_rank), fts: rank(r.l_rank), ident: rank(r.i_rank) },
   };
 }
 
@@ -821,7 +843,8 @@ async function fetchKnowledgeCandidates(
       WITH q AS (SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh)
       SELECT source_path, section_id, chunk_index, source_type, content, id,
              1 - (vector <=> (SELECT qv FROM q)) AS dense_sim,
-             0 AS ts_norm, 0 AS hybrid, 0 AS rrf
+             0 AS ts_norm, 0 AS hybrid, 0 AS rrf,
+             NULL::bigint AS d_rank, NULL::bigint AS l_rank, NULL::bigint AS i_rank
       FROM ${RAG_TABLE}
       WHERE ${conds.join('\n        AND ')}
         AND (1 - (vector <=> (SELECT qv FROM q))) >= $4::double precision
