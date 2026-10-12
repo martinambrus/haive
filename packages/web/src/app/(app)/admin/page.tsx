@@ -220,6 +220,11 @@ function AdminPageInner() {
   const [registrationMode, setRegistrationMode] = useState<RegistrationMode | null>(null);
   const [savingRegistrationMode, setSavingRegistrationMode] = useState(false);
   const [savingPlanCanvas, setSavingPlanCanvas] = useState(false);
+  const [taskTypes, setTaskTypes] = useState<{
+    customEnabled: boolean;
+    moduleEnabled: boolean;
+  } | null>(null);
+  const [savingTaskTypes, setSavingTaskTypes] = useState(false);
   const [debugModeEnabled, setDebugModeEnabled] = useState<boolean | null>(null);
   const [savingDebugMode, setSavingDebugMode] = useState(false);
   const [browserAccessEnabled, setBrowserAccessEnabled] = useState<boolean | null>(null);
@@ -303,6 +308,7 @@ function AdminPageInner() {
         timeoutLadderData,
         ideData,
         planCanvasData,
+        taskTypesData,
         registrationModeData,
         debugModeData,
         browserAccessData,
@@ -345,6 +351,7 @@ function AdminPageInner() {
         ),
         api.get<{ enabled: boolean }>('/admin/config/ide'),
         api.get<{ enabled: boolean }>('/admin/config/plan-canvas'),
+        api.get<{ customEnabled: boolean; moduleEnabled: boolean }>('/admin/config/task-types'),
         api.get<{ mode: RegistrationMode }>('/admin/config/registration-mode'),
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
@@ -400,6 +407,7 @@ function AdminPageInner() {
       setTimeoutRungs(timeoutLadderData.rungs);
       setIdeEnabled(ideData.enabled);
       setPlanCanvasEnabled(planCanvasData.enabled);
+      setTaskTypes(taskTypesData);
       setRegistrationMode(registrationModeData.mode);
       setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
@@ -1013,6 +1021,23 @@ function AdminPageInner() {
       setError((err as Error).message ?? 'Failed to update plan canvas switch');
     } finally {
       setSavingPlanCanvas(false);
+    }
+  }
+
+  async function saveTaskTypes(next: { customEnabled: boolean; moduleEnabled: boolean }) {
+    setSavingTaskTypes(true);
+    try {
+      setTaskTypes(
+        await api.put<{ customEnabled: boolean; moduleEnabled: boolean }>(
+          '/admin/config/task-types',
+          next,
+        ),
+      );
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update task type switches');
+    } finally {
+      setSavingTaskTypes(false);
     }
   }
 
@@ -2488,6 +2513,48 @@ function AdminPageInner() {
             {planCanvasEnabled ? 'Enabled' : 'Disabled'}
             {savingPlanCanvas && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
+        </Card>
+      )}
+
+      {tab === 'workflow' && taskTypes !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Non-built-in task types</CardTitle>
+            <CardDescription>
+              Both switches are off by default. Creating the first task of a type that is not
+              built-in cannot be rolled back by reverting the database type change, so turn a switch
+              on only when you are ready to cross that line. Custom types are the ones an admin
+              authored; module types are the ones a module seeded. Existing tasks are not affected.
+              Takes effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-2 text-sm text-neutral-200">
+              <input
+                type="checkbox"
+                checked={taskTypes.customEnabled}
+                disabled={savingTaskTypes}
+                onChange={(e) =>
+                  void saveTaskTypes({ ...taskTypes, customEnabled: e.target.checked })
+                }
+                className="h-4 w-4"
+              />
+              Allow tasks of admin-authored types
+            </label>
+            <label className="flex items-center gap-2 text-sm text-neutral-200">
+              <input
+                type="checkbox"
+                checked={taskTypes.moduleEnabled}
+                disabled={savingTaskTypes}
+                onChange={(e) =>
+                  void saveTaskTypes({ ...taskTypes, moduleEnabled: e.target.checked })
+                }
+                className="h-4 w-4"
+              />
+              Allow tasks of module-seeded types
+              {savingTaskTypes && <span className="text-xs text-neutral-500">saving…</span>}
+            </label>
+          </div>
         </Card>
       )}
 

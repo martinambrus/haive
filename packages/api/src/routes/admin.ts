@@ -1153,6 +1153,26 @@ adminRoutes.put('/config/plan-canvas', async (c) => {
   return c.json({ enabled });
 });
 
+const taskTypesSchema = z.object({ customEnabled: z.boolean(), moduleEnabled: z.boolean() });
+
+adminRoutes.get('/config/task-types', async (c) => {
+  const [customEnabled, moduleEnabled] = await Promise.all([
+    configService.getBoolean(CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED, false),
+    configService.getBoolean(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, false),
+  ]);
+  return c.json({ customEnabled, moduleEnabled });
+});
+
+adminRoutes.put('/config/task-types', async (c) => {
+  const { customEnabled, moduleEnabled } = taskTypesSchema.parse(await c.req.json());
+  await Promise.all([
+    configService.set(CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED, customEnabled ? 'true' : 'false'),
+    configService.set(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, moduleEnabled ? 'true' : 'false'),
+  ]);
+  log.info({ customEnabled, moduleEnabled }, 'task type switches updated');
+  return c.json({ customEnabled, moduleEnabled });
+});
+
 const registrationModeSchema = z.object({ mode: z.enum(REGISTRATION_MODES) });
 
 const createInviteSchema = z.object({
