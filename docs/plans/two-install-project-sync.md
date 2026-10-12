@@ -174,10 +174,10 @@ Phase 1 (the record):
   rendering an empty context (Codex round 1; MEASURED without those steps: framework null, no LSP,
   no agents, 7 files), against which every later check would pass empty. Passing today: the round
   trip, the mirror (environment, tooling without its machine-local keys, exclusions, the RTK switch)
-  and the plan. Known gaps: B holds A's claims (B1.6), B's upgrade plan reads every claimed path
-  `unchanged` (B1.6), and a second 12 run leaves A's checkout clean (B1.7; today
+  and the plan. One known gap remains: a second 12 run leaves A's checkout clean (B1.7; today
   `.haive/install.json` differs). B1.4c closed the gap of B's upgrade plan resolving a render
-  context naming A's framework, agents and LSP languages.
+  context naming A's framework, agents and LSP languages, and B1.6 those of B holding A's claims and
+  reading every claimed path `unchanged`.
   A listed gap no check names fails the run too. The scenarios that need machinery not built yet (a
   sweep, the record, conflicts) arrive with the PRs that build it, each with its own check.
   MEASURED: 17 checks, 4 gaps, 35 paths claimed on A; a passing check listed as a gap and a listed
@@ -438,7 +438,27 @@ Phase 1 (the record):
   backfill + marker rows, `foreign` bucket in 01/02, rollback eligibility vs `imported_at`,
   onboarding verdict counts imported claims. Control (smoke): after a fresh clone B has 0 rows, a
   409 and a throw today; after, B's rows equal A's claims and 01 is all `unchanged`; after A's
-  upgrade B reads `conflict` everywhere today, `unchanged` after.
+  upgrade B reads `conflict` everywhere today, `unchanged` after. **As built, in six parts**
+  (see onboarding-upgrades.md): (a) migration 0189 (`task_id` nullable, `imported_at`, a CHECK that
+  lets only a marker have no task) and the marker constants; (b) the `foreign` bucket (a bundle item
+  this install holds no bundle for, a newer release's claim, an agent at a directory it renders no
+  CLI for); (c) the onboarding verdict counts a marker imported since a reset, and an upgrade
+  completed before an import cannot be rolled back; (d) the record carries one claim file per live
+  row, and the writer removes only the files the previous base named; (e) a claim both installs
+  changed and the bytes on disk settle for neither is a pending row of unit `claimFileName(path)`,
+  answered like a render key; (f) the sync merges the whole record and moves the ledger with it, as
+  markers. A marker is `source = 'backfill'`, step `project-state-import`, no task, `imported_at`
+  set. Two decisions the plan did not make: a claim both sides changed whose `writtenHash` the disk
+  holds on both takes incoming, since only metadata differs; and the sync defers only for a root
+  claim of kind `reset`, because a clone or refresh calls it from inside its own claim, so
+  deferring on any claim would have skipped the import it exists for (MEASURED: B's clone sync
+  returned `deferred` and B held no row). An empty claim set in the checkout, with claims in the
+  base, retires nothing. Controls: `smoke:two-install` ends `TWO_INSTALL_OK` with 64 checks and one
+  gap (B1.7): B's rows are markers equal to A's claims, its plan reads every path `unchanged` with no
+  backfill, a rescan writes nothing, and after A's upgrade and push B holds no live row for the agent
+  A removed, plans `unchanged` and has nothing in its set its ledger lacks; B's applicable set equals
+  the set A's sync wrote (A's own 02 writes the set without the cli-rules id, which 01 and the sync
+  include).
 - **B1.7 feat(worker): write the record at onboarding, upgrade and rollback; retire install.json**
   [B1.6]. The writer collapses local bundles to one descriptor per portable source, since the codec
   refuses a source listed twice. Control: two identical 12 runs leave `git diff` empty (today

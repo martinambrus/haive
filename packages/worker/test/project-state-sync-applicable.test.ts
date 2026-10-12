@@ -1035,7 +1035,7 @@ describe('D8: the recompute and the column commit together or not at all', () =>
     const txn = transactions(trace).inside[0]!;
     expect(txn.filter((e) => e === 'update repositories')).toHaveLength(2);
     const columnAt = txn.indexOf('update repositories');
-    const claimsAt = txn.indexOf('select onboarding_artifacts');
+    const claimsAt = txn.lastIndexOf('select onboarding_artifacts');
     const setAt = txn.lastIndexOf('update repositories');
     const syncRowAt = txn.findIndex((e) => /^(insert|update) project_state_sync$/.test(e));
     expect(columnAt).toBeGreaterThan(0);
@@ -1066,6 +1066,34 @@ describe('D8: the recompute and the column commit together or not at all', () =>
 
     expect(s.dump()).toEqual(before);
     expect(s.syncRow()?.lastError).toBe('an earlier refusal');
+  });
+});
+
+describe('D8e: an import that moves the ledger and not the column writes the set', () => {
+  it('fills the NULL set of a repository that held no claim, from the column it already has', async () => {
+    const s = await setup({ column: column(BASE), base: BASE, set: null });
+    const withClaim = {
+      ...record(BASE),
+      claims: [
+        {
+          path: '.claude/workflow-config.json',
+          templateId: 'workflow-config',
+          kind: 'workflow-config',
+          schemaVersion: 1,
+          templateHash: HASH,
+          writtenHash: HASH,
+          haiveVersion: '1.2.3',
+        },
+      ],
+    };
+    for (const [rel, text] of renderProjectState(withClaim))
+      await s.put(`${STATE_DIR}/${rel}`, text);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(s.setOf()).toEqual(P);
+    expect(json(s.columnOf())).toEqual(json(column(BASE)));
   });
 });
 

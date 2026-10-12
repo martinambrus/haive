@@ -80,3 +80,13 @@ onboarded. For a clone the column admits and no artifact row records, nothing on
 say what changed. upgrade-status therefore offers it the first upgrade (`firstUpgradeOnThisInstall`)
 until a row records it, because the banner is the only place one starts. The offer outlives an
 upgrade task: one cancelled at 02's form has written no row.
+
+**A claim imported after a reset answers it.** The sync imports another install's ledger as import
+markers (`task_id` NULL, `imported_at` set; [Onboarding template versioning](onboarding-upgrades.md)),
+and a marker is step 12's output from elsewhere: `loadNewestLiveArtifactAt` counts a live marker,
+dated by `imported_at`, beside an `onboarding` row dated by `generated_at`. `resolveOnboardingVerdict`
+therefore reads a repository as onboarded when a live marker is newer than `onboarding_reset_at`
+(`importedSinceReset`, ORed beside `onboarded_at` and a completed onboarding), and a repository whose
+only rows are markers can be marked onboarded. A marker older than the reset cannot, since the reset
+superseded it; an ordinary `upgrade` or `backfill` row after the reset still only offers the button.
+A live onboarding still blocks, as for every term.

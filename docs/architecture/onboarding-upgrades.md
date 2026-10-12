@@ -477,6 +477,49 @@ mirror import) stamps it `converged` in the transaction that writes the column
 already off. The banner words it from the unit, since its
 key is null like the whole render file's (`isRtkConflict`).
 
+**The ledger follows the record: another install's claims are imported as markers.** The record
+carries one claim file per live row (`artifacts/<claimFileName(path)>`: path, portable template id,
+kind, schema version, template and written hashes, Haive version), written by 12, 02 and 04 through
+`writeProjectStateRecord`. The writer removes only a claim file the previous `base_snapshot` named
+and the new render no longer produces, so a teammate's unsynced file is never touched, and it
+returns `{written, removed}` for 12 and 03 to stage. The sync reads those files back: it loads the
+live rows as claims (`loadRecordClaims`), merges the whole record (render and claims) three ways
+against `base_snapshot`, and moves the ledger to the merge inside its one transaction. A path whose
+merged claim differs from the local one, or that this install held none for, has its live row
+superseded (`imported_at` stamped) and an **import marker** inserted: `task_id` NULL, `source =
+'backfill'`, `source_step_id = 'project-state-import'` (`isImportMarker`), `imported_at` and
+`generated_at` the import instant, the claim's hashes and Haive version, `written_content` only when
+the bytes on disk hash to the claim's `writtenHash`, and the render snapshot of the merged column.
+That snapshot names the marker's own agent in `acceptedAgentIds`, since the boot repair
+(`supersedePhantomAgentArtifacts`) retires an agent row its snapshot does not accept. A claim the
+other install removed while this one left it unchanged retires the row (`superseded_at` and
+`imported_at`); a claim only this install holds, and a live row that renders no claim (a custom item
+whose bundle is gone), stay. Migration 0189 lets the table hold them: `task_id` is nullable, and a
+CHECK allows a NULL task only for a marker, which must carry `imported_at`. A claim both sides
+changed is settled by the bytes on disk: the side whose `writtenHash` the file holds wins, and
+incoming when it holds both, since the two then differ in metadata only. Bytes that hold neither
+leave one pending row of unit `claimFileName(path)`, which the writer overlays and
+`upgradeAdmission` counts as it does a render key; a pending claim row is answered like one (keep
+mine writes the claim file and the base at the live row, take theirs retires it and inserts the
+marker). The import runs before the pending rows are settled, so a row is never closed `converged`
+when the right outcome was to import their claim. A checkout with no claim file while the base holds
+some is a record from before it carried claims, and retires nothing. The sync's base keeps the
+checkout's claims, each conflicted one at its old base, so a second sync of the same files writes
+nothing and the writer keeps owning its claim files. It defers while a reset holds the root claim
+and stands down when `onboarding_reset_at` moved after it read the checkout; a clone's or a
+refresh's own claim does not stop it, since they call it. The applicable set is written after the
+ledger moves, whenever the column or the ledger did.
+
+**A row this install cannot manage is `foreign`.** `foreignReason` (shared) names a `custom:` id (a
+bundle item this install holds no bundle for, stored verbatim, never as `foreign`), a marker from a
+release strictly newer than this one (only plain `major.minor.patch` strings are ordered; a dev
+build is never newer), and a marker of an agent or skill kind at a directory this install renders
+no CLI for. 01 classifies it first, 02 skips it whatever the form sent, the form names such paths in
+one note, and upgrade-status leaves them out of every comparison. An imported cli-rules row whose
+template moved reads `conflict`. A marker is no upgrade's output, so an upgrade completed before an
+import cannot be rolled back (`ledgerImportedSince`): the banner offers none, the route answers 409
+and 04's detect refuses; a rollback that puts back a retired marker restores it as a marker.
+
 **An upgrade offers the RTK block back, unticked.** 07 is the only writer of the block, so once an
 upgrade took it out, only a re-onboarding used to restore it. 01 now lists `AGENTS.md` in
 `rtkBlockRestorable` when ALL hold: the context recorded an RTK choice and RTK is on

@@ -233,6 +233,19 @@ describe('mergeProjectState, claims both sides changed', () => {
     expect(claimOf(toLocal.merged)?.writtenHash).toBe('w-local');
   });
 
+  it('take the incoming claim when the bytes hold both sides: they differ in metadata only', () => {
+    const withVersion = (version: string) =>
+      edit((r) => (r.claims[0] = { ...claim(PATH, 'w-same'), haiveVersion: version }));
+    const result = mergeProjectState({
+      base: base(),
+      local: withVersion('1.0.0'),
+      incoming: withVersion('2.0.0'),
+      diskHash: () => 'w-same',
+    });
+    expect(claimOf(result.merged)?.haiveVersion).toBe('2.0.0');
+    expect(result.conflicts).toEqual([]);
+  });
+
   it('are a conflict when the bytes hold neither, or nothing says what they hold', () => {
     const local = changed('w-local');
     const incoming = changed('w-incoming');

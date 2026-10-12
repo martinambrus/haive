@@ -842,6 +842,21 @@ describe('a claim question', () => {
     expect(s.rowOf(s.id)).toMatchObject({ resolution: 'take_theirs', resolvedBy: OWNER });
   });
 
+  it('gives a marker for an agent a snapshot that accepts the agent', async () => {
+    const theirs = claim(DISK_HASH, { templateId: 'agent.qa-lead', kind: 'agent' });
+    const s = await claimSetup({ incoming: theirs, disk: DISK_TEXT });
+
+    await s.answer('take_theirs', s.id);
+
+    const marker = s.ledger().find((r) => r.supersededAt == null)!;
+    expect((marker.formValuesSnapshot as { acceptedAgentIds: string[] }).acceptedAgentIds).toEqual([
+      'code-reviewer',
+      'docs-writer',
+      'qa-lead',
+      'security-auditor',
+    ]);
+  });
+
   it('keeps no bytes in the marker when the disk does not hold their claim', async () => {
     const s = await claimSetup({ disk: 'something else\n' });
 

@@ -51,6 +51,7 @@ import {
   upgradePlanStep,
   type UpgradePlanDetect,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 
 const log = logger.child({ module: 'two-install-smoke' });
 
@@ -63,8 +64,6 @@ const urlA = process.env.DATABASE_URL;
 /** What a second install cannot do yet, each with the Track B PR that closes it. A gap that
  *  passes fails the run, so the PR that closes one removes it here. */
 const KNOWN_GAPS: Record<string, string> = {
-  'B holds a live claim for every path A claims': 'B1.6',
-  "B's upgrade plan reads every claimed path as unchanged": 'B1.6',
   "a second 12 run leaves A's checkout clean": 'B1.7',
 };
 const gapsChecked = new Set<string>();
@@ -324,6 +323,55 @@ async function upgradePlan(install: Install): Promise<{
     if (!(err instanceof RenderContextUnresolvedError)) throw err;
     return { taskId: upgrade!.id, stepId: planRow!.id, plan: null, error: err.message };
   }
+}
+
+/** An upgrade run through 01 and 02: the plan applied, the apply form's defaults with `pick`'s
+ *  values over them, each step's output stored where the next reads it, the task completed. */
+async function upgradeApplied(
+  install: Install,
+  pick: (plan: UpgradePlanDetect) => Record<string, unknown>,
+): Promise<{ error: string | null }> {
+  const planned = await upgradePlan(install);
+  if (planned.plan === null) return { error: planned.error };
+  const planCtx = ctxFor(install, planned.taskId, planned.stepId);
+  const output = await upgradePlanStep.apply(planCtx, {
+    detected: planned.plan,
+    formValues: {},
+    iteration: 0,
+    previousIterations: [],
+  });
+  await install.db
+    .update(schema.taskSteps)
+    .set({ output: output as unknown as Record<string, unknown>, status: 'done' })
+    .where(eq(schema.taskSteps.id, planned.stepId));
+  const [applyRow] = await install.db
+    .insert(schema.taskSteps)
+    .values({
+      taskId: planned.taskId,
+      stepId: '02-upgrade-apply',
+      stepIndex: 2,
+      title: 'Apply upgrade',
+      status: 'running',
+    })
+    .returning({ id: schema.taskSteps.id });
+  const applyCtx = ctxFor(install, planned.taskId, applyRow!.id);
+  const detected = await upgradeApplyStep.detect!(applyCtx);
+  const form = (await upgradeApplyStep.form!(applyCtx, detected)) as FormSchema | null;
+  const applied = await upgradeApplyStep.apply(applyCtx, {
+    detected,
+    formValues: { ...defaultValues(form), ...pick(planned.plan) },
+    iteration: 0,
+    previousIterations: [],
+  });
+  await install.db
+    .update(schema.taskSteps)
+    .set({ output: applied as unknown as Record<string, unknown>, status: 'done' })
+    .where(eq(schema.taskSteps.id, applyRow!.id));
+  await install.db
+    .update(schema.tasks)
+    .set({ status: 'completed', completedAt: new Date() })
+    .where(eq(schema.tasks.id, planned.taskId));
+  return { error: null };
 }
 
 const CONTEXT_KEYS = [
@@ -857,13 +905,19 @@ async function main(): Promise<void> {
       sql`select base_snapshot, last_error from project_state_sync where repository_id = ${b.repositoryId}`,
     );
     check(
-      "B's sync starts from the record A committed, with no error",
+      "B's sync starts from the record A committed, claims included, with no error",
       wantRecord !== null &&
         'rows' in syncB &&
         syncB.rows.length === 1 &&
         isDeepStrictEqual(
-          asJson(syncB.rows[0]!.base_snapshot),
+          asJson({ ...(syncB.rows[0]!.base_snapshot as object), claims: [] }),
           asJson(normalizeProjectState(wantRecord)),
+        ) &&
+        isDeepStrictEqual(
+          (syncB.rows[0]!.base_snapshot as { claims: { path: string }[] }).claims
+            .map((c) => c.path)
+            .sort(),
+          liveRowsA.map((r) => r.diskPath).sort(),
         ) &&
         syncB.rows[0]!.last_error === null,
       syncB,
@@ -873,7 +927,7 @@ async function main(): Promise<void> {
     const syncStateB = () =>
       rowsOf<Record<string, unknown>>(
         b.db,
-        sql`select r.render_context, s.base_snapshot, s.last_error, s.updated_at from repositories r left join project_state_sync s on s.repository_id = r.id where r.id = ${b.repositoryId}`,
+        sql`select r.render_context, r.applicable_template_ids, s.base_snapshot, s.last_error, s.updated_at, (select jsonb_agg(to_jsonb(o) order by o.id) from onboarding_artifacts o where o.repository_id = r.id) as ledger from repositories r left join project_state_sync s on s.repository_id = r.id where r.id = ${b.repositoryId}`,
       );
     const beforeRescan = await syncStateB();
     await handleScan(
@@ -887,11 +941,12 @@ async function main(): Promise<void> {
     );
     const afterRescan = await syncStateB();
     check(
-      "a rescan of B's checkout leaves its render_context and its sync row as they were",
+      "a rescan of B's checkout leaves its render_context, its ledger and its sync row as they were",
       'rows' in beforeRescan &&
         'rows' in afterRescan &&
         beforeRescan.rows.length === 1 &&
         beforeRescan.rows[0]!.base_snapshot !== null &&
+        beforeRescan.rows[0]!.ledger !== null &&
         isDeepStrictEqual(afterRescan.rows, beforeRescan.rows),
       { beforeRescan, afterRescan },
     );
@@ -936,7 +991,7 @@ async function main(): Promise<void> {
       },
     );
 
-    // ---- what B cannot do yet ---------------------------------------------------------------
+    // ---- B holds A's claims as import markers (B1.6) ----------------------------------------
     const pathsA = await livePaths(a);
     const pathsB = await livePaths(b);
     check('A records its claims', pathsA.length > 0, pathsA.length);
@@ -944,6 +999,53 @@ async function main(): Promise<void> {
       'B holds a live claim for every path A claims',
       pathsA.length > 0 && isDeepStrictEqual(pathsA, pathsB),
       { a: pathsA.length, b: pathsB.length },
+    );
+    const ledgerOf = (install: Install) =>
+      rowsOf<{
+        disk_path: string;
+        template_id: string;
+        template_kind: string;
+        template_content_hash: string;
+        written_hash: string;
+        task_id: string | null;
+        user_id: string;
+        source: string;
+        source_step_id: string;
+        imported_at: Date | null;
+      }>(
+        install.db,
+        sql`select disk_path, template_id, template_kind, template_content_hash, written_hash, task_id, user_id, source, source_step_id, imported_at from onboarding_artifacts where repository_id = ${install.repositoryId} and superseded_at is null order by disk_path`,
+      );
+    const ledgerA = await ledgerOf(a);
+    const ledgerBRows = await ledgerOf(b);
+    const markersB = 'rows' in ledgerBRows ? ledgerBRows.rows : [];
+    check(
+      "B's rows are import markers: no task, B's user, imported, written by the import",
+      markersB.length > 0 &&
+        markersB.every(
+          (r) =>
+            r.task_id === null &&
+            r.user_id === b.userId &&
+            r.source === 'backfill' &&
+            r.source_step_id === PROJECT_STATE_IMPORT_STEP_ID &&
+            r.imported_at !== null,
+        ),
+      markersB,
+    );
+    const claimOf = (r: {
+      disk_path: string;
+      template_id: string;
+      template_kind: string;
+      template_content_hash: string;
+      written_hash: string;
+    }) =>
+      [r.disk_path, r.template_id, r.template_kind, r.template_content_hash, r.written_hash].join(
+        '|',
+      );
+    check(
+      "and each carries the template and the hashes A's row records",
+      'rows' in ledgerA && isDeepStrictEqual(markersB.map(claimOf), ledgerA.rows.map(claimOf)),
+      { a: 'rows' in ledgerA ? ledgerA.rows.map(claimOf) : ledgerA, b: markersB.map(claimOf) },
     );
 
     const upgradeB = await upgradePlan(b);
@@ -976,6 +1078,11 @@ async function main(): Promise<void> {
       "B's upgrade plan reads every claimed path as unchanged",
       entries !== null && entries.length > 0 && notUnchanged!.length === 0,
       notUnchanged ?? planError,
+    );
+    check(
+      "and writes no backfill rows under B's task",
+      upgradeB.plan !== null && upgradeB.plan.ranBackfill === false,
+      upgradeB.plan?.ranBackfill ?? planError,
     );
 
     // A reads its own record again, and its own plan must still call every path it claims unchanged.
@@ -1127,7 +1234,28 @@ async function main(): Promise<void> {
       droppedState,
     );
 
-    // B holds no claim, so the sync leaves its set NULL while it takes the agent into its column. The
+    // A upgrades onto the teammate's record: 02 removes the files of the agent it dropped and writes
+    // those of the one it added, and A commits and pushes the result.
+    const removedPaths = droppedRows.map((row) => row.diskPath);
+    const upgradedA = await upgradeApplied(a, (planned) => ({
+      selectedObsoleteRemovals: planned.entries
+        .filter((e) => e.bucket === 'obsolete' && removedPaths.includes(e.diskPath))
+        .map((e) => e.entryId),
+    }));
+    check('A upgrades onto the teammate record', upgradedA.error === null, upgradedA.error);
+    const liveAfterA = await livePaths(a);
+    check(
+      "A's upgrade retires the rows of the dropped agent and claims the added one's files",
+      removedPaths.every((p) => !liveAfterA.includes(p)) &&
+        liveAfterA.some((p) => p.includes(String(newAgent))),
+      { removedPaths, liveAfterA },
+    );
+    git(a.repoPath, 'add', '-A');
+    git(a.repoPath, 'commit', '-q', '-m', 'A upgrades');
+    git(a.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+
+    // B follows both the teammate's record and A's upgrade. Its ledger moves with A's: the rows of the
+    // dropped agent are retired, the added agent's are imported, and its set is the one A's sync wrote. The
     // upgrade task the plan above opened for B is cancelled first: a live one makes the sync defer.
     await b.db
       .update(schema.tasks)
@@ -1137,12 +1265,64 @@ async function main(): Promise<void> {
     const refreshedB = await repoStateOf(b);
     const rowB = 'rows' in refreshedB ? refreshedB.rows[0] : undefined;
     check(
-      "B, which holds no claim, keeps a NULL applicable set while its render_context takes the teammate's agent",
+      "B's applicable set equals A's while its render_context takes the teammate's agent",
       newAgent !== null &&
         rowB !== undefined &&
-        rowB.applicable_template_ids === null &&
+        rowB.applicable_template_ids !== null &&
+        isDeepStrictEqual(rowB.applicable_template_ids, setA) &&
+        rowB.applicable_template_ids.includes(`agent.${newAgent}`) &&
         (rowB.render_context?.acceptedAgentIds ?? []).includes(newAgent),
-      refreshedB,
+      { refreshedB, setA },
+    );
+    const pathsAfterB = await livePaths(b);
+    check(
+      "after A's upgrade B holds the claims A holds, and no live row for the agent A removed",
+      isDeepStrictEqual(pathsAfterB, liveAfterA) &&
+        removedPaths.every((p) => !pathsAfterB.includes(p)),
+      { a: liveAfterA, b: pathsAfterB },
+    );
+    const retiredOnB = await rowsOf<{ disk_path: string; imported_at: Date | null }>(
+      b.db,
+      sql`select disk_path, imported_at from onboarding_artifacts where repository_id = ${b.repositoryId} and superseded_at is not null`,
+    );
+    check(
+      'and the rows it retired are stamped as the import retired them',
+      'rows' in retiredOnB &&
+        removedPaths.every((p) =>
+          retiredOnB.rows.some((r) => r.disk_path === p && r.imported_at !== null),
+        ),
+      retiredOnB,
+    );
+    const afterUpgradeB = await upgradePlan(b);
+    await b.db
+      .update(schema.tasks)
+      .set({ status: 'cancelled' })
+      .where(eq(schema.tasks.id, afterUpgradeB.taskId));
+    const notUnchangedAfter = afterUpgradeB.plan?.entries
+      .filter((e) => e.bucket !== 'unchanged')
+      .map((e) => `${e.diskPath}: ${e.bucket}`);
+    check(
+      "after A's upgrade B's plan reads every path as unchanged, and offers none of the removed agent's",
+      afterUpgradeB.plan !== null &&
+        afterUpgradeB.plan.entries.length > 0 &&
+        notUnchangedAfter!.length === 0 &&
+        !afterUpgradeB.plan.entries.some((e) => removedPaths.includes(e.diskPath)),
+      afterUpgradeB.error ?? notUnchangedAfter,
+    );
+    // What GET /repos/:id/upgrade-status compares: the template ids of the live rows against the set.
+    const installedB = await rowsOf<{ template_id: string }>(
+      b.db,
+      sql`select distinct template_id from onboarding_artifacts where repository_id = ${b.repositoryId} and superseded_at is null`,
+    );
+    const setB = rowB?.applicable_template_ids ?? [];
+    const installedIds = 'rows' in installedB ? installedB.rows.map((r) => r.template_id) : [];
+    check(
+      "B's upgrade status offers no upgrade: nothing in its set is missing from its ledger",
+      installedIds.length > 0 && setB.filter((id) => !installedIds.includes(id)).length === 0,
+      {
+        missing: setB.filter((id) => !installedIds.includes(id)),
+        outside: installedIds.filter((id) => !setB.includes(id)),
+      },
     );
 
     // ---- both installs change one setting: a pending conflict, asked and never chosen (B1.5a) ----

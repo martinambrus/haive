@@ -1,14 +1,14 @@
 import { isUtf8 } from 'node:buffer';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { isRootClaimLive, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
   ProjectStateError,
+  claimFileName,
   conflictSide,
   emptyProjectState,
-  conflictSideValue,
   isClaimUnit,
   isRenderUnit,
   mergeProjectState,
@@ -30,6 +30,7 @@ import {
 } from '../step-engine/_upgrade-render.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { claimDiskHash } from './claim-disk.js';
+import { insertImportMarker, loadMarkerContext } from './import-marker.js';
 import {
   loadPendingRenderConflicts,
   loadRecordClaims,
@@ -187,7 +188,8 @@ function keptRender(
 
 /** Keeps one pending row per conflicted unit, so the writer leaves the other side's value in the file
  *  and an upgrade waits for an answer. A repeat of the same conflict writes nothing. A pending render
- *  row whose unit no longer conflicts converged: a side moved to the other's value or back to the base. */
+ *  or claim row whose unit no longer conflicts converged: a side moved to the other's value or back to
+ *  the base, or the claim was settled by the bytes on disk. Runs after the ledger took the merge. */
 async function recordConflicts(
   tx: Tx,
   repositoryId: string,
@@ -225,70 +227,11 @@ async function recordConflicts(
   }
   const open = new Set(conflicts.map(({ unit }) => unit));
   for (const row of pending) {
-    if (!isRenderUnit(row.unit) || open.has(row.unit)) continue;
+    if (!(isRenderUnit(row.unit) || isClaimUnit(row.unit)) || open.has(row.unit)) continue;
     await tx
       .update(schema.projectStateConflicts)
       .set({ resolution: 'converged', resolvedAt: new Date() })
       .where(eq(schema.projectStateConflicts.id, row.id));
-  }
-}
-
-/** A pending claim row stays while the claim still changed on both installs and the disk holds
- *  neither side's bytes; a repeat of it follows the sides. One that no longer conflicts converged. */
-async function settleClaimConflicts(
-  tx: Tx,
-  repositoryId: string,
-  repoPath: string,
-  incomingClaims: readonly ProjectStateClaim[],
-): Promise<void> {
-  const pending = (
-    await tx
-      .select()
-      .from(schema.projectStateConflicts)
-      .where(
-        and(
-          eq(schema.projectStateConflicts.repositoryId, repositoryId),
-          isNull(schema.projectStateConflicts.resolvedAt),
-        ),
-      )
-  ).filter((row) => isClaimUnit(row.unit));
-  if (pending.length === 0) return;
-  const localClaims = await loadRecordClaims(tx, repositoryId);
-  for (const row of pending) {
-    const base = conflictSideValue(row.base) as ProjectStateClaim | undefined;
-    const known = [base, conflictSideValue(row.local), conflictSideValue(row.incoming)].find(
-      (side) => side !== undefined,
-    ) as ProjectStateClaim | undefined;
-    const path = known?.path;
-    const local = localClaims.find((c) => c.path === path);
-    const incoming = incomingClaims.find((c) => c.path === path);
-    const held = new Map<string, string | null>();
-    const claim = local ?? incoming ?? base;
-    if (claim !== undefined) held.set(claim.path, await claimDiskHash(repoPath, claim));
-    const of = (c: ProjectStateClaim | undefined): ProjectStateRecord => ({
-      ...emptyProjectState(),
-      claims: c === undefined ? [] : [c],
-    });
-    const merge = mergeProjectState({
-      base: of(base),
-      local: of(local),
-      incoming: of(incoming),
-      diskHash: (p) => held.get(p) ?? null,
-    });
-    if (!merge.conflicts.some(({ unit }) => unit === row.unit)) {
-      await tx
-        .update(schema.projectStateConflicts)
-        .set({ resolution: 'converged', resolvedAt: new Date() })
-        .where(eq(schema.projectStateConflicts.id, row.id));
-      continue;
-    }
-    const sides = { local: conflictSide(local), incoming: conflictSide(incoming) };
-    if (!sameValue(row.local, sides.local) || !sameValue(row.incoming, sides.incoming)) {
-      await tx
-        .update(schema.projectStateConflicts)
-        .set(sides)
-        .where(eq(schema.projectStateConflicts.id, row.id));
-    }
   }
 }
 
@@ -366,15 +309,99 @@ export async function recomputeSyncedApplicableSets(db: Database): Promise<void>
   }
 }
 
-/** Merges the render unit of the checkout's project state record into the repository's render
- *  context against the base the last sync or writer recorded. Writes the column and the sync row, and
- *  for a repository with a claim the applicable template ids, all in one transaction. */
+const claimsOf = (snapshot: unknown): ProjectStateClaim[] => {
+  const claims = (snapshot as { claims?: unknown } | null)?.claims;
+  return Array.isArray(claims) ? (claims as ProjectStateClaim[]) : [];
+};
+
+const byPath = (claims: readonly ProjectStateClaim[]) => new Map(claims.map((c) => [c.path, c]));
+
+/** What a path holds on disk, for each claim both installs changed since the base: the only ones the
+ *  merge settles by the bytes. */
+async function heldBytes(
+  repoPath: string,
+  { base, local, incoming }: Record<'base' | 'local' | 'incoming', readonly ProjectStateClaim[]>,
+): Promise<Map<string, string | null>> {
+  const [b, l, i] = [byPath(base), byPath(local), byPath(incoming)];
+  const held = new Map<string, string | null>();
+  for (const path of new Set([...l.keys(), ...i.keys()])) {
+    const [bc, lc, ic] = [b.get(path), l.get(path), i.get(path)];
+    if (sameValue(lc, ic) || sameValue(bc, lc) || sameValue(bc, ic)) continue;
+    held.set(path, await claimDiskHash(repoPath, (lc ?? ic)!));
+  }
+  return held;
+}
+
+/** Moves the ledger to the merged claims: a path whose claim the merge changed, or this install held
+ *  none for, has its live row superseded and an import marker inserted; one the merge dropped is
+ *  retired. A path the merge left as local holds stays untouched. True when a row moved. */
+async function importClaims(
+  tx: Tx,
+  {
+    repositoryId,
+    repoPath,
+    repo,
+    local,
+    merged,
+  }: {
+    repositoryId: string;
+    repoPath: string;
+    repo: { userId: string; renderContext: unknown };
+    local: readonly ProjectStateClaim[];
+    merged: readonly ProjectStateClaim[];
+  },
+): Promise<boolean> {
+  const [l, m] = [byPath(local), byPath(merged)];
+  const now = new Date();
+  let context: Awaited<ReturnType<typeof loadMarkerContext>> | null = null;
+  let moved = false;
+  for (const path of [...new Set([...l.keys(), ...m.keys()])].sort()) {
+    const claim = m.get(path);
+    if (sameValue(l.get(path), claim)) continue;
+    await tx
+      .update(schema.onboardingArtifacts)
+      .set({ supersededAt: now, importedAt: now })
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          eq(schema.onboardingArtifacts.diskPath, path),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    moved = true;
+    if (claim === undefined) continue;
+    context ??= await loadMarkerContext(tx, repositoryId, repo);
+    await insertImportMarker(tx, { repositoryId, repoPath, claim, now, context });
+  }
+  return moved;
+}
+
+/** The claims a sync base keeps: the checkout's, each one the merge left in conflict held at what the
+ *  base had, so the next sync finds the same conflict again. */
+function keptClaims(
+  incoming: readonly ProjectStateClaim[],
+  base: readonly ProjectStateClaim[],
+  conflicts: readonly ProjectStateConflict[],
+): ProjectStateClaim[] {
+  const open = new Set(conflicts.map(({ unit }) => unit));
+  const contested = (claim: ProjectStateClaim) => open.has(claimFileName(claim.path));
+  return [...incoming.filter((c) => !contested(c)), ...base.filter(contested)];
+}
+
+/** Merges the checkout's project state record into the repository's render context and artifact
+ *  ledger against the base the last sync or writer recorded. Writes the column, the ledger, the sync
+ *  row and, for a repository with a claim, the applicable template ids, all in one transaction. */
 export async function syncProjectStateFromCheckout(
   db: Database,
   { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
 ): Promise<ProjectStateSyncResult> {
   // The base goes first: a writer that finishes after it left a newer base for the lock to find.
   const seen = await readSyncRow(db, repositoryId);
+  const [seenRepo] = await db
+    .select({ onboardingResetAt: schema.repositories.onboardingResetAt })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
   const checkout = await readCheckout(repoPath);
   if (checkout.kind === 'absent') return { outcome: 'absent' };
 
@@ -385,6 +412,9 @@ export async function syncProjectStateFromCheckout(
       .select({
         renderContext: schema.repositories.renderContext,
         userId: schema.repositories.userId,
+        onboardingResetAt: schema.repositories.onboardingResetAt,
+        rootClaimedAt: schema.repositories.rootClaimedAt,
+        rootClaimKind: schema.repositories.rootClaimKind,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
@@ -402,7 +432,16 @@ export async function syncProjectStateFromCheckout(
         ),
       )
       .limit(1);
-    if (live.length > 0) return { outcome: 'deferred' };
+    // Only a reset: a clone or refresh holds its own claim while it calls the sync.
+    const resetting = isRootClaimLive(repo.rootClaimedAt) && repo.rootClaimKind === 'reset';
+    if (live.length > 0 || resetting) return { outcome: 'deferred' };
+    // A reset since the files were read took back the column, the ledger and the sync row.
+    if (
+      (repo.onboardingResetAt?.getTime() ?? null) !==
+      (seenRepo?.onboardingResetAt?.getTime() ?? null)
+    ) {
+      return { outcome: 'superseded' };
+    }
 
     const row = await readSyncRow(tx, repositoryId);
     if (!sameValue(row?.baseSnapshot ?? null, seen?.baseSnapshot ?? null)) {
@@ -435,13 +474,30 @@ export async function syncProjectStateFromCheckout(
     }
 
     const baseRender = row === null ? null : renderOf(row.baseSnapshot);
+    const baseClaims = row === null ? [] : claimsOf(row.baseSnapshot);
+    const localClaims = await loadRecordClaims(tx, repositoryId);
+    // A checkout with no claim file is one written before the record carried claims: it retires none.
+    const incomingClaims =
+      checkout.claims.length === 0 && baseClaims.length > 0 ? baseClaims : checkout.claims;
+    const held =
+      row === null
+        ? new Map<string, string | null>()
+        : await heldBytes(repoPath, {
+            base: baseClaims,
+            local: localClaims,
+            incoming: incomingClaims,
+          });
     const merge = mergeProjectState({
-      base: row === null ? null : recordOf(baseRender),
-      local,
-      incoming: recordOf(checkout.render),
+      base: row === null ? null : { ...recordOf(baseRender), claims: baseClaims },
+      local: { ...local, claims: localClaims },
+      incoming: { ...recordOf(checkout.render), claims: incomingClaims },
+      diskHash: (path) => held.get(path) ?? null,
     });
+    const claimConflicts = merge.conflicts.filter(({ unit }) => isClaimUnit(unit));
+    const renderConflicts = merge.conflicts.filter(({ unit }) => !isClaimUnit(unit));
     const merged = merge.merged.render;
     let wrote = false;
+    let columnAfter: unknown = column;
     if (
       merged !== null &&
       (rebuilt !== null || !sameValue(merged, normalizeProjectState(local).render))
@@ -462,19 +518,34 @@ export async function syncProjectStateFromCheckout(
         .set({ renderContext: next.data })
         .where(eq(schema.repositories.id, repositoryId));
       wrote = true;
-      await writeApplicableTemplateIds(tx, { repositoryId, userId: repo.userId });
+      columnAfter = next.data;
+    }
+
+    const imported = await importClaims(tx, {
+      repositoryId,
+      repoPath,
+      repo: { userId: repo.userId, renderContext: columnAfter },
+      local: localClaims,
+      merged: merge.merged.claims,
+    });
+    if (wrote || imported) {
+      await writeApplicableTemplateIds(tx, {
+        repositoryId,
+        userId: repo.userId,
+        requireResolved: wrote,
+      });
     }
 
     await recordConflicts(tx, repositoryId, merge.conflicts);
-    await settleClaimConflicts(tx, repositoryId, repoPath, checkout.claims);
 
     const lastError =
-      merge.conflicts.length === 0
+      renderConflicts.length === 0
         ? null
-        : `${CONFLICT_ERROR_PREFIX}${merge.conflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
-    const baseSnapshot = normalizeProjectState(
-      recordOf(keptRender(checkout.render, baseRender, merge.conflicts)),
-    );
+        : `${CONFLICT_ERROR_PREFIX}${renderConflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
+    const baseSnapshot = normalizeProjectState({
+      ...recordOf(keptRender(checkout.render, baseRender, renderConflicts)),
+      claims: keptClaims(incomingClaims, baseClaims, claimConflicts),
+    });
     if (row === null || row.lastError !== lastError || !sameValue(row.baseSnapshot, baseSnapshot)) {
       const synced = { baseSnapshot, lastError, updatedAt: new Date() };
       await tx
@@ -484,6 +555,6 @@ export async function syncProjectStateFromCheckout(
     }
 
     if (lastError !== null) return { outcome: 'conflict', reason: lastError };
-    return { outcome: wrote ? 'applied' : 'unchanged' };
+    return { outcome: wrote || imported ? 'applied' : 'unchanged' };
   });
 }

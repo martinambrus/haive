@@ -224,7 +224,11 @@ async function setup(seed: Seed = {}) {
     projectStateSync: sync,
     projectStateConflicts: conflicts,
     tasks,
+    taskSteps: schema.taskSteps,
     onboardingArtifacts,
+    cliProviders: schema.cliProviders,
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
   });
   // Columns the sync must leave as they are, set as persistDetection and the mirror import leave them.
   fake.insert(repositories, {
@@ -1466,17 +1470,7 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
     render: BASE,
     cli: ['claude-code', 'codex'],
     settings,
-    claims: [
-      {
-        path: '.claude/agents/code-reviewer.md',
-        templateId: 'agent.code-reviewer',
-        kind: 'agent',
-        schemaVersion: 1,
-        templateHash: 'a'.repeat(64),
-        writtenHash: 'b'.repeat(64),
-        haiveVersion: '0.0.0-dev',
-      },
-    ],
+    claims: [],
     bundles: [{ source: 'git:https://example.com/bundle.git', name: 'bundle' }],
     ...over,
   });
@@ -1512,7 +1506,6 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
       full({
         environment: { envDetectData: { project: { name: 'renamed' } }, confirmedValues: { a: 1 } },
         cli: ['codex'],
-        claims: [],
         bundles: [],
       }),
     );
@@ -1731,7 +1724,10 @@ describe('syncProjectStateFromCheckout: a pending claim question', () => {
   });
 
   async function claimSetup(local: ReturnType<typeof claim>, incoming: ReturnType<typeof claim>) {
-    const s = await setup(synced(BASE));
+    const s = await setup({
+      column: column(BASE),
+      sync: { base: json({ ...normalizeProjectState(record(BASE)), claims: [CBASE] }) },
+    });
     s.fake.insert(schema.onboardingArtifacts, {
       userId: USER,
       repositoryId: REPO,
@@ -1828,5 +1824,371 @@ describe('syncProjectStateFromCheckout: a pending claim question', () => {
 
     expect(trace.filter(isWrite)).toEqual([]);
     expect(s.dump()).toEqual(before);
+  });
+});
+
+describe('syncProjectStateFromCheckout: the record carries artifact claims', () => {
+  const GUIDE = 'docs/guide.md';
+  const AGENT = '.claude/agents/qa-lead.md';
+  const GUIDE_TEXT = 'the guide\n';
+  const claim = (
+    path: string,
+    writtenHash: string,
+    over: Partial<{ templateId: string; kind: string; haiveVersion: string }> = {},
+  ) => ({
+    path,
+    templateId: path === AGENT ? 'agent.qa-lead' : 'workflow-config',
+    kind: path === AGENT ? 'agent' : 'workflow-config',
+    schemaVersion: 1,
+    templateHash: 'c'.repeat(64),
+    writtenHash,
+    haiveVersion: '1.2.3',
+    ...over,
+  });
+  type Claim = ReturnType<typeof claim>;
+  const H = (digit: string) => digit.repeat(64);
+  const withClaims = (...claims: Claim[]): ProjectStateRecord => ({ ...record(BASE), claims });
+  const ledger = (s: Setup) => s.fake.rows(schema.onboardingArtifacts);
+  const live = (s: Setup) => ledger(s).filter((r) => r.supersededAt == null);
+  const baseClaims = (s: Setup) => (json(s.syncRow()?.baseSnapshot) as { claims: Claim[] }).claims;
+
+  async function claimed(opts: { base: Claim[]; local: Claim[]; incoming: Claim[] }) {
+    const s = await setup({
+      column: column(BASE),
+      sync: { base: json({ ...normalizeProjectState(record(BASE)), claims: opts.base }) },
+    });
+    for (const c of opts.local) {
+      s.fake.insert(schema.onboardingArtifacts, {
+        userId: USER,
+        repositoryId: REPO,
+        taskId: randomUUID(),
+        diskPath: c.path,
+        templateId: c.templateId,
+        templateKind: c.kind,
+        templateSchemaVersion: c.schemaVersion,
+        templateContentHash: c.templateHash,
+        writtenHash: c.writtenHash,
+        sourceStepId: '12-post-onboarding',
+        source: 'onboarding',
+        haiveVersion: c.haiveVersion,
+        supersededAt: null,
+      });
+    }
+    await s.putRecord(withClaims(...opts.incoming));
+    return s;
+  }
+
+  it('imports one marker per claim of a first sync, and the base holds the claims', async () => {
+    const s = await setup();
+    await s.put(GUIDE, GUIDE_TEXT);
+    const hash = sha256Hex(normalizeContent(GUIDE_TEXT));
+    await s.putRecord(withClaims(claim(GUIDE, hash), claim(AGENT, H('4'))));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    const rows = live(s);
+    expect(rows.map((r) => r.diskPath).sort()).toEqual([AGENT, GUIDE]);
+    for (const row of rows) {
+      expect(row).toMatchObject({
+        taskId: null,
+        source: 'backfill',
+        sourceStepId: 'project-state-import',
+        userId: USER,
+        userModified: false,
+      });
+      expect(row.importedAt).toBeInstanceOf(Date);
+      expect(row.generatedAt).toEqual(row.importedAt);
+    }
+    const guide = rows.find((r) => r.diskPath === GUIDE)!;
+    expect(guide).toMatchObject({
+      templateId: 'workflow-config',
+      writtenHash: hash,
+      writtenContent: GUIDE_TEXT,
+      lastObservedDiskHash: hash,
+    });
+    expect(baseClaims(s).map((c) => c.path)).toEqual([GUIDE, AGENT].sort());
+  });
+
+  it('gives a marker for an agent the snapshot accepting that agent', async () => {
+    const s = await setup();
+    await s.putRecord(withClaims(claim(AGENT, H('4'))));
+
+    await s.run();
+
+    const [row] = live(s);
+    const accepted = (row!.formValuesSnapshot as { acceptedAgentIds: string[] }).acceptedAgentIds;
+    expect(accepted).toEqual(['code-reviewer', 'qa-lead', 'security-auditor']);
+    expect(row!.formValuesSnapshot).not.toHaveProperty('rtkChoiceRecorded');
+  });
+
+  it('keeps no bytes for a marker whose path holds other bytes', async () => {
+    const s = await setup();
+    await s.put(GUIDE, GUIDE_TEXT);
+    await s.putRecord(withClaims(claim(GUIDE, H('4'))));
+
+    await s.run();
+
+    expect(live(s)[0]).toMatchObject({
+      writtenContent: null,
+      lastObservedDiskHash: sha256Hex(normalizeContent(GUIDE_TEXT)),
+    });
+  });
+
+  it('writes nothing on a second sync of the same checkout', async () => {
+    const s = await setup();
+    await s.putRecord(withClaims(claim(GUIDE, H('4')), claim(AGENT, H('5'))));
+    await s.run();
+    const before = s.dump();
+    const ledgerBefore = json(ledger(s));
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('unchanged');
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
+    expect(json(ledger(s))).toEqual(ledgerBefore);
+  });
+
+  it('retires the row of a claim the other install removed, and keeps the rest', async () => {
+    const [g, a] = [claim(GUIDE, H('4')), claim(AGENT, H('5'))];
+    const s = await claimed({ base: [g, a], local: [g, a], incoming: [a] });
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    const guide = ledger(s).find((r) => r.diskPath === GUIDE)!;
+    expect(guide.supersededAt).toBeInstanceOf(Date);
+    expect(guide.importedAt).toEqual(guide.supersededAt);
+    expect(live(s).map((r) => r.diskPath)).toEqual([AGENT]);
+    expect(baseClaims(s)).toEqual([a]);
+  });
+
+  it('keeps a claim only this install holds', async () => {
+    const [g, a] = [claim(GUIDE, H('4')), claim(AGENT, H('5'))];
+    const s = await claimed({ base: [a], local: [g, a], incoming: [a] });
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('unchanged');
+    expect(
+      live(s)
+        .map((r) => r.diskPath)
+        .sort(),
+    ).toEqual([AGENT, GUIDE]);
+    expect(ledger(s).every((r) => r.importedAt == null)).toBe(true);
+  });
+
+  it('supersedes the row of a claim the other install changed and inserts its marker', async () => {
+    const [was, now] = [claim(GUIDE, H('4')), claim(GUIDE, H('6'), { haiveVersion: '2.0.0' })];
+    const s = await claimed({ base: [was], local: [was], incoming: [now] });
+
+    await s.run();
+
+    const [old] = ledger(s).filter((r) => r.supersededAt != null);
+    expect(old).toMatchObject({ writtenHash: H('4'), taskId: expect.any(String) });
+    expect(old!.importedAt).toBeInstanceOf(Date);
+    expect(live(s)).toHaveLength(1);
+    expect(live(s)[0]).toMatchObject({
+      taskId: null,
+      writtenHash: H('6'),
+      haiveVersion: '2.0.0',
+      sourceStepId: 'project-state-import',
+    });
+    expect(baseClaims(s)).toEqual([now]);
+  });
+
+  it('settles a claim both installs changed by the bytes on disk, taking the incoming one', async () => {
+    const hash = sha256Hex(normalizeContent(GUIDE_TEXT));
+    const [was, mine, theirs] = [claim(GUIDE, H('4')), claim(GUIDE, H('5')), claim(GUIDE, hash)];
+    const s = await claimed({ base: [was], local: [mine], incoming: [theirs] });
+    await s.put(GUIDE, GUIDE_TEXT);
+
+    await s.run();
+
+    expect(live(s)).toHaveLength(1);
+    expect(live(s)[0]).toMatchObject({
+      taskId: null,
+      writtenHash: hash,
+      writtenContent: GUIDE_TEXT,
+    });
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('keeps its own claim when the bytes on disk hold it', async () => {
+    const hash = sha256Hex(normalizeContent(GUIDE_TEXT));
+    const [was, mine, theirs] = [claim(GUIDE, H('4')), claim(GUIDE, hash), claim(GUIDE, H('6'))];
+    const s = await claimed({ base: [was], local: [mine], incoming: [theirs] });
+    await s.put(GUIDE, GUIDE_TEXT);
+
+    await s.run();
+
+    expect(live(s)).toHaveLength(1);
+    expect(live(s)[0]).toMatchObject({ writtenHash: hash, source: 'onboarding' });
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('takes the incoming claim when the bytes hold the claim of both installs', async () => {
+    const hash = sha256Hex(normalizeContent(GUIDE_TEXT));
+    const [was, mine, theirs] = [
+      claim(GUIDE, H('4')),
+      claim(GUIDE, hash, { haiveVersion: '1.0.0' }),
+      claim(GUIDE, hash, { haiveVersion: '2.0.0' }),
+    ];
+    const s = await claimed({ base: [was], local: [mine], incoming: [theirs] });
+    await s.put(GUIDE, GUIDE_TEXT);
+
+    await s.run();
+
+    expect(live(s)).toHaveLength(1);
+    expect(live(s)[0]).toMatchObject({ taskId: null, haiveVersion: '2.0.0' });
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('records one pending claim row when both changed it and the bytes hold neither', async () => {
+    const [was, mine, theirs] = [claim(GUIDE, H('4')), claim(GUIDE, H('5')), claim(GUIDE, H('6'))];
+    const s = await claimed({ base: [was], local: [mine], incoming: [theirs] });
+    await s.put(GUIDE, GUIDE_TEXT);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('unchanged');
+    const rows = s.pending();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ unit: claimFileName(GUIDE) });
+    expect(json(rows[0]!.base)).toEqual({ v: was });
+    expect(json(rows[0]!.local)).toEqual({ v: mine });
+    expect(json(rows[0]!.incoming)).toEqual({ v: theirs });
+    expect(live(s)).toHaveLength(1);
+    expect(live(s)[0]).toMatchObject({ writtenHash: H('5'), source: 'onboarding' });
+    expect(baseClaims(s)).toEqual([was]);
+  });
+
+  it('records a claim the other install removed and this one changed, with no incoming side', async () => {
+    const [was, mine, other] = [claim(GUIDE, H('4')), claim(GUIDE, H('5')), claim(AGENT, H('7'))];
+    const s = await claimed({ base: [was, other], local: [mine, other], incoming: [other] });
+    await s.put(GUIDE, GUIDE_TEXT);
+
+    await s.run();
+
+    expect(s.pending()).toHaveLength(1);
+    expect(s.pending()[0]!.incoming).toBeNull();
+    expect(baseClaims(s)).toEqual([was, other].sort((x, y) => (x.path < y.path ? -1 : 1)));
+  });
+
+  it('imports first and closes the pending row after, when the bytes now hold their claim', async () => {
+    const hash = sha256Hex(normalizeContent(GUIDE_TEXT));
+    const [was, mine, theirs] = [claim(GUIDE, H('4')), claim(GUIDE, H('5')), claim(GUIDE, hash)];
+    const s = await claimed({ base: [was], local: [mine], incoming: [theirs] });
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit: claimFileName(GUIDE),
+      base: { v: was },
+      local: { v: mine },
+      incoming: { v: theirs },
+    });
+    await s.put(GUIDE, GUIDE_TEXT);
+
+    await s.run();
+
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows()[0]).toMatchObject({ resolution: 'converged' });
+    expect(live(s)).toHaveLength(1);
+    expect(live(s)[0]).toMatchObject({ taskId: null, writtenHash: hash });
+    expect(baseClaims(s)).toEqual([theirs]);
+  });
+
+  it('retires nothing when the checkout carries no claim and the base has some', async () => {
+    const [g, a] = [claim(GUIDE, H('4')), claim(AGENT, H('5'))];
+    const s = await claimed({ base: [g, a], local: [g, a], incoming: [] });
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('unchanged');
+    expect(live(s)).toHaveLength(2);
+    expect(baseClaims(s)).toEqual([a, g].sort((x, y) => (x.path < y.path ? -1 : 1)));
+  });
+
+  it('keeps its own change to a claim when the checkout carries no claim', async () => {
+    const [was, mine] = [claim(GUIDE, H('4')), claim(GUIDE, H('5'))];
+    const s = await claimed({ base: [was], local: [mine], incoming: [] });
+
+    await s.run();
+
+    expect(live(s)[0]).toMatchObject({ writtenHash: H('5'), source: 'onboarding' });
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('leaves a row that renders no claim alone', async () => {
+    const [g] = [claim(GUIDE, H('4'))];
+    const s = await claimed({ base: [], local: [], incoming: [g] });
+    s.fake.insert(schema.onboardingArtifacts, {
+      userId: USER,
+      repositoryId: REPO,
+      taskId: randomUUID(),
+      diskPath: '.claude/skills/custom.md',
+      templateId:
+        'custom.00000000-0000-4000-8000-000000000001.00000000-0000-4000-8000-000000000002',
+      templateKind: 'custom-skill',
+      templateSchemaVersion: 1,
+      templateContentHash: H('1'),
+      writtenHash: H('1'),
+      sourceStepId: '12-post-onboarding',
+      source: 'onboarding',
+      supersededAt: null,
+    });
+
+    await s.run();
+
+    expect(
+      live(s)
+        .map((r) => r.diskPath)
+        .sort(),
+    ).toEqual(['.claude/skills/custom.md', GUIDE]);
+    expect(ledger(s).filter((r) => r.supersededAt != null)).toEqual([]);
+  });
+
+  it('defers while a reset holds the root claim, writing nothing', async () => {
+    const s = await setup();
+    await s.putRecord(withClaims(claim(GUIDE, H('4'))));
+    s.fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(), rootClaimKind: 'reset' });
+    const before = s.dump();
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('deferred');
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
+    expect(ledger(s)).toEqual([]);
+  });
+
+  it.each(['rebuild', 'refresh'])(
+    'does not defer for the %s claim of the job that calls it',
+    async (kind) => {
+      const s = await setup();
+      await s.putRecord(withClaims(claim(GUIDE, H('4'))));
+      s.fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(), rootClaimKind: kind });
+
+      expect((await s.run()).outcome).toBe('applied');
+      expect(live(s)).toHaveLength(1);
+    },
+  );
+
+  it('stands down when a reset moved after the checkout was read', async () => {
+    const s = await setup();
+    await s.putRecord(withClaims(claim(GUIDE, H('4'))));
+    s.hook.onLock = () => {
+      s.fake.patch(schema.repositories, REPO, { onboardingResetAt: new Date() });
+    };
+    const before = s.dump();
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('superseded');
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(json(s.fake.rows(schema.projectStateSync))).toEqual(
+      (before as { projectStateSync: unknown }).projectStateSync,
+    );
+    expect(ledger(s)).toEqual([]);
   });
 });
