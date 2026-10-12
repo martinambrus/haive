@@ -62,9 +62,11 @@ export function goldsOf(q: SetQuery): Gold[] {
   return q.gold ?? [{ path: q.expected ?? '' }];
 }
 
-/** The chunk text after its first line, which holds the `[path > ...]` context header. */
-export function chunkBody(content: string): string {
+/** The chunk text after its `[path > ...]` context header line; a legacy chunk has none. */
+export function chunkBody(content: string, sourcePath: string): string {
   const nl = content.indexOf('\n');
+  const first = nl < 0 ? content : content.slice(0, nl);
+  if (!first.startsWith(`[${sourcePath}`) || !first.endsWith(']')) return content;
   return nl < 0 ? '' : content.slice(nl + 1);
 }
 
@@ -76,7 +78,7 @@ export function goldRank(
   if (gold.anchor === undefined) return rankOfExpected(hits, gold.path);
   const anchor = gold.anchor;
   const i = hits.findIndex(
-    (h) => h.sourcePath === gold.path && chunkBody(h.content).includes(anchor),
+    (h) => h.sourcePath === gold.path && chunkBody(h.content, h.sourcePath).includes(anchor),
   );
   return i >= 0 ? i + 1 : null;
 }

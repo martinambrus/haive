@@ -49,9 +49,14 @@ describe('parseQuerySet', () => {
 });
 
 describe('chunkBody', () => {
-  it('is the content after its first line', () => {
-    expect(chunkBody('[a.ts > f]\n\nfunction f() {}')).toBe('\nfunction f() {}');
-    expect(chunkBody('only a header')).toBe('');
+  it('is the content after its context header line', () => {
+    expect(chunkBody('[a.ts > f]\n\nfunction f() {}', 'a.ts')).toBe('\nfunction f() {}');
+    expect(chunkBody('[a.ts]', 'a.ts')).toBe('');
+  });
+
+  it('is the whole content of a chunk with no header', () => {
+    expect(chunkBody('function f() {}\nreturn 1;', 'a.ts')).toBe('function f() {}\nreturn 1;');
+    expect(chunkBody('[$x, $y] = f();\nreturn 1;', 'a.ts')).toBe('[$x, $y] = f();\nreturn 1;');
   });
 });
 
