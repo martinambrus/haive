@@ -60,10 +60,12 @@ import {
   clearRuntimeReservations,
 } from './sandbox/runtime-admission.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
+import { bootStepEngine } from './step-engine/boot.js';
 
 async function main(): Promise<void> {
   const buildStamp = initBuildStamp();
   const { repoStoragePath, bundleStoragePath } = await bootstrap();
+  bootStepEngine();
   // Reap any cli sandbox containers left behind by a prior worker that died
   // mid-job (tsx watch restart, SIGKILL, OOM). BullMQ will redeliver the
   // job to this worker once its lock expires; we want a clean slate to
