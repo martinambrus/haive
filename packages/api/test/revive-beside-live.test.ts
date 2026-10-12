@@ -117,6 +117,7 @@ function setup(
   revival: Revival,
   other?: { type: string; status: string },
   repo: Record<string, unknown> = {},
+  conflicts: string[] = [],
 ) {
   const fake = createFakeDb({
     tasks: schema.tasks,
@@ -128,6 +129,7 @@ function setup(
     taskDagPlans: schema.taskDagPlans,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -137,6 +139,15 @@ function setup(
     renderContext: null,
     ...repo,
   });
+  for (const unit of conflicts) {
+    fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit,
+      base: { v: 1 },
+      local: { v: 2 },
+      incoming: { v: 3 },
+    });
+  }
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
@@ -263,6 +274,37 @@ describe.each([
       if (!revival.worker) expect(t.task().status).not.toBe('failed');
       expect(h.add).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe.each([
+  ['an upgrade', undefined],
+  ['a rollback', { mode: 'rollback' }],
+])('reviving a failed %s while a project state conflict is pending', (_n, metadata) => {
+  describe.each(revivals)('by $name', (revival) => {
+    const failedWith = { ...revival, task: { ...revival.task, metadata } };
+
+    it('answers 409 naming the conflict and stays failed', async () => {
+      const t = setup('onboarding_upgrade', failedWith, undefined, {}, [
+        'project/render.json#acceptedAgentIds',
+      ]);
+      const res = await revival.request();
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        error: expect.stringContaining('project/render.json#acceptedAgentIds'),
+      });
+      expect(t.task()).toMatchObject({ status: 'failed', orchestrationEpoch: 3 });
+      expect(h.add).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('reviving a failed onboarding while a project state conflict is pending', () => {
+  it('is not held by it: only an upgrade or a rollback writes the contested state', async () => {
+    const revival = revivals[0]!;
+    const t = setup('onboarding', revival, undefined, {}, ['project/render.json#framework']);
+    expect((await revival.request()).status).toBe(200);
+    expect(t.task().status).not.toBe('failed');
   });
 });
 

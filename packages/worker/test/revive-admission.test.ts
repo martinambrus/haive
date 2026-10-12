@@ -27,6 +27,7 @@ type World = {
   live?: { type: string; status: string };
   repo?: Record<string, unknown>;
   task?: Record<string, unknown>;
+  conflicts?: string[];
 };
 
 function setup(w: World = {}) {
@@ -38,7 +39,17 @@ function setup(w: World = {}) {
     taskStepAgentMinings: schema.taskStepAgentMinings,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
+    projectStateConflicts: schema.projectStateConflicts,
   });
+  for (const unit of w.conflicts ?? []) {
+    fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit,
+      base: { v: 1 },
+      local: { v: 2 },
+      incoming: { v: 3 },
+    });
+  }
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,
@@ -136,6 +147,22 @@ describe('the worker reviving a failed upgrade runs the reset admission', () => 
     expect(t.events()[0]).toMatchObject({ payload: { reason: 'none' } });
   });
 
+  it('refuses an upgrade while a project state conflict is pending, and says why', async () => {
+    const t = setup({ ...admitted(), conflicts: ['project/render.json#acceptedAgentIds'] });
+    expect(await t.revive()).toBe(false);
+    expect(t.task()).toMatchObject({ status: 'failed', errorMessage: 'boom' });
+    expect(t.events()).toHaveLength(1);
+    expect(t.events()[0]).toMatchObject({
+      eventType: 'upgrade.revive_refused',
+      payload: { reason: 'contested' },
+    });
+  });
+
+  it('does not hold an onboarding for it', async () => {
+    const t = setup({ type: 'onboarding', conflicts: ['project/render.json#framework'] });
+    expect(await t.revive()).toBe(true);
+  });
+
   it('revives when no reset intervened', async () => {
     const t = setup(admitted());
     expect(await t.revive()).toBe(true);
@@ -192,6 +219,13 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
     expect(await t.resume()).toBe(false);
     expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
     expect(t.events()[0]).toMatchObject({ payload: { reason: 'reset' } });
+  });
+
+  it('refuses an upgrade while a project state conflict is pending', async () => {
+    const t = setup({ ...admitted(), conflicts: ['project/render.json#framework'] });
+    expect(await t.resume()).toBe(false);
+    expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
+    expect(t.events()[0]).toMatchObject({ payload: { reason: 'contested' } });
   });
 
   it('answers a unique violation of the one-live-upgrade index as a refusal', async () => {

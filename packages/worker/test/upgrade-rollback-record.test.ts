@@ -58,6 +58,7 @@ async function rollback(older: Record<string, unknown> | null) {
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateSync: schema.projectStateSync,
     taskSteps: schema.taskSteps,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, {
     id: REPO,

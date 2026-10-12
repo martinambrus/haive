@@ -58,6 +58,7 @@ async function setup(
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
     projectStateSync: schema.projectStateSync,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'upload' });
   fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO, type: 'onboarding' });

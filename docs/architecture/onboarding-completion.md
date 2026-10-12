@@ -57,9 +57,10 @@ refuses when a marker is missing or a run is live.
 **One rule admits an upgrade, and a rollback.** `upgradeAdmission`
 (`api/src/lib/onboarding-state.ts`) is what POST /tasks, upgrade-status's banner and
 `POST /repositories/:id/rollback-upgrade` all ask. It refuses while an onboarding of the repository
-is live, naming the task, since an upgrade or a rollback beside it would race 07's writes. Then it
-admits on a completed onboarding since the reset epoch (`onboarding_reset_at`), or an
-onboarding-written artifact row since it. An upgrade's own rows do not count: before this rule an
+is live, naming the task, since an upgrade or a rollback beside it would race 07's writes. It also
+refuses while a project state conflict is pending (`contested`, naming the units): see
+[Onboarding template versioning](onboarding-upgrades.md). Then it admits on a completed onboarding
+since the reset epoch (`onboarding_reset_at`), or an onboarding-written artifact row since it. An upgrade's own rows do not count: before this rule an
 upgrade could start on a reset repository, so its rows prove nothing. The banner alone still shows
 an upgrade on a repository with no reset and any earlier upgrade task, which POST /tasks then
 refuses. A rollback is gated alike

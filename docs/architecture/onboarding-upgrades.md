@@ -403,6 +403,25 @@ since an upgrade replaces only the paths it writes and rows from several runs st
 side. So the banner and the plan read the same context, and a repository whose snapshots all
 predate RTK stays quiet.
 
+**A key both installs changed is held for an answer, never settled for the column's side.** The
+project-state sync merges the checkout's record against the base it last synced from. A render key
+both sides changed since that base, differently, becomes one pending row in `project_state_conflicts`
+(migration 0188; `base`, `local` and `incoming` as `{"v": value}`, NULL for a side with no such unit;
+one pending row per repository and unit by a partial unique index), written in the sync's own
+transaction. The column keeps the local value and the sync row keeps the OLD base for that key. A repeat
+sync of the same files writes nothing; a changed incoming value moves the same row; a pending render
+row whose unit no longer conflicts (the teammate went back to the base or took this side's value) is
+stamped `resolution = 'converged'`. A writer (12, 02, 04: `writeProjectStateRecord`) renders
+`project/render.json` with each contested key at its row's `incoming` value and records the row's
+`base` for it in `base_snapshot`, reading the rows under the lock, while the column stays the
+writer's own. Without that the writer settled the conflict silently: the file and the base both
+became the local value, so the next sync saw no difference and a teammate's value was gone.
+`upgradeAdmission` refuses (`contested`, with the units) while any row is pending, so POST /tasks,
+the rollback, the banner, and every revival in the api and the worker hold, and upgrade-status
+returns `contestedUnits` and offers nothing. Workflow tasks keep running on the local value. The
+reset deletes the repository's rows with its sync row. Answering a row (the API, the apply, the
+file rewrite) and the UI arrive in the PRs after the hold.
+
 **An upgrade offers the RTK block back, unticked.** 07 is the only writer of the block, so once an
 upgrade took it out, only a re-onboarding used to restore it. 01 now lists `AGENTS.md` in
 `rtkBlockRestorable` when ALL hold: the context recorded an RTK choice and RTK is on

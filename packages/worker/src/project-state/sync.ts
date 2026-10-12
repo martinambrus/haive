@@ -6,7 +6,9 @@ import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haiv
 import {
   PROJECT_STATE_DIR,
   ProjectStateError,
+  conflictSide,
   emptyProjectState,
+  isRenderUnit,
   mergeProjectState,
   normalizeProjectState,
   parseProjectState,
@@ -172,6 +174,54 @@ function keptRender(
   return kept as ProjectRender;
 }
 
+/** Keeps one pending row per conflicted unit, so the writer leaves the other side's value in the file
+ *  and an upgrade waits for an answer. A repeat of the same conflict writes nothing. A pending render
+ *  row whose unit no longer conflicts converged: a side moved to the other's value or back to the base. */
+async function recordConflicts(
+  tx: Tx,
+  repositoryId: string,
+  conflicts: readonly ProjectStateConflict[],
+): Promise<void> {
+  const pending = await tx
+    .select()
+    .from(schema.projectStateConflicts)
+    .where(
+      and(
+        eq(schema.projectStateConflicts.repositoryId, repositoryId),
+        isNull(schema.projectStateConflicts.resolvedAt),
+      ),
+    );
+  const rowOf = new Map(pending.map((row) => [row.unit, row]));
+  for (const { unit, base, local, incoming } of conflicts) {
+    const sides = {
+      base: conflictSide(base),
+      local: conflictSide(local),
+      incoming: conflictSide(incoming),
+    };
+    const row = rowOf.get(unit);
+    if (!row) {
+      await tx.insert(schema.projectStateConflicts).values({ repositoryId, unit, ...sides });
+    } else if (
+      !sameValue(row.base, sides.base) ||
+      !sameValue(row.local, sides.local) ||
+      !sameValue(row.incoming, sides.incoming)
+    ) {
+      await tx
+        .update(schema.projectStateConflicts)
+        .set(sides)
+        .where(eq(schema.projectStateConflicts.id, row.id));
+    }
+  }
+  const open = new Set(conflicts.map(({ unit }) => unit));
+  for (const row of pending) {
+    if (!isRenderUnit(row.unit) || open.has(row.unit)) continue;
+    await tx
+      .update(schema.projectStateConflicts)
+      .set({ resolution: 'converged', resolvedAt: new Date() })
+      .where(eq(schema.projectStateConflicts.id, row.id));
+  }
+}
+
 /** The set 01's apply writes from the column just written, which upgrade-status compares a
  *  repository's claims against. A repository with no claim keeps its set until 01's first plan. */
 async function writeApplicableTemplateIds(
@@ -324,6 +374,8 @@ export async function syncProjectStateFromCheckout(
       wrote = true;
       await writeApplicableTemplateIds(tx, { repositoryId, userId: repo.userId });
     }
+
+    await recordConflicts(tx, repositoryId, merge.conflicts);
 
     const lastError =
       merge.conflicts.length === 0

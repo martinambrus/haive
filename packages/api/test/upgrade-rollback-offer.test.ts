@@ -107,6 +107,7 @@ function repoWith(tasks: TaskSeed[], opts: { resetAt?: number; liveOnboarding?: 
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, {
     id: REPO,
