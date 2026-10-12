@@ -233,6 +233,10 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
             return (row) =>
               row[key] != null && v != null && canonicalJson(row[key]) === canonicalJson(v);
           }
+          if (v instanceof Date) {
+            return (row) =>
+              row[key] instanceof Date && (row[key] as Date).getTime() === v.getTime();
+          }
           return (row) => row[key] === v;
         }
         if (
