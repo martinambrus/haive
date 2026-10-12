@@ -347,6 +347,8 @@ export interface RepoRagCleanupPayload {
   projectNames: string[];
   /** The `repo_cleanups` row to delete once the job has run. */
   cleanupId?: string;
+  /** The sweep claim (`last_enqueued_at`, ISO) this job was counted under; a refund consumes it. */
+  claimStamp?: string;
 }
 
 /** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES`. Tears down what a deleted

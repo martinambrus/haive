@@ -99,7 +99,10 @@ import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { splitRepoStoragePath } from '../repo/worktree-paths.js';
 import { getTaskEnvTemplate, pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { discardPlanMerge } from '../step-engine/steps/plan/01-plan-merge.js';
-import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
+import {
+  RagCleanupDeferredError,
+  cleanupRagForRepository,
+} from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
@@ -3412,7 +3415,16 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
 }
 
 async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload): Promise<void> {
-  const result = await cleanupRagForRepository(db, payload);
+  let result: Awaited<ReturnType<typeof cleanupRagForRepository>>;
+  try {
+    result = await cleanupRagForRepository(db, payload);
+  } catch (err) {
+    if (err instanceof RagCleanupDeferredError) {
+      logger.warn({ repositoryId: payload.repositoryId, err }, 'repo rag cleanup deferred');
+      await refundRepoCleanupAttempt(db, payload.cleanupId, payload.claimStamp);
+    }
+    throw err;
+  }
   logger.info(
     {
       repositoryId: payload.repositoryId,
@@ -3423,6 +3435,29 @@ async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload
     'repo rag cleanup complete',
   );
   await dropRepoCleanupRow(db, payload.cleanupId);
+}
+
+async function refundRepoCleanupAttempt(
+  db: Database,
+  cleanupId: string | undefined,
+  claimStamp: string | undefined,
+): Promise<void> {
+  if (!cleanupId || !claimStamp) return;
+  const claimed = new Date(claimStamp);
+  try {
+    // Moving the stamp consumes the claim, so a redelivered job cannot refund it twice.
+    await db
+      .update(schema.repoCleanups)
+      .set({
+        attempts: sql`greatest(${schema.repoCleanups.attempts} - 1, 0)`,
+        lastEnqueuedAt: new Date(claimed.getTime() + 1),
+      })
+      .where(
+        and(eq(schema.repoCleanups.id, cleanupId), eq(schema.repoCleanups.lastEnqueuedAt, claimed)),
+      );
+  } catch (refundErr) {
+    logger.warn({ cleanupId, err: refundErr }, 'repo cleanup attempt refund failed');
+  }
 }
 
 async function dropRepoCleanupRow(db: Database, cleanupId: string | undefined): Promise<void> {
@@ -3619,6 +3654,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       throw new Error(`unknown task job ${job.name}`);
     }
   } catch (err) {
+    if (err instanceof RagCleanupDeferredError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     const taskId = (job.data as TaskJobPayload).taskId;
     logger.error({ taskId, jobName: job.name, err }, 'task job failed');

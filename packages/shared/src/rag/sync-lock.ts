@@ -210,19 +210,42 @@ export async function acquireRagSyncLock(
   }
 }
 
-/** A view of `conn` whose every `pg.unsafe` checks the lock before it is sent, so no store statement
- *  starts once the lock is lost. A statement already in flight still lands. */
+/** `conn` whose every statement, through `pg` or a `pg.begin` transaction, called or `unsafe`, asserts the lock first. */
 export function fenceRagStore<C extends { pg: object }>(conn: C, lock: RagSyncLock | null): C {
   if (!lock) return conn;
-  const pg = new Proxy(conn.pg, {
-    get(target, prop, receiver) {
-      if (prop !== 'unsafe') return Reflect.get(target, prop, receiver);
-      const unsafe = Reflect.get(target, prop, target) as (...args: unknown[]) => unknown;
-      return (...args: unknown[]) => {
+  type Args = (args: unknown[]) => unknown[];
+  const fenced = <T extends object>(target: T, methods: Record<string, Args>): T =>
+    new Proxy(target, {
+      // postgres.js's sql and tx are callable: a tagged-template statement goes through apply.
+      apply(obj, thisArg, args) {
         lock.assertHeld();
-        return unsafe.apply(target, args);
-      };
-    },
-  });
-  return { ...conn, pg };
+        return Reflect.apply(obj as (...a: unknown[]) => unknown, thisArg, args);
+      },
+      get(obj, prop, receiver) {
+        const mapArgs = typeof prop === 'string' && Object.hasOwn(methods, prop) && methods[prop];
+        if (!mapArgs) return Reflect.get(obj, prop, receiver);
+        const fn = Reflect.get(obj, prop, obj) as (...args: unknown[]) => unknown;
+        return (...args: unknown[]) => {
+          lock.assertHeld();
+          return fn.apply(obj, mapArgs(args));
+        };
+      },
+    });
+  const keep: Args = (args) => args;
+  const fenceTransaction: Args = (args) => {
+    const at = args.findLastIndex((arg) => typeof arg === 'function');
+    if (at < 0) return args;
+    const run = args[at] as (tx: object) => unknown;
+    return args.map((arg, i) =>
+      i === at
+        ? async (tx: object) => {
+            const result = await run(fenced(tx, { unsafe: keep }));
+            // Thrown inside the callback, so postgres.js rolls back instead of committing.
+            lock.assertHeld();
+            return result;
+          }
+        : arg,
+    );
+  };
+  return { ...conn, pg: fenced(conn.pg, { unsafe: keep, begin: fenceTransaction }) };
 }
