@@ -155,6 +155,10 @@
       "types": "./dist/release/index.d.ts",
       "import": "./dist/release/index.js"
     },
+    "./module-db": {
+      "types": "./dist/module-db/index.d.ts",
+      "import": "./dist/module-db/index.js"
+    },
     "./system": {
       "types": "./dist/system/index.d.ts",
       "import": "./dist/system/index.js"
