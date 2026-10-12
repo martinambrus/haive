@@ -33,6 +33,7 @@ const h = vi.hoisted(() => {
         }),
       },
       repositories: { findFirst: async () => ({ storagePath: '/tmp/repo', localPath: null }) },
+      taskTypeDefinitions: { findFirst: async () => undefined },
     },
     select: () => ({
       from: () => ({

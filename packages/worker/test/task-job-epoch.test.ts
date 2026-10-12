@@ -184,6 +184,10 @@ const db = {
         h.state.repoGone ? undefined : { storagePath: '/tmp/repo', localPath: null },
     },
     cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
+    taskTypeDefinitions: {
+      findFirst: async () =>
+        h.state.taskType === 'workflow' ? undefined : { runListStrategy: 'static' },
+    },
   },
   select: (fields?: Record<string, unknown>) => {
     h.state.onSelect();
