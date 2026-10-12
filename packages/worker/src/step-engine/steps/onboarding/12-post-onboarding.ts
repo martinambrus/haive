@@ -778,7 +778,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       } else {
         // Any other commit is built in a private index, so what the person staged stays theirs.
         const plan = { add: keep, remove: removedPaths };
-        staged = await commitRecorded(ctx.repoPath, plan, message, commitEnv);
+        staged = await commitRecorded(ctx.repoPath, plan, message, commitEnv, warnings);
       }
       stagedPaths.push(...staged);
 

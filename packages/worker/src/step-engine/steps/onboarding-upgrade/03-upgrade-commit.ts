@@ -365,7 +365,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       } else {
         // Any other commit is built in a private index, so what the person staged stays theirs.
         const plan = { add: toStage, remove: removedPaths };
-        staged = await commitRecorded(ctx.repoPath, plan, message, commitEnv);
+        staged = await commitRecorded(ctx.repoPath, plan, message, commitEnv, warnings);
       }
       stagedPaths.push(...staged);
 

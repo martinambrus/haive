@@ -729,6 +729,27 @@ describe('commit steps stage only the paths their step outputs record', () => {
     expect(files).not.toContain('.haive-data/plan.md');
   });
 
+  it('13c: a plan file removed while its sibling removal fails is still committed as removed', async () => {
+    const repo = await seeded({ '.haive-data/plan.json': '{}\n', '.haive-data/plan.md': 'p\n' });
+    await rm(path.join(repo, '.haive-data', 'plan.md'));
+    await mkdir(path.join(repo, '.haive-data', 'plan.md'), { recursive: true });
+    await writeFile(path.join(repo, '.haive-data', 'plan.md', 'keep.txt'), 'k\n');
+    await put(repo, { '.claude/agents/a.md': 'a\n' });
+    const out = await twelve(
+      repo,
+      {
+        '07-generate-files': { output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] } },
+      },
+      [],
+      emptyMirrorRow,
+      [],
+    );
+    expect(out.commitPerformed).toBe(true);
+    const files = await tracked(repo);
+    expect(files).not.toContain('.haive-data/plan.json');
+    expect(files).not.toContain('.haive-data/plan.md/keep.txt');
+  });
+
   it('14: a canonical legacy move is committed although legacy/<rel> already exists', async () => {
     const repo = await seeded({ '.claude/knowledge_base/A.md': 'a\n' });
     const kb = path.join(repo, '.haive-data', 'knowledge_base');
@@ -844,6 +865,39 @@ describe('commitRecorded commits what it staged in a private index', () => {
     );
     expect(done).toEqual(['a.md']);
     expect(await git(repo, ['show', 'HEAD:back.md'])).toBe('old\n');
+  });
+
+  it('a real index locked briefly by another writer is synced once the lock goes', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    const lock = path.join(repo, '.git', 'index.lock');
+    await writeFile(lock, '');
+    setTimeout(() => void rm(lock, { force: true }), 250);
+    const warnings: string[] = [];
+    await commitRecorded(repo, { add: ['a.md'], remove: [] }, 'chore: onboard', GIT_ENV, warnings);
+    expect(warnings).toEqual([]);
+    expect(await git(repo, ['status', '--porcelain', '--', 'a.md'])).toBe('');
+  });
+
+  it('a real index that stays locked leaves the commit and reports which names to reset', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    const lock = path.join(repo, '.git', 'index.lock');
+    await writeFile(lock, '');
+    const warnings: string[] = [];
+    try {
+      await commitRecorded(
+        repo,
+        { add: ['a.md'], remove: [] },
+        'chore: onboard',
+        GIT_ENV,
+        warnings,
+      );
+    } finally {
+      await rm(lock, { force: true });
+    }
+    expect(await git(repo, ['show', 'HEAD:a.md'])).toBe('a\n');
+    expect(warnings.join('\n')).toContain('a.md');
   });
 
   it('R7-2: the committed names are clean afterwards and the person staged work stays staged', async () => {

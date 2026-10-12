@@ -105,12 +105,15 @@ async function writePlanMirrorLocked(
   ]);
 
   if (nodes.length === 0) {
-    await Promise.all(
+    // Both settle before a failure propagates, so a removal that landed is always reported.
+    const removals = await Promise.allSettled(
       [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown].map(async (rel) => {
         await removeNoFollow(repoPath, rel);
         changes?.removed.push(rel);
       }),
     );
+    const refused = removals.find((r) => r.status === 'rejected');
+    if (refused) throw refused.reason;
     await db
       .update(schema.planMirrorState)
       .set({

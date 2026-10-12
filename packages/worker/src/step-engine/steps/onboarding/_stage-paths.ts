@@ -295,6 +295,7 @@ export async function commitRecorded(
   plan: StagePlan,
   message: string,
   env: NodeJS.ProcessEnv,
+  warnings?: string[],
 ): Promise<string[]> {
   const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
     gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
@@ -340,8 +341,20 @@ export async function commitRecorded(
     ).stdout.trim();
     const subject = message.split('\n')[0]!;
     await run(['update-ref', '-m', `commit: ${subject}`, 'HEAD', commit, parent]);
-    // The commit has landed; a real index locked by another writer only leaves these names stale there.
-    await syncRealIndex(run, commit, changed).catch(() => undefined);
+    // The commit has landed; a real index another writer holds locked is retried, then reported.
+    let synced = false;
+    for (let attempt = 0; attempt < 6 && !synced; attempt += 1) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * 2 ** attempt));
+      synced = await syncRealIndex(run, commit, changed).then(
+        () => true,
+        () => false,
+      );
+    }
+    if (!synced) {
+      warnings?.push(
+        `committed, but the git index was locked by another process, so these files may show as staged changes until you run \`git reset -- <file>\`: ${changed.join(', ')}`,
+      );
+    }
     return changed;
   } finally {
     await rm(indexFile, { force: true });
