@@ -21,6 +21,8 @@
  *   RAG_EXCLUDE        JSON array of anchored directory prefixes to leave out (default [])
  *   RAG_EXTENSION_SET  JSON array of code extensions, as 09_7 saved them (default: all)
  *   RAG_SELECTED_DIRS  JSON array of directories, as 09_7 saved them (default: all)
+ *   RAG_OWN_PATHS      JSON array of the repository's own code paths, as 01-env-detect's
+ *                      customCodePaths.include lists them: exempt from the per-file budgets (default [])
  *   RAG_STORE          NAME of the store: database haive_rag_<NAME> (required unless RAG_DRY_RUN=1)
  *   RAG_REPOSITORY_ID  uuid stamped on every row (required unless RAG_DRY_RUN=1)
  *   RAG_SOURCE_REPOSITORY_ID  uuid of the repository whose secret-mask rules apply (default: the default globs)
@@ -59,9 +61,9 @@ import {
   capChunks,
   chunkSection,
   contextHeader,
+  fileBudget,
   extractCodeSections,
   extractMarkdownSections,
-  MAX_FILE_BYTES,
   type RagChunk,
 } from '../src/step-engine/steps/onboarding/_rag-chunkers.js';
 import {
@@ -182,6 +184,7 @@ interface Options {
   exclude: string[];
   extensionSet?: string[];
   selectedDirs?: string[];
+  ownPaths: string[];
   store: string | null;
   repositoryId: string | null;
   sourceRepositoryId: string | null;
@@ -214,6 +217,7 @@ function parseOptions(): Options {
   const exclude = stringArrayEnv('RAG_EXCLUDE') ?? [];
   const extensionSet = stringArrayEnv('RAG_EXTENSION_SET');
   const selectedDirs = stringArrayEnv('RAG_SELECTED_DIRS');
+  const ownPaths = stringArrayEnv('RAG_OWN_PATHS') ?? [];
   const dims = Number(process.env.RAG_DIMS || 2560);
   if (!Number.isInteger(dims) || dims <= 0) fail('RAG_DIMS must be a positive integer');
   const limitRaw = process.env.RAG_LIMIT_FILES;
@@ -241,6 +245,7 @@ function parseOptions(): Options {
     exclude,
     extensionSet,
     selectedDirs,
+    ownPaths,
     store,
     repositoryId,
     sourceRepositoryId,
@@ -329,6 +334,7 @@ async function chunkFile(
   tree: string,
   kind: SourceType,
   relPath: string,
+  ownPaths: readonly string[],
   tally: Tally,
 ): Promise<FileChunks | null> {
   let text: string | null;
@@ -341,7 +347,8 @@ async function chunkFile(
     tally.unreadable += 1;
     return null;
   }
-  if (Buffer.byteLength(text, 'utf8') > MAX_FILE_BYTES) {
+  const budget = fileBudget(relPath, kind, ownPaths);
+  if (Buffer.byteLength(text, 'utf8') > budget.maxBytes) {
     tally.oversize += 1;
     return null;
   }
@@ -351,7 +358,7 @@ async function chunkFile(
   for (const section of sections) {
     built.push(...chunkSection(section, { header: contextHeader(relPath, section.breadcrumb) }));
   }
-  const { chunks, dropped } = capChunks(built);
+  const { chunks, dropped } = capChunks(built, budget.maxChunks);
   if (dropped > 0) {
     tally.dropped += dropped;
     tally.filesCapped += 1;
@@ -366,14 +373,15 @@ async function* chunkAll(
   tree: string,
   kbFiles: string[],
   codeFiles: string[],
+  ownPaths: readonly string[],
   tally: Tally,
 ): AsyncGenerator<FileChunks> {
   for (const relPath of kbFiles) {
-    const file = await chunkFile(tree, 'kb', relPath, tally);
+    const file = await chunkFile(tree, 'kb', relPath, ownPaths, tally);
     if (file) yield file;
   }
   for (const relPath of codeFiles) {
-    const file = await chunkFile(tree, 'code', relPath, tally);
+    const file = await chunkFile(tree, 'code', relPath, ownPaths, tally);
     if (file) yield file;
   }
 }
@@ -513,7 +521,7 @@ async function build(
   let batches = 0;
   const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
 
-  for await (const file of chunkAll(opts.tree, kbFiles, codeFiles, tally)) {
+  for await (const file of chunkAll(opts.tree, kbFiles, codeFiles, opts.ownPaths, tally)) {
     const toEmbed: RagChunk[] = [];
     for (const chunk of file.chunks) {
       const key = chunkKey(file.relPath, chunk.sectionId, chunk.chunkIndex);
@@ -623,7 +631,8 @@ async function main(): Promise<void> {
 
   if (opts.dryRun) {
     const tally = newTally();
-    for await (const file of chunkAll(opts.tree, kbFiles, codeFiles, tally)) void file;
+    for await (const file of chunkAll(opts.tree, kbFiles, codeFiles, opts.ownPaths, tally))
+      void file;
     printTally(tally);
     process.exit(0);
   }
