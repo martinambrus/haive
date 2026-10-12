@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,9 +59,10 @@ vi.mock('../src/step-engine/steps/onboarding/_rag-embed.js', async (original) =>
   warmOllamaModel: async () => false,
 }));
 
-const { ragPopulateStep, RagEmbedFailureError } =
+const { ragPopulateStep, RagEmbedFailureError, SecretMaskError } =
   await import('../src/step-engine/steps/onboarding/10-rag-populate.js').then(async (m) => ({
     ragPopulateStep: m.ragPopulateStep,
+    SecretMaskError: (await import('../src/queues/cli-exec/secret-mask.js')).SecretMaskError,
     RagEmbedFailureError: (await import('../src/step-engine/steps/_rag-embed-health.js'))
       .RagEmbedFailureError,
   }));
@@ -138,6 +140,20 @@ beforeEach(async () => {
             hash: params[6] as string | null,
             params,
           });
+        }
+        if (query.startsWith('SELECT DISTINCT source_path'))
+          return [...new Set([...rows.values()].map((r) => r.params[3]))].map((p) => ({
+            source_path: p,
+          }));
+        if (query.includes('source_path = $2') && query.startsWith('DELETE')) {
+          order.push('delete-denied');
+          let count = 0;
+          for (const [key, r] of rows)
+            if (r.params[3] === params[1]) {
+              rows.delete(key);
+              count += 1;
+            }
+          return Object.assign([], { count });
         }
         if (query.includes('chunk_hash IS NULL') && query.startsWith('SELECT')) {
           nullHashProbes.push(params);
@@ -541,5 +557,82 @@ describe('onboarding populate holds the repository RAG lock', () => {
   it('takes no lock when the mode is none', async () => {
     await populate(detected({ ragMode: 'none' as never }));
     expect(fakeLock.state.tried).toEqual([]);
+  });
+});
+
+describe('onboarding populate applies the repository secret-mask policy', () => {
+  const SETTINGS = 'sites/default/settings.php';
+  const SECRETS = 'src/secrets.ts';
+  const OK = 'src/ok.ts';
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' });
+  const writeCode = async (rel: string, text: string) => {
+    await mkdir(join(root, rel, '..'), { recursive: true });
+    await writeFile(join(root, rel), text);
+  };
+  const withCode = (rels: string[]) =>
+    detected({
+      kbFiles: [],
+      codeFiles: rels.map((relPath) => ({ relPath, sizeBytes: 40 })),
+      ollamaReachable: true,
+    });
+  const storedPaths = () => [...rows.values()].map((r) => r.params[3]);
+
+  beforeEach(async () => {
+    git('init', '-q');
+    git('config', 'gc.auto', '0');
+    const filler = '// '.concat('configuration notes for this module. '.repeat(6), '\n');
+    await writeCode(SETTINGS, `<?php\n${filler}$databases = ["pass" => "hunter2"];\n`);
+    await writeCode(SECRETS, `${filler}export const token = "abc123";\n`);
+    await writeCode(OK, `${filler}export const ok = 1;\n`);
+  });
+
+  it('indexes neither an untracked settings.php nor secrets.ts, but an ordinary file', async () => {
+    await populate(withCode([SETTINGS, SECRETS, OK]));
+    expect(storedPaths()).toEqual([OK]);
+    const embedded = mocks.ollamaEmbed.mock.calls.flatMap((c) => c[2]).join('\n');
+    expect(embedded).not.toContain('hunter2');
+    expect(embedded).not.toContain('abc123');
+  });
+
+  it('indexes a settings.php that git tracks', async () => {
+    git('add', SETTINGS);
+    await populate(withCode([SETTINGS, SECRETS, OK]));
+    expect(storedPaths().sort()).toEqual([OK, SETTINGS].sort());
+  });
+
+  it('deletes a stored row of a now-denied path before embedding, even when the embed fails', async () => {
+    rows.set(JSON.stringify([SETTINGS, 's', 0]), {
+      hash: 'h',
+      params: ['t', 'repo-1', 'code', SETTINGS, 's', 0, 'h', 'x', '[0.1]'],
+    });
+    mocks.embedFails = true;
+    await expect(populate(withCode([OK]))).rejects.toBeInstanceOf(RagEmbedFailureError);
+    expect(order).toContain('delete-denied');
+    expect(storedPaths()).toEqual([]);
+  });
+
+  it('counts the purged rows as deleted', async () => {
+    rows.set(JSON.stringify([SETTINGS, 's', 0]), {
+      hash: 'h',
+      params: ['t', 'repo-1', 'code', SETTINGS, 's', 0, 'h', 'x', '[0.1]'],
+    });
+    const result = await populate(withCode([OK]));
+    expect(result.chunksDeleted).toBe(1);
+    expect(storedPaths()).toEqual([OK]);
+  });
+
+  it('applies the default deny globs to a task with no repository', async () => {
+    mocks.taskRepositoryId = null;
+    await populate(withCode([SETTINGS, SECRETS, OK]));
+    expect(storedPaths()).toEqual([OK]);
+  });
+
+  it('throws SecretMaskError and writes nothing when the policy cannot be resolved', async () => {
+    (ctx.db.query.repositories as { findFirst: () => Promise<undefined> }).findFirst = async () =>
+      undefined;
+    await expect(populate(withCode([OK]))).rejects.toBeInstanceOf(SecretMaskError);
+    expect(mocks.connects).toBe(0);
+    expect(order).toEqual([]);
+    expect(rows.size).toBe(0);
   });
 });

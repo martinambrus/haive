@@ -28,6 +28,12 @@ import {
 import { probeOllama, warmOllamaModel, vectorLiteral } from './_rag-embed.js';
 import { detectEmbedDevice, embedDeviceWarning, type EmbedDevice } from '../_embed-device.js';
 import { acquireRepoRagSyncLock } from '../_rag-sync-lock.js';
+import { listTrackedFiles } from '../../../queues/cli-exec/secret-mask.js';
+import {
+  secretMaskDeniesPath,
+  secretMaskPolicy,
+} from '../../../queues/cli-exec/secret-mask-policy.js';
+import { purgeDeniedRagRows, resolveRagIngestionPolicy } from '../workflow/_rag-index.js';
 import {
   clearRagEmbedDegraded,
   composeRagWarning,
@@ -536,16 +542,23 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
     // Collect KB files
     await ctx.emitProgress('Scanning for knowledge base files...');
-    const kbFiles = await collectKbFiles(ctx.repoPath);
+    let kbFiles = await collectKbFiles(ctx.repoPath);
 
     // Collect code files (filtered to user-selected directories if available)
     await ctx.emitProgress('Scanning for code files...');
-    const codeFiles = await collectCodeFiles(
+    let codeFiles = await collectCodeFiles(
       ctx.repoPath,
       excludePaths,
       selectedDirs,
       resolvedExtSet,
     );
+
+    // apply is the fail-closed point; an unresolved policy only leaves the counts unfiltered here.
+    const detectPolicy = await resolveRagIngestionPolicy(ctx, ctx.repoPath).catch(() => null);
+    if (detectPolicy) {
+      kbFiles = kbFiles.filter((f) => !secretMaskDeniesPath(detectPolicy, f.relPath));
+      codeFiles = codeFiles.filter((f) => !secretMaskDeniesPath(detectPolicy, f.relPath));
+    }
 
     // Probe Ollama connectivity
     await ctx.emitProgress('Testing Ollama connectivity...');
@@ -685,6 +698,13 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     const repositoryId = taskRow?.repositoryId ?? null;
     const lock = repositoryId ? await acquireRepoRagSyncLock(ctx, repositoryId) : null;
     try {
+      // A repo-less task has no repository rules to read; the default deny globs still apply.
+      const policy = repositoryId
+        ? await resolveRagIngestionPolicy(ctx, ctx.repoPath)
+        : { ...secretMaskPolicy({}), tracked: await listTrackedFiles(ctx.repoPath) };
+      const kbFiles = detected.kbFiles.filter((f) => !secretMaskDeniesPath(policy, f.relPath));
+      const codeFiles = detected.codeFiles.filter((f) => !secretMaskDeniesPath(policy, f.relPath));
+
       await ctx.emitProgress('Connecting to RAG database...');
       const opened = await resolveRagConnection(prefs, ctx.db, detected.projectName);
       const conn = opened && fenceRagStore(opened, lock);
@@ -711,6 +731,10 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       try {
         await ctx.emitProgress('Creating RAG schema and indexes...');
         const { usedPgvector } = await ensureRagSchema(conn);
+
+        const purged = repositoryId
+          ? await purgeDeniedRagRows(conn, repositoryId, policy, lock)
+          : 0;
 
         // Resolve populate mode. Incremental (default) skips re-embedding chunks
         // whose content is unchanged; full rebuilds from scratch. Legacy
@@ -801,11 +825,11 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         const hashed = { chunks: 0, realEmbedding: false };
 
         // --- KB files ---
-        const totalKb = detected.kbFiles.length;
+        const totalKb = kbFiles.length;
         for (let fi = 0; fi < totalKb; fi += 1) {
           ctx.throwIfCancelled();
           lock?.assertHeld();
-          const file = detected.kbFiles[fi]!;
+          const file = kbFiles[fi]!;
           await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}`);
 
           let text: string;
@@ -866,11 +890,11 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         }
 
         // --- Code files ---
-        const totalCode = detected.codeFiles.length;
+        const totalCode = codeFiles.length;
         for (let fi = 0; fi < totalCode; fi += 1) {
           ctx.throwIfCancelled();
           lock?.assertHeld();
-          const file = detected.codeFiles[fi]!;
+          const file = codeFiles[fi]!;
           await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}`);
 
           let text: string;
@@ -930,7 +954,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           chunksSkipped += codeRes.skipped;
         }
 
-        let chunksDeleted = 0;
+        let chunksDeleted = purged;
         if (sync) {
           const staleKeys = computeStaleKeys(sync.existing.keys(), sync.seen);
           if (staleKeys.length > 0) {
