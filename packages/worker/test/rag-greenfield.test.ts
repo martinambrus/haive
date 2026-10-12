@@ -887,6 +887,93 @@ describe('greenfield RAG initialization at 11c', () => {
   });
 });
 
+describe('per-file RAG budgets in the workflow sync', () => {
+  const OWN = 'sites/all/modules/activit/';
+  const fns = (count: number, pad = 0) =>
+    Array.from(
+      { length: count },
+      (_, i) => `export function fn${i}() { return '${'p'.repeat(pad)}${i}'; }\n`,
+    ).join('\n');
+  const rowsOf = (rel: string) => inserts.filter((row) => row[3] === rel).length;
+  const sync = async () => {
+    const detected = await preRagSyncStep.detect!(ctx);
+    await preRagSyncStep.apply(ctx, {
+      detected,
+      formValues: { runSync: true },
+      iteration: 0,
+      previousIterations: [],
+    });
+  };
+
+  beforeEach(() => {
+    onboarding = { id: 'onboarding-1' };
+    repo.source = 'git_https';
+    repo.onboardingTooling = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
+    priorSteps.set('01-env-detect', {
+      detectOutput: { data: { paths: { customCodePaths: { include: [OWN] } } } },
+    });
+  });
+
+  it('indexes every chunk of an own-path code file over the chunk budget', async () => {
+    await writeSource(`${OWN}big.ts`, fns(150), root);
+    await sync();
+    expect(rowsOf(`${OWN}big.ts`)).toBe(150);
+  });
+
+  it('takes the own paths from the environment mirror when no onboarding task is left', async () => {
+    onboarding = null;
+    repo.onboardingEnvironment = {
+      schemaVersion: 1,
+      envDetectData: { paths: { customCodePaths: { include: [OWN] } } },
+      confirmedValues: {},
+    };
+    await writeSource(`${OWN}big.ts`, fns(150), root);
+    await sync();
+    expect(rowsOf(`${OWN}big.ts`)).toBe(150);
+  });
+
+  it('indexes an own-path code file of about 600 KB', async () => {
+    await writeSource(`${OWN}wide.ts`, fns(5500, 70), root);
+    await sync();
+    expect(rowsOf(`${OWN}wide.ts`)).toBe(5500);
+  });
+
+  it('keeps the chunk budget for code outside the own paths', async () => {
+    await writeSource('sites/all/modules/views/big.ts', fns(150), root);
+    await sync();
+    expect(rowsOf('sites/all/modules/views/big.ts')).toBe(80);
+  });
+
+  it('keeps skipping code outside the own paths over 512 KB', async () => {
+    await writeSource('sites/all/modules/views/wide.ts', fns(5500, 70), root);
+    await sync();
+    expect(rowsOf('sites/all/modules/views/wide.ts')).toBe(0);
+  });
+
+  it('skips an own-path file over 2 MB and reports that limit', async () => {
+    const warn = vi.fn();
+    ctx.logger.warn = warn;
+    await writeSource(`${OWN}gen.ts`, `// ${'g'.repeat(2_000_100)}\n`, root);
+    await sync();
+    expect(rowsOf(`${OWN}gen.ts`)).toBe(0);
+    expect(
+      warn.mock.calls.some(([bindings]) => (bindings as { max?: number }).max === 2_000_000),
+    ).toBe(true);
+  });
+
+  it('indexes every chunk of a knowledge base file over the chunk budget', async () => {
+    const kb = '.haive-data/knowledge_base/big.md';
+    await writeSource(
+      kb,
+      Array.from({ length: 150 }, (_, i) => `# Section ${i}\n\nBody of section ${i}.\n`).join('\n'),
+      root,
+    );
+    priorSteps.set('01-env-detect', { detectOutput: { data: {} } });
+    await sync();
+    expect(rowsOf(kb)).toBe(150);
+  });
+});
+
 async function writeSource(
   rel: string,
   body = 'export function source() { return "project code"; }\n',

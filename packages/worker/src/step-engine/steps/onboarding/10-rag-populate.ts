@@ -21,8 +21,8 @@ import {
   extractCodeSections,
   chunkSection,
   capChunks,
+  fileBudget,
   contextHeader,
-  MAX_FILE_BYTES,
   type RagChunk,
 } from './_rag-chunkers.js';
 import { probeOllama, warmOllamaModel, vectorLiteral } from './_rag-embed.js';
@@ -54,6 +54,7 @@ export interface RagSourceFile {
 export interface RagPopulateDetect {
   kbFiles: RagSourceFile[];
   codeFiles: RagSourceFile[];
+  ownPaths?: string[];
   ollamaReachable: boolean;
   ollamaUrl: string | null;
   embeddingModel: string | null;
@@ -509,7 +510,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       envPrev?.detect as {
         data?: {
           project?: { name?: string };
-          paths?: { customCodePaths?: { exclude?: string[] } };
+          paths?: { customCodePaths?: { exclude?: string[]; include?: string[] } };
         };
       } | null
     )?.data;
@@ -570,6 +571,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     return {
       kbFiles,
       codeFiles,
+      ownPaths: envData?.paths?.customCodePaths?.include ?? [],
       ollamaReachable,
       ollamaUrl: prefs.ollamaUrl,
       embeddingModel: prefs.embeddingModel,
@@ -800,6 +802,8 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         let chunksSkipped = 0;
         const hashed = { chunks: 0, realEmbedding: false };
 
+        const ownPaths = detected.ownPaths ?? [];
+
         // --- KB files ---
         const totalKb = detected.kbFiles.length;
         for (let fi = 0; fi < totalKb; fi += 1) {
@@ -818,10 +822,11 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
             continue;
           }
 
+          const budget = fileBudget(file.relPath, 'kb', ownPaths);
           const kbBytes = Buffer.byteLength(text, 'utf8');
-          if (kbBytes > MAX_FILE_BYTES) {
+          if (kbBytes > budget.maxBytes) {
             ctx.logger.warn(
-              { file: file.relPath, bytes: kbBytes, max: MAX_FILE_BYTES },
+              { file: file.relPath, bytes: kbBytes, max: budget.maxBytes },
               'KB file exceeds the RAG size limit; skipped',
             );
             continue;
@@ -834,7 +839,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
               ...chunkSection(section, { header: contextHeader(file.relPath, section.breadcrumb) }),
             );
           }
-          const { chunks, dropped } = capChunks(built);
+          const { chunks, dropped } = capChunks(built, budget.maxChunks);
           if (dropped > 0) {
             ctx.logger.warn(
               { file: file.relPath, kept: chunks.length, dropped },
@@ -883,10 +888,11 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
             continue;
           }
 
+          const budget = fileBudget(file.relPath, 'code', ownPaths);
           const codeBytes = Buffer.byteLength(text, 'utf8');
-          if (codeBytes > MAX_FILE_BYTES) {
+          if (codeBytes > budget.maxBytes) {
             ctx.logger.warn(
-              { file: file.relPath, bytes: codeBytes, max: MAX_FILE_BYTES },
+              { file: file.relPath, bytes: codeBytes, max: budget.maxBytes },
               'code file exceeds the RAG size limit; skipped',
             );
             continue;
@@ -899,7 +905,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
               ...chunkSection(section, { header: contextHeader(file.relPath, section.breadcrumb) }),
             );
           }
-          const { chunks, dropped } = capChunks(built);
+          const { chunks, dropped } = capChunks(built, budget.maxChunks);
           if (dropped > 0) {
             ctx.logger.warn(
               { file: file.relPath, kept: chunks.length, dropped },

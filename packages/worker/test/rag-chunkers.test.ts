@@ -7,7 +7,10 @@ import {
   contextHeader,
   isHeadingOnlyChunk,
   isHeadingOnlyMarkdown,
+  fileBudget,
   MAX_CHUNKS_PER_FILE,
+  MAX_FILE_BYTES,
+  MAX_OWN_FILE_BYTES,
 } from '../src/step-engine/steps/onboarding/_rag-chunkers.js';
 
 /** Body of roughly `size` chars carrying a unique MARK<n> token every ~100 chars,
@@ -253,5 +256,33 @@ describe('capChunks', () => {
   it('reports nothing dropped when under budget', () => {
     const chunks = chunkSection({ sectionId: 's', content: 'short', breadcrumb: [] });
     expect(capChunks(chunks)).toEqual({ chunks, dropped: 0 });
+  });
+});
+
+describe('fileBudget', () => {
+  const own = { maxBytes: MAX_OWN_FILE_BYTES, maxChunks: Infinity };
+  const other = { maxBytes: MAX_FILE_BYTES, maxChunks: MAX_CHUNKS_PER_FILE };
+
+  it('exempts a knowledge base file whatever the own paths are', () => {
+    expect(fileBudget('.haive-data/knowledge_base/a.md', 'kb', [])).toEqual(own);
+  });
+
+  it('exempts code under an own path, with or without a trailing slash', () => {
+    const rel = 'sites/all/modules/activit/x.inc';
+    expect(fileBudget(rel, 'code', ['sites/all/modules/activit/'])).toEqual(own);
+    expect(fileBudget(rel, 'code', ['sites/all/modules/activit'])).toEqual(own);
+  });
+
+  it('keeps the budgets for a sibling directory that only shares the prefix', () => {
+    expect(
+      fileBudget('sites/all/modules/activit2/x.inc', 'code', ['sites/all/modules/activit/']),
+    ).toEqual(other);
+  });
+
+  it('keeps the budgets for other code', () => {
+    expect(
+      fileBudget('sites/all/modules/views/x.inc', 'code', ['sites/all/modules/activit/']),
+    ).toEqual(other);
+    expect(fileBudget('sites/all/modules/activit/x.inc', 'code', [])).toEqual(other);
   });
 });
