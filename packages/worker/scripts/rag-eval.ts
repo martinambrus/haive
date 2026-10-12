@@ -56,6 +56,7 @@ import {
 } from '@haive/shared/rag';
 import { checkDensePool, type DensePoolCheck } from './rag-eval-dense.js';
 import {
+  chunkBody,
   fmtScoreSummary,
   goldRank,
   goldsOf,
@@ -253,11 +254,13 @@ async function main(): Promise<void> {
         : `source_path = $1 AND position($2 in content) > 0`;
     const repo = repositoryId ? ` AND repository_id = $${params.length + 1}` : '';
     if (repositoryId) params.push(repositoryId);
-    const rows = await openConn.pg.unsafe(
-      `SELECT 1 FROM ${RAG_TABLE} WHERE ${cond}${repo} LIMIT 1`,
+    const rows = (await openConn.pg.unsafe(
+      `SELECT source_path, content FROM ${RAG_TABLE} WHERE ${cond}${repo}${g.anchor === undefined ? ' LIMIT 1' : ''}`,
       params,
-    );
-    return rows.length > 0;
+    )) as unknown as { source_path: string; content: string }[];
+    const anchor = g.anchor;
+    if (anchor === undefined) return rows.length > 0;
+    return rows.some((r) => chunkBody(r.content, r.source_path).includes(anchor));
   }
 
   const settings =
