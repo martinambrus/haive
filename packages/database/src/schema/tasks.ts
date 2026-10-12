@@ -147,7 +147,7 @@ export const tasks = pgTable(
     parentTaskId: uuid('parent_task_id').references((): AnyPgColumn => tasks.id, {
       onDelete: 'set null',
     }),
-    type: workflowTypeEnum('type').notNull(),
+    type: text('type').notNull(),
     title: varchar('title', { length: 512 }).notNull(),
     description: text('description'),
     status: taskStatusEnum('status').notNull().default('created'),
