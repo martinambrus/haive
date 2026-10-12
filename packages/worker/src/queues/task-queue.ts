@@ -3396,6 +3396,7 @@ async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload
   } catch (err) {
     if (err instanceof RagCleanupDeferredError) {
       logger.warn({ repositoryId: payload.repositoryId, err }, 'repo rag cleanup deferred');
+      await refundRepoCleanupAttempt(db, payload.cleanupId);
     }
     throw err;
   }
@@ -3409,6 +3410,21 @@ async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload
     'repo rag cleanup complete',
   );
   await dropRepoCleanupRow(db, payload.cleanupId);
+}
+
+async function refundRepoCleanupAttempt(
+  db: Database,
+  cleanupId: string | undefined,
+): Promise<void> {
+  if (!cleanupId) return;
+  try {
+    await db
+      .update(schema.repoCleanups)
+      .set({ attempts: sql`greatest(${schema.repoCleanups.attempts} - 1, 0)` })
+      .where(eq(schema.repoCleanups.id, cleanupId));
+  } catch (refundErr) {
+    logger.warn({ cleanupId, err: refundErr }, 'repo cleanup attempt refund failed');
+  }
 }
 
 async function dropRepoCleanupRow(db: Database, cleanupId: string | undefined): Promise<void> {

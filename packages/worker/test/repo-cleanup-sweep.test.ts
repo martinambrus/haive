@@ -1,5 +1,7 @@
 import type { Job } from 'bullmq';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { TASK_JOB_NAMES } from '@haive/shared';
@@ -195,6 +197,57 @@ describe('the rag cleanup job', () => {
     h.ragCleanup.mockRejectedValueOnce(new RagCleanupDeferredError(REPO, 'a sync holds the lock'));
     await expect(run(ROW(1))).rejects.toBeInstanceOf(RagCleanupDeferredError);
     expect(fake.rows(schema.repoCleanups)).toHaveLength(1);
+  });
+
+  describe('a deferral', () => {
+    const renderedAttempts = (fake: ReturnType<typeof setup>['fake']) => {
+      const [row] = fake.rows(schema.repoCleanups);
+      return new PgDialect().sqlToQuery(row!.attempts as SQL).sql;
+    };
+
+    it('refunds the attempt it was queued with, floored at zero, and keeps the row', async () => {
+      const { fake, add } = setup();
+      add(1, { kind: 'rag', attempts: 3 });
+      h.db = fake.db;
+      h.ragCleanup.mockRejectedValueOnce(new RagCleanupDeferredError(REPO, 'a sync holds it'));
+      await expect(run(ROW(1))).rejects.toBeInstanceOf(RagCleanupDeferredError);
+      expect(fake.rows(schema.repoCleanups)).toHaveLength(1);
+      expect(renderedAttempts(fake)).toBe('greatest("repo_cleanups"."attempts" - 1, 0)');
+    });
+
+    it('leaves attempts alone when the job carries no cleanupId', async () => {
+      const { fake, add } = setup();
+      add(1, { kind: 'rag', attempts: 3 });
+      h.db = fake.db;
+      h.ragCleanup.mockRejectedValueOnce(new RagCleanupDeferredError(REPO, 'a sync holds it'));
+      await expect(run()).rejects.toBeInstanceOf(RagCleanupDeferredError);
+      expect(fake.rows(schema.repoCleanups)[0]!.attempts).toBe(3);
+    });
+
+    it('does not refund a cleanup that failed for another reason', async () => {
+      const { fake, add } = setup();
+      add(1, { kind: 'rag', attempts: 3 });
+      h.db = fake.db;
+      h.ragCleanup.mockRejectedValueOnce(new Error('db busy'));
+      await expect(run(ROW(1))).rejects.toThrow('db busy');
+      expect(fake.rows(schema.repoCleanups)[0]!.attempts).toBe(3);
+    });
+
+    it('still rethrows the deferral when the refund write fails', async () => {
+      const { fake, add } = setup();
+      add(1, { kind: 'rag', attempts: 3 });
+      h.db = new Proxy(fake.db as object, {
+        get: (target, prop, receiver) =>
+          prop === 'update'
+            ? () => {
+                throw new Error('write refused');
+              }
+            : Reflect.get(target, prop, receiver),
+      });
+      h.ragCleanup.mockRejectedValueOnce(new RagCleanupDeferredError(REPO, 'a sync holds it'));
+      await expect(run(ROW(1))).rejects.toBeInstanceOf(RagCleanupDeferredError);
+      expect(fake.rows(schema.repoCleanups)[0]!.attempts).toBe(3);
+    });
   });
 
   it('runs a payload with no cleanupId as before', async () => {
