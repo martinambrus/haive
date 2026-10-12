@@ -133,8 +133,9 @@ already in flight when the lock is lost still lands: the store cannot see the lo
 window would take a fencing token the store itself checks. A run with no repository id takes no lock.
 Deleting a repository reclaims its internal store under the same lock (`cleanupRagForRepository`): while
 a sync holds it, or Redis cannot say, the cleanup defers by throwing `RagCleanupDeferredError` before it
-touches anything, the cleanup row stays, and the stalled-cleanup sweep retries it (every 10 minutes, five
-times); a lock lost before the `DROP DATABASE` keeps the database. The per-repository lock does not
+touches anything, the cleanup row stays, and the stalled-cleanup sweep retries it every 10 minutes; a deferral gives back the attempt it was counted
+as, so the sweep's five-attempt cap never gives up on a cleanup that only waited for a sync. Statements
+inside a transaction of the fenced store are fenced too; a lock lost before the `DROP DATABASE` keeps the database. The per-repository lock does not
 cover two repositories sharing one external store, so the claim of legacy rows with no repository
 (`repository_id IS NULL`) runs per file in one transaction under `pg_advisory_xact_lock` on the path.
 
