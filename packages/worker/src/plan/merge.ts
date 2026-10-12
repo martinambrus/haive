@@ -275,28 +275,39 @@ async function commitOf(worktreePath: string, spec: string): Promise<string | nu
   return res.code === 0 ? res.stdout.trim() : null;
 }
 
-/** Reopen an unlanded resolved merge at its conflicts, as git opens them, for the agent to resolve
- *  again under the new guidance; null when HEAD is not such a merge. Only the scratch worktree is
- *  written. Nothing of the previous answer is copied back: its paths, modes and directory/file
- *  choices are git's to restore, not a per-file copy's. */
-export async function reopenResolvedMerge(args: {
+/** The merge commit HEAD is, while it has not landed on the branch; null when HEAD is no such merge.
+ *  `head` is its first parent, which a reopened worktree stands on. */
+export async function unlandedResolvedMerge(args: {
   repoPath: string;
+  worktreePath: string;
+  branch: string;
+}): Promise<{ sha: string; head: string } | null> {
+  const { repoPath, worktreePath, branch } = args;
+  const sha = await commitOf(worktreePath, 'HEAD');
+  if (sha === null || (await commitOf(worktreePath, `${sha}^2`)) === null) return null;
+  const head = await commitOf(worktreePath, `${sha}^1`);
+  if (head === null) return null;
+  const landed = await gitRun(repoPath, [
+    'merge-base',
+    '--is-ancestor',
+    sha,
+    `refs/heads/${branch}`,
+  ]);
+  return landed.code === 1 ? { sha, head } : null;
+}
+
+/** Reopen the unlanded resolved merge `prior` at its conflicts, as git opens them, for the agent to
+ *  resolve again under the new guidance. Only the scratch worktree is written. Nothing of the previous
+ *  answer is copied back: its paths, modes and directory/file choices are git's to restore, not a
+ *  per-file copy's. */
+export async function reopenResolvedMerge(args: {
   worktreePath: string;
   branch: string;
   unrelated: boolean;
   gitEnv: Record<string, string>;
-}): Promise<PlanMergeAttempt | null> {
-  const { repoPath, worktreePath, branch } = args;
-  const prior = await commitOf(worktreePath, 'HEAD');
-  if (prior === null || (await commitOf(worktreePath, `${prior}^2`)) === null) return null;
-  const landed = await gitRun(repoPath, [
-    'merge-base',
-    '--is-ancestor',
-    prior,
-    `refs/heads/${branch}`,
-  ]);
-  if (landed.code !== 1) return null;
-
+  prior: string;
+}): Promise<PlanMergeAttempt> {
+  const { worktreePath, branch, prior } = args;
   const reset = await gitRun(worktreePath, ['reset', '--hard', `${prior}^1`]);
   if (reset.code !== 0) {
     throw new Error(`git reset (plan merge) failed: ${reset.stderr || reset.stdout}`);
