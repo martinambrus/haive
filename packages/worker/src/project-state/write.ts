@@ -393,7 +393,7 @@ export async function writeProjectStateRecord(
         const gone = await removeFileIfNoFollow(repoPath, path, () => true);
         const was = written.indexOf(path);
         if (was >= 0) written.splice(was, 1);
-        if (gone === 'removed' && !removed.includes(path)) removed.push(path);
+        if (gone !== 'kept' && !removed.includes(path)) removed.push(path);
       }
     };
     // A fenced write keeps the lock from its check to its last write, files included, so no sync
