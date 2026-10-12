@@ -1,25 +1,21 @@
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
-import type { CliProviderName, FormField, FormSchema } from '@haive/shared';
+import type { FormField, FormSchema } from '@haive/shared';
 import {
   CLI_RULES_DISK_PATH,
   CLI_RULES_END,
   CLI_RULES_START,
   extractRegion,
-  getCliProviderMetadata,
   normalizeContent,
   RTK_SETTINGS_PATHS,
 } from '@haive/shared';
-import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { RTK_BLOCK_FILES, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
-import type { Database } from '@haive/database';
 import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { commitRecorded, stageNamed, stagedChanges } from '../onboarding/_stage-paths.js';
 import {
   RULES_IMPORT_LINE,
   dropIgnoredRulesFiles,
@@ -45,33 +41,8 @@ const INIT_COMMIT_MESSAGE = [
   'template updates from the onboarding-upgrade workflow.',
 ].join('\n');
 
-const BASE_STAGE_PATHS = [
-  '.gitignore',
-  '.claude/agents/',
-  '.claude/skills/',
-  `${KB_DIR}/`,
-  `${LEARNINGS_DIR}/`,
-  '.claude/workflow/',
-  '.claude/mcp_settings.json',
-  '.claude/workflow-checkpoint.json',
-  '.claude/project-config.yaml',
-  '.haive/install.json',
-];
-
-async function resolveStagePaths(db: Database, userId: string): Promise<string[]> {
-  const providerRows = await db.query.cliProviders.findMany({
-    where: eq(schema.cliProviders.userId, userId),
-    columns: { name: true, enabled: true },
-  });
-  const extra = new Set<string>();
-  for (const row of providerRows) {
-    if (!row.enabled) continue;
-    const meta = getCliProviderMetadata(row.name as CliProviderName);
-    if (meta.projectAgentsDir) extra.add(`${meta.projectAgentsDir}/`);
-    if (meta.projectSkillsDir) extra.add(`${meta.projectSkillsDir}/`);
-  }
-  return [...BASE_STAGE_PATHS, ...Array.from(extra)];
-}
+// 02 writes install.json under a fixed name and does not report it; every other path is 02's record.
+const FIXED_STAGE_PATHS = ['.haive/install.json'];
 
 /** The paths 02 reports writing, as repository-relative ones. They come from a persisted step
  *  output — one written before the field existed has none — so each is validated again. */
@@ -317,7 +288,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     }
     const stagePaths = [
       ...new Set([
-        ...(await resolveStagePaths(ctx.db, ctx.userId)),
+        ...FIXED_STAGE_PATHS,
         ...appliedWrittenPaths(applied?.output),
         ...stubPaths,
         ...(agentsRules.verdict === 'stage' ? [CLI_RULES_DISK_PATH] : []),
@@ -344,10 +315,10 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       // dies with "fatal: not a git repository". Create the repo first, then stage the
       // WHOLE working tree: `git worktree add` checks out tracked files only, so a first
       // commit holding just the upgraded files would hand every later workflow task an
-      // empty project. The .gitignore onboarding wrote is already on disk, so `add -A`
-      // honours it. requireUsableGit rather than detect.hasGit: it throws on a `.git` git
-      // refuses (corruption gets reported, never initialized over) and it re-reads state
-      // detect may have missed, e.g. a Terminal-tab `git init`.
+      // empty project. A .gitignore already on disk is honoured by `add -A`.
+      // requireUsableGit rather than detect.hasGit: it throws on a `.git` git refuses
+      // (corruption gets reported, never initialized over) and it re-reads state detect
+      // may have missed, e.g. a Terminal-tab `git init`.
       let didInit = false;
       if (!(await requireUsableGit(ctx.repoPath))) {
         const initBranch =
@@ -370,33 +341,6 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
         ]),
       );
       warnings.push(...ignored);
-      // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via
-      // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
-      // aborts the whole stage. Same fix as 12-post-onboarding.
-      if (toStage.length > 0) {
-        await gitExec(['add', '-f', '--', ...toStage], {
-          cwd: ctx.repoPath,
-          maxBuffer: GIT_MAX_BUFFER,
-        });
-      }
-      if (removedPaths.length > 0) {
-        await gitExec(['rm', '--cached', '--ignore-unmatch', '-q', '--', ...removedPaths], {
-          cwd: ctx.repoPath,
-          maxBuffer: GIT_MAX_BUFFER,
-        });
-      }
-      const { stdout: stagedOut } = await gitExec(['diff', '--cached', '--name-only', '-z'], {
-        cwd: ctx.repoPath,
-        maxBuffer: GIT_MAX_BUFFER,
-      });
-      const staged = stagedOut.split('\0').filter((s) => s.length > 0);
-      stagedPaths.push(...staged);
-
-      if (staged.length === 0) {
-        warnings.push('no changes to commit (files already committed or identical)');
-        return { commitPerformed, commitSha, stagedPaths, warnings };
-      }
-
       const message =
         typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
           ? values.commitMessage
@@ -405,11 +349,31 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
             : DEFAULT_COMMIT_MESSAGE;
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
-      await gitExec(['commit', '-m', message], {
-        cwd: ctx.repoPath,
-        env: { ...process.env, ...identity },
-        maxBuffer: GIT_MAX_BUFFER,
-      });
+      const commitEnv = { ...process.env, ...identity };
+      let staged: string[];
+      if (didInit) {
+        // The first commit of a new repository holds the whole index on purpose.
+        await stageNamed(ctx.repoPath, toStage, removedPaths);
+        staged = await stagedChanges(ctx.repoPath);
+        if (staged.length > 0) {
+          await gitExec(['commit', '-m', message], {
+            cwd: ctx.repoPath,
+            env: commitEnv,
+            maxBuffer: GIT_MAX_BUFFER,
+          });
+        }
+      } else {
+        // Any other commit is built in a private index, so what the person staged stays theirs.
+        const plan = { add: toStage, remove: removedPaths };
+        staged = await commitRecorded(ctx.repoPath, plan, message, commitEnv, warnings);
+      }
+      stagedPaths.push(...staged);
+
+      if (staged.length === 0) {
+        warnings.push('no changes to commit (files already committed or identical)');
+        return { commitPerformed, commitSha, stagedPaths, warnings };
+      }
+
       const { stdout } = await gitExec(['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;

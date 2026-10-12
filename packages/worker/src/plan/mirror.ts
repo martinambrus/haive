@@ -30,11 +30,18 @@ import {
  *     Hence both, from one source.
  */
 
-/** Write both mirror files. Returns the repo-relative paths written. */
+export interface PlanMirrorChanges {
+  written: string[];
+  removed: string[];
+}
+
+/** Write both mirror files. Returns the repo-relative paths written; `changes`, when given,
+ *  also collects what was written or removed up to a throw. */
 export async function writePlanMirror(
   db: Database,
   repositoryId: string,
   repoPath: string,
+  changes?: PlanMirrorChanges,
 ): Promise<string[]> {
   try {
     return await db.transaction(async (tx) => {
@@ -42,7 +49,7 @@ export async function writePlanMirror(
       // repository across worker processes so an older render can never rename
       // over a newer one after the newer writer already marked itself current.
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
-      return writePlanMirrorLocked(tx, repositoryId, repoPath);
+      return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
     });
   } catch (err) {
     await recordPlanMirrorError(db, repositoryId, err).catch(() => undefined);
@@ -56,6 +63,7 @@ async function writePlanMirrorLocked(
   db: PlanMirrorTx,
   repositoryId: string,
   repoPath: string,
+  changes?: PlanMirrorChanges,
 ): Promise<string[]> {
   let [state] = await db
     .select()
@@ -97,11 +105,15 @@ async function writePlanMirrorLocked(
   ]);
 
   if (nodes.length === 0) {
-    await Promise.all(
-      [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown].map((rel) =>
-        removeNoFollow(repoPath, rel),
-      ),
+    // Both settle before a failure propagates, so a removal that landed is always reported.
+    const removals = await Promise.allSettled(
+      [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown].map(async (rel) => {
+        await removeNoFollow(repoPath, rel);
+        changes?.removed.push(rel);
+      }),
     );
+    const refused = removals.find((r) => r.status === 'rejected');
+    if (refused) throw refused.reason;
     await db
       .update(schema.planMirrorState)
       .set({
@@ -159,6 +171,7 @@ async function writePlanMirrorLocked(
     // still sees either the old bytes or the new ones, never a half-written mirror.
     await writeFileNoFollow(repoPath, rel, content, { createParents: true });
     written.push(rel);
+    changes?.written.push(rel);
   };
 
   await write(HAIVE_DATA_FILES.plan, `${JSON.stringify(mirror, null, 2)}\n`);

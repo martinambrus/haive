@@ -108,6 +108,10 @@ interface KnowledgeApply {
   unknownPaths?: string[];
   /** `legacy/` imports deleted because an update folded their content into a newer page. */
   mergedRemoved?: string[];
+  /** Repo-relative paths of the pages this step took out of the knowledge base: the sources of
+   *  re-placed, improved and re-routed pages. 12 stages each removal from this record. Optional:
+   *  outputs written before this existed must parse. */
+  removedPaths?: string[];
   /** Markdown files under `KB_DIR` once this step finished. `07_5-verify-files` used to
    *  count them one step before they existed, so it failed on every run ever recorded. */
   kbFileCount: number;
@@ -2109,6 +2113,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     const unknownPaths: string[] = [];
     /** Legacy pages deleted because an update folded their content into a newer page. */
     const mergedRemoved: string[] = [];
+    const removedPaths: string[] = [];
     for (const u of updates) {
       const src = existingByPath.get(existingKbKey(u.path));
       if (!src) {
@@ -2132,8 +2137,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           }),
           { createParents: true },
         );
+        // Recorded as soon as it is on disk: a deletion below that throws must not leave it unstaged.
+        written.push({ id: src.relPath, filePath: destPath, source: 'updated' });
         if (dest !== src.relPath) {
           await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
+          removedPaths.push(`${KB_DIR}/${src.relPath}`);
         }
         // The legacy copies this page absorbed. Removed only AFTER the merged page is on
         // disk, so a failed write leaves the original where it is rather than deleting the
@@ -2157,7 +2165,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           await removeNoFollow(ctx.repoPath, `${KB_DIR}/${safe.normalized}`);
           mergedRemoved.push(safe.normalized);
         }
-        written.push({ id: src.relPath, filePath: destPath, source: 'updated' });
       } catch (err) {
         ctx.logger.warn({ err, path: u.path, dest }, 'kb update write failed');
       }
@@ -2220,6 +2227,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             );
             if (promo && !promo.deduped) {
               await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
+              removedPaths.push(`${KB_DIR}/${src.relPath}`);
               globalPromoted += 1;
               written.push({
                 id: src.relPath,
@@ -2264,8 +2272,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         await writeFileNoFollow(ctx.repoPath, `${KB_DIR}/${dest}`, content, {
           createParents: true,
         });
-        await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
         written.push({ id: src.relPath, filePath: destPath, source: 'existing' });
+        await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
+        removedPaths.push(`${KB_DIR}/${src.relPath}`);
       } catch (err) {
         ctx.logger.warn({ err, path: p.path, dest }, 'kb placement move failed');
       }
@@ -2495,6 +2504,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       kbFileCount: finalFiles.length,
       ...(unknownPaths.length > 0 ? { unknownPaths } : {}),
       ...(mergedRemoved.length > 0 ? { mergedRemoved } : {}),
+      ...(removedPaths.length > 0 ? { removedPaths } : {}),
     };
   },
 };

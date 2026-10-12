@@ -59,7 +59,7 @@ claude-family CLI never loads AGENTS.md, rules block included, and nothing else 
 whose only gap is a missing import still gets the upgrade banner. A rules file linked anywhere but
 AGENTS.md is reported apart (`linkedRulesFiles`) and never offers an upgrade, since the restore
 refuses to write through a link, and a repository root the api cannot read claims nothing.
-`03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) beside its base list,
+`03-upgrade-commit` stages the paths 02 reports writing (`writtenPaths`) beside `.haive/install.json`,
 because a workflow task checks out HEAD: a refreshed block left uncommitted never reaches one. It
 also stages each stub 02 left holding the import whose HEAD copy lacks the line
 (`headLacksImport`), and a `CLAUDE.md -> AGENTS.md` link 02 left alone. It stages AGENTS.md itself when
@@ -85,6 +85,48 @@ rules file that is not UTF-8) is never staged by 12's own `git add`, though its 
 an output from before that field stages as before. A repository 12 had to `git init` is the
 exception: its first commit takes the whole working tree on purpose, the person's files included,
 since a worktree checks out tracked files only.
+
+**Both commit steps stage by name, from records, and commit only what they staged.** Neither names
+a directory: `git add -f` of `.claude/skills/` or `.haive-data/` also took a person's untracked or
+git-ignored file beside Haive's. 12 stages (`collectOnboardingStagePaths`,
+`steps/onboarding/_stage-paths.ts`) what this task's own step outputs record: 07's `wroteFiles`, its
+live artifact rows and `quarantinedAgentFiles`; 08's `written`, `removedPaths` and
+`mergedRemoved`, plus the KB `INDEX.md` it rewrites; 09_3's `kbWritten`; 09_5's `written` for each
+`mirroredDirs` entry (SKILL.md, the `subSkillSlugs`, the dir's README) and 09_5b's repairs, whose
+removals come from git (every file HEAD tracks under a repaired skill's directory that is gone from
+disk, since the repair clears the whole directory); and the
+files 12 writes itself (the `.haive-data` mirror, the project state, `.haive/install.json`), kept
+even when a write threw after some of the files landed. The plan mirror reports what it wrote and
+removed through an accumulator (`writePlanMirror`'s `changes`), also on a throw, so a plan file the
+refresh never reached (a symlink it refused) is not staged, and a mirror that failed before it knew
+the plan was empty removes nothing. A
+quarantine target under `<agents>-legacy/` is staged only when its source is in HEAD, together with
+the source's deletion: an agent git never tracked is the person's file, and its move is theirs to
+commit. A removal is staged with `git rm --cached --ignore-unmatch` from a record, and only while the
+path is still absent from disk, never with `add -u <dir>`. The legacy knowledge
+move (`.claude/knowledge_base` and `.claude/learnings` into `.haive-data/`, done by 08's `detect`) has
+no record, so a Retry of 08 cannot lose it: 12 reads it from git and the disk. A file tracked in HEAD
+under a legacy directory and gone from disk has its deletion staged, and so is the file now at
+`legacy/<rel>` and `<rel>` under the destination (`LEGACY_KNOWLEDGE_MIGRATIONS`), whichever exist: the
+migration moves to `<rel>` whenever that slot was free, whatever sits at `legacy/<rel>`. A legacy file git
+never tracked is the person's, so its destination is not staged, as with 07's quarantine. A file an
+agent writes without reporting it stays uncommitted. The commit is built in a private index, not
+with `git commit --only` (which re-reads the named paths from the worktree) and not from the real
+index (another writer, the plan-mirror save or a Terminal `git add`, can stage a newer blob there
+between our own steps). `commitRecorded` (`_stage-paths.ts`) reads `HEAD` into a private
+`GIT_INDEX_FILE`, runs `git add -f` for the recorded files and links and `git rm --cached` for the
+removals against it, takes the names that differ from `HEAD` there, and commits them with
+`write-tree`, `commit-tree` and a compare-and-swap `update-ref HEAD`. It then sets exactly those
+names in the real index to their entries in the CURRENT `HEAD` (`update-index --cacheinfo`), so the
+index agrees with the newest commit even when another writer committed on top in between; a `HEAD`
+moved to something that does not contain the commit is left alone, and a `HEAD` that moves during
+the sync is retried. Every other real-index entry,
+a file the person staged included, is neither committed nor unstaged (a blob they staged at one of
+those very names is not committed and is reset to `HEAD`). A pathspec is `:(literal)`
+and the changed list is read with `--no-renames`, since a detected rename would name only the new
+path and leave the deletion out. A merge or cherry-pick in progress is refused, which fails the
+step loudly, as `--only` did. The first commit of a
+repository 12 or 03 had to `git init` is the one exception, as above.
 
 **The cli-rules row records the region on disk, not the render.** 07 leaves an existing region
 alone unless its overwrite flag is on, so `12-post-onboarding` reads the region back and records
