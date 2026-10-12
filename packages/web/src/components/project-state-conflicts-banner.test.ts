@@ -72,9 +72,9 @@ describe('ProjectStateConflictsView', () => {
     const c = conflict();
     const html = view({
       conflicts: [c],
-      messages: { [c.id]: { tone: 'error', text: 'An upgrade is using this repository.' } },
+      messages: { [c.id]: { tone: 'error', text: 'An upgrade is using `this repository`.' } },
     });
-    expect(html).toContain('An upgrade is using this repository.');
+    expect(html).toContain('An upgrade is using <code>this repository</code>.');
   });
 
   it('keeps showing a notice after the last conflict is answered', () => {

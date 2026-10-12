@@ -60,10 +60,10 @@ export function ProjectStateConflictsView({
             {conflicts.length === 1 ? 'Question' : `${conflicts.length} questions`} about the
             project record
           </Badge>
-          <span className="text-neutral-300">
-            This install and another one changed the same setting differently. Upgrades and
-            rollbacks are held until every question is answered.
-          </span>
+          <InlineMarkdown
+            className="text-neutral-300"
+            body="This install and another one changed the same setting differently. Upgrades and rollbacks are held until every question is answered."
+          />
         </div>
       )}
       {notice && <InlineMarkdown body={notice} className="text-xs text-emerald-400" />}
@@ -82,13 +82,12 @@ export function ProjectStateConflictsView({
               <Side title="Before either changed it" markdown={conflictSideMarkdown(c.base)} />
             </div>
             {message && (
-              <p
+              <InlineMarkdown
                 className={
                   message.tone === 'error' ? 'text-xs text-red-400' : 'text-xs text-amber-200'
                 }
-              >
-                {message.text}
-              </p>
+                body={message.text}
+              />
             )}
             <div className="flex flex-wrap gap-2">
               <Button
@@ -135,20 +134,23 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const alive = useRef(true);
   const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const load = useCallback(async (): Promise<ProjectStateConflictBody[] | null> => {
-    try {
-      const res = await api.get<{ conflicts: ProjectStateConflictBody[] }>(
-        `/repos/${repositoryId}/project-state/conflicts`,
-      );
-      if (!alive.current) return null;
-      setConflicts(res.conflicts);
-      setLoadError(null);
-      return res.conflicts;
-    } catch (err) {
-      if (alive.current) setLoadError((err as Error).message ?? 'Failed to check');
-      return null;
-    }
-  }, [repositoryId]);
+  const load = useCallback(
+    async (quiet = false): Promise<ProjectStateConflictBody[] | null> => {
+      try {
+        const res = await api.get<{ conflicts: ProjectStateConflictBody[] }>(
+          `/repos/${repositoryId}/project-state/conflicts`,
+        );
+        if (!alive.current) return null;
+        setConflicts(res.conflicts);
+        setLoadError(null);
+        return res.conflicts;
+      } catch (err) {
+        if (alive.current && !quiet) setLoadError((err as Error).message ?? 'Failed to check');
+        return null;
+      }
+    },
+    [repositoryId],
+  );
 
   const setPending = useCallback((ids: string[]) => {
     pendingRef.current = ids;
@@ -157,9 +159,10 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
 
   const pollPending = useCallback(async () => {
     refetchTimer.current = null;
-    const listed = await load();
-    if (!alive.current || listed === null) return;
-    const remaining = stillListed(pendingRef.current, listed);
+    const listed = await load(true);
+    if (!alive.current) return;
+    const remaining =
+      listed === null ? pendingRef.current : stillListed(pendingRef.current, listed);
     const done = pendingRef.current.filter((id) => !remaining.includes(id));
     if (done.length > 0) {
       setAnswered((prev) => [...prev, ...done.map((id) => pendingAnswers.current[id]!)]);
@@ -216,7 +219,12 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   }
 
   if (loadError) {
-    return <div className="text-xs text-red-400">Project record check: {loadError}</div>;
+    return (
+      <InlineMarkdown
+        className="text-xs text-red-400"
+        body={`Project record check: ${loadError}`}
+      />
+    );
   }
 
   const confirmation = confirming
