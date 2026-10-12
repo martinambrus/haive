@@ -161,6 +161,7 @@ async function setup() {
   const hook = {
     onLock: null as ((key: string) => void) | null,
     onCommit: null as (() => Promise<void>) | null,
+    failNextSelect: false,
   };
   fake.hooks.beforeLock = (key) => {
     firstWrite();
@@ -200,6 +201,10 @@ async function setup() {
         }
         if (prop === 'select') {
           return (...args: Parameters<FakeDbHandle['select']>) => {
+            if (hook.failNextSelect) {
+              hook.failNextSelect = false;
+              throw new Error('read refused');
+            }
             events.push('select');
             return (value as FakeDbHandle['select'])(...args);
           };
@@ -669,6 +674,17 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
     expect(json(baseSnapshot)).toEqual(json(normalizeProjectState(recordOf(withIds(base)))));
     expect(json(s.columnOf(REPO))).toEqual(json({ ...context(), rtkChoiceRecorded: true }));
     expect(s.fake.rows(schema.projectStateConflicts)).toHaveLength(1);
+  });
+
+  it('keeps the column when only the first look at the pending rows fails', async () => {
+    const s = await setup();
+    s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
+    s.hook.failNextSelect = true;
+
+    await s.write(context(), true);
+
+    expect(json(s.columnOf(REPO))).toEqual(json({ ...context(), rtkChoiceRecorded: true }));
+    expect(s.onDisk().render).toBe(expectedFiles(withIds(incoming)).render);
   });
 
   it('carries a teammate’s null as a value, not as an absent key', async () => {

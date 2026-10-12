@@ -157,7 +157,10 @@ export async function writeProjectStateRecord(
         render: overlayRender(portable, pending, 'base'),
       }),
     });
-    let seen = expectedColumns ? [] : await loadPendingRenderConflicts(db, repositoryId);
+    // A first look only: the locked read below is the one that counts, so its failure must not clear the column.
+    let seen = expectedColumns
+      ? []
+      : await loadPendingRenderConflicts(db, repositoryId).catch((): PendingRenderConflict[] => []);
     let plan = planFor(seen);
     const writeFiles = async (): Promise<void> => {
       for (const [rel, text] of renderProjectState(plan.record)) {
