@@ -3372,6 +3372,17 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
       ),
     );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
+  // Before the kill and the listing: a run still queued reads this right before it creates its sandbox.
+  await db
+    .update(schema.cliInvocations)
+    .set({ supersededAt: new Date() })
+    .where(
+      and(
+        eq(schema.cliInvocations.taskId, payload.taskId),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
   // The cleanup above swallows docker failures, so the claims and the finish record wait for a
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.

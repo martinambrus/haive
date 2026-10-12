@@ -144,6 +144,13 @@ async function main(): Promise<void> {
       })),
     );
 
+    // A fixer still queued: it has no container yet, so only its row can stop it starting later.
+    const [queuedRun] = await db
+      .insert(schema.cliInvocations)
+      .values({ taskId: task.id, taskStepId: steps[0]!.id, mode: 'cli', prompt: 'smoke' })
+      .returning({ id: schema.cliInvocations.id });
+    if (!queuedRun) throw new Error('cli invocation insert failed');
+
     state.worker = startTaskWorker();
     state.queue = new Queue<TaskJobPayload>(QUEUE_NAMES.TASK, {
       connection: getBullRedis(),
@@ -243,6 +250,13 @@ async function main(): Promise<void> {
       throw new Error(`expected the cancelled task's claim released, got ${mine.length}`);
     if (theirs.length !== 1)
       throw new Error(`expected the bystander's claim kept, got ${theirs.length}`);
+    const [run] = await db
+      .select({ supersededAt: schema.cliInvocations.supersededAt })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.id, queuedRun.id));
+    if (run?.supersededAt == null) {
+      throw new Error('expected the queued run superseded, so it cannot start after the release');
+    }
 
     // A cancel whose containers cannot be confirmed gone keeps the claim and records no finish,
     // so a fixer that may still be writing the dir does not lose it to another task. A `docker`

@@ -28,7 +28,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   same step's again on a re-entry, a Retry or a base-sync round, and the same task's from an earlier
   step. Another task's claim halts the step, naming that task, without touching its merge; the Retry
   asks again. It is released only by the owning pass, in the section that removes the base worktree
-  and records `done`; by `handleCancelTask` once a docker listing shows no cli sandbox of the task left
+  and records `done`; by `handleCancelTask` once a docker listing shows no cli sandbox of the task left (the cancel
+  first marks every unended run of the task superseded, so one still queued refuses to create its
+  sandbox after the listing)
   (`releaseTaskMergeClaims`, each claim deleted under its dir's lock, so a section the old pass is
   inside finishes first), since the cancel commits before the fixer it ran is stopped; a listing that
   fails, times out or still shows one keeps the claims, skips the dir-touching teardown and the
