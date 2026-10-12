@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  answerAndConfirm,
   answerConfirmation,
   conflictKeyLabel,
   conflictSideMarkdown,
@@ -130,5 +131,47 @@ describe('landedAnswer', () => {
     expect(landedAnswer('take_theirs')).toBe('take_theirs');
     expect(landedAnswer('converged')).toBeNull();
     expect(landedAnswer(null)).toBeNull();
+  });
+});
+
+describe('answerAndConfirm', () => {
+  const failingPost = async () => {
+    throw new Error('Network error');
+  };
+  const rowWith = (resolution: string | null) => async () =>
+    ({ conflict: { resolution } }) as never;
+
+  it('counts an answer the row was closed with although its response was lost', async () => {
+    const out = await answerAndConfirm(failingPost, rowWith('keep_mine'), REPO, ROW, 'keep_mine');
+    expect(out).toEqual({ outcome: { kind: 'resolved' }, confirmed: true });
+  });
+
+  it('keeps the error when the row is still open or closed another way', async () => {
+    const open = await answerAndConfirm(failingPost, rowWith(null), REPO, ROW, 'keep_mine');
+    expect(open.outcome.kind).toBe('error');
+    const converged = await answerAndConfirm(
+      failingPost,
+      rowWith('converged'),
+      REPO,
+      ROW,
+      'keep_mine',
+    );
+    expect(converged.outcome.kind).toBe('error');
+  });
+
+  it('says it could not confirm when the lookup fails too', async () => {
+    const lost = async () => {
+      throw new Error('Network error');
+    };
+    const out = await answerAndConfirm(failingPost, lost, REPO, ROW, 'take_theirs');
+    expect(out).toMatchObject({ outcome: { kind: 'error' }, confirmed: false });
+  });
+
+  it('does not look the row up after an answer that came back', async () => {
+    const get = vi.fn();
+    const post = async () => ({ pending: true, message: 'later' }) as never;
+    const out = await answerAndConfirm(post, get, REPO, ROW, 'keep_mine');
+    expect(out.outcome.kind).toBe('pending');
+    expect(get).not.toHaveBeenCalled();
   });
 });

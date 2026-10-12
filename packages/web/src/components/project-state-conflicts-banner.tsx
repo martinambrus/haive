@@ -16,7 +16,7 @@ import {
   conflictKeyLabel,
   conflictSideMarkdown,
   stillListed,
-  submitConflictAnswer,
+  answerAndConfirm,
   type ProjectStateAnswer,
   type ProjectStateConflictBody,
 } from '@/lib/project-state-conflicts';
@@ -225,7 +225,13 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     if (!confirming || busyId) return;
     const { conflict, answer } = confirming;
     setBusyId(conflict.id);
-    const out = await submitConflictAnswer(api.post, repositoryId, conflict.id, answer);
+    const { outcome: out, confirmed } = await answerAndConfirm(
+      api.post,
+      api.get,
+      repositoryId,
+      conflict.id,
+      answer,
+    );
     if (!alive.current) return;
     setBusyId(null);
     setConfirming(null);
@@ -245,7 +251,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
         pollLoop.current = true;
         refetchTimer.current = setTimeout(() => void pollPending(), PENDING_REFETCH_MS);
       }
-    } else {
+    } else if (confirmed) {
       await load();
     }
   }

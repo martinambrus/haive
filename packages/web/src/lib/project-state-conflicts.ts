@@ -94,3 +94,27 @@ export async function submitConflictAnswer(
     return { kind: 'error', message: (err as Error).message || 'Could not send the answer.' };
   }
 }
+
+/** Sends the answer; when the reply is an error, asks the row itself, since the answer may have
+ *  landed with its response lost. `confirmed` is false when that lookup failed too. */
+export async function answerAndConfirm(
+  post: <T>(path: string, body?: unknown) => Promise<T>,
+  get: <T>(path: string) => Promise<T>,
+  repositoryId: string,
+  conflictId: string,
+  answer: ProjectStateAnswer,
+): Promise<{ outcome: ConflictAnswerOutcome; confirmed: boolean }> {
+  const outcome = await submitConflictAnswer(post, repositoryId, conflictId, answer);
+  if (outcome.kind !== 'error') return { outcome, confirmed: true };
+  try {
+    const row = await get<{ conflict: ProjectStateConflictBody }>(
+      `/repos/${repositoryId}/project-state/conflicts/${conflictId}`,
+    );
+    if (landedAnswer(row.conflict.resolution) === answer) {
+      return { outcome: { kind: 'resolved' }, confirmed: true };
+    }
+    return { outcome, confirmed: true };
+  } catch {
+    return { outcome, confirmed: false };
+  }
+}
