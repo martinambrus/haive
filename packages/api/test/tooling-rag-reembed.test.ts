@@ -475,6 +475,18 @@ describe('a RAG embed action while a sync of the repository runs', () => {
     expect(h.statements).toEqual([]);
   });
 
+  it('answers 503 and writes nothing when Redis does not answer the lock command', async () => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag', true, true);
+    const before = structuredClone(fake.rows(schema.repositories));
+    fakeLock.state.stalled = true;
+
+    const res = await patch({ ragEmbedAction: 'retry' });
+
+    expect(res.status).toBe(503);
+    expect(fake.rows(schema.repositories)).toEqual(before);
+    expect(h.statements).toEqual([]);
+  }, 3_000);
+
   it('holds the lock across the work and releases it after success', async () => {
     setup('postgres://rag:rag@127.0.0.1:1/rag');
     h.batches = [500, 0];

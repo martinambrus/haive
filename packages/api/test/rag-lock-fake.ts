@@ -20,6 +20,7 @@ export function createFakeRagLock(actual: typeof RagModule) {
     handles: [] as FakeLockHandle[],
     timeoutNow: false,
     redisDown: false,
+    stalled: false,
   };
   const take = (repositoryId: string): FakeLockHandle => {
     state.held.add(repositoryId);
@@ -42,6 +43,7 @@ export function createFakeRagLock(actual: typeof RagModule) {
       state.handles.length = 0;
       state.timeoutNow = false;
       state.redisDown = false;
+      state.stalled = false;
     },
     acquireRagSyncLock: async (
       _redis: unknown,
@@ -63,6 +65,12 @@ export function createFakeRagLock(actual: typeof RagModule) {
     ): Promise<FakeLockHandle | null> => {
       state.tried.push({ repositoryId, options: undefined });
       if (state.redisDown) throw new Error('connect ECONNREFUSED');
+      if (state.stalled) {
+        const never = () => new Promise<never>(() => undefined);
+        return actual.tryAcquireRagSyncLock({ set: never, eval: never } as never, repositoryId, {
+          commandTimeoutMs: 50,
+        }) as Promise<FakeLockHandle | null>;
+      }
       return state.held.has(repositoryId) ? null : take(repositoryId);
     },
   };

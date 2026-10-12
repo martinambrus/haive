@@ -8,6 +8,8 @@ const log = logger.child({ module: 'rag-sync-lock' });
 const LOCK_TTL_MS = 120_000;
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
+/** The shared Redis clients queue commands forever while Redis is stalled; no lock command waits longer. */
+const COMMAND_TIMEOUT_MS = 5_000;
 
 const REFRESH_SCRIPT = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -38,6 +40,13 @@ export class RagSyncLockTimeoutError extends Error {
   }
 }
 
+export class RagSyncLockCommandTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`the RAG sync lock store did not answer within ${Math.round(timeoutMs / 1000)}s`);
+    this.name = 'RagSyncLockCommandTimeoutError';
+  }
+}
+
 export interface RagSyncLock {
   /** True once a heartbeat found the key gone or owned by another holder. */
   readonly lost: boolean;
@@ -48,6 +57,7 @@ export interface RagSyncLock {
 export interface RagSyncLockTuning {
   ttlMs?: number;
   heartbeatMs?: number;
+  commandTimeoutMs?: number;
 }
 
 export interface AcquireRagSyncLockOptions extends RagSyncLockTuning {
@@ -62,20 +72,51 @@ export function ragSyncLockKey(repositoryId: string): string {
   return `haive:rag-sync:${repositoryId}`;
 }
 
+function bounded<T>(op: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finish(() => reject(new RagSyncLockCommandTimeoutError(timeoutMs)));
+    }, timeoutMs);
+    const onAbort = (): void => finish(() => reject(new RagSyncLockAbortedError()));
+    function finish(settle: () => void): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      settle();
+    }
+    op.then(
+      (value) => finish(() => resolve(value)),
+      (err: unknown) => finish(() => reject(err)),
+    );
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function attempt(
   redis: Redis,
   repositoryId: string,
   tuning: RagSyncLockTuning,
+  signal?: AbortSignal,
 ): Promise<RagSyncLock | null> {
   const key = ragSyncLockKey(repositoryId);
   const token = randomUUID();
   const ttlMs = tuning.ttlMs ?? LOCK_TTL_MS;
-  if ((await redis.set(key, token, 'PX', ttlMs, 'NX')) !== 'OK') return null;
+  const commandTimeoutMs = tuning.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
+  const taking = redis.set(key, token, 'PX', ttlMs, 'NX');
+  let taken: string | null;
+  try {
+    taken = await bounded(taking, commandTimeoutMs, signal);
+  } catch (err) {
+    void taking
+      .then((late) => (late === 'OK' ? redis.eval(RELEASE_SCRIPT, 1, key, token) : null))
+      .catch(() => undefined);
+    throw err;
+  }
+  if (taken !== 'OK') return null;
   let lost = false;
   let released = false;
   const beat = setInterval(() => {
-    redis
-      .eval(REFRESH_SCRIPT, 1, key, token, ttlMs)
+    bounded(redis.eval(REFRESH_SCRIPT, 1, key, token, ttlMs), commandTimeoutMs)
       .then((kept) => {
         if (kept === 1 || lost) return;
         lost = true;
@@ -95,14 +136,17 @@ async function attempt(
       if (released) return;
       released = true;
       clearInterval(beat);
-      await redis.eval(RELEASE_SCRIPT, 1, key, token).catch((err: unknown) => {
-        log.warn({ err, repositoryId }, 'RAG sync lock release failed; its expiry will clear it');
-      });
+      await bounded(redis.eval(RELEASE_SCRIPT, 1, key, token), commandTimeoutMs).catch(
+        (err: unknown) => {
+          log.warn({ err, repositoryId }, 'RAG sync lock release failed; its expiry will clear it');
+        },
+      );
     },
   };
 }
 
-/** The lock if no other holder has it right now, else null. Throws when Redis is unreachable. */
+/** The lock if no other holder has it right now, else null. Throws when Redis is unreachable or
+ *  does not answer within the command timeout. */
 export function tryAcquireRagSyncLock(
   redis: Redis,
   repositoryId: string,
@@ -111,8 +155,9 @@ export function tryAcquireRagSyncLock(
   return attempt(redis, repositoryId, tuning);
 }
 
-/** Waits for the current holder, polling. Throws RagSyncLockAbortedError when `signal` fires and
- *  RagSyncLockTimeoutError after `waitMs`. The caller MUST release the lock in a finally. */
+/** Waits for the current holder, polling; an attempt Redis does not answer counts as not acquired.
+ *  Throws RagSyncLockAbortedError when `signal` fires and RagSyncLockTimeoutError after `waitMs`.
+ *  The caller MUST release the lock in a finally. */
 export async function acquireRagSyncLock(
   redis: Redis,
   repositoryId: string,
@@ -123,7 +168,13 @@ export async function acquireRagSyncLock(
   const startedAt = Date.now();
   for (;;) {
     if (signal?.aborted) throw new RagSyncLockAbortedError();
-    const got = await attempt(redis, repositoryId, options);
+    let got: RagSyncLock | null = null;
+    try {
+      got = await attempt(redis, repositoryId, options, signal);
+    } catch (err) {
+      if (!(err instanceof RagSyncLockCommandTimeoutError)) throw err;
+      log.warn({ err, repositoryId }, 'RAG sync lock attempt got no answer; retrying');
+    }
     if (got) return got;
     if (Date.now() - startedAt >= waitMs) throw new RagSyncLockTimeoutError(waitMs);
     onWait?.();
