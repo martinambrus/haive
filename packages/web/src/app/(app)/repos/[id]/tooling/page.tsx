@@ -937,7 +937,7 @@ export default function RepoToolingPage() {
                     className="flex items-start justify-between gap-3 rounded border border-neutral-800 bg-neutral-950 p-3"
                   >
                     <div className="min-w-0">
-                      <p className="text-sm text-neutral-200">{g.guidance}</p>
+                      <InlineMarkdown body={g.guidance} className="text-sm text-neutral-200" />
                       <p className="mt-1 text-xs text-neutral-500">
                         {g.stepId} ·{' '}
                         {g.scope === 'global' ? 'every repo on this stack' : 'this repo'} ·{' '}
