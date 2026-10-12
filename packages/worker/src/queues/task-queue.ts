@@ -77,7 +77,6 @@ import {
 } from '../step-engine/steps/workflow/_app-runtime.js';
 import { computeFoldContribution } from '@haive/shared/timing';
 import type { StepDefinition } from '../step-engine/step-definition.js';
-import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
 import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
@@ -99,13 +98,14 @@ import {
 } from '../repo/scratch-workspace.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { splitRepoStoragePath } from '../repo/worktree-paths.js';
-import { getTaskEnvTemplate, pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
+import { pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { discardPlanMerge } from '../step-engine/steps/plan/01-plan-merge.js';
 import {
   RagCleanupDeferredError,
   cleanupRagForRepository,
 } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
+import { buildRunList, runListStrategyFor, type ResolvedTaskContext } from './run-list.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
@@ -182,116 +182,6 @@ interface HeldTask {
   claimed?: boolean;
 }
 
-interface ResolvedTaskContext {
-  taskId: string;
-  userId: string;
-  workflowType: WorkflowType;
-  repoPath: string;
-  workspacePath: string;
-  cliProviderId: string | null;
-  ignoreSavedStepClis: boolean;
-  /** Execution path recorded by 00-triage; null pre-triage and on legacy rows. */
-  executionPath: ExecutionPath | null;
-  metadata: Record<string, unknown> | null;
-  /** Current orchestration generation; advance-step jobs from an older epoch are
-   *  skipped as stale (see handleAdvanceStep). */
-  orchestrationEpoch: number;
-  /** The step the orchestrator considers current. Every legitimate advance targets it:
-   *  the forward walk and every loop-back/revise path call markTaskRunningWithStep before
-   *  enqueueing, and the api step actions repoint it (and bump the epoch) in the same
-   *  transaction. An advance for a different step at the SAME epoch is therefore a second
-   *  orchestration loop for one task. Null on a task that has not advanced yet. */
-  currentStepId: string | null;
-  currentRound: number;
-  /** Task status as of job pickup. A `cancelled`/`completed` task must never be advanced —
-   *  cancel leaves its already-queued advance jobs in place, so this is what stops them. */
-  status: string;
-  /** When the task last ended: on a failed task, when it failed. */
-  completedAt: Date | null;
-}
-
-async function buildRunList(ctx: ResolvedTaskContext, db: Database): Promise<StepDefinition[]> {
-  // run_app assembles its own mode-aware list from steps reused BY ID (there is no
-  // full registered list for the type — only the 99-run-app-ready gate is native).
-  if (ctx.workflowType === 'run_app') return buildRunAppRunList(ctx, db);
-  const main = stepRegistry.listByWorkflow(ctx.workflowType);
-  // Only implementation-workflow tasks branch by execution path; onboarding,
-  // onboarding_upgrade, kb_author, etc. run their full registered list unchanged.
-  if (ctx.workflowType !== 'workflow') return main;
-  const prelude = stepRegistry.listByWorkflow('env_replicate');
-  // The model-health canary runs first (a dead model fails loudly before any path is
-  // chosen — the path is moot when no model can run it), then 00-triage, both ahead of
-  // the env-replicate prelude so the path is chosen up front; execution_path (null
-  // pre-triage / on legacy rows) then trims the workflow steps to the chosen path. The
-  // ordering + filtering is a pure helper in orchestrator/execution-paths.ts so it can
-  // be unit-tested. Safe with the forward walk because every path set contains the
-  // canary + triage + the spine, so the just-finished step is always present in the
-  // filtered list.
-  return orderWorkflowRunList(main, prelude, ctx.executionPath);
-}
-
-/** Assemble a run_app task's run list. The env + runtime steps are reused BY ID
- *  from the workflow / env-replicate sets; the runtime tail is chosen from the
- *  container tool 01-declare-deps persisted into the env template. Before declare-
- *  deps has run the tool is unknown, so the tail is empty and is filled in on the
- *  next rebuild (handleResult rebuilds the list after every step). The prefix
- *  [declare-deps, worktree-setup, debug-mode] is stable and 99-run-app-ready is
- *  always last, so the forward walk (findIndex(stepId)+1) stays correct as the tail
- *  grows. 01-debug-mode precedes the runtime (it self-skips when the global debug
- *  kill-switch is off) so a run_app session — the prime "run it and poke at it"
- *  surface — can opt into step-debugging before DDEV / the app-runner comes up.
- *  98-choose-view ALSO precedes the runtime (not just 99-run-app-ready): the
- *  VNC-vs-own-browser choice writes tasks.direct_access, which the runner reads at
- *  CREATE to decide host-port publishing (fixed at cold boot, never reconfigured) —
- *  mirrors 01d-browser-access in the workflow pipeline. */
-async function buildRunAppRunList(
-  ctx: ResolvedTaskContext,
-  db: Database,
-): Promise<StepDefinition[]> {
-  const prefix = [
-    stepRegistry.require('01-declare-deps'),
-    stepRegistry.require('01-worktree-setup'),
-    stepRegistry.require('01-debug-mode'),
-  ];
-  const chooseView = stepRegistry.require('98-choose-view');
-  const ready = stepRegistry.require('99-run-app-ready');
-
-  const envTemplate = await getTaskEnvTemplate(db, ctx.taskId);
-  const containerTool = (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)
-    ?.containerTool;
-
-  if (containerTool && containerTool !== 'ddev') {
-    const database = await db.query.taskDatabaseStates.findFirst({
-      where: eq(schema.taskDatabaseStates.taskId, ctx.taskId),
-    });
-    if (database?.sourceSnapshotId && !database.importedAt)
-      throw new Error(
-        'The selected saved database requires DDEV. Choose DDEV in the declared dependencies before continuing.',
-      );
-  }
-
-  let runtime: StepDefinition[] = [];
-  if (containerTool === 'ddev') {
-    // 01c starts DDEV; 01c1 restores the selected database; 06a runs the framework
-    // DB migrations (drush updatedb / artisan migrate / …) so an imported DB matches
-    // the code before browsing. 06a self-gates on .ddev/config.yaml and is skippable.
-    runtime = [
-      stepRegistry.require('01c-ddev-env'),
-      stepRegistry.require('01c1-restore-database'),
-      stepRegistry.require('06a-db-migrate'),
-    ];
-  } else if (containerTool) {
-    // Non-DDEV (none / docker / docker-compose): build the env image, then boot the
-    // app in the app-runner (01a-app-boot's optional LLM infers the run command).
-    runtime = [
-      stepRegistry.require('02-generate-dockerfile'),
-      stepRegistry.require('03-build-image'),
-      stepRegistry.require('01a-app-boot'),
-    ];
-  }
-  return [...prefix, chooseView, ...runtime, ready, stepRegistry.require('11g-save-database')];
-}
-
 async function resolveTaskContext(
   db: Database,
   taskId: string,
@@ -354,6 +244,8 @@ async function resolveTaskContext(
     currentRound: task.currentRound ?? 0,
     status: task.status,
     completedAt: task.completedAt ?? null,
+    runListStrategy: await runListStrategyFor(db, task.type),
+    runListSnapshot: task.runListSnapshot ?? null,
   };
 }
 
