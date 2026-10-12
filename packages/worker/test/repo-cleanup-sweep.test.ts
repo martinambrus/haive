@@ -1,7 +1,7 @@
 import { UnrecoverableError, type Job } from 'bullmq';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import type { SQL } from 'drizzle-orm';
+import { eq, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { TASK_JOB_NAMES } from '@haive/shared';
@@ -71,7 +71,7 @@ describe('redriveRepoCleanups', () => {
     expect(queued[0]).toMatchObject({
       kind: 'resources',
       payload: { repositoryId: REPO, cleanupId: ROW(1) },
-      jobId: `repo-cleanup-${ROW(1)}-1`,
+      jobId: expect.stringMatching(new RegExp(`^repo-cleanup-${ROW(1)}-1-\\d+$`)),
     });
     const [row] = fake.rows(schema.repoCleanups);
     expect(row!.attempts).toBe(1);
@@ -90,6 +90,20 @@ describe('redriveRepoCleanups', () => {
     expect(await redriveRepoCleanups(db, deps)).toBe(1);
     expect(seen).toEqual([3]);
     expect(fake.rows(schema.repoCleanups)[0]!.attempts).toBe(3);
+  });
+
+  it('queues a fresh job id when a refunded attempt is counted again', async () => {
+    const { db, add, queued, deps } = setup();
+    add(1, { attempts: 2, lastEnqueuedAt: ago(REPO_CLEANUP_STALE_MS + 60_000) });
+    await redriveRepoCleanups(db, deps);
+    await db
+      .update(schema.repoCleanups)
+      .set({ attempts: 2, lastEnqueuedAt: ago(REPO_CLEANUP_STALE_MS + 60_000) })
+      .where(eq(schema.repoCleanups.id, ROW(1)));
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await redriveRepoCleanups(db, deps);
+    expect(queued).toHaveLength(2);
+    expect(queued[0]!.jobId).not.toBe(queued[1]!.jobId);
   });
 
   it('leaves a just-written row to the api that is queuing it', async () => {
@@ -113,7 +127,9 @@ describe('redriveRepoCleanups', () => {
     const { db, add, queued, deps } = setup();
     add(1, { attempts: 2, lastEnqueuedAt: ago(REPO_CLEANUP_STALE_MS + 60_000) });
     await redriveRepoCleanups(db, deps);
-    expect(queued.map((q) => q.jobId)).toEqual([`repo-cleanup-${ROW(1)}-3`]);
+    expect(queued.map((q) => q.jobId)).toEqual([
+      expect.stringMatching(new RegExp(`^repo-cleanup-${ROW(1)}-3-\\d+$`)),
+    ]);
   });
 
   it('leaves a recently queued one alone', async () => {
@@ -133,7 +149,9 @@ describe('redriveRepoCleanups', () => {
     add(2, { attempts: 1, lastEnqueuedAt: ago(REPO_CLEANUP_STALE_MS + 60_000) });
     await redriveRepoCleanups(db, deps);
     expect(fake.rows(schema.repoCleanups).map((r) => r.id)).toEqual([ROW(2)]);
-    expect(queued.map((q) => q.jobId)).toEqual([`repo-cleanup-${ROW(2)}-2`]);
+    expect(queued.map((q) => q.jobId)).toEqual([
+      expect.stringMatching(new RegExp(`^repo-cleanup-${ROW(2)}-2-\\d+$`)),
+    ]);
   });
 
   it('a second sweep right after the first queues nothing', async () => {

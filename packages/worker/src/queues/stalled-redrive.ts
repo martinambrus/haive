@@ -514,7 +514,8 @@ export const REPO_CLEANUP_BATCH = 50;
 /** Queues again each `repo_cleanups` row whose job was never recorded as queued or was queued
  *  before the cutoff: the worker deletes a row when its job succeeds, so a standing one is a
  *  cleanup the api never queued or one that keeps failing. The attempt is counted before the job
- *  exists, and its id carries the count, so two sweeps cannot queue one attempt twice. */
+ *  exists, and its id carries the count and the claim's stamp, so two sweeps cannot queue one attempt
+ *  twice and an attempt counted again after a refund gets a fresh id. */
 export async function redriveRepoCleanups(
   db: Database,
   deps: RepoCleanupDeps = defaultRepoCleanupDeps,
@@ -555,9 +556,10 @@ export async function redriveRepoCleanups(
       const sameStamp = row.lastEnqueuedAt
         ? eq(schema.repoCleanups.lastEnqueuedAt, row.lastEnqueuedAt)
         : isNull(schema.repoCleanups.lastEnqueuedAt);
+      const stamp = new Date();
       const claimed = await db
         .update(schema.repoCleanups)
-        .set({ lastEnqueuedAt: new Date(), attempts: row.attempts + 1 })
+        .set({ lastEnqueuedAt: stamp, attempts: row.attempts + 1 })
         .where(and(eq(schema.repoCleanups.id, row.id), sameStamp))
         .returning({ id: schema.repoCleanups.id });
       if (claimed.length === 0) continue;
@@ -570,7 +572,8 @@ export async function redriveRepoCleanups(
             ...(row.payload as RepoRagCleanupPayload | RepoResourceCleanupPayload),
             cleanupId: row.id,
           },
-          `repo-cleanup-${row.id}-${attempt}`,
+          // The stamp keeps ids unique when a refunded attempt is counted again.
+          `repo-cleanup-${row.id}-${attempt}-${stamp.getTime()}`,
         );
       } catch (err) {
         await db
