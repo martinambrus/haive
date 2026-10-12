@@ -1,0 +1,134 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import type { StepContext } from '../src/step-engine/step-definition.js';
+import type { UpgradePlanOutput } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import { renderContextColumnFor } from '../src/project-state/write.js';
+import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+
+const USER = '00000000-0000-4000-8000-0000000000a1';
+const REPO = '00000000-0000-4000-8000-0000000000b1';
+const TASK = '00000000-0000-4000-8000-0000000000c1';
+const BUNDLE = '00000000-0000-4000-8000-0000000000e1';
+const ITEM = '00000000-0000-4000-8000-0000000000e2';
+
+const dirs: string[] = [];
+afterEach(async () => {
+  await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+});
+
+const AGENT = {
+  id: 'billing',
+  title: 'Billing',
+  description: 'Billing agent',
+  color: 'blue',
+  field: 'billing',
+  tools: [],
+  coreMission: 'Bill',
+  responsibilities: [],
+  whenInvoked: [],
+  executionSteps: [],
+  outputFormat: '',
+  qualityCriteria: [],
+  antiPatterns: [],
+};
+
+async function run(withColumn: boolean) {
+  const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-set-'));
+  dirs.push(root);
+  const fake = createFakeDb({
+    onboardingArtifacts: schema.onboardingArtifacts,
+    repositories: schema.repositories,
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+    cliProviders: schema.cliProviders,
+    projectStateSync: schema.projectStateSync,
+    projectStateConflicts: schema.projectStateConflicts,
+  });
+  const column = renderContextColumnFor(REFERENCE_CONTEXT, false);
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'blank',
+    renderContext: withColumn ? column : null,
+    applicableTemplateIds: null,
+  });
+  fake.insert(schema.cliProviders, {
+    userId: USER,
+    name: 'claude-code',
+    label: 'Claude Code',
+    enabled: true,
+    rulesContent: 'Always be kind.',
+  });
+  fake.insert(schema.customBundles, {
+    id: BUNDLE,
+    userId: USER,
+    repositoryId: REPO,
+    name: 'acme-kit',
+    sourceType: 'zip',
+    storageRoot: '/bundles/acme-kit',
+  });
+  fake.insert(schema.customBundleItems, {
+    id: ITEM,
+    bundleId: BUNDLE,
+    kind: 'agent',
+    sourceFormat: 'claude-md',
+    sourcePath: 'agents/billing.md',
+    normalizedSpec: AGENT,
+    contentHash: 'c'.repeat(64),
+  });
+  const plan = {
+    repositoryId: REPO,
+    ranBackfill: false,
+    entries: [],
+    counts: {
+      unchanged: 0,
+      clean_update: 0,
+      adopt: 0,
+      conflict: 0,
+      new_artifact: 0,
+      user_deleted: 0,
+      obsolete: 0,
+      foreign: 0,
+    },
+    installedTemplateSetHash: null,
+    currentTemplateSetHash: 'set',
+    renderCtxSnapshot: REFERENCE_CONTEXT as unknown as Record<string, unknown>,
+    ...(withColumn ? { renderContextColumn: column } : {}),
+    backfilledRows: 0,
+  } as UpgradePlanOutput;
+  const noop = () => undefined;
+  const ctx = {
+    db: fake.db,
+    repoPath: root,
+    taskId: TASK,
+    userId: USER,
+    throwIfCancelled: () => {},
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+  } as unknown as StepContext;
+  await upgradeApplyStep.apply(ctx, {
+    detected: plan,
+    formValues: {},
+    iteration: 0,
+    previousIterations: [],
+  });
+  return fake.rows(schema.repositories)[0]!.applicableTemplateIds as string[];
+}
+
+describe('02 writes the applicable set the way 01 and the sync do', () => {
+  it.each([
+    ['a plan that read no column', false],
+    ['a plan that read the column, inside its fenced transaction', true],
+  ])('holds the custom bundle item and cli-rules after %s', async (_name, withColumn) => {
+    const set = await run(withColumn);
+
+    expect(set).toContain(`custom.${BUNDLE}.${ITEM}`);
+    expect(set).toContain('cli-rules');
+    expect(set).toContain('workflow-config');
+  });
+});

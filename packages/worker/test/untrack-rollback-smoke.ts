@@ -19,11 +19,8 @@ import type {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
-import {
-  expandManifestFor,
-  getTemplateManifest,
-  REFERENCE_CONTEXT,
-} from '../src/step-engine/template-manifest.js';
+import { unionExpandedFor } from '../src/step-engine/_upgrade-render.js';
+import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 
 const log = logger.child({ module: 'untrack-rollback-smoke' });
 
@@ -374,7 +371,14 @@ async function main(): Promise<void> {
       .where(eq(schema.repositories.id, w2.repositoryId));
     const rendered = [
       ...new Set(
-        expandManifestFor(REFERENCE_CONTEXT, getTemplateManifest()).map((r) => r.templateId),
+        (
+          await unionExpandedFor(db, {
+            repositoryId: w2.repositoryId,
+            userId,
+            renderCtx: REFERENCE_CONTEXT,
+            logger: log,
+          })
+        ).map((r) => r.templateId),
       ),
     ].sort();
     check(

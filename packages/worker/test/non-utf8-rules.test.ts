@@ -258,6 +258,9 @@ describe('04 and a rules file that is not UTF-8', () => {
     const fake = createFakeDb({
       onboardingArtifacts: schema.onboardingArtifacts,
       repositories: schema.repositories,
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+      cliProviders: schema.cliProviders,
     });
     const prior = fake.insert(schema.onboardingArtifacts, {
       userId: USER,

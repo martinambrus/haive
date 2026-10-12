@@ -19,6 +19,23 @@ const TASK = '00000000-0000-4000-8000-0000000000c1';
 const UPGRADE_TASK = '00000000-0000-4000-8000-0000000000c2';
 const PRIOR_ROW = '00000000-0000-4000-8000-0000000000d1';
 const REMOVED = '.claude/agents/security-auditor.md';
+const BUNDLE = '00000000-0000-4000-8000-0000000000e1';
+const ITEM = '00000000-0000-4000-8000-0000000000e2';
+const AGENT = {
+  id: 'billing',
+  title: 'Billing',
+  description: 'Billing agent',
+  color: 'blue',
+  field: 'billing',
+  tools: [],
+  coreMission: 'Bill',
+  responsibilities: [],
+  whenInvoked: [],
+  executionSteps: [],
+  outputFormat: '',
+  qualityCriteria: [],
+  antiPatterns: [],
+};
 const hashOf = (text: string) => sha256Hex(normalizeContent(text));
 
 const dirs: string[] = [];
@@ -33,7 +50,7 @@ const SNAPSHOT = { ...REFERENCE_CONTEXT, acceptedAgentIds: ['code-reviewer'] } a
 >;
 
 describe('R1: a rollback and the applicable set', () => {
-  it('writes the set its snapshot renders, without the agent whose removal it undid', async () => {
+  it('writes the set its snapshot renders with the bundle items and cli-rules, without the agent whose removal it undid', async () => {
     const repoPath = await mkdtemp(join(tmpdir(), 'upgrade-rollback-set-'));
     dirs.push(repoPath);
     const fake = createFakeDb({
@@ -42,6 +59,9 @@ describe('R1: a rollback and the applicable set', () => {
       projectStateSync: schema.projectStateSync,
       projectStateConflicts: schema.projectStateConflicts,
       taskSteps: schema.taskSteps,
+      cliProviders: schema.cliProviders,
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
     });
     fake.insert(schema.repositories, {
       id: REPO,
@@ -50,6 +70,30 @@ describe('R1: a rollback and the applicable set', () => {
       source: 'blank',
       renderContext: null,
       applicableTemplateIds: null,
+    });
+    fake.insert(schema.cliProviders, {
+      userId: USER,
+      name: 'claude-code',
+      label: 'Claude Code',
+      enabled: true,
+      rulesContent: 'Always be kind.',
+    });
+    fake.insert(schema.customBundles, {
+      id: BUNDLE,
+      userId: USER,
+      repositoryId: REPO,
+      name: 'acme-kit',
+      sourceType: 'zip',
+      storageRoot: '/bundles/acme-kit',
+    });
+    fake.insert(schema.customBundleItems, {
+      id: ITEM,
+      bundleId: BUNDLE,
+      kind: 'agent',
+      sourceFormat: 'claude-md',
+      sourcePath: 'agents/billing.md',
+      normalizedSpec: AGENT,
+      contentHash: 'c'.repeat(64),
     });
     const detected = {
       repositoryId: REPO,
@@ -92,6 +136,8 @@ describe('R1: a rollback and the applicable set', () => {
     expect(fake.rows(schema.repositories)[0]!.applicableTemplateIds).toEqual([
       'agent.code-reviewer',
       'agents-index',
+      'cli-rules',
+      `custom.${BUNDLE}.${ITEM}`,
       'workflow-config',
     ]);
   });

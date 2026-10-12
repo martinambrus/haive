@@ -61,6 +61,7 @@ async function rollback(older: Record<string, unknown> | null) {
     projectStateConflicts: schema.projectStateConflicts,
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
+    cliProviders: schema.cliProviders,
   });
   fake.insert(schema.repositories, {
     id: REPO,

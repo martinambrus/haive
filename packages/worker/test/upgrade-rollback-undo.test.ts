@@ -65,7 +65,12 @@ async function setup() {
   dirs.push(root);
   await mkdir(join(root, '.claude', 'agents'), { recursive: true });
   await writeFile(join(root, REL), 'HAIVE\n', 'utf8');
-  const fake = createFakeDb({ onboardingArtifacts: schema.onboardingArtifacts });
+  const fake = createFakeDb({
+    onboardingArtifacts: schema.onboardingArtifacts,
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+    cliProviders: schema.cliProviders,
+  });
   const row = fake.insert(schema.onboardingArtifacts, {
     userId: USER,
     repositoryId: REPO,
@@ -233,6 +238,9 @@ describe('rolling back a file an upgrade rewrote', () => {
     const fake = createFakeDb({
       onboardingArtifacts: schema.onboardingArtifacts,
       repositories: schema.repositories,
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+      cliProviders: schema.cliProviders,
     });
     const kind = opts.rules ? CLI_RULES_TEMPLATE_KIND : 'agent';
     const templateId = opts.rules ? 'cli-rules' : 'agent.new';
@@ -411,6 +419,9 @@ describe('rolling back what an upgrade removed', () => {
     const fake = createFakeDb({
       onboardingArtifacts: schema.onboardingArtifacts,
       repositories: schema.repositories,
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+      cliProviders: schema.cliProviders,
     });
     const templateId = rules ? 'cli-rules' : 'agent.gone';
     const kind = rules ? CLI_RULES_TEMPLATE_KIND : 'agent';
