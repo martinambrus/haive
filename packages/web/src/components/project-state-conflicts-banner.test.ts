@@ -62,6 +62,26 @@ describe('ProjectStateConflictsView', () => {
     expect(html).toContain('The whole project record file');
   });
 
+  it('shows the RTK question under its own name, with its values as On and Off', () => {
+    const html = view({
+      conflicts: [
+        conflict({
+          unit: 'settings/rtk-enabled.json',
+          key: null,
+          base: { present: true, value: true },
+          local: { present: true, value: true },
+          incoming: { present: true, value: false },
+        }),
+      ],
+    });
+    expect(html).toContain('RTK command compression');
+    expect(html).not.toContain('The whole project record file');
+    expect(html).not.toContain('haive-json-tree');
+    expect(html).toContain('Off');
+    expect(html).toContain('Keep mine');
+    expect(html).toContain('Take theirs');
+  });
+
   it('disables Keep mine where this install has no value of its own', () => {
     const html = view({ conflicts: [conflict({ local: { present: false } })] });
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Keep mine/);

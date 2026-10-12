@@ -30,6 +30,7 @@ import { holdImportedMcpServers } from './sandbox/mcp-config.js';
 import { isHeadingOnlyChunk } from './step-engine/steps/onboarding/_rag-chunkers.js';
 import { describePlanOp, proposedOps } from './step-engine/steps/workflow/_plan-ops.js';
 import { recomputeSyncedApplicableSets } from './project-state/sync.js';
+import { raiseRtkQuestions } from './project-state/rtk-conflict.js';
 import {
   copySecretLikeProviderEnv,
   dropCopiedSecretLikeProviderEnv,
@@ -85,6 +86,8 @@ const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'flagHashIndexedRestoredRepos', kind: 'convergent', run: flagHashIndexedRestoredRepos },
   // Convergent: a row it held, and one accepted or discarded since, never matches again.
   { id: 'holdImportedMcpServerLists', kind: 'convergent', run: holdImportedMcpServerLists },
+  // Convergent: a pending or answered row for the unit stands in the way of another.
+  { id: 'raiseRtkQuestions', kind: 'convergent', run: raiseRtkQuestions },
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
   // After the schema backfill has canonicalised the facets those keys are derived from — it runs
   // on the global-KB connection at first use, which `withGlobalKb` here triggers.

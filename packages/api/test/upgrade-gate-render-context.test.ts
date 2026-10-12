@@ -23,6 +23,7 @@ import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { conflictUnitLabel } from '@haive/shared/project-state-conflicts';
 import * as onboardingState from '../src/lib/onboarding-state.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -609,7 +610,7 @@ describe('POST /tasks holds an upgrade while a project state conflict is pending
 
     expect(res.status).toBe(409);
     const error = await refusal(res);
-    expect(error).toContain(UNIT);
+    expect(error).toContain(conflictUnitLabel(UNIT));
     expect(error).toMatch(/conflict/i);
     expect(error).toContain('cannot be upgraded');
     expect(t.upgrades()).toHaveLength(0);

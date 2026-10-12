@@ -1,6 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
+import { rtkEnabledUpdate } from '@haive/shared/rtk-enabled';
 import { isUtf8 } from 'node:buffer';
 import {
   isPathContainmentError,
@@ -11,10 +12,11 @@ import {
   PROJECT_STATE_DIR,
   ProjectStateError,
   RENDER_UNIT,
+  RTK_ENABLED_UNIT,
   conflictBody,
   conflictSideValue,
   emptyProjectState,
-  isRenderUnit,
+  isConflictUnit,
   normalizeProjectState,
   renderContextColumnSchema,
   renderProjectState,
@@ -22,6 +24,7 @@ import {
   sameValue,
   type ProjectRender,
   type ProjectStateRecord,
+  type ProjectStateAnswer,
   type ProjectStateResolvePayload,
   type ProjectStateResolveResult,
 } from '@haive/shared/project-state';
@@ -39,6 +42,7 @@ const RENDER_FILE = `${PROJECT_STATE_DIR}/project/render.json`;
 const MAX_RENDER_BYTES = 1024 * 1024;
 
 type Json = Record<string, unknown>;
+type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /** The checkout's render file as parsed and as its bytes stand, or null when it is gone, links out of
  *  the repository or does not read as a render unit: whatever the question was asked against has moved. */
@@ -142,6 +146,43 @@ async function putBackIfPending(
   });
 }
 
+/** Keep mine leaves the column; take theirs switches RTK off as the tooling page does. No file is
+ *  written: the question names a setting, not a record file. */
+async function answerRtkQuestion(
+  tx: Tx,
+  {
+    repositoryId,
+    userId,
+    answer,
+    row,
+  }: {
+    repositoryId: string;
+    userId: string;
+    answer: ProjectStateAnswer;
+    row: typeof schema.projectStateConflicts.$inferSelect;
+  },
+): Promise<ProjectStateResolveResult> {
+  if (answer === 'take_theirs') {
+    const incoming = conflictSideValue(row.incoming);
+    if (typeof incoming !== 'boolean') return { kind: 'invalid' };
+    await tx
+      .update(schema.repositories)
+      .set(rtkEnabledUpdate(incoming))
+      .where(eq(schema.repositories.id, repositoryId));
+  }
+  const now = new Date();
+  const [closed] = await tx
+    .update(schema.projectStateConflicts)
+    .set({ resolution: answer, resolvedAt: now, resolvedBy: userId })
+    .where(eq(schema.projectStateConflicts.id, row.id))
+    .returning();
+  return {
+    kind: 'resolved',
+    conflict: conflictBody(closed ?? { ...row, resolution: answer, resolvedAt: now }),
+    written: [],
+  };
+}
+
 async function answerInTransaction(
   db: Database,
   { repositoryId, userId, conflictId, answer }: ProjectStateResolvePayload,
@@ -173,7 +214,7 @@ async function answerInTransaction(
         ),
       )
       .for('update');
-    if (!row || !isRenderUnit(row.unit)) return { kind: 'not_found' };
+    if (!row || !isConflictUnit(row.unit)) return { kind: 'not_found' };
     if (row.resolvedAt !== null) {
       return row.resolution === answer
         ? { kind: 'resolved', conflict: conflictBody(row), written: [] }
@@ -192,6 +233,10 @@ async function answerInTransaction(
       )
       .limit(1);
     if (live.length > 0) return { kind: 'busy' };
+
+    if (row.unit === RTK_ENABLED_UNIT) {
+      return answerRtkQuestion(tx, { repositoryId, userId, answer, row });
+    }
 
     const repoPath = repo.storagePath ?? repo.localPath;
     if (!repoPath) return { kind: 'moved' };

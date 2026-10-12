@@ -142,6 +142,9 @@ interface SelectQuery extends PromiseLike<FakeRow[]> {
  *  `set`, and an insert matching none goes in as a new row. */
 interface Insert extends Lazy<FakeRow[]> {
   onConflictDoUpdate(conflict: { target: Column | Column[]; set: FakeRow }): Lazy<FakeRow[]>;
+  /** `ON CONFLICT (target) [WHERE where] DO NOTHING`: a value matching a row on the target
+   *  columns, among the rows `where` selects, goes in as nothing and returns no row. */
+  onConflictDoNothing(conflict: { target: Column | Column[]; where?: unknown }): Lazy<FakeRow[]>;
 }
 
 /** The handle a test casts to `Database`, and the transaction a section receives. */
@@ -410,6 +413,27 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     return update(ctx, table, (row) => row === hit, compileSet(table, conflict.set))[0]!;
   }
 
+  function insertUnlessConflict(
+    ctx: TxContext | null,
+    table: PgTable,
+    values: FakeRow,
+    conflict: { target: Column[]; where?: unknown },
+  ): FakeRow | null {
+    const keyOf = columnKeys(table);
+    const keys = conflict.target.map((col) => {
+      const key = keyOf.get(col);
+      if (key === undefined) {
+        throw new Error(`fake db: a conflict target is not a column of ${getTableName(table)}`);
+      }
+      return key;
+    });
+    const inIndex = conflict.where === undefined ? () => true : compileWhere(table, conflict.where);
+    const hit = tableRows(table).some(
+      (row) => inIndex(row) && keys.every((k) => row[k] === values[k]),
+    );
+    return hit ? null : insertRow(ctx, table, values);
+  }
+
   function update(
     ctx: TxContext | null,
     table: PgTable,
@@ -490,19 +514,30 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       select: (fields) => ({ from: (table) => selectQuery(fields, table) }),
       insert: (table: PgTable) => ({
         values: (values: FakeRow | FakeRow[]): Insert => {
-          const run = (conflict?: { target: Column[]; set: FakeRow }) =>
+          const run = (
+            conflict?:
+              | { target: Column[]; set: FakeRow }
+              | { target: Column[]; where?: unknown; doNothing: true },
+          ) =>
             lazy(
               async () => {
                 await hooks.beforeInsert?.(table);
-                return (Array.isArray(values) ? values : [values]).map((v) =>
-                  conflict ? upsertRow(ctx, table, v, conflict) : insertRow(ctx, table, v),
-                );
+                return (Array.isArray(values) ? values : [values]).flatMap((v) => {
+                  if (!conflict) return [insertRow(ctx, table, v)];
+                  if ('doNothing' in conflict) {
+                    const row = insertUnlessConflict(ctx, table, v, conflict);
+                    return row ? [row] : [];
+                  }
+                  return [upsertRow(ctx, table, v, conflict)];
+                });
               },
               (rows, fields) => rows.map((row) => project(table, fields, row)),
             );
           return Object.assign(run(), {
             onConflictDoUpdate: (c: { target: Column | Column[]; set: FakeRow }) =>
               run({ target: [c.target].flat(), set: c.set }),
+            onConflictDoNothing: (c: { target: Column | Column[]; where?: unknown }) =>
+              run({ target: [c.target].flat(), where: c.where, doNothing: true }),
           });
         },
       }),

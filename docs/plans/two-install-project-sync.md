@@ -415,7 +415,7 @@ Phase 1 (the record):
 - **B1.5 feat: pending conflicts, asked, never chosen for the person** [B1.4]. **As built, B1.5a:**
   the table (migration 0188), the sync's rows, the writer overlay and the `contested` hold.
   **B1.5b:** `GET/POST /repos/:id/project-state/conflicts` and the `RESOLVE_PROJECT_STATE` worker
-  job (see onboarding-upgrades.md); the RTK detector and the banner follow as B1.5c-d.
+  job (see onboarding-upgrades.md); the banner is B1.5d.
   `project_state_conflicts`, the hold rules, and the panel/banner resolution UI (browser check at
   375/768/1280). Control (smoke): two installs
   change one setting differently → a pending conflict, the local value still in effect and that
@@ -425,6 +425,15 @@ Phase 1 (the record):
   imported tooling says `rtkEnabled: false` while `rtk_enabled` still holds its default `true`, and
   no local 04 run equals that tooling. The tooling page writes the column alone, so nothing says
   whether a person switched RTK back on since; a migration would have to choose.
+  **As built, B1.5c:** the question is a pending row of unit `settings/rtk-enabled.json`
+  (`RTK_ENABLED_UNIT`, base and local `{v: true}`, incoming `{v: false}`), raised by the pure
+  `needsRtkQuestion` (`worker/src/project-state/rtk-conflict.ts`) from `persistDetection` and from the
+  convergent boot entry `raiseRtkQuestions`; no SQL migration. The api lists and serves it, the worker
+  answers it, and the banner words it as "RTK command compression" (see onboarding-upgrades.md).
+  Taking theirs writes the columns the tooling page's PATCH writes (`rtkEnabledUpdate`), nothing
+  more; the upgrade that follows removes the RTK files. MEASURED on the dev install 2026-10-12: 0 of
+  7 repositories with tooling match, so the detector is inert there and the unit tests carry the
+  proof.
 - **B1.6 feat(worker,api): adopt the record's artifact ledger** [B1.5]. Nullable `task_id` + CHECK,
   backfill + marker rows, `foreign` bucket in 01/02, rollback eligibility vs `imported_at`,
   onboarding verdict counts imported claims. Control (smoke): after a fresh clone B has 0 rows, a

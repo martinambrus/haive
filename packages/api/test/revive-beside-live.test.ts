@@ -291,7 +291,7 @@ describe.each([
       const res = await revival.request();
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({
-        error: expect.stringContaining('project/render.json#acceptedAgentIds'),
+        error: expect.stringContaining('Accepted agents'),
       });
       expect(t.task()).toMatchObject({ status: 'failed', orchestrationEpoch: 3 });
       expect(h.add).not.toHaveBeenCalled();

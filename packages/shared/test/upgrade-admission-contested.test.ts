@@ -6,6 +6,7 @@ import {
   upgradeAdmission,
   type RepositoryForUpgrade,
 } from '../src/onboarding-admission.js';
+import { RTK_ENABLED_UNIT } from '../src/project-state/index.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -75,9 +76,13 @@ describe('upgradeAdmission: a pending project state conflict', () => {
 
   it('holds on a pending row of any unit, not only a render key', async () => {
     const s = setup();
-    s.pend('settings/rtk-enabled.json');
+    s.pend(RTK_ENABLED_UNIT);
 
-    expect(await s.admission()).toMatchObject({ admitted: false, reason: 'contested' });
+    expect(await s.admission()).toEqual({
+      admitted: false,
+      reason: 'contested',
+      units: [RTK_ENABLED_UNIT],
+    });
   });
 
   it('admits again once the row is resolved, and ignores another repository’s row', async () => {

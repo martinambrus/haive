@@ -475,6 +475,30 @@ describe('the fake database', () => {
   });
 });
 
+describe('ON CONFLICT DO NOTHING on the fake', () => {
+  const c = schema.projectStateConflicts;
+  const REPO = '00000000-0000-4000-8000-0000000000b1';
+
+  it('skips a value matching a row of the target among the rows its WHERE selects, and returns none', async () => {
+    const fake = createFakeDb({ repositories: schema.repositories, projectStateConflicts: c });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme' });
+    const ask = () =>
+      fake.db
+        .insert(c)
+        .values({ repositoryId: REPO, unit: 'u' })
+        .onConflictDoNothing({ target: [c.repositoryId, c.unit], where: isNull(c.resolvedAt) })
+        .returning({ id: c.id });
+
+    expect(await ask()).toHaveLength(1);
+    expect(await ask()).toEqual([]);
+    expect(fake.rows(c)).toHaveLength(1);
+
+    await fake.db.update(c).set({ resolvedAt: new Date() }).where(eq(c.repositoryId, REPO));
+    expect(await ask()).toHaveLength(1);
+    expect(fake.rows(c)).toHaveLength(2);
+  });
+});
+
 describe('the timeouts a section sets on the fake', () => {
   const setTimeouts = (db: Database) => [
     db.execute(sql.raw(`SET LOCAL lock_timeout = '30000ms'`)),

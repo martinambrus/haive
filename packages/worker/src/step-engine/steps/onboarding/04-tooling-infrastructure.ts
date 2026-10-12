@@ -7,6 +7,7 @@ import {
   DEFAULT_EXTERNAL_OLLAMA_URL,
   sha256Hex,
 } from '@haive/shared';
+import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
 import type { DetectResult, FormSchema, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { DEFAULT_MCP_SETTINGS_JSON, mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
@@ -501,14 +502,17 @@ export const toolingInfrastructureStep: StepDefinition<
         schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
         tooling,
       };
-      await ctx.db
-        .update(schema.repositories)
-        .set({
-          rtkEnabled,
-          onboardingTooling: toolingMirror as unknown as Record<string, unknown>,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.repositories.id, repositoryId));
+      await ctx.db.transaction(async (tx) => {
+        await tx
+          .update(schema.repositories)
+          .set({
+            rtkEnabled,
+            onboardingTooling: toolingMirror as unknown as Record<string, unknown>,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.repositories.id, repositoryId));
+        if (!rtkEnabled) await convergeRtkQuestion(tx, repositoryId, ctx.userId);
+      });
     } else {
       ctx.logger.warn(
         'tooling-infrastructure: task has no repository_id; rtk_enabled persisted only in step output',

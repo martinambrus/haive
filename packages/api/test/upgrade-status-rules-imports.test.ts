@@ -17,6 +17,7 @@ import {
   sha256Hex,
 } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { RTK_ENABLED_UNIT } from '@haive/shared/project-state';
 import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 
 const { state } = vi.hoisted(() => ({
@@ -158,6 +159,13 @@ describe('upgrade-status and the rules import', () => {
       'project/render.json#framework',
     ]);
     expect(body.missingRulesImports).toBeUndefined();
+  });
+
+  it('holds the upgrade, and names the unit, while the RTK question is pending', async () => {
+    state.rows.set(schema.projectStateConflicts, [{ unit: RTK_ENABLED_UNIT }]);
+    const body = await status();
+    expect(body.hasUpgradeAvailable).toBe(false);
+    expect(body.contestedUnits).toEqual([RTK_ENABLED_UNIT]);
   });
 
   it('offers an upgrade for a rules file that lacks the import', async () => {

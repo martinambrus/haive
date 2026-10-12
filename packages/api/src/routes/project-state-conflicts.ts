@@ -6,7 +6,7 @@ import { logger } from '@haive/shared';
 import {
   PROJECT_STATE_ANSWERS,
   conflictBody,
-  isRenderUnit,
+  isConflictUnit,
   type ProjectStateResolveResult,
 } from '@haive/shared/project-state';
 import { getDb } from '../db.js';
@@ -43,7 +43,7 @@ projectStateConflictRoutes.get('/:id/project-state/conflicts', requireAuth, asyn
     )
     .orderBy(asc(schema.projectStateConflicts.detectedAt), asc(schema.projectStateConflicts.unit));
   return c.json({
-    conflicts: rows.filter((row) => isRenderUnit(row.unit)).map((row) => conflictBody(row)),
+    conflicts: rows.filter((row) => isConflictUnit(row.unit)).map((row) => conflictBody(row)),
   });
 });
 
@@ -61,7 +61,7 @@ projectStateConflictRoutes.get(
         eq(schema.projectStateConflicts.repositoryId, repositoryId),
       ),
     });
-    if (!row || !isRenderUnit(row.unit)) throw new HttpError(404, 'Question not found');
+    if (!row || !isConflictUnit(row.unit)) throw new HttpError(404, 'Question not found');
     return c.json({ conflict: conflictBody(row) });
   },
 );

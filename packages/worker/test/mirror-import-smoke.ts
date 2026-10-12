@@ -6,11 +6,14 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
+import { RTK_ENABLED_UNIT } from '@haive/shared/project-state';
 import { handleScan } from '../src/repo/clone.js';
+import { raiseRtkQuestions } from '../src/project-state/rtk-conflict.js';
+import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 
 const log = logger.child({ module: 'mirror-import-smoke' });
 
@@ -138,6 +141,98 @@ async function main(): Promise<void> {
         imported: c.onboardingTooling !== null,
         rtkEnabled: c.rtkEnabled,
       },
+    );
+
+    // D: tooling imported before the column followed it says off while the column holds on.
+    const askedAbout = async (repositoryId: string) =>
+      db
+        .select()
+        .from(schema.projectStateConflicts)
+        .where(
+          and(
+            eq(schema.projectStateConflicts.repositoryId, repositoryId),
+            eq(schema.projectStateConflicts.unit, RTK_ENABLED_UNIT),
+          ),
+        );
+    const imported = async (name: string) => {
+      const folder = path.join(tmp, name);
+      await mkdir(folder);
+      const [row] = await db
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name,
+          source: 'local_path',
+          localPath: folder,
+          onboardingTooling: JSON.parse(tooling()),
+        })
+        .returning({ id: schema.repositories.id });
+      const scan = () =>
+        handleScan({ repositoryId: row!.id, userId, source: 'local_path', localPath: folder }, db);
+      return { id: row!.id, scan };
+    };
+    const rtkOf = async (id: string) =>
+      (await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, id),
+        columns: { rtkEnabled: true },
+      }))!.rtkEnabled;
+
+    const taken = await imported('rtk-take');
+    await taken.scan();
+    check(
+      'an imported RTK-off the column never took is asked about',
+      (await askedAbout(taken.id)).length === 1,
+    );
+    await taken.scan();
+    await raiseRtkQuestions(db);
+    const rows = await askedAbout(taken.id);
+    check('asked once, however often it is scanned or booted', rows.length === 1, rows.length);
+    check('with the column still on', (await rtkOf(taken.id)) === true);
+    const takeAnswer = await resolveProjectStateConflict(db, {
+      repositoryId: taken.id,
+      userId,
+      conflictId: rows[0]!.id,
+      answer: 'take_theirs',
+    });
+    check(
+      'taking theirs switches RTK off',
+      takeAnswer.kind === 'resolved' && (await rtkOf(taken.id)) === false,
+      takeAnswer,
+    );
+    await taken.scan();
+    await raiseRtkQuestions(db);
+    check('an answered question is never asked again', (await askedAbout(taken.id)).length === 1);
+
+    const kept = await imported('rtk-keep');
+    await kept.scan();
+    const keepRows = await askedAbout(kept.id);
+    const keepAnswer = await resolveProjectStateConflict(db, {
+      repositoryId: kept.id,
+      userId,
+      conflictId: keepRows[0]!.id,
+      answer: 'keep_mine',
+    });
+    await raiseRtkQuestions(db);
+    check(
+      'keeping mine leaves RTK on and the question closed',
+      keepAnswer.kind === 'resolved' &&
+        (await rtkOf(kept.id)) === true &&
+        (await askedAbout(kept.id)).length === 1,
+      keepAnswer,
+    );
+
+    const switchedOff = await imported('rtk-off');
+    await switchedOff.scan();
+    await db
+      .update(schema.repositories)
+      .set({ rtkEnabled: false })
+      .where(eq(schema.repositories.id, switchedOff.id));
+    await raiseRtkQuestions(db);
+    const closedRows = await askedAbout(switchedOff.id);
+    check(
+      'a question still pending once RTK is off is closed as converged',
+      closedRows.length === 1 && closedRows[0]!.resolution === 'converged',
+      closedRows,
     );
 
     if (failures > 0) {

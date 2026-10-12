@@ -17,7 +17,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { conflictSide } from '@haive/shared/project-state';
+import { RTK_ENABLED_UNIT, conflictSide } from '@haive/shared/project-state';
 import { projectStateConflictRoutes } from '../src/routes/project-state-conflicts.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -29,6 +29,7 @@ const PENDING = '00000000-0000-4000-8000-0000000000d1';
 const PENDING_WHOLE = '00000000-0000-4000-8000-0000000000d2';
 const CLOSED = '00000000-0000-4000-8000-0000000000d3';
 const OTHER_REPO_ROW = '00000000-0000-4000-8000-0000000000d4';
+const RTK_ROW = '00000000-0000-4000-8000-0000000000d5';
 
 const app = new Hono<AppEnv>();
 app.route('/repos', projectStateConflictRoutes);
@@ -66,6 +67,12 @@ function seed() {
     resolution: 'keep_mine',
     resolvedAt: new Date('2026-10-02T10:00:00Z'),
   });
+  row(RTK_ROW, REPO, RTK_ENABLED_UNIT, {
+    base: conflictSide(true),
+    local: conflictSide(true),
+    incoming: conflictSide(false),
+    detectedAt: new Date('2026-10-01T12:00:00Z'),
+  });
   row(OTHER_REPO_ROW, FOREIGN_REPO, 'project/render.json#acceptedAgentIds', {});
   h.db = fake.db;
 }
@@ -89,7 +96,7 @@ describe('GET /repos/:id/project-state/conflicts', () => {
 
     expect(res.status).toBe(200);
     const { conflicts } = (await res.json()) as { conflicts: Record<string, unknown>[] };
-    expect(conflicts.map((c) => c.id)).toEqual([PENDING, PENDING_WHOLE]);
+    expect(conflicts.map((c) => c.id)).toEqual([PENDING, PENDING_WHOLE, RTK_ROW]);
     expect(conflicts[0]).toEqual({
       id: PENDING,
       unit: 'project/render.json#acceptedAgentIds',
@@ -105,6 +112,21 @@ describe('GET /repos/:id/project-state/conflicts', () => {
       key: null,
       local: { present: false },
       incoming: { present: true, value: { framework: null } },
+    });
+  });
+
+  it('lists the RTK question with its values, and no render key', async () => {
+    const { conflicts } = (await (await get()).json()) as { conflicts: Record<string, unknown>[] };
+    expect(conflicts.find((c) => c.id === RTK_ROW)).toEqual({
+      id: RTK_ROW,
+      unit: RTK_ENABLED_UNIT,
+      key: null,
+      base: { present: true, value: true },
+      local: { present: true, value: true },
+      incoming: { present: true, value: false },
+      detectedAt: '2026-10-01T12:00:00.000Z',
+      resolution: null,
+      resolvedAt: null,
     });
   });
 
@@ -126,6 +148,13 @@ describe('GET /repos/:id/project-state/conflicts/:conflictId', () => {
     const open = await app.request(`/repos/${REPO}/project-state/conflicts/${PENDING}`);
     const openBody = (await open.json()) as { conflict: unknown };
     expect(openBody.conflict).toMatchObject({ id: PENDING, resolution: null });
+  });
+
+  it('returns the RTK question', async () => {
+    const res = await app.request(`/repos/${REPO}/project-state/conflicts/${RTK_ROW}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { conflict: unknown };
+    expect(body.conflict).toMatchObject({ id: RTK_ROW, unit: RTK_ENABLED_UNIT, resolution: null });
   });
 
   it('is a 404 for a row of another repository, and for another user’s repository', async () => {
@@ -169,6 +198,22 @@ describe('POST /repos/:id/project-state/conflicts/:conflictId', () => {
       });
     });
   }
+
+  it('hands an answer to the RTK question to the worker', async () => {
+    h.resolve.mockResolvedValue({
+      kind: 'resolved',
+      conflict: { id: RTK_ROW, unit: RTK_ENABLED_UNIT, key: null, resolution: 'take_theirs' },
+      written: [],
+    });
+    const res = await post(RTK_ROW, { answer: 'take_theirs' });
+    expect(res.status).toBe(200);
+    expect(h.resolve).toHaveBeenCalledWith({
+      repositoryId: REPO,
+      userId: USER,
+      conflictId: RTK_ROW,
+      answer: 'take_theirs',
+    });
+  });
 
   it('answers the same answer again with the same body (the worker returns the closed row)', async () => {
     h.resolve.mockResolvedValue({ kind: 'resolved', conflict: closed, written: [] });

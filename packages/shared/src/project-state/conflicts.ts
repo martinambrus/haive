@@ -4,8 +4,30 @@ export const RENDER_UNIT = 'project/render.json';
 export const isRenderUnit = (unit: string): boolean =>
   unit === RENDER_UNIT || unit.startsWith(`${RENDER_UNIT}#`);
 
+/** The unit of the question about an imported RTK-off this install never applied; the file does not
+ *  exist, it only names the setting. */
+export const RTK_ENABLED_UNIT = 'settings/rtk-enabled.json';
+
+export const isConflictUnit = (unit: string): boolean =>
+  isRenderUnit(unit) || unit === RTK_ENABLED_UNIT;
+
 /** A conflict side as the `project_state_conflicts` columns hold it: `{ v }`, so a JSON null is a
  *  value, and NULL for a side that has no such unit. */
+export const CONFLICT_KEY_LABELS: Readonly<Record<string, string>> = {
+  projectInfo: 'Project details',
+  framework: 'Framework',
+  acceptedAgentIds: 'Accepted agents',
+  customAgentSpecs: 'Custom agents',
+};
+
+/** What a person calls the setting a conflict unit holds, rather than its storage path. */
+export function conflictUnitLabel(unit: string): string {
+  if (unit === RTK_ENABLED_UNIT) return 'RTK command compression';
+  if (unit === RENDER_UNIT) return 'The whole project record file';
+  const key = unit.startsWith(`${RENDER_UNIT}#`) ? unit.slice(RENDER_UNIT.length + 1) : unit;
+  return CONFLICT_KEY_LABELS[key] ?? key;
+}
+
 export const conflictSide = (value: unknown): { v: unknown } | null =>
   value === undefined ? null : { v: value };
 
