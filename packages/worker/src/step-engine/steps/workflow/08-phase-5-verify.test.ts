@@ -427,14 +427,14 @@ describe('buildUnverifiedNote', () => {
 
   // detect_output is persisted and replayed: a payload with no declinedConfigs must keep
   // rendering exactly what it rendered before the field existed.
-  it("renders today's exact text when no config was declined", () => {
+  it('renders the exact text, with the Tooling page hint, when no config was declined', () => {
     const note = buildUnverifiedNote(
       { test: cmd, lint: null, typecheck: null },
       { test: skipped, lint: skipped, typecheck: skipped },
     );
     expect(note).toBe(
       'No verification check ran this pass, so this step passing means nothing was checked — not that everything passed.\n\n' +
-        'No runner was detected in this workspace for: lint, typecheck. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.\n\n' +
+        "No runner was detected in this workspace for: lint, typecheck. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. Declare commands on the repository's Tooling page.\n\n" +
         'Detected but not selected for this pass: test.',
     );
     expect(

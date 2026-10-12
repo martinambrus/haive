@@ -623,14 +623,16 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ? declinedRaw.filter((c): c is string => typeof c === 'string')
       : [];
     const prevDetect = (prev?.detect ?? null) as Record<string, unknown> | null;
-    const slotWithoutRunner =
-      prevDetect?.test === null || prevDetect?.lint === null || prevDetect?.typecheck === null;
     const slotNames: VerifySlotName[] = ['test', 'lint', 'typecheck'];
     const declaredSlots = slotNames.filter(
       (n) => (prevDetect?.[n] as { source?: unknown } | null | undefined)?.source === 'declared',
     );
     const offRaw = prevDetect?.offSlots;
     const offSlots = Array.isArray(offRaw) ? slotNames.filter((n) => offRaw.includes(n)) : [];
+    // A slot turned off on purpose is not a missing runner.
+    const slotWithoutRunner = slotNames.some(
+      (n) => prevDetect?.[n] === null && !offSlots.includes(n),
+    );
 
     // Phase 4 pre-test validation: surface the verdict (the legacy "escalate to
     // user" lands here — exhausted budget / open issues / unparseable output).
@@ -1082,7 +1084,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         detail: 'no check was executed — this is not a passing verification',
         body: [
           '08-phase-5-verify detected no runner it could execute, or none was selected. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.',
-          detected.declaredSlots?.length || detected.offSlots?.length ? TOOLING_PAGE_HINT : '',
+          TOOLING_PAGE_HINT,
           'Nothing here says the code is correct.',
           declinedConfigsSentence(detected.declinedConfigs),
         ]

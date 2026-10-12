@@ -190,8 +190,6 @@ export function buildUnverifiedNote(
   const undetected: string[] = [];
   const unticked: string[] = [];
   const turnedOff: string[] = [];
-  const hasDeclaration =
-    (offSlots?.length ?? 0) > 0 || Object.values(slots).some((c) => c?.source === 'declared');
   for (const name of ['test', 'lint', 'phpLint', 'typecheck'] as const) {
     const result = results[name];
     if (!result || result.note) continue;
@@ -206,7 +204,7 @@ export function buildUnverifiedNote(
   ];
   if (undetected.length > 0) {
     parts.push(
-      `No runner was detected in this workspace for: ${undetected.join(', ')}. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none.${hasDeclaration ? ` ${TOOLING_PAGE_HINT}` : ''}`,
+      `No runner was detected in this workspace for: ${undetected.join(', ')}. Only the workspace ROOT is searched for a package.json / composer.json script or a phpunit / pytest / phpcs / phpstan config, so a project whose tooling lives in a subdirectory reports none. ${TOOLING_PAGE_HINT}`,
     );
     const declined = declinedConfigsSentence(declinedConfigs);
     if (declined) parts.push(declined);
@@ -220,7 +218,7 @@ export function buildUnverifiedNote(
   return parts.join('\n\n');
 }
 
-/** Appended to the root-only sentence once the repository declares anything. */
+/** Appended to every root-only sentence: declaring commands is how a repo past root-only detection runs. */
 export const TOOLING_PAGE_HINT = "Declare commands on the repository's Tooling page.";
 
 /** What gate 2 and the unverified note say about the configs one level down that were not used. */

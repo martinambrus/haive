@@ -387,9 +387,9 @@ describe('08 notes and form for declared and turned-off slots', () => {
     expect(note).toContain('Detected but not selected for this pass: test, typecheck.');
   });
 
-  it('is unchanged without declared or off slots', () => {
+  it('points at the Tooling page and says nothing is turned off without declared or off slots', () => {
     const plain = buildUnverifiedNote({ test: cmd, lint: null, typecheck: null }, results);
-    expect(plain).not.toContain('Tooling page');
+    expect(plain).toContain('Tooling page');
     expect(plain).not.toContain('Turned off');
     expect(buildUnverifiedNote({ test: cmd, lint: null, typecheck: null }, results, [], [])).toBe(
       plain,
