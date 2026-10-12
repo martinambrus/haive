@@ -86,10 +86,14 @@ describe('submitConflictAnswer', () => {
   });
 
   it('carries a refusal text through as an error', async () => {
-    const post = vi.fn().mockRejectedValue(new Error('An onboarding is using this repository.'));
+    const refusal = Object.assign(new Error('An onboarding is using this repository.'), {
+      status: 409,
+    });
+    const post = vi.fn().mockRejectedValue(refusal);
     expect(await submitConflictAnswer(post, REPO, ROW, 'keep_mine')).toEqual({
       kind: 'error',
       message: 'An onboarding is using this repository.',
+      ambiguous: false,
     });
   });
 });
@@ -135,43 +139,48 @@ describe('landedAnswer', () => {
 });
 
 describe('answerAndConfirm', () => {
-  const failingPost = async () => {
-    throw new Error('Network error');
+  const failing = (status?: number) => async () => {
+    throw Object.assign(new Error('failed'), status === undefined ? {} : { status });
   };
   const rowWith = (resolution: string | null) => async () =>
     ({ conflict: { resolution } }) as never;
+  const lookupFails = async () => {
+    throw new Error('Network error');
+  };
 
   it('counts an answer the row was closed with although its response was lost', async () => {
-    const out = await answerAndConfirm(failingPost, rowWith('keep_mine'), REPO, ROW, 'keep_mine');
-    expect(out).toEqual({ outcome: { kind: 'resolved' }, confirmed: true });
-  });
-
-  it('keeps the error when the row is still open or closed another way', async () => {
-    const open = await answerAndConfirm(failingPost, rowWith(null), REPO, ROW, 'keep_mine');
-    expect(open.outcome.kind).toBe('error');
-    const converged = await answerAndConfirm(
-      failingPost,
-      rowWith('converged'),
-      REPO,
-      ROW,
-      'keep_mine',
+    expect(await answerAndConfirm(failing(), rowWith('keep_mine'), REPO, ROW, 'keep_mine')).toEqual(
+      { kind: 'resolved' },
     );
-    expect(converged.outcome.kind).toBe('error');
   });
 
-  it('says it could not confirm when the lookup fails too', async () => {
-    const lost = async () => {
-      throw new Error('Network error');
-    };
-    const out = await answerAndConfirm(failingPost, lost, REPO, ROW, 'take_theirs');
-    expect(out).toMatchObject({ outcome: { kind: 'error' }, confirmed: false });
+  it('keeps polling a row still open after a lost response', async () => {
+    const out = await answerAndConfirm(failing(502), rowWith(null), REPO, ROW, 'keep_mine');
+    expect(out.kind).toBe('pending');
+  });
+
+  it('keeps polling when the lookup fails too', async () => {
+    const out = await answerAndConfirm(failing(), lookupFails, REPO, ROW, 'take_theirs');
+    expect(out.kind).toBe('pending');
+  });
+
+  it('shows the error when the row was closed another way', async () => {
+    const out = await answerAndConfirm(failing(), rowWith('converged'), REPO, ROW, 'keep_mine');
+    expect(out.kind).toBe('error');
+  });
+
+  it('lets a refusal stand without asking the row', async () => {
+    const get = vi.fn();
+    const out = await answerAndConfirm(failing(409), get, REPO, ROW, 'keep_mine');
+    expect(out).toMatchObject({ kind: 'error', ambiguous: false });
+    expect(get).not.toHaveBeenCalled();
   });
 
   it('does not look the row up after an answer that came back', async () => {
     const get = vi.fn();
     const post = async () => ({ pending: true, message: 'later' }) as never;
     const out = await answerAndConfirm(post, get, REPO, ROW, 'keep_mine');
-    expect(out.outcome.kind).toBe('pending');
+    expect(out.kind).toBe('pending');
     expect(get).not.toHaveBeenCalled();
   });
 });

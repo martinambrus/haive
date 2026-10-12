@@ -73,7 +73,12 @@ export function resolutionNotice(answered: readonly ProjectStateAnswer[]): strin
 }
 
 export type ConflictAnswerOutcome =
-  { kind: 'resolved' } | { kind: 'pending'; message: string } | { kind: 'error'; message: string };
+  | { kind: 'resolved' }
+  | { kind: 'pending'; message: string }
+  | { kind: 'error'; message: string; ambiguous: boolean };
+
+export const UNCONFIRMED_MESSAGE =
+  'The answer could not be confirmed yet. Checking again before anything else is offered.';
 
 export async function submitConflictAnswer(
   post: <T>(path: string, body?: unknown) => Promise<T>,
@@ -91,30 +96,34 @@ export async function submitConflictAnswer(
     }
     return { kind: 'resolved' };
   } catch (err) {
-    return { kind: 'error', message: (err as Error).message || 'Could not send the answer.' };
+    const status = (err as { status?: unknown }).status;
+    return {
+      kind: 'error',
+      message: (err as Error).message || 'Could not send the answer.',
+      ambiguous: typeof status !== 'number' || status >= 500,
+    };
   }
 }
 
-/** Sends the answer; when the reply is an error, asks the row itself, since the answer may have
- *  landed with its response lost. `confirmed` is false when that lookup failed too. */
+/** Sends the answer. A refusal (4xx) stands. Any other failure leaves it unknown whether the answer
+ *  landed, so the row is asked: closed with this answer is resolved, closed another way is the
+ *  error, and still open or unreadable stays pending for the poll to settle. */
 export async function answerAndConfirm(
   post: <T>(path: string, body?: unknown) => Promise<T>,
   get: <T>(path: string) => Promise<T>,
   repositoryId: string,
   conflictId: string,
   answer: ProjectStateAnswer,
-): Promise<{ outcome: ConflictAnswerOutcome; confirmed: boolean }> {
+): Promise<ConflictAnswerOutcome> {
   const outcome = await submitConflictAnswer(post, repositoryId, conflictId, answer);
-  if (outcome.kind !== 'error') return { outcome, confirmed: true };
-  try {
-    const row = await get<{ conflict: ProjectStateConflictBody }>(
-      `/repos/${repositoryId}/project-state/conflicts/${conflictId}`,
-    );
-    if (landedAnswer(row.conflict.resolution) === answer) {
-      return { outcome: { kind: 'resolved' }, confirmed: true };
-    }
-    return { outcome, confirmed: true };
-  } catch {
-    return { outcome, confirmed: false };
-  }
+  if (outcome.kind !== 'error' || !outcome.ambiguous) return outcome;
+  const row = await get<{ conflict: ProjectStateConflictBody }>(
+    `/repos/${repositoryId}/project-state/conflicts/${conflictId}`,
+  ).then(
+    (res) => res.conflict,
+    () => null,
+  );
+  if (row !== null && landedAnswer(row.resolution) === answer) return { kind: 'resolved' };
+  if (row !== null && row.resolution !== null) return outcome;
+  return { kind: 'pending', message: UNCONFIRMED_MESSAGE };
 }

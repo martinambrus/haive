@@ -225,13 +225,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     if (!confirming || busyId) return;
     const { conflict, answer } = confirming;
     setBusyId(conflict.id);
-    const { outcome: out, confirmed } = await answerAndConfirm(
-      api.post,
-      api.get,
-      repositoryId,
-      conflict.id,
-      answer,
-    );
+    const out = await answerAndConfirm(api.post, api.get, repositoryId, conflict.id, answer);
     if (!alive.current) return;
     setBusyId(null);
     setConfirming(null);
@@ -251,7 +245,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
         pollLoop.current = true;
         refetchTimer.current = setTimeout(() => void pollPending(), PENDING_REFETCH_MS);
       }
-    } else if (confirmed) {
+    } else {
       await load();
     }
   }
