@@ -7,6 +7,15 @@ import { api } from '@/lib/api-client';
 import { Button, Card, FormError, Label } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { usePageTitle } from '@/lib/use-page-title';
+import type { VerifyCommands } from '@haive/shared/schemas';
+import {
+  saveVerifyCommands,
+  slotsFromConfig,
+  VERIFY_COMMAND_MAX,
+  VERIFY_SLOTS,
+  type VerifyMode,
+  type VerifySlots,
+} from '@/lib/verify-commands';
 
 interface LspOption {
   value: string;
@@ -49,6 +58,7 @@ interface ToolingConfig {
   lspOptions: LspOption[];
   reviewDimensions: string[];
   reviewDimensionOptions: ReviewDimensionOption[];
+  verifyCommands?: VerifyCommands;
   /** ISO timestamp of the first embed failure, or null when healthy. The
    *  STRUCTURAL flag — gate on this, never on the reason string beside it. */
   ragEmbedDegradedAt: string | null;
@@ -132,6 +142,10 @@ export default function RepoToolingPage() {
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState(false);
   const [stepGuidanceEnabled, setStepGuidanceEnabled] = useState(true);
   const [reviewDimensions, setReviewDimensions] = useState<Set<string>>(new Set());
+  const [verifySlots, setVerifySlots] = useState<VerifySlots>(slotsFromConfig({}));
+  const [verifySaving, setVerifySaving] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+  const [verifySaved, setVerifySaved] = useState(false);
   const [guidance, setGuidance] = useState<GuidanceItem[]>([]);
   const [archiving, setArchiving] = useState<string | null>(null);
   const [ragEmbedBusy, setRagEmbedBusy] = useState<string | null>(null);
@@ -206,6 +220,7 @@ export default function RepoToolingPage() {
         setPrWorkflowEnabled(cfg.prWorkflowEnabled);
         setStepGuidanceEnabled(cfg.stepGuidanceEnabled ?? true);
         setReviewDimensions(new Set(cfg.reviewDimensions ?? []));
+        setVerifySlots(slotsFromConfig(cfg.verifyCommands));
         setGuidance(cfg.stepGuidance ?? []);
       } catch (err) {
         if (!cancelled) setError((err as Error).message ?? 'Failed to load tooling config');
@@ -236,6 +251,26 @@ export default function RepoToolingPage() {
     } finally {
       setArchiving(null);
     }
+  }
+
+  async function handleVerifySave() {
+    if (verifySaving) return;
+    setVerifySaving(true);
+    setVerifyError(null);
+    setVerifySaved(false);
+    const res = await saveVerifyCommands(api, repositoryId, verifySlots);
+    if (res.ok) {
+      setVerifySlots(res.slots);
+      setVerifySaved(true);
+    } else {
+      setVerifyError(res.error);
+    }
+    setVerifySaving(false);
+  }
+
+  function setVerifySlot(key: keyof VerifySlots, patch: { mode?: VerifyMode; text?: string }) {
+    setVerifySlots((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+    setVerifySaved(false);
   }
 
   async function handleSave() {
@@ -793,6 +828,74 @@ export default function RepoToolingPage() {
                 Pick at least one dimension &mdash; a review that scores nothing cannot be saved.
               </p>
             )}
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-semibold text-neutral-100">Verify commands</h2>
+            <InlineMarkdown
+              className="mt-1 text-xs text-neutral-500"
+              body={
+                "**Auto** runs what is detected at the repository root, as today. **Off** never runs that check. **Custom** runs your text as one shell command inside the task's environment (the DDEV web container or the sandbox), for example `vendor/bin/phpunit -c core modules/custom`. A custom **Lint** replaces both lint checks and is not limited to changed lines."
+              }
+            />
+            <div className="mt-3 flex flex-col gap-4">
+              {VERIFY_SLOTS.map(({ key, label }) => {
+                const slot = verifySlots[key];
+                return (
+                  <div key={key} className="flex flex-col gap-2">
+                    <div
+                      role="radiogroup"
+                      aria-label={`${label} command`}
+                      className="flex flex-wrap items-center gap-x-4 gap-y-1"
+                    >
+                      <span className="w-24 text-sm font-medium text-neutral-200">{label}</span>
+                      {(
+                        [
+                          ['auto', 'Auto'],
+                          ['off', 'Off'],
+                          ['custom', 'Custom'],
+                        ] as const
+                      ).map(([mode, modeLabel]) => (
+                        <label
+                          key={mode}
+                          className="flex items-center gap-1.5 text-sm text-neutral-300"
+                        >
+                          <input
+                            type="radio"
+                            name={`verify-${key}`}
+                            className="h-4 w-4 border-neutral-700 bg-neutral-900 text-indigo-500"
+                            checked={slot.mode === mode}
+                            onChange={() => setVerifySlot(key, { mode })}
+                          />
+                          {modeLabel}
+                        </label>
+                      ))}
+                    </div>
+                    {slot.mode === 'custom' && (
+                      <input
+                        aria-label={`${label} command`}
+                        className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 font-mono text-xs text-neutral-100"
+                        maxLength={VERIFY_COMMAND_MAX}
+                        placeholder="vendor/bin/phpunit -c core modules/custom"
+                        value={slot.text}
+                        onChange={(e) => setVerifySlot(key, { text: e.target.value })}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {verifyError && (
+              <div className="mt-3">
+                <FormError message={verifyError} />
+              </div>
+            )}
+            <div className="mt-3 flex items-center gap-3">
+              <Button size="sm" onClick={() => void handleVerifySave()} disabled={verifySaving}>
+                {verifySaving ? 'Saving...' : 'Save verify commands'}
+              </Button>
+              {verifySaved && <span className="text-sm text-emerald-400">Saved.</span>}
+            </div>
           </Card>
 
           <Card>
