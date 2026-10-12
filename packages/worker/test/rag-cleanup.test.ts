@@ -292,6 +292,28 @@ describe('cleanupRagForRepository', () => {
     expect(fake.calls.filter((c) => c.includes('DROP DATABASE'))).toHaveLength(2);
   });
 
+  it('does not retry the DROP once the lock is lost during the wait', async () => {
+    fake = makeFakeDb([]);
+    const store = fakeStore({ deleted: 10, remaining: 0 });
+    openExistingRagDatabase.mockResolvedValue(store.conn);
+    fake.queueResult([]); // pg_stat_activity
+    const inUse = Object.assign(new Error('is being accessed by other users'), { code: '55006' });
+    const execute = fake.db.execute as unknown as (q: unknown) => Promise<unknown>;
+    fake.db.execute = (async (q: unknown) => {
+      if (sqlText(q).includes('DROP DATABASE')) {
+        fakeLock.state.handles[0]!.lost = true;
+        await execute(q).catch(() => undefined);
+        throw inUse;
+      }
+      return execute(q);
+    }) as unknown as Database['execute'];
+
+    const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+    expect(res).toEqual({ dropped: [], kept: ['haive_rag_rdapi'] });
+    expect(fake.calls.filter((c) => c.includes('DROP DATABASE'))).toHaveLength(1);
+  });
+
   it('retries the DROP once when drizzle wraps the in-use error', async () => {
     fake = makeFakeDb([]);
     const store = fakeStore({ deleted: 10, remaining: 0 });

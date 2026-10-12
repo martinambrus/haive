@@ -444,15 +444,7 @@ async function cleanupRagLocked(
       continue;
     }
 
-    if (lock.lost) {
-      log.warn(
-        { dbName, projectName },
-        'rag database kept — the sync lock was lost before the drop',
-      );
-      kept.push(dbName);
-      continue;
-    }
-    if (await dropRagDatabase(haiveDb, dbName, projectName, payload.repositoryId)) {
+    if (await dropRagDatabase(haiveDb, dbName, projectName, payload.repositoryId, lock)) {
       dropped.push(dbName);
     } else {
       kept.push(dbName);
@@ -513,8 +505,16 @@ async function dropRagDatabase(
   dbName: string,
   projectName: string,
   repositoryId: string,
+  lock: RagSyncLock,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (lock.lost) {
+      log.warn(
+        { dbName, projectName },
+        'rag database kept — the sync lock was lost before the drop',
+      );
+      return false;
+    }
     try {
       await haiveDb.execute(sql.raw(`DROP DATABASE IF EXISTS "${dbName}"`));
       log.info(
