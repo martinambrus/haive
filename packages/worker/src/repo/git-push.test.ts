@@ -97,6 +97,31 @@ describe('git-push helpers', () => {
     }
   });
 
+  it('pushBranch with a sha pushes that commit, not where the branch has moved to, and sets upstream', async () => {
+    const { work, bare } = await setupRepoWithBareOrigin();
+    try {
+      await git(work, ['remote', 'add', 'origin', `file://${bare}`]);
+      const sha = (await git(work, ['rev-parse', 'main'])).trim();
+      await writeFile(path.join(work, 'f.txt'), 'two\n', 'utf8');
+      await git(work, ['commit', '-am', 'two']);
+      await pushBranch({
+        cwd: work,
+        branch: 'main',
+        sha,
+        setUpstream: true,
+        db: stubDb,
+        userId: 'u1',
+      });
+      expect((await git(bare, ['rev-parse', 'main'])).trim()).toBe(sha);
+      expect((await git(work, ['rev-parse', '--abbrev-ref', 'main@{upstream}'])).trim()).toBe(
+        'origin/main',
+      );
+    } finally {
+      await rm(work, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
   it('pushBranch throws on a rejected (non-fast-forward) push', async () => {
     const { work, bare } = await setupRepoWithBareOrigin();
     const other = await mkdtemp(path.join(tmpdir(), 'gp-other-'));

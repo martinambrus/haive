@@ -3,9 +3,7 @@ import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect, vi } from 'vitest';
-import type { SQL } from 'drizzle-orm';
-import { PgDialect } from 'drizzle-orm/pg-core';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { schema, type MergeResolveState } from '@haive/database';
 import { MERGE_CLARIFICATION_ANSWERED_EVENT, MERGE_CLARIFICATION_ASKED_EVENT } from '@haive/shared';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
@@ -15,6 +13,13 @@ import { resolveTaskDispatch } from '../../../orchestrator/dispatcher.js';
 import { OUTPUT_TRUNCATION_HEADLINE } from '../../../queues/cli-exec/failure-class.js';
 import { TRUNCATION_RETRY_NOTICE } from '../../step-runner.js';
 import type { StepContext, StepApplyArgs, StepDefinition } from '../../step-definition.js';
+import { claimFake } from '../../../../test/merge-dir-claim-fake.js';
+
+vi.mock('../../merge-dir-claim.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../merge-dir-claim.js')>()),
+  ...(await import('../../../../test/merge-dir-claim-fake.js')).mergeDirClaimOverrides(),
+}));
+beforeEach(() => claimFake.reset());
 
 // Pre-existing tests pass no providers, which this answers with skip as the real
 // dispatcher does; the real one needs ConfigService and the adapter registry.
@@ -185,16 +190,6 @@ function makeDb(
     /** Rejects the fix-agent invocation insert, as the one-live-per-step unique index does
      *  when a concurrent advance already dispatched one. */
     insertRejects?: unknown;
-    /** A merge another task's step has recorded; the claim query only returns it while that
-     *  task is live, is not the caller, and the bound merge dir and phase list match. */
-    mergeSharer?: {
-      id: string;
-      title: string;
-      status: string;
-      mergeDir: string;
-      phase: string;
-      cancelFinished?: boolean;
-    };
   } = {},
 ) {
   let mergeState: MergeResolveState | null = null;
@@ -211,7 +206,6 @@ function makeDb(
   };
   const db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
-    execute: async () => [],
     query: {
       users: { findFirst: async () => undefined },
       tasks: { findFirst: async () => opts.worktreeSharer ?? undefined },
@@ -258,28 +252,6 @@ function makeDb(
     // by its columns argument, and honours the same ownership guard as the update mock above.
     select: (cols?: unknown) => ({
       from: (table?: unknown) => {
-        if (table === schema.taskSteps && cols && typeof cols === 'object' && 'title' in cols) {
-          return {
-            innerJoin: () => ({
-              where: (cond: unknown) => ({
-                limit: async () => {
-                  const bound = new PgDialect().sqlToQuery(cond as SQL).params;
-                  const s = opts.mergeSharer;
-                  const released =
-                    s?.status === 'completed' ||
-                    (s?.status === 'cancelled' && s.cancelFinished === true);
-                  const matches =
-                    s &&
-                    !released &&
-                    bound.includes(s.mergeDir) &&
-                    bound.includes(s.phase) &&
-                    !bound.includes(s.id);
-                  return matches ? [{ id: s.id, title: s.title, status: s.status }] : [];
-                },
-              }),
-            }),
-          };
-        }
         if (table === schema.taskSteps && cols && typeof cols === 'object' && 'id' in cols) {
           return {
             where: () => ({
@@ -343,6 +315,10 @@ function mkCurrent(
   formValues: Record<string, unknown>,
   state: MergeResolveState | null = null,
 ) {
+  // A merge a step recorded as open or landed holds its dir, as the claim it took before it began.
+  if (state && state.phase !== 'pending' && state.phase !== 'done') {
+    claimFake.claims.set(state.mergeDir, { taskId: 't1', stepId: 'step1', title: '' });
+  }
   return {
     id: 'step1',
     detectOutput: detected,
@@ -466,19 +442,30 @@ describe('12 merge phase + apply (real git)', () => {
       expect(await gitCode(base, ['merge', '--no-ff', 'feature/other', '-m', 'other'])).not.toBe(0);
       return base;
     }
-    const sharer = (
-      over: { id?: string; status?: string; cancelFinished?: boolean },
-      mergeDir: string,
-    ) => ({
-      id: 'other-task',
-      title: 'Other feature',
-      status: 'running',
-      mergeDir,
-      phase: 'resolving',
-      ...over,
-    });
-    const runB = async (parent: string, wt: string, mergeSharer: ReturnType<typeof sharer>) => {
-      const h = makeDb({ mergeSharer });
+    /** `main--base` holds a merge of `feature/other` that landed clean on `main`, which its task
+     *  has yet to squash or push: the base-sync round between two of its sections. */
+    async function landOtherMerge(parent: string): Promise<string> {
+      const tmp = path.join(parent, '.haive', 'worktrees', 'other-src');
+      await git(parent, ['worktree', 'add', '-b', 'feature/other', tmp, 'main']);
+      await writeFile(path.join(tmp, 'other.txt'), 'other\n', 'utf8');
+      await git(tmp, ['add', '-A']);
+      await git(tmp, ['commit', '-m', 'other work']);
+      await git(parent, ['worktree', 'remove', '--force', tmp]);
+      await git(parent, ['checkout', '-b', 'develop']);
+      const base = path.join(parent, '.haive', 'worktrees', 'main--base');
+      await git(parent, ['worktree', 'add', base, 'main']);
+      await git(base, ['merge', '--no-ff', 'feature/other', '-m', 'other']);
+      return base;
+    }
+    const claimedBy = (mergeDir: string, over: { taskId?: string; stepId?: string } = {}) =>
+      claimFake.claims.set(mergeDir, {
+        taskId: 'other-task',
+        stepId: 'other-step',
+        title: 'Other feature',
+        ...over,
+      });
+    const runB = async (parent: string, wt: string) => {
+      const h = makeDb();
       const merge = await resolveMergePhase(
         h.db as never,
         step,
@@ -489,11 +476,12 @@ describe('12 merge phase + apply (real git)', () => {
       return { h, merge };
     };
 
-    it('a live task with a resolving merge there is not aborted; this task halts naming it', async () => {
+    it('a task holding the claim there is not aborted; this task halts naming it', async () => {
       const { parent, wt } = await setupWorktree();
       try {
         const base = await openOtherMerge(parent, wt);
-        const { h, merge } = await runB(parent, wt, sharer({}, base));
+        claimedBy(base);
+        const { h, merge } = await runB(parent, wt);
         expect(merge.resolved).toBe(false);
         if (!merge.resolved) {
           expect(merge.result.status).toBe('failed');
@@ -510,45 +498,29 @@ describe('12 merge phase + apply (real git)', () => {
       }
     });
 
-    it('a failed task there still holds its merge, which its Retry resumes', async () => {
+    it("a task's merge that landed clean, between its sections, is not merged over", async () => {
       const { parent, wt } = await setupWorktree();
       try {
-        const base = await openOtherMerge(parent, wt);
-        const { merge } = await runB(parent, wt, sharer({ status: 'failed' }, base));
+        const base = await landOtherMerge(parent);
+        claimedBy(base);
+        const tip = (await git(parent, ['rev-parse', 'main'])).trim();
+        const { merge } = await runB(parent, wt);
         expect(merge.resolved).toBe(false);
         if (!merge.resolved) {
           expect((merge.result as { error: string }).error).toContain('retry once it finishes');
         }
-        expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+        expect((await git(parent, ['rev-parse', 'main'])).trim()).toBe(tip);
+        expect(await gitCode(parent, ['show', 'main:feature.txt'])).not.toBe(0);
       } finally {
         await rm(parent, { recursive: true, force: true });
       }
     });
 
-    it('a cancelled task still holds its merge until its teardown finished', async () => {
+    it('a merge whose claim was released is cleaned up: its merge is aborted', async () => {
       const { parent, wt } = await setupWorktree();
       try {
         const base = await openOtherMerge(parent, wt);
-        const { merge } = await runB(parent, wt, sharer({ status: 'cancelled' }, base));
-        expect(merge.resolved).toBe(false);
-        if (!merge.resolved) {
-          expect((merge.result as { error: string }).error).toContain('retry once it finishes');
-        }
-        expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
-      } finally {
-        await rm(parent, { recursive: true, force: true });
-      }
-    });
-
-    it('a cancelled task whose teardown finished is cleaned up as before: its merge is aborted', async () => {
-      const { parent, wt } = await setupWorktree();
-      try {
-        const base = await openOtherMerge(parent, wt);
-        const { merge } = await runB(
-          parent,
-          wt,
-          sharer({ status: 'cancelled', cancelFinished: true }, base),
-        );
+        const { merge } = await runB(parent, wt);
         expect(merge.resolved).toBe(false);
         if (!merge.resolved) {
           expect((merge.result as { error: string }).error).not.toContain('retry once it finishes');
@@ -563,10 +535,12 @@ describe('12 merge phase + apply (real git)', () => {
       const { parent, wt } = await setupWorktree();
       try {
         const base = await openOtherMerge(parent, wt);
-        const first = await runB(parent, wt, sharer({}, base));
+        claimedBy(base);
+        const first = await runB(parent, wt);
         expect(first.merge.resolved).toBe(false);
         await git(base, ['merge', '--abort']);
         await git(parent, ['worktree', 'remove', '--force', base]);
+        claimFake.claims.clear();
         const h = makeDb();
         const ctx = mkCtx(parent, h.db);
         const retry = await resolveMergePhase(
@@ -593,12 +567,66 @@ describe('12 merge phase + apply (real git)', () => {
       const { parent, wt } = await setupWorktree();
       try {
         const base = await openOtherMerge(parent, wt);
-        const { merge } = await runB(parent, wt, sharer({ id: 't1' }, base));
+        claimedBy(base, { taskId: 't1', stepId: 'older-step' });
+        const { merge } = await runB(parent, wt);
         expect(merge.resolved).toBe(false);
         if (!merge.resolved) {
           expect((merge.result as { error: string }).error).not.toContain('retry once it finishes');
         }
         expect(await gitCode(base, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a pass whose task was cancelled meanwhile writes nothing in the base worktree', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await git(parent, ['checkout', '-b', 'develop']);
+        claimFake.fenced = true;
+        const h = makeDb();
+        await expect(
+          resolveMergePhase(
+            h.db as never,
+            step,
+            mkCurrent(det(wt, { parentBranch: 'develop' }), { action: 'merge_remove' }),
+            mkCtx(parent, h.db),
+            mkParams(h.db),
+          ),
+        ).rejects.toBeInstanceOf(StepSupersededError);
+        expect(await git(parent, ['worktree', 'list', '--porcelain'])).not.toContain('main--base');
+        expect(await gitCode(parent, ['show', 'main:feature.txt'])).not.toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a finished merge releases the claim in the section that records it done', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await git(parent, ['checkout', '-b', 'develop']);
+        const { h, merge } = await runB(parent, wt);
+        expect(merge.resolved).toBe(true);
+        expect(h.getState()?.phase).toBe('done');
+        expect(claimFake.claims.size).toBe(0);
+        expect(claimFake.released).toEqual([
+          { mergeDir: expect.stringContaining('main--base'), inSection: true },
+        ]);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a merge that halts keeps the claim for its Retry', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        await git(parent, ['checkout', '-b', 'develop']);
+        const { merge } = await runB(parent, wt);
+        expect(merge.resolved).toBe(false);
+        const held = [...claimFake.claims.values()];
+        expect(held).toEqual([expect.objectContaining({ taskId: 't1', stepId: 'step1' })]);
+        expect(claimFake.released).toEqual([]);
       } finally {
         await rm(parent, { recursive: true, force: true });
       }
@@ -689,6 +717,74 @@ describe('12 merge phase + apply (real git)', () => {
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
+  });
+
+  describe('a pass whose task was cancelled or reset meanwhile', () => {
+    const seed = (parent: string, over: Partial<MergeResolveState>): MergeResolveState => ({
+      mode: 'same-branch',
+      phase: 'resolving',
+      baseBranch: 'main',
+      featureBranch: 'feature/x',
+      mergeDir: parent,
+      sandboxMergeDir: parent,
+      fixInvocationId: 'inv1',
+      conflictRetries: 1,
+      pendingQuestion: null,
+      pushAfterMerge: false,
+      merged: false,
+      skipReason: null,
+      pushed: false,
+      ...over,
+    });
+    const run = async (parent: string, wt: string, state: MergeResolveState) => {
+      claimFake.claims.set(parent, { taskId: 't1', stepId: 'step1', title: '' });
+      claimFake.fenced = true;
+      const h = makeDb({ invocation: { id: 'inv1', endedAt: new Date(), exitCode: 0 } });
+      return resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, state),
+        mkCtx(parent, h.db),
+        mkParams(h.db, { providers: [], deps: { enqueueCliInvocation: async () => {} } }),
+      );
+    };
+
+    it("does not ingest a fixer's result: no commit, and the merge is still open", async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+        await writeFile(path.join(parent, 'base.txt'), 'resolved\n', 'utf8');
+        const tip = (await git(parent, ['rev-parse', 'main'])).trim();
+        await expect(run(parent, wt, seed(parent, {}))).rejects.toBeInstanceOf(StepSupersededError);
+        expect((await git(parent, ['rev-parse', 'main'])).trim()).toBe(tip);
+        expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('does not squash a landed merge: the base tip is not reset', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const before = (await git(parent, ['rev-parse', 'main'])).trim();
+        await git(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+        const tip = (await git(parent, ['rev-parse', 'main'])).trim();
+        const state = seed(parent, {
+          phase: 'squashing',
+          fixInvocationId: null,
+          squashAfterMerge: true,
+          baseShaBefore: before,
+          mergeStage: 'feature',
+        });
+        await expect(run(parent, wt, state)).rejects.toBeInstanceOf(StepSupersededError);
+        expect((await git(parent, ['rev-parse', 'main'])).trim()).toBe(tip);
+        expect((await git(parent, ['rev-parse', 'main^'])).trim()).toBe(before);
+        expect(await git(parent, ['status', '--porcelain', '--untracked-files=no'])).toBe('');
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
   });
 
   it('commits nothing a fixer left when it did not finish cleanly', async () => {

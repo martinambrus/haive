@@ -72,16 +72,18 @@ export async function buildCredentialHelper(
 
 /** Push `branch` to origin, optionally with a stored credential and upstream.
  *  Throws with a scrubbed message on non-zero exit. An empty/undefined
- *  credentialId means no helper (SSH / public / manual). */
+ *  credentialId means no helper (SSH / public / manual). With `sha` it pushes that commit to the
+ *  branch, whatever the local ref has moved to since. */
 export async function pushBranch(args: {
   cwd: string;
   branch: string;
+  sha?: string;
   setUpstream: boolean;
   credentialId?: string;
   db: Database;
   userId: string;
 }): Promise<{ pushed: true; remote: 'origin'; branch: string }> {
-  const { cwd, branch, setUpstream, credentialId, db, userId } = args;
+  const { cwd, branch, sha, setUpstream, credentialId, db, userId } = args;
   const pushArgs: string[] = [];
   const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
   let secret: string | null = null;
@@ -94,12 +96,16 @@ export async function pushBranch(args: {
   }
 
   pushArgs.push('push');
-  if (setUpstream) pushArgs.push('-u');
-  pushArgs.push('origin', branch);
+  if (setUpstream && !sha) pushArgs.push('-u');
+  pushArgs.push('origin', sha ? `${sha}:refs/heads/${branch}` : branch);
 
   const res = await gitRun(cwd, pushArgs, env);
   if (res.code !== 0) {
     throw new Error(`git push failed: ${scrubSecret(res.stderr || res.stdout, secret)}`);
+  }
+  // `-u` sets nothing for a commit that is not a branch name.
+  if (setUpstream && sha) {
+    await gitRun(cwd, ['branch', `--set-upstream-to=origin/${branch}`, branch]);
   }
   return { pushed: true, remote: 'origin', branch };
 }

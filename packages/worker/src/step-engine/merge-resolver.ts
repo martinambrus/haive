@@ -27,8 +27,14 @@ import {
   squashMergeCommit,
   unmergedPaths,
   type MergeAbort,
+  type SecretMaskSource,
 } from './git-merge.js';
-import { findOtherMergeHolder, lockMergeDir, type DbHandle } from './merge-dir-claim.js';
+import {
+  claimMergeDir,
+  releaseMergeDir,
+  withMergeDirSection,
+  type DbHandle,
+} from './merge-dir-claim.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import {
   addStepWarning,
@@ -218,6 +224,33 @@ async function saveMergeState(
     .where(eq(schema.taskSteps.id, stepRowId));
 }
 
+/** A host-side write to the merge dir, fenced on this step's claim and the pass's epoch. */
+function inMergeDir<T>(
+  db: Database,
+  current: TaskStepRow,
+  params: AdvanceStepParams,
+  mergeDir: string,
+  fn: (tx: DbHandle) => Promise<T>,
+): Promise<T> {
+  return withMergeDirSection(
+    db,
+    { mergeDir, stepId: current.id, taskId: params.taskId, epoch: params.epoch },
+    fn,
+  );
+}
+
+/** Read ahead of a section: a pool read inside one can wait on a connection the sections hold. */
+async function maskSourceOnce(db: Database, taskId: string): Promise<SecretMaskSource> {
+  const read = await taskSecretMaskPolicy(db, taskId).then(
+    (policy) => ({ policy }),
+    (error: unknown) => ({ error }),
+  );
+  return async () => {
+    if ('error' in read) throw read.error;
+    return read.policy;
+  };
+}
+
 /** Host + sandbox paths for a transient worktree checked out on the base branch.
  *  Suffixes `--base` so it never collides with a feature worktree. */
 function baseWorktreePaths(
@@ -260,18 +293,17 @@ async function removeBaseWorktree(repoPath: string, worktreePath: string): Promi
   return (res.stderr || res.stdout).trim().split('\n')[0] || 'git gave no reason';
 }
 
-/** Terminal success: tear down a transient base worktree (cross-branch only — the
- *  merge commit already persists in the shared object store) and mark the state done. */
+/** Terminal success: tear down a transient base worktree, release the merge dir and mark the state
+ *  done, in one section. */
 async function reachDone(
   db: Database,
   current: TaskStepRow,
   ctx: StepContext,
+  params: AdvanceStepParams,
   state: MergeResolveState,
 ): Promise<MergeResolved> {
-  // Push the integrated base branch to origin first when the form requested it. The
-  // push runs from ctx.repoPath, which shares refs with any base worktree, so it
-  // carries the new merge commit even after the worktree is removed. Idempotent on
-  // re-entry: a completed push reports "up-to-date".
+  // Pushes the commit a section read, so a pass that lost the dir cannot send another task's work.
+  // Idempotent on re-entry: a completed push reports "up-to-date".
   if (state.pushAfterMerge && !state.pushed) {
     const pushing: MergeResolveState = {
       ...state,
@@ -279,12 +311,21 @@ async function reachDone(
       merged: true,
       mergedAt: state.mergedAt ?? new Date().toISOString(),
     };
-    await saveMergeState(db, current.id, pushing);
+    const sha = await inMergeDir(db, current, params, state.mergeDir, async (tx) => {
+      await saveMergeState(tx, current.id, pushing);
+      const tip = await gitRun(state.mergeDir, [
+        'rev-parse',
+        '--verify',
+        `refs/heads/${state.baseBranch}^{commit}`,
+      ]);
+      return tip.code === 0 ? tip.stdout.trim() : undefined;
+    });
     const fv = (current.formValues ?? {}) as { credentialId?: string; setUpstream?: boolean };
     try {
       await pushBranch({
         cwd: ctx.repoPath,
         branch: state.baseBranch,
+        sha,
         setUpstream: fv.setUpstream !== false,
         credentialId: fv.credentialId || undefined,
         db,
@@ -305,25 +346,34 @@ async function reachDone(
     }
     state = { ...pushing, pushed: true };
   }
-  if (state.mode === 'cross-branch') {
-    const kept = await removeBaseWorktree(ctx.repoPath, state.mergeDir);
-    if (kept) {
-      ctx.logger.warn({ worktree: state.mergeDir, reason: kept }, 'base worktree kept after merge');
-      current = await addStepWarning(
-        db,
-        current,
-        `The base worktree ${relUnder(ctx.repoPath, state.mergeDir)} was kept, since git would not remove it: ${kept}.`,
-      );
-    }
-  }
   const done: MergeResolveState = {
     ...state,
     phase: 'done',
     merged: true,
     mergedAt: state.mergedAt ?? new Date().toISOString(),
   };
-  await saveMergeState(db, current.id, done);
-  return { resolved: true, current: { ...current, mergeResolveState: done } };
+  const finished = state;
+  const row = await inMergeDir(db, current, params, finished.mergeDir, async (tx) => {
+    let updated = current;
+    if (finished.mode === 'cross-branch') {
+      const kept = await removeBaseWorktree(ctx.repoPath, finished.mergeDir);
+      if (kept) {
+        ctx.logger.warn(
+          { worktree: finished.mergeDir, reason: kept },
+          'base worktree kept after merge',
+        );
+        updated = await addStepWarning(
+          tx,
+          current,
+          `The base worktree ${relUnder(ctx.repoPath, finished.mergeDir)} was kept, since git would not remove it: ${kept}.`,
+        );
+      }
+    }
+    await releaseMergeDir(tx, { mergeDir: finished.mergeDir, stepId: current.id });
+    await saveMergeState(tx, current.id, done);
+    return updated;
+  });
+  return { resolved: true, current: { ...row, mergeResolveState: done } };
 }
 
 /** Cap on pre-push base-sync rounds before giving up (origin is a moving target). */
@@ -340,7 +390,7 @@ async function finishMerge(
   params: AdvanceStepParams,
   state: MergeResolveState,
 ): Promise<MergeResolved> {
-  const squashed = await squashFeatureMerge(db, current, ctx, state);
+  const squashed = await squashFeatureMerge(db, current, ctx, params, state);
   if (
     squashed.pushAfterMerge &&
     !squashed.pushed &&
@@ -348,7 +398,7 @@ async function finishMerge(
   ) {
     return prePushSync(db, stepDef, current, ctx, params, squashed);
   }
-  return reachDone(db, current, ctx, squashed);
+  return reachDone(db, current, ctx, params, squashed);
 }
 
 /** Collapse the landed feature merge into ONE commit on the base branch when the form
@@ -367,6 +417,7 @@ async function squashFeatureMerge(
   db: Database,
   current: TaskStepRow,
   ctx: StepContext,
+  params: AdvanceStepParams,
   state: MergeResolveState,
 ): Promise<MergeResolveState> {
   if (!state.squashAfterMerge) return state;
@@ -377,20 +428,26 @@ async function squashFeatureMerge(
   if (!state.baseShaBefore) return state;
 
   const squashing: MergeResolveState = { ...state, phase: 'squashing' };
-  await saveMergeState(db, current.id, squashing);
-
   const userEnv = await resolveGitEnv(db, { userId: ctx.userId, taskId: ctx.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
   const message = await buildSquashCommitMessage(db, ctx.taskId, state.featureBranch);
-  const squashCommitSha = await squashMergeCommit(
-    squashing.mergeDir,
-    state.baseShaBefore,
-    message,
-    commitEnv,
+  const baseShaBefore = state.baseShaBefore;
+  // Committed ahead of the reset, so a crash between the reset and the commit re-enters here.
+  await inMergeDir(db, current, params, squashing.mergeDir, (tx) =>
+    saveMergeState(tx, current.id, squashing),
   );
-
-  const next: MergeResolveState = { ...squashing, squashCommitSha };
-  await saveMergeState(db, current.id, next);
+  const next = await inMergeDir(db, current, params, squashing.mergeDir, async (tx) => {
+    const squashCommitSha = await squashMergeCommit(
+      squashing.mergeDir,
+      baseShaBefore,
+      message,
+      commitEnv,
+    );
+    const squashed: MergeResolveState = { ...squashing, squashCommitSha };
+    await saveMergeState(tx, current.id, squashed);
+    return squashed;
+  });
+  const squashCommitSha = next.squashCommitSha;
   ctx.logger.info(
     {
       featureBranch: state.featureBranch,
@@ -413,6 +470,7 @@ async function fetchForSync(
   cwd: string,
   base: string,
   credentialId: string | undefined,
+  run: typeof gitRun,
 ): Promise<{ ok: boolean; error: string | null }> {
   const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
   const argv: string[] = [];
@@ -428,7 +486,7 @@ async function fetchForSync(
     }
   }
   argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
-  const res = await gitRun(cwd, argv, env);
+  const res = await run(cwd, argv, env);
   if (res.code !== 0) {
     return {
       ok: false,
@@ -462,7 +520,15 @@ async function prePushSync(
 ): Promise<MergeResolved> {
   const base = state.baseBranch;
   const fv = (current.formValues ?? {}) as { credentialId?: string };
-  const fetched = await fetchForSync(db, ctx, state.mergeDir, base, fv.credentialId || undefined);
+  const fetched = await fetchForSync(
+    db,
+    ctx,
+    state.mergeDir,
+    base,
+    fv.credentialId || undefined,
+    (cwd, argv, env) =>
+      inMergeDir(db, current, params, state.mergeDir, () => gitRun(cwd, argv, env)),
+  );
   if (!fetched.ok) {
     // A flaky link must never block the task: push the local base as-is. If origin did
     // move, the push fails non-ff exactly as before — recoverable by retry.
@@ -470,12 +536,12 @@ async function prePushSync(
       { base, err: fetched.error },
       'pre-push base sync: fetch failed; pushing the local base as-is',
     );
-    return reachDone(db, current, ctx, state);
+    return reachDone(db, current, ctx, params, state);
   }
   const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
   if (behind === 0) {
     // Origin has not moved since 00a-sync-base — push directly (today's behavior).
-    return reachDone(db, current, ctx, state);
+    return reachDone(db, current, ctx, params, state);
   }
   const rounds = state.baseSyncRounds ?? 0;
   if (rounds >= MAX_BASE_SYNC_ROUNDS) {
@@ -499,7 +565,9 @@ async function prePushSync(
     conflictRetries: 0,
     baseSyncRounds: rounds + 1,
   };
-  await saveMergeState(db, current.id, next);
+  await inMergeDir(db, current, params, state.mergeDir, (tx) =>
+    saveMergeState(tx, current.id, next),
+  );
   return resolveMergePhase(db, stepDef, { ...current, mergeResolveState: next }, ctx, params);
 }
 
@@ -681,6 +749,8 @@ export async function resolveMergePhase(
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
 
   let state = current.mergeResolveState as MergeResolveState | null;
+  const section = <T>(mergeDir: string, fn: (tx: DbHandle) => Promise<T>) =>
+    inMergeDir(db, current, params, mergeDir, fn);
 
   // --- init: snapshot the merge target + mode from the detect output ---
   if (!state) {
@@ -750,15 +820,24 @@ export async function resolveMergePhase(
   // --- pending: attempt the merge; clean -> done, conflict -> resolving (live) ---
   if (state.phase === 'pending') {
     const pending = state;
-    // Locked per merge dir: a second task's check cannot interleave with this one's abort and open.
-    const attempt = await db.transaction(async (tx) => {
-      await lockMergeDir(tx, pending.mergeDir);
-      const holder = await findOtherMergeHolder(tx, {
-        mergeDir: pending.mergeDir,
-        taskId: params.taskId,
-      });
-      if (holder) return { kind: 'held' as const, holder };
-      // Every task creates or removes the shared base worktree only under this lock.
+    // Taken before the first git write in the dir and kept until this merge is done, so no other
+    // task opens there between this one's sections.
+    const claim = await claimMergeDir(db, {
+      mergeDir: pending.mergeDir,
+      stepId: current.id,
+      taskId: params.taskId,
+      epoch: params.epoch,
+    });
+    if (claim.kind === 'held') {
+      return haltFailed(
+        db,
+        current,
+        `Task "${claim.holder.title}" (${claim.holder.id}) is still merging into ${state.baseBranch} in ${state.mergeDir}; retry once it finishes.`,
+        'merge dir in use',
+      );
+    }
+    const attempt = await section(pending.mergeDir, async (tx) => {
+      // Every task creates or removes the shared base worktree only in a section.
       if (pending.mode === 'cross-branch') {
         await ensureBaseWorktree(ctx, pending.mergeDir, pending.baseBranch);
       }
@@ -779,20 +858,12 @@ export async function resolveMergePhase(
         ['-m', `Merge ${armed.featureBranch}`],
         commitEnv,
       );
-      // Recorded inside the lock's transaction, so a landed merge the squash has yet to reset is held too.
+      // Recorded in the same transaction, so a landed merge the squash has yet to reset is held too.
       if (opened.kind !== 'refused') {
         await saveMergeState(tx, current.id, { ...armed, phase: 'resolving' });
       }
       return { kind: 'opened' as const, opened, armed };
     });
-    if (attempt.kind === 'held') {
-      return haltFailed(
-        db,
-        current,
-        `Task "${attempt.holder.title}" (${attempt.holder.id}) is still merging into ${state.baseBranch} in ${state.mergeDir}; retry once it finishes.`,
-        'merge dir in use',
-      );
-    }
     state = attempt.armed;
     if (attempt.kind === 'unaborted') {
       return haltUnaborted(db, current, params.taskId, state, attempt.stale);
@@ -831,18 +902,26 @@ export async function resolveMergePhase(
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
       }
       if (inv.supersededAt != null) await assertOwnsStep(db, current.id);
-      const leftovers = await relocateFixerChanges(
-        state.mergeDir,
-        state.fixBaseline,
-        { taskId: params.taskId, runId: inv.id },
-        () => taskSecretMaskPolicy(db, params.taskId),
-      );
-      // Spent once used: a later pass comparing it with a tree the merge has since left would put
-      // the merge's files back. Kept while the index still holds what the fixer staged, for the retry.
-      if (state.fixBaseline && !leftovers?.indexHeld) {
-        state = { ...state, fixBaseline: null };
-        await saveMergeState(db, current.id, state);
-      }
+      const ingesting = state;
+      const maskSource = await maskSourceOnce(db, params.taskId);
+      const relocated = await section(ingesting.mergeDir, async (tx) => {
+        const found = await relocateFixerChanges(
+          ingesting.mergeDir,
+          ingesting.fixBaseline,
+          { taskId: params.taskId, runId: inv.id },
+          maskSource,
+        );
+        // Spent once used: a later pass comparing it with a tree the merge has since left would put
+        // the merge's files back. Kept while the index still holds what the fixer staged, for the retry.
+        if (ingesting.fixBaseline && !found?.indexHeld) {
+          const spent = { ...ingesting, fixBaseline: null };
+          await saveMergeState(tx, current.id, spent);
+          return { leftovers: found, state: spent };
+        }
+        return { leftovers: found, state: ingesting };
+      });
+      const leftovers = relocated.leftovers;
+      state = relocated.state;
       if (leftovers) {
         await recordFixerLeftovers(db, params.taskId, current.id, state.featureBranch, leftovers);
         current = await addStepWarning(
@@ -867,13 +946,17 @@ export async function resolveMergePhase(
           .update(schema.cliInvocations)
           .set({ consumedAt: new Date() })
           .where(eq(schema.cliInvocations.id, inv.id));
-        const aborted = await abortMerge(state.mergeDir);
-        state = {
+        const refunded: MergeResolveState = {
           ...state,
           fixInvocationId: null,
           conflictRetries: Math.max(0, state.conflictRetries - 1),
         };
-        await saveMergeState(db, current.id, state);
+        const aborted = await section(refunded.mergeDir, async (tx) => {
+          const result = await abortMerge(refunded.mergeDir);
+          await saveMergeState(tx, current.id, refunded);
+          return result;
+        });
+        state = refunded;
         if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted);
       } else {
         // Fatal provider failure (rate-limit/quota, bad/expired auth, 5xx outage) will
@@ -885,7 +968,8 @@ export async function resolveMergePhase(
             .update(schema.cliInvocations)
             .set({ consumedAt: new Date() })
             .where(eq(schema.cliInvocations.id, inv.id));
-          const aborted = await abortMerge(state.mergeDir);
+          const failedDir = state.mergeDir;
+          const aborted = await section(failedDir, () => abortMerge(failedDir));
           const why = inv.errorMessage ?? 'fatal provider error';
           if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
           return haltFailed(db, current, why, 'fatal provider error');
@@ -911,16 +995,24 @@ export async function resolveMergePhase(
           await saveMergeState(db, current.id, state);
           return parkForGuidance(db, current, spec, state);
         }
+        const completing = state;
         const committed =
-          usable && (await completeMergeHostSide(state.mergeDir, commitEnv, state.featureBranch));
-        state = { ...state, fixInvocationId: null };
+          usable &&
+          (await section(completing.mergeDir, () =>
+            completeMergeHostSide(completing.mergeDir, commitEnv, completing.featureBranch),
+          ));
+        const idle: MergeResolveState = { ...state, fixInvocationId: null };
+        state = idle;
         if (committed) {
           return finishMerge(db, stepDef, current, ctx, params, state);
         }
         // Unusable, or markers remain → abort this attempt; the dispatch decision below retries or
         // halts, and the attempt stays spent.
-        const aborted = await abortMerge(state.mergeDir);
-        await saveMergeState(db, current.id, state);
+        const aborted = await section(idle.mergeDir, async (tx) => {
+          const result = await abortMerge(idle.mergeDir);
+          await saveMergeState(tx, current.id, idle);
+          return result;
+        });
         if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted);
       }
     }
@@ -932,38 +1024,40 @@ export async function resolveMergePhase(
     if (await mergeCommitted(state.mergeDir, state.featureBranch)) {
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
+    const dir = state.mergeDir;
     if (state.conflictRetries >= MAX_MERGE_CONFLICT_RETRIES) {
-      const aborted = await abortMerge(state.mergeDir);
+      const aborted = await section(dir, () => abortMerge(dir));
       const why = `Merge conflict merging ${state.featureBranch} into ${state.baseBranch}: auto-resolution exhausted after ${MAX_MERGE_CONFLICT_RETRIES} attempts. Resolve manually or use "Retry with AI".`;
       if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
       return haltFailed(db, current, why, 'merge conflict');
     }
     if (!params.providers || !params.deps) {
-      const aborted = await abortMerge(state.mergeDir);
+      const aborted = await section(dir, () => abortMerge(dir));
       const why = 'Merge conflict requires a CLI provider to resolve, but none were supplied.';
       if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
       return haltFailed(db, current, why, 'no provider');
     }
     // Recreate the live merge if it isn't open (after an abort or a crash). One open for another
     // ref is not this conflict, and a fixer must never be sent into it.
-    const cleared = await abortOtherMerge(state.mergeDir, state.featureBranch);
-    if (!cleared.ok) return haltUnaborted(db, current, params.taskId, state, cleared);
-    if (!(await mergeOpenFor(state.mergeDir, state.featureBranch))) {
-      const opened = await openMerge(
-        state.mergeDir,
-        state.featureBranch,
-        ['-m', `Merge ${state.featureBranch}`],
-        commitEnv,
-      );
-      if (opened.kind === 'merged') {
-        return finishMerge(db, stepDef, current, ctx, params, state);
+    const feature = state.featureBranch;
+    const baselineSource = await maskSourceOnce(db, params.taskId);
+    const reopened = await section(dir, async () => {
+      const cleared = await abortOtherMerge(dir, feature);
+      if (!cleared.ok) return { kind: 'unaborted' as const, cleared };
+      if (!(await mergeOpenFor(dir, feature))) {
+        const opened = await openMerge(dir, feature, ['-m', `Merge ${feature}`], commitEnv);
+        if (opened.kind === 'merged') return { kind: 'merged' as const };
+        if (opened.kind === 'refused') return { kind: 'refused' as const, detail: opened.detail };
       }
-      if (opened.kind === 'refused') return haltRefused(db, current, state, opened.detail);
+      return { kind: 'ready' as const, fixBaseline: await captureFixBaseline(dir, baselineSource) };
+    });
+    if (reopened.kind === 'unaborted') {
+      return haltUnaborted(db, current, params.taskId, state, reopened.cleared);
     }
+    if (reopened.kind === 'merged') return finishMerge(db, stepDef, current, ctx, params, state);
+    if (reopened.kind === 'refused') return haltRefused(db, current, state, reopened.detail);
+    const fixBaseline = reopened.fixBaseline;
     const guidance = await loadOutstandingMergeGuidance(db, params.taskId);
-    const fixBaseline = await captureFixBaseline(state.mergeDir, () =>
-      taskSecretMaskPolicy(db, params.taskId),
-    );
     // A const alias so the closure below keeps TypeScript's narrowing of `state` to
     // non-null (a `let` loses that narrowing across a function boundary).
     const priorState = state;
@@ -999,7 +1093,7 @@ export async function resolveMergePhase(
       return { resolved: false, result: { status: 'waiting_cli', row } };
     }
     if (dispatched.kind === 'no_provider') {
-      const aborted = await abortMerge(state.mergeDir);
+      const aborted = await section(dir, () => abortMerge(dir));
       const why = 'No CLI provider available for merge conflict resolution.';
       if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
       return haltFailed(db, current, why, 'no provider');
@@ -1022,7 +1116,7 @@ export async function resolveMergePhase(
   // Crash-recovery: a push persisted as in-flight ('pushing') re-runs idempotently
   // (a completed push reports "up-to-date").
   if (state.phase === 'pushing') {
-    return reachDone(db, current, ctx, state);
+    return reachDone(db, current, ctx, params, state);
   }
 
   // phase 'done' → proceed to apply, which reads the terminal state.

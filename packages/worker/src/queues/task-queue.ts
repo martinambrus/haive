@@ -127,6 +127,7 @@ import {
   HUMAN_REJECT_SOURCES,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
+import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import {
   StepSupersededError,
   TERMINAL_TASK_STATUSES,
@@ -3371,6 +3372,8 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  // After the containers: a fixer the cancel was still stopping may write into the merge dir.
+  await releaseTaskMergeClaims(db, payload.taskId);
   await discardPlanMerge(db, payload.taskId);
   try {
     await cleanupTaskScratchWorkspace(db, payload.taskId);

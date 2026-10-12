@@ -34,6 +34,7 @@ for (const k of REQUIRED_ENV) {
 interface State {
   userId?: string;
   taskId?: string;
+  otherTaskId?: string;
   worker?: Awaited<ReturnType<typeof startTaskWorker>>;
   queue?: Queue<TaskJobPayload>;
 }
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
   const state: State = {};
   let exitCode = 0;
   let stubCalls = 0;
+  let claimHeldDuringCleanup: boolean | null = null;
   try {
     log.info('bootstrapping');
     initRedis(process.env.REDIS_URL!);
@@ -69,6 +71,11 @@ async function main(): Promise<void> {
 
     setContainerCleanupRunner(async (_db, taskId) => {
       stubCalls += 1;
+      const held = await db
+        .select({ dir: schema.mergeDirClaims.mergeDir })
+        .from(schema.mergeDirClaims)
+        .where(eq(schema.mergeDirClaims.taskId, taskId));
+      claimHeldDuringCleanup = held.length === 1;
       log.info({ taskId, call: stubCalls }, 'stub cleanup runner invoked');
       return 3;
     });
@@ -99,6 +106,38 @@ async function main(): Promise<void> {
       .returning();
     if (!task) throw new Error('task insert failed');
     state.taskId = task.id;
+
+    // The cancelled task's merge dir claim, and another task's that the cancel must leave alone.
+    const [other] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        type: 'workflow',
+        title: 'container cleanup smoke bystander',
+        status: 'running',
+      })
+      .returning();
+    if (!other) throw new Error('bystander task insert failed');
+    state.otherTaskId = other.id;
+    const steps = await db
+      .insert(schema.taskSteps)
+      .values(
+        [task.id, other.id].map((taskId) => ({
+          taskId,
+          stepId: '12-worktree-cleanup',
+          stepIndex: 0,
+          title: 'merge',
+          status: 'waiting_cli' as const,
+        })),
+      )
+      .returning({ id: schema.taskSteps.id, taskId: schema.taskSteps.taskId });
+    await db.insert(schema.mergeDirClaims).values(
+      steps.map((step) => ({
+        mergeDir: `/smoke/${step.taskId}/main--base`,
+        taskId: step.taskId,
+        taskStepId: step.id,
+      })),
+    );
 
     state.worker = startTaskWorker();
     state.queue = new Queue<TaskJobPayload>(QUEUE_NAMES.TASK, {
@@ -185,6 +224,21 @@ async function main(): Promise<void> {
       'task.cancel_finished task_event',
     );
 
+    // Held while the containers were being torn down, gone once the teardown finished, and only
+    // this task's: the claim is what keeps another task out of a dir a fixer may still be writing.
+    if (claimHeldDuringCleanup !== true) {
+      throw new Error(
+        `expected the claim held while containers were cleaned up, got ${claimHeldDuringCleanup}`,
+      );
+    }
+    const claims = await db.select().from(schema.mergeDirClaims);
+    const mine = claims.filter((c) => c.taskId === task.id);
+    const theirs = claims.filter((c) => c.taskId === state.otherTaskId);
+    if (mine.length !== 0)
+      throw new Error(`expected the cancelled task's claim released, got ${mine.length}`);
+    if (theirs.length !== 1)
+      throw new Error(`expected the bystander's claim kept, got ${theirs.length}`);
+
     log.info(
       { status: cancelled.status, stubCalls, eventCount: cleanupEvents.length },
       'cleanup wiring verified',
@@ -206,6 +260,9 @@ async function main(): Promise<void> {
     setContainerCleanupRunner(null);
     try {
       const db = getDb();
+      if (state.otherTaskId) {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, state.otherTaskId));
+      }
       if (state.taskId) {
         await db.delete(schema.taskEvents).where(eq(schema.taskEvents.taskId, state.taskId));
         await db.delete(schema.tasks).where(eq(schema.tasks.id, state.taskId));
