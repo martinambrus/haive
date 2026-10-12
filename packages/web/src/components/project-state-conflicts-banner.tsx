@@ -11,6 +11,7 @@ import {
   PENDING_REFETCH_LIMIT,
   PENDING_REFETCH_MS,
   answerConfirmation,
+  landedAnswer,
   resolutionNotice,
   conflictKeyLabel,
   conflictSideMarkdown,
@@ -164,9 +165,21 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     const remaining =
       listed === null ? pendingRef.current : stillListed(pendingRef.current, listed);
     const done = pendingRef.current.filter((id) => !remaining.includes(id));
+    for (const id of done) delete pendingAnswers.current[id];
     if (done.length > 0) {
-      setAnswered((prev) => [...prev, ...done.map((id) => pendingAnswers.current[id]!)]);
-      for (const id of done) delete pendingAnswers.current[id];
+      const landed = await Promise.all(
+        done.map((id) =>
+          api
+            .get<{ conflict: ProjectStateConflictBody }>(
+              `/repos/${repositoryId}/project-state/conflicts/${id}`,
+            )
+            .then((res) => landedAnswer(res.conflict.resolution))
+            .catch(() => null),
+        ),
+      );
+      if (!alive.current) return;
+      const answers = landed.filter((a): a is ProjectStateAnswer => a !== null);
+      if (answers.length > 0) setAnswered((prev) => [...prev, ...answers]);
     }
     setPending(remaining);
     if (remaining.length === 0) return;
@@ -180,7 +193,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       for (const id of remaining) next[id] = { tone: 'info', text: PENDING_GAVE_UP_MESSAGE };
       return next;
     });
-  }, [load, setPending]);
+  }, [load, setPending, repositoryId]);
 
   useEffect(() => {
     alive.current = true;
@@ -218,21 +231,18 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     }
   }
 
-  if (loadError) {
-    return (
-      <InlineMarkdown
-        className="text-xs text-red-400"
-        body={`Project record check: ${loadError}`}
-      />
-    );
-  }
-
   const confirmation = confirming
     ? answerConfirmation(confirming.answer, confirming.conflict.key)
     : null;
 
   return (
     <>
+      {loadError && (
+        <InlineMarkdown
+          className="text-xs text-red-400"
+          body={`Project record check: ${loadError}`}
+        />
+      )}
       <ProjectStateConflictsView
         conflicts={conflicts}
         notice={resolutionNotice(answered)}

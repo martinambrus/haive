@@ -3,6 +3,7 @@ import {
   answerConfirmation,
   conflictKeyLabel,
   conflictSideMarkdown,
+  landedAnswer,
   resolutionNotice,
   stillListed,
   submitConflictAnswer,
@@ -120,5 +121,14 @@ describe('resolutionNotice', () => {
 
   it("reports the teammate's value when nothing was kept", () => {
     expect(resolutionNotice(['take_theirs'])).toBe("This install now uses your teammate's value.");
+  });
+});
+
+describe('landedAnswer', () => {
+  it('counts only an answer the row was actually closed with', () => {
+    expect(landedAnswer('keep_mine')).toBe('keep_mine');
+    expect(landedAnswer('take_theirs')).toBe('take_theirs');
+    expect(landedAnswer('converged')).toBeNull();
+    expect(landedAnswer(null)).toBeNull();
   });
 });

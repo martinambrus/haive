@@ -60,6 +60,10 @@ export function answerConfirmation(
   };
 }
 
+export function landedAnswer(resolution: string | null | undefined): ProjectStateAnswer | null {
+  return resolution === 'keep_mine' || resolution === 'take_theirs' ? resolution : null;
+}
+
 export function resolutionNotice(answered: readonly ProjectStateAnswer[]): string | null {
   if (answered.includes('keep_mine')) {
     return `This install's value is written into \`${RECORD_FILE}\`. Commit and push that file so your teammate gets it.`;
