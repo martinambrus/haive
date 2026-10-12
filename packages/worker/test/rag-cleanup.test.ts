@@ -1,18 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import type { createFakeRagLock } from './rag-lock-fake.js';
+
+const lockFake = vi.hoisted(() => ({ value: undefined as unknown }));
 
 /** `openExistingRagDatabase` opens a real postgres pool, so it is the one thing the fake
  *  cannot provide. Everything else in the module (RAG_TABLE, ragDatabaseName, …) must keep
  *  its real behaviour — `ragDatabaseName` in particular, since the sanitised name is what
  *  the keeper compares on. */
 const openExistingRagDatabase = vi.fn();
-vi.mock('@haive/shared/rag', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  openExistingRagDatabase: (...args: unknown[]) => openExistingRagDatabase(...args),
+vi.mock('@haive/shared/rag', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/rag')>();
+  const { createFakeRagLock: create } = await import('./rag-lock-fake.js');
+  const fake = create(actual);
+  lockFake.value = fake;
+  return {
+    ...actual,
+    openExistingRagDatabase: (...args: unknown[]) => openExistingRagDatabase(...args),
+    tryAcquireRagSyncLock: fake.tryAcquireRagSyncLock,
+  };
+});
+vi.mock('../src/redis.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getRedis: () => ({}),
 }));
 
-const { cleanupRagForRepository } =
+const { RagCleanupDeferredError, cleanupRagForRepository } =
   await import('../src/step-engine/steps/onboarding/_rag-connection.js');
+const fakeLock = lockFake.value as ReturnType<typeof createFakeRagLock>;
 
 /** Best-effort textual rendering of a drizzle SQL object, by walking `queryChunks`. */
 function sqlText(sqlObj: unknown): string {
@@ -115,6 +130,7 @@ let fake: FakeDb;
 
 beforeEach(() => {
   openExistingRagDatabase.mockReset();
+  fakeLock.reset();
 });
 
 afterEach(() => {
@@ -299,5 +315,111 @@ describe('cleanupRagForRepository', () => {
 
     expect(res.kept).toEqual(['haive_rag_rdapi']);
     expect(openExistingRagDatabase).toHaveBeenCalledTimes(1);
+  });
+
+  describe('the repository RAG sync lock', () => {
+    it('defers by throwing, and touches nothing, while a sync holds the lock', async () => {
+      fake = makeFakeDb([]);
+      const store = fakeStore({ deleted: 10, remaining: 0 });
+      openExistingRagDatabase.mockResolvedValue(store.conn);
+      fakeLock.state.held.add('deleted-repo');
+
+      await expect(cleanupRagForRepository(fake.db, payload(['RDApi']))).rejects.toBeInstanceOf(
+        RagCleanupDeferredError,
+      );
+
+      expect(openExistingRagDatabase).not.toHaveBeenCalled();
+      expect(store.statements).toEqual([]);
+      expect(fake.calls).toEqual([]);
+      expect(fakeLock.state.handles).toHaveLength(0);
+    });
+
+    it('defers the same way when Redis cannot be reached', async () => {
+      fake = makeFakeDb([]);
+      openExistingRagDatabase.mockResolvedValue(fakeStore({}).conn);
+      fakeLock.state.redisDown = true;
+
+      const err = await cleanupRagForRepository(fake.db, payload(['RDApi'])).catch(
+        (e: unknown) => e,
+      );
+
+      expect(err).toBeInstanceOf(RagCleanupDeferredError);
+      expect((err as Error).message).toContain('deleted-repo');
+      expect(openExistingRagDatabase).not.toHaveBeenCalled();
+      expect(fake.calls).toEqual([]);
+    });
+
+    it('holds the lock through the DROP and releases it exactly once', async () => {
+      fake = makeFakeDb([]);
+      const store = fakeStore({ deleted: 9199, remaining: 0 });
+      let heldAtDrop: boolean | null = null;
+      openExistingRagDatabase.mockResolvedValue(store.conn);
+      const execute = fake.db.execute as unknown as (q: unknown) => Promise<unknown>;
+      fake.db.execute = (async (q: unknown) => {
+        if (sqlText(q).includes('DROP DATABASE')) {
+          heldAtDrop = fakeLock.state.held.has('deleted-repo');
+        }
+        return execute(q);
+      }) as unknown as Database['execute'];
+
+      const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+      expect(res.dropped).toEqual(['haive_rag_rdapi']);
+      expect(heldAtDrop).toBe(true);
+      expect(fakeLock.state.handles).toHaveLength(1);
+      expect(fakeLock.state.handles[0]!.released).toBe(1);
+      expect(fakeLock.state.held.size).toBe(0);
+    });
+
+    it('releases the lock when the cleanup fails', async () => {
+      fake = makeFakeDb([]);
+      openExistingRagDatabase.mockRejectedValue(new Error('connection refused'));
+      await cleanupRagForRepository(fake.db, payload(['RDApi']));
+      expect(fakeLock.state.handles[0]!.released).toBe(1);
+
+      const broken = {
+        execute: vi.fn(),
+        query: {
+          repositories: {
+            findMany: async () => {
+              throw new Error('db down');
+            },
+          },
+        },
+      } as unknown as Database;
+      await cleanupRagForRepository(broken, payload(['RDApi']));
+      expect(fakeLock.state.handles[1]!.released).toBe(1);
+      expect(fakeLock.state.held.size).toBe(0);
+    });
+
+    it('keeps the database when the lock is lost after the rows went and before the drop', async () => {
+      fake = makeFakeDb([]);
+      const store = fakeStore({ deleted: 10, remaining: 0 });
+      openExistingRagDatabase.mockResolvedValue(store.conn);
+      const execute = fake.db.execute as unknown as (q: unknown) => Promise<unknown>;
+      fake.db.execute = (async (q: unknown) => {
+        if (sqlText(q).includes('pg_stat_activity')) fakeLock.state.handles[0]!.lost = true;
+        return execute(q);
+      }) as unknown as Database['execute'];
+
+      const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+      expect(res).toEqual({ dropped: [], kept: ['haive_rag_rdapi'] });
+      expect(fake.calls.some((c) => c.includes('DROP DATABASE'))).toBe(false);
+      expect(fakeLock.state.handles[0]!.released).toBe(1);
+    });
+
+    it('sends no store statement once the lock is lost, and keeps the database', async () => {
+      fake = makeFakeDb([]);
+      const store = fakeStore({ deleted: 10, remaining: 0 });
+      openExistingRagDatabase.mockResolvedValue(store.conn);
+      fakeLock.state.loseOnTake = true;
+
+      const res = await cleanupRagForRepository(fake.db, payload(['RDApi']));
+
+      expect(store.statements).toEqual([]);
+      expect(res).toEqual({ dropped: [], kept: ['haive_rag_rdapi'] });
+      expect(fakeLock.state.handles[0]!.released).toBe(1);
+    });
   });
 });

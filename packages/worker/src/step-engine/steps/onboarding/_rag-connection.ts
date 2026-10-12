@@ -7,11 +7,15 @@ import {
   identifierTsvSentinelQuery,
   identifierTsvSql,
   isPgvectorUnavailable,
+  fenceRagStore,
   openExistingRagDatabase,
   ragDatabaseName,
+  tryAcquireRagSyncLock,
   type RagConnection,
+  type RagSyncLock,
 } from '@haive/shared/rag';
 import { repoRagIdentityFromMirror } from '@haive/shared/global-kb';
+import { getRedis } from '../../../redis.js';
 
 // Connection resolution + types moved to @haive/shared/rag so the API query
 // path can reuse them without importing the worker. Re-exported here so
@@ -269,6 +273,13 @@ async function dedupeAndEnforceRepoUniqueness(conn: RagConnection): Promise<void
 /* Repository cleanup                                                  */
 /* ------------------------------------------------------------------ */
 
+export class RagCleanupDeferredError extends Error {
+  constructor(repositoryId: string, reason: string) {
+    super(`RAG cleanup of repository ${repositoryId} deferred: ${reason}`);
+    this.name = 'RagCleanupDeferredError';
+  }
+}
+
 /**
  * Reclaim the per-project internal RAG storage of a deleted repository.
  *
@@ -304,12 +315,37 @@ async function dedupeAndEnforceRepoUniqueness(conn: RagConnection): Promise<void
  * not own. The caller filters `projectNames` to `ragMode='internal'` names of the deleted
  * repo.
  *
- * Never throws, and every uncertainty resolves to `kept`: a leaked database costs disk,
- * a wrongly dropped one cannot be recovered.
+ * Never throws once it holds the repository's sync lock, and every uncertainty resolves to
+ * `kept`: a leaked database costs disk, a wrongly dropped one cannot be recovered. It defers
+ * by throwing `RagCleanupDeferredError` while a sync holds or may hold that lock.
  */
 export async function cleanupRagForRepository(
   haiveDb: Database,
   payload: { repositoryId: string; userId: string; projectNames: string[] },
+): Promise<{ dropped: string[]; kept: string[] }> {
+  let lock: RagSyncLock | null;
+  try {
+    lock = await tryAcquireRagSyncLock(getRedis(), payload.repositoryId);
+  } catch (err) {
+    throw new RagCleanupDeferredError(
+      payload.repositoryId,
+      `the sync lock could not be checked (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+  if (!lock) {
+    throw new RagCleanupDeferredError(payload.repositoryId, 'a sync of it is running');
+  }
+  try {
+    return await cleanupRagLocked(haiveDb, payload, lock);
+  } finally {
+    await lock.release();
+  }
+}
+
+async function cleanupRagLocked(
+  haiveDb: Database,
+  payload: { repositoryId: string; userId: string; projectNames: string[] },
+  lock: RagSyncLock,
 ): Promise<{ dropped: string[]; kept: string[] }> {
   const dropped: string[] = [];
   const kept: string[] = [];
@@ -340,7 +376,8 @@ export async function cleanupRagForRepository(
     let deletedRows = 0;
     let conn: RagConnection | null = null;
     try {
-      conn = await openExistingRagDatabase(haiveDb, dbName);
+      const opened = await openExistingRagDatabase(haiveDb, dbName);
+      conn = opened ? fenceRagStore(opened, lock) : null;
       if (!conn) {
         // Nothing on disk. `DROP DATABASE IF EXISTS` would be a no-op, and opening through
         // resolveRagConnection would have CREATED it.
@@ -405,6 +442,14 @@ export async function cleanupRagForRepository(
       continue;
     }
 
+    if (lock.lost) {
+      log.warn(
+        { dbName, projectName },
+        'rag database kept — the sync lock was lost before the drop',
+      );
+      kept.push(dbName);
+      continue;
+    }
     if (await dropRagDatabase(haiveDb, dbName, projectName, payload.repositoryId)) {
       dropped.push(dbName);
     } else {

@@ -14,6 +14,7 @@ vi.mock('../src/step-engine/steps/onboarding/_rag-connection.js', async (importO
   ...(await importOriginal<object>()),
   cleanupRagForRepository: h.ragCleanup,
 }));
+import { RagCleanupDeferredError } from '../src/step-engine/steps/onboarding/_rag-connection.js';
 
 import { processTaskJob } from '../src/queues/task-queue.js';
 import {
@@ -184,6 +185,15 @@ describe('the rag cleanup job', () => {
     h.db = fake.db;
     h.ragCleanup.mockRejectedValueOnce(new Error('db busy'));
     await expect(run(ROW(1))).rejects.toThrow('db busy');
+    expect(fake.rows(schema.repoCleanups)).toHaveLength(1);
+  });
+
+  it('keeps the row and rejects when the cleanup is deferred by a running sync', async () => {
+    const { fake, add } = setup();
+    add(1, { kind: 'rag' });
+    h.db = fake.db;
+    h.ragCleanup.mockRejectedValueOnce(new RagCleanupDeferredError(REPO, 'a sync holds the lock'));
+    await expect(run(ROW(1))).rejects.toBeInstanceOf(RagCleanupDeferredError);
     expect(fake.rows(schema.repoCleanups)).toHaveLength(1);
   });
 
