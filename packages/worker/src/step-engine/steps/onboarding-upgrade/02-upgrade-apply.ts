@@ -1615,7 +1615,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       taskId: schema.onboardingArtifacts.taskId,
       sourceStepId: schema.onboardingArtifacts.sourceStepId,
     };
-    const retired: { id: string; diskPath: string; taskId: string; sourceStepId: string }[] = [];
+    const retired: { id: string; diskPath: string; taskId: string | null; sourceStepId: string }[] =
+      [];
     // An earlier attempt's own rows hold what it wrote, never what stood before.
     const retiredBefore = () =>
       retired.filter((r) => r.taskId !== ctx.taskId || r.sourceStepId !== '02-upgrade-apply');

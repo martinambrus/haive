@@ -17,6 +17,7 @@ import {
   withGlobalKb,
 } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
+import { PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { TOOLING_ID_PATTERN } from './cli-executor/tool-usage.js';
 import { classifyGlobalKbVectorProvenance } from './global-kb-vector-provenance.js';
@@ -791,10 +792,12 @@ export async function unclaimBackfilledEdits(db: Database): Promise<string[]> {
     SET written_hash = a.template_content_hash, template_content_hash = a.written_hash, updated_at = now()
     WHERE a.source IN ('backfill', 'rollback')
       AND a.template_kind <> ${CLI_RULES_TEMPLATE_KIND}
+      AND a.source_step_id <> ${PROJECT_STATE_IMPORT_STEP_ID}
       AND a.written_hash <> a.template_content_hash
       AND EXISTS (
         SELECT 1 FROM onboarding_artifacts b
         WHERE b.source = 'backfill'
+          AND b.source_step_id <> ${PROJECT_STATE_IMPORT_STEP_ID}
           AND b.user_modified
           AND b.template_kind <> ${CLI_RULES_TEMPLATE_KIND}
           AND b.written_hash = b.last_observed_disk_hash

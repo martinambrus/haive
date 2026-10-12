@@ -19,6 +19,7 @@ import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   emptyProjectState,
   normalizeProjectState,
+  PROJECT_STATE_IMPORT_STEP_ID,
   renderProjectState,
 } from '@haive/shared/project-state';
 import { applyPlanPatch } from '@haive/shared/plan';
@@ -683,6 +684,73 @@ async function main(): Promise<void> {
           (i) => /UNIQUE/.test(i.indexdef) && /WHERE \(?resolved_at IS NULL/.test(i.indexdef),
         ),
       { conflictColumns, conflictKeys, conflictIndexes },
+    );
+
+    const ledgerColumns = await columnsOf(a.db, 'onboarding_artifacts');
+    const ledgerChecks = await rowsOf<{ conname: string; def: string }>(
+      a.db,
+      sql`select conname, pg_get_constraintdef(oid) as def from pg_constraint where conrelid = to_regclass('onboarding_artifacts') and contype = 'c'`,
+    );
+    const ledgerCheckRows = 'rows' in ledgerChecks ? ledgerChecks.rows : [];
+    const ledgerCheck = ledgerCheckRows.find(
+      (c) => c.conname === 'onboarding_artifacts_import_marker_check',
+    );
+    const sqlStateOf = async (run: () => Promise<unknown>): Promise<string | null> => {
+      try {
+        await run();
+        return null;
+      } catch (err) {
+        const cause = err instanceof Error ? err.cause : undefined;
+        return (cause as { code?: string } | undefined)?.code ?? String(err);
+      }
+    };
+    const ledgerPath = '.two-install-smoke/ledger';
+    const ledgerHash = 'a'.repeat(64);
+    const ledgerInsert = (
+      path: string,
+      taskId: string | null,
+      source: 'onboarding' | 'backfill',
+      stepId: string,
+      importedAt: boolean,
+    ) =>
+      a.db.execute(
+        sql`insert into onboarding_artifacts (user_id, repository_id, task_id, disk_path, template_id, template_kind, template_schema_version, template_content_hash, written_hash, source_step_id, source, imported_at) values (${a.userId}, ${a.repositoryId}, ${taskId}::uuid, ${path}, 'smoke', 'agent', 1, ${ledgerHash}, ${ledgerHash}, ${stepId}, ${source}::artifact_source, ${importedAt ? new Date().toISOString() : null}::timestamp)`,
+      );
+    const ledgerOutcomes = {
+      marker: await sqlStateOf(() =>
+        ledgerInsert(`${ledgerPath}/1`, null, 'backfill', PROJECT_STATE_IMPORT_STEP_ID, true),
+      ),
+      retiredLocal: await sqlStateOf(() =>
+        ledgerInsert(`${ledgerPath}/2`, taskA, 'onboarding', '12-post-onboarding', true),
+      ),
+      noTaskOtherSource: await sqlStateOf(() =>
+        ledgerInsert(`${ledgerPath}/3`, null, 'onboarding', '12-post-onboarding', true),
+      ),
+      noTaskOtherStep: await sqlStateOf(() =>
+        ledgerInsert(`${ledgerPath}/4`, null, 'backfill', '01-upgrade-plan', true),
+      ),
+      markerWithTask: await sqlStateOf(() =>
+        ledgerInsert(`${ledgerPath}/5`, taskA, 'backfill', PROJECT_STATE_IMPORT_STEP_ID, true),
+      ),
+      markerWithoutInstant: await sqlStateOf(() =>
+        ledgerInsert(`${ledgerPath}/6`, null, 'backfill', PROJECT_STATE_IMPORT_STEP_ID, false),
+      ),
+    };
+    await a.db.execute(
+      sql`delete from onboarding_artifacts where repository_id = ${a.repositoryId} and disk_path like ${ledgerPath + '/%'}`,
+    );
+    check(
+      'migration 0189 lets the ledger hold an imported marker and refuses every other row without a task',
+      shapeOf(ledgerColumns, 'task_id') === 'uuid YES' &&
+        shapeOf(ledgerColumns, 'imported_at') === 'timestamp without time zone YES' &&
+        ledgerCheck !== undefined &&
+        ledgerOutcomes.marker === null &&
+        ledgerOutcomes.retiredLocal === null &&
+        ledgerOutcomes.noTaskOtherSource === '23514' &&
+        ledgerOutcomes.noTaskOtherStep === '23514' &&
+        ledgerOutcomes.markerWithTask === '23514' &&
+        ledgerOutcomes.markerWithoutInstant === '23514',
+      { ledgerColumns, ledgerChecks, ledgerOutcomes },
     );
 
     await a.db

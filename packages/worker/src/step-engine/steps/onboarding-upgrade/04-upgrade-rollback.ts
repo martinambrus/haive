@@ -829,7 +829,10 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
                   schema.onboardingArtifacts.diskPath,
                   untrackedRows.map((r) => r.diskPath),
                 ),
-                ne(schema.onboardingArtifacts.taskId, ctx.taskId),
+                or(
+                  isNull(schema.onboardingArtifacts.taskId),
+                  ne(schema.onboardingArtifacts.taskId, ctx.taskId),
+                ),
                 isNull(schema.onboardingArtifacts.supersededAt),
               ),
             )
