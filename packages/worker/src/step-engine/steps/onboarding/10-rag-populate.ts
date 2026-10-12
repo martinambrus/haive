@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
-import type { RagSyncLock } from '@haive/shared/rag';
+import { fenceRagStore, type RagSyncLock } from '@haive/shared/rag';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import { loadScopeExcludeGlobs } from './_scope.js';
@@ -686,7 +686,8 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     const lock = repositoryId ? await acquireRepoRagSyncLock(ctx, repositoryId) : null;
     try {
       await ctx.emitProgress('Connecting to RAG database...');
-      const conn = await resolveRagConnection(prefs, ctx.db, detected.projectName);
+      const opened = await resolveRagConnection(prefs, ctx.db, detected.projectName);
+      const conn = opened && fenceRagStore(opened, lock);
       if (!conn) {
         ctx.logger.warn('rag connection resolved to null');
         return {

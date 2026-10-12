@@ -324,6 +324,27 @@ describe('onboarding populate with an embedding endpoint configured', () => {
     expect(fakeLock.state.handles[0]!.released).toBe(1);
   });
 
+  it('sends no further statement once the lock is lost between two chunks of one file', async () => {
+    await writeFile(
+      join(root, KB),
+      '# Architecture\n\n## Storage\n\nDocuments live in PostgreSQL.\n\n## Queues\n\nJobs run on BullMQ.\n',
+    );
+    const pg = (conn as { pg: { unsafe: (q: string, p?: unknown[]) => Promise<unknown> } }).pg;
+    const unsafe = pg.unsafe;
+    const afterLoss: string[] = [];
+    pg.unsafe = async (query, params) => {
+      if (fakeLock.state.handles[0]!.lost) afterLoss.push(query);
+      const result = await unsafe(query, params);
+      if (query.includes('INSERT INTO')) fakeLock.state.handles[0]!.lost = true;
+      return result;
+    };
+    await expect(populate(detected({ ollamaReachable: true }))).rejects.toBeInstanceOf(
+      RagSyncLockLostError,
+    );
+    expect(order.filter((event) => event === 'insert')).toHaveLength(1);
+    expect(afterLoss).toEqual([]);
+  });
+
   it('never stops a populate whose lock is still held', async () => {
     const other = '.haive-data/knowledge_base/other.md';
     await writeFile(join(root, other), '# Other\n\nA second document about queues.\n');

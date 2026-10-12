@@ -13,7 +13,7 @@ import {
   LEARNINGS_DIR,
 } from '@haive/shared/knowledge-paths';
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
-import type { RagSyncLock } from '@haive/shared/rag';
+import { fenceRagStore, type RagSyncLock } from '@haive/shared/rag';
 import type { StepContext } from '../../step-definition.js';
 import { acquireRepoRagSyncLock } from '../_rag-sync-lock.js';
 import { gitRun } from '../../../repo/git-push.js';
@@ -495,8 +495,9 @@ async function syncRepositoryIndex(
   const ingestionPolicy = { ...secretPolicy, tracked: await listTrackedFiles(repoPath) };
 
   await ctx.emitProgress('Connecting to RAG database...');
-  const conn = await resolveRagConnection(prefs, ctx.db, projectName);
-  if (!conn) return EMPTY_RESULT('connection resolved to null');
+  const opened = await resolveRagConnection(prefs, ctx.db, projectName);
+  if (!opened) return EMPTY_RESULT('connection resolved to null');
+  const conn = fenceRagStore(opened, lock);
 
   try {
     await ctx.emitProgress('Ensuring RAG schema...');

@@ -209,3 +209,20 @@ export async function acquireRagSyncLock(
     });
   }
 }
+
+/** A view of `conn` whose every `pg.unsafe` checks the lock before it is sent, so no store statement
+ *  starts once the lock is lost. A statement already in flight still lands. */
+export function fenceRagStore<C extends { pg: object }>(conn: C, lock: RagSyncLock | null): C {
+  if (!lock) return conn;
+  const pg = new Proxy(conn.pg, {
+    get(target, prop, receiver) {
+      if (prop !== 'unsafe') return Reflect.get(target, prop, receiver);
+      const unsafe = Reflect.get(target, prop, target) as (...args: unknown[]) => unknown;
+      return (...args: unknown[]) => {
+        lock.assertHeld();
+        return unsafe.apply(target, args);
+      };
+    },
+  });
+  return { ...conn, pg };
+}

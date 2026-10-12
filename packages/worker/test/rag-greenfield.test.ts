@@ -94,6 +94,7 @@ let failDegradedWrite: boolean;
 let leftoverNullHash: boolean;
 let nullHashProbeFails: boolean;
 let onNullHashProbe: (() => void) | null;
+let onInsert: (() => void) | null;
 let nullHashProbes: unknown[][];
 let ctx: StepContext;
 let executionPath: 'full_workflow' | 'quick_bugfix';
@@ -141,6 +142,7 @@ beforeEach(async () => {
   leftoverNullHash = false;
   nullHashProbeFails = false;
   onNullHashProbe = null;
+  onInsert = null;
   nullHashProbes = [];
   mocks.connect.mockImplementation(async () => ({
     close: mocks.close,
@@ -151,6 +153,7 @@ beforeEach(async () => {
           if (failInsertAt !== null && order.filter((e) => e === 'insert').length === failInsertAt)
             throw new Error('store went away');
           inserts.push(params);
+          onInsert?.();
           const rows = indexedChunks.get(params[3] as string) ?? [];
           const row = {
             section_id: params[4] as string,
@@ -1718,6 +1721,21 @@ describe('one RAG sync per repository at a time', () => {
     await expect(syncWorktree()).rejects.toBeInstanceOf(RagSyncLockLostError);
     expect(insertedAtLoss).toBeGreaterThan(0);
     expect(inserts).toHaveLength(insertedAtLoss);
+    expect(deletedPaths).not.toContain('gone.ts');
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('sends no further statement once the lock is lost between two chunks of one batch', async () => {
+    stalePaths = ['gone.ts'];
+    await writeFile(
+      join(worktree, '.haive-data/knowledge_base/architecture.md'),
+      '# Architecture\n\n## Storage\n\nDocuments live in PostgreSQL.\n\n## Queues\n\nJobs run on BullMQ.\n',
+    );
+    onInsert = () => {
+      fakeLock.state.handles[0]!.lost = true;
+    };
+    await expect(syncWorktree()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(inserts).toHaveLength(1);
     expect(deletedPaths).not.toContain('gone.ts');
     expect(fakeLock.state.handles[0]!.released).toBe(1);
   });

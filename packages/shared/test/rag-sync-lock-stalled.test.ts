@@ -6,6 +6,7 @@ import {
   RagSyncLockLostError,
   RagSyncLockTimeoutError,
   acquireRagSyncLock,
+  fenceRagStore,
   tryAcquireRagSyncLock,
 } from '../src/rag/sync-lock.js';
 
@@ -123,4 +124,42 @@ describe('RAG sync lock against a Redis that does not answer', () => {
     expect(held!.lost).toBe(true);
     await held!.release();
   }, 3_000);
+});
+
+describe('a RAG store fenced by its sync lock', () => {
+  const lockWith = (state: { lost: boolean }) => ({
+    get lost() {
+      return state.lost;
+    },
+    assertHeld: () => {
+      if (state.lost) throw new RagSyncLockLostError();
+    },
+    release: async () => undefined,
+  });
+
+  it('sends statements while the lock is held and none once it is lost', async () => {
+    const sent: unknown[][] = [];
+    const conn = {
+      mode: 'external',
+      pg: {
+        unsafe: (...args: unknown[]) => (sent.push(args), Promise.resolve([])),
+        end: () => 'end',
+      },
+      close: async () => undefined,
+    };
+    const state = { lost: false };
+    const fenced = fenceRagStore(conn, lockWith(state));
+    await fenced.pg.unsafe('INSERT 1', [1]);
+    state.lost = true;
+    expect(() => fenced.pg.unsafe('INSERT 2', [2])).toThrow(RagSyncLockLostError);
+    expect(sent).toEqual([['INSERT 1', [1]]]);
+    expect(fenced.pg.end()).toBe('end');
+    expect(fenced.close).toBe(conn.close);
+    expect(fenced.mode).toBe('external');
+  });
+
+  it('returns the connection itself when there is no lock', () => {
+    const conn = { pg: { unsafe: () => undefined } };
+    expect(fenceRagStore(conn, null)).toBe(conn);
+  });
 });
