@@ -180,6 +180,22 @@ describe('answerAndConfirm', () => {
     expect(out).toMatchObject({ kind: 'error', landed: 'keep_mine' });
   });
 
+  it('carries the other answer when a lost request lost to a concurrent one', async () => {
+    const out = await answerAndConfirm(failing(), rowWith('keep_mine'), REPO, ROW, 'take_theirs');
+    expect(out).toMatchObject({ kind: 'error', landed: 'keep_mine' });
+  });
+
+  it('keeps a settled refusal pending when the row cannot be read', async () => {
+    const settled = async () => {
+      throw Object.assign(new Error('already answered'), {
+        status: 409,
+        code: 'project_state_conflict_settled',
+      });
+    };
+    const out = await answerAndConfirm(settled, lookupFails, REPO, ROW, 'take_theirs');
+    expect(out.kind).toBe('pending');
+  });
+
   it('lets a refusal stand without asking the row', async () => {
     const get = vi.fn();
     const out = await answerAndConfirm(failing(409), get, REPO, ROW, 'keep_mine');

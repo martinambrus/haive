@@ -115,10 +115,10 @@ export async function submitConflictAnswer(
   }
 }
 
-/** Sends the answer. A refusal (4xx) stands; one saying another request already settled the row
- *  also carries the answer that landed, so its notice is not lost. Any other failure leaves it unknown whether the answer
- *  landed, so the row is asked: closed with this answer is resolved, closed another way is the
- *  error, and still open or unreadable stays pending for the poll to settle. */
+/** Sends the answer. A refusal (4xx) stands. A failure that leaves it unknown whether the answer
+ *  landed (network, 5xx), or a refusal saying the row was already settled, asks the row: closed with
+ *  this answer is resolved, closed with the other carries it as `landed` so its notice is shown,
+ *  and still open or unreadable stays pending for the poll to settle. */
 export async function answerAndConfirm(
   post: <T>(path: string, body?: unknown) => Promise<T>,
   get: <T>(path: string) => Promise<T>,
@@ -128,19 +128,17 @@ export async function answerAndConfirm(
 ): Promise<ConflictAnswerOutcome> {
   const outcome = await submitConflictAnswer(post, repositoryId, conflictId, answer);
   if (outcome.kind !== 'error') return outcome;
-  const settled = outcome.code === SETTLED_CODE;
-  if (!outcome.ambiguous && !settled) return outcome;
+  if (!outcome.ambiguous && outcome.code !== SETTLED_CODE) return outcome;
   const row = await get<{ conflict: ProjectStateConflictBody }>(
     `/repos/${repositoryId}/project-state/conflicts/${conflictId}`,
   ).then(
     (res) => res.conflict,
     () => null,
   );
-  if (settled) {
-    const landed = landedAnswer(row?.resolution);
-    return landed ? { ...outcome, landed } : outcome;
+  if (row === null || row.resolution === null) {
+    return { kind: 'pending', message: UNCONFIRMED_MESSAGE };
   }
-  if (row !== null && landedAnswer(row.resolution) === answer) return { kind: 'resolved' };
-  if (row !== null && row.resolution !== null) return outcome;
-  return { kind: 'pending', message: UNCONFIRMED_MESSAGE };
+  const landed = landedAnswer(row.resolution);
+  if (landed === answer) return { kind: 'resolved' };
+  return landed ? { ...outcome, landed } : outcome;
 }
