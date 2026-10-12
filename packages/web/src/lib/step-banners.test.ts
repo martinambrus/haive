@@ -3,6 +3,7 @@ import {
   archiveExpansionBanner,
   failureBanner,
   invocationBanner,
+  leftMergeBanners,
   modelIdentityBanner,
   parkBanner,
   PAUSED_WAIT_TEXT,
@@ -232,5 +233,45 @@ describe('archiveExpansionBanner', () => {
 
   it('says nothing for an attachment from an api that predates the fields', () => {
     expect(archiveExpansionBanner({})).toBeNull();
+  });
+});
+
+describe('leftMergeBanners', () => {
+  const opened = {
+    eventType: 'merge.left_open',
+    payload: { dir: '/repo', ref: 'feat/a', head: 'h1', mergeHead: 'm1' },
+  };
+  const settled = (outcome: string, reason: string) => ({
+    eventType: 'merge.left_open_settled',
+    payload: { dir: '/repo', mergeHead: 'm1', outcome, reason },
+  });
+
+  it('shows an unsettled merge on a cancelled task, offering the abort', () => {
+    const [b] = leftMergeBanners([opened], { taskStatus: 'cancelled' });
+    expect(b).toMatchObject({ dir: '/repo', ref: 'feat/a', canAbort: true });
+    expect(b?.text).toContain('feat/a');
+    expect(b?.text).toContain('/repo');
+  });
+
+  it('shows the settled outcome instead once one exists, with no abort', () => {
+    const [b] = leftMergeBanners([opened, settled('moved', 'The merge changed since.')], {
+      taskStatus: 'cancelled',
+    });
+    expect(b?.canAbort).toBe(false);
+    expect(b?.text).toContain('The merge changed since.');
+  });
+
+  it('words each outcome differently', () => {
+    const text = (o: string) =>
+      leftMergeBanners([opened, settled(o, 'why')], { taskStatus: 'cancelled' })[0]!.text;
+    expect(new Set(['aborted', 'moved', 'refused', 'aborted-by-next'].map(text)).size).toBe(4);
+  });
+
+  it('shows nothing for a task that is not cancelled, whatever the events say', () => {
+    expect(leftMergeBanners([opened], { taskStatus: 'failed' })).toEqual([]);
+  });
+
+  it('shows nothing without an event', () => {
+    expect(leftMergeBanners([], { taskStatus: 'cancelled' })).toEqual([]);
   });
 });

@@ -1139,6 +1139,10 @@ function makeDagMergeWaitDb(opts: {
         return chain(resultsFor(table));
       },
     }),
+    // The lookup for a cancelled task's report of the merge this pass clears: none here.
+    selectDistinct: () => ({
+      from: () => ({ innerJoin: () => ({ where: async () => [] }) }),
+    }),
     insert: (table: unknown) => ({
       values: (v: { eventType?: string }) => {
         if (table === schema.taskEvents) events.push(v);

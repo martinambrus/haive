@@ -35,6 +35,7 @@ import {
   withMergeDirSection,
   type DbHandle,
 } from './merge-dir-claim.js';
+import { noteAbortedByNext, peekOpenMerge } from './left-open-merge.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import {
   addStepWarning,
@@ -858,6 +859,7 @@ export async function resolveMergePhase(
         if (baseHead.code === 0) armed = { ...armed, baseShaBefore: baseHead.stdout.trim() };
       }
       // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
+      const staleOpen = await peekOpenMerge(armed.mergeDir);
       const cleared = await abortOtherMerge(armed.mergeDir, armed.featureBranch);
       const stale = cleared.ok ? await abortMerge(armed.mergeDir) : cleared;
       if (!stale.ok) return { kind: 'unaborted' as const, stale, armed };
@@ -871,11 +873,20 @@ export async function resolveMergePhase(
       if (opened.kind !== 'refused') {
         await saveMergeState(tx, current.id, { ...armed, phase: 'resolving' });
       }
-      return { kind: 'opened' as const, opened, armed };
+      return { kind: 'opened' as const, opened, armed, staleOpen };
     });
     state = attempt.armed;
     if (attempt.kind === 'unaborted') {
       return haltUnaborted(db, current, params.taskId, state, attempt.stale);
+    }
+    if (attempt.staleOpen) {
+      current = await noteAbortedByNext(
+        db,
+        current,
+        params.taskId,
+        state.mergeDir,
+        attempt.staleOpen,
+      );
     }
     if (attempt.opened.kind === 'merged') {
       return finishMerge(db, stepDef, current, ctx, params, state);
@@ -1051,17 +1062,29 @@ export async function resolveMergePhase(
     const feature = state.featureBranch;
     const baselineSource = await maskSourceOnce(db, params.taskId);
     const reopened = await section(dir, async () => {
+      const wasOpen = await peekOpenMerge(dir);
+      const ours = wasOpen !== null && (await mergeOpenFor(dir, feature));
       const cleared = await abortOtherMerge(dir, feature);
       if (!cleared.ok) return { kind: 'unaborted' as const, cleared };
+      const staleOpen = ours ? null : wasOpen;
       if (!(await mergeOpenFor(dir, feature))) {
         const opened = await openMerge(dir, feature, ['-m', `Merge ${feature}`], commitEnv);
-        if (opened.kind === 'merged') return { kind: 'merged' as const };
-        if (opened.kind === 'refused') return { kind: 'refused' as const, detail: opened.detail };
+        if (opened.kind === 'merged') return { kind: 'merged' as const, staleOpen };
+        if (opened.kind === 'refused') {
+          return { kind: 'refused' as const, detail: opened.detail, staleOpen };
+        }
       }
-      return { kind: 'ready' as const, fixBaseline: await captureFixBaseline(dir, baselineSource) };
+      return {
+        kind: 'ready' as const,
+        fixBaseline: await captureFixBaseline(dir, baselineSource),
+        staleOpen,
+      };
     });
     if (reopened.kind === 'unaborted') {
       return haltUnaborted(db, current, params.taskId, state, reopened.cleared);
+    }
+    if (reopened.staleOpen) {
+      current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
     }
     if (reopened.kind === 'merged') return finishMerge(db, stepDef, current, ctx, params, state);
     if (reopened.kind === 'refused') return haltRefused(db, current, state, reopened.detail);

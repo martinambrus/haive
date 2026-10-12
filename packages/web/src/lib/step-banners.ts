@@ -1,3 +1,5 @@
+import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
+
 /** Banner visibility for step cards, invocation terminals and attachment rows.
  *
  *  ONE RULE: a message column is display copy, not state. `task_steps.status_message`,
@@ -161,4 +163,60 @@ export interface ArchiveBannerRow {
 export function archiveExpansionBanner(a: ArchiveBannerRow): { text: string } | null {
   if (a.expandedAt == null || !a.expansionNote) return null;
   return { text: a.expansionNote };
+}
+
+/** The event rows the left-open merge banner reads. */
+export interface LeftMergeEventRow {
+  eventType: string;
+  payload: Record<string, unknown> | null;
+}
+
+export interface LeftMergeBanner {
+  dir: string;
+  /** The branch that was being merged. */
+  ref: string;
+  /** True while the merge is still reported open: the person may abort it. */
+  canAbort: boolean;
+  /** Markdown. */
+  text: string;
+}
+
+const LEFT_MERGE_OUTCOME_LABEL: Record<MergeLeftOpenOutcome, string> = {
+  aborted: 'Merge aborted:',
+  moved: 'Merge left as it is:',
+  refused: 'Merge not aborted:',
+  'aborted-by-next': 'Merge aborted by another task:',
+};
+
+function codeSpan(value: string): string {
+  const longest = Math.max(0, ...(value.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return `${fence}${value}${fence}`;
+}
+
+/** The merges a cancelled task left open, one banner each: offering the abort while the report is
+ *  unsettled, then the settled outcome's words. Gated on the `merge.left_open` events and on a
+ *  matching `merge.left_open_settled` one, never on a message column; only a cancelled task has any. */
+export function leftMergeBanners(
+  events: readonly LeftMergeEventRow[],
+  opts: { taskStatus: string },
+): LeftMergeBanner[] {
+  if (opts.taskStatus !== 'cancelled') return [];
+  return leftOpenMerges(events).map((m) => {
+    const where = `${codeSpan(m.ref)} in ${codeSpan(m.dir)}`;
+    if (m.settled === null) {
+      return {
+        dir: m.dir,
+        ref: m.ref,
+        canAbort: true,
+        text: `A merge of ${where} was left open when this task was cancelled. Aborting it puts that checkout back to how it was before the merge started.`,
+      };
+    }
+    return {
+      dir: m.dir,
+      ref: m.ref,
+      canAbort: false,
+      text: `${LEFT_MERGE_OUTCOME_LABEL[m.settled.outcome]} ${where}. ${m.settled.reason}`.trim(),
+    };
+  });
 }

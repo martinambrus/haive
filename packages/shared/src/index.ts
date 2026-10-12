@@ -17,3 +17,4 @@ export * from './naming/index.js';
 export * from './knowledge-paths.js';
 export * from './task-scratch.js';
 export * from './task-worktree.js';
+export * from './merge-left-open.js';

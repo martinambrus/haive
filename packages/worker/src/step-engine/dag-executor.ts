@@ -43,6 +43,7 @@ import {
   completeMergeHostSide,
   fixerIndexHeldNote,
   fixerLeftoversWarning,
+  mergeOpenFor,
   openMerge,
   recordFixerLeftovers,
   relocateFixerChanges,
@@ -50,6 +51,7 @@ import {
   type FixBaselineUnavailable,
   type MergeAbort,
 } from './git-merge.js';
+import { noteAbortedByNext, peekOpenMerge, type OpenMerge } from './left-open-merge.js';
 import {
   addStepWarning,
   assertOwnsStep,
@@ -607,6 +609,11 @@ async function haltMerge(
   return { status: 'halt', row, error: msg };
 }
 
+/** The merge cleared before this one opened may be one a cancelled task left: settle its report. */
+async function noteStaleMergeAborted(m: MergeArgs, open: OpenMerge): Promise<void> {
+  m.current = await noteAbortedByNext(m.db, m.current, m.params.taskId, m.integration.path, open);
+}
+
 /** A merge git refused opened nothing, so there is no conflict a fixer could resolve. */
 function haltRefused(m: MergeArgs, branch: string, detail: string) {
   return haltMerge(
@@ -652,11 +659,13 @@ async function startConflictFix(
 ): Promise<{ status: 'ok' | 'halt' | 'waiting'; row: TaskStepRow; error?: string }> {
   // No fixer is in flight here (the ingest runs first, and a step's advances run one at a time),
   // so a merge still open is an earlier attempt's, and a fixer must start from a fresh one.
+  const staleOpen = await peekOpenMerge(m.integration.path);
   const stale = await abortMerge(m.integration.path);
   if (!stale.ok) {
     await clearAiFix(m.db, m.current.id);
     return haltUnaborted(m, target.branchName!, stale);
   }
+  if (staleOpen) await noteStaleMergeAborted(m, staleOpen);
   const opened = await openMerge(m.integration.path, target.branchName!, ['--no-edit'], m.gitEnv);
   if (opened.kind === 'refused') {
     await clearAiFix(m.db, m.current.id);
@@ -917,8 +926,11 @@ async function runLevelMerge(
   // 3. Merge pass: merge still-pending branches (mergeStatus null) in order.
   for (const issue of mergeable) {
     if (issue.mergeStatus !== null) continue; // clean | resolved | conflict already decided
+    const wasOpen = await peekOpenMerge(integration.path);
+    const ours = wasOpen !== null && (await mergeOpenFor(integration.path, issue.branchName!));
     const cleared = await abortOtherMerge(integration.path, issue.branchName!);
     if (!cleared.ok) return haltUnaborted(m, issue.branchName!, cleared);
+    if (wasOpen && !ours) await noteStaleMergeAborted(m, wasOpen);
     const opened = await openMerge(integration.path, issue.branchName!, ['--no-edit'], gitEnv);
     if (opened.kind === 'refused') return haltRefused(m, issue.branchName!, opened.detail);
     if (opened.kind === 'merged') {

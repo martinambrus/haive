@@ -123,6 +123,10 @@
       "types": "./dist/modularity/index.d.ts",
       "import": "./dist/modularity/index.js"
     },
+    "./merge-left-open": {
+      "types": "./dist/merge-left-open.d.ts",
+      "import": "./dist/merge-left-open.js"
+    },
     "./markdown-fences": {
       "types": "./dist/markdown-fences.d.ts",
       "import": "./dist/markdown-fences.js"

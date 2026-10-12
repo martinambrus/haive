@@ -87,6 +87,7 @@ import {
 } from '@/components/form-renderer';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { TaskLeftMergeBanner } from '@/components/task-left-merge-banner';
 import { PersistedDetails } from '@/components/persisted-details';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
 import {
@@ -2135,6 +2136,9 @@ export default function TaskDetailPage() {
                 )}
               </div>
             </div>
+          )}
+          {task.status === 'cancelled' && (
+            <TaskLeftMergeBanner taskId={id} taskStatus={task.status} />
           )}
         </div>
       )}

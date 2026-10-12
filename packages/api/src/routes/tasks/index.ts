@@ -105,6 +105,7 @@ import {
 } from '../upgrades.js';
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
+import { mergeRoutes } from './merges.js';
 
 export const taskRoutes = new Hono<AppEnv>();
 
@@ -1668,13 +1669,14 @@ taskRoutes.get('/:id/events', async (c) => {
   // `?type=` narrows to one event type. The Activity tab wants everything; a caller
   // restoring one widget's history (the terminal's steer list) wants a handful, and a
   // long task carries hundreds of events it would otherwise download to discard.
-  const type = c.req.query('type');
+  // Several types may be asked for at once, comma-separated.
+  const types = c.req.query('type')?.split(',').filter(Boolean);
   const events = await db
     .select()
     .from(schema.taskEvents)
     .where(
-      type
-        ? and(eq(schema.taskEvents.taskId, id), eq(schema.taskEvents.eventType, type))
+      types?.length
+        ? and(eq(schema.taskEvents.taskId, id), inArray(schema.taskEvents.eventType, types))
         : eq(schema.taskEvents.taskId, id),
     )
     .orderBy(asc(schema.taskEvents.createdAt));
@@ -1692,6 +1694,9 @@ taskRoutes.route('/', fileRoutes);
 // Direct browser-access routes (/:id/access-urls, /:id/ddev-ca): open the task's
 // running app in your own browser as a fast alternative to the VNC pixel stream.
 taskRoutes.route('/', browserAccessRoutes);
+
+// Merges a cancelled task left open (/:id/merges/abort).
+taskRoutes.route('/', mergeRoutes);
 
 // Task file attachments (/:id/attachments...): user-uploaded reference files the
 // AI CLI agent reads from the task workspace.
