@@ -78,6 +78,7 @@ export function renderContextColumnFor(context: TemplateRenderContext, rtkChoice
 export interface PendingRenderConflict {
   unit: string;
   base: unknown;
+  local: unknown;
   incoming: unknown;
 }
 
@@ -89,6 +90,7 @@ export async function loadPendingRenderConflicts(
     .select({
       unit: schema.projectStateConflicts.unit,
       base: schema.projectStateConflicts.base,
+      local: schema.projectStateConflicts.local,
       incoming: schema.projectStateConflicts.incoming,
     })
     .from(schema.projectStateConflicts)
@@ -104,6 +106,7 @@ export async function loadPendingRenderConflicts(
     .map((row) => ({
       unit: row.unit,
       base: conflictSideValue(row.base),
+      local: conflictSideValue(row.local),
       incoming: conflictSideValue(row.incoming),
     }));
 }
@@ -114,7 +117,7 @@ export async function loadPendingRenderConflicts(
 export function overlayRender(
   render: ProjectRender | null,
   pending: readonly PendingRenderConflict[],
-  side: 'base' | 'incoming',
+  side: 'base' | 'local' | 'incoming',
 ): ProjectRender | null {
   let out: Record<string, unknown> | null = render;
   for (const row of pending) {

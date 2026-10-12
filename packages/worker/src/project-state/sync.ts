@@ -26,7 +26,7 @@ import {
   unionExpandedFor,
 } from '../step-engine/_upgrade-render.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
-import { lockProjectState } from './write.js';
+import { loadPendingRenderConflicts, lockProjectState, overlayRender } from './write.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
@@ -222,6 +222,20 @@ async function recordConflicts(
   }
 }
 
+/** A failed writer's clear leaves no column: the file with each contested key back at its pending row's
+ *  local value stands in, so the conflict stays per key. Null when none is pending or it is no column. */
+async function rebuildLocalRender(
+  tx: Tx,
+  repositoryId: string,
+  onDisk: ProjectRender,
+): Promise<ProjectRender | null> {
+  const pending = await loadPendingRenderConflicts(tx, repositoryId);
+  if (pending.length === 0) return null;
+  const rebuilt = overlayRender(onDisk, pending, 'local');
+  const valid = renderContextColumnSchema.safeParse({ ...rebuilt, rtkChoiceRecorded: true });
+  return rebuilt !== null && valid.success ? rebuilt : null;
+}
+
 /** The set 01's apply writes from the column just written, which upgrade-status compares a
  *  repository's claims against. A repository with no claim keeps its set until 01's first plan. */
 async function writeApplicableTemplateIds(
@@ -337,8 +351,10 @@ export async function syncProjectStateFromCheckout(
     if (!repo) return { outcome: 'superseded' };
     const column = (repo.renderContext ?? null) as Record<string, unknown> | null;
 
+    const rebuilt =
+      column === null ? await rebuildLocalRender(tx, repositoryId, checkout.render) : null;
     const local = recordOf(
-      column === null ? null : portableRender(column as Parameters<typeof portableRender>[0]),
+      column === null ? rebuilt : portableRender(column as Parameters<typeof portableRender>[0]),
     );
     try {
       renderProjectState(local);
@@ -355,7 +371,10 @@ export async function syncProjectStateFromCheckout(
     });
     const merged = merge.merged.render;
     let wrote = false;
-    if (merged !== null && !sameValue(merged, normalizeProjectState(local).render)) {
+    if (
+      merged !== null &&
+      (rebuilt !== null || !sameValue(merged, normalizeProjectState(local).render))
+    ) {
       const next = renderContextColumnSchema.safeParse({
         ...column,
         ...merged,

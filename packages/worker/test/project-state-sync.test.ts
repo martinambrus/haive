@@ -1625,3 +1625,61 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
     });
   });
 });
+
+describe('syncProjectStateFromCheckout: a writer failed after it rendered a pending conflict into the file', () => {
+  const AGENTS = 'project/render.json#acceptedAgentIds';
+  const mine = render({ acceptedAgentIds: ['code-reviewer'] });
+  const theirs = render({ acceptedAgentIds: ['code-reviewer', 'qa-lead'] });
+
+  async function failedWriter() {
+    const s = await setup({ column: column(mine), sync: { base: baseOf(BASE) } });
+    await s.putRecord(record(theirs));
+    expect((await s.run()).outcome).toBe('conflict');
+    let writes = 0;
+    s.hook.onWrite = async () => {
+      writes += 1;
+      if (writes === 2) throw new Error('database refused');
+    };
+    await s.write({ ...mine, ...PER_INSTALL }, true).then(
+      () => {
+        throw new Error('the writer should have failed');
+      },
+      (err: Error) => expect(err.name).toBe('ProjectStateWriteError'),
+    );
+    s.hook.onWrite = null;
+    return s;
+  }
+
+  it('meets the per-key conflict again, with this side its own value, and settles nothing', async () => {
+    const s = await failedWriter();
+    expect(s.columnOf()).toBeNull();
+    const pendingBefore = s.pending().map((r) => ({ ...r }));
+    expect(pendingBefore).toHaveLength(1);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(s.pending()).toEqual(pendingBefore);
+    expect(s.conflictRows()).toHaveLength(1);
+    expect(s.conflictRows().some((r) => r.unit === 'project/render.json')).toBe(false);
+    expect(s.conflictRows().some((r) => r.resolution === 'converged')).toBe(false);
+    expect(json(s.pending()[0]!.local)).toEqual({ v: mine.acceptedAgentIds });
+    expect(json(s.pending()[0]!.incoming)).toEqual({ v: theirs.acceptedAgentIds });
+    expect(json(s.columnOf())).toMatchObject({ acceptedAgentIds: mine.acceptedAgentIds });
+    expect(s.syncRow()?.lastError).toContain('acceptedAgentIds');
+    expect(s.syncRow()?.lastError).not.toContain(AGENTS);
+  });
+
+  it('writes nothing on the sync after that', async () => {
+    const s = await failedWriter();
+    await s.run();
+    expect(s.pending().map((r) => r.unit)).toEqual([AGENTS]);
+    const before = s.dump();
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
+  });
+});
