@@ -12,6 +12,7 @@ import {
 import {
   defaultDockerRunner,
   type DockerRunner,
+  type DockerRunOpts,
   type DockerRunResult,
   type DockerVolumeMount,
 } from './docker-runner.js';
@@ -160,6 +161,8 @@ export interface SandboxRunSpec {
   captureDir?: { containerDir: string; fileName: string };
   /** Asked right before the container is created; false starts none. */
   beforeRun?: () => Promise<boolean>;
+  /** Wraps the container create; see DockerRunOpts.guardCreate. */
+  createFence?: DockerRunOpts['guardCreate'];
 }
 
 export interface SandboxRunnerOptions {
@@ -372,6 +375,7 @@ export async function runInSandbox(
       stdinInitial: spec.stdinInitial,
       stdinPrompt: spec.stdinPrompt,
       onStdinWritable: spec.onStdinWritable,
+      guardCreate: spec.createFence,
     });
     // Read the captured log back out of the volume (best-effort, tail-capped). Done
     // before the `finally` removes the dir. A missing file (CLI wrote nothing) or a
