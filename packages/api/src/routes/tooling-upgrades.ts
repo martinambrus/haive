@@ -868,6 +868,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       .where(eq(schema.repositories.id, repositoryId));
     // A sync can write fallback rows between the probe and the clear; look once more after it.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
+      assertRagLockHeld(lock);
       await db
         .update(schema.repositories)
         .set(retryCleared)
