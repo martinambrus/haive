@@ -34,7 +34,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
-import { resolveRenderContext } from '../../_upgrade-render.js';
+import { resolveRenderContext, unionExpandedFor } from '../../_upgrade-render.js';
 import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
@@ -932,10 +932,12 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     // (e.g. prior baseline didn't include LSP plugins) — recompute from
     // ground truth.
     if (recorded) {
-      const applicableExpanded = expandManifestFor(
-        recorded as unknown as TemplateRenderContext,
-        manifest,
-      );
+      const applicableExpanded = await unionExpandedFor(ctx.db, {
+        repositoryId: detected.repositoryId,
+        userId: ctx.userId,
+        renderCtx: recorded as unknown as TemplateRenderContext,
+        logger: ctx.logger,
+      });
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
     }
 

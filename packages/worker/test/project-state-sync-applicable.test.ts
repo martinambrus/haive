@@ -728,16 +728,7 @@ describe('D2d: 02 writes what its plan renders and retains nothing', () => {
 
     await s.applyPlan(detected);
 
-    // 02 writes the manifest's ids and the bundles', which is TEAM2_SET without cli-rules: only 01, 12
-    // and the sync add that one (design-d.md Found-not-fixed 5).
-    expect(s.setOf()).toEqual([
-      'agent.code-reviewer',
-      'agents-index',
-      PLUGIN_JSON,
-      PLUGIN_LSP,
-      PLUGIN_MARKETPLACE,
-      'workflow-config',
-    ]);
+    expect(s.setOf()).toEqual(TEAM2_SET);
   });
 });
 

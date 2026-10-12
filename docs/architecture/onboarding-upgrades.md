@@ -12,7 +12,10 @@ On worker boot, `syncTemplateManifestCache(db)` upserts the manifest into Postgr
 **The applicable set is what the render context renders, at every writer.** 12, 01, 02 and 04 write
 `repositories.applicable_template_ids` from the context they render, and a project-state sync that
 changes the render context of a repository with a claim writes it in the same transaction through
-01's own functions (`step-engine/_upgrade-render.ts`); none keeps an id it does not render.
+01's own functions (`step-engine/_upgrade-render.ts`); none keeps an id it does not render. 01, 02, 04
+and the sync all expand the context through `unionExpandedFor`, so the set holds the custom bundle
+items (`custom.*`) and `cli-rules` as well as the manifest's templates: 02 writes it inside its fenced
+transaction, 04 from the context it restored. 12 keeps its own rule for the `cli-rules` region on disk.
 upgrade-status compares a claim the set holds against the manifest, and reports a claim the set does
 not hold as changed while 02 could still act on one of its paths: one that is absent, one holding the
 bytes its row records as Haive's, or an RTK settings file whose hook can come out. A path 02 keeps (a

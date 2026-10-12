@@ -15,7 +15,7 @@ import {
   type UnreadReason,
 } from '@haive/shared/rules-files';
 import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import {
   CLI_RULES_END,
   CLI_RULES_START,
@@ -30,14 +30,12 @@ import {
 import { rtkLeftoversToRemove, sameValue } from '@haive/shared/project-state';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
-  expandCustomBundlesFor,
-  expandManifestFor,
   getTemplateManifest,
   updateApplicableTemplateIds,
-  type ExpandedRendering,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
-import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
+import { extractBundleItemId } from '../../_custom-bundle-loader.js';
+import { unionExpandedFor } from '../../_upgrade-render.js';
 import {
   failIfColumnStale,
   lockProjectState,
@@ -47,7 +45,7 @@ import {
   renderContextColumnFor,
   writeProjectStateRecord,
 } from '../../../project-state/write.js';
-import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
   appendRtkBlock,
   cliRulesRegionRecord,
@@ -1772,25 +1770,24 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       });
     }
 
-    // Refresh applicable_template_ids on the repo from a fresh expansion
-    // against the plan's render context — the source of truth for which
-    // templates apply to this repo right now (gating included). Joins Haive
-    // template expansion with custom-bundle expansion so the per-repo
-    // applicable set covers `custom.*` ids as well.
+    // Refresh applicable_template_ids from the plan's render context, expanded the way 01 and the
+    // project-state sync do: Haive templates, custom bundles and the cli-rules region.
     const renderCtx = plan.renderCtxSnapshot as unknown as TemplateRenderContext;
-    const haiveApplicable = expandManifestFor(renderCtx, manifest);
-    const bundles = await loadBundlesForExpansion(ctx.db, plan.repositoryId, ctx.logger);
-    const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
-    const customApplicable = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
-    const applicableExpanded: ExpandedRendering[] = [...haiveApplicable, ...customApplicable];
+    const expandApplicable = (db: Database | DbTx) =>
+      unionExpandedFor(db, {
+        repositoryId: plan.repositoryId,
+        userId: ctx.userId,
+        renderCtx,
+        logger: ctx.logger,
+      });
     if (plan.renderContextColumn === undefined) {
-      await updateApplicableTemplateIds(ctx.db, plan.repositoryId, applicableExpanded);
+      await updateApplicableTemplateIds(ctx.db, plan.repositoryId, await expandApplicable(ctx.db));
     } else {
       await ctx.db
         .transaction(async (tx) => {
           await lockProjectState(tx, plan.repositoryId);
           await refuseMovedColumn(tx, plan.repositoryId, plannedColumns(plan));
-          await updateApplicableTemplateIds(tx, plan.repositoryId, applicableExpanded);
+          await updateApplicableTemplateIds(tx, plan.repositoryId, await expandApplicable(tx));
         })
         .catch((err: unknown) => {
           throw err instanceof ProjectStateMovedError ? new Error(PLAN_NO_LONGER_HOLDS) : err;

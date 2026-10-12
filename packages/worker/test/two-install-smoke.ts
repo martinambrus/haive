@@ -1280,12 +1280,15 @@ async function main(): Promise<void> {
         liveAfterA.some((p) => p.includes(String(newAgent))),
       { removedPaths, liveAfterA },
     );
+    const upgradedStateA = await repoStateOf(a);
+    const setAfterUpgradeA =
+      'rows' in upgradedStateA ? (upgradedStateA.rows[0]?.applicable_template_ids ?? null) : null;
     git(a.repoPath, 'add', '-A');
     git(a.repoPath, 'commit', '-q', '-m', 'A upgrades');
     git(a.repoPath, 'push', '-q', 'origin', 'HEAD:main');
 
     // B follows both the teammate's record and A's upgrade. Its ledger moves with A's: the rows of the
-    // dropped agent are retired, the added agent's are imported, and its set is the one A's sync wrote. The
+    // dropped agent are retired, the added agent's are imported, and its set is the one A's 02 wrote. The
     // upgrade task the plan above opened for B is cancelled first: a live one makes the sync defer.
     await b.db
       .update(schema.tasks)
@@ -1295,14 +1298,15 @@ async function main(): Promise<void> {
     const refreshedB = await repoStateOf(b);
     const rowB = 'rows' in refreshedB ? refreshedB.rows[0] : undefined;
     check(
-      "B's applicable set equals A's while its render_context takes the teammate's agent",
+      "B's applicable set equals the one A's 02 wrote while its render_context takes the teammate's agent",
       newAgent !== null &&
         rowB !== undefined &&
         rowB.applicable_template_ids !== null &&
-        isDeepStrictEqual(rowB.applicable_template_ids, setA) &&
+        setAfterUpgradeA !== null &&
+        isDeepStrictEqual(rowB.applicable_template_ids, setAfterUpgradeA) &&
         rowB.applicable_template_ids.includes(`agent.${newAgent}`) &&
         (rowB.render_context?.acceptedAgentIds ?? []).includes(newAgent),
-      { refreshedB, setA },
+      { refreshedB, setA, setAfterUpgradeA },
     );
     const pathsAfterB = await livePaths(b);
     check(
