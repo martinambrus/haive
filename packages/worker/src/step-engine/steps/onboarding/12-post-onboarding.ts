@@ -675,16 +675,20 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       }
       if (renderContext) {
         try {
-          const stateFiles = await writeProjectStateRecord(ctx.db, {
+          const state = await writeProjectStateRecord(ctx.db, {
             repositoryId: mirrorRepositoryId,
             repoPath: ctx.repoPath,
             context: renderContext,
             rtkChoiceRecorded,
           });
-          ownFiles.push(...stateFiles);
+          ownFiles.push(...state.written);
+          ownRemoved.push(...state.removed);
         } catch (err) {
           failIfColumnStale(err);
-          if (err instanceof ProjectStateWriteError) ownFiles.push(...err.written);
+          if (err instanceof ProjectStateWriteError) {
+            ownFiles.push(...err.written);
+            ownRemoved.push(...err.removed);
+          }
           const message = err instanceof Error ? err.message : String(err);
           warnings.push(`project state record write failed: ${message}`);
           ctx.logger.warn({ err }, 'project state record write failed');

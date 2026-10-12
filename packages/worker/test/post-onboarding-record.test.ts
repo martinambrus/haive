@@ -1,7 +1,9 @@
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -57,6 +59,7 @@ async function setup(
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
+    users: schema.users,
     projectStateSync: schema.projectStateSync,
     projectStateConflicts: schema.projectStateConflicts,
   });
@@ -96,9 +99,16 @@ async function setup(
       },
       formValues: { commit: false },
     } as never);
+  const applyCommit = () =>
+    postOnboardingStep.apply(ctx, {
+      detected: { hasGit: true, currentBranch: 'main', hasOrigin: false, credentials: [] },
+      formValues: { commit: true, commitMessage: 'onboard' },
+    } as never);
   return {
     root,
     apply,
+    applyCommit,
+    liveRows: () => fake.rows(schema.onboardingArtifacts).filter((r) => r.supersededAt == null),
     column: () => fake.rows(schema.repositories)[0]!.renderContext ?? null,
     syncRows: () => fake.rows(schema.projectStateSync),
   };
@@ -159,5 +169,31 @@ describe('12 writes the project state record whatever the artifact recording did
     await s.apply();
 
     expect(s.column()).toMatchObject({ rtkEnabled: false, rtkChoiceRecorded: false });
+  });
+});
+
+describe('12 commits the artifact claims it wrote into the record', () => {
+  const git = promisify(execFile);
+
+  it('holds a claim file per live artifact row in its commit', async () => {
+    const s = await setup('none');
+    await git('git', ['-C', s.root, 'init', '-q', '-b', 'main']);
+    await git('git', ['-C', s.root, 'config', 'user.email', 't@example.com']);
+    await git('git', ['-C', s.root, 'config', 'user.name', 'T']);
+    await git('git', ['-C', s.root, 'config', 'gc.auto', '0']);
+    await writeFile(join(s.root, 'README.md'), 'hi\n');
+    await git('git', ['-C', s.root, 'add', 'README.md']);
+    await git('git', ['-C', s.root, 'commit', '-qm', 'seed']);
+
+    const out = await s.applyCommit();
+
+    expect(out.commitPerformed).toBe(true);
+    const tree = (await git('git', ['-C', s.root, 'ls-tree', '-r', '--name-only', 'HEAD'])).stdout
+      .split('\n')
+      .filter(Boolean);
+    const claims = tree.filter((p) => /^\.haive-data\/state\/artifacts\/.+\.json$/.test(p));
+    expect(s.liveRows().length).toBeGreaterThan(0);
+    expect(claims).toHaveLength(s.liveRows().length);
+    expect(tree).toContain(RECORD_RENDER);
   });
 });

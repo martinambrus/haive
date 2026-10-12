@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
 import {
+  claimFileName,
   emptyProjectState,
   normalizeProjectState,
   renderProjectState,
@@ -132,6 +133,9 @@ async function setup() {
     repositories,
     projectStateSync: sync,
     projectStateConflicts: schema.projectStateConflicts,
+    onboardingArtifacts: schema.onboardingArtifacts,
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
     tasks: schema.tasks,
   });
   fake.insert(repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
@@ -233,7 +237,7 @@ async function setup() {
     });
   const db = traced(fake.db as unknown as FakeDbHandle) as unknown as Database;
 
-  const write = (
+  const writeFull = (
     c: Context,
     rtkChoiceRecorded: boolean,
     over: {
@@ -242,7 +246,7 @@ async function setup() {
       expectedColumns?: unknown[];
       holdingTaskId?: string;
     } = {},
-  ): Promise<readonly string[]> =>
+  ) =>
     writeProjectStateRecord(db, {
       repositoryId: over.repositoryId ?? REPO,
       repoPath: over.repoPath ?? root,
@@ -251,6 +255,8 @@ async function setup() {
       ...(over.expectedColumns ? { expectedColumns: over.expectedColumns } : {}),
       ...(over.holdingTaskId ? { holdingTaskId: over.holdingTaskId } : {}),
     });
+  const write = (...args: Parameters<typeof writeFull>): Promise<readonly string[]> =>
+    writeFull(...args).then((result) => result.written);
   const syncSeed = (values: Record<string, unknown>) =>
     fake.insert(sync, {
       [col.repositoryId]: REPO,
@@ -276,6 +282,7 @@ async function setup() {
     root,
     fake,
     write,
+    writeFull,
     pend,
     col,
     columnOf,
@@ -809,5 +816,177 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
     expect(s.onDisk().render).toBe(expectedFiles(withIds(incoming)).render);
     const baseSnapshot = s.syncRows()[0]![s.col.baseSnapshot];
     expect(json(baseSnapshot)).toEqual(json(normalizeProjectState(recordOf(withIds(base)))));
+  });
+});
+
+describe('writeProjectStateRecord: one claim per live ledger row', () => {
+  const BUNDLE = '00000000-0000-4000-8000-0000000000d1';
+  const ITEM = '00000000-0000-4000-8000-0000000000d2';
+  const TASK = '00000000-0000-4000-8000-0000000000c1';
+  const claimPath = (diskPath: string) => `${STATE_DIR}/${claimFileName(diskPath)}`;
+
+  const row = (diskPath: string, over: Record<string, unknown> = {}) => ({
+    userId: USER,
+    repositoryId: REPO,
+    taskId: TASK,
+    diskPath,
+    templateId: 'agent.code-reviewer',
+    templateKind: 'agent',
+    templateSchemaVersion: 2,
+    templateContentHash: 'a'.repeat(64),
+    writtenHash: 'b'.repeat(64),
+    sourceStepId: '12-post-onboarding',
+    source: 'onboarding',
+    haiveVersion: '1.2.3',
+    supersededAt: null,
+    ...over,
+  });
+  const marker = (diskPath: string, over: Record<string, unknown> = {}) =>
+    row(diskPath, {
+      taskId: null,
+      source: 'backfill',
+      sourceStepId: 'project-state-import',
+      importedAt: new Date(5),
+      haiveVersion: null,
+      ...over,
+    });
+
+  const claimOnDisk = (root: string, diskPath: string) =>
+    JSON.parse(readFileSync(join(root, claimPath(diskPath)), 'utf8')) as unknown;
+  const claimFiles = async (root: string) =>
+    (await listFiles(root)).filter((f) => f.startsWith(`${STATE_DIR}/artifacts/`));
+
+  it('writes a claim file per live row, markers and custom bundle items included, and none for the rest', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
+    s.fake.insert(
+      schema.onboardingArtifacts,
+      marker('.claude/agents/imported.md', {
+        templateId: 'custom:zip%3Aacme-kit:agents%2Fimported.md',
+        templateKind: 'custom-agent',
+      }),
+    );
+    s.fake.insert(
+      schema.onboardingArtifacts,
+      row('.claude/agents/billing.md', {
+        templateId: `custom.${BUNDLE}.${ITEM}`,
+        templateKind: 'custom-agent',
+      }),
+    );
+    s.fake.insert(
+      schema.onboardingArtifacts,
+      row('.claude/agents/dangling.md', {
+        templateId: `custom.${BUNDLE}.00000000-0000-4000-8000-0000000000ff`,
+      }),
+    );
+    s.fake.insert(schema.onboardingArtifacts, row('../outside.md'));
+    s.fake.insert(
+      schema.onboardingArtifacts,
+      row('.claude/agents/old.md', { supersededAt: new Date(1) }),
+    );
+    s.fake.insert(schema.onboardingArtifacts, { ...row('other.md'), repositoryId: OTHER });
+    s.fake.insert(schema.customBundles, {
+      id: BUNDLE,
+      userId: USER,
+      repositoryId: REPO,
+      name: 'acme-kit',
+      sourceType: 'zip',
+      storageRoot: '/bundles/acme-kit',
+    });
+    s.fake.insert(schema.customBundleItems, {
+      id: ITEM,
+      bundleId: BUNDLE,
+      kind: 'agent',
+      sourceFormat: 'claude-md',
+      sourcePath: 'agents/billing.md',
+      normalizedSpec: {},
+      contentHash: 'c'.repeat(64),
+    });
+
+    const { written, removed } = await s.writeFull(context(), true);
+
+    const paths = [
+      '.claude/agents/billing.md',
+      '.claude/agents/code-reviewer.md',
+      '.claude/agents/imported.md',
+    ];
+    expect(removed).toEqual([]);
+    expect(await claimFiles(s.root)).toEqual(paths.map(claimPath).sort());
+    expect(paths.map(claimPath).every((p) => written.includes(p))).toBe(true);
+    expect(claimOnDisk(s.root, '.claude/agents/code-reviewer.md')).toEqual({
+      path: '.claude/agents/code-reviewer.md',
+      templateId: 'agent.code-reviewer',
+      kind: 'agent',
+      schemaVersion: 2,
+      templateHash: 'a'.repeat(64),
+      writtenHash: 'b'.repeat(64),
+      haiveVersion: '1.2.3',
+    });
+    expect(claimOnDisk(s.root, '.claude/agents/billing.md')).toMatchObject({
+      templateId: 'custom:zip%3Aacme-kit:agents%2Fbilling.md',
+    });
+    expect(claimOnDisk(s.root, '.claude/agents/imported.md')).toMatchObject({
+      templateId: 'custom:zip%3Aacme-kit:agents%2Fimported.md',
+      kind: 'custom-agent',
+      haiveVersion: '',
+    });
+  });
+
+  it('carries the same claims in the sync base', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
+    s.fake.insert(schema.onboardingArtifacts, marker('.claude/agents/imported.md'));
+
+    await s.write(context(), true);
+
+    const base = s.syncRows()[0]![s.col.baseSnapshot] as { claims: { path: string }[] };
+    expect(base.claims.map((c) => c.path)).toEqual([
+      '.claude/agents/code-reviewer.md',
+      '.claude/agents/imported.md',
+    ]);
+    expect(json(base)).toEqual(
+      json(
+        normalizeProjectState({
+          ...recordOf(context()),
+          claims: base.claims as never,
+        }),
+      ),
+    );
+  });
+
+  it('removes the claim file of a row retired since the last write, and only that one', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
+    const retiring = s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/old.md'));
+    await s.write(context(), true);
+    const teammate = '.claude/agents/teammate.md';
+    const teammateFile = join(s.root, claimPath(teammate));
+    await mkdir(join(s.root, STATE_DIR, 'artifacts'), { recursive: true });
+    await writeFile(teammateFile, '{"unsynced":true}\n');
+    s.fake.patch(schema.onboardingArtifacts, retiring.id as string, { supersededAt: new Date(2) });
+
+    const { written, removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([claimPath('.claude/agents/old.md')]);
+    expect(written).not.toContain(claimPath('.claude/agents/old.md'));
+    expect(await claimFiles(s.root)).toEqual(
+      [claimPath('.claude/agents/code-reviewer.md'), claimPath(teammate)].sort(),
+    );
+    expect(readFileSync(teammateFile, 'utf8')).toBe('{"unsynced":true}\n');
+    const base = s.syncRows()[0]![s.col.baseSnapshot] as { claims: { path: string }[] };
+    expect(base.claims.map((c) => c.path)).toEqual(['.claude/agents/code-reviewer.md']);
+  });
+
+  it('leaves a claim file the previous base never named, though no row produces it', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
+    const stray = claimPath('.claude/agents/stray.md');
+    await mkdir(join(s.root, STATE_DIR, 'artifacts'), { recursive: true });
+    await writeFile(join(s.root, stray), '{"unsynced":true}\n');
+
+    const { removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([]);
+    expect(await claimFiles(s.root)).toContain(stray);
   });
 });

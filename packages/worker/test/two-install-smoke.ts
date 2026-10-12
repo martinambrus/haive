@@ -17,6 +17,7 @@ import { createDatabase, schema, type Database } from '@haive/database';
 import { logger, normalizeContent, sha256Hex, type FormSchema } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
+  claimFileName,
   emptyProjectState,
   normalizeProjectState,
   PROJECT_STATE_IMPORT_STEP_ID,
@@ -576,6 +577,26 @@ async function main(): Promise<void> {
       [RECORD_FORMAT, RECORD_RENDER].every((rel) => inCommit.includes(rel)),
       inCommit,
     );
+    const liveRowsA = await a.db
+      .select({
+        diskPath: schema.onboardingArtifacts.diskPath,
+        templateId: schema.onboardingArtifacts.templateId,
+      })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, a.repositoryId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    const claimFilesWanted = liveRowsA
+      .filter((r) => !r.templateId.startsWith('custom.'))
+      .map((r) => `.haive-data/state/${claimFileName(r.diskPath)}`);
+    check(
+      "A's commit holds a claim file for every live row it recorded",
+      claimFilesWanted.length > 0 && claimFilesWanted.every((rel) => inCommit.includes(rel)),
+      { wanted: claimFilesWanted.length, inCommit },
+    );
     const onDisk = {
       format: await recordOnDisk(RECORD_FORMAT),
       render: await recordOnDisk(RECORD_RENDER),
@@ -607,13 +628,19 @@ async function main(): Promise<void> {
       sql`select base_snapshot, last_error from project_state_sync where repository_id = ${a.repositoryId}`,
     );
     check(
-      "A's sync starts from the record it wrote, with no error",
+      "A's sync starts from the record it wrote, claims included, with no error",
       wantRecord !== null &&
         'rows' in syncA &&
         syncA.rows.length === 1 &&
         isDeepStrictEqual(
-          asJson(syncA.rows[0]!.base_snapshot),
+          asJson({ ...(syncA.rows[0]!.base_snapshot as object), claims: [] }),
           asJson(normalizeProjectState(wantRecord)),
+        ) &&
+        isDeepStrictEqual(
+          (syncA.rows[0]!.base_snapshot as { claims: { path: string }[] }).claims
+            .map((c) => c.path)
+            .sort(),
+          liveRowsA.map((r) => r.diskPath).sort(),
         ) &&
         syncA.rows[0]!.last_error === null,
       syncA,

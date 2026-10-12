@@ -374,7 +374,7 @@ async function setup(seed: Seed = {}) {
       repoPath: root,
       context: c as never,
       rtkChoiceRecorded,
-    });
+    }).then((result) => result.written);
 
   const columnOf = (id = REPO): unknown =>
     fake.rows(repositories).find((r) => r.id === id)?.renderContext ?? null;

@@ -248,6 +248,24 @@ async function main(): Promise<void> {
         render: await readOrNull(RECORD_RENDER, root),
       };
       const readable = !('error' in state);
+      const liveClaims = (
+        await db
+          .select({
+            diskPath: schema.onboardingArtifacts.diskPath,
+            templateId: schema.onboardingArtifacts.templateId,
+          })
+          .from(schema.onboardingArtifacts)
+          .where(
+            and(
+              eq(schema.onboardingArtifacts.repositoryId, repoId),
+              isNull(schema.onboardingArtifacts.supersededAt),
+            ),
+          )
+      )
+        .filter((r) => !r.templateId.startsWith('custom.'))
+        .map((r) => r.diskPath)
+        .sort();
+      const baseOf = readable && state.sync.length === 1 ? state.sync[0]!.base_snapshot : null;
       return {
         column:
           readable &&
@@ -262,8 +280,12 @@ async function main(): Promise<void> {
           readable &&
           state.sync.length === 1 &&
           isDeepStrictEqual(
-            asJson(state.sync[0]!.base_snapshot),
+            asJson({ ...(baseOf as object), claims: [] }),
             asJson(normalizeProjectState(want)),
+          ) &&
+          isDeepStrictEqual(
+            (baseOf as { claims: { path: string }[] }).claims.map((c) => c.path).sort(),
+            liveClaims,
           ) &&
           state.sync[0]!.last_error === null,
         detail: { state, onDisk, want: { context, recorded } },
