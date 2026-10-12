@@ -3,9 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { schema } from '@haive/database';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { StepContext } from '../src/step-engine/step-definition.js';
+import { TaskCancelledError, type StepContext } from '../src/step-engine/step-definition.js';
+import type { createFakeRagLock } from './rag-lock-fake.js';
 
+const lockFake = vi.hoisted(() => ({ value: undefined as unknown }));
 const mocks = vi.hoisted(() => ({
+  connects: 0,
+  gate: null as Promise<void> | null,
+  taskRepositoryId: 'repo-1' as string | null,
   strict: true,
   embedFails: false,
   ollamaEmbed: vi.fn(async (_url: string, _model: string, texts: string[]) => {
@@ -13,21 +18,39 @@ const mocks = vi.hoisted(() => ({
     return texts.map(() => [0.1, 0.2]);
   }),
 }));
-vi.mock('@haive/shared/rag', async (original) => ({
+vi.mock('@haive/shared/rag', async (original) => {
+  const actual = await original<typeof import('@haive/shared/rag')>();
+  const { createFakeRagLock: create } = await import('./rag-lock-fake.js');
+  const fake = create(actual);
+  lockFake.value = fake;
+  return {
+    ...actual,
+    acquireRagSyncLock: fake.acquireRagSyncLock,
+    tryAcquireRagSyncLock: fake.tryAcquireRagSyncLock,
+    ollamaEmbed: mocks.ollamaEmbed,
+    resolveEmbedBudget: async () => ({
+      embedTimeoutMs: 1000,
+      queryTimeoutMs: 1000,
+      warmupTimeoutMs: 1000,
+      batchSize: 8,
+      strict: mocks.strict,
+    }),
+  };
+});
+vi.mock('../src/redis.js', async (original) => ({
   ...(await original<object>()),
-  ollamaEmbed: mocks.ollamaEmbed,
-  resolveEmbedBudget: async () => ({
-    embedTimeoutMs: 1000,
-    queryTimeoutMs: 1000,
-    warmupTimeoutMs: 1000,
-    batchSize: 8,
-    strict: mocks.strict,
-  }),
+  getRedis: () => ({}),
 }));
 vi.mock('../src/step-engine/steps/onboarding/_rag-connection.js', async (original) => ({
   ...(await original<object>()),
-  resolveRagConnection: async () => conn,
-  ensureRagSchema: async () => ({ usedPgvector: false, tableName: 'ai_rag_embeddings' }),
+  resolveRagConnection: async () => {
+    mocks.connects += 1;
+    return conn;
+  },
+  ensureRagSchema: async () => {
+    await mocks.gate;
+    return { usedPgvector: false, tableName: 'ai_rag_embeddings' };
+  },
 }));
 vi.mock('../src/step-engine/steps/onboarding/_rag-embed.js', async (original) => ({
   ...(await original<object>()),
@@ -41,6 +64,7 @@ const { ragPopulateStep, RagEmbedFailureError } =
       .RagEmbedFailureError,
   }));
 
+const fakeLock = lockFake.value as ReturnType<typeof createFakeRagLock>;
 const KB = '.haive-data/knowledge_base/architecture.md';
 let root: string;
 let rows: Map<string, { hash: string | null; params: unknown[] }>;
@@ -78,6 +102,10 @@ const populate = (d: ReturnType<typeof detected>) =>
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  fakeLock.reset();
+  mocks.connects = 0;
+  mocks.gate = null;
+  mocks.taskRepositoryId = 'repo-1';
   mocks.strict = true;
   mocks.embedFails = false;
   root = await mkdtemp(join(tmpdir(), 'haive-rag-populate-'));
@@ -128,7 +156,7 @@ beforeEach(async () => {
   ctx = {
     db: {
       query: {
-        tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) },
+        tasks: { findFirst: async () => ({ repositoryId: mocks.taskRepositoryId }) },
         repositories: { findFirst: async () => repo },
       },
       update: (table: unknown) => ({
@@ -353,5 +381,77 @@ describe('onboarding populate with an embedding endpoint configured', () => {
       ]
     `);
     expect(repo.ragEmbedDegradedAt).toBeNull();
+  });
+});
+
+describe('onboarding populate holds the repository RAG lock', () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('keeps a second populate of one repository off the store until the first released', async () => {
+    let open!: () => void;
+    mocks.gate = new Promise<void>((resolve) => (open = resolve));
+    const first = populate(detected());
+    for (let i = 0; i < 100 && mocks.connects < 1; i += 1) await sleep(5);
+    const progress: string[] = [];
+    const second = ragPopulateStep.apply(
+      { ...ctx, emitProgress: async (m: string) => void progress.push(m) } as StepContext,
+      {
+        detected: detected(),
+        formValues: { populateMode: 'incremental' },
+        iteration: 0,
+        previousIterations: [],
+      },
+    );
+    await sleep(150);
+    expect(mocks.connects).toBe(1);
+    expect(progress.join('\n')).toMatch(/another RAG sync of this repository/i);
+    mocks.gate = null;
+    open();
+    await Promise.all([first, second]);
+    expect(mocks.connects).toBe(2);
+    expect(fakeLock.state.handles.map((h) => h.released)).toEqual([1, 1]);
+    expect(fakeLock.state.tried[0]!.options?.waitMs).toBe(2 * 60 * 60 * 1000);
+  });
+
+  it('fails with a clear message past the bound, before connecting', async () => {
+    fakeLock.state.held.add('repo-1');
+    fakeLock.state.timeoutNow = true;
+    await expect(populate(detected())).rejects.toThrow(/another RAG sync of this repository/i);
+    expect(mocks.connects).toBe(0);
+  });
+
+  it('ends as cancelled when the task is stopped while it waits', async () => {
+    fakeLock.state.held.add('repo-1');
+    const controller = new AbortController();
+    const waiting = ragPopulateStep.apply({ ...ctx, signal: controller.signal } as StepContext, {
+      detected: detected(),
+      formValues: { populateMode: 'incremental' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    const settled = expect(waiting).rejects.toBeInstanceOf(TaskCancelledError);
+    await sleep(40);
+    controller.abort();
+    await settled;
+    expect(mocks.connects).toBe(0);
+  });
+
+  it('releases the lock when the populate fails', async () => {
+    mocks.embedFails = true;
+    await expect(populate(detected({ ollamaReachable: false }))).rejects.toBeInstanceOf(
+      RagEmbedFailureError,
+    );
+    expect(fakeLock.state.handles.map((h) => h.released)).toEqual([1]);
+  });
+
+  it('takes no lock when the task has no repository', async () => {
+    mocks.taskRepositoryId = null;
+    await populate(detected());
+    expect(fakeLock.state.tried).toEqual([]);
+  });
+
+  it('takes no lock when the mode is none', async () => {
+    await populate(detected({ ragMode: 'none' as never }));
+    expect(fakeLock.state.tried).toEqual([]);
   });
 });

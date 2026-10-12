@@ -13,7 +13,9 @@ import {
   LEARNINGS_DIR,
 } from '@haive/shared/knowledge-paths';
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
+import type { RagSyncLock } from '@haive/shared/rag';
 import type { StepContext } from '../../step-definition.js';
+import { acquireRepoRagSyncLock } from '../_rag-sync-lock.js';
 import { gitRun } from '../../../repo/git-push.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import {
@@ -438,6 +440,33 @@ export async function runRagIndexSync(
   ctx: StepContext,
   opts: RunRagIndexOpts,
 ): Promise<RagSyncResult> {
+  const { repoPath } = opts;
+  const refusal = await scanRootRefusal(repoPath);
+  if (refusal !== null) {
+    ctx.logger.warn({ repoPath, refusal }, 'RAG scan root refused; nothing indexed or swept');
+    return EMPTY_RESULT(`the scan root was refused (${refusal}), so nothing was indexed or swept`);
+  }
+
+  const taskRow = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { repositoryId: true, title: true, description: true },
+  });
+  const repositoryId = taskRow?.repositoryId ?? null;
+  if (!repositoryId) return syncRepositoryIndex(ctx, opts, taskRow, null);
+  const lock = await acquireRepoRagSyncLock(ctx, repositoryId);
+  try {
+    return await syncRepositoryIndex(ctx, opts, taskRow, lock);
+  } finally {
+    await lock.release();
+  }
+}
+
+async function syncRepositoryIndex(
+  ctx: StepContext,
+  opts: RunRagIndexOpts,
+  taskRow: { repositoryId: string | null; title: string; description: string | null } | undefined,
+  lock: RagSyncLock | null,
+): Promise<RagSyncResult> {
   const {
     repoPath,
     prefs,
@@ -447,12 +476,6 @@ export async function runRagIndexSync(
     sweepProtectedPaths,
   } = opts;
   const wa = workspaceAnchor(repoPath);
-
-  const refusal = await scanRootRefusal(repoPath);
-  if (refusal !== null) {
-    ctx.logger.warn({ repoPath, refusal }, 'RAG scan root refused; nothing indexed or swept');
-    return EMPTY_RESULT(`the scan root was refused (${refusal}), so nothing was indexed or swept`);
-  }
 
   const scope = await resolveRagSyncPrefs(ctx);
   if (scope.needsScopeSelection) {
@@ -487,10 +510,6 @@ export async function runRagIndexSync(
     // the same content on every task) and for the per-repo embed-health record, and
     // bailing here saves a pointless model warm. Bail with a logged warning rather
     // than silently filling the table.
-    const taskRow = await ctx.db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, ctx.taskId),
-      columns: { repositoryId: true, title: true, description: true },
-    });
     const repositoryId = taskRow?.repositoryId ?? null;
     if (!repositoryId) {
       ctx.logger.warn(
@@ -908,6 +927,13 @@ export async function runRagIndexSync(
       else if (outcome.kind === 'failed') embedFailureReason = outcome.reason;
     }
 
+    if (lock?.lost) {
+      ctx.logger.warn(
+        { repositoryId },
+        'RAG sync lock was lost during the run; not clearing the degraded flag',
+      );
+    }
+
     // Remember (or forget) the embed failure on the REPO, so the condition outlives
     // this step row — a manual retry nulls task_steps.output — and every later RAG
     // step can say so. Only an actual model run can clear it: a hash-mode sync
@@ -920,6 +946,7 @@ export async function runRagIndexSync(
       hashedChunks === 0 &&
       realEmbeddingSucceeded &&
       health.degradedAt &&
+      !lock?.lost &&
       !(await ragStoreAwaitsReembed(conn, repositoryId, ctx.logger))
     ) {
       await clearRagEmbedDegraded(ctx.db, repositoryId, ctx.logger);
