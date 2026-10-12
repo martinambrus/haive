@@ -1,0 +1,161 @@
+import {
+  pgTable,
+  uuid,
+  text,
+  varchar,
+  boolean,
+  jsonb,
+  timestamp,
+  index,
+  unique,
+  primaryKey,
+  check,
+  pgEnum,
+} from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { users } from './auth.js';
+import { repositories, repoCredentials } from './repos.js';
+import { tasks, taskSteps, cliInvocations } from './tasks.js';
+
+export const integrationConnectionScopeEnum = pgEnum('integration_connection_scope', [
+  'user',
+  'shared',
+]);
+export const integrationConnectionStatusEnum = pgEnum('integration_connection_status', [
+  'connected',
+  'needs_reauth',
+  'revoked',
+  'provider_unavailable',
+]);
+export const integrationGrantTargetEnum = pgEnum('integration_grant_target', [
+  'task',
+  'repository',
+]);
+export const integrationAccessEnum = pgEnum('integration_access', ['read', 'write']);
+export const integrationSurfaceEnum = pgEnum('integration_surface', ['mcp', 'rest']);
+export const integrationCallOutcomeEnum = pgEnum('integration_call_outcome', [
+  'ok',
+  'refused',
+  'error',
+]);
+
+export const integrationProviderConfigs = pgTable('integration_provider_configs', {
+  providerId: varchar('provider_id', { length: 256 }).primaryKey(),
+  enabled: boolean('enabled').notNull().default(false),
+  oauthClientId: text('oauth_client_id'),
+  oauthClientSecretEncrypted: text('oauth_client_secret_encrypted'),
+  encryptedDek: text('encrypted_dek'),
+  apiBaseUrl: text('api_base_url'),
+  updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
+
+export const integrationConnections = pgTable(
+  'integration_connections',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    providerId: varchar('provider_id', { length: 256 }).notNull(),
+    scope: integrationConnectionScopeEnum('scope').notNull(),
+    ownerUserId: uuid('owner_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    accountLabel: text('account_label').notNull(),
+    externalAccountId: text('external_account_id'),
+    authMethod: varchar('auth_method', { length: 16 }).notNull(),
+    grantedScopes: jsonb('granted_scopes').$type<string[]>().notNull().default([]),
+    accessTokenEncrypted: text('access_token_encrypted'),
+    refreshTokenEncrypted: text('refresh_token_encrypted'),
+    encryptedDek: text('encrypted_dek'),
+    expiresAt: timestamp('expires_at'),
+    repoCredentialId: uuid('repo_credential_id').references(() => repoCredentials.id, {
+      onDelete: 'cascade',
+    }),
+    writeEnabled: boolean('write_enabled').notNull().default(false),
+    status: integrationConnectionStatusEnum('status').notNull().default('connected'),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    index('integration_connections_owner_user_id_idx').on(table.ownerUserId),
+    index('integration_connections_provider_id_idx').on(table.providerId),
+  ],
+);
+
+export const integrationGrants = pgTable(
+  'integration_grants',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => integrationConnections.id, { onDelete: 'cascade' }),
+    targetKind: integrationGrantTargetEnum('target_kind').notNull(),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'cascade' }),
+    repositoryId: uuid('repository_id').references(() => repositories.id, {
+      onDelete: 'cascade',
+    }),
+    categoryId: varchar('category_id', { length: 256 }),
+    toolAllowList: jsonb('tool_allow_list').$type<string[] | null>(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      'integration_grants_target_check',
+      sql`(${table.targetKind} = 'task' AND ${table.taskId} IS NOT NULL AND ${table.repositoryId} IS NULL) OR (${table.targetKind} = 'repository' AND ${table.repositoryId} IS NOT NULL AND ${table.taskId} IS NULL)`,
+    ),
+    index('integration_grants_task_id_idx').on(table.taskId),
+    index('integration_grants_repository_id_idx').on(table.repositoryId),
+    index('integration_grants_connection_id_idx').on(table.connectionId),
+  ],
+);
+
+export const integrationUserSettings = pgTable(
+  'integration_user_settings',
+  {
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    providerId: varchar('provider_id', { length: 256 }).notNull(),
+    writeEnabled: boolean('write_enabled').notNull().default(false),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.providerId] })],
+);
+
+export const integrationCategoryPreferences = pgTable(
+  'integration_category_preferences',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    categoryId: varchar('category_id', { length: 256 }).notNull(),
+    providerId: varchar('provider_id', { length: 256 }).notNull(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    unique('integration_category_preferences_user_category_unique')
+      .on(table.userId, table.categoryId)
+      .nullsNotDistinct(),
+  ],
+);
+
+export const integrationCalls = pgTable(
+  'integration_calls',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    connectionId: uuid('connection_id').references(() => integrationConnections.id, {
+      onDelete: 'set null',
+    }),
+    providerId: varchar('provider_id', { length: 256 }).notNull(),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    taskStepId: uuid('task_step_id').references(() => taskSteps.id, { onDelete: 'set null' }),
+    cliInvocationId: uuid('cli_invocation_id').references(() => cliInvocations.id, {
+      onDelete: 'set null',
+    }),
+    tool: text('tool').notNull(),
+    access: integrationAccessEnum('access').notNull(),
+    surface: integrationSurfaceEnum('surface').notNull(),
+    outcome: integrationCallOutcomeEnum('outcome').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => [index('integration_calls_task_id_idx').on(table.taskId)],
+);
