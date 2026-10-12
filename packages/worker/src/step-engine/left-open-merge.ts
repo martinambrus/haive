@@ -197,6 +197,7 @@ interface AbortDecision {
  *  settled event; it throws only when no outcome could be recorded, so the job is retried. */
 export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayload): Promise<void> {
   const { taskId, dir } = payload;
+  let changed = false;
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
@@ -235,10 +236,18 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
       }
       const open = await peekOpenMerge(dir);
       if (!open || open.head !== target.head || open.mergeHead !== target.mergeHead) {
+        // An earlier attempt may have aborted it and failed to report what it moved aside.
+        const unreported = await relocateFixerChanges(
+          dir,
+          null,
+          { taskId, runId: recorded?.fixInvocationId ?? randomUUID() },
+          maskSource,
+        );
         return {
           outcome: 'moved',
           reason:
             'The merge in this directory is no longer the one the cancel left; nothing was changed.',
+          leftovers: unreported,
         };
       }
       const leftovers = baseline
@@ -258,6 +267,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
       }
       const aborted = await abortMerge(dir);
       if (!aborted.ok) return { outcome: 'refused', reason: abortFailureNote(aborted), leftovers };
+      changed = true;
       const unchecked = baseline
         ? ''
         : ' Files the fixer changed outside the conflict were not checked: no record of the tree it was sent into remains.';
@@ -279,6 +289,9 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
     await settle(db, taskId, target, decision.outcome, decision.reason);
   } catch (err) {
     logger.warn({ err, taskId, dir }, 'aborting the merge a cancel left open failed');
+    // Once the merge is aborted a retry can only see it as moved: it reports what was moved aside
+    // from the unreported manifest, so the job is retried rather than settled as refused.
+    if (changed) throw err;
     const target = (await taskLeftOpen(db, taskId)).find(
       (m) => m.dir === dir && m.settled === null,
     );

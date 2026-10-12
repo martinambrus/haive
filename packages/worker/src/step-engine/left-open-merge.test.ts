@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import { logger } from '@haive/shared';
 
 const git = vi.hoisted(() => ({
   abortMerge: vi.fn(),
+  recordFixerLeftovers: vi.fn(),
   relocateFixerChanges: vi.fn(),
   revParse: vi.fn(),
 }));
@@ -12,7 +14,7 @@ vi.mock('./git-merge.js', () => ({
   abortMerge: git.abortMerge,
   isHostCheckout: () => false,
   mergeOpenFor: async () => true,
-  recordFixerLeftovers: async () => undefined,
+  recordFixerLeftovers: git.recordFixerLeftovers,
   relocateFixerChanges: git.relocateFixerChanges,
   revParse: git.revParse,
 }));
@@ -68,41 +70,80 @@ describe('recordLeftOpenMerges', () => {
 
 describe('abortLeftMerge', () => {
   beforeEach(() => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     git.abortMerge.mockReset().mockResolvedValue({ ok: true });
+    git.recordFixerLeftovers.mockReset().mockResolvedValue(undefined);
+    git.relocateFixerChanges.mockReset();
     git.revParse.mockImplementation(async (_dir: string, ref: string) =>
       ref === 'MERGE_HEAD' ? 'm1' : 'h1',
     );
   });
 
+  const reportedOpen = () => [
+    {
+      eventType: 'merge.left_open',
+      payload: { dir: '/repo', ref: 'feat/a', head: 'h1', mergeHead: 'm1' },
+    },
+  ];
+  const fixerStep = () => [
+    {
+      id: 'step-1',
+      state: {
+        phase: 'resolving',
+        mergeDir: '/repo',
+        featureBranch: 'feat/a',
+        fixInvocationId: 'inv-1',
+        fixBaseline: { head: 'h1', mergeHead: 'm1', tree: 't1' },
+      },
+    },
+  ];
+  const fixture = () =>
+    chainDb([reportedOpen(), fixerStep(), [{ worktreePath: null }]], { status: 'cancelled' });
+
   it('leaves the merge open while the index still holds what the fixer staged', async () => {
     git.relocateFixerChanges.mockResolvedValue({ moved: [], indexHeld: 'index.lock exists' });
-    const events = [
-      {
-        eventType: 'merge.left_open',
-        payload: { dir: '/repo', ref: 'feat/a', head: 'h1', mergeHead: 'm1' },
-      },
-    ];
-    const steps = [
-      {
-        id: 'step-1',
-        state: {
-          phase: 'resolving',
-          mergeDir: '/repo',
-          featureBranch: 'feat/a',
-          fixInvocationId: 'inv-1',
-          fixBaseline: { head: 'h1', mergeHead: 'm1', tree: 't1' },
-        },
-      },
-    ];
-    const { db, inserted } = chainDb([events, steps, [{ worktreePath: null }]], {
-      status: 'cancelled',
-    });
+    const { db, inserted } = fixture();
     await abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo' });
     expect(git.abortMerge).not.toHaveBeenCalled();
     expect(inserted).toEqual([
       expect.objectContaining({
         payload: expect.objectContaining({ outcome: 'refused', dir: '/repo', mergeHead: 'm1' }),
       }),
+    ]);
+  });
+
+  it('is retried, not settled as refused, when reporting fails after the abort went through', async () => {
+    git.relocateFixerChanges.mockResolvedValue({ moved: ['a.txt'], interrupted: [] });
+    git.recordFixerLeftovers.mockRejectedValue(new Error('connection lost'));
+    const { db, inserted } = fixture();
+    await expect(
+      abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo' }),
+    ).rejects.toThrow('connection lost');
+    expect(git.abortMerge).toHaveBeenCalled();
+    expect(inserted).toEqual([]);
+  });
+
+  it('reports a moved-aside attempt left unreported when the merge is already gone', async () => {
+    git.revParse.mockResolvedValue(null);
+    const unreported = { moved: [], interrupted: ['.haive/merge-leftovers/task-1/inv-1'] };
+    git.relocateFixerChanges.mockResolvedValue(unreported);
+    const { db, inserted } = fixture();
+    await abortLeftMerge(db, { taskId: 'task-1', userId: 'u', dir: '/repo' });
+    expect(git.relocateFixerChanges).toHaveBeenCalledWith(
+      '/repo',
+      null,
+      expect.objectContaining({ taskId: 'task-1' }),
+      expect.any(Function),
+    );
+    expect(git.recordFixerLeftovers).toHaveBeenCalledWith(
+      db,
+      'task-1',
+      'step-1',
+      'feat/a',
+      unreported,
+    );
+    expect(inserted).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ outcome: 'moved' }) }),
     ]);
   });
 });
