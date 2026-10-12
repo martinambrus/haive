@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  collectFieldIds,
   dashboardSpecSchema,
   dashboardWidgetSchema,
   moduleManifestSchema,
@@ -190,5 +191,11 @@ describe('dashboardWidgetSchema exactly-one rule', () => {
       expect(widgetOk({ type: 'status', endpoint })).toBe(false);
     }
     expect(widgetOk({ type: 'status', endpoint: '/m/acme/x?y=1' })).toBe(true);
+  });
+});
+
+describe('collectFieldIds', () => {
+  it('returns top-level and accordion field ids', () => {
+    expect([...collectFieldIds(form as never)].sort()).toEqual(['apiUrl', 'group', 'nested']);
   });
 });

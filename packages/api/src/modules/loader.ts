@@ -1,7 +1,11 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { configService, validateFormValues } from '@haive/shared';
-import { moduleManifestSchema, type ModuleManifest } from '@haive/shared/modularity';
+import {
+  collectFieldIds,
+  moduleManifestSchema,
+  type ModuleManifest,
+} from '@haive/shared/modularity';
 import { HttpError, type AppEnv } from '../context.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 
@@ -77,14 +81,6 @@ export async function mountModules(
   return loaded;
 }
 
-function fieldIds(form: NonNullable<ModuleManifest['globalSettings']>['form']): string[] {
-  return form.fields.flatMap((field) =>
-    field.type === 'accordion'
-      ? field.items.flatMap((item) => item.fields.map((inner) => inner.id))
-      : [field.id],
-  );
-}
-
 export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
   const routes = new Hono<AppEnv>();
   routes.use('*', requireAuth);
@@ -106,7 +102,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         nav: (manifest.nav ?? []).filter((item) => isAdmin || item.adminOnly !== true),
         pages: manifest.pages ?? {},
         hasGlobalSettings: manifest.globalSettings !== undefined,
-        hasAdminSettings: manifest.adminSettings !== undefined,
+        hasAdminSettings: isAdmin && manifest.adminSettings !== undefined,
       })),
     });
   });
@@ -119,9 +115,18 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       throw new HttpError(403, 'Admin access required');
     }
     const values: Record<string, unknown> = { ...settings.defaults };
-    for (const field of new Set([...Object.keys(settings.defaults), ...fieldIds(settings.form)])) {
+    for (const field of new Set([
+      ...Object.keys(settings.defaults),
+      ...collectFieldIds(settings.form),
+    ])) {
       const stored = await configService.getFresh(settingsKey(id, kind, field));
-      if (stored !== null) values[field] = JSON.parse(stored);
+      if (stored !== null) {
+        try {
+          values[field] = JSON.parse(stored);
+        } catch {
+          // A non-JSON value is treated as absent: the default stays.
+        }
+      }
     }
     return c.json({ form: settings.form, values });
   });
