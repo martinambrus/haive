@@ -681,30 +681,36 @@ async function syncRepositoryIndex(
       // Claim legacy onboarding rows (repository_id IS NULL) for this file into
       // the repo scope so the dedup below matches them instead of re-ingesting
       // duplicates. First collapse duplicate NULL rows for this chunk key.
-      await conn.pg.unsafe(
-        `DELETE FROM ${RAG_TABLE} a USING ${RAG_TABLE} b
-           WHERE a.repository_id IS NULL AND b.repository_id IS NULL
-             AND a.source_path = $1 AND b.source_path = $1
-             AND a.section_id = b.section_id AND a.chunk_index = b.chunk_index
-             AND a.ctid > b.ctid`,
-        [relPath],
-      );
-      // Then drop any NULL row whose key already exists under the repo (would
-      // also violate the unique index on adopt), then adopt the rest.
-      await conn.pg.unsafe(
-        `DELETE FROM ${RAG_TABLE} n
-           WHERE n.repository_id IS NULL AND n.source_path = $2
-             AND EXISTS (
-               SELECT 1 FROM ${RAG_TABLE} r
-               WHERE r.repository_id = $1 AND r.source_path = n.source_path
-                 AND r.section_id = n.section_id AND r.chunk_index = n.chunk_index)`,
-        [repositoryId, relPath],
-      );
-      await conn.pg.unsafe(
-        `UPDATE ${RAG_TABLE} SET repository_id = $1
-           WHERE repository_id IS NULL AND source_path = $2`,
-        [repositoryId, relPath],
-      );
+      lock?.assertHeld();
+      await conn.pg.begin(async (tx) => {
+        await tx.unsafe(`SELECT pg_advisory_xact_lock(hashtext('haive:rag-claim:' || $1::text))`, [
+          relPath,
+        ]);
+        await tx.unsafe(
+          `DELETE FROM ${RAG_TABLE} a USING ${RAG_TABLE} b
+             WHERE a.repository_id IS NULL AND b.repository_id IS NULL
+               AND a.source_path = $1 AND b.source_path = $1
+               AND a.section_id = b.section_id AND a.chunk_index = b.chunk_index
+               AND a.ctid > b.ctid`,
+          [relPath],
+        );
+        // Then drop any NULL row whose key already exists under the repo (would
+        // also violate the unique index on adopt), then adopt the rest.
+        await tx.unsafe(
+          `DELETE FROM ${RAG_TABLE} n
+             WHERE n.repository_id IS NULL AND n.source_path = $2
+               AND EXISTS (
+                 SELECT 1 FROM ${RAG_TABLE} r
+                 WHERE r.repository_id = $1 AND r.source_path = n.source_path
+                   AND r.section_id = n.section_id AND r.chunk_index = n.chunk_index)`,
+          [repositoryId, relPath],
+        );
+        await tx.unsafe(
+          `UPDATE ${RAG_TABLE} SET repository_id = $1
+             WHERE repository_id IS NULL AND source_path = $2`,
+          [repositoryId, relPath],
+        );
+      });
 
       // Get existing chunks for this file scoped to the repository.
       const existingRows = (await conn.pg.unsafe(

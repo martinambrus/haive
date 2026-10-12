@@ -96,6 +96,7 @@ let nullHashProbeFails: boolean;
 let onNullHashProbe: (() => void) | null;
 let onInsert: (() => void) | null;
 let nullHashProbes: unknown[][];
+let claimLog: Array<{ via: 'direct' | 'tx' | 'begin'; query: string; params: unknown[] }>;
 let ctx: StepContext;
 let executionPath: 'full_workflow' | 'quick_bugfix';
 let priorSteps: Map<string, { output?: unknown; detectOutput?: unknown }>;
@@ -144,10 +145,23 @@ beforeEach(async () => {
   onNullHashProbe = null;
   onInsert = null;
   nullHashProbes = [];
+  claimLog = [];
   mocks.connect.mockImplementation(async () => ({
     close: mocks.close,
     pg: {
+      begin: async (run: (tx: unknown) => Promise<unknown>) => {
+        claimLog.push({ via: 'begin', query: '', params: [] });
+        return run({
+          unsafe: async (query: string, params: unknown[] = []) => {
+            claimLog.push({ via: 'tx', query, params });
+            return Object.assign([], { count: 0 });
+          },
+        });
+      },
       unsafe: async (query: string, params: unknown[] = []) => {
+        if (query.includes('repository_id IS NULL')) {
+          claimLog.push({ via: 'direct', query, params });
+        }
         if (query.includes('INSERT INTO')) {
           order.push('insert');
           if (failInsertAt !== null && order.filter((e) => e === 'insert').length === failInsertAt)
@@ -1737,6 +1751,42 @@ describe('one RAG sync per repository at a time', () => {
     await expect(syncWorktree()).rejects.toBeInstanceOf(RagSyncLockLostError);
     expect(inserts).toHaveLength(1);
     expect(deletedPaths).not.toContain('gone.ts');
+    expect(fakeLock.state.handles[0]!.released).toBe(1);
+  });
+
+  it('runs the three claim statements of a file in one transaction behind a per-path advisory lock', async () => {
+    await syncWorktree();
+    expect(claimLog.filter((entry) => entry.via === 'direct')).toEqual([]);
+    const begins = claimLog.filter((entry) => entry.via === 'begin').length;
+    expect(begins).toBeGreaterThan(1);
+    const statements = claimLog.filter((entry) => entry.via === 'tx');
+    expect(statements).toHaveLength(begins * 4);
+    for (let i = 0; i < statements.length; i += 4) {
+      const [advisory, collapse, dropExisting, adopt] = statements.slice(i, i + 4);
+      expect(advisory!.query).toContain('pg_advisory_xact_lock');
+      expect(advisory!.query).toContain("'haive:rag-claim:'");
+      const relPath = advisory!.params[0];
+      expect(typeof relPath).toBe('string');
+      expect(collapse!.query).toMatch(/^DELETE FROM/);
+      expect(collapse!.params).toEqual([relPath]);
+      expect(dropExisting!.query).toMatch(/^DELETE FROM/);
+      expect(dropExisting!.params).toEqual(['repo-1', relPath]);
+      expect(adopt!.query).toMatch(/^UPDATE/);
+      expect(adopt!.params).toEqual(['repo-1', relPath]);
+    }
+    const beginIndexes = claimLog.flatMap((entry, i) => (entry.via === 'begin' ? [i] : []));
+    for (const at of beginIndexes) expect(claimLog[at + 1]!.via).toBe('tx');
+  });
+
+  it('sends none of the claim statements when the lock is lost just before them', async () => {
+    const lose = ctx.emitProgress;
+    ctx.emitProgress = async (message: string) => {
+      if (message.startsWith('Scanning (1/')) fakeLock.state.handles[0]!.lost = true;
+      return lose(message);
+    };
+    await expect(syncWorktree()).rejects.toBeInstanceOf(RagSyncLockLostError);
+    expect(claimLog).toEqual([]);
+    expect(inserts).toHaveLength(0);
     expect(fakeLock.state.handles[0]!.released).toBe(1);
   });
 
