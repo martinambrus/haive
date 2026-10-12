@@ -47,7 +47,9 @@ export interface LiveArtifactRow {
   templateSchemaVersion: number;
   writtenHash: string;
   formValuesSnapshot: Record<string, unknown> | null;
+  source: string;
   sourceStepId: string;
+  haiveVersion: string | null;
   bundleItemId: string | null;
   generatedAt: Date | null;
 }
@@ -66,7 +68,9 @@ export async function loadLiveArtifacts(
       templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
       writtenHash: schema.onboardingArtifacts.writtenHash,
       formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+      source: schema.onboardingArtifacts.source,
       sourceStepId: schema.onboardingArtifacts.sourceStepId,
+      haiveVersion: schema.onboardingArtifacts.haiveVersion,
       bundleItemId: schema.onboardingArtifacts.bundleItemId,
       generatedAt: schema.onboardingArtifacts.generatedAt,
     })
@@ -86,7 +90,9 @@ export async function loadLiveArtifacts(
     templateSchemaVersion: r.templateSchemaVersion,
     writtenHash: r.writtenHash,
     formValuesSnapshot: (r.formValuesSnapshot ?? null) as Record<string, unknown> | null,
+    source: r.source,
     sourceStepId: r.sourceStepId,
+    haiveVersion: r.haiveVersion,
     bundleItemId: r.bundleItemId,
     generatedAt: r.generatedAt ?? null,
   }));

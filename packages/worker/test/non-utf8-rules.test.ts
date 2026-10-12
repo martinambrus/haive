@@ -139,6 +139,7 @@ describe('02 and a rules file that is not UTF-8', () => {
         new_artifact: 1,
         user_deleted: 0,
         obsolete: 0,
+        foreign: 0,
       },
       installedTemplateSetHash: null,
       currentTemplateSetHash: 'set',

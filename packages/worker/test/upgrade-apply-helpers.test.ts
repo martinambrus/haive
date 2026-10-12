@@ -205,6 +205,22 @@ describe('classifyApplyAction — primary buckets', () => {
   });
 });
 
+describe('classifyApplyAction — a row from another install', () => {
+  it('is skipped whatever the form sent', () => {
+    const e = entry('foreign', 'a.toml', { liveArtifactId: 'live-1', templateId: 'custom.b.i' });
+    const sel = selections({
+      selectedUpdates: new Set([e.entryId]),
+      selectedNew: new Set([e.entryId]),
+      selectedReinstate: new Set([e.entryId]),
+      selectedObsoleteRemovals: new Set([e.entryId]),
+      selectedRtkHookStrips: new Set([e.entryId]),
+      selectedObsoleteUntracks: new Set([e.entryId]),
+      conflictChoices: new Map([[e.entryId, 'apply_theirs']]),
+    });
+    expect(classifyApplyAction(e, [e], sel)).toBe('skip');
+  });
+});
+
 describe('classifyApplyAction — a path the plan did not read', () => {
   it('neither writes, keeps, removes nor strips it, whatever the form sent', () => {
     const conflict = entry('conflict', 'a.md', { unread: 'oversized' });

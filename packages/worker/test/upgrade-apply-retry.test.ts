@@ -193,6 +193,7 @@ async function setup({
       new_artifact: region ? 1 : 2,
       user_deleted: 1,
       obsolete: 0,
+      foreign: 0,
     },
     installedTemplateSetHash: null,
     currentTemplateSetHash: 'set',
