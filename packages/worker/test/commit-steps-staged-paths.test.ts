@@ -655,6 +655,15 @@ describe('commitOnly commits the entries that were staged, not the worktree', ()
     expect(await readFile(path.join(repo, '.haive-data', 'plan.json'), 'utf8')).toBe('swept\n');
   });
 
+  it('a directory standing at a recorded file path is never staged', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    await mkdir(path.join(repo, '.haive-data', 'plan.json'), { recursive: true });
+    await writeFile(path.join(repo, '.haive-data', 'plan.json', 'private.md'), 'p\n');
+    await writeFile(path.join(repo, 'a.md'), 'a\n');
+    await stageNamed(repo, ['.haive-data/plan.json', 'a.md'], []);
+    expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe('a.md');
+  });
+
   it('R2-2: a staged removal is committed even when the file is back on disk', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n', 'gone.md': 'g\n', 'keep.md': 'k\n' });
     await rm(path.join(repo, 'gone.md'));

@@ -214,8 +214,14 @@ export async function stageNamed(
   add: readonly string[],
   remove: readonly string[],
 ): Promise<void> {
-  if (add.length > 0) {
-    await gitExec(['add', '-f', '--', ...literal(add)], {
+  // Only a file or a link is named: a directory standing at a recorded path would be added whole.
+  const files: string[] = [];
+  for (const rel of add) {
+    const entry = await lstatNoFollow(repoPath, rel);
+    if (entry && (entry.kind === 'file' || entry.kind === 'symlink')) files.push(rel);
+  }
+  if (files.length > 0) {
+    await gitExec(['add', '-f', '--', ...literal(files)], {
       cwd: repoPath,
       maxBuffer: GIT_MAX_BUFFER,
     });
