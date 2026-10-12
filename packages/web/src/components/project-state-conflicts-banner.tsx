@@ -5,12 +5,16 @@ import { api } from '@/lib/api-client';
 import { Badge, Button } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader } from '@/components/dialog';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import {
+  PENDING_GAVE_UP_MESSAGE,
+  PENDING_REFETCH_LIMIT,
   PENDING_REFETCH_MS,
   RECORD_FILE,
   answerConfirmation,
   conflictKeyLabel,
   conflictSideMarkdown,
+  stillListed,
   submitConflictAnswer,
   type ProjectStateAnswer,
   type ProjectStateConflictBody,
@@ -26,6 +30,7 @@ export interface ProjectStateConflictsViewProps {
   notice: string | null;
   messages: Record<string, ConflictMessage>;
   busyId: string | null;
+  pendingIds: readonly string[];
   onAnswer: (conflict: ProjectStateConflictBody, answer: ProjectStateAnswer) => void;
 }
 
@@ -43,6 +48,7 @@ export function ProjectStateConflictsView({
   notice,
   messages,
   busyId,
+  pendingIds,
   onAnswer,
 }: ProjectStateConflictsViewProps) {
   if (conflicts.length === 0 && !notice) return null;
@@ -63,7 +69,7 @@ export function ProjectStateConflictsView({
       {notice && <p className="text-xs text-emerald-400">{notice}</p>}
       {conflicts.map((c) => {
         const message = messages[c.id];
-        const busy = busyId === c.id;
+        const busy = busyId === c.id || pendingIds.includes(c.id);
         return (
           <div
             key={c.id}
@@ -122,21 +128,50 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     answer: ProjectStateAnswer;
   } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [pendingIds, setPendingIds] = useState<string[]>([]);
+  const pendingRef = useRef<string[]>([]);
+  const refetchCount = useRef(0);
   const alive = useRef(true);
   const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<ProjectStateConflictBody[] | null> => {
     try {
       const res = await api.get<{ conflicts: ProjectStateConflictBody[] }>(
         `/repos/${repositoryId}/project-state/conflicts`,
       );
-      if (!alive.current) return;
+      if (!alive.current) return null;
       setConflicts(res.conflicts);
       setLoadError(null);
+      return res.conflicts;
     } catch (err) {
       if (alive.current) setLoadError((err as Error).message ?? 'Failed to check');
+      return null;
     }
   }, [repositoryId]);
+
+  const setPending = useCallback((ids: string[]) => {
+    pendingRef.current = ids;
+    setPendingIds(ids);
+  }, []);
+
+  const pollPending = useCallback(async () => {
+    refetchTimer.current = null;
+    const listed = await load();
+    if (!alive.current || listed === null) return;
+    const remaining = stillListed(pendingRef.current, listed);
+    setPending(remaining);
+    if (remaining.length === 0) return;
+    refetchCount.current += 1;
+    if (refetchCount.current < PENDING_REFETCH_LIMIT) {
+      refetchTimer.current = setTimeout(() => void pollPending(), PENDING_REFETCH_MS);
+      return;
+    }
+    setMessages((prev) => {
+      const next = { ...prev };
+      for (const id of remaining) next[id] = { tone: 'info', text: PENDING_GAVE_UP_MESSAGE };
+      return next;
+    });
+  }, [load, setPending]);
 
   useEffect(() => {
     alive.current = true;
@@ -170,8 +205,10 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       );
     }
     if (out.kind === 'pending') {
+      setPending([...pendingRef.current.filter((id) => id !== conflict.id), conflict.id]);
+      refetchCount.current = 0;
       if (refetchTimer.current) clearTimeout(refetchTimer.current);
-      refetchTimer.current = setTimeout(() => void load(), PENDING_REFETCH_MS);
+      refetchTimer.current = setTimeout(() => void pollPending(), PENDING_REFETCH_MS);
     } else {
       await load();
     }
@@ -192,6 +229,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
         notice={notice}
         messages={messages}
         busyId={busyId}
+        pendingIds={pendingIds}
         onAnswer={(conflict, answer) => setConfirming({ conflict, answer })}
       />
       <Dialog
@@ -204,7 +242,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
               <DialogHeader>
                 <h2 className="text-sm font-semibold text-neutral-100">{confirmation.title}</h2>
               </DialogHeader>
-              <p className="text-sm text-neutral-300">{confirmation.body}</p>
+              <InlineMarkdown body={confirmation.body} className="text-sm text-neutral-300" />
               <div className="mt-4 flex justify-end gap-2">
                 <Button
                   size="sm"

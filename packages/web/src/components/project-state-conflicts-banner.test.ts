@@ -24,6 +24,7 @@ const view = (props: Partial<Parameters<typeof ProjectStateConflictsView>[0]> = 
       notice: null,
       messages: {},
       busyId: null,
+      pendingIds: [],
       onAnswer: () => {},
       ...props,
     }),
@@ -79,5 +80,13 @@ describe('ProjectStateConflictsView', () => {
   it('keeps showing a notice after the last conflict is answered', () => {
     const html = view({ notice: 'Commit and push the record file.' });
     expect(html).toContain('Commit and push the record file.');
+  });
+
+  it('keeps both answers disabled while an answer to that conflict is still being applied', () => {
+    const c = conflict();
+    const other = conflict({ id: '33333333-3333-4333-8333-333333333333' });
+    const html = view({ conflicts: [c, other], pendingIds: [c.id] });
+    expect(html.match(/<button[^>]*disabled=""[^>]*>(Keep mine|Take theirs)/g)).toHaveLength(2);
+    expect(html.match(/<button[^>]*>(Keep mine|Take theirs)/g)).toHaveLength(4);
   });
 });

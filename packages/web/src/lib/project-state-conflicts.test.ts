@@ -3,7 +3,9 @@ import {
   answerConfirmation,
   conflictKeyLabel,
   conflictSideMarkdown,
+  stillListed,
   submitConflictAnswer,
+  type ProjectStateConflictBody,
 } from './project-state-conflicts';
 
 const REPO = '11111111-1111-4111-8111-111111111111';
@@ -86,5 +88,17 @@ describe('submitConflictAnswer', () => {
       kind: 'error',
       message: 'An onboarding is using this repository.',
     });
+  });
+});
+
+describe('stillListed', () => {
+  const listed = (id: string) => ({ id }) as ProjectStateConflictBody;
+
+  it('keeps an answered conflict pending while the list still holds it', () => {
+    expect(stillListed([ROW], [listed(ROW)])).toEqual([ROW]);
+  });
+
+  it('drops a pending conflict once the list no longer holds it', () => {
+    expect(stillListed([ROW], [listed(REPO)])).toEqual([]);
   });
 });

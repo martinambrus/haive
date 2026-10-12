@@ -11,6 +11,19 @@ export const RECORD_FILE = '.haive-data/state/project/render.json';
 
 export const PENDING_REFETCH_MS = 3000;
 
+export const PENDING_REFETCH_LIMIT = 20;
+
+export const PENDING_GAVE_UP_MESSAGE =
+  'The answer is still being applied. Reload the page to check again.';
+
+export function stillListed(
+  ids: readonly string[],
+  conflicts: ProjectStateConflictBody[],
+): string[] {
+  const listed = new Set(conflicts.map((c) => c.id));
+  return ids.filter((id) => listed.has(id));
+}
+
 const KEY_LABELS: Record<string, string> = {
   projectInfo: 'Project details',
   framework: 'Framework',
