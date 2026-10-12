@@ -249,6 +249,13 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
             maskSource,
           )
         : null;
+      if (leftovers?.indexHeld) {
+        return {
+          outcome: 'refused',
+          reason: `A merge fixer staged changes outside the conflicted files, and they could not be taken back out of the index (${leftovers.indexHeld}), so the merge was left open to keep them; try again once the index is free.`,
+          leftovers,
+        };
+      }
       const aborted = await abortMerge(dir);
       if (!aborted.ok) return { outcome: 'refused', reason: abortFailureNote(aborted), leftovers };
       const unchecked = baseline
