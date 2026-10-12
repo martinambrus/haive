@@ -731,9 +731,9 @@ export async function resolveMergePhase(
     // at ctx.repoPath without landing on the wrong branch. Create a transient worktree
     // checked out on the base branch (shares .git, so the merge commit persists) and
     // merge there.
+    // The shared base worktree is created, and the base tip measured, under the merge-dir lock below.
     if (base && parentBranch && parentBranch !== base) {
       const wt = baseWorktreePaths(ctx, base);
-      await ensureBaseWorktree(ctx, wt.worktreePath, base);
       state = {
         ...base0,
         mode: 'cross-branch',
@@ -744,11 +744,6 @@ export async function resolveMergePhase(
     } else {
       state = { ...base0, phase: 'pending' };
     }
-    // The base tip before ANY merge round: the squash resets back to it, and it is the
-    // documented undo point. Captured after mergeDir is settled so the cross-branch
-    // worktree (checked out on base) is the thing measured.
-    const baseHead = await gitRun(state.mergeDir, ['rev-parse', 'HEAD']);
-    if (baseHead.code === 0) state = { ...state, baseShaBefore: baseHead.stdout.trim() };
     await saveMergeState(db, current.id, state);
   }
 
@@ -763,25 +758,32 @@ export async function resolveMergePhase(
         taskId: params.taskId,
       });
       if (holder) return { kind: 'held' as const, holder };
-      // The task that held the dir removes it when it finishes, so a Retry after a hold finds it gone.
+      // Every task creates or removes the shared base worktree only under this lock.
       if (pending.mode === 'cross-branch') {
         await ensureBaseWorktree(ctx, pending.mergeDir, pending.baseBranch);
       }
+      // The base tip before ANY merge round: the squash resets back to it, and it is the
+      // documented undo point, measured in the dir the merge runs in.
+      let armed = pending;
+      if (!armed.baseShaBefore) {
+        const baseHead = await gitRun(armed.mergeDir, ['rev-parse', 'HEAD']);
+        if (baseHead.code === 0) armed = { ...armed, baseShaBefore: baseHead.stdout.trim() };
+      }
       // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
-      const cleared = await abortOtherMerge(pending.mergeDir, pending.featureBranch);
-      const stale = cleared.ok ? await abortMerge(pending.mergeDir) : cleared;
-      if (!stale.ok) return { kind: 'unaborted' as const, stale };
+      const cleared = await abortOtherMerge(armed.mergeDir, armed.featureBranch);
+      const stale = cleared.ok ? await abortMerge(armed.mergeDir) : cleared;
+      if (!stale.ok) return { kind: 'unaborted' as const, stale, armed };
       const opened = await openMerge(
-        pending.mergeDir,
-        pending.featureBranch,
-        ['-m', `Merge ${pending.featureBranch}`],
+        armed.mergeDir,
+        armed.featureBranch,
+        ['-m', `Merge ${armed.featureBranch}`],
         commitEnv,
       );
       // Recorded inside the lock's transaction, so a landed merge the squash has yet to reset is held too.
       if (opened.kind !== 'refused') {
-        await saveMergeState(tx, current.id, { ...pending, phase: 'resolving' });
+        await saveMergeState(tx, current.id, { ...armed, phase: 'resolving' });
       }
-      return { kind: 'opened' as const, opened };
+      return { kind: 'opened' as const, opened, armed };
     });
     if (attempt.kind === 'held') {
       return haltFailed(
@@ -791,6 +793,7 @@ export async function resolveMergePhase(
         'merge dir in use',
       );
     }
+    state = attempt.armed;
     if (attempt.kind === 'unaborted') {
       return haltUnaborted(db, current, params.taskId, state, attempt.stale);
     }
