@@ -1,4 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -35,6 +38,8 @@ interface State {
   userId?: string;
   taskId?: string;
   otherTaskId?: string;
+  extraTaskIds: string[];
+  fakeDockerDir?: string;
   worker?: Awaited<ReturnType<typeof startTaskWorker>>;
   queue?: Queue<TaskJobPayload>;
 }
@@ -56,7 +61,7 @@ async function pollUntil<T>(
 }
 
 async function main(): Promise<void> {
-  const state: State = {};
+  const state: State = { extraTaskIds: [] };
   let exitCode = 0;
   let stubCalls = 0;
   let claimHeldDuringCleanup: boolean | null = null;
@@ -239,6 +244,106 @@ async function main(): Promise<void> {
     if (theirs.length !== 1)
       throw new Error(`expected the bystander's claim kept, got ${theirs.length}`);
 
+    // A cancel whose containers cannot be confirmed gone keeps the claim and records no finish,
+    // so a fixer that may still be writing the dir does not lose it to another task. A `docker`
+    // first on PATH answers for every call, so nothing here reaches a real container.
+    const fakeDir = await mkdtemp(path.join(tmpdir(), 'haive-fake-docker-'));
+    state.fakeDockerDir = fakeDir;
+    await writeFile(
+      path.join(fakeDir, 'docker'),
+      [
+        '#!/bin/sh',
+        'case "$1" in',
+        '  ps)',
+        '    [ "$FAKE_DOCKER_MODE" = fail ] && exit 1',
+        '    if [ "$FAKE_DOCKER_MODE" = stuck ] || [ ! -e "$FAKE_DOCKER_DIR/removed" ]; then echo fake0001; fi',
+        '    exit 0;;',
+        '  rm)',
+        '    [ "$FAKE_DOCKER_MODE" = stuck ] || : > "$FAKE_DOCKER_DIR/removed"',
+        '    exit 0;;',
+        'esac',
+        'exit 0',
+        '',
+      ].join('\n'),
+    );
+    await chmod(path.join(fakeDir, 'docker'), 0o755);
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeDir}:${realPath}`;
+    process.env.FAKE_DOCKER_DIR = fakeDir;
+    try {
+      for (const mode of ['stuck', 'fail', 'removed'] as const) {
+        await rm(path.join(fakeDir, 'removed'), { force: true });
+        process.env.FAKE_DOCKER_MODE = mode;
+        const [t] = await db
+          .insert(schema.tasks)
+          .values({ userId, type: 'workflow', title: `cancel confirm ${mode}`, status: 'running' })
+          .returning();
+        if (!t) throw new Error('task insert failed');
+        state.extraTaskIds.push(t.id);
+        const [step] = await db
+          .insert(schema.taskSteps)
+          .values({
+            taskId: t.id,
+            stepId: '12-worktree-cleanup',
+            stepIndex: 0,
+            title: 'merge',
+            status: 'waiting_cli' as const,
+          })
+          .returning({ id: schema.taskSteps.id });
+        await db.insert(schema.mergeDirClaims).values({
+          mergeDir: `/smoke/${t.id}/main--base`,
+          taskId: t.id,
+          taskStepId: step!.id,
+        });
+        const job = await state.queue.add(TASK_JOB_NAMES.CANCEL, { taskId: t.id, userId });
+        const finished = (): Promise<boolean> =>
+          db
+            .select({ id: schema.taskEvents.id })
+            .from(schema.taskEvents)
+            .where(
+              and(
+                eq(schema.taskEvents.taskId, t.id),
+                eq(schema.taskEvents.eventType, 'task.cancel_finished'),
+              ),
+            )
+            .then((rows) => rows.length > 0);
+        const held = (): Promise<number> =>
+          db
+            .select({ dir: schema.mergeDirClaims.mergeDir })
+            .from(schema.mergeDirClaims)
+            .where(eq(schema.mergeDirClaims.taskId, t.id))
+            .then((rows) => rows.length);
+        // The job's own end is the barrier: a failed job for the unconfirmed cancels (the
+        // re-drive's cue), the finish record for the confirmed one.
+        await pollUntil(
+          async () => ((await job.getState()) === 'failed' || (await finished()) ? true : null),
+          () => true,
+          `cancel job end (${mode})`,
+          20000,
+        );
+        const isFinished = await finished();
+        const claimsLeft = await held();
+        const status = (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, t.id) }))
+          ?.status;
+        if (status !== 'cancelled') throw new Error(`${mode}: expected cancelled, got ${status}`);
+        if (mode === 'removed') {
+          if (!isFinished || claimsLeft !== 0) {
+            throw new Error(
+              `${mode}: expected the claim released and the finish recorded, got finished=${isFinished} claims=${claimsLeft}`,
+            );
+          }
+        } else if (isFinished || claimsLeft !== 1) {
+          throw new Error(
+            `${mode}: expected the claim kept and no finish recorded, got finished=${isFinished} claims=${claimsLeft}`,
+          );
+        }
+      }
+    } finally {
+      process.env.PATH = realPath;
+      delete process.env.FAKE_DOCKER_MODE;
+      delete process.env.FAKE_DOCKER_DIR;
+    }
+
     log.info(
       { status: cancelled.status, stubCalls, eventCount: cleanupEvents.length },
       'cleanup wiring verified',
@@ -263,6 +368,10 @@ async function main(): Promise<void> {
       if (state.otherTaskId) {
         await db.delete(schema.tasks).where(eq(schema.tasks.id, state.otherTaskId));
       }
+      for (const id of state.extraTaskIds) {
+        await db.delete(schema.taskEvents).where(eq(schema.taskEvents.taskId, id));
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, id));
+      }
       if (state.taskId) {
         await db.delete(schema.taskEvents).where(eq(schema.taskEvents.taskId, state.taskId));
         await db.delete(schema.tasks).where(eq(schema.tasks.id, state.taskId));
@@ -273,6 +382,7 @@ async function main(): Promise<void> {
     } catch (cleanupErr) {
       log.warn({ err: cleanupErr }, 'cleanup db rows failed');
     }
+    if (state.fakeDockerDir) await rm(state.fakeDockerDir, { recursive: true, force: true });
     if (state.worker) await state.worker.close().catch(() => {});
     if (state.queue) await state.queue.close().catch(() => {});
     await closeTaskQueue().catch(() => {});

@@ -28,9 +28,12 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   same step's again on a re-entry, a Retry or a base-sync round, and the same task's from an earlier
   step. Another task's claim halts the step, naming that task, without touching its merge; the Retry
   asks again. It is released only by the owning pass, in the section that removes the base worktree
-  and records `done`; by `handleCancelTask` after `cleanupTaskContainers` (`releaseTaskMergeClaims`, each claim deleted
-  under its dir's lock, so a section the old pass is inside finishes first), since the cancel commits
-  before the fixer it ran is stopped; or by the foreign key when the task goes. A completed task, a
+  and records `done`; by `handleCancelTask` once a docker listing shows no cli sandbox of the task left
+  (`releaseTaskMergeClaims`, each claim deleted under its dir's lock, so a section the old pass is
+  inside finishes first), since the cancel commits before the fixer it ran is stopped; a listing that
+  fails, times out or still shows one keeps the claims, skips the dir-touching teardown and the
+  finish record, and fails the CANCEL job for the stalled re-drive; or by the foreign key when the
+  task goes. A completed task, a
   skipped step, or a cancelled task whose `task.cancel_finished` event exists is stale: the next
   claim takes the row over and its abort cleans the leftover. The event is written after the
   release, so it also covers a claim that committed after the release read the task's claims; a
