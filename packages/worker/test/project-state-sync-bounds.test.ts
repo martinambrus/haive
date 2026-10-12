@@ -8,8 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
+  PROJECT_STATE_LIMITS,
   emptyProjectState,
   normalizeProjectState,
+  recordReadable,
   renderProjectState,
   type ProjectRender,
   type ProjectStateClaim,
@@ -76,6 +78,9 @@ async function setup(seed: { column?: unknown; base?: unknown } = {}) {
     tasks: schema.tasks,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateConflicts: schema.projectStateConflicts,
+    cliProviders: schema.cliProviders,
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
   });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -306,4 +311,51 @@ describe('syncProjectStateFromCheckout: the walk is bounded', () => {
       );
     });
   });
+});
+
+describe('recordReadable: the writer counts what the reader walks', () => {
+  const sample = (claims: number): ProjectStateRecord => ({
+    ...emptyProjectState(),
+    render: BASE,
+    claims: Array.from({ length: claims }, (_, i) => claim(i)),
+    bundles: [{ source: 'git:https%3A%2F%2Fexample.com%2Fkit.git@main', name: 'kit' }],
+  });
+
+  it('takes the limits from the same constants the reader checks', () => {
+    expect(PROJECT_STATE_LIMITS).toEqual({
+      maxEntries: MAX_ENTRIES,
+      maxFileBytes: 1024 * 1024,
+      maxTotalBytes: MAX_BYTES,
+    });
+  });
+
+  it('counts the entries a recursive listing of the written record finds', LONG, async () => {
+    const s = await setup();
+    const record = sample(50);
+    await putRecord(s.root, record);
+    const files = renderProjectState(record);
+    const dirs = new Set(
+      [...files.keys()].flatMap((rel) =>
+        rel.includes('/') ? [rel.slice(0, rel.lastIndexOf('/'))] : [],
+      ),
+    );
+
+    expect(files.size + dirs.size).toBe(await countEntries(s.root));
+  });
+
+  it.each([
+    [MAX_ENTRIES - 6, 'applied', true],
+    [MAX_ENTRIES - 5, 'refused', false],
+  ])(
+    'a record of %i claims and one bundle: the reader says %s, and so does recordReadable',
+    LONG,
+    async (claims, outcome, readable) => {
+      const s = await setup();
+      const record = sample(claims);
+      await putRecord(s.root, record);
+
+      expect(recordReadable(renderProjectState(record)).readable).toBe(readable);
+      expect((await s.run()).outcome).toBe(outcome);
+    },
+  );
 });

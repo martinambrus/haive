@@ -979,6 +979,20 @@ describe('writeProjectStateRecord: one claim per live ledger row', () => {
     expect(base.claims.map((c) => c.path)).toEqual(['.claude/agents/code-reviewer.md']);
   });
 
+  it('reports a claim file already gone from disk as removed, so the commit drops it from git too', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
+    const retiring = s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/old.md'));
+    await s.write(context(), true);
+    await rm(join(s.root, claimPath('.claude/agents/old.md')));
+    s.fake.patch(schema.onboardingArtifacts, retiring.id as string, { supersededAt: new Date(2) });
+
+    const { written, removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([claimPath('.claude/agents/old.md')]);
+    expect(written).not.toContain(claimPath('.claude/agents/old.md'));
+  });
+
   it('leaves a claim file the previous base never named, though no row produces it', async () => {
     const s = await setup();
     s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
@@ -1187,6 +1201,17 @@ describe('writeProjectStateRecord: one descriptor per bundle source', () => {
     expect(removed).toEqual([descriptorPath]);
     expect(written).not.toContain(descriptorPath);
     expect(await bundleFiles(s.root)).toEqual([]);
+    expect(baseBundles(s)).toEqual([]);
+  });
+
+  it('reports a descriptor already gone from disk as removed', async () => {
+    const s = await setup();
+    await seedDescriptor(s, true);
+    await rm(join(s.root, descriptorPath));
+
+    const { removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([descriptorPath]);
     expect(baseBundles(s)).toEqual([]);
   });
 
