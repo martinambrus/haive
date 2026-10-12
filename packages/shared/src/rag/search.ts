@@ -24,7 +24,8 @@ const EXCLUDE_TASK_ROWS = `source_type <> '${TASK_SOURCE_TYPE}'`;
 export interface RagSearchConfig {
   /** Candidate pool size pulled from each of the dense and lexical rankers
    *  before fusion. On the HNSW path the dense half ends after `hnsw.ef_search`
-   *  candidates (40 by default, identical vectors sharing one), so it can return fewer. */
+   *  candidates (200 for a per-repo read, else the default 40; identical vectors share one),
+   *  so it can return fewer. */
   candidatePool: number;
   /** RRF constant k. Larger = flatter rank weighting. 60 is the common default. */
   rrfK: number;
@@ -452,24 +453,62 @@ function identifierCteSql(
 }
 
 /** The global HNSW index holds every model row and `embed_model` filters after its scan, so old-model rows can exhaust `ef_search`. */
-const GLOBAL_DENSE_SCAN_SQL = 'SET LOCAL hnsw.iterative_scan = relaxed_order';
+const GLOBAL_DENSE_SCAN: DenseScanSettings = [['hnsw.iterative_scan', 'relaxed_order']];
 
-/** A global dense read runs in a transaction with iterative scan on, the SET in a savepoint; a per-repo read is untouched. */
+const REPO_DENSE_SCAN: DenseScanSettings = [
+  ['hnsw.ef_search', '200'],
+  ['cpu_operator_cost', '0.1'],
+  ['hnsw.iterative_scan', 'relaxed_order'],
+];
+
+type DenseScanSettings = ReadonlyArray<readonly [name: string, value: string]>;
+
+/** A global or per-repo dense read runs in a transaction with its SETs in a savepoint, and puts
+ *  the prior values back after the statement, since a caller's transaction outlives it. */
 async function denseRead(
   conn: RagConnection,
   filter: RagFacetFilter | undefined,
   text: string,
   params: unknown[],
+  widen = false,
 ): Promise<RawRow[]> {
-  if (!filter) return (await conn.pg.unsafe(text, params as never)) as unknown as RawRow[];
+  const settings = filter ? GLOBAL_DENSE_SCAN : widen ? REPO_DENSE_SCAN : [];
+  if (settings.length === 0) {
+    return (await conn.pg.unsafe(text, params as never)) as unknown as RawRow[];
+  }
   const run = async (pg: RagConnection['pg']): Promise<RawRow[]> => {
+    let prior: Array<readonly [string, string | null]> = [];
     try {
-      await (pg as unknown as TransactionSql).savepoint((sp) => sp.unsafe(GLOBAL_DENSE_SCAN_SQL));
+      await (pg as unknown as TransactionSql).savepoint(async (sp) => {
+        const names = settings.map(([name]) => name);
+        const [row] = (await sp.unsafe(
+          `SELECT ${names.map((_, i) => `current_setting($${i + 1}, true) AS s${i}`).join(', ')}`,
+          names,
+        )) as unknown as Array<Record<string, string | null>>;
+        for (const [name, value] of settings) await sp.unsafe(`SET LOCAL ${name} = ${value}`);
+        prior = names.map((name, i) => {
+          const was = row?.[`s${i}`];
+          return [name, typeof was === 'string' ? was : null] as const;
+        });
+      });
     } catch (err) {
       const code = (err as { code?: unknown } | null)?.code;
-      log.warn({ code: typeof code === 'string' ? code : undefined }, 'iterative scan unavailable');
+      log.warn(
+        { code: typeof code === 'string' ? code : undefined },
+        'dense scan settings unavailable',
+      );
     }
-    return (await pg.unsafe(text, params as never)) as unknown as RawRow[];
+    try {
+      return (await pg.unsafe(text, params as never)) as unknown as RawRow[];
+    } finally {
+      for (const [name, was] of prior) {
+        await (
+          was === null
+            ? pg.unsafe(`SET LOCAL ${name} TO DEFAULT`)
+            : pg.unsafe('SELECT set_config($1, $2, true)', [name, was] as never)
+        ).catch(() => undefined);
+      }
+    }
   };
   const inTransaction = typeof (conn.pg as Partial<TransactionSql>).savepoint === 'function';
   return inTransaction ? run(conn.pg) : ((await conn.pg.begin(run as never)) as RawRow[]);
@@ -542,14 +581,8 @@ export async function ragHybridSearch(
     // CTE re-derives d_rank over the returned pool and recomputes dense_sim at full
     // `vector` precision for the relevance gate.
     //
-    // We deliberately do NOT raise hnsw.ef_search: on modest tables that inflates
-    // the planner's estimated HNSW cost past a plain seq-scan+sort and reverts the
-    // dense CTE to a full scan (measured: ef_search=100 -> 430ms seq scan vs the
-    // default's 5ms index scan). At the default ef_search the planner keeps the
-    // index, which ends the dense half after 40 candidates (see `candidatePool`). A selective
-    // repo/facet filter is served by a bitmap index scan + exact sort (the planner's
-    // own choice) — fast and exact — so no iterative_scan GUC (and thus no
-    // transaction wrapper) is needed.
+    // A per-repo read widens hnsw.ef_search to 200 (40 settles in the wrong region), raises
+    // cpu_operator_cost so the planner keeps HNSW, and scans iteratively to fill a shared store's pool.
     // A global row reached only by words reports no dense similarity: its vector was never ranked.
     const denseSimFallback = 'COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))';
     const denseSimSel = filter ? 'd.dense_sim' : denseSimFallback;
@@ -644,7 +677,7 @@ export async function ragHybridSearch(
         ? [pgTextArrayLiteral(ident.terms), pgFloatArrayLiteral(ident.idfs), ident.query as string]
         : []),
     ];
-    rows = await denseRead(conn, filter, sqlText, params);
+    rows = await denseRead(conn, filter, sqlText, params, Boolean(repositoryId));
   } else {
     // No usable dense half — either a jsonb-fallback store with no vector column,
     // or `lexicalOnly` for a repo whose vectors cannot be trusted. Lexical ranking.
