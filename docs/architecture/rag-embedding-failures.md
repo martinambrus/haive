@@ -32,6 +32,11 @@ Both code and managed KB ingestion also apply `taskSecretMaskPolicy`: untracked 
 paths stay out of the index, using the scan root's own tracked set and the repository's
 custom allow/deny rules. An unavailable git listing treats all matches as untracked;
 an unresolved task/repository policy fails closed before connecting or embedding.
+Onboarding's `10-rag-populate` applies the same policy through the same helpers
+(`resolveRagIngestionPolicy`, `purgeDeniedRagRows`); before it did, an untracked
+`settings.php` or `secrets.*` was embedded at onboarding and stayed retrievable until the
+next workflow sync purged it. A task with no repository has no rules to read, so populate
+masks it with the default deny globs.
 Previously indexed denied paths are purged within the repository's scope before embedding,
 even when missing, protected by a worktree scan, or an embedding endpoint is down.
 The picker refreshes its tree on every task and preselects the saved scope, including an

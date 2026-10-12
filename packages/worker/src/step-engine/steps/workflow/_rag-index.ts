@@ -23,7 +23,10 @@ import {
   SecretMaskError,
   taskSecretMaskPolicy,
 } from '../../../queues/cli-exec/secret-mask.js';
-import { secretMaskDeniesPath } from '../../../queues/cli-exec/secret-mask-policy.js';
+import {
+  secretMaskDeniesPath,
+  type SecretMaskPolicy,
+} from '../../../queues/cli-exec/secret-mask-policy.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { isDeniedFile, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import { collectCodeFiles, type CodeCollectOptions } from '../onboarding/_rag-collect.js';
@@ -32,6 +35,7 @@ import {
   resolveToolingOllamaUrl,
   ensureRagSchema,
   RAG_TABLE,
+  type RagConnection,
   type RagMode,
   type RagToolingPrefs,
 } from '../onboarding/_rag-connection.js';
@@ -475,6 +479,44 @@ export async function runRagIndexSync(
   }
 }
 
+/** RAG is another route into an agent's context. Use the same policy as prompt
+ *  writers, including this scan root's tracked set; a worktree may track different
+ *  files from the main checkout. Failure to resolve the policy must stop ingestion. */
+export async function resolveRagIngestionPolicy(
+  ctx: StepContext,
+  repoPath: string,
+): Promise<SecretMaskPolicy> {
+  const secretPolicy = await taskSecretMaskPolicy(ctx.db, ctx.taskId);
+  if (!secretPolicy) throw new SecretMaskError('RAG secret-mask policy has no repository');
+  return { ...secretPolicy, tracked: await listTrackedFiles(repoPath) };
+}
+
+/** Purge old denied rows BEFORE any embedding attempts. Secret exclusions must
+ *  survive embedding outages and the worktree's untracked-file protections,
+ *  even when the source file has disappeared since an earlier sync. */
+export async function purgeDeniedRagRows(
+  conn: RagConnection,
+  repositoryId: string,
+  policy: SecretMaskPolicy,
+  lock: RagSyncLock | null,
+): Promise<number> {
+  let deleted = 0;
+  lock?.assertHeld();
+  const indexedPaths = (await conn.pg.unsafe(
+    `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
+    [repositoryId, TASK_EMBED_SOURCE_TYPE],
+  )) as Array<{ source_path: string }>;
+  for (const row of indexedPaths) {
+    if (!secretMaskDeniesPath(policy, row.source_path)) continue;
+    const result = await conn.pg.unsafe(
+      `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2`,
+      [repositoryId, row.source_path],
+    );
+    deleted += result.count;
+  }
+  return deleted;
+}
+
 async function syncRepositoryIndex(
   ctx: StepContext,
   opts: RunRagIndexOpts,
@@ -501,12 +543,7 @@ async function syncRepositoryIndex(
   // deny list at apply time so cached forms cannot re-ingest newly excluded code.
   const codeCollect = { ...detectedCodeCollect, exclude: scope.codeCollect.exclude };
 
-  // RAG is another route into an agent's context. Use the same policy as prompt
-  // writers, including this scan root's tracked set; a worktree may track different
-  // files from the main checkout. Failure to resolve the policy must stop ingestion.
-  const secretPolicy = await taskSecretMaskPolicy(ctx.db, ctx.taskId);
-  if (!secretPolicy) throw new SecretMaskError('RAG secret-mask policy has no repository');
-  const ingestionPolicy = { ...secretPolicy, tracked: await listTrackedFiles(repoPath) };
+  const ingestionPolicy = await resolveRagIngestionPolicy(ctx, repoPath);
 
   await ctx.emitProgress('Connecting to RAG database...');
   const opened = await resolveRagConnection(prefs, ctx.db, projectName);
@@ -535,23 +572,7 @@ async function syncRepositoryIndex(
     }
     const health = await loadRagEmbedHealth(ctx.db, repositoryId);
 
-    // Purge old denied rows BEFORE any embedding attempts. Secret exclusions must
-    // survive embedding outages and the worktree's untracked-file protections,
-    // even when the source file has disappeared since an earlier sync.
-    let deleted = 0;
-    lock?.assertHeld();
-    const indexedPaths = (await conn.pg.unsafe(
-      `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
-      [repositoryId, TASK_EMBED_SOURCE_TYPE],
-    )) as Array<{ source_path: string }>;
-    for (const row of indexedPaths) {
-      if (!secretMaskDeniesPath(ingestionPolicy, row.source_path)) continue;
-      const result = await conn.pg.unsafe(
-        `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2`,
-        [repositoryId, row.source_path],
-      );
-      deleted += result.count;
-    }
+    let deleted = await purgeDeniedRagRows(conn, repositoryId, ingestionPolicy, lock);
 
     // A re-derived endpoint means the stored tooling never carried one, so every earlier
     // sync of this repo ran with `useOllama` false and wrote hash vectors. Content hashing
