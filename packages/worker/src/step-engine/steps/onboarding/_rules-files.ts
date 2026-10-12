@@ -513,7 +513,8 @@ export function cliRulesRegionRecord(
 }
 
 /** The written hashes of the repository's earlier cli-rules rows that hold a render. Backfill
- *  and rollback rows are left out: their hash is whatever was on disk. */
+ *  and rollback rows are left out (an import marker is a backfill row): their hash is whatever
+ *  was on disk. */
 export async function loadCliRulesRenderHashes(
   db: Database,
   repositoryId: string,

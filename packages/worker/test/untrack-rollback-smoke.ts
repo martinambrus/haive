@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger, normalizeContent, sha256Hex } from '@haive/shared';
+import { PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
 import { initDatabase, getDb } from '../src/db.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import type {
@@ -226,12 +227,13 @@ async function main(): Promise<void> {
           const ctx = ctxFor(rollbackTask);
           const detected = await upgradeRollbackStep.detect!(ctx);
           lastWarnings = detected.warnings;
-          await upgradeRollbackStep.apply(ctx, {
+          const out = (await upgradeRollbackStep.apply(ctx, {
             detected,
             formValues: {},
             iteration: 0,
             previousIterations: [],
-          });
+          })) as { warnings?: string[] };
+          lastWarnings = out.warnings ?? lastWarnings;
           return null;
         } catch (err) {
           return err instanceof Error ? err.message : String(err);
@@ -413,6 +415,41 @@ async function main(): Promise<void> {
       check(
         'O5c: and the kept file is as it was',
         (await readOrNull(w3.root, KEPT.diskPath)) === bodyOf(KEPT.diskPath),
+      );
+    }
+
+    // ---- O5f: an imported marker stands at the path when the rollback runs ----------------------
+    const w3m = await world('o5f', [KEPT]);
+    await w3m.upgrade({ selectedObsoleteUntracks: [w3m.entryOf(KEPT.diskPath)] });
+    const untracked3m = (await w3m.liveAt(KEPT.diskPath)).length === 0;
+    check('O5f: the kept file is untracked first', untracked3m, await w3m.rowsAt(KEPT.diskPath));
+    if (untracked3m) {
+      const [marker] = await db
+        .insert(schema.onboardingArtifacts)
+        .values({
+          userId,
+          repositoryId: w3m.repositoryId,
+          taskId: null,
+          diskPath: KEPT.diskPath,
+          templateId: KEPT.templateId,
+          templateKind: 'agent',
+          templateSchemaVersion: 1,
+          templateContentHash: 'f'.repeat(64),
+          writtenHash: 'f'.repeat(64),
+          sourceStepId: PROJECT_STATE_IMPORT_STEP_ID,
+          source: 'backfill',
+          importedAt: new Date(),
+        })
+        .returning({ id: schema.onboardingArtifacts.id });
+      const failure3m = await w3m.rollback();
+      const standingM = await w3m.liveAt(KEPT.diskPath);
+      check(
+        'O5f: and a live marker standing there at rollback time is kept, with a warning',
+        failure3m === null &&
+          standingM.length === 1 &&
+          standingM[0]!.id === marker!.id &&
+          w3m.warnings().some((w) => w.startsWith(`did not put back the row for ${KEPT.diskPath}`)),
+        { failure3m, standingM, warnings: w3m.warnings() },
       );
     }
 

@@ -23,6 +23,7 @@ import {
 import {
   emptyProjectState,
   normalizeProjectState,
+  PROJECT_STATE_IMPORT_STEP_ID,
   renderProjectState,
 } from '@haive/shared/project-state';
 import { initDatabase, getDb } from '../src/db.js';
@@ -1460,7 +1461,62 @@ async function main(): Promise<void> {
         }),
       ])
       .returning({ id: schema.onboardingArtifacts.id });
-    const ours = new Set([preFix!.id, copy!.id, rules!.id, postFix!.id]);
+    const marker = (over: Partial<typeof schema.onboardingArtifacts.$inferInsert>) =>
+      row({
+        taskId: null,
+        source: 'backfill',
+        sourceStepId: PROJECT_STATE_IMPORT_STEP_ID,
+        importedAt: now,
+        ...over,
+      });
+    const [markerA, , markerProving] = await db
+      .insert(schema.onboardingArtifacts)
+      .values([
+        marker({
+          diskPath: 'smoke/marker-a.md',
+          writtenHash: h('a'),
+          templateContentHash: h('b'),
+        }),
+        row({
+          diskPath: 'smoke/marker-a.md',
+          source: 'backfill',
+          userModified: true,
+          writtenHash: h('a'),
+          lastObservedDiskHash: h('a'),
+          templateContentHash: h('b'),
+          supersededAt: now,
+        }),
+        marker({
+          diskPath: 'smoke/marker-b.md',
+          userModified: true,
+          writtenHash: h('a'),
+          lastObservedDiskHash: h('a'),
+          templateContentHash: h('b'),
+          supersededAt: now,
+        }),
+      ])
+      .returning({ id: schema.onboardingArtifacts.id });
+    const [rollbackBeside] = await db
+      .insert(schema.onboardingArtifacts)
+      .values(
+        row({
+          diskPath: 'smoke/marker-b.md',
+          source: 'rollback',
+          writtenHash: h('a'),
+          lastObservedDiskHash: h('a'),
+          templateContentHash: h('b'),
+        }),
+      )
+      .returning({ id: schema.onboardingArtifacts.id });
+    const ours = new Set([
+      preFix!.id,
+      copy!.id,
+      rules!.id,
+      postFix!.id,
+      markerA!.id,
+      markerProving!.id,
+      rollbackBeside!.id,
+    ]);
     if (replaced) ours.add(replaced.priorArtifactId);
     const hashesOf = async (id: string) =>
       (
@@ -1490,6 +1546,13 @@ async function main(): Promise<void> {
       { preFix: await hashesOf(preFix!.id), copy: await hashesOf(copy!.id) },
     );
     check('a rules row is left alone', (await hashOf(rules!.id)) === h('c'));
+    check(
+      'an import marker is left alone, whether it is the row repaired or the one that proves it',
+      first.every((id) => ![markerA!.id, markerProving!.id, rollbackBeside!.id].includes(id)) &&
+        (await hashOf(markerA!.id)) === h('a') &&
+        (await hashOf(rollbackBeside!.id)) === h('a'),
+      first,
+    );
     check('a row the fix wrote is left alone', (await hashOf(postFix!.id)) === h('e'));
     check(
       'the baseline 02 kept is left alone',

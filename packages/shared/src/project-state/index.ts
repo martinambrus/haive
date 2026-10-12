@@ -8,3 +8,4 @@ export * from './hash.js';
 export * from './render-context.js';
 export * from './render-targets.js';
 export * from './conflicts.js';
+export * from './import-marker.js';

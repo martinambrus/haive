@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   index,
   pgEnum,
+  check,
 } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 import { users } from './auth.js';
@@ -36,9 +37,7 @@ export const onboardingArtifacts = pgTable(
     repositoryId: uuid('repository_id')
       .notNull()
       .references(() => repositories.id, { onDelete: 'cascade' }),
-    taskId: uuid('task_id')
-      .notNull()
-      .references(() => tasks.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'cascade' }),
     diskPath: text('disk_path').notNull(),
     templateId: text('template_id').notNull(),
     templateKind: text('template_kind').notNull(),
@@ -62,6 +61,7 @@ export const onboardingArtifacts = pgTable(
     bundleItemId: uuid('bundle_item_id').references(() => customBundleItems.id, {
       onDelete: 'set null',
     }),
+    importedAt: timestamp('imported_at'),
   },
   (table) => [
     index('onboarding_artifacts_repo_id_idx').on(table.repositoryId),
@@ -71,6 +71,10 @@ export const onboardingArtifacts = pgTable(
     uniqueIndex('onboarding_artifacts_repo_path_live_idx')
       .on(table.repositoryId, table.diskPath)
       .where(sql`superseded_at IS NULL`),
+    check(
+      'onboarding_artifacts_import_marker_check',
+      sql`(${table.taskId} IS NULL) = (${table.source} = 'backfill' AND ${table.sourceStepId} = 'project-state-import') AND (${table.taskId} IS NOT NULL OR ${table.importedAt} IS NOT NULL)`,
+    ),
   ],
 );
 
