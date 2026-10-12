@@ -22,3 +22,4 @@ export * from './step-guidance.js';
 export * from './plan.js';
 export * from './merge-dir-claims.js';
 export * from './step-catalog.js';
+export * from './task-types.js';
