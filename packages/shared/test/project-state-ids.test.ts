@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   FOREIGN_TEMPLATE,
+  bundleDescriptors,
   localTemplateId,
   portableBundleSource,
   type LocalBundle,
@@ -116,5 +117,44 @@ describe('portableBundleSource', () => {
     expect(at('https://example.com/b.git/')).toBe(source('https://example.com/b.git/'));
     expect(at('https://example.com')).toBe(source('https://example.com/'));
     expect(at('ssh://git@example.com/a/../b.git')).toBe(source('ssh://git@example.com/a/../b.git'));
+  });
+});
+
+describe('bundleDescriptors', () => {
+  const source = 'zip:skills';
+  const claimAt = (src: string) => ({ templateId: `custom:${encodeURIComponent(src)}:a.md` });
+
+  it('lists one descriptor per source, named by the smallest name', () => {
+    const out = bundleDescriptors(
+      [
+        { source, name: 'b-name' },
+        { source, name: 'Z-name' },
+        { source, name: 'a-name' },
+        { source: 'zip:other', name: 'other' },
+      ],
+      [],
+      [],
+    );
+    expect(out).toEqual([
+      { source, name: 'Z-name' },
+      { source: 'zip:other', name: 'other' },
+    ]);
+  });
+
+  it('keeps a base descriptor no local bundle holds while a claim names its source', () => {
+    const base = [{ source, name: 'theirs' }];
+    expect(bundleDescriptors([], base, [claimAt(source)])).toEqual(base);
+    expect(bundleDescriptors([], base, [claimAt('zip:other')])).toEqual([]);
+    expect(bundleDescriptors([], base, [{ templateId: 'agent.code-reviewer' }])).toEqual([]);
+  });
+
+  it('lets a local bundle name its source over the base descriptor', () => {
+    expect(
+      bundleDescriptors(
+        [{ source, name: 'mine' }],
+        [{ source, name: 'theirs' }],
+        [claimAt(source)],
+      ),
+    ).toEqual([{ source, name: 'mine' }]);
   });
 });

@@ -76,6 +76,8 @@ async function setup(seedColumn: Context | null = null) {
     projectStateSync: sync,
     projectStateConflicts: schema.projectStateConflicts,
     onboardingArtifacts: schema.onboardingArtifacts,
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
   });
   const column = keyOf(repositories, 'render_context');
   fake.insert(repositories, {

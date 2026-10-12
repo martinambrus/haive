@@ -1,4 +1,5 @@
 import { parseScpLikeGitUrl } from '../schemas/git-url.js';
+import type { ProjectStateBundle, ProjectStateClaim } from './record.js';
 
 /** A custom bundle as this install holds it: its local id, the source another install can find
  *  it by, and its items' local ids against their paths in that source. */
@@ -6,6 +7,11 @@ export interface LocalBundle {
   bundleId: string;
   source: string;
   items: ReadonlyMap<string, string>;
+}
+
+/** A local bundle with the name the record's descriptor carries. */
+export interface NamedLocalBundle extends LocalBundle {
+  name: string;
 }
 
 /** A claim whose bundle item this install does not hold: it claims its file, and no upgrade here
@@ -122,4 +128,27 @@ export function localTemplateId(portableId: string, bundles: readonly LocalBundl
     if (path === sourcePath) return `custom.${bundle.bundleId}.${itemId}`;
   }
   return FOREIGN_TEMPLATE;
+}
+
+/** The descriptors a record carries: one per source this install holds, named by the smallest of
+ *  its bundles' names (code-unit order), so two bundles at one source cannot make the record unwritable.
+ *  A descriptor of the base that no local bundle holds stays while a claim names its source. */
+export function bundleDescriptors(
+  local: readonly Pick<NamedLocalBundle, 'source' | 'name'>[],
+  baseBundles: readonly ProjectStateBundle[],
+  claims: readonly Pick<ProjectStateClaim, 'templateId'>[],
+): ProjectStateBundle[] {
+  const bySource = new Map<string, ProjectStateBundle>();
+  for (const { source, name } of local) {
+    const held = bySource.get(source);
+    if (held === undefined || name < held.name) bySource.set(source, { source, name });
+  }
+  for (const descriptor of baseBundles) {
+    if (bySource.has(descriptor.source)) continue;
+    const prefix = `${PORTABLE_CUSTOM}${encodeURIComponent(descriptor.source)}:`;
+    if (claims.some((claim) => claim.templateId.startsWith(prefix))) {
+      bySource.set(descriptor.source, descriptor);
+    }
+  }
+  return [...bySource.values()];
 }

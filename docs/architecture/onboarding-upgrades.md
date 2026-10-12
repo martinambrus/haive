@@ -510,6 +510,17 @@ and stands down when `onboarding_reset_at` moved after it read the checkout; a c
 refresh's own claim does not stop it, since they call it. The applicable set is written after the
 ledger moves, whenever the column or the ledger did.
 
+**A bundle's source travels as a descriptor, and is never merged.** The record also carries one
+`bundles/<bundleFileName(source)>` file per portable bundle source (`{source, name}`), so another
+install can name a source a claim points at (`bundleDescriptors`, shared). Two local bundles at one
+source (`custom_bundles` has no unique index on it) collapse to the smallest name in code-unit order,
+since the codec refuses a source listed twice and would fail the whole write. A descriptor in the
+previous `base_snapshot` that no local bundle holds is kept while a claim's template id starts
+`custom:<encodeURIComponent(source)>:`, and removed (reported in `removed`) once none does; a
+descriptor file the base never named is not touched, like a claim file. The sync reads the descriptors
+into the base as the checkout holds them and leaves them out of the merge: a conflict row on one could
+not be answered by anybody, and `upgradeAdmission` would hold every upgrade for it.
+
 **A row this install cannot manage is `foreign`.** `foreignReason` (shared) names a `custom:` id (a
 bundle item this install holds no bundle for, stored verbatim, never as `foreign`), a marker from a
 release strictly newer than this one (only plain `major.minor.patch` strings are ordered; a dev

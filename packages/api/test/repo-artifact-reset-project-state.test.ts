@@ -23,7 +23,7 @@ import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
-import { claimFileName } from '@haive/shared/project-state';
+import { bundleFileName, claimFileName } from '@haive/shared/project-state';
 import { repoRoutes, resetOnboardingArtifacts } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -36,8 +36,12 @@ const RENDER = '.haive-data/state/project/render.json';
 const PROJECT_DIR = '.haive-data/state/project';
 const STATE_DIR = '.haive-data/state';
 const ARTIFACTS_DIR = '.haive-data/state/artifacts';
+const BUNDLES_DIR = '.haive-data/state/bundles';
 const AGENT = '.claude/agents/code-reviewer.md';
 const claimFile = (diskPath: string) => `${STATE_DIR}/${claimFileName(diskPath)}`;
+const bundleFile = (source: string) => `${STATE_DIR}/${bundleFileName(source)}`;
+const ZIP_SOURCE = 'zip:team-skills';
+const BASE_SOURCE = 'git:https%3A%2F%2Fexample.test%2Fx.git#main';
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -148,16 +152,55 @@ describe('the reset takes back the claim files of the rows it supersedes', () =>
   });
 });
 
+describe('the reset takes back the bundle descriptors of the record', () => {
+  it('removes the descriptor of each source it is given, and the empty directory that held them', async () => {
+    const root = await repoRoot({
+      [bundleFile(ZIP_SOURCE)]: '{}\n',
+      [bundleFile(BASE_SOURCE)]: '{}\n',
+    });
+
+    const { removed } = await resetOnboardingArtifacts(root, {
+      ...noProvenance,
+      bundleSources: [ZIP_SOURCE, BASE_SOURCE],
+    });
+
+    for (const rel of [bundleFile(ZIP_SOURCE), bundleFile(BASE_SOURCE), BUNDLES_DIR, STATE_DIR]) {
+      expect(await exists(root, rel), rel).toBe(false);
+      expect(removed, rel).toContain(rel);
+    }
+  });
+
+  it('leaves a descriptor no source names, and the directory around it', async () => {
+    const root = await repoRoot({
+      [bundleFile(ZIP_SOURCE)]: '{}\n',
+      [bundleFile(BASE_SOURCE)]: '{"unsynced":true}\n',
+    });
+
+    const { removed } = await resetOnboardingArtifacts(root, {
+      ...noProvenance,
+      bundleSources: [ZIP_SOURCE],
+    });
+
+    expect(await exists(root, bundleFile(ZIP_SOURCE))).toBe(false);
+    expect(await readFile(path.join(root, bundleFile(BASE_SOURCE)), 'utf8')).toBe(
+      '{"unsynced":true}\n',
+    );
+    expect(removed).not.toContain(BUNDLES_DIR);
+    expect(removed).not.toContain(STATE_DIR);
+  });
+});
+
 /** The statements the route's closing transaction makes, against the fake. The provenance query joins
  *  `task_steps` to `tasks`, which the fake has no builder for; a repository with no onboarding run
  *  has no rows to read there. */
-async function setup(root: string) {
+async function setup(root: string, snapshot: Record<string, unknown> = {}) {
   const fake = createFakeDb({
     repositories: schema.repositories,
     tasks: schema.tasks,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateSync: schema.projectStateSync,
     projectStateConflicts: schema.projectStateConflicts,
+    customBundles: schema.customBundles,
   });
   const context = {
     projectInfo: {},
@@ -180,7 +223,10 @@ async function setup(root: string) {
       onboardedAt: new Date('2026-01-01T00:00:00Z'),
       renderContext: context,
     });
-    fake.insert(schema.projectStateSync, { repositoryId: id, baseSnapshot: { render: context } });
+    fake.insert(schema.projectStateSync, {
+      repositoryId: id,
+      baseSnapshot: { render: context, ...snapshot },
+    });
     fake.insert(schema.projectStateConflicts, {
       repositoryId: id,
       unit: 'project/render.json#framework',
@@ -256,6 +302,28 @@ describe('resetting a repository through the route', () => {
 
     expect(await exists(root, claimFile(AGENT))).toBe(false);
     expect(await exists(root, ARTIFACTS_DIR)).toBe(false);
+    expect(await exists(root, STATE_DIR)).toBe(false);
+  });
+
+  it('takes the descriptors of the sync base and of its local bundles off the checkout', async () => {
+    const root = await repoRoot({
+      [bundleFile(ZIP_SOURCE)]: '{}\n',
+      [bundleFile(BASE_SOURCE)]: '{}\n',
+    });
+    const fake = await setup(root, { bundles: [{ source: BASE_SOURCE, name: 'theirs' }] });
+    fake.insert(schema.customBundles, {
+      userId: USER,
+      repositoryId: REPO,
+      name: 'team-skills',
+      sourceType: 'zip',
+      storageRoot: '/bundles/team-skills',
+    });
+
+    expect((await reset()).status).toBe(200);
+
+    expect(await exists(root, bundleFile(ZIP_SOURCE))).toBe(false);
+    expect(await exists(root, bundleFile(BASE_SOURCE))).toBe(false);
+    expect(await exists(root, BUNDLES_DIR)).toBe(false);
     expect(await exists(root, STATE_DIR)).toBe(false);
   });
 

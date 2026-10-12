@@ -64,7 +64,13 @@ import {
   unmanagedAgentsDir,
   type ArchiveFormat,
 } from '@haive/shared';
-import { PROJECT_STATE_DIR, claimFileName, isClaimablePath } from '@haive/shared/project-state';
+import {
+  PROJECT_STATE_DIR,
+  bundleFileName,
+  claimFileName,
+  isClaimablePath,
+  portableBundleSource,
+} from '@haive/shared/project-state';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { parseScpLikeGitUrl } from '@haive/shared/schemas';
 import {
@@ -1571,6 +1577,7 @@ const ONBOARDING_RESET_FILES = [
 const ONBOARDING_RESET_EMPTY_DIRS = [
   `${PROJECT_STATE_DIR}/project`,
   `${PROJECT_STATE_DIR}/artifacts`,
+  `${PROJECT_STATE_DIR}/bundles`,
   PROJECT_STATE_DIR,
 ];
 
@@ -1904,6 +1911,8 @@ export interface OnboardingResetProvenance {
    *  every pre-existing step output behaving exactly as it did. A hash is the evidence that a
    *  file still holds what Haive put there — see `claimSatisfied`. */
   haiveEntries: ReadonlyMap<string, string | null>;
+  /** The sources of the bundle descriptors the record holds: the sync base's and the local bundles'. */
+  bundleSources?: readonly string[];
 }
 
 /**
@@ -2377,6 +2386,9 @@ export async function resetOnboardingArtifacts(
     if (isClaimablePath(diskPath))
       await remove(`${PROJECT_STATE_DIR}/${claimFileName(diskPath)}`, false);
   }
+  for (const source of provenance.bundleSources ?? []) {
+    await remove(`${PROJECT_STATE_DIR}/${bundleFileName(source)}`, false);
+  }
   for (const rel of ONBOARDING_RESET_EMPTY_DIRS) await removeIfEmpty(rel);
 
   for (const rel of ONBOARDING_RULES_FILES) {
@@ -2811,12 +2823,35 @@ async function runOnboardingArtifactReset(
     resolveMergedTasks(onboardingSteps, epoch),
   );
 
+  // Read before the transaction below deletes the sync row.
+  const [syncRow] = await db
+    .select({ baseSnapshot: schema.projectStateSync.baseSnapshot })
+    .from(schema.projectStateSync)
+    .where(eq(schema.projectStateSync.repositoryId, id))
+    .limit(1);
+  const baseBundles = (syncRow?.baseSnapshot as { bundles?: unknown } | null | undefined)?.bundles;
+  const localBundles = await db
+    .select({
+      name: schema.customBundles.name,
+      sourceType: schema.customBundles.sourceType,
+      gitUrl: schema.customBundles.gitUrl,
+      gitBranch: schema.customBundles.gitBranch,
+    })
+    .from(schema.customBundles)
+    .where(eq(schema.customBundles.repositoryId, id));
+  const bundleSources = new Set(localBundles.map((b) => portableBundleSource(b)));
+  for (const bundle of Array.isArray(baseBundles) ? baseBundles : []) {
+    const source = (bundle as { source?: unknown } | null)?.source;
+    if (typeof source === 'string' && source !== '') bundleSources.add(source);
+  }
+
   const { removed, cleaned, skipped, quarantined, vacatedPaths } = await resetOnboardingArtifacts(
     root,
     {
       writtenHashes: new Map(live.map((row) => [row.diskPath, row.writtenHash])),
       haiveDirs: written.dirs,
       haiveEntries: written.entries,
+      bundleSources: [...bundleSources],
     },
   );
 
