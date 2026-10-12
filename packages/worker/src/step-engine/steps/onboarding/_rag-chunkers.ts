@@ -95,7 +95,11 @@ export function fileBudget(
   ownPaths: readonly string[],
 ): { maxBytes: number; maxChunks: number } {
   const own =
-    kind === 'kb' || ownPaths.some((dir) => relPath.startsWith(`${dir.replace(/\/+$/, '')}/`));
+    kind === 'kb' ||
+    ownPaths.some((entry) => {
+      const base = entry.replace(/\/+$/, '');
+      return relPath === base || relPath.startsWith(`${base}/`);
+    });
   return own
     ? { maxBytes: MAX_OWN_FILE_BYTES, maxChunks: Infinity }
     : { maxBytes: MAX_FILE_BYTES, maxChunks: MAX_CHUNKS_PER_FILE };

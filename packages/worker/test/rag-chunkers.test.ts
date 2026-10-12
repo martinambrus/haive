@@ -273,6 +273,12 @@ describe('fileBudget', () => {
     expect(fileBudget(rel, 'code', ['sites/all/modules/activit'])).toEqual(own);
   });
 
+  it('exempts a single-file own path, such as a one-file WordPress plugin', () => {
+    const plugin = 'wp-content/plugins/client-hooks.php';
+    expect(fileBudget(plugin, 'code', [plugin])).toEqual(own);
+    expect(fileBudget(`${plugin}.bak`, 'code', [plugin])).toEqual(other);
+  });
+
   it('keeps the budgets for a sibling directory that only shares the prefix', () => {
     expect(
       fileBudget('sites/all/modules/activit2/x.inc', 'code', ['sites/all/modules/activit/']),
