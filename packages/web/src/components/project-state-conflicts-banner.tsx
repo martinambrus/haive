@@ -132,6 +132,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const pendingRef = useRef<string[]>([]);
   const pendingAnswers = useRef<Record<string, ProjectStateAnswer>>({});
   const refetchCount = useRef(0);
+  const pollLoop = useRef(false);
   const alive = useRef(true);
   const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -160,11 +161,11 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
 
   const pollPending = useCallback(async () => {
     refetchTimer.current = null;
+    const before = [...pendingRef.current];
     const listed = await load(true);
     if (!alive.current) return;
-    const remaining =
-      listed === null ? [...pendingRef.current] : stillListed(pendingRef.current, listed);
-    const done = pendingRef.current.filter((id) => !remaining.includes(id));
+    const remaining = listed === null ? [...before] : stillListed(before, listed);
+    const done = before.filter((id) => !remaining.includes(id));
     const unconfirmed: string[] = [];
     if (done.length > 0) {
       const looked = await Promise.all(
@@ -190,13 +191,18 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       if (answers.length > 0) setAnswered((prev) => [...prev, ...answers]);
     }
     remaining.push(...unconfirmed);
+    remaining.push(...pendingRef.current.filter((id) => !before.includes(id)));
     setPending(remaining);
-    if (remaining.length === 0) return;
+    if (remaining.length === 0) {
+      pollLoop.current = false;
+      return;
+    }
     refetchCount.current += 1;
     if (refetchCount.current < PENDING_REFETCH_LIMIT) {
       refetchTimer.current = setTimeout(() => void pollPending(), PENDING_REFETCH_MS);
       return;
     }
+    pollLoop.current = false;
     setMessages((prev) => {
       const next = { ...prev };
       for (const id of remaining) next[id] = { tone: 'info', text: PENDING_GAVE_UP_MESSAGE };
@@ -210,6 +216,8 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     return () => {
       alive.current = false;
       if (refetchTimer.current) clearTimeout(refetchTimer.current);
+      refetchTimer.current = null;
+      pollLoop.current = false;
     };
   }, [load]);
 
@@ -233,8 +241,10 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       pendingAnswers.current[conflict.id] = answer;
       setPending([...pendingRef.current.filter((id) => id !== conflict.id), conflict.id]);
       refetchCount.current = 0;
-      if (refetchTimer.current) clearTimeout(refetchTimer.current);
-      refetchTimer.current = setTimeout(() => void pollPending(), PENDING_REFETCH_MS);
+      if (!pollLoop.current) {
+        pollLoop.current = true;
+        refetchTimer.current = setTimeout(() => void pollPending(), PENDING_REFETCH_MS);
+      }
     } else {
       await load();
     }
