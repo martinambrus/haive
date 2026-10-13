@@ -45,9 +45,10 @@ function readWorkerReport(raw: unknown): { at: string | null; versions: Map<stri
   const { at, modules } = raw as { at?: unknown; modules?: unknown };
   if (typeof at !== 'string' || !Array.isArray(modules)) return { at: null, versions };
   for (const entry of modules as unknown[]) {
-    if (typeof entry !== 'object' || entry === null) continue;
-    const { id, version } = entry as { id?: unknown; version?: unknown };
-    if (typeof id === 'string' && typeof version === 'string') versions.set(id, version);
+    const { id, version } = (entry ?? {}) as { id?: unknown; version?: unknown };
+    if (typeof id !== 'string' || typeof version !== 'string')
+      return { at: null, versions: new Map() };
+    versions.set(id, version);
   }
   return { at, versions };
 }

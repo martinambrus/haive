@@ -125,6 +125,8 @@ describe('diffModuleIntent', () => {
     { modules: [null, { id: 4 }] },
     { at: '2026-10-13T10:00:00.000Z' },
     { at: '2026-10-13T10:00:00.000Z', modules: 'x' },
+    { at: '2026-10-13T10:00:00.000Z', modules: [{ id: 'm' }] },
+    { at: '2026-10-13T10:00:00.000Z', modules: [{ id: 'm', version: '1.0.0' }, null] },
   ])('treats a malformed worker report %j as no report', (worker) => {
     const result = diffModuleIntent([], [api('m')], worker);
     expect(result.workerAt).toBeNull();
