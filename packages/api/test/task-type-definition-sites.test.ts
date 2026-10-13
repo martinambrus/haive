@@ -118,6 +118,20 @@ describe('POST /tasks pins the run list', () => {
     expect(created()[0]).toMatchObject({ runListSnapshot: null });
   });
 
+  it('refuses, creating nothing, when an edit changed the type between its two reads', async () => {
+    const { created } = world();
+    h.definition.mockResolvedValueOnce({ runListSnapshot: null, takesRootLock: false });
+    h.definition.mockResolvedValueOnce({ runListSnapshot: null, takesRootLock: true });
+    const res = await post('/tasks', {
+      type: 'workflow',
+      title: 't',
+      description: 'd',
+      repositoryId: REPO,
+    });
+    expect(res.status).toBe(409);
+    expect(created()).toHaveLength(0);
+  });
+
   it('creates nothing when the type is refused', async () => {
     const { created } = world();
     h.definition.mockRejectedValueOnce(new HttpError(403, 'Task type workflow is disabled'));

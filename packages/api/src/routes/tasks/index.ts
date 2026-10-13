@@ -516,7 +516,7 @@ taskRoutes.post('/', async (c) => {
   if (
     body.databaseSnapshotId &&
     (!body.repositoryId ||
-      !(['workflow', 'run_app'].includes(body.type) || definition.pinsDatabase))
+      !(['workflow', 'run_app'].includes(body.type) || definition.restoresDatabase))
   ) {
     throw new HttpError(
       400,
@@ -636,11 +636,20 @@ taskRoutes.post('/', async (c) => {
   if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
 
   const insertTask = async (handle: typeof db | DbTx) => {
-    const { runListSnapshot, preAnswers, stepLoopLimits, simplifyCode } = await definitionForCreate(
-      handle,
-      body.type,
-      { generic: true },
-    );
+    const locked = await definitionForCreate(handle, body.type, { generic: true });
+    // The lock and database decisions above came from the preflight read; refuse if an edit changed them since.
+    if (
+      locked.takesRootLock !== definition.takesRootLock ||
+      locked.pinsDatabase !== definition.pinsDatabase ||
+      locked.restoresDatabase !== definition.restoresDatabase ||
+      locked.requiresRepository !== definition.requiresRepository
+    ) {
+      throw new HttpError(
+        409,
+        'The task type changed while this task was being created; try again',
+      );
+    }
+    const { runListSnapshot, preAnswers, stepLoopLimits, simplifyCode } = locked;
     return await handle
       .insert(schema.tasks)
       .values({

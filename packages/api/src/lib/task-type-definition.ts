@@ -32,6 +32,8 @@ export interface TaskTypeDefinitionForCreate {
   takesRootLock: boolean;
   /** True makes the task pin a database state; a built-in's workflow/run_app gate stays at the site. */
   pinsDatabase: boolean;
+  /** True when the run list imports a saved database, so the create may name one. */
+  restoresDatabase: boolean;
 }
 
 const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
@@ -42,6 +44,7 @@ const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
   simplifyCode: false,
   takesRootLock: slug === 'workflow',
   pinsDatabase: false,
+  restoresDatabase: false,
 });
 
 function describeIssue(issue: CompositionIssue): string {
@@ -152,5 +155,6 @@ export async function definitionForCreate(
     simplifyCode: custom && has(SIMPLIFY_STEP_ID),
     takesRootLock: slug === 'workflow' || ROOT_WRITING_STEP_IDS.some(has),
     pinsDatabase: custom && DATABASE_PIN_STEP_IDS.some(has),
+    restoresDatabase: custom && has('01c1-restore-database'),
   };
 }

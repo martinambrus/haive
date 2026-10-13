@@ -254,6 +254,14 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
     expect((await post({ type: 'cp-norepo', repositoryId: REPO })).status).toBe(409);
   });
 
+  it('accepts a saved database only for a custom type that restores one', async () => {
+    const snapshot = { databaseSnapshotId: '00000000-0000-4000-8000-0000000000dd' };
+    expect((await post({ type: 'cp-pin', repositoryId: REPO, ...snapshot })).status).toBe(400);
+    expect((await post({ type: 'cp-restore', repositoryId: REPO, ...snapshot })).status).not.toBe(
+      400,
+    );
+  });
+
   it('pins a database for a custom type with 01c1-restore-database or 11g-save-database', async () => {
     for (const type of ['cp-pin', 'cp-restore']) {
       expect((await created(await post({ type, repositoryId: REPO }))).pinned).toBe(true);
