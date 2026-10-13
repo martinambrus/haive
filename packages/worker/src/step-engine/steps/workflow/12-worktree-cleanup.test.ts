@@ -5,9 +5,21 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { schema, type MergeResolveState } from '@haive/database';
-import { MERGE_CLARIFICATION_ANSWERED_EVENT, MERGE_CLARIFICATION_ASKED_EVENT } from '@haive/shared';
+import {
+  MERGE_CLARIFICATION_ANSWERED_EVENT,
+  MERGE_CLARIFICATION_ASKED_EVENT,
+  type PlanMirror,
+} from '@haive/shared';
+import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared/plan';
+import {
+  PROJECT_STATE_DIR,
+  emptyProjectState,
+  renderProjectState,
+  type ProjectRender,
+} from '@haive/shared/project-state';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 import { loadOutstandingMergeGuidance, resolveMergePhase } from '../../merge-resolver.js';
+import { HAIVE_OWN_FILES_LINE } from '../../git-merge.js';
 import { StepSupersededError } from '../../step-ownership.js';
 import { resolveTaskDispatch } from '../../../orchestrator/dispatcher.js';
 import { OUTPUT_TRUNCATION_HEADLINE } from '../../../queues/cli-exec/failure-class.js';
@@ -88,11 +100,22 @@ async function gitCode(dir: string, args: string[]): Promise<number> {
   }
 }
 
+async function writeIn(dir: string, files: Record<string, string>): Promise<void> {
+  for (const [file, body] of Object.entries(files)) {
+    await mkdir(path.dirname(path.join(dir, file)), { recursive: true });
+    await writeFile(path.join(dir, file), body, 'utf8');
+  }
+}
+
 /** A parent repo on `main` with a `feature/x` worktree that has one commit ahead. */
-async function setupWorktree(): Promise<{ parent: string; wt: string }> {
+async function setupWorktree(
+  seed: Record<string, string> = {},
+): Promise<{ parent: string; wt: string }> {
   const parent = await mkdtemp(path.join(tmpdir(), 'wt-parent-'));
   await git(parent, ['init', '-b', 'main']);
+  await git(parent, ['config', 'gc.auto', '0']);
   await writeFile(path.join(parent, 'base.txt'), 'base\n', 'utf8');
+  await writeIn(parent, seed);
   await git(parent, ['add', '-A']);
   await git(parent, ['commit', '-m', 'initial']);
   const wt = path.join(parent, '.haive', 'worktrees', 'feature-x');
@@ -1569,6 +1592,185 @@ describe('12 merge fix-agent dispatch', () => {
       // fix invocation of our own).
       expect(h.getState()?.fixInvocationId).toBeNull();
       expect(h.getState()?.phase).toBe('resolving');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+const ROOT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const CHILD_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const PLAN_JSON = '.haive-data/plan.json';
+const STATE_RENDER = `${PROJECT_STATE_DIR}/project/render.json`;
+
+function planFiles(childTitle: string): Record<string, string> {
+  const plan: PlanMirror = {
+    schemaVersion: 2,
+    nodes: (
+      [
+        [ROOT_ID, null, 'Product'],
+        [CHILD_ID, ROOT_ID, childTitle],
+      ] as const
+    ).map(([id, parentId, title], ordinal) => ({
+      id,
+      parentId,
+      ordinal,
+      title,
+      kind: 'component',
+      body: null,
+      status: 'todo',
+      taskable: false,
+    })),
+    edges: [],
+    codeLinks: [],
+  };
+  return {
+    [PLAN_JSON]: serializePlanMirror(plan),
+    '.haive-data/plan.md': renderPlanMarkdownFromMirror(plan),
+  };
+}
+
+function stateFiles(render: Partial<ProjectRender>): Record<string, string> {
+  const record = {
+    ...emptyProjectState(),
+    render: {
+      projectInfo: {},
+      framework: null,
+      acceptedAgentIds: [],
+      customAgentSpecs: [],
+      lspLanguages: [],
+      ...render,
+    },
+  };
+  return Object.fromEntries(
+    [...renderProjectState(record)].map(([rel, text]) => [`${PROJECT_STATE_DIR}/${rel}`, text]),
+  );
+}
+
+async function commitIn(dir: string, files: Record<string, string>, message: string) {
+  await writeIn(dir, files);
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', message]);
+}
+
+describe("12 merge phase: Haive's own files merge before any agent", () => {
+  const dispatching = {
+    providers: [{ id: 'p1', enabled: true }],
+    deps: { enqueueCliInvocation: async () => {} },
+  };
+  const dispatches = () => vi.mocked(resolveTaskDispatch).mock.calls.length;
+
+  async function merge(parent: string, wt: string, over: Partial<StepDefinition> = {}) {
+    const h = makeDb();
+    const before = dispatches();
+    const out = await resolveMergePhase(
+      h.db as never,
+      { ...step, ...over } as StepDefinition,
+      mkCurrent(det(wt), { action: 'merge_remove' }),
+      mkCtx(parent, h.db),
+      mkParams(h.db, dispatching),
+    );
+    return { out, h, dispatched: dispatches() - before };
+  }
+
+  it('a merge whose only conflict is plan.json commits with no fixer', async () => {
+    const { parent, wt } = await setupWorktree(planFiles('Base'));
+    try {
+      await commitIn(wt, planFiles('Theirs'), 'plan on feature');
+      await commitIn(parent, planFiles('Ours'), 'plan on main');
+      const { out, h, dispatched } = await merge(parent, wt);
+      expect(out.resolved).toBe(true);
+      expect(dispatched).toBe(0);
+      expect(h.invocationInserts).toEqual([]);
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+      expect(await git(parent, ['ls-files', '-u'])).toBe('');
+      expect(await git(parent, ['show', `HEAD:${PLAN_JSON}`])).toContain('Theirs');
+      expect(await git(parent, ['show', 'HEAD:feature.txt'])).toBe('feature\n');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a merge whose only conflict is under .haive-data/state/ commits with no fixer', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}));
+    try {
+      await commitIn(
+        wt,
+        stateFiles({ customAgentSpecs: [{ id: 'agent-a', description: 'A' }] }),
+        's',
+      );
+      await commitIn(parent, stateFiles({ framework: 'drupal' }), 'state on main');
+      const { out, dispatched } = await merge(parent, wt);
+      expect(out.resolved).toBe(true);
+      expect(dispatched).toBe(0);
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+      expect(await git(parent, ['ls-files', '-u'])).toBe('');
+      const render = JSON.parse(await git(parent, ['show', `HEAD:${STATE_RENDER}`])) as {
+        framework: string;
+        customAgentSpecs: unknown[];
+      };
+      expect(render.framework).toBe('drupal');
+      expect(render.customAgentSpecs).toHaveLength(1);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a retry that reopens the merge settles plan.json the same way', async () => {
+    const { parent, wt } = await setupWorktree(planFiles('Base'));
+    try {
+      await commitIn(wt, planFiles('Theirs'), 'plan on feature');
+      await commitIn(parent, planFiles('Ours'), 'plan on main');
+      const h = makeDb();
+      const state: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: null,
+        conflictRetries: 0,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      };
+      const before = dispatches();
+      const out = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, state),
+        mkCtx(parent, h.db),
+        mkParams(h.db, dispatching),
+      );
+      expect(out.resolved).toBe(true);
+      expect(dispatches() - before).toBe(0);
+      expect(await git(parent, ['show', `HEAD:${PLAN_JSON}`])).toContain('Theirs');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a mixed conflict sends the fixer only the other file, with the leave-alone line', async () => {
+    const { parent, wt } = await setupWorktree(planFiles('Base'));
+    try {
+      await commitIn(wt, { ...planFiles('Theirs'), 'base.txt': 'feature-edit\n' }, 'feature');
+      await commitIn(parent, { ...planFiles('Ours'), 'base.txt': 'main-edit\n' }, 'main');
+      const buildFixPrompt = vi.fn(step.mergeResolve!.buildFixPrompt);
+      const { out, dispatched } = await merge(parent, wt, {
+        mergeResolve: { ...step.mergeResolve!, buildFixPrompt },
+      });
+      expect(out.resolved).toBe(false);
+      expect(dispatched).toBe(1);
+      expect(buildFixPrompt.mock.calls[0]![0].conflictFiles).toEqual(['base.txt']);
+      const call = vi.mocked(resolveTaskDispatch).mock.calls.at(-1);
+      const prompt = (call?.[2] as { input: { prompt: string } }).input.prompt;
+      expect(prompt).toContain(HAIVE_OWN_FILES_LINE);
+      expect(prompt).not.toContain('.haive-data/**');
+      expect(await git(parent, ['show', ':3:base.txt'])).toBe('feature-edit\n');
+      expect(await git(parent, ['show', `:${PLAN_JSON}`])).toContain('Theirs');
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

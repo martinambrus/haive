@@ -298,11 +298,6 @@ async function mergeStateRecord(worktreePath: string): Promise<void> {
   }
 }
 
-async function takeTheirs(worktreePath: string, path: string): Promise<boolean> {
-  const take = await gitRun(worktreePath, ['checkout', '--theirs', '--', path]);
-  return take.code === 0 && (await gitRun(worktreePath, ['add', '--', path])).code === 0;
-}
-
 /**
  * Resolve a merge's conflicts in the plan mirror's own two files.
  *
@@ -326,7 +321,7 @@ export async function resolveHaiveProjectionConflicts(
   let plan: PlanMirrorPayload | null = null;
 
   const fallBack = async (path: string, why: string): Promise<void> => {
-    if (await takeTheirs(worktreePath, path)) {
+    if (await takeIncoming(worktreePath, path)) {
       out.resolved.push(path);
       out.warnings.push(`${path}: ${why}; took the incoming side`);
     }

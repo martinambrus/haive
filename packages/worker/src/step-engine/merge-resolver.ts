@@ -27,8 +27,10 @@ import {
   squashMergeCommit,
   unmergedPaths,
   type MergeAbort,
+  type MergeOpen,
   type SecretMaskSource,
 } from './git-merge.js';
+import { resolveHaiveProjectionConflicts } from '../plan/projection-merge.js';
 import {
   claimMergeDir,
   releaseMergeDir,
@@ -581,6 +583,38 @@ async function prePushSync(
   return resolveMergePhase(db, stepDef, { ...current, mergeResolveState: next }, ctx, params);
 }
 
+/** Haive's own files (the plan and the project state) merge by their own rules before any agent or
+ *  person sees the conflict; a merge left with nothing else unmerged is committed here. */
+async function settleOwnFiles(
+  dir: string,
+  feature: string,
+  env: Record<string, string>,
+): Promise<{ merged: boolean; warnings: string[] }> {
+  const { resolved, warnings } = await resolveHaiveProjectionConflicts(dir);
+  if (resolved.length === 0) return { merged: false, warnings };
+  const left = await unmergedPaths(dir);
+  return {
+    merged: left?.length === 0 && (await completeMergeHostSide(dir, env, feature)),
+    warnings,
+  };
+}
+
+async function noteOwnFileFallbacks(
+  db: Database,
+  current: TaskStepRow,
+  ctx: StepContext,
+  dir: string,
+  warnings: string[],
+): Promise<TaskStepRow> {
+  if (warnings.length === 0) return current;
+  ctx.logger.warn({ dir, warnings }, "merge fell back on a side of Haive's own files");
+  return addStepWarning(
+    db,
+    current,
+    `Haive's own files in the merge fell back on a side: ${warnings.join('; ')}.`,
+  );
+}
+
 /** Unmerged paths in a mid-merge worktree (for the fix prompt). */
 async function conflictFiles(mergeDir: string): Promise<string[]> {
   return (await unmergedPaths(mergeDir)) ?? [];
@@ -873,11 +907,22 @@ export async function resolveMergePhase(
         ['-m', `Merge ${armed.featureBranch}`],
         commitEnv,
       );
+      const settled =
+        opened.kind === 'conflict'
+          ? await settleOwnFiles(armed.mergeDir, armed.featureBranch, commitEnv)
+          : { merged: false, warnings: [] };
+      const result: MergeOpen = settled.merged ? { kind: 'merged' } : opened;
       // Recorded in the same transaction, so a landed merge the squash has yet to reset is held too.
-      if (opened.kind !== 'refused') {
+      if (result.kind !== 'refused') {
         await saveMergeState(tx, current.id, { ...armed, phase: 'resolving' });
       }
-      return { kind: 'opened' as const, opened, armed, staleOpen };
+      return {
+        kind: 'opened' as const,
+        opened: result,
+        armed,
+        staleOpen,
+        warnings: settled.warnings,
+      };
     });
     state = attempt.armed;
     if (attempt.kind === 'unaborted') {
@@ -892,6 +937,9 @@ export async function resolveMergePhase(
         state.mergeDir,
         attempt.staleOpen,
       );
+    }
+    if (attempt.kind === 'opened') {
+      current = await noteOwnFileFallbacks(db, current, ctx, state.mergeDir, attempt.warnings);
     }
     if (attempt.opened.kind === 'merged') {
       return finishMerge(db, stepDef, current, ctx, params, state);
@@ -1076,15 +1124,20 @@ export async function resolveMergePhase(
       const staleOpen = ours ? null : wasOpen;
       if (!(await mergeOpenFor(dir, feature))) {
         const opened = await openMerge(dir, feature, ['-m', `Merge ${feature}`], commitEnv);
-        if (opened.kind === 'merged') return { kind: 'merged' as const, staleOpen };
+        if (opened.kind === 'merged') return { kind: 'merged' as const, staleOpen, warnings: [] };
         if (opened.kind === 'refused') {
           return { kind: 'refused' as const, detail: opened.detail, staleOpen };
         }
+      }
+      const settled = await settleOwnFiles(dir, feature, commitEnv);
+      if (settled.merged) {
+        return { kind: 'merged' as const, staleOpen, warnings: settled.warnings };
       }
       return {
         kind: 'ready' as const,
         fixBaseline: await captureFixBaseline(dir, baselineSource),
         staleOpen,
+        warnings: settled.warnings,
       };
     });
     if (reopened.kind === 'unaborted') {
@@ -1093,6 +1146,9 @@ export async function resolveMergePhase(
     if (reopened.kind === 'held') return haltFailed(db, current, reopened.held, 'merge index held');
     if (reopened.staleOpen) {
       current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
+    }
+    if (reopened.kind !== 'refused') {
+      current = await noteOwnFileFallbacks(db, current, ctx, dir, reopened.warnings);
     }
     if (reopened.kind === 'merged') return finishMerge(db, stepDef, current, ctx, params, state);
     if (reopened.kind === 'refused') return haltRefused(db, current, state, reopened.detail);
