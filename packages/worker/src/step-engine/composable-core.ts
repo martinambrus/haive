@@ -8,10 +8,6 @@ const IMPLEMENT = '07-phase-2-implement';
 export const MERGE_CAPABLE_STEP_IDS: readonly string[] = ['00a-sync-base', '12-worktree-cleanup'];
 
 const needWorktree = { needs: 'worktree', reason: 'Works inside the task worktree.' };
-const runtimeChoices = [
-  { needs: 'debug-choice', reason: 'The debugger is wired when the runtime starts.' },
-  { needs: 'browser-choice', reason: 'Browser access is fixed when the runtime starts.' },
-];
 
 export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   {
@@ -55,6 +51,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [],
     provides: [],
+    precedes: ['worktree'],
   },
   {
     stepId: '01-worktree-setup',
@@ -70,7 +67,8 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'setup',
     dispatchesCli: false,
     requires: [],
-    provides: ['debug-choice'],
+    provides: [],
+    precedes: ['app-runtime'],
   },
   {
     stepId: '01b-install-plugins',
@@ -86,18 +84,15 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'runtime',
     dispatchesCli: false,
     requires: [{ needs: 'env-deps', reason: 'Reads the declared browser-testing dependency.' }],
-    provides: ['browser-choice'],
+    provides: [],
+    precedes: ['app-runtime'],
   },
   {
     stepId: '01c-ddev-env',
     label: 'DDEV environment',
     group: 'runtime',
     dispatchesCli: false,
-    requires: [
-      needWorktree,
-      { needs: 'env-deps', reason: 'Reads the declared container tool.' },
-      ...runtimeChoices,
-    ],
+    requires: [needWorktree, { needs: 'env-deps', reason: 'Reads the declared container tool.' }],
     provides: ['ddev', 'app-runtime'],
   },
   {
@@ -105,11 +100,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'App boot',
     group: 'runtime',
     dispatchesCli: true,
-    requires: [
-      needWorktree,
-      { needs: 'env-image', reason: 'Boots the app from the ready image.' },
-      ...runtimeChoices,
-    ],
+    requires: [needWorktree, { needs: 'env-image', reason: 'Boots the app from the ready image.' }],
     provides: ['app-runtime'],
   },
   {
@@ -274,6 +265,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [{ needs: 'commit', reason: 'Merges or opens a PR for the committed work.' }],
     provides: ['pr'],
+    removes: ['worktree'],
   },
   {
     stepId: '13-pr-wait',

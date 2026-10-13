@@ -3,6 +3,7 @@ import type { ComposableStepEntry } from './contracts.js';
 export type CompositionIssue =
   | { kind: 'unknown-step'; index: number; stepId: string }
   | { kind: 'unmet-need'; index: number; stepId: string; needs: string; reason: string }
+  | { kind: 'too-late'; index: number; stepId: string; token: string }
   | { kind: 'missing-loop-target'; index: number; stepId: string; target: string }
   | { kind: 'duplicate-step'; index: number; stepId: string }
   | { kind: 'loop-after-closing'; index: number; stepId: string; closingStepId: string }
@@ -25,6 +26,9 @@ export function validateComposition(
       issues.push({ kind: 'unknown-step', index, stepId });
       return;
     }
+    for (const token of entry.precedes ?? []) {
+      if (provided.has(token)) issues.push({ kind: 'too-late', index, stepId, token });
+    }
     for (const { needs, reason } of entry.requires) {
       if (!provided.has(needs)) issues.push({ kind: 'unmet-need', index, stepId, needs, reason });
     }
@@ -43,6 +47,7 @@ export function validateComposition(
       issues.push({ kind: 'loop-after-closing', index, stepId, closingStepId: closing.stepId });
     }
     for (const token of entry.provides) provided.add(token);
+    for (const token of entry.removes ?? []) provided.delete(token);
   });
   return issues;
 }

@@ -127,33 +127,54 @@ describe('core composable catalog', () => {
     ]);
   });
 
+  const runtimeSetup: Record<string, string[]> = {
+    '01c-ddev-env': ['01-declare-deps', '01-worktree-setup'],
+    '01a-app-boot': [
+      '01-declare-deps',
+      '02-generate-dockerfile',
+      '03-build-image',
+      '01-worktree-setup',
+    ],
+  };
+
   it.each([
-    ['01c-ddev-env', '01-debug-mode', 'debug-choice'],
-    ['01c-ddev-env', '01d-browser-access', 'browser-choice'],
-    ['01a-app-boot', '01-debug-mode', 'debug-choice'],
-    ['01a-app-boot', '01d-browser-access', 'browser-choice'],
-  ])('rejects %s starting before %s', (runtime, choice, token) => {
-    const runtimeSetup: Record<string, string[]> = {
-      '01c-ddev-env': ['01-declare-deps', '01-worktree-setup'],
-      '01a-app-boot': [
-        '01-declare-deps',
-        '02-generate-dockerfile',
-        '03-build-image',
-        '01-worktree-setup',
-      ],
-    };
-    const choices = ['01-debug-mode', '01d-browser-access'];
-    const inOrder = [...runtimeSetup[runtime]!, ...choices, runtime];
-    expect(validateComposition(inOrder, catalog)).toEqual([]);
-    const late = [
-      ...runtimeSetup[runtime]!,
-      ...choices.filter((c) => c !== choice),
-      runtime,
-      choice,
-    ];
-    expect(validateComposition(late, catalog)).toEqual([
-      expect.objectContaining({ kind: 'unmet-need', stepId: runtime, needs: token }),
+    ['01c-ddev-env', '01-debug-mode'],
+    ['01c-ddev-env', '01d-browser-access'],
+    ['01a-app-boot', '01-debug-mode'],
+    ['01a-app-boot', '01d-browser-access'],
+  ])('rejects %s starting before %s, and accepts it without that step', (runtime, choice) => {
+    const setup = runtimeSetup[runtime]!;
+    expect(validateComposition([...setup, choice, runtime], catalog)).toEqual([]);
+    expect(validateComposition([...setup, runtime], catalog)).toEqual([]);
+    expect(validateComposition([...setup, runtime, choice], catalog)).toEqual([
+      { kind: 'too-late', index: setup.length + 1, stepId: choice, token: 'app-runtime' },
     ]);
+  });
+
+  it('rejects syncing the base after the worktree is cut', () => {
+    expect(validateComposition(['00a-sync-base', '01-worktree-setup'], catalog)).toEqual([]);
+    expect(validateComposition(['01-worktree-setup', '00a-sync-base'], catalog)).toEqual([
+      { kind: 'too-late', index: 1, stepId: '00a-sync-base', token: 'worktree' },
+    ]);
+  });
+
+  it('rejects a worktree step after cleanup removed the worktree', () => {
+    const order = [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+      '12-worktree-cleanup',
+      '11c-rag-reindex',
+    ];
+    expect(validateComposition(order, catalog)).toEqual([
+      expect.objectContaining({ kind: 'unmet-need', stepId: '11c-rag-reindex', needs: 'worktree' }),
+    ]);
+    expect(
+      validateComposition(
+        [...order.slice(0, 3), '11c-rag-reindex', '12-worktree-cleanup', '13-pr-wait'],
+        catalog,
+      ),
+    ).toEqual([]);
   });
 
   it('rejects verify without implement earlier', () => {

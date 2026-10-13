@@ -150,6 +150,36 @@ describe('validateComposition', () => {
     expect(validateComposition(['commit', 'learn', 'review-learnings'], catalog)).toEqual([]);
   });
 
+  it('reports a step placed after a provider of a token it must precede', () => {
+    const catalog = catalogOf(entry('cut', { provides: ['worktree'] }), {
+      ...entry('sync'),
+      precedes: ['worktree'],
+    });
+    expect(validateComposition(['sync', 'cut'], catalog)).toEqual([]);
+    expect(validateComposition(['sync'], catalog)).toEqual([]);
+    expect(validateComposition(['cut', 'sync'], catalog)).toEqual([
+      { kind: 'too-late', index: 1, stepId: 'sync', token: 'worktree' },
+    ]);
+  });
+
+  it('withdraws a token a step removes', () => {
+    const catalog = catalogOf(
+      entry('cut', { provides: ['worktree'] }),
+      { ...entry('clean'), removes: ['worktree'] },
+      entry('use', { needs: ['worktree'] }),
+    );
+    expect(validateComposition(['cut', 'use', 'clean'], catalog)).toEqual([]);
+    expect(validateComposition(['cut', 'clean', 'use'], catalog)).toEqual([
+      {
+        kind: 'unmet-need',
+        index: 2,
+        stepId: 'use',
+        needs: 'worktree',
+        reason: 'use needs worktree',
+      },
+    ]);
+  });
+
   it('treats a step that both closes and loops as its own barrier', () => {
     const catalog = catalogOf(
       entry('impl', { provides: ['implementation'] }),
