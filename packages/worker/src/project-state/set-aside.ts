@@ -516,6 +516,13 @@ async function setAsideOnce(
   if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
     return refuse(dirty.paths[0]!, 'is part of a merge or rebase that is still open');
   }
+  const stray = dirty.paths.find(
+    (p) =>
+      !p.startsWith(STATE_PREFIX) &&
+      p !== HAIVE_DATA_FILES.plan &&
+      p !== HAIVE_DATA_FILES.planMarkdown,
+  );
+  if (stray) return refuse(stray, 'is not a file Haive writes there');
   const state = dirty.paths.filter((p) => p.startsWith(STATE_PREFIX));
   const plan = dirty.paths.filter((p) => !p.startsWith(STATE_PREFIX));
 
@@ -572,6 +579,13 @@ export async function restoreProjectionsInTx(
   if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
     return refuse(dirty.paths[0]!, 'is part of a merge or rebase that is still open');
   }
+  const stray = dirty.paths.find(
+    (p) =>
+      !p.startsWith(STATE_PREFIX) &&
+      p !== HAIVE_DATA_FILES.plan &&
+      p !== HAIVE_DATA_FILES.planMarkdown,
+  );
+  if (stray) return refuse(stray, 'is not a file Haive writes there');
   return { outcome: 'retry' };
 }
 

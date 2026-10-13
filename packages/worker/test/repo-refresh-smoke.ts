@@ -1276,6 +1276,27 @@ async function main(): Promise<void> {
         { m3InHead, asideM3, m3Mode },
       );
 
+      // R1. `.haive-data/state` itself as an untracked file is no projection Haive writes: refused, kept.
+      const bareR1 = path.join(tmp, 'origin-r1.git');
+      git(tmp, 'init', '-q', '--bare', '-b', 'main', bareR1);
+      const seedR1 = path.join(tmp, 'seed-r1');
+      git(tmp, 'clone', '-q', `file://${bareR1}`, seedR1);
+      await commitFile(seedR1, 'README.md', 'seed\n', 'seed');
+      git(seedR1, 'push', '-q', 'origin', 'HEAD:main');
+      const r1 = await cloned(bareR1);
+      const stateRoot = path.join(r1.dest, '.haive-data', 'state');
+      await mkdir(path.dirname(stateRoot), { recursive: true });
+      await writeFile(stateRoot, 'a person wrote this\n');
+      const asideR1 = await setAsideHaiveProjections(db, r1.payload.repositoryId, r1.dest);
+      const keptR1 = await readFile(stateRoot, 'utf8').catch(() => null);
+      check(
+        'R1: an untracked file at .haive-data/state refuses the set-aside, is named, and is kept',
+        asideR1.outcome === 'refused' &&
+          asideR1.file === '.haive-data/state' &&
+          keptR1 === 'a person wrote this\n',
+        { asideR1, keptR1 },
+      );
+
       // 11l-2. A mode change is not in the blob id: a staged chmod, or one only in the working tree, on a
       // file holding Haive's bytes is a person's change, and returning the path to HEAD would lose it.
       const indexMode = (dir: string, rel: string) =>
