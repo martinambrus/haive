@@ -362,6 +362,7 @@ export const restoreFaults: {
   afterBase?: () => void | Promise<void>;
   afterRestore?: () => void | Promise<void>;
   beforeResync?: (domain: 'state' | 'plan') => void;
+  beforeRestore?: () => void | Promise<void>;
 } = {};
 
 interface RestoreGuard {
@@ -427,9 +428,11 @@ async function restoreJudged(
   for (const path of mine) {
     const bytes = await keptBytes(repoPath, path);
     const index = await indexEntry(repoPath, path);
-    kept.set(path, bytes === undefined ? { index } : { bytes, index });
+    if (!kept.has(path)) kept.set(path, bytes === undefined ? { index } : { bytes, index });
   }
-  await restoreFromHead(repoPath, mine);
+  await restoreFaults.beforeRestore?.();
+  const raced = await restoreFromHead(repoPath, mine, kept);
+  if (raced !== null) return { changed: raced };
   await restoreFaults.afterRestore?.();
   await after?.(tx);
   return null;
@@ -494,33 +497,71 @@ const planGuard = (
   fence,
 });
 
-async function restoreFromHead(repoPath: string, paths: readonly string[]): Promise<void> {
-  const tracked: string[] = [];
-  const own: string[] = [];
+/** Puts each path back to HEAD, in the file and the index, only while it still holds what the set-aside
+ *  captured; returns the first path written by someone else meanwhile, which sends the set-aside round
+ *  again. A path whose bytes were not captured is restored as git restores it. */
+async function restoreFromHead(
+  repoPath: string,
+  paths: readonly string[],
+  kept: KeptFiles,
+): Promise<string | null> {
   for (const path of paths) {
-    const inHead = await gitRun(repoPath, ['cat-file', '-e', `HEAD:${path}`]);
-    (inHead.code === 0 ? tracked : own).push(path);
-  }
-  if (tracked.length > 0) {
-    const res = await gitRun(repoPath, ['checkout', '-q', 'HEAD', '--', ...tracked]);
-    if (res.code !== 0) throw new Error(`git checkout failed: ${res.stderr.trim().slice(0, 300)}`);
-  }
-  for (const path of own) {
-    const unstaged = await gitRun(repoPath, [
-      'rm',
-      '--cached',
-      '-f',
-      '-q',
-      '--ignore-unmatch',
-      '--',
-      path,
-    ]);
-    if (unstaged.code !== 0) {
-      throw new Error(`git rm --cached failed: ${unstaged.stderr.trim().slice(0, 300)}`);
+    const captured = kept.get(path);
+    const head = await readBlob(repoPath, `HEAD:${path}`);
+    if (captured === undefined || captured.bytes === undefined) {
+      const res =
+        head !== null
+          ? await gitRun(repoPath, ['checkout', '-q', 'HEAD', '--', path])
+          : await gitRun(repoPath, ['rm', '--cached', '-f', '-q', '--ignore-unmatch', '--', path]);
+      if (res.code !== 0) throw new Error(`git restore failed: ${res.stderr.trim().slice(0, 300)}`);
+      if (head === null) await removeNoFollow(repoPath, path);
+    } else {
+      const was = captured.bytes;
+      const maxBytes = Math.max(head?.length ?? 0, was?.length ?? 0) + 1;
+      if (head !== null && was === null) {
+        try {
+          await writeFileNoFollow(repoPath, path, head, {
+            mode: 'create-exclusive',
+            createParents: true,
+          });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') return path;
+          throw err;
+        }
+      } else if (head !== null && was !== null) {
+        const res = await rewriteFileIfNoFollow(
+          repoPath,
+          path,
+          (now) => (now.equals(was) ? head : null),
+          { maxBytes },
+        );
+        if (res !== 'rewritten') return path;
+      } else if (was !== null) {
+        const res = await removeFileIfNoFollow(repoPath, path, (now) => now.equals(was), {
+          maxBytes,
+        });
+        if (res !== 'removed') return path;
+      }
+      if ((await indexEntry(repoPath, path)) !== captured.index) return path;
+      const headIdx = await headEntry(repoPath, path);
+      if (headIdx !== captured.index) {
+        const res =
+          headIdx === null
+            ? await gitRun(repoPath, ['update-index', '--force-remove', '--', path])
+            : await gitRun(repoPath, [
+                'update-index',
+                '--add',
+                '--cacheinfo',
+                `${headIdx.replace(' ', ',')},${path}`,
+              ]);
+        if (res.code !== 0) {
+          throw new Error(`git update-index failed: ${res.stderr.trim().slice(0, 300)}`);
+        }
+      }
     }
-    await removeNoFollow(repoPath, path);
-    await pruneEmptyStateDirs(repoPath, path);
+    if (head === null) await pruneEmptyStateDirs(repoPath, path);
   }
+  return null;
 }
 
 /** A directory left empty under the state directory reads as a record with no format file, not as no record. */

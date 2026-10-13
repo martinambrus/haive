@@ -399,7 +399,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       const aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
       if (aside.outcome === 'set-aside') {
         asided = true;
-        for (const [file, bytes] of aside.kept) kept.set(file, bytes);
+        for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
       }
       return aside;
     };

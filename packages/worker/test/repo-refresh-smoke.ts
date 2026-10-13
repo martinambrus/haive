@@ -1114,6 +1114,78 @@ async function main(): Promise<void> {
       );
     }
 
+    // 11e8. A file written by someone else after the set-aside captured it and before its restore is not
+    // overwritten: the restore swaps only what it captured, so the set-aside goes round, re-judges and refuses.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const target = path.join(c.dest, RENDER_REL);
+      const foreign = '{"written":"in a terminal"}\n';
+      let fired = false;
+      restoreFaults.beforeRestore = async () => {
+        if (fired) return;
+        fired = true;
+        await writeFile(target, foreign);
+      };
+      let aside;
+      try {
+        aside = await setAsideHaiveProjections(db, id, c.dest);
+      } finally {
+        delete restoreFaults.beforeRestore;
+      }
+      const now = await readFile(target, 'utf8');
+      check(
+        'a write landing between the capture and the restore is kept, and the set-aside refuses it',
+        fired && aside.outcome === 'refused' && now === foreign,
+        { aside, now },
+      );
+    }
+
+    // 11e9. A refresh retried after its move check keeps the first snapshot of each path: a render.json
+    // staged with Haive's bytes is staged again after the retried refresh is held.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const target = path.join(c.dest, RENDER_REL);
+      const rendered = await readFile(target);
+      git(c.dest, 'add', '--', RENDER_REL);
+      const stagedBefore = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b', 'c', 'd'] });
+      upstreamCommit('a teammate adds a fourth agent', '.haive-data/state');
+      let restores = 0;
+      restoreFaults.afterRestore = async () => {
+        restores += 1;
+        if (restores === 2) await writeFile(target, rendered);
+        if (restores === 3) {
+          await db.insert(schema.tasks).values({
+            userId,
+            repositoryId: id,
+            type: 'workflow',
+            title: 'repo-refresh-smoke',
+            status: 'running',
+          });
+        }
+      };
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      }
+      const stagedAfter = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      check(
+        'a retried, then held refresh stages render.json again as the first set-aside found it',
+        restores >= 3 && stagedAfter === stagedBefore,
+        { restores, stagedBefore, stagedAfter },
+      );
+    }
+
     // 11e4. A re-sync that fails after a clean move raises the domain's mark, so the sweep retries it.
     {
       const c = await withPendingRender();

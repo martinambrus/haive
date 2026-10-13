@@ -166,7 +166,7 @@ async function fastForward(
     if (aside.outcome === 'held') return holdingRefusal(aside.holding);
     if (aside.outcome === 'set-aside') {
       asided = true;
-      for (const [file, bytes] of aside.kept) kept.set(file, bytes);
+      for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
     }
 
     const { again, merge: merged } = await db.transaction(async (tx) => {
