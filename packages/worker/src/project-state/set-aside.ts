@@ -140,6 +140,38 @@ async function stagedOid(repoPath: string, rel: string): Promise<string | null |
   return oid;
 }
 
+/** Why each path's mode differs from HEAD's, in the index or in the working tree. A blob id does not
+ *  carry the mode, so a path HEAD lacks has none to differ from and is left to its bytes. */
+async function modeChanges(
+  repoPath: string,
+  paths: readonly string[],
+): Promise<Map<string, string>> {
+  const changed = new Map<string, string>();
+  if (paths.length === 0) return changed;
+  for (const side of ['index', 'tree'] as const) {
+    const res = await gitRun(repoPath, [
+      '--no-optional-locks',
+      'diff-index',
+      '--raw',
+      '-z',
+      '--no-renames',
+      ...(side === 'index' ? ['--cached'] : []),
+      'HEAD',
+      '--',
+      ...paths.map(literal),
+    ]);
+    if (res.code !== 0)
+      throw new Error(`git diff-index failed: ${res.stderr.trim().slice(0, 300)}`);
+    const fields = res.stdout.split('\0');
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      const m = /^:(\d+) (\d+) /.exec(fields[i]!);
+      if (!m || m[1] === m[2] || /^0+$/.test(m[1]!) || /^0+$/.test(m[2]!)) continue;
+      changed.set(fields[i + 1]!, `${side}:${m[1]}>${m[2]}`);
+    }
+  }
+  return changed;
+}
+
 async function headOid(repoPath: string, rel: string): Promise<string | null> {
   const res = await gitRun(repoPath, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`]);
   return res.code === 0 ? res.stdout.trim() : null;
@@ -163,7 +195,7 @@ async function stagedIsHaives(
   return bytes !== null && haives(bytes);
 }
 
-/** The working-tree bytes and the index blob of `rel` as one string, to tell later whether either moved. */
+/** The working-tree bytes, the index blob and any mode change of `rel` as one string, to tell later whether any moved. */
 async function fingerprint(repoPath: string, rel: string): Promise<string> {
   const maxBytes = rel.startsWith(STATE_PREFIX)
     ? PROJECT_STATE_LIMITS.maxFileBytes
@@ -175,7 +207,7 @@ async function fingerprint(repoPath: string, rel: string): Promise<string> {
   } catch {
     work = 'unreadable';
   }
-  return `${work}|${await stagedOid(repoPath, rel)}`;
+  return `${work}|${await stagedOid(repoPath, rel)}|${(await modeChanges(repoPath, [rel])).get(rel) ?? ''}`;
 }
 
 /** The first dirty state file that is not what the sync base renders there, or null. The base is the
@@ -212,11 +244,13 @@ async function stateOffender(
       return paths[0]!;
     }
   }
+  const modes = await modeChanges(repoPath, paths);
   for (const path of paths) {
     const want = expected.get(path.slice(STATE_PREFIX.length));
     const wantBytes = want === undefined ? null : Buffer.from(want, 'utf8');
     const maxBytes = PROJECT_STATE_LIMITS.maxFileBytes;
     const ok =
+      !modes.has(path) &&
       (await holds(repoPath, path, wantBytes, maxBytes)) &&
       (await stagedIsHaives(repoPath, path, maxBytes, (bytes) =>
         bytes === null ? wantBytes === null : wantBytes !== null && bytes.equals(wantBytes),
@@ -227,13 +261,15 @@ async function stateOffender(
 }
 
 /** plan.json must be what the last flush or read-in stamped, and the database must hold a plan to write it
- *  from again; plan.md is rendered from it on every flush and read by nobody, so it is never judged. */
+ *  from again; plan.md is rendered from it on every flush and read by nobody, so only its mode is judged. */
 async function planOffender(
   db: DbOrTx,
   repositoryId: string,
   repoPath: string,
   paths: readonly string[],
 ): Promise<string | null> {
+  const [moded] = [...(await modeChanges(repoPath, paths)).keys()];
+  if (moded !== undefined) return moded;
   if (!paths.includes(HAIVE_DATA_FILES.plan)) return null;
   const [row] = await db
     .select({ syncedHash: schema.planMirrorState.syncedHash })
@@ -271,7 +307,10 @@ async function planOffender(
 }
 
 /** Test seam: a function here runs at its point of the restore and may throw to stand for a crash. */
-export const restoreFaults: { afterBase?: () => void; afterRestore?: () => void } = {};
+export const restoreFaults: {
+  afterBase?: () => void | Promise<void>;
+  afterRestore?: () => void;
+} = {};
 
 interface RestoreGuard {
   owns: (path: string) => boolean;
@@ -279,7 +318,7 @@ interface RestoreGuard {
   offender: (tx: Tx) => Promise<string | null>;
   mark: (tx: Tx) => Promise<unknown>;
   base?: (tx: Tx) => Promise<unknown>;
-  readBase?: (tx: Tx) => Promise<string>;
+  generation: (tx: Tx) => Promise<string>;
   fence: CheckoutFence | undefined;
 }
 
@@ -287,13 +326,14 @@ type Changed = { changed: string };
 
 /** First transaction, with the domain's lock held: the files judged and the fence read, then the stale
  *  mark and the sync base at HEAD's record committed, so a crash before the files move finds the mark
- *  and a base the pending value still merges against. Nothing else is asked of the pool meanwhile. */
+ *  and a base the pending value still merges against. Nothing else is asked of the pool meanwhile. The
+ *  generation read last is what the second transaction finds unchanged unless a sweep took the lock between. */
 async function judgeAndMark(
   tx: Tx,
   repoPath: string,
   paths: readonly string[],
   guard: RestoreGuard,
-): Promise<{ stopped: SetAsideResult } | { prints: Map<string, string>; base: string | null }> {
+): Promise<{ stopped: SetAsideResult } | { prints: Map<string, string>; generation: string }> {
   await guard.lock(tx);
   const prints = new Map<string, string>();
   for (const path of paths) prints.set(path, await fingerprint(repoPath, path));
@@ -303,15 +343,15 @@ async function judgeAndMark(
   if (holding > 0) return { stopped: { outcome: 'held', holding } };
   await guard.mark(tx);
   await guard.base?.(tx);
-  return { prints, base: (await guard.readBase?.(tx)) ?? null };
+  return { prints, generation: await guard.generation(tx) };
 }
 
-/** Second transaction: the files are still as the first judged them (or already at HEAD) and the base is
- *  still the one it committed, then the restore, and `after` in the same transaction. */
+/** Second transaction: the files are still as the first judged them (or already at HEAD) and the base and
+ *  mark rows are still as it committed them, then the restore, and `after` in the same transaction. */
 async function restoreJudged(
   tx: Tx,
   repoPath: string,
-  judged: { prints: Map<string, string>; base: string | null },
+  judged: { prints: Map<string, string>; generation: string },
   guard: RestoreGuard,
   after?: (tx: Tx) => Promise<void>,
 ): Promise<SetAsideResult | Changed | null> {
@@ -321,7 +361,7 @@ async function restoreJudged(
   for (const path of mine) {
     if (judged.prints.get(path) !== (await fingerprint(repoPath, path))) return { changed: path };
   }
-  if (guard.readBase && judged.base !== (await guard.readBase(tx)))
+  if (judged.generation !== (await guard.generation(tx)))
     return { changed: [...judged.prints.keys()][0] ?? '' };
   if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
     return refuse(
@@ -347,7 +387,7 @@ async function setAsideDomain(
 ): Promise<SetAsideResult | Changed | null> {
   const judged = await db.transaction((tx) => judgeAndMark(tx, repoPath, paths, guard));
   if ('stopped' in judged) return judged.stopped;
-  restoreFaults.afterBase?.();
+  await restoreFaults.afterBase?.();
   return db.transaction((tx) => restoreJudged(tx, repoPath, judged, guard, after));
 }
 
@@ -362,7 +402,7 @@ const stateGuard = (
   offender: (tx) => stateOffender(tx, repositoryId, repoPath, state),
   mark: (tx) => markProjectStateDirty(tx, repositoryId),
   base: (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
-  readBase: (tx) => readProjectStateBase(tx, repositoryId),
+  generation: (tx) => readProjectStateBase(tx, repositoryId),
   fence,
 });
 
@@ -376,6 +416,8 @@ const planGuard = (
   lock: (tx) => lockPlanMirror(tx, repositoryId),
   offender: (tx) => planOffender(tx, repositoryId, repoPath, plan),
   mark: (tx) => markPlanMirrorDirty(tx, repositoryId),
+  generation: async (tx) =>
+    JSON.stringify(await readMark(tx, schema.planMirrorState, repositoryId)),
   fence,
 });
 
@@ -509,17 +551,26 @@ export async function restoreProjectionsInTx(
   return { outcome: 'retry' };
 }
 
-async function isDirty(
-  db: Database,
+async function readMark(
+  db: DbOrTx,
   table: typeof schema.projectStateOutbox | typeof schema.planMirrorState,
   repositoryId: string,
-): Promise<boolean> {
+) {
   const [row] = await db
     .select({ revision: table.revision, written: table.writtenRevision })
     .from(table)
     .where(eq(table.repositoryId, repositoryId))
     .limit(1);
-  return row !== undefined && row.written < row.revision;
+  return row ?? null;
+}
+
+async function isDirty(
+  db: Database,
+  table: typeof schema.projectStateOutbox | typeof schema.planMirrorState,
+  repositoryId: string,
+): Promise<boolean> {
+  const row = await readMark(db, table, repositoryId);
+  return row !== null && row.written < row.revision;
 }
 
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install

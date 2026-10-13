@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import { isDeepStrictEqual as isDeepEqual } from 'node:util';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq, sql } from 'drizzle-orm';
@@ -1082,6 +1082,125 @@ async function main(): Promise<void> {
           indexed(s2.dest, PLAN_REL) === held2.staged &&
           (await readFile(held2.target)).equals(held2.rendered),
         { aside2, now: indexed(s2.dest, PLAN_REL), staged: held2.staged },
+      );
+
+      // 11l-2. A mode change is not in the blob id: a staged chmod, or one only in the working tree, on a
+      // file holding Haive's bytes is a person's change, and returning the path to HEAD would lose it.
+      const indexMode = (dir: string, rel: string) =>
+        git(dir, 'ls-files', '-s', '--', rel).split(' ')[0];
+      const m1 = await withPendingRender();
+      git(m1.dest, 'update-index', '--chmod=+x', RENDER_REL);
+      const m1Mode = indexMode(m1.dest, RENDER_REL);
+      const m1Bytes = await readFile(path.join(m1.dest, RENDER_REL));
+      const aside3 = await setAsideHaiveProjections(db, m1.payload.repositoryId, m1.dest);
+      check(
+        "M1: a staged mode change on render.json holding Haive's bytes refuses the set-aside, names the file, and keeps the index mode",
+        aside3.outcome === 'refused' &&
+          aside3.file === RENDER_REL &&
+          m1Mode === '100755' &&
+          indexMode(m1.dest, RENDER_REL) === '100755' &&
+          (await readFile(path.join(m1.dest, RENDER_REL))).equals(m1Bytes),
+        { aside3, mode: indexMode(m1.dest, RENDER_REL), was: m1Mode },
+      );
+
+      const m2 = await cloned();
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: m2.payload.repositoryId, origin: 'user' },
+      );
+      await writePlanMirror(db, m2.payload.repositoryId, m2.dest);
+      git(m2.dest, 'add', '.haive-data');
+      git(m2.dest, 'commit', '-q', '-m', 'plan');
+      const m2Target = path.join(m2.dest, PLAN_REL);
+      const m2Bytes = await readFile(m2Target);
+      await chmod(m2Target, 0o755);
+      const aside4 = await setAsideHaiveProjections(db, m2.payload.repositoryId, m2.dest);
+      const m2Mode = (await stat(m2Target)).mode & 0o777;
+      check(
+        "M2: a working-tree mode change on plan.json holding Haive's bytes refuses the set-aside, names the file, and keeps the mode",
+        aside4.outcome === 'refused' &&
+          aside4.file === PLAN_REL &&
+          m2Mode === 0o755 &&
+          (await readFile(m2Target)).equals(m2Bytes),
+        { aside4, mode: m2Mode.toString(8) },
+      );
+
+      // 11l-3. A sweep that takes the lock between the two transactions rewrites the same bytes and
+      // clears the mark the first raised: the second must see the row moved and go round again, so a crash
+      // after the restore still leaves the row dirty.
+      const markOf = async (id: string) =>
+        (
+          await db
+            .select({
+              revision: schema.planMirrorState.revision,
+              written: schema.planMirrorState.writtenRevision,
+            })
+            .from(schema.planMirrorState)
+            .where(eq(schema.planMirrorState.repositoryId, id))
+        )[0]!;
+      const crashAfterRestore = new Error('crash after the restore');
+      const interposed = async (
+        sweep: () => Promise<unknown>,
+        run: () => Promise<unknown>,
+      ): Promise<{ sweeps: number; thrown: unknown }> => {
+        let sweeps = 0;
+        restoreFaults.afterBase = async () => {
+          sweeps += 1;
+          if (sweeps === 1) await sweep();
+        };
+        restoreFaults.afterRestore = () => {
+          throw crashAfterRestore;
+        };
+        let thrown: unknown = null;
+        try {
+          await run();
+        } catch (err) {
+          thrown = err;
+        } finally {
+          delete restoreFaults.afterBase;
+          delete restoreFaults.afterRestore;
+        }
+        return { sweeps, thrown };
+      };
+
+      const g1 = await cloned();
+      const g1Id = g1.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: g1Id, origin: 'user' },
+      );
+      await writePlanMirror(db, g1Id, g1.dest);
+      git(g1.dest, 'add', '.haive-data');
+      git(g1.dest, 'commit', '-q', '-m', 'plan');
+      const g1Root = (await db.query.planNodes.findFirst({
+        where: eq(schema.planNodes.repositoryId, g1Id),
+      }))!;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: g1Root.id, title: 'Root, edited here' }] },
+        { repositoryId: g1Id, origin: 'user' },
+      );
+      await writePlanMirror(db, g1Id, g1.dest);
+      const g1Run = await interposed(
+        () => writePlanMirror(db, g1Id, g1.dest),
+        () => setAsideHaiveProjections(db, g1Id, g1.dest),
+      );
+      const g1Mark = await markOf(g1Id);
+      const g1AtHead = !(await readFile(path.join(g1.dest, PLAN_REL), 'utf8')).includes(
+        'edited here',
+      );
+      await writePlanMirror(db, g1Id, g1.dest);
+      const g1After = await readFile(path.join(g1.dest, PLAN_REL), 'utf8');
+      check(
+        'G1: a plan sweep between the two transactions sends the set-aside round again, and a crash after the restore leaves the plan row dirty for the next sweep',
+        g1Run.thrown === crashAfterRestore &&
+          g1Run.sweeps === 2 &&
+          g1Mark.written < g1Mark.revision &&
+          g1AtHead &&
+          g1After.includes('Root, edited here'),
+        { g1Run: { ...g1Run, thrown: String(g1Run.thrown) }, g1Mark, g1AtHead },
       );
     }
 
