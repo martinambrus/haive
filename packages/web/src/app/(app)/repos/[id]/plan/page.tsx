@@ -500,13 +500,13 @@ export default function PlanPage() {
         return;
       }
       setPullReport(result.pulled ?? null);
-      setQuestionsKey((k) => k + 1);
       setSnapshot(await getPlanSnapshot(repositoryId));
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to pull the plan snapshot');
     } finally {
       setSnapshotBusy(false);
+      setQuestionsKey((k) => k + 1);
     }
   }
 

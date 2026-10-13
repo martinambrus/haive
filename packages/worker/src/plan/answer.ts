@@ -120,7 +120,7 @@ export async function answerPlanQuestion(
     }
     await tx
       .update(schema.planNodes)
-      .set({ ...set, version: node.version + 1, updatedAt: now })
+      .set({ ...set, sourceTaskId: null, version: node.version + 1, updatedAt: now })
       .where(eq(schema.planNodes.id, nodeId));
   }
   await setBaseField(tx, repositoryId, nodeId, field, incoming);

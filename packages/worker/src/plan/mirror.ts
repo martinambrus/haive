@@ -1164,7 +1164,12 @@ async function reconcilePlanLocked(
     }
     const updated = await tx
       .update(schema.planNodes)
-      .set({ ...set, version: sql`${schema.planNodes.version} + 1`, updatedAt: new Date() })
+      .set({
+        ...set,
+        sourceTaskId: null,
+        version: sql`${schema.planNodes.version} + 1`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(schema.planNodes.id, node.id),

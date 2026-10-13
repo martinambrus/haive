@@ -3199,6 +3199,19 @@ async function main(): Promise<void> {
     { staleAnswer, staleRow },
   );
 
+  const paSource = async (id: string) =>
+    (
+      await db
+        .select({ sourceTaskId: schema.planNodes.sourceTaskId })
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.id, id))
+    )[0]?.sourceTaskId;
+  const markBuilt = (id: string) =>
+    db
+      .update(schema.planNodes)
+      .set({ sourceTaskId: linkTaskId })
+      .where(eq(schema.planNodes.id, id));
+  await markBuilt(paXId);
   const xBefore = await paNode(paXId);
   const taken = await answerRow(xRow, 'take_theirs');
   const xAfter = await paNode(paXId);
@@ -3209,6 +3222,11 @@ async function main(): Promise<void> {
       xAfter.version === xBefore!.version + 1 &&
       (await paRowFor(paXId)) === undefined,
     { taken, xBefore, xAfter },
+  );
+  check(
+    'plan answer: take theirs clears the plan build provenance, as a canvas edit does',
+    (await paSource(paXId)) === null,
+    await paSource(paXId),
   );
   check(
     'plan answer: the flush after take theirs writes the title into plan.json',
@@ -3274,6 +3292,14 @@ async function main(): Promise<void> {
       (await pendingPlanRows(paId)).length === 0 &&
       JSON.stringify(await paANodes()) === JSON.stringify(yVersions),
     { againKept, versions: await paANodes() },
+  );
+
+  await markBuilt(paYId);
+  await paArrive(await paTheirs(paYId, 'Y remote 2'));
+  check(
+    'three-way: a node the other side changed loses the plan build provenance, as a canvas edit does',
+    (await paNode(paYId))?.title === 'Y remote 2' && (await paSource(paYId)) === null,
+    { node: await paNode(paYId), source: await paSource(paYId) },
   );
 
   await retitle(paZId, 'Z local');
