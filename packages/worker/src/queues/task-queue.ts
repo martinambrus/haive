@@ -2358,6 +2358,14 @@ async function handleAdvanceStep(
 
   const stepDef = stepRegistry.get(payload.stepId);
   if (!stepDef) {
+    // Only the step the task stands on can kill it; any other job, answered ones included, is stale.
+    if (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) {
+      logger.warn(
+        { taskId: ctx.taskId, stepId: payload.stepId, round, currentStepId: ctx.currentStepId },
+        'advance-step skipped: an unregistered step the task is not on',
+      );
+      return;
+    }
     await markTaskDeadFromJob(db, ctx.taskId, deadReasonFor([payload.stepId]), {
       epoch: ctx.orchestrationEpoch,
       unresolved: [payload.stepId],

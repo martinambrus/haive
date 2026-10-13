@@ -402,6 +402,27 @@ async function main(): Promise<void> {
       );
     }
     {
+      const id = await makeTask('advance-unknown-answered-moved-past');
+      const before = await view(id);
+      await run(TASK_JOB_NAMES.ADVANCE_STEP, {
+        taskId: id,
+        userId,
+        stepId: GONE,
+        round: 0,
+        epoch: 3,
+        formValues: { ok: true },
+      });
+      const v = await view(id);
+      check(
+        'an ANSWERED ADVANCE for an unknown step the task has moved past is dropped, not dead',
+        v.deadAt === null &&
+          v.status === 'running' &&
+          v.currentStepId === before.currentStepId &&
+          !(await eventTypes(id)).includes('task.dead'),
+        v,
+      );
+    }
+    {
       const id = await makeTask('advance-unknown-stale');
       const before = await view(id);
       await run(TASK_JOB_NAMES.ADVANCE_STEP, {
