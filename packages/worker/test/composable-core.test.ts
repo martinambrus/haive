@@ -15,8 +15,8 @@ const replace = (stepId: string, patch: Partial<ComposableStepEntry>): Composabl
 describe('core composable catalog', () => {
   beforeAll(() => registerStepsOnce());
 
-  it('holds the 32 curated steps and passes the assert on the real registry', () => {
-    expect(CORE_COMPOSABLE_STEPS).toHaveLength(32);
+  it('holds the 34 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(34);
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
   });
 
@@ -212,6 +212,8 @@ describe('core composable catalog', () => {
     ['07b-phase-4-validate', '10-gate-3-commit', 'commit'],
     ['07-phase-2-implement', '11g-save-database', 'db-saved'],
     ['08-phase-5-verify', '11g-save-database', 'db-saved'],
+    ['01c1-restore-database', '11g-save-database', 'db-saved'],
+    ['11d-skill-sync', '11a-gate-4-push', 'pushed'],
   ])('rejects %s placed after %s', (early, late, token) => {
     const setup = [
       '04-phase-0b-pre-planning',
@@ -259,7 +261,9 @@ describe('core composable catalog', () => {
         needs: 'clean-tree',
       }),
     ]);
-    expect(validateComposition([...head, '11b-kb-commit', ...tail], catalog)).toEqual([]);
+    expect(
+      validateComposition([...head, '11d-skill-sync', '11b-kb-commit', ...tail], catalog),
+    ).toEqual([]);
   });
 
   it('places the database save after the push and before cleanup', () => {
@@ -287,6 +291,36 @@ describe('core composable catalog', () => {
     ).toContainEqual({ kind: 'too-late', index: 6, stepId: '11g-save-database', token: 'cleaned' });
   });
 
+  it('needs the skill sync before the knowledge commit and the scope picker before re-indexing', () => {
+    const head = [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+      '11-phase-8-learning',
+    ];
+    expect(validateComposition([...head, '11b-kb-commit'], catalog)).toEqual([
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '11b-kb-commit',
+        needs: 'skills-synced',
+      }),
+    ]);
+    expect(validateComposition([...head, '11d-skill-sync', '11b-kb-commit'], catalog)).toEqual([]);
+    expect(validateComposition(['01-worktree-setup', '11c-rag-reindex'], catalog)).toEqual([
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '11c-rag-reindex',
+        needs: 'rag-scope',
+      }),
+    ]);
+    expect(
+      validateComposition(
+        ['01-worktree-setup', '11b1-rag-source-selection', '11c-rag-reindex'],
+        catalog,
+      ),
+    ).toEqual([]);
+  });
+
   it('remembers a capability cleanup removed when checking precedence', () => {
     const order = [
       '01-worktree-setup',
@@ -312,6 +346,7 @@ describe('core composable catalog', () => {
       '01-worktree-setup',
       '07-phase-2-implement',
       '10-gate-3-commit',
+      '11b1-rag-source-selection',
       '12-worktree-cleanup',
       '11c-rag-reindex',
     ];
@@ -320,7 +355,7 @@ describe('core composable catalog', () => {
     ]);
     expect(
       validateComposition(
-        [...order.slice(0, 3), '11c-rag-reindex', '12-worktree-cleanup', '13-pr-wait'],
+        [...order.slice(0, 4), '11c-rag-reindex', '12-worktree-cleanup', '13-pr-wait'],
         catalog,
       ),
     ).toEqual([]);
