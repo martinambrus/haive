@@ -12,6 +12,7 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import {
+  ENVIRONMENT_UNIT,
   PROJECT_STATE_DIR,
   ProjectStateError,
   RENDER_UNIT,
@@ -21,13 +22,23 @@ import {
   conflictBody,
   conflictSideValue,
   emptyProjectState,
+  environmentColumnOf,
+  environmentSchema,
+  environmentUnitOf,
   isClaimUnit,
   isConflictUnit,
+  isEnvironmentUnit,
+  isSettingUnit,
+  normalizeEnvironment,
   normalizeProjectState,
+  normalizeSetting,
+  portableSettingsOf,
+  settingColumnUpdate,
   renderContextColumnSchema,
   renderProjectState,
   renderSchema,
   sameValue,
+  type ProjectEnvironment,
   type ProjectRender,
   type ProjectStateClaim,
   type ProjectStateRecord,
@@ -286,7 +297,7 @@ async function answerClaimQuestion(
 
   const mine = (await loadRecordClaims(tx, repositoryId)).find((claim) => claim.path === path);
   if (answer === 'keep_mine' && mine === undefined) return { kind: 'no_local' };
-  const chosen = answer === 'keep_mine' ? mine : incoming;
+  let chosen = answer === 'keep_mine' ? mine : incoming;
 
   let fileText: string | null = null;
   if (answer === 'keep_mine' && !(file.kind === 'file' && sameValue(file.claim, mine))) {
@@ -402,6 +413,223 @@ async function answerClaimQuestion(
   };
 }
 
+type RecordFile =
+  { kind: 'absent' } | { kind: 'unreadable' } | { kind: 'file'; value: unknown; raw: Buffer };
+
+async function readRecordFile(repoPath: string, rel: string): Promise<RecordFile> {
+  try {
+    const read = await readFileNoFollow(repoPath, rel, {
+      strict: true,
+      maxBytes: MAX_RENDER_BYTES,
+    });
+    if (read === null) return { kind: 'absent' };
+    if (read.truncated || !isUtf8(read.data)) return { kind: 'unreadable' };
+    return { kind: 'file', value: JSON.parse(read.data.toString('utf8')), raw: read.data };
+  } catch (err) {
+    if (err instanceof SyntaxError || isPathContainmentError(err)) return { kind: 'unreadable' };
+    throw err;
+  }
+}
+
+const settingNameOf = (unit: string): string => unit.slice('settings/'.length, -'.json'.length);
+
+/** What the checkout's file holds for the unit, as the sync reads it: normalised, `undefined` where
+ *  the file or the key is not there, `null` where the file is no valid value of the unit. */
+function fileValueOf(unit: string, file: RecordFile): unknown {
+  if (file.kind === 'absent') return undefined;
+  if (file.kind === 'unreadable') return null;
+  if (isSettingUnit(unit)) {
+    const checked = normalizeSetting(settingNameOf(unit), file.value);
+    return checked.ok ? checked.value : null;
+  }
+  const parsed = environmentSchema.safeParse(file.value);
+  if (!parsed.success) return null;
+  const environment = normalizeEnvironment(parsed.data);
+  return unit === ENVIRONMENT_UNIT
+    ? environment
+    : (environment as Record<string, unknown>)[unit.slice(ENVIRONMENT_UNIT.length + 1)];
+}
+
+/** Answers a question about a portable setting or the environment: keep mine writes the column's
+ *  value into the unit's file and the base at it, take theirs applies the other install's value to
+ *  the column, as the routes would, and the base takes it; the file already holds it. */
+async function answerSettingsQuestion(
+  tx: Tx,
+  {
+    repositoryId,
+    userId,
+    answer,
+    row,
+    repoPath,
+    after,
+    moved,
+  }: {
+    repositoryId: string;
+    userId: string;
+    answer: ProjectStateAnswer;
+    row: typeof schema.projectStateConflicts.$inferSelect;
+    repoPath: string;
+    after: After;
+    moved: () => ProjectStateResolveResult;
+  },
+): Promise<ProjectStateResolveResult> {
+  const environmental = isEnvironmentUnit(row.unit);
+  const rel = `${PROJECT_STATE_DIR}/${row.unit.split('#')[0]}`;
+  const incoming = conflictSideValue(row.incoming);
+  const file = await readRecordFile(repoPath, rel);
+  const held = fileValueOf(row.unit, file);
+  if (held === null || !sameValue(held, incoming)) return moved();
+
+  const [columns] = await tx
+    .select({
+      scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
+      rtkEnabled: schema.repositories.rtkEnabled,
+      rtkVersion: schema.repositories.rtkVersion,
+      lspServers: schema.repositories.lspServers,
+      lspServerVersions: schema.repositories.lspServerVersions,
+      chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
+      reviewDimensions: schema.repositories.reviewDimensions,
+      onboardingEnvironment: schema.repositories.onboardingEnvironment,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  if (!columns) return { kind: 'not_found' };
+  const environment = environmentUnitOf(columns.onboardingEnvironment);
+  const key = row.unit.includes('#') ? row.unit.slice(ENVIRONMENT_UNIT.length + 1) : null;
+  const mine = environmental
+    ? key === null
+      ? environment
+      : (environment as Record<string, unknown> | null)?.[key]
+    : portableSettingsOf(columns)[settingNameOf(row.unit)];
+  if (answer === 'keep_mine' && (mine === undefined || mine === null)) return { kind: 'no_local' };
+
+  const sync = await loadSyncRow(tx, repositoryId);
+  const snapshot = (sync?.baseSnapshot ?? {}) as Partial<ProjectStateRecord>;
+  let chosen = answer === 'keep_mine' ? mine : incoming;
+
+  let update: Record<string, unknown> | null = null;
+  let plannedEnvironment: ProjectEnvironment | null = null;
+  if (environmental) {
+    const onDisk = file.kind === 'file' ? environmentSchema.parse(file.value) : null;
+    plannedEnvironment =
+      key === null
+        ? ((chosen ?? null) as ProjectEnvironment | null)
+        : ((onDisk && { ...onDisk, [key]: chosen }) as ProjectEnvironment | null);
+    if (answer === 'take_theirs') {
+      const next =
+        key === null
+          ? (chosen as ProjectEnvironment | undefined)
+          : environment && ({ ...environment, [key]: chosen } as ProjectEnvironment);
+      if (!next) return { kind: 'invalid' };
+      update = { onboardingEnvironment: environmentColumnOf(normalizeEnvironment(next)) };
+    }
+  } else if (answer === 'take_theirs') {
+    const checked = chosen === undefined ? null : normalizeSetting(settingNameOf(row.unit), chosen);
+    if (checked !== null && !checked.ok) return { kind: 'invalid' };
+    chosen = checked?.value;
+    update = settingColumnUpdate(settingNameOf(row.unit), chosen);
+    if (update === null) return { kind: 'invalid' };
+  }
+
+  let fileText: string | null = null;
+  if (answer === 'keep_mine') {
+    try {
+      const planned = environmental
+        ? { ...emptyProjectState(), environment: plannedEnvironment }
+        : { ...emptyProjectState(), settings: { [settingNameOf(row.unit)]: chosen } };
+      fileText = renderProjectState(planned).get(rel.slice(PROJECT_STATE_DIR.length + 1)) ?? null;
+    } catch (err) {
+      if (err instanceof ProjectStateError) return { kind: 'invalid' };
+      throw err;
+    }
+    if (fileText === null) return { kind: 'invalid' };
+    if (file.kind === 'file' && file.raw.equals(Buffer.from(fileText, 'utf8'))) fileText = null;
+  }
+
+  const now = new Date();
+  if (update !== null) {
+    await tx
+      .update(schema.repositories)
+      .set({ ...update, updatedAt: now })
+      .where(eq(schema.repositories.id, repositoryId));
+  }
+
+  const [closed] = await tx
+    .update(schema.projectStateConflicts)
+    .set({ resolution: answer, resolvedAt: now, resolvedBy: userId })
+    .where(eq(schema.projectStateConflicts.id, row.id))
+    .returning();
+
+  const baseEnvironment = (snapshot.environment ?? plannedEnvironment) as ProjectEnvironment | null;
+  const base = environmental
+    ? {
+        ...snapshot,
+        environment: (key === null
+          ? (chosen ?? null)
+          : baseEnvironment && { ...baseEnvironment, [key]: chosen }) as ProjectEnvironment | null,
+      }
+    : {
+        ...snapshot,
+        settings: Object.fromEntries(
+          Object.entries({
+            ...(snapshot.settings ?? {}),
+            [settingNameOf(row.unit)]: chosen,
+          }).filter(([, value]) => value !== undefined),
+        ),
+      };
+  const synced = {
+    baseSnapshot: normalizeProjectState({ ...emptyProjectState(), ...base }),
+    lastError: sync?.lastError ?? null,
+    updatedAt: now,
+  };
+  await tx
+    .insert(schema.projectStateSync)
+    .values({ repositoryId, ...synced })
+    .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
+
+  const written: string[] = [];
+  if (fileText !== null) {
+    const bytes = Buffer.from(fileText, 'utf8');
+    if (file.kind === 'file') {
+      const outcome = await rewriteFileIfNoFollow(repoPath, rel, (data) =>
+        data.equals(file.raw) ? bytes : null,
+      );
+      if (outcome !== 'rewritten') throw new RenderFileMovedError(repoPath);
+    } else {
+      try {
+        await writeFileNoFollow(repoPath, rel, bytes, {
+          mode: 'create-exclusive',
+          createParents: true,
+        });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST')
+          throw new RenderFileMovedError(repoPath);
+        throw err;
+      }
+    }
+    after.putBack = {
+      repoPath,
+      rel,
+      raw: file.kind === 'file' ? file.raw : null,
+      wrote: bytes,
+    };
+    written.push(rel);
+  } else {
+    const again = await readRecordFile(repoPath, rel);
+    const unchanged =
+      again.kind === file.kind &&
+      (again.kind !== 'file' || (file.kind === 'file' && again.raw.equals(file.raw)));
+    if (!unchanged) throw new RenderFileMovedError(repoPath);
+  }
+
+  return {
+    kind: 'resolved',
+    conflict: conflictBody(closed ?? { ...row, resolution: answer, resolvedAt: now }),
+    written,
+  };
+}
+
 async function answerInTransaction(
   db: Database,
   { repositoryId, userId, conflictId, answer }: ProjectStateResolvePayload,
@@ -471,6 +699,18 @@ async function answerInTransaction(
         answer,
         row,
         repo,
+        repoPath,
+        after,
+        moved,
+      });
+    }
+
+    if (isSettingUnit(row.unit) || isEnvironmentUnit(row.unit)) {
+      return answerSettingsQuestion(tx, {
+        repositoryId,
+        userId,
+        answer,
+        row,
         repoPath,
         after,
         moved,

@@ -2,19 +2,36 @@ import { isUtf8 } from 'node:buffer';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { isRootClaimLive, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
+import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
 import {
+  PORTABLE_SETTING_NAMES,
   PROJECT_STATE_DIR,
   PROJECT_STATE_LIMITS,
   ProjectStateError,
   claimFileName,
   conflictSide,
   emptyProjectState,
+  environmentColumnOf,
+  environmentUnitOf,
+  intakeSettings,
   isClaimUnit,
+  isEnvironmentUnit,
+  isPortableSettingName,
   isRenderUnit,
+  isRtkQuestion,
+  isSettingUnit,
   mergeProjectState,
+  normalizeEnvironment,
   normalizeProjectState,
+  normalizeSetting,
   parseProjectState,
+  portableSettingsOf,
+  settingColumnUpdate,
+  settingFileName,
+  settingsDifferingFrom,
+  withoutUnchosenRtk,
   portableRender,
   renderContextColumnSchema,
   renderProjectState,
@@ -201,9 +218,11 @@ function keptRender(
 }
 
 /** Keeps one pending row per conflicted unit, so the writer leaves the other side's value in the file
- *  and an upgrade waits for an answer. A repeat of the same conflict writes nothing. A pending render
- *  or claim row whose unit no longer conflicts converged: a side moved to the other's value or back to
- *  the base, or the claim was settled by the bytes on disk. Runs after the ledger took the merge. */
+ *  and an upgrade waits for an answer. A repeat of the same conflict writes nothing. A pending render,
+ *  claim, setting or environment row whose unit no longer conflicts converged: a side moved to the
+ *  other's value or back to the base, or the claim was settled by the bytes on disk. The RTK question
+ *  is no conflict of any merge and stays until it is answered or RTK goes off. Runs after the ledger
+ *  took the merge. */
 async function recordConflicts(
   tx: Tx,
   repositoryId: string,
@@ -241,7 +260,12 @@ async function recordConflicts(
   }
   const open = new Set(conflicts.map(({ unit }) => unit));
   for (const row of pending) {
-    if (!(isRenderUnit(row.unit) || isClaimUnit(row.unit)) || open.has(row.unit)) continue;
+    const mergeUnit =
+      isRenderUnit(row.unit) ||
+      isClaimUnit(row.unit) ||
+      isSettingUnit(row.unit) ||
+      isEnvironmentUnit(row.unit);
+    if (!mergeUnit || isRtkQuestion(row) || open.has(row.unit)) continue;
     await tx
       .update(schema.projectStateConflicts)
       .set({ resolution: 'converged', resolvedAt: new Date() })
@@ -402,6 +426,113 @@ function keptClaims(
   return [...incoming.filter((c) => !contested(c)), ...base.filter(contested)];
 }
 
+const portableOf = (settings: unknown): Record<string, unknown> => {
+  const out = Object.create(null) as Record<string, unknown>;
+  if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return out;
+  for (const [name, value] of Object.entries(settings)) {
+    if (isPortableSettingName(name)) out[name] = value;
+  }
+  return out;
+};
+
+/** The value as the column would store it, so a column holding the same value in another order or
+ *  with a dropped entry is not moved by a merge that left it be. */
+function normalizedOf(name: string, value: unknown): unknown {
+  if (value === undefined) return undefined;
+  const checked = normalizeSetting(name, value);
+  return checked.ok ? checked.value : value;
+}
+
+interface PortableMerge {
+  conflicts: ProjectStateConflict[];
+  /** The repositories columns the merge moves. */
+  updates: Record<string, unknown>;
+  /** The settings and environment a sync base keeps. */
+  baseSettings: Record<string, unknown>;
+  baseEnvironment: ProjectEnvironment | null;
+  /** The merge left a value the checkout's files do not hold, so the writer has to bring them to it. */
+  stale: boolean;
+  rejected: string[];
+}
+
+/** Merges the portable settings and the environment of the checkout into this install's columns. A
+ *  base that holds none (no sync row, or one an earlier release wrote) merges as no base at all, so
+ *  the checkout's value wins over a column nobody chose, such as RTK's default. */
+function mergePortable(
+  repo: Parameters<typeof portableSettingsOf>[0] & {
+    onboardingEnvironment: unknown;
+    renderContext: unknown;
+  },
+  checkout: { settings: Record<string, unknown>; environment: ProjectEnvironment | null },
+  row: { baseSnapshot: unknown } | null,
+): PortableMerge {
+  const previous = (row?.baseSnapshot ?? {}) as Partial<ProjectStateRecord>;
+  const rtkRecorded =
+    (repo.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true;
+  const previousSettings = withoutUnchosenRtk(portableOf(previous.settings), rtkRecorded);
+  const previousEnvironment = previous.environment ?? null;
+  // The import of a record into a NULL column records the choice, so what it imports is kept in the base.
+  const rtkKept = rtkRecorded || repo.renderContext == null;
+  const heldSettings = portableSettingsOf(repo);
+  const localSettings = withoutUnchosenRtk(heldSettings, rtkRecorded);
+  const localEnvironment = environmentUnitOf(repo.onboardingEnvironment);
+  const importable = repo.onboardingEnvironment == null || localEnvironment !== null;
+  const intake = intakeSettings(checkout.settings, localSettings);
+  const checkoutEnvironment = checkout.environment && normalizeEnvironment(checkout.environment);
+  const record = (settings: Record<string, unknown>, environment: ProjectEnvironment | null) => ({
+    ...emptyProjectState(),
+    settings,
+    environment: importable ? environment : null,
+  });
+  const hasBase =
+    row !== null && (Object.keys(previousSettings).length > 0 || previousEnvironment !== null);
+  const merge = mergeProjectState({
+    base: hasBase ? record(previousSettings, previousEnvironment) : null,
+    local: record(localSettings, localEnvironment),
+    incoming: record(intake.incoming, checkoutEnvironment ?? localEnvironment),
+  });
+
+  const contested = new Set(merge.conflicts.map(({ unit }) => unit));
+  const environmentContested = merge.conflicts.some(({ unit }) => isEnvironmentUnit(unit));
+  const updates: Record<string, unknown> = {};
+  const baseSettings = Object.create(null) as Record<string, unknown>;
+  for (const name of PORTABLE_SETTING_NAMES) {
+    const merged = merge.merged.settings[name];
+    if (
+      !sameValue(merged, heldSettings[name]) &&
+      !sameValue(merged, normalizedOf(name, heldSettings[name]))
+    ) {
+      Object.assign(updates, settingColumnUpdate(name, merged) ?? {});
+    }
+    const kept =
+      contested.has(settingFileName(name)) || intake.rejected.includes(name)
+        ? previousSettings[name]
+        : intake.accepted[name];
+    if (kept !== undefined && (rtkKept || name !== 'rtk-enabled')) baseSettings[name] = kept;
+  }
+  const mergedEnvironment = merge.merged.environment;
+  if (importable && mergedEnvironment !== null && !sameValue(mergedEnvironment, localEnvironment)) {
+    updates.onboardingEnvironment = environmentColumnOf(mergedEnvironment);
+  }
+  const contestedNames = new Set(
+    PORTABLE_SETTING_NAMES.filter((name) => contested.has(settingFileName(name))),
+  );
+  return {
+    conflicts: merge.conflicts,
+    updates,
+    baseSettings,
+    baseEnvironment: environmentContested
+      ? previousEnvironment
+      : importable
+        ? checkoutEnvironment
+        : previousEnvironment,
+    stale:
+      settingsDifferingFrom(merge.merged.settings, checkout.settings, contestedNames).length > 0 ||
+      (importable && !environmentContested && !sameValue(mergedEnvironment, checkout.environment)),
+    rejected: intake.rejected,
+  };
+}
+
 /** Merges the checkout's project state record into the repository's render context and artifact
  *  ledger against the base the last sync or writer recorded. Writes the column, the ledger, the sync
  *  row and, for a repository with a claim, the applicable template ids, all in one transaction. */
@@ -429,6 +560,14 @@ export async function syncProjectStateFromCheckout(
         onboardingResetAt: schema.repositories.onboardingResetAt,
         rootClaimedAt: schema.repositories.rootClaimedAt,
         rootClaimKind: schema.repositories.rootClaimKind,
+        scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
+        rtkEnabled: schema.repositories.rtkEnabled,
+        rtkVersion: schema.repositories.rtkVersion,
+        lspServers: schema.repositories.lspServers,
+        lspServerVersions: schema.repositories.lspServerVersions,
+        chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
+        reviewDimensions: schema.repositories.reviewDimensions,
+        onboardingEnvironment: schema.repositories.onboardingEnvironment,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
@@ -509,6 +648,7 @@ export async function syncProjectStateFromCheckout(
     });
     const claimConflicts = merge.conflicts.filter(({ unit }) => isClaimUnit(unit));
     const renderConflicts = merge.conflicts.filter(({ unit }) => !isClaimUnit(unit));
+    const portable = mergePortable(repo, checkout, row);
     const merged = merge.merged.render;
     let wrote = false;
     let columnAfter: unknown = column;
@@ -550,22 +690,35 @@ export async function syncProjectStateFromCheckout(
       });
     }
 
-    await recordConflicts(tx, repositoryId, merge.conflicts);
+    const settingsMoved = Object.keys(portable.updates).length > 0;
+    if (settingsMoved) {
+      await tx
+        .update(schema.repositories)
+        .set({ ...portable.updates, updatedAt: new Date() })
+        .where(eq(schema.repositories.id, repositoryId));
+      if (portable.updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, null);
+    }
+    if (portable.stale) await markProjectStateDirty(tx, repositoryId);
+    if (portable.rejected.length > 0) {
+      logger.warn(
+        { repositoryId, settings: portable.rejected },
+        "project state settings the checkout holds are not valid here; this install's value stands",
+      );
+    }
+
+    await recordConflicts(tx, repositoryId, [...merge.conflicts, ...portable.conflicts]);
 
     const lastError =
       renderConflicts.length === 0
         ? null
         : `${CONFLICT_ERROR_PREFIX}${renderConflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
-    const previous = row?.baseSnapshot as Partial<ProjectStateRecord> | undefined;
     const baseSnapshot = normalizeProjectState({
       ...recordOf(keptRender(checkout.render, baseRender, renderConflicts)),
       claims: keptClaims(incomingClaims, baseClaims, claimConflicts),
       // Never merged: a conflict row on a descriptor could not be answered, and would block upgrades.
       bundles: checkout.bundles,
-      // Not imported yet, so the base keeps what the last sync or writer left; a first sync takes the checkout's.
-      settings:
-        row === null ? checkout.settings : (previous?.settings ?? emptyProjectState().settings),
-      environment: row === null ? checkout.environment : (previous?.environment ?? null),
+      settings: portable.baseSettings,
+      environment: portable.baseEnvironment,
     });
     if (row === null || row.lastError !== lastError || !sameValue(row.baseSnapshot, baseSnapshot)) {
       const synced = { baseSnapshot, lastError, updatedAt: new Date() };
@@ -576,6 +729,13 @@ export async function syncProjectStateFromCheckout(
     }
 
     if (lastError !== null) return { outcome: 'conflict', reason: lastError };
-    return { outcome: wrote || imported ? 'applied' : 'unchanged' };
+    if (portable.conflicts.length > 0) {
+      const names = portable.conflicts.map(({ unit }) => unit).join(', ');
+      return {
+        outcome: 'conflict',
+        reason: `settings conflict with the checkout's record: ${names}`,
+      };
+    }
+    return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged' };
   });
 }

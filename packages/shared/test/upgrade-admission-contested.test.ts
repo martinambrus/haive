@@ -85,6 +85,27 @@ describe('upgradeAdmission: a pending project state conflict', () => {
     });
   });
 
+  it('admits an upgrade over a contested setting other than RTK, and over the environment', async () => {
+    const s = setup();
+    s.pend('settings/review-dimensions.json');
+    s.pend('settings/lsp-servers.json');
+    s.pend('project/environment.json#confirmedValues');
+
+    expect(await s.admission()).toEqual({ admitted: true });
+  });
+
+  it('holds on a contested RTK setting, beside others that do not hold', async () => {
+    const s = setup();
+    s.pend('settings/review-dimensions.json');
+    s.pend(RTK_ENABLED_UNIT);
+
+    expect(await s.admission()).toEqual({
+      admitted: false,
+      reason: 'contested',
+      units: [RTK_ENABLED_UNIT],
+    });
+  });
+
   it('holds on a pending claim row, the unit being the claim file name', async () => {
     const s = setup();
     const unit = claimFileName('.claude/agents/code-reviewer.md');

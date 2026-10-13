@@ -1057,6 +1057,79 @@ async function main(): Promise<void> {
       repoB?.scopeExcludeGlobs,
     );
     check("B takes A's RTK switch", repoB?.rtkEnabled === false, repoB?.rtkEnabled);
+    await b.db.execute(
+      sql`update repositories set rtk_enabled = true where id = ${b.repositoryId}`,
+    );
+    await b.db.execute(sql`delete from project_state_sync where repository_id = ${b.repositoryId}`);
+    const firstSync = await syncProjectStateFromCheckout(b.db, {
+      repositoryId: b.repositoryId,
+      repoPath: b.repoPath,
+    });
+    const rtkOnB = () =>
+      rowsOf<{ rtk_enabled: boolean }>(
+        b.db,
+        sql`select rtk_enabled from repositories where id = ${b.repositoryId}`,
+      );
+    const afterFirst = await rtkOnB();
+    await markProjectStateDirty(b.db, b.repositoryId);
+    await sweepDirtyProjectStates(b.db);
+    const afterSweep = await rtkOnB();
+    const rtkFile = await readFile(
+      path.join(b.repoPath, '.haive-data/state/settings/rtk-enabled.json'),
+      'utf8',
+    );
+    check(
+      "a first sync with no sync row takes A's RTK-off over B's default, and B's next sweep does not write true back",
+      firstSync.outcome === 'applied' &&
+        'rows' in afterFirst &&
+        afterFirst.rows[0]?.rtk_enabled === false &&
+        'rows' in afterSweep &&
+        afterSweep.rows[0]?.rtk_enabled === false &&
+        rtkFile.trim() === 'false',
+      { firstSync, afterFirst, afterSweep, rtkFile },
+    );
+    const rtkRel = '.haive-data/state/settings/rtk-enabled.json';
+    await b.db.execute(
+      sql`update repositories set rtk_enabled = true,
+        render_context = jsonb_set(render_context, '{rtkChoiceRecorded}', 'false')
+        where id = ${b.repositoryId}`,
+    );
+    await b.db.execute(sql`delete from project_state_sync where repository_id = ${b.repositoryId}`);
+    const unchosenSync = await syncProjectStateFromCheckout(b.db, {
+      repositoryId: b.repositoryId,
+      repoPath: b.repoPath,
+    });
+    const unchosenColumn = await rtkOnB();
+    await markProjectStateDirty(b.db, b.repositoryId);
+    await sweepDirtyProjectStates(b.db);
+    const unchosenFile = await readFile(path.join(b.repoPath, rtkRel), 'utf8');
+    check(
+      "B never recorded an RTK choice: A's value replaces B's default, and B's next sweep leaves A's rtk-enabled.json as committed",
+      unchosenSync.outcome === 'applied' &&
+        'rows' in unchosenColumn &&
+        unchosenColumn.rows[0]?.rtk_enabled === false &&
+        unchosenFile.trim() === 'false' &&
+        git(b.repoPath, 'status', '--porcelain', '--', rtkRel) === '',
+      { unchosenSync, unchosenColumn, unchosenFile },
+    );
+    await rm(path.join(b.repoPath, rtkRel));
+    await b.db.execute(
+      sql`update repositories set rtk_enabled = true where id = ${b.repositoryId}`,
+    );
+    await markProjectStateDirty(b.db, b.repositoryId);
+    await sweepDirtyProjectStates(b.db);
+    check(
+      'and a default nobody chose is not written into a checkout that holds no rtk-enabled.json',
+      (await readFile(path.join(b.repoPath, rtkRel), 'utf8').catch(() => null)) === null,
+    );
+    git(b.repoPath, 'checkout', '--', rtkRel);
+    await b.db.execute(
+      sql`update repositories set rtk_enabled = false where id = ${b.repositoryId}`,
+    );
+    await b.db.execute(
+      sql`update repositories set render_context = jsonb_set(render_context, '{rtkChoiceRecorded}', 'true')
+        where id = ${b.repositoryId}`,
+    );
     const planA = await planOf(a);
     const planB = await planOf(b);
     check(
@@ -1599,6 +1672,14 @@ async function main(): Promise<void> {
     const upgradedStateA = await repoStateOf(a);
     const setAfterUpgradeA =
       'rows' in upgradedStateA ? (upgradedStateA.rows[0]?.applicable_template_ids ?? null) : null;
+    const scopeEdited = [...globs, 'e2e-fresh/**'].sort();
+    await setScope(scopeEdited);
+    await sweepDirtyProjectStates(a.db);
+    check(
+      "A's sweep brings the exclusion list it edited into the record",
+      isDeepStrictEqual(JSON.parse((await diskText(scopeRel)) ?? 'null'), scopeEdited),
+      await diskText(scopeRel),
+    );
     git(a.repoPath, 'add', '-A');
     git(a.repoPath, 'commit', '-q', '-m', 'A upgrades');
     git(a.repoPath, 'push', '-q', 'origin', 'HEAD:main');
@@ -1623,6 +1704,15 @@ async function main(): Promise<void> {
         rowB.applicable_template_ids.includes(`agent.${newAgent}`) &&
         (rowB.render_context?.acceptedAgentIds ?? []).includes(newAgent),
       { refreshedB, setA, setAfterUpgradeA },
+    );
+    const scopeOnB = await rowsOf<{ scope_exclude_globs: string[] | null }>(
+      b.db,
+      sql`select scope_exclude_globs from repositories where id = ${b.repositoryId}`,
+    );
+    check(
+      "B's exclusion list equals the one A edited, A's sweep wrote and A pushed",
+      'rows' in scopeOnB && isDeepStrictEqual(scopeOnB.rows[0]?.scope_exclude_globs, scopeEdited),
+      scopeOnB,
     );
     const pathsAfterB = await livePaths(b);
     check(

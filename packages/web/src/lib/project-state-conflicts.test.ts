@@ -7,6 +7,7 @@ import {
   conflictKeyLabel,
   conflictSideMarkdown,
   isRtkConflict,
+  isSettingConflict,
   landedAnswer,
   resolutionNotice,
   stillListed,
@@ -332,5 +333,57 @@ describe('answerAndConfirm', () => {
     const out = await answerAndConfirm(post, get, REPO, ROW, 'keep_mine');
     expect(out.kind).toBe('pending');
     expect(get).not.toHaveBeenCalled();
+  });
+});
+
+describe('a setting or environment question', () => {
+  const LSP = 'settings/lsp-servers.json';
+  const present = (value: unknown) => ({ present: true as const, value });
+
+  it('is labelled by its unit and named by its own record file', () => {
+    expect(conflictKeyLabel(null, LSP)).toBe('Language servers');
+    expect(conflictKeyLabel('confirmedValues', 'project/environment.json#confirmedValues')).toBe(
+      'Confirmed environment values',
+    );
+    expect(answerConfirmation('keep_mine', null, LSP).body).toContain(
+      '.haive-data/state/settings/lsp-servers.json',
+    );
+    expect(
+      answerConfirmation('keep_mine', 'confirmedValues', 'project/environment.json#confirmedValues')
+        .body,
+    ).toContain('.haive-data/state/project/environment.json');
+    expect(
+      answerConfirmation('keep_mine', 'framework', 'project/render.json#framework').body,
+    ).toContain('.haive-data/state/project/render.json');
+  });
+
+  it('shows a list, a version map, a text and a switch readably, not as JSON', () => {
+    expect(conflictSideMarkdown(present(['vtsls', 'pyright']), LSP)).toBe('- `vtsls`\n- `pyright`');
+    expect(conflictSideMarkdown(present([]), LSP)).toBe('Empty.');
+    expect(
+      conflictSideMarkdown(present({ vtsls: '1.0.0' }), 'settings/lsp-server-versions.json'),
+    ).toBe('- `vtsls`: `1.0.0`');
+    expect(conflictSideMarkdown(present('0.42.4'), 'settings/rtk-version.json')).toBe('`0.42.4`');
+    expect(conflictSideMarkdown(present(false), 'settings/rtk-enabled.json')).toBe('Off');
+  });
+
+  it('keeps a value that is no list in the json fence, and the environment too', () => {
+    expect(conflictSideMarkdown(present({ a: 1 }), LSP)).toBe('```json\n{\n  "a": 1\n}\n```');
+    expect(
+      conflictSideMarkdown(present({ web: 'nginx' }), 'project/environment.json#confirmedValues'),
+    ).toBe('```json\n{\n  "web": "nginx"\n}\n```');
+  });
+
+  it('is told apart from the RTK question and the render keys when an answer lands', () => {
+    expect(isSettingConflict({ unit: LSP })).toBe(true);
+    expect(isSettingConflict({ unit: 'project/environment.json' })).toBe(true);
+    expect(isSettingConflict({ unit: 'settings/rtk-enabled.json' })).toBe(false);
+    expect(isSettingConflict({ unit: 'project/render.json#framework' })).toBe(false);
+    expect(resolutionNotice([], [], [], ['keep_mine'])).toContain(
+      'Commit and push the changed file',
+    );
+    expect(resolutionNotice([], [], [], ['take_theirs'])).toBe(
+      "This install now uses your teammate's value.",
+    );
   });
 });

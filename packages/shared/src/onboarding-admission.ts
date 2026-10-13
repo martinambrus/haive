@@ -13,6 +13,7 @@ import { lstatNoFollow } from './fs-safe.js';
 import { lockPlanMerge } from './plan/merge-lock.js';
 import { KB_DIR } from './knowledge-paths.js';
 import {
+  blocksUpgrade,
   isImportMarker,
   PROJECT_STATE_IMPORT_STEP_ID,
   readRenderContextColumn,
@@ -480,7 +481,7 @@ export type UpgradeAdmission =
   | { admitted: false; reason: 'reset' | 'none' };
 
 /** The units of the repository's project state that a sync found changed on both installs and that
- *  nobody has answered yet. */
+ *  nobody has answered yet, those holding an upgrade or not. */
 export async function pendingConflictUnits(
   db: Database | DbTx,
   repositoryId: string,
@@ -498,7 +499,7 @@ export async function pendingConflictUnits(
 }
 
 /** The rule the banner and POST /tasks share: no live onboarding, no unanswered project state
- *  conflict, and an onboarding finished, or a row it wrote, since the reset epoch, or the render
+ *  conflict that holds upgrades (`blocksUpgrade`), and an onboarding finished, or a row it wrote, since the reset epoch, or the render
  *  context column of a clone. */
 export async function upgradeAdmission(
   db: Database | DbTx,
@@ -511,7 +512,7 @@ export async function upgradeAdmission(
   if (facts.liveTaskId) {
     return { admitted: false, reason: 'live-onboarding', taskId: facts.liveTaskId };
   }
-  const units = await pendingConflictUnits(db, repo.id);
+  const units = (await pendingConflictUnits(db, repo.id)).filter(blocksUpgrade);
   if (units.length > 0) return { admitted: false, reason: 'contested', units };
   if (hasCompletedSinceReset(facts, resetAt)) return { admitted: true };
   const newestArtifactAt = (await loadNewestLiveArtifactAt(db, userId, [repo.id])).get(repo.id);

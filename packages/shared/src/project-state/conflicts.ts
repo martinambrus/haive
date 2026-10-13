@@ -1,3 +1,6 @@
+import { sameValue } from './canonical.js';
+import { isPortableSettingName } from './settings.js';
+
 /** The unit of the whole render file; a key of it is `<RENDER_UNIT>#<key>`. */
 export const RENDER_UNIT = 'project/render.json';
 
@@ -12,11 +15,53 @@ export const RTK_ENABLED_UNIT = 'settings/rtk-enabled.json';
 export const isClaimUnit = (unit: string): boolean =>
   /^artifacts\/[^/]+~[0-9a-f]{32}\.json$/.test(unit);
 
+/** The unit of the whole environment file; a key of it is `<ENVIRONMENT_UNIT>#<key>`. */
+export const ENVIRONMENT_UNIT = 'project/environment.json';
+
+export const isEnvironmentUnit = (unit: string): boolean =>
+  unit === ENVIRONMENT_UNIT || unit.startsWith(`${ENVIRONMENT_UNIT}#`);
+
+/** The unit of one portable setting: its file in the record. */
+export const isSettingUnit = (unit: string): boolean => {
+  const named = /^settings\/([^/]+)\.json$/.exec(unit);
+  return named !== null && isPortableSettingName(named[1]!);
+};
+
 export const isConflictUnit = (unit: string): boolean =>
-  isRenderUnit(unit) || isClaimUnit(unit) || unit === RTK_ENABLED_UNIT;
+  isRenderUnit(unit) ||
+  isClaimUnit(unit) ||
+  isSettingUnit(unit) ||
+  isEnvironmentUnit(unit) ||
+  unit === RTK_ENABLED_UNIT;
+
+/** Whether an unanswered question about the unit holds upgrades and rollbacks. Of the settings and
+ *  the environment only RTK does: its off state takes files out of the next upgrade. */
+export const blocksUpgrade = (unit: string): boolean =>
+  isConflictUnit(unit) &&
+  (unit === RTK_ENABLED_UNIT || !(isSettingUnit(unit) || isEnvironmentUnit(unit)));
+
+/** The row of the RTK question about an imported RTK-off, whose base is what this install holds. A
+ *  sync never converges it: no merge contests that unit, so nothing it finds would be this question. */
+export const isRtkQuestion = (row: { unit: string; base: unknown; local: unknown }): boolean =>
+  row.unit === RTK_ENABLED_UNIT && sameValue(row.base, row.local);
 
 /** A conflict side as the `project_state_conflicts` columns hold it: `{ v }`, so a JSON null is a
  *  value, and NULL for a side that has no such unit. */
+const SETTING_LABELS: Readonly<Record<string, string>> = {
+  'scope-exclude-globs': 'Paths left out of the project scope',
+  'rtk-enabled': 'RTK command compression',
+  'rtk-version': 'RTK version',
+  'lsp-servers': 'Language servers',
+  'lsp-server-versions': 'Language server versions',
+  'chrome-devtools-mcp-version': 'Chrome DevTools MCP version',
+  'review-dimensions': 'Review dimensions',
+};
+
+const ENVIRONMENT_KEY_LABELS: Readonly<Record<string, string>> = {
+  envDetectData: 'Detected environment',
+  confirmedValues: 'Confirmed environment values',
+};
+
 export const CONFLICT_KEY_LABELS: Readonly<Record<string, string>> = {
   projectInfo: 'Project details',
   framework: 'Framework',
@@ -27,7 +72,12 @@ export const CONFLICT_KEY_LABELS: Readonly<Record<string, string>> = {
 /** What a person calls the setting a conflict unit holds, rather than its storage path. A claim
  *  unit names no path itself, so `claimPath` (read from a side) says which file it is about. */
 export function conflictUnitLabel(unit: string, claimPath?: string | null): string {
-  if (unit === RTK_ENABLED_UNIT) return 'RTK command compression';
+  if (isSettingUnit(unit)) return SETTING_LABELS[unit.slice('settings/'.length, -'.json'.length)]!;
+  if (unit === ENVIRONMENT_UNIT) return 'The project environment';
+  if (unit.startsWith(`${ENVIRONMENT_UNIT}#`)) {
+    const key = unit.slice(ENVIRONMENT_UNIT.length + 1);
+    return ENVIRONMENT_KEY_LABELS[key] ?? key;
+  }
   if (isClaimUnit(unit)) return `the claim for ${claimPath ?? 'a generated file'}`;
   if (unit === RENDER_UNIT) return 'The whole project record file';
   const key = unit.startsWith(`${RENDER_UNIT}#`) ? unit.slice(RENDER_UNIT.length + 1) : unit;

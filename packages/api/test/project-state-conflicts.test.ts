@@ -32,6 +32,8 @@ const OTHER_REPO_ROW = '00000000-0000-4000-8000-0000000000d4';
 const RTK_ROW = '00000000-0000-4000-8000-0000000000d5';
 const CLAIM_ROW = '00000000-0000-4000-8000-0000000000d6';
 const STRAY_ROW = '00000000-0000-4000-8000-0000000000d7';
+const SETTING_ROW = '00000000-0000-4000-8000-0000000000d8';
+const ENV_ROW = '00000000-0000-4000-8000-0000000000d9';
 const CLAIM_UNIT = claimFileName('docs/guide.md');
 const claim = (writtenHash: string) => ({
   path: 'docs/guide.md',
@@ -91,6 +93,15 @@ function seed() {
     incoming: null,
     detectedAt: new Date('2026-10-01T13:00:00Z'),
   });
+  row(SETTING_ROW, REPO, 'settings/lsp-servers.json', {
+    base: conflictSide(['vtsls']),
+    local: conflictSide(['pyright']),
+    incoming: conflictSide(['gopls']),
+    detectedAt: new Date('2026-10-01T13:30:00Z'),
+  });
+  row(ENV_ROW, REPO, 'project/environment.json#confirmedValues', {
+    detectedAt: new Date('2026-10-01T13:40:00Z'),
+  });
   row(STRAY_ROW, REPO, 'artifacts/not-a-claim.json', {
     detectedAt: new Date('2026-10-01T14:00:00Z'),
   });
@@ -117,7 +128,14 @@ describe('GET /repos/:id/project-state/conflicts', () => {
 
     expect(res.status).toBe(200);
     const { conflicts } = (await res.json()) as { conflicts: Record<string, unknown>[] };
-    expect(conflicts.map((c) => c.id)).toEqual([PENDING, PENDING_WHOLE, RTK_ROW, CLAIM_ROW]);
+    expect(conflicts.map((c) => c.id)).toEqual([
+      PENDING,
+      PENDING_WHOLE,
+      RTK_ROW,
+      CLAIM_ROW,
+      SETTING_ROW,
+      ENV_ROW,
+    ]);
     expect(conflicts[0]).toEqual({
       id: PENDING,
       unit: 'project/render.json#acceptedAgentIds',
@@ -166,6 +184,22 @@ describe('GET /repos/:id/project-state/conflicts', () => {
     });
   });
 
+  it('lists a settings question and an environment key question, the same way', async () => {
+    const { conflicts } = (await (await get()).json()) as { conflicts: Record<string, unknown>[] };
+    expect(conflicts.find((c) => c.id === SETTING_ROW)).toEqual({
+      id: SETTING_ROW,
+      unit: 'settings/lsp-servers.json',
+      key: null,
+      base: { present: true, value: ['vtsls'] },
+      local: { present: true, value: ['pyright'] },
+      incoming: { present: true, value: ['gopls'] },
+      detectedAt: '2026-10-01T13:30:00.000Z',
+      resolution: null,
+      resolvedAt: null,
+    });
+    expect(conflicts.find((c) => c.id === ENV_ROW)).toMatchObject({ key: 'confirmedValues' });
+  });
+
   it('leaves out a row whose unit is no unit it can answer', async () => {
     const { conflicts } = (await (await get()).json()) as { conflicts: Record<string, unknown>[] };
     expect(conflicts.map((c) => c.id)).not.toContain(STRAY_ROW);
@@ -189,6 +223,13 @@ describe('GET /repos/:id/project-state/conflicts/:conflictId', () => {
     const open = await app.request(`/repos/${REPO}/project-state/conflicts/${PENDING}`);
     const openBody = (await open.json()) as { conflict: unknown };
     expect(openBody.conflict).toMatchObject({ id: PENDING, resolution: null });
+  });
+
+  it('returns a settings question', async () => {
+    const res = await app.request(`/repos/${REPO}/project-state/conflicts/${SETTING_ROW}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { conflict: unknown };
+    expect(body.conflict).toMatchObject({ id: SETTING_ROW, unit: 'settings/lsp-servers.json' });
   });
 
   it('returns the RTK question', async () => {

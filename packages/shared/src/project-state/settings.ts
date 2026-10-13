@@ -1,4 +1,12 @@
-import { ONBOARDING_ENVIRONMENT_SCHEMA_VERSION } from '../types/index.js';
+import { stripManagedKnowledgeGlobs, trimGlobSlashes } from '../knowledge-paths.js';
+import { normalizeReviewDimensionIds } from '../review/dimensions.js';
+import { LSP_KEY_SET } from '../tooling/lsp-servers.js';
+import {
+  ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+  mirroredEnvDetectData,
+  type OnboardingEnvironmentMirror,
+} from '../types/index.js';
+import { sameValue } from './canonical.js';
 import type { ProjectEnvironment } from './record.js';
 
 /** The record's portable settings, by file name. App login and verify commands are left out on
@@ -52,6 +60,17 @@ export function portableSettingsOf(row: PortableSettingColumns): Record<string, 
   return settings;
 }
 
+/** Without `rtk-enabled` unless the repository's RTK choice is recorded: `rtk_enabled` is NOT NULL
+ *  default true, so a column nobody chose must neither travel nor count as this install's value. */
+export function withoutUnchosenRtk(
+  settings: Readonly<Record<string, unknown>>,
+  rtkChoiceRecorded: boolean,
+): Record<string, unknown> {
+  const out = Object.assign(Object.create(null) as Record<string, unknown>, settings);
+  if (!rtkChoiceRecorded) delete out['rtk-enabled'];
+  return out;
+}
+
 /** The environment unit from `repositories.onboarding_environment` (the mirror without its
  *  schema version), or null when the column holds none a reader of this release takes. */
 export function environmentUnitOf(column: unknown): ProjectEnvironment | null {
@@ -65,3 +84,144 @@ export function environmentUnitOf(column: unknown): ProjectEnvironment | null {
 
 /** The `settings/<name>.json` files of the record's settings, relative to the state directory. */
 export const settingFileName = (name: string): string => `settings/${name}.json`;
+
+const COLUMN_OF = {
+  'scope-exclude-globs': 'scopeExcludeGlobs',
+  'rtk-enabled': 'rtkEnabled',
+  'rtk-version': 'rtkVersion',
+  'lsp-servers': 'lspServers',
+  'lsp-server-versions': 'lspServerVersions',
+  'chrome-devtools-mcp-version': 'chromeDevtoolsMcpVersion',
+  'review-dimensions': 'reviewDimensions',
+} as const satisfies Record<(typeof PORTABLE_SETTING_NAMES)[number], keyof PortableSettingColumns>;
+
+export const isPortableSettingName = (name: string): boolean =>
+  Object.prototype.hasOwnProperty.call(COLUMN_OF, name);
+
+/** Settings an import never unsets: a column that cannot hold nothing, and the scope list, which is
+ *  NULL only while nobody chose one, so another install's silence says nothing about it. */
+const NEVER_UNSET: ReadonlySet<string> = new Set(['rtk-enabled', 'scope-exclude-globs']);
+export const isUnsettableSetting = (name: string): boolean => !NEVER_UNSET.has(name);
+
+const nonEmptyText = (value: unknown): string | null =>
+  typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+
+export type SettingCheck = { ok: true; value: unknown } | { ok: false };
+
+/** A setting as the column stores it, by the same rules the repository routes apply to what a person
+ *  sends; `ok: false` for a value the column could not hold. */
+export function normalizeSetting(name: string, value: unknown): SettingCheck {
+  const valid = (v: unknown): SettingCheck => ({ ok: true, value: v });
+  switch (name) {
+    case 'scope-exclude-globs':
+      return isStringList(value)
+        ? valid(
+            stripManagedKnowledgeGlobs([
+              ...new Set(value.map(trimGlobSlashes).filter((g) => g.length > 0)),
+            ]).sort(),
+          )
+        : { ok: false };
+    case 'rtk-enabled':
+      return typeof value === 'boolean' ? valid(value) : { ok: false };
+    case 'rtk-version':
+    case 'chrome-devtools-mcp-version': {
+      const text = nonEmptyText(value);
+      return text === null ? { ok: false } : valid(text);
+    }
+    case 'lsp-servers':
+      return isStringList(value)
+        ? valid([...new Set(value.filter((s) => LSP_KEY_SET.has(s)))])
+        : { ok: false };
+    case 'lsp-server-versions': {
+      if (!isVersionMap(value)) return { ok: false };
+      const clean: Record<string, string> = {};
+      for (const [key, version] of Object.entries(value)) {
+        const text = nonEmptyText(version);
+        if (LSP_KEY_SET.has(key) && text !== null) clean[key] = text;
+      }
+      return valid(clean);
+    }
+    case 'review-dimensions': {
+      const ids = isStringList(value) ? normalizeReviewDimensionIds(value) : [];
+      return ids.length === 0 ? { ok: false } : valid(ids);
+    }
+    default:
+      return { ok: false };
+  }
+}
+
+/** The `repositories` columns to write so a repository holds `value` for the setting (undefined:
+ *  unset it), or null when there is nothing to write: an unknown name, a value the column cannot hold,
+ *  or a setting that is never unset. */
+export function settingColumnUpdate(
+  name: string,
+  value: unknown,
+): Partial<Record<keyof PortableSettingColumns, unknown>> | null {
+  if (!isPortableSettingName(name)) return null;
+  const column = COLUMN_OF[name as keyof typeof COLUMN_OF];
+  if (value === undefined) return isUnsettableSetting(name) ? { [column]: null } : null;
+  const checked = normalizeSetting(name, value);
+  return checked.ok ? { [column]: checked.value } : null;
+}
+
+export interface SettingsIntake {
+  /** What the merge sees as the checkout's: each valid setting normalised, the rest as this install
+   *  holds them, so that they move nothing. */
+  incoming: Record<string, unknown>;
+  /** The checkout's settings, normalised, that a base may keep: the valid ones. */
+  accepted: Record<string, unknown>;
+  /** Names whose checkout value no column could hold; left unimported. */
+  rejected: string[];
+}
+
+/** Reads the checkout's portable settings against this install's. A name it does not hold stays as
+ *  this install has it when that setting is never unset, and a value that is not valid is left out. */
+export function intakeSettings(
+  checkout: Readonly<Record<string, unknown>>,
+  local: Readonly<Record<string, unknown>>,
+): SettingsIntake {
+  const incoming = Object.create(null) as Record<string, unknown>;
+  const accepted = Object.create(null) as Record<string, unknown>;
+  const rejected: string[] = [];
+  for (const name of PORTABLE_SETTING_NAMES) {
+    const held = Object.prototype.hasOwnProperty.call(checkout, name);
+    const checked = held ? normalizeSetting(name, checkout[name]) : null;
+    if (checked?.ok) {
+      incoming[name] = checked.value;
+      accepted[name] = checked.value;
+      continue;
+    }
+    if (held) rejected.push(name);
+    if ((held || !isUnsettableSetting(name)) && local[name] !== undefined) {
+      incoming[name] = local[name];
+    }
+  }
+  return { incoming, accepted, rejected };
+}
+
+/** The environment as the column mirrors it, without the prompt-only fields of an older release. */
+export const normalizeEnvironment = (environment: ProjectEnvironment): ProjectEnvironment => ({
+  envDetectData: mirroredEnvDetectData(environment.envDetectData),
+  confirmedValues: environment.confirmedValues,
+});
+
+/** The `onboarding_environment` column for an environment unit. */
+export const environmentColumnOf = (
+  environment: ProjectEnvironment,
+): OnboardingEnvironmentMirror => ({
+  schemaVersion: ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+  envDetectData: environment.envDetectData,
+  confirmedValues: environment.confirmedValues,
+});
+
+/** The portable settings of a record that differ from what the file held, for the names not in
+ *  `except`: the settings the writer has to bring the checkout's files to. */
+export function settingsDifferingFrom(
+  merged: Readonly<Record<string, unknown>>,
+  files: Readonly<Record<string, unknown>>,
+  except: ReadonlySet<string>,
+): string[] {
+  return PORTABLE_SETTING_NAMES.filter(
+    (name) => !except.has(name) && !sameValue(merged[name], files[name]),
+  );
+}

@@ -4,11 +4,17 @@ import { claimFileName } from '../src/project-state/names.js';
 import {
   RENDER_UNIT,
   RTK_ENABLED_UNIT,
+  blocksUpgrade,
   conflictBody,
+  conflictUnitLabel,
   isClaimUnit,
   isConflictUnit,
+  isEnvironmentUnit,
   isRenderUnit,
+  isRtkQuestion,
+  isSettingUnit,
 } from '../src/project-state/conflicts.js';
+import { PORTABLE_SETTING_NAMES } from '../src/project-state/settings.js';
 
 describe('conflict units', () => {
   it('names the RTK question by one constant that is no render unit', () => {
@@ -90,5 +96,75 @@ describe('conflictUnitLabel', () => {
     const unit = claimFileName('docs/guide.md');
     expect(conflictUnitLabel(unit, 'docs/guide.md')).toBe('the claim for docs/guide.md');
     expect(conflictUnitLabel(unit)).toBe('the claim for a generated file');
+  });
+});
+
+describe('setting and environment units', () => {
+  it('are conflict units: each portable setting file, the environment and a key of it', () => {
+    for (const name of PORTABLE_SETTING_NAMES)
+      expect(isConflictUnit(`settings/${name}.json`)).toBe(true);
+    expect(isConflictUnit('project/environment.json')).toBe(true);
+    expect(isConflictUnit('project/environment.json#confirmedValues')).toBe(true);
+    expect(isSettingUnit('settings/lsp-servers.json')).toBe(true);
+    expect(isEnvironmentUnit('project/environment.json#envDetectData')).toBe(true);
+  });
+
+  it('are nothing else that looks like one', () => {
+    for (const other of [
+      'settings/app-auth.json',
+      'settings/verify-commands.json',
+      'settings/lsp-servers.json#x',
+      'settings/../lsp-servers.json',
+      'project/environment.jsonx',
+    ]) {
+      expect(isConflictUnit(other)).toBe(false);
+    }
+  });
+
+  it('hold an upgrade only for render, claim and RTK units', () => {
+    expect(blocksUpgrade(RTK_ENABLED_UNIT)).toBe(true);
+    expect(blocksUpgrade(RENDER_UNIT)).toBe(true);
+    expect(blocksUpgrade(`${RENDER_UNIT}#framework`)).toBe(true);
+    expect(blocksUpgrade(claimFileName('docs/a.md'))).toBe(true);
+    for (const name of PORTABLE_SETTING_NAMES.filter((n) => n !== 'rtk-enabled')) {
+      expect(blocksUpgrade(`settings/${name}.json`)).toBe(false);
+    }
+    expect(blocksUpgrade('project/environment.json')).toBe(false);
+    expect(blocksUpgrade('project/environment.json#confirmedValues')).toBe(false);
+    expect(blocksUpgrade('settings/app-auth.json')).toBe(false);
+  });
+
+  it('name the RTK question by its sides: base equals local', () => {
+    const side = (v: unknown) => ({ v });
+    expect(isRtkQuestion({ unit: RTK_ENABLED_UNIT, base: side(true), local: side(true) })).toBe(
+      true,
+    );
+    expect(isRtkQuestion({ unit: RTK_ENABLED_UNIT, base: side(true), local: side(false) })).toBe(
+      false,
+    );
+    expect(
+      isRtkQuestion({ unit: 'settings/lsp-servers.json', base: side(1), local: side(1) }),
+    ).toBe(false);
+  });
+
+  it('are labelled as a person knows them', () => {
+    expect(conflictUnitLabel('settings/lsp-servers.json')).toBe('Language servers');
+    expect(conflictUnitLabel('settings/review-dimensions.json')).toBe('Review dimensions');
+    expect(conflictUnitLabel('settings/scope-exclude-globs.json')).toBe(
+      'Paths left out of the project scope',
+    );
+    expect(conflictUnitLabel('project/environment.json')).toBe('The project environment');
+    expect(conflictUnitLabel('project/environment.json#envDetectData')).toBe(
+      'Detected environment',
+    );
+    expect(conflictUnitLabel('project/environment.json#other')).toBe('other');
+  });
+
+  it('serve as a body with the key of the environment, and none for a setting', () => {
+    const base = { id: 'x', base: null, local: null, incoming: null, detectedAt: new Date(0) };
+    const body = (unit: string) =>
+      conflictBody({ ...base, unit, resolution: null, resolvedAt: null });
+    expect(body('project/environment.json#confirmedValues').key).toBe('confirmedValues');
+    expect(body('settings/lsp-servers.json').key).toBeNull();
   });
 });

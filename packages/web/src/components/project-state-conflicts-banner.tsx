@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api-client';
+import { blocksUpgrade } from '@haive/shared/project-state-conflicts';
 import { Badge, Button } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader } from '@/components/dialog';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -18,6 +19,7 @@ import {
   conflictSideMarkdown,
   isClaimConflict,
   isRtkConflict,
+  isSettingConflict,
   stillListed,
   answerAndConfirm,
   type ProjectStateAnswer,
@@ -66,7 +68,11 @@ export function ProjectStateConflictsView({
           </Badge>
           <InlineMarkdown
             className="text-neutral-300"
-            body="This install and another one changed the same setting differently. Upgrades and rollbacks are held until every question is answered."
+            body={
+              conflicts.some((c) => blocksUpgrade(c.unit))
+                ? 'This install and another one changed the same setting differently. Upgrades and rollbacks are held until every question is answered.'
+                : "This install and another one changed the same setting differently. This install's value stays in effect and upgrades are not held."
+            }
           />
         </div>
       )}
@@ -132,6 +138,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const [answered, setAnswered] = useState<ProjectStateAnswer[]>([]);
   const [rtkAnswered, setRtkAnswered] = useState<ProjectStateAnswer[]>([]);
   const [claimAnswered, setClaimAnswered] = useState<ProjectStateAnswer[]>([]);
+  const [settingAnswered, setSettingAnswered] = useState<ProjectStateAnswer[]>([]);
   const [messages, setMessages] = useState<Record<string, ConflictMessage>>({});
   const [confirming, setConfirming] = useState<{
     conflict: ProjectStateConflictBody;
@@ -144,8 +151,12 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const recordAnswers = useCallback((items: { answer: ProjectStateAnswer; unit: string }[]) => {
     const rtk = items.filter(isRtkConflict).map((i) => i.answer);
     const claims = items.filter(isClaimConflict).map((i) => i.answer);
-    const rest = items.filter((i) => !isRtkConflict(i) && !isClaimConflict(i)).map((i) => i.answer);
+    const settings = items.filter(isSettingConflict).map((i) => i.answer);
+    const rest = items
+      .filter((i) => !isRtkConflict(i) && !isClaimConflict(i) && !isSettingConflict(i))
+      .map((i) => i.answer);
     if (rest.length > 0) setAnswered((prev) => [...prev, ...rest]);
+    if (settings.length > 0) setSettingAnswered((prev) => [...prev, ...settings]);
     if (rtk.length > 0) setRtkAnswered((prev) => [...prev, ...rtk]);
     if (claims.length > 0) setClaimAnswered((prev) => [...prev, ...claims]);
   }, []);
@@ -295,7 +306,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       )}
       <ProjectStateConflictsView
         conflicts={conflicts}
-        notice={resolutionNotice(answered, rtkAnswered, claimAnswered)}
+        notice={resolutionNotice(answered, rtkAnswered, claimAnswered, settingAnswered)}
         messages={messages}
         busyId={busyId}
         pendingIds={pendingIds}

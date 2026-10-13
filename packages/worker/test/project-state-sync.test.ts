@@ -241,7 +241,8 @@ async function setup(seed: Seed = {}) {
     status: 'ready',
     statusMessage: 'The previous folder was not a usable checkout; it was kept at /aside.',
     updatedAt: new Date(1000),
-    rtkEnabled: true,
+    // Holds no value, so the render-only checkouts below are coherent with it; the settings cases set it.
+    rtkEnabled: null,
     renderContext: jsonb(seed.column ?? null),
   });
   fake.insert(repositories, { id: OTHER, userId: USER, name: 'other', source: 'blank' });
@@ -1463,69 +1464,360 @@ describe('syncProjectStateFromCheckout: nothing to import', () => {
 });
 
 describe('syncProjectStateFromCheckout: units this release does not map', () => {
-  const settings = Object.assign(Object.create(null) as Record<string, unknown>, {
-    'scope-exclude-globs': ['vendor/**'],
-    'review-dimensions': ['security'],
-  });
-  const full = (over: Partial<ProjectStateRecord> = {}): ProjectStateRecord => ({
-    environment: { envDetectData: { project: { name: 'acme' } }, confirmedValues: {} },
-    render: BASE,
-    cli: ['claude-code', 'codex'],
-    settings,
-    claims: [],
-    bundles: [{ source: 'git:https://example.com/bundle.git', name: 'bundle' }],
-    ...over,
-  });
-
-  it('are not applied; a first sync keeps the checkout settings and environment in the base, and bundle descriptors', async () => {
+  it('leaves the CLI set and keeps the bundle descriptors of the checkout in the base', async () => {
     const s = await setup();
-    await s.putRecord(full());
-    const reposBefore = json(s.fake.rows(schema.repositories)) as Json[];
+    const bundles = [{ source: 'git:https://example.com/bundle.git', name: 'bundle' }];
+    await s.putRecord({ ...record(BASE), cli: ['claude-code', 'codex'], bundles });
 
     const { outcome } = await s.run();
 
     expect(outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
     const base = json(s.syncRow()?.baseSnapshot) as Json;
-    expect(base).toEqual({
-      ...(baseOf(BASE) as Json),
-      bundles: full().bundles,
-      settings: json(settings),
-      environment: full().environment,
-    });
     expect(base.cli).toEqual([]);
-    expect(base.claims).toEqual([]);
-    const after = json(s.fake.rows(schema.repositories)) as Json[];
-    const without = (rows: Json[]) => rows.map(({ renderContext: _c, ...rest }) => rest);
-    expect(without(after)).toEqual(without(reposBefore));
+    expect(base.bundles).toEqual(bundles);
+  });
+});
+
+const settingsOf = (values: Record<string, unknown>): Record<string, unknown> =>
+  Object.assign(Object.create(null) as Record<string, unknown>, values);
+const envOf = (name: string, confirmed: Json = {}) => ({
+  envDetectData: { project: { name } },
+  confirmedValues: confirmed,
+});
+const repoRow = (s: Setup): Json => s.fake.rows(schema.repositories).find((r) => r.id === REPO)!;
+const withSettings = (
+  settings: Record<string, unknown>,
+  environment: ProjectStateRecord['environment'] = null,
+): ProjectStateRecord => ({ ...record(BASE), settings: settingsOf(settings), environment });
+const syncBase = (
+  settings: Record<string, unknown>,
+  environment: ProjectStateRecord['environment'] = null,
+): unknown => json(normalizeProjectState(withSettings(settings, environment)));
+const dirtyMarks = (s: Setup) => s.fake.rows(schema.projectStateOutbox);
+
+describe('syncProjectStateFromCheckout: the portable settings and the environment', () => {
+  it('first sync: the checkout wins over a column nobody chose, and the next sync writes nothing', async () => {
+    const s = await setup();
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true, reviewDimensions: null });
+    await s.putRecord(
+      withSettings(
+        { 'rtk-enabled': false, 'review-dimensions': ['security'] },
+        envOf('acme', { a: 1 }),
+      ),
+    );
+
+    const first = await s.run();
+
+    expect(first.outcome).toBe('applied');
+    const row = repoRow(s);
+    expect(row.rtkEnabled).toBe(false);
+    expect(row.reviewDimensions).toEqual(['security']);
+    expect(json(row.onboardingEnvironment)).toEqual({
+      schemaVersion: 1,
+      ...envOf('acme', { a: 1 }),
+    });
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(
+      syncBase(
+        { 'rtk-enabled': false, 'review-dimensions': ['security'] },
+        envOf('acme', { a: 1 }),
+      ),
+    );
+    expect(dirtyMarks(s)).toEqual([]);
+    const before = s.dump();
+
+    const second = await s.run();
+
+    expect(second.outcome).toBe('unchanged');
+    expect(second.trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
   });
 
-  it('changing them in the checkout does not make the next sync write anything, and the base keeps the previous ones', async () => {
+  it('first sync: a set joins what both installs hold, the other settings take the checkout', async () => {
     const s = await setup();
-    await s.putRecord(full());
+    s.fake.patch(schema.repositories, REPO, { scopeExcludeGlobs: ['mine'], rtkVersion: '0.1.0' });
+    await s.putRecord(withSettings({ 'scope-exclude-globs': ['theirs'], 'rtk-version': '0.42.4' }));
+
     await s.run();
-    const before = s.dump();
-    const baseBefore = json(s.syncRow()?.baseSnapshot) as Json;
-    await rm(join(s.root, STATE_DIR), { recursive: true });
+
+    expect(repoRow(s).scopeExcludeGlobs).toEqual(['mine', 'theirs']);
+    expect(repoRow(s).rtkVersion).toBe('0.42.4');
+  });
+
+  it('a base an earlier release wrote, holding no setting, merges the settings as no base too', async () => {
+    const s = await setup({ column: column(BASE), sync: { base: baseOf(BASE) } });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+    await s.putRecord(withSettings({ 'rtk-enabled': false }));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(repoRow(s).rtkEnabled).toBe(false);
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('a change the other install made reaches the column, and a change of ours stays', async () => {
+    const base = syncBase({ 'scope-exclude-globs': ['a'], 'rtk-version': '0.1.0' });
+    const s = await setup({ column: column(BASE), sync: { base } });
+    s.fake.patch(schema.repositories, REPO, {
+      scopeExcludeGlobs: ['a', 'mine'],
+      rtkVersion: '0.1.0',
+      rtkEnabled: null,
+    });
     await s.putRecord(
-      full({
-        environment: { envDetectData: { project: { name: 'renamed' } }, confirmedValues: { a: 1 } },
-        cli: ['codex'],
-        settings: Object.assign(Object.create(null) as Record<string, unknown>, {
-          'review-dimensions': ['performance'],
-        }),
-      }),
+      withSettings({ 'scope-exclude-globs': ['a', 'theirs'], 'rtk-version': '0.2.0' }),
     );
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(repoRow(s).scopeExcludeGlobs).toEqual(['a', 'mine', 'theirs']);
+    expect(repoRow(s).rtkVersion).toBe('0.2.0');
+    expect(s.pending()).toEqual([]);
+    expect(dirtyMarks(s)).toHaveLength(1);
+  });
+
+  it('a setting both installs set differently is one pending question; ours stands, the base is kept', async () => {
+    const base = syncBase({ 'lsp-servers': ['vtsls'] });
+    const s = await setup({ column: column(BASE), sync: { base } });
+    s.fake.patch(schema.repositories, REPO, { lspServers: ['pyright'], rtkEnabled: null });
+    await s.putRecord(withSettings({ 'lsp-servers': ['gopls'] }));
 
     const { outcome, trace } = await s.run();
 
+    expect(outcome).toBe('conflict');
+    expect(repoRow(s).lspServers).toEqual(['pyright']);
+    const rows = s.pending();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      unit: 'settings/lsp-servers.json',
+      base: { v: ['vtsls'] },
+      local: { v: ['pyright'] },
+      incoming: { v: ['gopls'] },
+    });
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(base);
+    expect(s.syncRow()?.lastError ?? null).toBeNull();
+    expect(dirtyMarks(s)).toEqual([]);
+    expect(writesTo(trace, 'repositories')).toEqual([]);
+
+    const again = await s.run();
+    expect(again.outcome).toBe('conflict');
+    expect(again.trace.filter(isWrite)).toEqual([]);
+  });
+
+  it('a pending setting question converges when the sides come to agree', async () => {
+    const base = syncBase({ 'lsp-servers': ['vtsls'] });
+    const s = await setup({ column: column(BASE), sync: { base } });
+    s.fake.patch(schema.repositories, REPO, { lspServers: ['pyright'], rtkEnabled: null });
+    await s.putRecord(withSettings({ 'lsp-servers': ['gopls'] }));
+    await s.run();
+    s.fake.patch(schema.repositories, REPO, { lspServers: ['gopls'] });
+
+    const { outcome } = await s.run();
+
     expect(outcome).toBe('unchanged');
-    expect(trace.filter(isWrite)).toEqual([]);
-    expect(s.dump()).toEqual(before);
-    const base = json(s.syncRow()?.baseSnapshot) as Json;
-    expect(base.settings).toEqual(json(settings));
-    expect(base.environment).toEqual(baseBefore.environment);
-    expect(base.environment).toEqual(full().environment);
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows().map((r) => r.resolution)).toEqual(['converged']);
+  });
+
+  it('an environment key both installs changed is one question per key; the other key is taken', async () => {
+    const base = syncBase({}, envOf('acme', { a: 1 }));
+    const s = await setup({ column: column(BASE), sync: { base } });
+    s.fake.patch(schema.repositories, REPO, {
+      rtkEnabled: null,
+      onboardingEnvironment: { schemaVersion: 1, ...envOf('mine', { a: 1 }) },
+    });
+    await s.putRecord(withSettings({}, { ...envOf('theirs', { a: 2 }) }));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(s.pending().map((r) => r.unit)).toEqual(['project/environment.json#envDetectData']);
+    expect(json(repoRow(s).onboardingEnvironment)).toEqual({
+      schemaVersion: 1,
+      ...envOf('mine', { a: 2 }),
+    });
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(base);
+  });
+
+  it('strips the prompt-only fields of an older release from an imported environment', async () => {
+    const s = await setup();
+    await s.putRecord(
+      withSettings(
+        {},
+        { envDetectData: { project: { name: 'acme' }, __digest: 'x' }, confirmedValues: {} },
+      ),
+    );
+
+    await s.run();
+
+    expect(json(repoRow(s).onboardingEnvironment)).toEqual({ schemaVersion: 1, ...envOf('acme') });
+  });
+
+  it('normalises a value as the routes do: unknown servers, unknown dimensions, managed globs', async () => {
+    const s = await setup();
+    await s.putRecord(
+      withSettings({
+        'lsp-servers': ['vtsls', 'made-up', 'vtsls'],
+        'lsp-server-versions': { vtsls: ' 1.0.0 ', 'made-up': '2', pyright: '' },
+        'review-dimensions': ['security', 'nope'],
+        'scope-exclude-globs': ['/vendor/', 'b', '', 'a'],
+      }),
+    );
+
+    await s.run();
+
+    const row = repoRow(s);
+    expect(row.lspServers).toEqual(['vtsls']);
+    expect(row.lspServerVersions).toEqual({ vtsls: '1.0.0' });
+    expect(row.reviewDimensions).toEqual(['security']);
+    expect(row.scopeExcludeGlobs).toEqual(['a', 'b', 'vendor']);
+  });
+
+  it('refuses an invalid value for that setting alone: the column stands and the base keeps the old value', async () => {
+    const base = syncBase({ 'review-dimensions': ['security'] });
+    const s = await setup({ column: column(BASE), sync: { base } });
+    s.fake.patch(schema.repositories, REPO, {
+      reviewDimensions: ['security'],
+      rtkEnabled: null,
+    });
+    await s.putRecord(withSettings({ 'review-dimensions': ['nope'], 'rtk-version': '9.9.9' }));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(repoRow(s).reviewDimensions).toEqual(['security']);
+    expect(repoRow(s).rtkVersion).toBe('9.9.9');
+    expect(s.pending()).toEqual([]);
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(
+      syncBase({ 'review-dimensions': ['security'], 'rtk-version': '9.9.9' }),
+    );
+    expect(dirtyMarks(s)).toHaveLength(1);
+  });
+
+  it('an absent scope list leaves the column alone and asks the writer to bring the file back', async () => {
+    const base = syncBase({ 'scope-exclude-globs': ['a'] });
+    const s = await setup({ column: column(BASE), sync: { base } });
+    s.fake.patch(schema.repositories, REPO, { scopeExcludeGlobs: ['a'], rtkEnabled: null });
+    await s.putRecord(withSettings({}));
+
+    await s.run();
+
+    expect(repoRow(s).scopeExcludeGlobs).toEqual(['a']);
+    expect(dirtyMarks(s)).toHaveLength(1);
+  });
+
+  it('a setting the other install unset is unset here, where nobody changed it', async () => {
+    const base = syncBase({ 'rtk-version': '0.1.0' });
+    const s = await setup({ column: column(BASE), sync: { base } });
+    s.fake.patch(schema.repositories, REPO, { rtkVersion: '0.1.0', rtkEnabled: null });
+    await s.putRecord(withSettings({}));
+
+    await s.run();
+
+    expect(repoRow(s).rtkVersion ?? null).toBeNull();
+  });
+
+  describe('an RTK choice this install never recorded', () => {
+    const RTK_FILE = join(STATE_DIR, 'settings/rtk-enabled.json');
+    const unrecorded = (base: unknown = baseOf(BASE)): Seed => ({
+      column: column(BASE, false),
+      sync: { base },
+    });
+
+    it('takes the other install’s value, with no conflict, and keeps it out of the base', async () => {
+      const s = await setup(unrecorded());
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await s.putRecord(withSettings({ 'rtk-enabled': false }));
+
+      const { outcome } = await s.run();
+
+      expect(outcome).toBe('applied');
+      expect(repoRow(s).rtkEnabled).toBe(false);
+      expect(s.pending()).toEqual([]);
+      expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({});
+      expect(dirtyMarks(s)).toEqual([]);
+    });
+
+    it('then the next writer leaves the other install’s file as it is', async () => {
+      const s = await setup(unrecorded());
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await s.putRecord(withSettings({ 'rtk-enabled': false }));
+      await s.run();
+      const before = await readFile(join(s.root, RTK_FILE), 'utf8');
+
+      await s.write(contextA(), false);
+
+      expect(await readFile(join(s.root, RTK_FILE), 'utf8')).toBe(before);
+      expect(JSON.parse(before)).toBe(false);
+      expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({});
+    });
+
+    it('leaves the default alone when the record has no file, and asks for none', async () => {
+      const s = await setup(unrecorded());
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await s.putRecord(withSettings({}));
+
+      const { trace } = await s.run();
+
+      expect(repoRow(s).rtkEnabled).toBe(true);
+      expect(writesTo(trace, 'repositories')).toEqual([]);
+      expect(dirtyMarks(s)).toEqual([]);
+    });
+
+    it('a recorded choice is written as before: the file and the base hold it', async () => {
+      const s = await setup({ column: column(BASE, true), sync: { base: baseOf(BASE) } });
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await s.write(contextA(), true);
+
+      expect(JSON.parse(await readFile(join(s.root, RTK_FILE), 'utf8'))).toBe(true);
+      expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-enabled': true });
+    });
+  });
+
+  it('an imported RTK-off closes the pending RTK question as converged', async () => {
+    const s = await setup();
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit: 'settings/rtk-enabled.json',
+      base: { v: true },
+      local: { v: true },
+      incoming: { v: false },
+    });
+    await s.putRecord(withSettings({ 'rtk-enabled': false }));
+
+    await s.run();
+
+    expect(repoRow(s).rtkEnabled).toBe(false);
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows().map((r) => r.resolution)).toEqual(['converged']);
+  });
+
+  it('never converges the RTK question itself: a sync that finds RTK on leaves it pending', async () => {
+    const base = syncBase({ 'rtk-enabled': true });
+    const s = await setup({ column: column(BASE), sync: { base } });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit: 'settings/rtk-enabled.json',
+      base: { v: true },
+      local: { v: true },
+      incoming: { v: false },
+    });
+    await s.putRecord(withSettings({ 'rtk-enabled': true }));
+
+    await s.run();
+
+    expect(s.pending().map((r) => r.unit)).toEqual(['settings/rtk-enabled.json']);
+  });
+
+  it('keeps a settings file of a name this release does not know out of the base', async () => {
+    const s = await setup();
+    await s.putRecord(withSettings({ 'rtk-version': '0.1.0', 'from-the-future': 1 }));
+
+    await s.run();
+
+    expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-version': '0.1.0' });
   });
 });
 
