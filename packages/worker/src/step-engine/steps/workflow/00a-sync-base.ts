@@ -273,7 +273,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     requiredCapabilities: ['tool_use', 'file_write'],
     selectedMerge: (formValues) => formValues.syncAction === 'merge',
     buildFixPrompt: ({ featureBranch, guidance }) =>
-      buildMergeFixPrompt(featureBranch, undefined, guidance),
+      buildMergeFixPrompt(featureBranch, undefined, guidance, true),
     buildClarificationForm: ({ baseBranch, featureBranch, uncertainty }) => ({
       title: 'Sync conflict — your input needed',
       description: `The AI is unsure how to merge ${featureBranch} into ${baseBranch}.`,

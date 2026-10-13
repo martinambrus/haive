@@ -112,7 +112,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // per-task opt-out on top of this.
     squashable: true,
     buildFixPrompt: ({ featureBranch, guidance }) =>
-      buildMergeFixPrompt(featureBranch, undefined, guidance),
+      buildMergeFixPrompt(featureBranch, undefined, guidance, true),
     buildClarificationForm: ({ baseBranch, featureBranch, uncertainty }) => ({
       title: 'Merge conflict — your input needed',
       description: `The AI is unsure how to resolve the merge of ${featureBranch} into ${baseBranch}.`,

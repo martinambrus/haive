@@ -246,7 +246,7 @@ export const onboardingPushStep: StepDefinition<OnboardingPushDetect, Onboarding
     requiredCapabilities: ['tool_use', 'file_write'],
     selectedMerge: (formValues) => formValues.pushBase === true,
     buildFixPrompt: ({ featureBranch, guidance }) =>
-      buildMergeFixPrompt(featureBranch, undefined, guidance),
+      buildMergeFixPrompt(featureBranch, undefined, guidance, true),
     buildClarificationForm: ({ baseBranch, featureBranch, uncertainty }) => ({
       title: 'Push conflict - your input needed',
       description: `The AI is unsure how to merge ${featureBranch} into ${baseBranch}.`,

@@ -190,5 +190,14 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   (`plan_merge.discard_skipped`),
   and a move that fails keeps the worktree (`plan_merge.discard_failed`).
 
+Haive's own files merge before any fixer or person sees a conflict. Right after the merge opens, and
+again when a Retry reopens it, the resolver runs `resolveHaiveProjectionConflicts` (the plan merge's
+three-way merge of `.haive-data/plan.{json,md}` and of the `.haive-data/state/` record) in the merge
+dir. A merge left with nothing else unmerged is committed host-side and finishes as a clean one does,
+with no fixer and no form; otherwise the list the fixer and the clarification form get omits the
+paths already resolved. A side it fell back on is logged and added to the step's warning. The fixer
+prompts (the three merge steps' and `01-plan-merge`'s) say to leave `.haive/**` and `.haive-data/**`
+alone (`HAIVE_OWN_FILES_LINE`). The DAG level merge does not do this yet, so its prompt omits the line.
+
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.

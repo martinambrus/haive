@@ -8,7 +8,7 @@ import { schema } from '@haive/database';
 import { PLAN_MERGE_MESSAGE_EVENT } from '@haive/shared';
 import { discardPlanMerge, planMergeStep } from './01-plan-merge.js';
 import { PLAN_MERGE_BASELINE_EVENT } from '../../../plan/merge-baseline.js';
-import { relocateFixerChanges, type FixBaseline } from '../../git-merge.js';
+import { HAIVE_OWN_FILES_LINE, relocateFixerChanges, type FixBaseline } from '../../git-merge.js';
 import {
   REPO_IS_DATA_MERGE_LINES,
   UNTRUSTED_CLOSE,
@@ -482,6 +482,13 @@ describe('plan merge: the conflicted files are data', () => {
     expect(guard).toBeGreaterThan(-1);
     expect(guard).toBeLessThan(prompt.indexOf('What the user asked for:'));
     expect(guard).toBeLessThan(prompt.indexOf('Conflicting files'));
+  });
+
+  it("tells the agent to leave Haive's own files alone", async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    const { next } = await reopened(local, db);
+    expect(promptOf(next)).toContain(HAIVE_OWN_FILES_LINE);
   });
 
   it('grants authority only to the labelled request, never to a conflicted name', () => {

@@ -1150,12 +1150,20 @@ export function fixerLeftoversWarning(taskId: string, leftovers: FixerLeftovers)
   return notes.join(' ');
 }
 
+export const HAIVE_OWN_FILES_LINE =
+  'Leave `.haive/**` and `.haive-data/**` alone: Haive merges and rewrites them itself.';
+
 /** Build the conflict-resolution agent's prompt. `title` is an optional
  *  human-readable label for the branch; `guidance` is the user's free-text answer
  *  to a prior clarification (omitted when none). The static instructions are the
  *  contract the host relies on — the agent edits files only, the host stages and
  *  commits afterward. */
-export function buildMergeFixPrompt(branch: string, title?: string, guidance?: string): string {
+export function buildMergeFixPrompt(
+  branch: string,
+  title?: string,
+  guidance?: string,
+  haiveMergesItsFiles = false,
+): string {
   return [
     'A git merge conflict occurred while merging an implemented issue branch into the integration branch.',
     'Your working directory is the integration worktree, MID-MERGE — the conflict markers are live in the files.',
@@ -1176,6 +1184,7 @@ export function buildMergeFixPrompt(branch: string, title?: string, guidance?: s
     "and combine both sides as the implementation intends; don't drop either side's work.",
     'Change no other file: only the conflicted files are committed, and anything else you change is',
     'moved out of the tree.',
+    ...(haiveMergesItsFiles ? [HAIVE_OWN_FILES_LINE] : []),
     'Do NOT run git — it is unavailable in this environment; the orchestrator stages and commits the merge',
     'after you finish. Do NOT run tests or any other commands.',
     'When every conflict marker is gone from the files, stop.',

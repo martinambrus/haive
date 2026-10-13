@@ -21,6 +21,7 @@ import {
   type FixBaseline,
   type FixBaselineUnavailable,
 } from '../../git-merge.js';
+import { HAIVE_OWN_FILES_LINE } from '../../git-merge.js';
 import { isSingleLine, REPO_IS_DATA_MERGE_LINES, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
@@ -254,6 +255,7 @@ function buildPrompt(d: PlanMergeDetect): string {
     'Resolve EVERY conflict by EDITING those files: remove the <<<<<<< / ======= / >>>>>>>',
     'markers and leave the content you want to keep. Change no other file: only the conflicted',
     'files are committed.',
+    HAIVE_OWN_FILES_LINE,
     'Do NOT run git — it is unavailable here; the orchestrator stages and commits the merge',
     'after you finish. Do NOT run tests or any other commands.',
     '',
