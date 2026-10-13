@@ -16,6 +16,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, like, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
+import { pendingConflictUnits, upgradeAdmission } from '@haive/shared/onboarding-admission';
+import { blocksUpgrade } from '@haive/shared/project-state-conflicts';
 // Subpath, not the root barrel: the plan applier reaches the database, and the
 // barrel is what pulls ioredis/dns into anything that imports it.
 import {
@@ -46,6 +48,7 @@ import {
   writePlanMirror,
 } from '../src/plan/mirror.js';
 import { completePlanNodesForTask } from '../src/plan/task-link.js';
+import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import { resolveAffectedComponents } from '../src/step-engine/steps/workflow/_affected-components.js';
 import { loadSeededPlanNodes } from '../src/step-engine/steps/workflow/_plan-task-nodes.js';
 
@@ -3089,6 +3092,219 @@ async function main(): Promise<void> {
     { askedAgain, afterWipe },
   );
   await db.delete(schema.repositories).where(eq(schema.repositories.id, sId));
+
+  /* --- 12.7b answering a plan question ------------------------------------- */
+
+  const paDir = path.join(holdRoot, 'answer');
+  await mkdir(paDir, { recursive: true });
+  const [paRepo] = await db
+    .insert(schema.repositories)
+    .values({ userId, name: 'plan-answer', source: 'blank', status: 'ready', storagePath: paDir })
+    .returning();
+  const paId = paRepo!.id;
+  const paBuilt = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'aroot', parentRef: null, title: 'Root' },
+        { op: 'upsert', nodeRef: 'ax', parentRef: 'aroot', title: 'X' },
+        { op: 'upsert', nodeRef: 'ay', parentRef: 'aroot', title: 'Y' },
+        { op: 'upsert', nodeRef: 'az', parentRef: 'aroot', title: 'Z' },
+      ],
+    },
+    { repositoryId: paId, origin: 'user' },
+  );
+  const [paXId, paYId, paZId] = ['ax', 'ay', 'az'].map((r) => paBuilt.refs[r]!) as [
+    string,
+    string,
+    string,
+  ];
+  await writePlanMirror(db, paId, paDir);
+  await seedPlanBaseFromCheckout(db, paId, paDir);
+  const paFile = path.join(paDir, HAIVE_DATA_FILES.plan);
+  const paANodes = () =>
+    db
+      .select({
+        id: schema.planNodes.id,
+        title: schema.planNodes.title,
+        version: schema.planNodes.version,
+      })
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.repositoryId, paId));
+  const paNode = async (id: string) => (await paANodes()).find((n) => n.id === id);
+  const retitle = async (id: string, title: string) => {
+    await applyPlanPatch(
+      db,
+      { ops: [{ op: 'upsert', nodeRef: id, title, expectedVersion: (await paNode(id))!.version }] },
+      { repositoryId: paId, origin: 'user' },
+    );
+  };
+  const paTheirs = async (id: string, title: string): Promise<PlanMirror> => {
+    const mirror = JSON.parse(await readFile(paFile, 'utf8')) as PlanMirror;
+    return { ...mirror, nodes: mirror.nodes.map((n) => (n.id === id ? { ...n, title } : n)) };
+  };
+  const paArrive = async (next: PlanMirror) => {
+    await writeFile(paFile, `${JSON.stringify(next, null, 2)}\n`);
+    return reconcilePlanFromCheckout(db, paId, paDir);
+  };
+  const paRowFor = async (nodeId: string) =>
+    (await pendingPlanRows(paId)).find((r) => r.unit === `plan/${nodeId}#title`);
+  const answerRow = async (row: { id: string } | undefined, answer: 'keep_mine' | 'take_theirs') =>
+    resolveProjectStateConflict(db, {
+      repositoryId: paId,
+      userId,
+      conflictId: row?.id ?? randomUUID(),
+      answer,
+    });
+  const forceMerge = () =>
+    db
+      .update(schema.planMirrorState)
+      .set({ syncedHash: 'forced-merge' })
+      .where(eq(schema.planMirrorState.repositoryId, paId));
+
+  await retitle(paXId, 'X local');
+  await writePlanMirror(db, paId, paDir);
+  await paArrive(await paTheirs(paXId, 'X by A'));
+  const xRow = await paRowFor(paXId);
+  check('plan answer: a title changed on both sides is a pending plan row', xRow !== undefined);
+
+  const paUnits = await pendingConflictUnits(db, paId);
+  const paAdmission = await upgradeAdmission(db, userId, {
+    id: paId,
+    source: 'blank',
+    renderContext: null,
+    status: 'ready',
+    storagePath: paDir,
+    localPath: null,
+    onboardedAt: null,
+    onboardingResetAt: null,
+  });
+  check(
+    'plan answer: a pending plan row holds no upgrade or admission',
+    paUnits.includes(`plan/${paXId}#title`) &&
+      paUnits.filter(blocksUpgrade).length === 0 &&
+      !(!paAdmission.admitted && paAdmission.reason === 'contested'),
+    { paUnits, paAdmission },
+  );
+
+  await retitle(paXId, 'X local 2');
+  const staleAnswer = await answerRow(xRow, 'take_theirs');
+  const staleRow = await paRowFor(paXId);
+  check(
+    'plan answer: a stale answer (edited since asked) is moved, changes nothing and re-asks with the current value',
+    staleAnswer.kind === 'moved' &&
+      (await paNode(paXId))?.title === 'X local 2' &&
+      staleRow !== undefined &&
+      JSON.stringify(staleRow.local) === '{"v":"X local 2"}',
+    { staleAnswer, staleRow },
+  );
+
+  const xBefore = await paNode(paXId);
+  const taken = await answerRow(xRow, 'take_theirs');
+  const xAfter = await paNode(paXId);
+  check(
+    "plan answer: take theirs sets the node to the other side's title and bumps its version",
+    taken.kind === 'resolved' &&
+      xAfter?.title === 'X by A' &&
+      xAfter.version === xBefore!.version + 1 &&
+      (await paRowFor(paXId)) === undefined,
+    { taken, xBefore, xAfter },
+  );
+  check(
+    'plan answer: the flush after take theirs writes the title into plan.json',
+    (await titleIn(paFile, paXId)) === 'X by A',
+  );
+  const takenRowAfter = await db.query.projectStateConflicts.findFirst({
+    where: eq(schema.projectStateConflicts.id, xRow!.id),
+  });
+  check(
+    'plan answer: the answered row records the answer',
+    takenRowAfter?.resolution === 'take_theirs' && takenRowAfter.resolvedBy === userId,
+    takenRowAfter,
+  );
+  const versionsBeforeAgain = await paANodes();
+  await forceMerge();
+  const againTaken = await reconcilePlanFromCheckout(db, paId, paDir);
+  check(
+    'plan answer: a reconcile of the same file after take theirs changes nothing and asks nothing',
+    againTaken.nodesUpdated === 0 &&
+      (againTaken.conflicts ?? []).length === 0 &&
+      (await pendingPlanRows(paId)).length === 0 &&
+      JSON.stringify(await paANodes()) === JSON.stringify(versionsBeforeAgain),
+    { againTaken, versions: await paANodes() },
+  );
+
+  await retitle(paYId, 'Y local');
+  await writePlanMirror(db, paId, paDir);
+  await paArrive(await paTheirs(paYId, 'Y by A'));
+  const yRow = await paRowFor(paYId);
+  const yBefore = await paNode(paYId);
+  const kept = await answerRow(yRow, 'keep_mine');
+  check(
+    'plan answer: keep mine leaves the node as it is',
+    yRow !== undefined &&
+      kept.kind === 'resolved' &&
+      (await paNode(paYId))?.title === 'Y local' &&
+      (await paNode(paYId))?.version === yBefore!.version &&
+      (await paRowFor(paYId)) === undefined,
+    { kept, yBefore, now: await paNode(paYId) },
+  );
+  check(
+    'plan answer: the flush after keep mine writes the local title into plan.json',
+    (await titleIn(paFile, paYId)) === 'Y local',
+    await titleIn(paFile, paYId),
+  );
+  const stillTheirs = await paArrive(await paTheirs(paYId, 'Y by A'));
+  check(
+    "plan answer: the other side's unchanged file after keep mine keeps the local title without asking",
+    stillTheirs.nodesUpdated === 0 &&
+      (stillTheirs.conflicts ?? []).length === 0 &&
+      (await pendingPlanRows(paId)).length === 0 &&
+      (await paNode(paYId))?.title === 'Y local',
+    { stillTheirs, node: await paNode(paYId) },
+  );
+  await writePlanMirror(db, paId, paDir);
+  const yVersions = await paANodes();
+  await forceMerge();
+  const againKept = await reconcilePlanFromCheckout(db, paId, paDir);
+  check(
+    'plan answer: a reconcile of the flushed file after keep mine changes nothing and asks nothing',
+    againKept.nodesUpdated === 0 &&
+      (againKept.conflicts ?? []).length === 0 &&
+      (await pendingPlanRows(paId)).length === 0 &&
+      JSON.stringify(await paANodes()) === JSON.stringify(yVersions),
+    { againKept, versions: await paANodes() },
+  );
+
+  await retitle(paZId, 'Z local');
+  await writePlanMirror(db, paId, paDir);
+  await paArrive(await paTheirs(paZId, 'Z by A'));
+  const zRow = await paRowFor(paZId);
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: paZId }] },
+    { repositoryId: paId, origin: 'user' },
+  );
+  const goneAnswer = await answerRow(zRow, 'take_theirs');
+  const zClosed = await db.query.projectStateConflicts.findFirst({
+    where: eq(schema.projectStateConflicts.id, zRow!.id),
+  });
+  check(
+    'plan answer: a question whose node is gone closes as converged',
+    zRow !== undefined &&
+      goneAnswer.kind === 'settled' &&
+      zClosed?.resolution === 'converged' &&
+      zClosed.resolvedAt !== null,
+    { goneAnswer, zClosed },
+  );
+  const wrongOwner = await resolveProjectStateConflict(db, {
+    repositoryId: paId,
+    userId: randomUUID(),
+    conflictId: xRow!.id,
+    answer: 'take_theirs',
+  });
+  check('plan answer: another user gets nothing', wrongOwner.kind === 'not_found', wrongOwner);
+  await db.delete(schema.repositories).where(eq(schema.repositories.id, paId));
 
   const mergingDir = path.join(holdRoot, 'import-merging');
   await mkdir(path.dirname(path.join(mergingDir, HAIVE_DATA_FILES.plan)), { recursive: true });

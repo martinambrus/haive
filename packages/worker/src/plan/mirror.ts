@@ -107,7 +107,7 @@ async function stampSyncedHash(
     .where(eq(schema.planMirrorState.repositoryId, repositoryId));
 }
 
-const lockPlanMirror = (db: Pick<Database, 'execute'>, repositoryId: string) =>
+export const lockPlanMirror = (db: Pick<Database, 'execute'>, repositoryId: string) =>
   db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
 
 type PlanQuestion = {

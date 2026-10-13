@@ -1,5 +1,6 @@
 import { sameValue } from './canonical.js';
 import { isPortableSettingName } from './settings.js';
+import { PLAN_MIRROR_ASKED_FIELDS } from '../plan/merge-mirror.js';
 
 /** The unit of the whole render file; a key of it is `<RENDER_UNIT>#<key>`. */
 export const RENDER_UNIT = 'project/render.json';
@@ -27,8 +28,7 @@ export const isSettingUnit = (unit: string): boolean => {
   return named !== null && isPortableSettingName(named[1]!);
 };
 
-/** The unit of one plan question: a field of one node, `plan/<nodeId>#<field>`. Not a conflict unit
- *  of the project state record until the api can answer it. */
+/** The unit of one plan question: a field of one node, `plan/<nodeId>#<field>`. */
 export const PLAN_UNIT_PREFIX = 'plan/';
 
 export const planConflictUnit = (nodeId: string, field: string): string =>
@@ -42,7 +42,13 @@ export const parsePlanConflictUnit = (unit: string): { nodeId: string; field: st
   return { nodeId: rest.slice(0, hash), field: rest.slice(hash + 1) };
 };
 
+export const isPlanUnit = (unit: string): boolean => {
+  const parsed = parsePlanConflictUnit(unit);
+  return parsed !== null && (PLAN_MIRROR_ASKED_FIELDS as readonly string[]).includes(parsed.field);
+};
+
 export const isConflictUnit = (unit: string): boolean =>
+  isPlanUnit(unit) ||
   isRenderUnit(unit) ||
   isClaimUnit(unit) ||
   isSettingUnit(unit) ||
@@ -50,9 +56,11 @@ export const isConflictUnit = (unit: string): boolean =>
   unit === RTK_ENABLED_UNIT;
 
 /** Whether an unanswered question about the unit holds upgrades and rollbacks. Of the settings and
- *  the environment only RTK does: its off state takes files out of the next upgrade. */
+ *  the environment only RTK does: its off state takes files out of the next upgrade. A plan question
+ *  never does. */
 export const blocksUpgrade = (unit: string): boolean =>
   isConflictUnit(unit) &&
+  !isPlanUnit(unit) &&
   (unit === RTK_ENABLED_UNIT || !(isSettingUnit(unit) || isEnvironmentUnit(unit)));
 
 /** The row of the RTK question about an imported RTK-off, whose base is what this install holds. A
@@ -87,6 +95,8 @@ export const CONFLICT_KEY_LABELS: Readonly<Record<string, string>> = {
 /** What a person calls the setting a conflict unit holds, rather than its storage path. A claim
  *  unit names no path itself, so `claimPath` (read from a side) says which file it is about. */
 export function conflictUnitLabel(unit: string, claimPath?: string | null): string {
+  const plan = parsePlanConflictUnit(unit);
+  if (plan && isPlanUnit(unit)) return `Plan: ${plan.field} of a node`;
   if (isSettingUnit(unit)) return SETTING_LABELS[unit.slice('settings/'.length, -'.json'.length)]!;
   if (unit === ENVIRONMENT_UNIT) return 'The project environment';
   if (unit.startsWith(`${ENVIRONMENT_UNIT}#`)) {
@@ -122,6 +132,8 @@ export interface ProjectStateConflictBody {
   detectedAt: string;
   resolution: string | null;
   resolvedAt: string | null;
+  /** A plan question only: the node's current title, null once the node is gone. */
+  nodeTitle?: string | null;
 }
 
 const sideBody = (side: unknown): ConflictSideBody =>

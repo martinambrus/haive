@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -7,6 +7,8 @@ import {
   PROJECT_STATE_ANSWERS,
   conflictBody,
   isConflictUnit,
+  parsePlanConflictUnit,
+  type ProjectStateConflictBody,
   type ProjectStateResolveResult,
 } from '@haive/shared/project-state';
 import { getDb } from '../db.js';
@@ -29,6 +31,30 @@ async function requireOwnedRepository(userId: string, repositoryId: string): Pro
   if (!repo) throw new HttpError(404, 'Repository not found');
 }
 
+/** A plan question carries its node's current title, null once the node is gone. */
+async function withNodeTitles(
+  repositoryId: string,
+  rows: (typeof schema.projectStateConflicts.$inferSelect)[],
+): Promise<ProjectStateConflictBody[]> {
+  const nodeIds = rows.flatMap((row) => parsePlanConflictUnit(row.unit)?.nodeId ?? []);
+  const titles = new Map<string, string>();
+  if (nodeIds.length > 0) {
+    const nodes = await getDb()
+      .select({ id: schema.planNodes.id, title: schema.planNodes.title })
+      .from(schema.planNodes)
+      .where(
+        and(eq(schema.planNodes.repositoryId, repositoryId), inArray(schema.planNodes.id, nodeIds)),
+      );
+    for (const node of nodes) titles.set(node.id, node.title);
+  }
+  return rows.map((row) => {
+    const plan = parsePlanConflictUnit(row.unit);
+    return plan
+      ? { ...conflictBody(row), nodeTitle: titles.get(plan.nodeId) ?? null }
+      : conflictBody(row);
+  });
+}
+
 projectStateConflictRoutes.get('/:id/project-state/conflicts', requireAuth, async (c) => {
   const repositoryId = c.req.param('id');
   await requireOwnedRepository(c.get('userId'), repositoryId);
@@ -43,7 +69,10 @@ projectStateConflictRoutes.get('/:id/project-state/conflicts', requireAuth, asyn
     )
     .orderBy(asc(schema.projectStateConflicts.detectedAt), asc(schema.projectStateConflicts.unit));
   return c.json({
-    conflicts: rows.filter((row) => isConflictUnit(row.unit)).map((row) => conflictBody(row)),
+    conflicts: await withNodeTitles(
+      repositoryId,
+      rows.filter((row) => isConflictUnit(row.unit)),
+    ),
   });
 });
 
@@ -62,7 +91,8 @@ projectStateConflictRoutes.get(
       ),
     });
     if (!row || !isConflictUnit(row.unit)) throw new HttpError(404, 'Question not found');
-    return c.json({ conflict: conflictBody(row) });
+    const [conflict] = await withNodeTitles(repositoryId, [row]);
+    return c.json({ conflict });
   },
 );
 

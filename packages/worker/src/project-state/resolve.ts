@@ -28,6 +28,7 @@ import {
   isClaimUnit,
   isConflictUnit,
   isEnvironmentUnit,
+  isPlanUnit,
   isSettingUnit,
   normalizeEnvironment,
   normalizeProjectState,
@@ -54,6 +55,8 @@ import {
   writeApplicableTemplateIds,
 } from './sync.js';
 import { lockPlanMerge } from '@haive/shared/plan';
+import { answerPlanQuestion } from '../plan/answer.js';
+import { flushPlanMirrorForRepository, lockPlanMirror } from '../plan/mirror.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
 import { loadPendingRenderConflicts, loadRecordClaims, lockProjectState } from './write.js';
 
@@ -101,6 +104,7 @@ interface PutBack {
 interface After {
   resync: string | null;
   putBack: PutBack | null;
+  flushPlan: boolean;
 }
 
 /** Answers one pending conflict of the render unit, so that the file, the sync base and the column
@@ -110,7 +114,7 @@ export async function resolveProjectStateConflict(
   db: Database,
   payload: ProjectStateResolvePayload,
 ): Promise<ProjectStateResolveResult> {
-  const after: After = { resync: null, putBack: null };
+  const after: After = { resync: null, putBack: null, flushPlan: false };
   let result: ProjectStateResolveResult;
   try {
     result = await answerInTransaction(db, payload, after);
@@ -140,6 +144,14 @@ export async function resolveProjectStateConflict(
       logger.warn(
         { err, repositoryId: payload.repositoryId },
         'project state not re-synced after a moved answer',
+      ),
+    );
+  }
+  if (after.flushPlan && result.kind === 'resolved') {
+    await flushPlanMirrorForRepository(db, payload.repositoryId).catch((err) =>
+      logger.warn(
+        { err, repositoryId: payload.repositoryId },
+        'plan mirror not flushed after a plan answer; the sweep retries',
       ),
     );
   }
@@ -640,6 +652,22 @@ async function answerInTransaction(
     // check and the commit.
     await lockPlanMerge(tx, repositoryId);
     await lockProjectState(tx, repositoryId);
+    const [peek] = await tx
+      .select({ unit: schema.projectStateConflicts.unit })
+      .from(schema.projectStateConflicts)
+      .where(
+        and(
+          eq(schema.projectStateConflicts.id, conflictId),
+          eq(schema.projectStateConflicts.repositoryId, repositoryId),
+        ),
+      );
+    if (peek && isPlanUnit(peek.unit)) {
+      // Lock order: plan merge, project state, plan mirror, then repository, conflict and node rows.
+      await lockPlanMirror(tx, repositoryId);
+      const planResult = await answerPlanQuestion(tx, { repositoryId, userId, conflictId, answer });
+      after.flushPlan = true;
+      return planResult;
+    }
     const [repo] = await tx
       .select({
         userId: schema.repositories.userId,

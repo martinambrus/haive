@@ -161,3 +161,40 @@ describe('ProjectStateConflictsView', () => {
     expect(html.match(/<button[^>]*>(Keep mine|Take theirs)/g)).toHaveLength(4);
   });
 });
+
+describe('ProjectStateConflictsView on the plan page', () => {
+  const NODE = '11111111-1111-4111-8111-111111111111';
+  const planConflict = (over: Partial<ProjectStateConflictBody> = {}) =>
+    conflict({
+      unit: `plan/${NODE}#body`,
+      key: 'body',
+      nodeTitle: 'Billing',
+      base: { present: true, value: 'Old text' },
+      local: { present: true, value: '## Mine\n\nWe **invoice** monthly.' },
+      incoming: { present: true, value: 'Their text' },
+      ...over,
+    });
+
+  it('names the node and the field, and renders a body as markdown', () => {
+    const html = view({ conflicts: [planConflict()], scope: 'plan' });
+    expect(html).toContain('Billing: Text');
+    expect(html).toContain('about the plan');
+    expect(html).toContain('<strong>invoice</strong>');
+    expect(html).toContain('Their text');
+    expect(html).toContain('Old text');
+    expect(html).toContain('Keep mine');
+    expect(html).toContain('Take theirs');
+  });
+
+  it('says upgrades are not held, and never talks of settings', () => {
+    const html = view({ conflicts: [planConflict()], scope: 'plan' });
+    expect(html).toContain('upgrades are not held');
+    expect(html).not.toContain('Upgrades and rollbacks are held');
+    expect(html).not.toContain('project record');
+  });
+
+  it('says the node is gone when the title is null', () => {
+    const html = view({ conflicts: [planConflict({ nodeTitle: null })], scope: 'plan' });
+    expect(html).toContain('A node that was deleted here: Text');
+  });
+});

@@ -10,13 +10,17 @@ import {
   conflictUnitLabel,
   isClaimUnit,
   isEnvironmentUnit,
+  isPlanUnit,
   isSettingUnit,
+  parsePlanConflictUnit,
 } from '@haive/shared/project-state-conflicts';
 import { fencedCode } from '../components/markdown/fenced-code';
 
 export type { ProjectStateAnswer, ProjectStateConflictBody };
 
 export const RECORD_FILE = '.haive-data/state/project/render.json';
+
+export const PLAN_FILE = '.haive-data/plan.json';
 
 function inlineCode(raw: string): string {
   const text = raw.replace(/[\r\n]+/g, ' ');
@@ -47,6 +51,31 @@ export function stillListed(
 ): string[] {
   const listed = new Set(conflicts.map((c) => c.id));
   return ids.filter((id) => listed.has(id));
+}
+
+/** A question about one field of one plan node, answered on the plan page. */
+export const isPlanConflict = (conflict: { unit: string }): boolean => isPlanUnit(conflict.unit);
+
+const PLAN_FIELD_LABELS: Readonly<Record<string, string>> = {
+  title: 'Title',
+  body: 'Text',
+  kind: 'Kind',
+  status: 'Status',
+  taskable: 'Can start tasks',
+};
+
+/** What a plan question is about, as its heading reads: the node, then the field. */
+export function planConflictHeading(conflict: { unit: string; nodeTitle?: string | null }): string {
+  const field = parsePlanConflictUnit(conflict.unit)?.field ?? '';
+  const node = conflict.nodeTitle ?? 'A node that was deleted here';
+  return `${node}: ${PLAN_FIELD_LABELS[field] ?? field}`;
+}
+
+function planSideMarkdown(field: string, value: unknown): string {
+  if (field === 'body') return typeof value === 'string' && value !== '' ? value : 'No text.';
+  if (field === 'taskable') return value === true ? 'Yes' : value === false ? 'No' : 'Not set.';
+  if (typeof value === 'string') return inlineCode(value);
+  return fencedCode(JSON.stringify(value, null, 2) ?? 'null', 'json');
 }
 
 export const isRtkConflict = (conflict: { unit: string }): boolean =>
@@ -101,6 +130,8 @@ function settingMarkdown(value: unknown): string | null {
 
 export function conflictSideMarkdown(side: ConflictSideBody, unit?: string): string {
   if (!side.present) return 'Not set.';
+  const plan = unit === undefined ? null : parsePlanConflictUnit(unit);
+  if (plan) return planSideMarkdown(plan.field, side.value);
   if (unit !== undefined && isSettingUnit(unit)) {
     const text = settingMarkdown(side.value);
     if (text !== null) return text;
@@ -127,6 +158,19 @@ export function answerConfirmation(
   claimPath?: string | null,
 ): { title: string; body: string; confirmLabel: string } {
   const label = conflictKeyLabel(key, unit, claimPath);
+  if (unit !== undefined && isPlanUnit(unit)) {
+    return answer === 'keep_mine'
+      ? {
+          title: "Keep this install's value",
+          confirmLabel: 'Keep mine',
+          body: `This plan keeps its own value, and \`${PLAN_FILE}\` is rewritten with it. Commit and push that file so your teammate gets it. Until then the other install keeps asking.`,
+        }
+      : {
+          title: "Take the other install's value",
+          confirmLabel: 'Take theirs',
+          body: `This plan switches to your teammate's value, and \`${PLAN_FILE}\` is rewritten with it. Its own value is dropped.`,
+        };
+  }
   if (unit === RTK_ENABLED_UNIT) {
     return answer === 'keep_mine'
       ? {
@@ -163,8 +207,16 @@ export function resolutionNotice(
   rtkAnswered: readonly ProjectStateAnswer[] = [],
   claimAnswered: readonly ProjectStateAnswer[] = [],
   settingAnswered: readonly ProjectStateAnswer[] = [],
+  planAnswered: readonly ProjectStateAnswer[] = [],
 ): string | null {
   const notices: string[] = [];
+  if (planAnswered.includes('keep_mine')) {
+    notices.push(
+      `This plan keeps its own value and \`${PLAN_FILE}\` is rewritten with it. Commit and push that file so your teammate gets it.`,
+    );
+  } else if (planAnswered.includes('take_theirs')) {
+    notices.push("This plan now uses your teammate's value.");
+  }
   if (settingAnswered.includes('keep_mine')) {
     notices.push(
       "This install's value is written into the project's record. Commit and push the changed file so your teammate gets it.",
