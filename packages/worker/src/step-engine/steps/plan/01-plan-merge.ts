@@ -50,6 +50,7 @@ import {
   advancePlanBaseFromCommit,
   flushPlanMirrorForRepository,
   reconcilePlanFromCheckout,
+  seedPlanBaseFromCheckout,
   writePlanMirror,
 } from '../../../plan/mirror.js';
 import {
@@ -611,6 +612,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     });
     const sha = await commitMerge(d.worktreePath, `Merge origin/${d.branch}`, identity);
     if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
+    await seedPlanBaseFromCheckout(ctx.db, d.repositoryId, ctx.repoPath);
     await landPlanMerge(ctx.repoPath, sha);
     result.landed = true;
 

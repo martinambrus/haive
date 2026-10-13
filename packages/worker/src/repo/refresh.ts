@@ -11,6 +11,7 @@ import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
 import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
 import { lockProjectState } from '../project-state/write.js';
+import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-push.js';
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -219,6 +220,13 @@ export async function handleRefresh(
         await rebuild(db, payload, repoStorageRoot, rel, dest);
         return;
       }
+      // A row stamped before 0196 takes its base from the checkout before the fast-forward moves it.
+      await seedPlanBaseFromCheckout(db, payload.repositoryId, dest).catch((err: unknown) =>
+        logger.warn(
+          { err, repositoryId: payload.repositoryId },
+          'plan base not seeded before refresh',
+        ),
+      );
       await persistDetection(db, payload.repositoryId, dest, await fastForward(db, payload, dest));
     },
     'refresh',
