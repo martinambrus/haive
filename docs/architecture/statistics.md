@@ -10,6 +10,14 @@ role because the parser has no access to it). Every arithmetic answer is a pure 
 `@haive/shared/stats` — the api fetches and scopes, `computeBusySpan` / `buildTaskTimeBreakdown`
 / `buildEstimationAccuracy` do the maths, and none of them needs a database to test.
 
+**DEFAULT WINDOW.** The module's one global setting, `defaultWindow` (7d, 30d, 90d, 1y or all; 30d
+when unset), is declared in its manifest and edited on the generic `/settings/m/statistics` page:
+every signed-in user reads it, only an admin writes it. It picks the page's window ONLY when the URL
+names no valid `preset` — an explicit `?preset=` always wins, so a shared link shows what its sender
+saw (`pickPreset`). Without a URL preset the page waits for the setting before requesting anything,
+so it never fires a 30-day request and then the real one; a failed read falls back to 30 days. The
+dashboard widget is not governed by it and keeps the api's own 30-day default.
+
 **ONE BUCKETER.** Day buckets are cut in JS with `Intl` (`dayKey`), never with `date_trunc` in
 SQL, because the busy-span union already needs a bucketer in JS and two that must agree
 eventually will not. The correct SQL form is recorded in the timeline handler's comment (`modules/statistics/src/routes.ts`) for the day that
