@@ -339,6 +339,36 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect((await row('tt-repo'))?.requiresRepository).toBe(true);
     });
 
+    it('validates an edit against the row as committed by a concurrent edit', async () => {
+      await send('POST', '/admin/task-types', valid('tt-conc'));
+      let locked!: () => void;
+      const holding = new Promise<void>((r) => (locked = r));
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const dropping = db.transaction(async (tx) => {
+        await tx
+          .select()
+          .from(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, 'tt-conc'))
+          .for('update');
+        await tx
+          .update(schema.taskTypeDefinitions)
+          .set({ stepIds: ['ta-a'] })
+          .where(eq(schema.taskTypeDefinitions.slug, 'tt-conc'));
+        locked();
+        await gate;
+      });
+      await holding;
+      const patching = send('PATCH', '/admin/task-types/tt-conc', {
+        stepLoopLimitDefaults: { 'ta-b': 3 },
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      release();
+      await dropping;
+      expect((await patching).status).toBe(400);
+      expect((await row('tt-conc'))?.stepLoopLimitDefaults).toEqual({});
+    });
+
     it('edits a custom type, revalidating the composition and the defaults', async () => {
       await send('POST', '/admin/task-types', valid('tt-edit'));
       const bad = await send('PATCH', '/admin/task-types/tt-edit', { stepIds: ['ta-c'] });

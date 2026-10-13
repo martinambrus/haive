@@ -220,43 +220,55 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
   const body = taskTypeUpdateSchema.parse(await c.req.json());
   if (body.requiresRepository === false) throw new HttpError(400, REPO_LESS_UNSUPPORTED);
   const db = getDb();
-  const row = await findDefinition(db, slug);
-  if (!row) throw new HttpError(404, 'Task type not found');
   const fields = Object.keys(body);
-  const allowed = allowedFields(row);
-  const refused = allowed ? fields.filter((f) => !allowed.includes(f)) : [];
-  if (refused.length > 0) {
-    throw new HttpError(400, `Cannot change ${refused.join(', ')} on this task type`);
-  }
-  if (
-    body.stepIds !== undefined ||
-    body.preAnswerDefaults !== undefined ||
-    body.stepLoopLimitDefaults !== undefined
-  ) {
-    const catalog = await loadCatalog(db);
-    requireSynced(catalog);
-    const stepIds = body.stepIds ?? row.stepIds ?? [];
-    if (body.stepIds !== undefined) {
-      const issues = validateComposition(stepIds, catalog.composable);
-      if (issues.length > 0) return c.json({ error: 'Invalid step composition', issues }, 400);
+  // Locked and reread, so two concurrent edits cannot each validate against the same stale row.
+  const outcome = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.taskTypeDefinitions)
+      .where(eq(schema.taskTypeDefinitions.slug, slug))
+      .for('update');
+    if (!row) throw new HttpError(404, 'Task type not found');
+    const allowed = allowedFields(row);
+    const refused = allowed ? fields.filter((f) => !allowed.includes(f)) : [];
+    if (refused.length > 0) {
+      throw new HttpError(400, `Cannot change ${refused.join(', ')} on this task type`);
     }
-    const defaultIssues = validateTaskTypeDefaults(
-      {
-        stepIds,
-        preAnswerDefaults: body.preAnswerDefaults ?? row.preAnswerDefaults,
-        stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? row.stepLoopLimitDefaults,
-      },
-      catalog.composable,
-    );
-    if (defaultIssues.length > 0) {
-      return c.json({ error: 'Invalid defaults', issues: defaultIssues }, 400);
+    if (
+      body.stepIds !== undefined ||
+      body.preAnswerDefaults !== undefined ||
+      body.stepLoopLimitDefaults !== undefined
+    ) {
+      const catalog = await loadCatalog(db);
+      requireSynced(catalog);
+      const stepIds = body.stepIds ?? row.stepIds ?? [];
+      if (body.stepIds !== undefined) {
+        const issues = validateComposition(stepIds, catalog.composable);
+        if (issues.length > 0) {
+          return { invalid: { error: 'Invalid step composition', issues } } as const;
+        }
+      }
+      const defaultIssues = validateTaskTypeDefaults(
+        {
+          stepIds,
+          preAnswerDefaults: body.preAnswerDefaults ?? row.preAnswerDefaults,
+          stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? row.stepLoopLimitDefaults,
+        },
+        catalog.composable,
+      );
+      if (defaultIssues.length > 0) {
+        return { invalid: { error: 'Invalid defaults', issues: defaultIssues } } as const;
+      }
     }
-  }
-  const [updated] = await db
-    .update(schema.taskTypeDefinitions)
-    .set({ ...body, updatedAt: new Date() })
-    .where(eq(schema.taskTypeDefinitions.slug, slug))
-    .returning();
+    const [updated] = await tx
+      .update(schema.taskTypeDefinitions)
+      .set({ ...body, updatedAt: new Date() })
+      .where(eq(schema.taskTypeDefinitions.slug, slug))
+      .returning();
+    return { updated } as const;
+  });
+  if ('invalid' in outcome) return c.json(outcome.invalid, 400);
+  const updated = outcome.updated;
   await recordAuditEvent(db, {
     actorUserId: c.get('userId'),
     action: 'task_type.update',
