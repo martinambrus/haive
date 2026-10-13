@@ -9,10 +9,10 @@
  * covers the `.haive-data/` mirror, whose whole job is to restore the portable
  * plan model onto a fresh clone.
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -2063,6 +2063,44 @@ async function main(): Promise<void> {
     (await readFile(path.join(holdRoot, 'legacy-diff', HAIVE_DATA_FILES.plan), 'utf8')).includes(
       'plan-legacy-differs',
     ) && (await hashOf(legacyDiffers)) !== null,
+  );
+  // A plan.md the flush cannot write leaves the row dirty but keeps the stamp of the plan.json that
+  // landed, so the next flush does not hold Haive's own bytes as unread changes.
+  const mdDir = path.join(holdRoot, 'legacy-diff');
+  await rm(path.join(mdDir, HAIVE_DATA_FILES.planMarkdown));
+  await symlink(
+    path.join(holdRoot, 'elsewhere.md'),
+    path.join(mdDir, HAIVE_DATA_FILES.planMarkdown),
+  );
+  await db
+    .update(schema.planNodes)
+    .set({ title: 'retitled under a refused plan.md' })
+    .where(eq(schema.planNodes.repositoryId, legacyDiffers));
+  await markPlanMirrorDirty(db, legacyDiffers);
+  const mdRefused = await writePlanMirror(db, legacyDiffers, mdDir).then(
+    () => 'wrote',
+    () => 'failed',
+  );
+  const landed = await readFile(path.join(mdDir, HAIVE_DATA_FILES.plan), 'utf8');
+  check(
+    'a refused plan.md still stamps the plan.json that landed',
+    mdRefused === 'failed' &&
+      landed.includes('retitled under a refused plan.md') &&
+      (await hashOf(legacyDiffers)) === createHash('sha256').update(landed).digest('hex'),
+    mdRefused,
+  );
+  await rm(path.join(mdDir, HAIVE_DATA_FILES.planMarkdown));
+  await db
+    .update(schema.planNodes)
+    .set({ title: 'retitled again' })
+    .where(eq(schema.planNodes.repositoryId, legacyDiffers));
+  await markPlanMirrorDirty(db, legacyDiffers);
+  check(
+    'the next flush writes over it without holding',
+    await writePlanMirror(db, legacyDiffers, mdDir).then(
+      () => true,
+      () => false,
+    ),
   );
   await db
     .delete(schema.repositories)

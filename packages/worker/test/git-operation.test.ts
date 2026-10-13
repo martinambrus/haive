@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -42,6 +42,14 @@ describe('gitOperationInProgress', () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+
+  it('sees a rebase whose state directory is present without REBASE_HEAD', async () => {
+    mkdirSync(join(repo, '.git', 'rebase-merge'));
+    expect(await gitOperationInProgress(repo)).toBe(true);
+    rmSync(join(repo, '.git', 'rebase-merge'), { recursive: true });
+    mkdirSync(join(repo, '.git', 'rebase-apply'));
+    expect(await gitOperationInProgress(repo)).toBe(true);
   });
 
   it('sees a merge left open by a conflict', async () => {

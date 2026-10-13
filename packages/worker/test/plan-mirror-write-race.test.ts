@@ -86,3 +86,22 @@ describe('a merge open when the file is judged', () => {
     expect(await onDisk(repo)).toBe('{"synced":1}\n');
   });
 });
+
+describe('bytes that decode alike', () => {
+  it('holds when malformed bytes read as the U+FFFD the synced file held', async () => {
+    const synced = '{"t":"\uFFFD"}\n';
+    const repo = await repoWith(null);
+    await mkdir(path.dirname(path.join(repo, HAIVE_DATA_FILES.plan)), { recursive: true });
+    const malformed = Buffer.concat([
+      Buffer.from('{"t":"'),
+      Buffer.from([0xff]),
+      Buffer.from('"}\n'),
+    ]);
+    await writeFile(path.join(repo, HAIVE_DATA_FILES.plan), malformed);
+    expect(malformed.toString('utf8')).toBe(synced);
+    await expect(
+      writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(synced)),
+    ).rejects.toBeInstanceOf(PlanMirrorHeldError);
+    expect(await readFile(path.join(repo, HAIVE_DATA_FILES.plan))).toEqual(malformed);
+  });
+});
