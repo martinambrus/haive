@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { validateComposition, type ComposableStepEntry } from '../src/modularity/index.js';
+import {
+  composableStepEntrySchema,
+  validateComposition,
+  type ComposableStepEntry,
+} from '../src/modularity/index.js';
 
 function entry(
   stepId: string,
@@ -187,6 +191,29 @@ describe('validateComposition', () => {
       { kind: 'unfulfilled', index: 1, stepId: 'implement', token: 'reconciled' },
     ]);
     expect(validateComposition(['runtime', 'implement', 'reconcile'], catalog)).toEqual([]);
+  });
+
+  it('never lets a step provide the implicit repository token', () => {
+    const catalog = catalogOf(
+      entry('fake', { provides: ['repository'] }),
+      entry('needs-repo', { needs: ['repository'] }),
+    );
+    expect(
+      validateComposition(['fake', 'needs-repo'], catalog, { requiresRepository: false }),
+    ).toContainEqual(
+      expect.objectContaining({ kind: 'unmet-need', stepId: 'needs-repo', needs: 'repository' }),
+    );
+  });
+
+  it('refuses an entry that declares an implicit token', () => {
+    const base = entry('x');
+    expect(composableStepEntrySchema.safeParse({ ...base, provides: ['repository'] }).success).toBe(
+      false,
+    );
+    expect(composableStepEntrySchema.safeParse({ ...base, removes: ['repository'] }).success).toBe(
+      false,
+    );
+    expect(composableStepEntrySchema.safeParse(base).success).toBe(true);
   });
 
   it('withdraws a token a step removes', () => {

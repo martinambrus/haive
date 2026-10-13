@@ -99,6 +99,11 @@ export const integrationRequirementSchema = z
   });
 export type IntegrationRequirement = z.infer<typeof integrationRequirementSchema>;
 
+export const REPOSITORY_TOKEN = 'repository';
+
+/** Tokens no catalog entry provides or removes: the composition starts with them. */
+export const IMPLICIT_COMPOSITION_TOKENS: ReadonlySet<string> = new Set([REPOSITORY_TOKEN]);
+
 export const composableStepEntrySchema = z
   .object({
     stepId: stepIdSchema,
@@ -125,6 +130,10 @@ export const composableStepEntrySchema = z
       return new Set(ids).size === ids.length;
     },
     { message: 'integration requirement ids must be unique within a step' },
+  )
+  .refine(
+    (e) => ![...e.provides, ...(e.removes ?? [])].some((t) => IMPLICIT_COMPOSITION_TOKENS.has(t)),
+    { message: 'an implicit composition token cannot be provided or removed by a step' },
   );
 export type ComposableStepEntry = z.infer<typeof composableStepEntrySchema>;
 
