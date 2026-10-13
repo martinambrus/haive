@@ -1,0 +1,398 @@
+import { describe, expect, it } from 'vitest';
+import {
+  COMPOSABLE_STEP_GROUPS,
+  CUSTOM_TASK_TYPE_SLUG_PATTERN,
+  customTaskTypeCreateSchema,
+  isCustomStepId,
+  publicTaskTypeSchema,
+  resolveTaskTypeAvailability,
+  taskTypeDefinitionSeedSchema,
+  taskTypeUpdateSchema,
+  validateTaskTypeDefaults,
+  type ComposableStepEntry,
+} from '../src/modularity/index.js';
+
+function entry(
+  stepId: string,
+  opts: { needs?: string[]; provides?: string[]; loopBudget?: boolean } = {},
+): ComposableStepEntry {
+  return {
+    stepId,
+    label: stepId,
+    group: 'test',
+    dispatchesCli: false,
+    requires: (opts.needs ?? []).map((needs) => ({ needs, reason: `${stepId} needs ${needs}` })),
+    provides: opts.provides ?? [],
+    ...(opts.loopBudget ? { loopBudgetEditable: true } : {}),
+  };
+}
+
+const composable = new Map<string, ComposableStepEntry>([
+  ['a', entry('a', { provides: ['t'] })],
+  ['b', entry('b', { needs: ['t'], loopBudget: true })],
+  ['c', entry('c', { needs: ['never'] })],
+]);
+const catalog = { stepIds: new Set(['a', 'b', 'c', 'legacy-step']), composable };
+const on = { customEnabled: true, moduleEnabled: true };
+
+function definition(over: Record<string, unknown> = {}) {
+  return {
+    source: 'builtin',
+    enabled: true,
+    selectable: true,
+    runListStrategy: 'static' as const,
+    stepIds: ['a', 'b'] as string[] | null,
+    ...over,
+  };
+}
+
+describe('resolveTaskTypeAvailability', () => {
+  it('is available for a healthy admin type', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'admin' }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+
+  it('disabled', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ enabled: false }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: false, reason: 'disabled' });
+  });
+
+  it('not-selectable only on the generic route', () => {
+    const input = { definition: definition({ selectable: false }), switches: on, catalog };
+    expect(resolveTaskTypeAvailability({ ...input, generic: true })).toEqual({
+      available: false,
+      reason: 'not-selectable',
+    });
+    expect(resolveTaskTypeAvailability({ ...input, generic: false })).toEqual({ available: true });
+  });
+
+  it('custom-types-off for admin source only', () => {
+    const off = { customEnabled: false, moduleEnabled: true };
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'admin' }),
+        switches: off,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: false, reason: 'custom-types-off' });
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition(),
+        switches: off,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+
+  it('module-types-off for module sources only', () => {
+    const off = { customEnabled: true, moduleEnabled: false };
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'module:acme' }),
+        switches: off,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: false, reason: 'module-types-off' });
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'admin' }),
+        switches: off,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+
+  it('missing-step lists the steps absent from the catalog', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ stepIds: ['a', 'gone', 'b', 'gone2'] }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: false, reason: 'missing-step', stepIds: ['gone', 'gone2'] });
+  });
+
+  it('disabled beats missing-step', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ enabled: false, stepIds: ['gone'] }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: false, reason: 'disabled' });
+  });
+
+  it('precedence runs not-selectable, custom-types-off, module-types-off, missing-step', () => {
+    const off = { customEnabled: false, moduleEnabled: false };
+    const base = { switches: off, catalog, generic: true };
+    expect(
+      resolveTaskTypeAvailability({
+        ...base,
+        definition: definition({ source: 'admin', selectable: false, stepIds: ['gone'] }),
+      }),
+    ).toMatchObject({ reason: 'not-selectable' });
+    expect(
+      resolveTaskTypeAvailability({
+        ...base,
+        definition: definition({ source: 'admin', stepIds: ['gone'] }),
+      }),
+    ).toMatchObject({ reason: 'custom-types-off' });
+    expect(
+      resolveTaskTypeAvailability({
+        ...base,
+        definition: definition({ source: 'module:x', stepIds: ['gone'] }),
+      }),
+    ).toMatchObject({ reason: 'module-types-off' });
+    expect(
+      resolveTaskTypeAvailability({
+        ...base,
+        switches: on,
+        definition: definition({ source: 'admin', stepIds: ['gone', 'c'] }),
+      }),
+    ).toMatchObject({ reason: 'missing-step' });
+  });
+
+  it('a null catalog skips missing-step and invalid-composition (unseeded builtin)', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ stepIds: ['not-in-any-catalog'] }),
+        switches: on,
+        catalog: null,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'admin', stepIds: ['c'] }),
+        switches: on,
+        catalog: null,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+
+  it('a builtin with steps that are in the catalog but not composable is available', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ stepIds: ['legacy-step', 'a'] }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+
+  it('a dynamic strategy has no step list to check', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ runListStrategy: 'workflow_paths', stepIds: null }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+
+  it('an admin type with an invalid composition is unavailable with the issues', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'admin', stepIds: ['b', 'a'] }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({
+      available: false,
+      reason: 'invalid-composition',
+      issues: [{ kind: 'unmet-need', index: 0, stepId: 'b', needs: 't', reason: 'b needs t' }],
+    });
+  });
+
+  it('a module type skips invalid-composition', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'module:acme', stepIds: ['b', 'a'] }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+
+  it('a builtin skips invalid-composition', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ stepIds: ['b', 'a'] }),
+        switches: on,
+        catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+});
+
+describe('CUSTOM_TASK_TYPE_SLUG_PATTERN', () => {
+  const accepted = ['a', '0', 'my-type', 'a-', 'x'.repeat(64), 'a1-b2'];
+  const rejected = ['', 'my_type', 'my.type', '-lead', 'x'.repeat(65), 'UPPER', 'a b'];
+
+  it('accepts and rejects', () => {
+    for (const slug of accepted) expect(CUSTOM_TASK_TYPE_SLUG_PATTERN.test(slug)).toBe(true);
+    for (const slug of rejected) expect(CUSTOM_TASK_TYPE_SLUG_PATTERN.test(slug)).toBe(false);
+  });
+
+  it('is a subset of the task type slug grammar', () => {
+    const seed = (slug: string) =>
+      taskTypeDefinitionSeedSchema.safeParse({
+        slug,
+        displayName: 'x',
+        runListStrategy: 'static',
+        stepIds: ['a'],
+        selectable: true,
+        requiresRepository: true,
+      }).success;
+    for (const slug of accepted) expect(seed(slug)).toBe(true);
+  });
+
+  it('agrees with the def segment of the custom step id grammar', () => {
+    for (const slug of [...accepted, ...rejected].filter((s) => s.length <= 64)) {
+      if (slug.length === 0 || /\s/.test(slug)) continue;
+      expect(isCustomStepId(`custom.${slug}.step`), slug).toBe(
+        CUSTOM_TASK_TYPE_SLUG_PATTERN.test(slug),
+      );
+    }
+  });
+});
+
+describe('COMPOSABLE_STEP_GROUPS', () => {
+  it('covers the eight groups of the core catalog, in order, with labels', () => {
+    expect(COMPOSABLE_STEP_GROUPS.map((g) => g.id)).toEqual([
+      'env',
+      'setup',
+      'runtime',
+      'spec',
+      'build',
+      'check',
+      'finish',
+      'knowledge',
+    ]);
+    expect(COMPOSABLE_STEP_GROUPS.map((g) => g.order)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    for (const g of COMPOSABLE_STEP_GROUPS) expect(g.label.length).toBeGreaterThan(0);
+  });
+});
+
+describe('task type schemas', () => {
+  const valid = {
+    slug: 'my-type',
+    displayName: 'My type',
+    stepIds: ['a', 'b'],
+    requiresRepository: true,
+  };
+
+  it('accepts a minimal create body and the optional fields', () => {
+    expect(customTaskTypeCreateSchema.safeParse(valid).success).toBe(true);
+    expect(
+      customTaskTypeCreateSchema.safeParse({
+        ...valid,
+        description: 'd',
+        preAnswerDefaults: { a: { k: 1 } },
+        stepLoopLimitDefaults: { b: 3 },
+        sortOrder: 4,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects bad create bodies', () => {
+    const bad = [
+      { ...valid, slug: 'my_type' },
+      { ...valid, displayName: '' },
+      { ...valid, stepIds: [] },
+      { ...valid, requiresRepository: undefined },
+      { ...valid, stepLoopLimitDefaults: { b: 0 } },
+      { ...valid, stepLoopLimitDefaults: { b: 51 } },
+      { ...valid, stepLoopLimitDefaults: { b: 1.5 } },
+      { ...valid, sortOrder: 1.5 },
+    ];
+    for (const body of bad) expect(customTaskTypeCreateSchema.safeParse(body).success).toBe(false);
+  });
+
+  it('update is partial and refuses a slug', () => {
+    expect(taskTypeUpdateSchema.safeParse({}).success).toBe(true);
+    expect(taskTypeUpdateSchema.safeParse({ displayName: 'x', sortOrder: 2 }).success).toBe(true);
+    expect(taskTypeUpdateSchema.safeParse({ slug: 'other' }).success).toBe(false);
+    expect(taskTypeUpdateSchema.safeParse({ stepIds: [] }).success).toBe(false);
+  });
+
+  it('public dto carries available and an optional reason', () => {
+    const dto = {
+      slug: 'workflow',
+      displayName: 'Workflow',
+      description: null,
+      requiresRepository: true,
+      sortOrder: 0,
+      available: false,
+      reason: 'missing-step',
+    };
+    expect(publicTaskTypeSchema.safeParse(dto).success).toBe(true);
+    expect(publicTaskTypeSchema.safeParse({ ...dto, reason: undefined }).success).toBe(true);
+    expect(publicTaskTypeSchema.safeParse({ ...dto, reason: 'nope' }).success).toBe(false);
+  });
+});
+
+describe('validateTaskTypeDefaults', () => {
+  const steps = new Map(composable);
+  it('is clean for no defaults and for matching ones', () => {
+    expect(validateTaskTypeDefaults({ stepIds: ['a', 'b'] }, steps)).toEqual([]);
+    expect(
+      validateTaskTypeDefaults(
+        {
+          stepIds: ['a', 'b'],
+          preAnswerDefaults: { a: { k: 1 } },
+          stepLoopLimitDefaults: { b: 2 },
+        },
+        steps,
+      ),
+    ).toEqual([]);
+  });
+
+  it('flags preAnswerDefaults keys outside stepIds', () => {
+    expect(
+      validateTaskTypeDefaults({ stepIds: ['a'], preAnswerDefaults: { zz: {} } }, steps),
+    ).toEqual([{ kind: 'default-key-not-in-steps', field: 'preAnswerDefaults', stepId: 'zz' }]);
+  });
+
+  it('flags stepLoopLimitDefaults keys outside stepIds', () => {
+    expect(
+      validateTaskTypeDefaults({ stepIds: ['a'], stepLoopLimitDefaults: { b: 2 } }, steps),
+    ).toEqual([{ kind: 'default-key-not-in-steps', field: 'stepLoopLimitDefaults', stepId: 'b' }]);
+  });
+
+  it('flags a loop limit on a step that is not loopBudgetEditable or not in the catalog', () => {
+    expect(
+      validateTaskTypeDefaults(
+        { stepIds: ['a', 'legacy-step'], stepLoopLimitDefaults: { a: 2, 'legacy-step': 2 } },
+        steps,
+      ),
+    ).toEqual([
+      { kind: 'loop-limit-not-editable', stepId: 'a' },
+      { kind: 'loop-limit-not-editable', stepId: 'legacy-step' },
+    ]);
+  });
+});

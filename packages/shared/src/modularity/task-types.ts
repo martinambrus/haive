@@ -1,0 +1,140 @@
+import { z } from 'zod';
+import { stepLoopLimitsSchema } from '../schemas/tasks.js';
+import { validateComposition, type CompositionIssue } from './composition.js';
+import type { ComposableStepEntry } from './contracts.js';
+
+export const CUSTOM_TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+export const COMPOSABLE_STEP_GROUPS = [
+  { id: 'env', label: 'Environment', order: 0 },
+  { id: 'setup', label: 'Setup', order: 1 },
+  { id: 'runtime', label: 'Runtime', order: 2 },
+  { id: 'spec', label: 'Specification', order: 3 },
+  { id: 'build', label: 'Build', order: 4 },
+  { id: 'check', label: 'Checks', order: 5 },
+  { id: 'finish', label: 'Finish', order: 6 },
+  { id: 'knowledge', label: 'Knowledge', order: 7 },
+] as const;
+
+export const TASK_TYPE_UNAVAILABLE_REASONS = [
+  'disabled',
+  'not-selectable',
+  'custom-types-off',
+  'module-types-off',
+  'missing-step',
+  'invalid-composition',
+] as const;
+export type TaskTypeUnavailableReason = (typeof TASK_TYPE_UNAVAILABLE_REASONS)[number];
+
+export interface TaskTypeAvailabilityInput {
+  definition: {
+    source: string;
+    enabled: boolean;
+    selectable: boolean;
+    runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
+    stepIds: readonly string[] | null;
+  };
+  switches: { customEnabled: boolean; moduleEnabled: boolean };
+  catalog: {
+    stepIds: ReadonlySet<string>;
+    composable: ReadonlyMap<string, ComposableStepEntry>;
+  } | null;
+  generic: boolean;
+}
+
+export type TaskTypeAvailability =
+  | { available: true }
+  | {
+      available: false;
+      reason: TaskTypeUnavailableReason;
+      stepIds?: string[];
+      issues?: CompositionIssue[];
+    };
+
+export function resolveTaskTypeAvailability(
+  input: TaskTypeAvailabilityInput,
+): TaskTypeAvailability {
+  const { definition, switches, catalog, generic } = input;
+  if (!definition.enabled) return { available: false, reason: 'disabled' };
+  if (generic && !definition.selectable) return { available: false, reason: 'not-selectable' };
+  if (definition.source === 'admin' && !switches.customEnabled) {
+    return { available: false, reason: 'custom-types-off' };
+  }
+  if (definition.source.startsWith('module:') && !switches.moduleEnabled) {
+    return { available: false, reason: 'module-types-off' };
+  }
+  if (catalog === null || definition.runListStrategy !== 'static' || definition.stepIds === null) {
+    return { available: true };
+  }
+  const missing = definition.stepIds.filter((id) => !catalog.stepIds.has(id));
+  if (missing.length > 0) return { available: false, reason: 'missing-step', stepIds: missing };
+  if (definition.source === 'admin') {
+    const issues = validateComposition(definition.stepIds, catalog.composable);
+    if (issues.length > 0) return { available: false, reason: 'invalid-composition', issues };
+  }
+  return { available: true };
+}
+
+const preAnswerDefaultsSchema = z.record(z.string(), z.record(z.string(), z.unknown()));
+
+export const customTaskTypeCreateSchema = z.object({
+  slug: z.string().regex(CUSTOM_TASK_TYPE_SLUG_PATTERN),
+  displayName: z.string().min(1),
+  description: z.string().optional(),
+  stepIds: z.array(z.string().min(1)).min(1),
+  preAnswerDefaults: preAnswerDefaultsSchema.optional(),
+  stepLoopLimitDefaults: stepLoopLimitsSchema,
+  requiresRepository: z.boolean(),
+  sortOrder: z.number().int().optional(),
+});
+export type CustomTaskTypeCreate = z.infer<typeof customTaskTypeCreateSchema>;
+
+export const taskTypeUpdateSchema = customTaskTypeCreateSchema
+  .omit({ slug: true })
+  .partial()
+  .strict();
+export type TaskTypeUpdate = z.infer<typeof taskTypeUpdateSchema>;
+
+export const publicTaskTypeSchema = z.object({
+  slug: z.string().min(1),
+  displayName: z.string().min(1),
+  description: z.string().nullable(),
+  requiresRepository: z.boolean(),
+  sortOrder: z.number().int(),
+  available: z.boolean(),
+  reason: z.enum(TASK_TYPE_UNAVAILABLE_REASONS).optional(),
+});
+export type PublicTaskType = z.infer<typeof publicTaskTypeSchema>;
+
+export type TaskTypeDefaultsIssue =
+  | {
+      kind: 'default-key-not-in-steps';
+      field: 'preAnswerDefaults' | 'stepLoopLimitDefaults';
+      stepId: string;
+    }
+  | { kind: 'loop-limit-not-editable'; stepId: string };
+
+export function validateTaskTypeDefaults(
+  input: {
+    stepIds: readonly string[];
+    preAnswerDefaults?: Record<string, unknown>;
+    stepLoopLimitDefaults?: Record<string, number>;
+  },
+  catalog: ReadonlyMap<string, ComposableStepEntry>,
+): TaskTypeDefaultsIssue[] {
+  const issues: TaskTypeDefaultsIssue[] = [];
+  const steps = new Set(input.stepIds);
+  for (const stepId of Object.keys(input.preAnswerDefaults ?? {})) {
+    if (!steps.has(stepId)) {
+      issues.push({ kind: 'default-key-not-in-steps', field: 'preAnswerDefaults', stepId });
+    }
+  }
+  for (const stepId of Object.keys(input.stepLoopLimitDefaults ?? {})) {
+    if (!steps.has(stepId)) {
+      issues.push({ kind: 'default-key-not-in-steps', field: 'stepLoopLimitDefaults', stepId });
+    } else if (catalog.get(stepId)?.loopBudgetEditable !== true) {
+      issues.push({ kind: 'loop-limit-not-editable', stepId });
+    }
+  }
+  return issues;
+}
