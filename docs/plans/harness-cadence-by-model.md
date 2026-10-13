@@ -166,8 +166,11 @@ structured command it ran. Two inputs those runners take from earlier steps do n
      it").
   The candidate that meets all four: a disposable, credential-free check container as today,
   whose capacity is reserved when 07 is admitted with the setting on (the invocation is admitted
-  at the weight of both), so the check never queues behind its caller. Whether admission can
-  carry that combined weight is what D5 settles before P1 is built.
+  at the weight of both), so the check never queues behind its caller. Where the combined weight
+  cannot be admitted (always at `MAX_PARALLEL_AGENTS=1`, where 07 takes the only slot), 07 is
+  admitted alone as today and every check request returns NOT RUN at once, naming the capacity
+  reason; the final gate still runs those checks. Nothing waits, and the cap is never exceeded.
+  Whether admission can carry the combined weight is what D5 settles before P1 is built.
 - **The test framework.** 08 reads it from 08b's persisted detect (`08-phase-5-verify.ts`), which
   does not exist before 08b runs. Without it a Playwright slot gets no browser provisioning and
   `classifyTestEnvFailure` runs with `null`, so a missing browser would come back failed rather
@@ -194,8 +197,9 @@ follow the step's chosen CLI and model, is D1.
 Verification: prompt tests for both setting values; a selective test request for a framework below
 the root runs from that framework's directory, as 08b ran it; a check request on a fixture repository runs
 exactly the command 08 runs for that slot; a missing program and a test-environment failure each
-come back NOT RUN, not failed; a check requested at `MAX_PARALLEL_AGENTS=1` runs rather than
-waiting on its own caller's slot, sees no CLI credentials, and leaves no process behind after a
+come back NOT RUN, not failed; a check requested at `MAX_PARALLEL_AGENTS=1` returns NOT RUN at
+once with the capacity reason, never waiting on its own caller's slot; a check sees no CLI
+credentials and leaves no process behind after a
 timeout or a Stop; a DDEV repository's check runs host-side and returns; one live task
 with the setting on, where 07's transcript shows the requests and their results, and 08 still runs
 its own checks. Rollback: the
@@ -222,7 +226,9 @@ for it must not rely on the framework's error wording.
   carried into the request.
 - **D5.** Where a non-DDEV requested check executes. It must meet P1's four constraints (no
   self-deadlock, no uncounted workload, no credentials, killable). The candidate is a disposable
-  credential-free container whose capacity 07 reserves at admission; the alternative is a separate
+  credential-free container whose capacity 07 reserves at admission, with an immediate NOT RUN
+  wherever that combined weight cannot be admitted (one-slot installs included); the alternative
+  is a separate
   check lane in admission. Rejected, each for one constraint: a second lease (1), sharing 07's
   lease (2), executing inside 07's container (3 and 4).
 
