@@ -530,16 +530,18 @@ async function main(): Promise<void> {
     }
 
     // --- the job's catch ------------------------------------------------------------
-    for (const [status, expectDead] of [
-      ['pending', false],
-      ['running', true],
+    for (const c of [
+      { name: 'pending-current', row: 'pending', taskEpoch: 3, dead: true },
+      { name: 'pending-retried', row: 'pending', taskEpoch: 4, dead: false },
+      { name: 'running', row: 'running', taskEpoch: 3, dead: true },
+      { name: 'stopped', row: 'failed', taskEpoch: 3, dead: false },
     ] as const) {
-      const id = await makeTask(`catch-owned-${status}`);
-      await makeRow(id, 'p4b-a', status === 'pending' ? 'running' : status);
-      if (status === 'pending') {
+      const id = await makeTask(`catch-owned-${c.name}`, { orchestrationEpoch: c.taskEpoch });
+      await makeRow(id, 'p4b-a', 'running');
+      if (c.row !== 'running') {
         await db
           .update(schema.taskSteps)
-          .set({ status: 'pending' })
+          .set({ status: c.row })
           .where(eq(schema.taskSteps.taskId, id));
       }
       await markTaskDeadFromJob(db, id, 'gone', {
@@ -550,10 +552,8 @@ async function main(): Promise<void> {
       });
       const v = await view(id);
       check(
-        expectDead
-          ? 'a job that still owns its step row marks the task dead from its catch'
-          : 'a job whose step row a Retry reset leaves the task alive from its catch',
-        (v.deadAt !== null) === expectDead && v.status === 'running',
+        `a job's catch on a ${c.name} step row ${c.dead ? 'marks the task dead' : 'leaves the task alive'}`,
+        (v.deadAt !== null) === c.dead,
         v,
       );
     }

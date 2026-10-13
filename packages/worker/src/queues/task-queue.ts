@@ -668,8 +668,9 @@ async function markTaskDeadOnStep(
   });
 }
 
-/** A job that met an unresolved step marks the task dead only while it still owns the step row it
- *  was running, as a Retry writes the steps before it moves the epoch. */
+/** A job that met an unresolved step marks the task dead under its step row's lock: a Retry resets
+ *  the row and moves the epoch in one transaction, so after the lock the epoch fence catches it,
+ *  while Skip and Stop leave the row skipped or failed without moving the epoch. */
 export async function markTaskDeadFromJob(
   db: Database,
   taskId: string,
@@ -694,7 +695,17 @@ export async function markTaskDeadFromJob(
     return;
   }
   await db.transaction(async (tx) => {
-    if (!(await lockOwnedStep(tx, row.id))) return;
+    const [locked] = await tx
+      .select({ id: schema.taskSteps.id })
+      .from(schema.taskSteps)
+      .where(
+        and(
+          eq(schema.taskSteps.id, row.id),
+          notInArray(schema.taskSteps.status, ['skipped', 'failed']),
+        ),
+      )
+      .for('update');
+    if (!locked) return;
     await markTaskDead(tx, taskId, reason, opts);
   });
 }
