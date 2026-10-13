@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { REPO_OPTIONAL_BUILTIN_TASK_TYPES } from '@haive/shared';
 import type { StepRegistry } from './registry.js';
 
 type RunListStrategy = (typeof schema.runListStrategyEnum.enumValues)[number];
@@ -36,7 +37,6 @@ const DYNAMIC_STRATEGIES: Record<string, RunListStrategy> = {
   run_app: 'run_app_modes',
 };
 const SELECTABLE_SLUGS = ['onboarding', 'workflow', 'onboarding_upgrade', 'run_app'];
-const REPOSITORY_OPTIONAL_SLUGS = ['kb_author'];
 
 export function builtinTaskTypeRows(registry: StepRegistry): BuiltinTaskTypeRow[] {
   return schema.workflowTypeEnum.enumValues.map((slug, index) => {
@@ -50,7 +50,7 @@ export function builtinTaskTypeRows(registry: StepRegistry): BuiltinTaskTypeRow[
       stepIds,
       source: 'builtin',
       selectable: SELECTABLE_SLUGS.includes(slug),
-      requiresRepository: !REPOSITORY_OPTIONAL_SLUGS.includes(slug),
+      requiresRepository: !REPO_OPTIONAL_BUILTIN_TASK_TYPES.has(slug),
       sortOrder: index,
       contentHash: createHash('sha256')
         .update(JSON.stringify({ strategy: runListStrategy, stepIds }))

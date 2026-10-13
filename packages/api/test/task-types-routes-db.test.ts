@@ -324,19 +324,19 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect((await row('run_app'))?.enabled).toBe(false);
     });
 
-    it('refuses a custom type without a repository until workers support one', async () => {
+    it('accepts a custom type without a repository when its steps need none', async () => {
       const res = await send(
         'POST',
         '/admin/task-types',
         valid('tt-norepo', { requiresRepository: false }),
       );
-      expect(res.status).toBe(400);
-      expect(await row('tt-norepo')).toBeUndefined();
+      expect(res.status).toBe(201);
+      expect((await row('tt-norepo'))?.requiresRepository).toBe(false);
       expect((await send('POST', '/admin/task-types', valid('tt-repo'))).status).toBe(201);
       expect(
         (await send('PATCH', '/admin/task-types/tt-repo', { requiresRepository: false })).status,
-      ).toBe(400);
-      expect((await row('tt-repo'))?.requiresRepository).toBe(true);
+      ).toBe(200);
+      expect((await row('tt-repo'))?.requiresRepository).toBe(false);
     });
 
     it('validates an edit against the row as committed by a concurrent edit', async () => {

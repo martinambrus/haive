@@ -25,6 +25,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { taskRoutes } from '../src/routes/tasks/index.js';
+import { adminTaskTypeRoutes } from '../src/routes/task-types.js';
 import { loadLiveRootWriters } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -45,6 +46,8 @@ const SLUGS = [
   'cp-restore',
   'cp-invalid',
   'cp-missing',
+  'cp-new-norepo',
+  'cp-new-wt',
 ];
 const STEP_IDS = [
   'cp-cli',
@@ -80,7 +83,11 @@ const catalogRow = (stepId: string, dispatchesCli = false) => ({
   composable: true,
   entry: entry(
     stepId,
-    stepId === 'cp-needs' ? { requires: [{ needs: 'nothing-provides-this', reason: 'x' }] } : {},
+    stepId === 'cp-needs'
+      ? { requires: [{ needs: 'nothing-provides-this', reason: 'x' }] }
+      : stepId === LOCK_STEP
+        ? { requires: [{ needs: 'repository', reason: 'Needs a repository.' }] }
+        : {},
   ),
 });
 
@@ -104,6 +111,7 @@ app.use(async (c, next) => {
   await next();
 });
 app.route('/tasks', taskRoutes);
+app.route('/admin/task-types', adminTaskTypeRoutes);
 app.onError(errorHandler);
 
 const post = (body: Record<string, unknown>) =>
@@ -250,8 +258,30 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
   it('refuses a type that requires a repository when the request names none', async () => {
     expect((await post({ type: 'cp-repo' })).status).toBe(400);
     expect((await post({ type: 'cp-repo', repositoryId: REPO })).status).toBe(201);
-    expect((await post({ type: 'cp-norepo' })).status).toBe(409);
-    expect((await post({ type: 'cp-norepo', repositoryId: REPO })).status).toBe(409);
+  });
+
+  it('creates a repo-less custom task with the anchor recorded as null, and anchors it when a repository is named', async () => {
+    const none = await created(await post({ type: 'cp-norepo' }));
+    expect(none.row.repositoryId).toBeNull();
+    expect(none.row.metadata).toEqual({ anchorRepositoryId: null });
+    const anchored = await created(await post({ type: 'cp-norepo', repositoryId: REPO }));
+    expect(anchored.row.repositoryId).toBe(REPO);
+    expect(anchored.row.metadata).toEqual({ anchorRepositoryId: REPO });
+  });
+
+  it('records no anchor on a task of a type that requires a repository', async () => {
+    const { row } = await created(await post({ type: 'cp-repo', repositoryId: REPO }));
+    expect(row.metadata).toBeNull();
+  });
+
+  it('records no anchor on an unseeded built-in, repository or not', async () => {
+    const withRepo = await created(await post({ type: 'workflow', repositoryId: REPO }));
+    expect(withRepo.row.metadata).toBeNull();
+    const without = await post({ type: 'workflow' });
+    expect(without.status).toBe(201);
+    const { task } = (await without.json()) as { task: { id: string } };
+    const [row] = await db.select().from(schema.tasks).where(eq(schema.tasks.id, task.id));
+    expect(row?.metadata).toBeNull();
   });
 
   it('accepts a saved database only for a custom type that restores one', async () => {
@@ -355,6 +385,59 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
         locked: false,
       },
       'run_app/true': { ...none, snapshot: null, simplifyCode: true, pinned: true, locked: false },
+    });
+  });
+
+  describe('admin task type routes', () => {
+    const adminPost = (body: Record<string, unknown>) =>
+      app.request('/admin/task-types', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ displayName: 'New', ...body }),
+      });
+    const adminPatch = (slug: string, body: Record<string, unknown>) =>
+      app.request(`/admin/task-types/${slug}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const issuesOf = async (res: Response) =>
+      ((await res.json()) as { issues: { kind: string; needs?: string }[] }).issues;
+
+    it('creates a type that needs no repository', async () => {
+      const res = await adminPost({
+        slug: 'cp-new-norepo',
+        stepIds: ['cp-plain'],
+        requiresRepository: false,
+      });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toMatchObject({ taskType: { requiresRepository: false } });
+    });
+
+    it('refuses a repo-less type holding a step that needs a repository', async () => {
+      const res = await adminPost({
+        slug: 'cp-new-wt',
+        stepIds: [LOCK_STEP],
+        requiresRepository: false,
+      });
+      expect(res.status).toBe(400);
+      expect(await issuesOf(res)).toMatchObject([{ kind: 'unmet-need', needs: 'repository' }]);
+    });
+
+    it('re-checks the composition when only requiresRepository is flipped to false', async () => {
+      const res = await adminPatch('cp-lock', { requiresRepository: false });
+      expect(res.status).toBe(400);
+      expect(await issuesOf(res)).toMatchObject([{ kind: 'unmet-need', needs: 'repository' }]);
+      const [row] = await db
+        .select()
+        .from(schema.taskTypeDefinitions)
+        .where(eq(schema.taskTypeDefinitions.slug, 'cp-lock'));
+      expect(row?.requiresRepository).toBe(true);
+    });
+
+    it('lets the flag flip on a type whose steps need no repository', async () => {
+      const res = await adminPatch('cp-plain', { requiresRepository: false });
+      expect(res.status).toBe(200);
     });
   });
 });

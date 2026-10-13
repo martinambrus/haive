@@ -1,3 +1,5 @@
+import { knownTaskTypes } from './stats/task-class.js';
+
 /** Where a repo-less task's scratch workspace lives, RELATIVE to the repo storage root.
  *
  *  Shared because TWO packages have to agree on this name and neither may import the other: the
@@ -18,7 +20,8 @@ export function taskScratchSubpath(userId: string, taskId: string): string {
   return `${userId}/${TASK_SCRATCH_DIR}/${taskId}`;
 }
 
-/** Task types that may run with no repository.
+/** Built-in task types that may run with no repository; a type that is not a built-in decides
+ *  that for itself.
  *
  *  An allowlist and not a blanket "null is fine", because a null `repositoryId` has TWO
  *  meanings: a task deliberately created without one, and a task whose repository was deleted
@@ -26,10 +29,12 @@ export function taskScratchSubpath(userId: string, taskId: string): string {
  *  state and should still fail loudly — a workflow run whose repo vanished cannot do anything
  *  useful, and silently handing it an empty directory would turn that into a confusing agent
  *  failure several minutes later. */
-const REPO_OPTIONAL_TASK_TYPES: ReadonlySet<string> = new Set(['kb_author']);
+export const REPO_OPTIONAL_BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(['kb_author']);
+
+const BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(knownTaskTypes());
 
 export function taskTypeAllowsNoRepository(type: string): boolean {
-  return REPO_OPTIONAL_TASK_TYPES.has(type);
+  return !BUILTIN_TASK_TYPES.has(type) || REPO_OPTIONAL_BUILTIN_TASK_TYPES.has(type);
 }
 
 /** Whether this task was CREATED without a repository, as opposed to having LOST one.

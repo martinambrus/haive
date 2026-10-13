@@ -640,6 +640,7 @@ taskRoutes.post('/', async (c) => {
   if (body.fromPlanChat) metadata.fromPlanChat = true;
   if (body.feature) metadata.feature = body.feature;
   if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
+  if (definition.repoOptional) metadata.anchorRepositoryId = body.repositoryId ?? null;
 
   const insertTask = async (handle: typeof db | DbTx) => {
     const locked = await definitionForCreate(handle, body.type, { generic: true });
@@ -648,7 +649,8 @@ taskRoutes.post('/', async (c) => {
       locked.takesRootLock !== definition.takesRootLock ||
       locked.pinsDatabase !== definition.pinsDatabase ||
       locked.restoresDatabase !== definition.restoresDatabase ||
-      locked.requiresRepository !== definition.requiresRepository
+      locked.requiresRepository !== definition.requiresRepository ||
+      locked.repoOptional !== definition.repoOptional
     ) {
       throw new HttpError(
         409,

@@ -211,7 +211,9 @@ async function resolveTaskContext(
     if (!taskWasCreatedRepoLess(task.metadata)) {
       throw new Error(
         `task ${taskId} was anchored to a repository that no longer exists; ` +
-          're-run it from a new entry to pick another anchor, or author it without one',
+          (task.type === 'kb_author'
+            ? 're-run it from a new entry to pick another anchor, or author it without one'
+            : 'create a new task'),
       );
     }
     // A task type that is ALLOWED to have no repository gets an empty workspace instead of a
