@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatSampledTps, formatTps, ratePerSecond } from './format-throughput';
+import { formatSampledTps, formatTps, ratePerSecond } from './format-throughput.js';
 
 describe('formatTps', () => {
   it('keeps one decimal under 10 and rounds above', () => {

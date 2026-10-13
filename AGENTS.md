@@ -32,6 +32,7 @@ haive/
     api/                       @haive/api       Hono REST + WebSocket terminal proxy
     worker/                    @haive/worker    BullMQ workers, step engine, sandbox manager, CLI adapters
     web/                       @haive/web       Next.js Conductor-style UI
+    web-kit/                   @haive/web-kit   UI primitives and host contract shared by web and modules
   tests/
     e2e/                       Playwright specs
     fixtures/
@@ -44,6 +45,7 @@ haive/
 - `@haive/api` is HTTP + WebSocket only. It must never spawn child processes for CLI execution; that responsibility lives in the worker.
 - `@haive/worker` owns BullMQ queues, the step engine, the CLI adapter registry, the sandbox/clawker wrapper, and the dispatcher priority chain. It holds no HTTP routes.
 - `@haive/web` consumes only the public REST API of `@haive/api`. It must not import from `@haive/database` or `@haive/worker`.
+- `@haive/web-kit` holds the generic UI primitives, formatters and the module host contract (`HostApi`, page and widget props) that `@haive/web` and module web parts both import; web keeps one-line re-exports at the old paths. It imports no server package and no api client: a module gets the host's own `api` through its props, since a second client would break the shared session refresh. It is built by tsc with Bundler resolution, so after editing it run `pnpm docker libs`.
 
 ## Architecture summary
 

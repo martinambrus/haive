@@ -1,0 +1,66 @@
+{
+  "name": "@haive/web-kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generic web UI primitives and the host contract shared by @haive/web and modules",
+  "type": "module",
+  "exports": {
+    "./cn": {
+      "types": "./dist/cn.d.ts",
+      "default": "./dist/cn.js"
+    },
+    "./ui": {
+      "types": "./dist/ui.d.ts",
+      "default": "./dist/ui.js"
+    },
+    "./tabs": {
+      "types": "./dist/tabs.d.ts",
+      "default": "./dist/tabs.js"
+    },
+    "./use-page-title": {
+      "types": "./dist/use-page-title.d.ts",
+      "default": "./dist/use-page-title.js"
+    },
+    "./format-duration": {
+      "types": "./dist/format-duration.d.ts",
+      "default": "./dist/format-duration.js"
+    },
+    "./format-cost": {
+      "types": "./dist/format-cost.d.ts",
+      "default": "./dist/format-cost.js"
+    },
+    "./format-tokens": {
+      "types": "./dist/format-tokens.d.ts",
+      "default": "./dist/format-tokens.js"
+    },
+    "./format-throughput": {
+      "types": "./dist/format-throughput.d.ts",
+      "default": "./dist/format-throughput.js"
+    },
+    "./host": {
+      "types": "./dist/host.d.ts",
+      "default": "./dist/host.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.7.0"
+  },
+  "peerDependencies": {
+    "next": "^16.3.8",
+    "react": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "next": "^16.3.8",
+    "react": "^19.3.0",
+    "typescript": "^5.7.3",
+    "vitest": "^5.0.3"
+  }
+}

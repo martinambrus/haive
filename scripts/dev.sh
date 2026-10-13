@@ -151,7 +151,7 @@ reset_stack() {
   # Wipe the bind-mount compiled artifacts inside a container (host rm hits
   # EACCES on root-owned files); recreates the fresh volumes in the same pass.
   dc run --rm --no-deps --entrypoint sh dev-libs -c \
-    "rm -rf packages/shared/dist packages/database/dist packages/shared/*.tsbuildinfo packages/database/*.tsbuildinfo"
+    "rm -rf packages/shared/dist packages/database/dist packages/web-kit/dist modules/*/dist packages/shared/*.tsbuildinfo packages/database/*.tsbuildinfo packages/web-kit/*.tsbuildinfo"
   gpu_note
   dc up -d
 }

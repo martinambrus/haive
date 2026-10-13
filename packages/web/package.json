@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@haive/shared": "workspace:*",
+    "@haive/web-kit": "workspace:*",
     "@novnc/novnc": "^1.5.0",
     "@tiptap/core": "^3.31.4",
     "@tiptap/extension-list": "^3.31.4",

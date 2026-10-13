@@ -4,6 +4,7 @@ import type { CostDisplay } from './format-cost';
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
 import type { FormSchema } from '@haive/shared';
+import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 
 // A real runtime import, unlike the type-only ones above. `api-origin` has no imports of its own,
 // so it introduces no cycle — the same reasoning that lets `format-cost` be imported for its type.
@@ -34,16 +35,7 @@ export function apiWebSocketUrl(path: string): string {
   return url.toString();
 }
 
-export interface ApiError extends Error {
-  status: number;
-  code?: string;
-  issues?: { path: string; message: string }[];
-  /** The parsed error body, verbatim. Kept so an endpoint can hand the UI
-   *  structured detail its message cannot carry — the plan delete's 409 names
-   *  the tasks blocking it, and a list of links beats a sentence telling the
-   *  user to go find them. Callers that do not need it ignore it. */
-  body?: unknown;
-}
+export type { ApiError };
 
 let refreshing: Promise<boolean> | null = null;
 // Set once this page has confirmed its session is over, so no later 401 asks the api again.
@@ -186,7 +178,7 @@ export const api = {
       method: 'DELETE',
       body: body !== undefined ? JSON.stringify(body) : undefined,
     }),
-};
+} satisfies HostApi;
 
 /** Post an increment of a step's user-active time. Uses `keepalive` so the
  *  final flush survives a tab close / navigation, and bypasses the `request`

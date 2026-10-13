@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react';
+import type { ModulePageProps } from '@haive/web-kit/host';
 
-export type ModulePageProps = { moduleId: string; path: string[] };
+export type { ModulePageProps };
 export type ModulePages = Readonly<Record<string, ComponentType<ModulePageProps>>>;
 
 export function resolveModulePage(
