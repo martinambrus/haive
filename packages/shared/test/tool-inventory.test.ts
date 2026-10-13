@@ -2,12 +2,12 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CLI_PROVIDER_LIST } from '@haive/shared';
+import { CLI_PROVIDER_LIST } from '../src/cli-providers/catalog.js';
 import {
   InventoryAnchorError,
   inventoryDirsFromCatalog,
   scanInstalledTooling,
-} from './tool-inventory.js';
+} from '../src/stats-server/tool-inventory.js';
 
 // The scan reads NAMES off a tree sandboxed agents write, through the link-refusing readers.
 // A temp tree stands in for a repository root: two CLIs' agent dirs, one skills dir, a link

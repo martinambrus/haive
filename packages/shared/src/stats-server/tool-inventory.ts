@@ -1,5 +1,5 @@
-import { CLI_PROVIDER_LIST } from '@haive/shared';
-import { isPathContainmentError, lstatNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import { CLI_PROVIDER_LIST } from '../cli-providers/catalog.js';
+import { isPathContainmentError, lstatNoFollow, readdirNoFollow } from '../fs-safe.js';
 
 /**
  * The installed half of the unused report: which persona and skill definition files a

@@ -12,7 +12,7 @@ import {
 import { NotUtf8Error, PathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { checkOnboardingMarkers } from '../src/lib/onboarding-state.js';
-import { inventoryDirsFromCatalog } from '../src/lib/tool-inventory.js';
+import { inventoryDirsFromCatalog } from '@haive/shared/stats-server';
 import { MAX_FILE_CONTENT_BYTES } from '../src/routes/tasks/_helpers.js';
 import {
   classifyResetFailure,

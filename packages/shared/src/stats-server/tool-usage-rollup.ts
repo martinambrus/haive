@@ -1,6 +1,5 @@
 import { sql, type SQL } from 'drizzle-orm';
-import { schema } from '@haive/database';
-import type { Database } from '../db.js';
+import { schema, type Database } from '@haive/database';
 
 /**
  * The one SQL rollup over `cli_invocations.tool_usage`, shared by `GET /stats/tool-usage`

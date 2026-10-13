@@ -2,7 +2,7 @@
  * Agent, skill and MCP usage — the pure half of the statistics built on
  * `cli_invocations.tool_usage`.
  *
- * The api does the fetching and scoping (`lib/tool-usage-rollup.ts`); this file holds the
+ * The fetching and scoping live in `stats-server/tool-usage-rollup.ts`; this file holds the
  * maths that needs no database: merging per-step rows into a task total, and the one list of
  * MCP servers Haive wires itself, so a server in a run's inventory can be told from one the
  * repository's own `.claude/mcp_settings.json` added.

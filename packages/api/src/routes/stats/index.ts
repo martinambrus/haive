@@ -40,16 +40,15 @@ import {
   sumProviderBreakdownWhere,
   type CostDisplay,
   type TaskProviderUsage,
-} from '../tasks/_helpers.js';
-import { parseStatsQuery, type StatsQuery } from './_query.js';
-import {
   rollupToolUsage,
   toolUsageLastSeen,
   toolUsageLoadedIds,
   toolUsageObservableSpan,
   type ToolUsageRollup,
-} from '../../lib/tool-usage-rollup.js';
-import { InventoryAnchorError, scanInstalledTooling } from '../../lib/tool-inventory.js';
+  InventoryAnchorError,
+  scanInstalledTooling,
+} from '@haive/shared/stats-server';
+import { parseStatsQuery, type StatsQuery } from './_query.js';
 
 export const statsRoutes = new Hono<AppEnv>();
 
