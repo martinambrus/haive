@@ -4,6 +4,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect, afterEach } from 'vitest';
+import { planMirrorPayloadSchema } from '@haive/shared/schemas';
+import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared/plan';
+import { mergePlanMirror } from '@haive/shared/plan-mirror-merge';
+import type { PlanMirror } from '@haive/shared';
 import {
   abortMerge,
   commitMerge,
@@ -278,6 +282,273 @@ describe('mergeOriginInto', () => {
     );
     expect(attempt.conflicts).toEqual([]);
     expect(attempt.clean).toBe(true);
+  });
+});
+
+const ROOT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const NODE_X = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const NODE_Y = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const NODE_Z = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const NODE_W = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const PLAN_JSON = '.haive-data/plan.json';
+const PLAN_MD = '.haive-data/plan.md';
+
+function planOf(spec: [string, string][]): PlanMirror {
+  return {
+    schemaVersion: 2,
+    nodes: [
+      {
+        id: ROOT_ID,
+        parentId: null,
+        ordinal: 0,
+        title: 'Product',
+        kind: 'component',
+        body: null,
+        status: 'todo',
+        taskable: false,
+      },
+      ...spec.map(([id, title], i) => ({
+        id,
+        parentId: ROOT_ID,
+        ordinal: i,
+        title,
+        kind: 'component',
+        body: null,
+        status: 'todo',
+        taskable: false,
+      })),
+    ],
+    edges: [],
+    codeLinks: [],
+  };
+}
+
+const withKind = (plan: PlanMirror, id: string, kind: string): PlanMirror => ({
+  ...plan,
+  nodes: plan.nodes.map((n) => (n.id === id ? { ...n, kind } : n)),
+});
+
+async function writePlan(dir: string, plan: PlanMirror): Promise<void> {
+  await write(dir, PLAN_JSON, serializePlanMirror(plan));
+  await write(dir, PLAN_MD, renderPlanMarkdownFromMirror(plan));
+}
+
+async function commitAll(dir: string, message: string): Promise<void> {
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', message]);
+}
+
+/** Two checkouts of one history: `base` committed, then each side commits its own plan (null = deleted). */
+async function relatedPair(
+  base: PlanMirror | null,
+  ours: PlanMirror | null,
+  theirs: PlanMirror | null,
+): Promise<{ local: string; wt: string }> {
+  const remote = await mkdtemp(path.join(tmpdir(), 'planmerge-remote-'));
+  const local = await mkdtemp(path.join(tmpdir(), 'planmerge-local-'));
+  dirs.push(remote, local);
+  await git(remote, ['init', '-b', 'main']);
+  await quietGit(remote);
+  await write(remote, 'README.md', '# repo\n');
+  if (base) await writePlan(remote, base);
+  await commitAll(remote, 'base');
+  await rm(local, { recursive: true, force: true });
+  await git(path.dirname(local), ['clone', remote, local]);
+  await quietGit(local);
+  const change = async (dir: string, plan: PlanMirror | null): Promise<void> => {
+    if (plan) await writePlan(dir, plan);
+    else await git(dir, ['rm', '-q', '-f', PLAN_JSON, PLAN_MD]);
+    await commitAll(dir, 'plan');
+  };
+  await change(local, ours);
+  await change(remote, theirs);
+  await git(local, ['fetch', 'origin', 'main']);
+  return { local, wt: await ensurePlanMergeWorktree(local) };
+}
+
+async function mergeAndCommit(local: string, wt: string) {
+  const attempt = await mergeOriginInto(
+    wt,
+    'main',
+    (await divergence(local, 'main')).unrelated,
+    COMMIT_ENV,
+  );
+  if (attempt.clean) await commitMerge(wt, 'merge', COMMIT_ENV);
+  const committed = async (file: string): Promise<string> => git(wt, ['show', `HEAD:${file}`]);
+  return { attempt, committed };
+}
+
+const nodeOf = (plan: PlanMirror, id: string): PlanMirror['nodes'][number] | undefined =>
+  plan.nodes.find((n) => n.id === id);
+const parsePlan = (json: string): PlanMirror => {
+  const parsed = planMirrorPayloadSchema.parse(JSON.parse(json) as unknown);
+  if (parsed.schemaVersion !== 2) throw new Error('expected a v2 plan');
+  return parsed;
+};
+
+describe('mergeOriginInto: plan.json merges three-way', () => {
+  const base = planOf([
+    [NODE_X, 'X'],
+    [NODE_Y, 'Y'],
+  ]);
+
+  it('carries both sides changes into the merge commit', async () => {
+    // Adjacent lines of one node (title, kind) are what makes git itself report a conflict.
+    const { local, wt } = await relatedPair(
+      base,
+      planOf([
+        [NODE_X, 'X ours'],
+        [NODE_Y, 'Y'],
+      ]),
+      withKind(
+        planOf([
+          [NODE_X, 'X'],
+          [NODE_Y, 'Y theirs'],
+        ]),
+        NODE_X,
+        'decision',
+      ),
+    );
+    const { attempt, committed } = await mergeAndCommit(local, wt);
+
+    expect(attempt.autoResolved).toContain(PLAN_JSON);
+    expect(attempt.clean).toBe(true);
+    const plan = parsePlan(await committed(PLAN_JSON));
+    expect(nodeOf(plan, NODE_X)).toMatchObject({ title: 'X ours', kind: 'decision' });
+    expect(nodeOf(plan, NODE_Y)?.title).toBe('Y theirs');
+    expect(await committed(PLAN_JSON)).toBe(serializePlanMirror(plan));
+    expect(await readFile(path.join(wt, PLAN_JSON), 'utf8')).toBe(await committed(PLAN_JSON));
+  });
+
+  it('renders plan.md from the merged plan.json', async () => {
+    const { local, wt } = await relatedPair(
+      base,
+      planOf([
+        [NODE_X, 'X ours'],
+        [NODE_Y, 'Y'],
+        [NODE_Z, 'Z'],
+      ]),
+      withKind(
+        planOf([
+          [NODE_X, 'X'],
+          [NODE_Y, 'Y theirs'],
+          [NODE_W, 'W'],
+        ]),
+        NODE_X,
+        'decision',
+      ),
+    );
+    const { committed } = await mergeAndCommit(local, wt);
+
+    const plan = parsePlan(await committed(PLAN_JSON));
+    expect(plan.nodes.map((n) => n.id)).toEqual(
+      expect.arrayContaining([NODE_X, NODE_Y, NODE_Z, NODE_W]),
+    );
+    expect(await committed(PLAN_MD)).toBe(renderPlanMarkdownFromMirror(plan));
+  });
+
+  it('keeps theirs for a field both sides changed, and ours elsewhere', async () => {
+    const ours = planOf([
+      [NODE_X, 'X ours'],
+      [NODE_Y, 'Y'],
+      [NODE_Z, 'Z'],
+    ]);
+    const theirs = planOf([
+      [NODE_X, 'X theirs'],
+      [NODE_Y, 'Y'],
+    ]);
+    const { local, wt } = await relatedPair(base, ours, theirs);
+    const { committed } = await mergeAndCommit(local, wt);
+
+    const plan = parsePlan(await committed(PLAN_JSON));
+    expect(nodeOf(plan, NODE_X)?.title).toBe('X theirs');
+    expect(nodeOf(plan, NODE_Z)?.title).toBe('Z');
+    const merge = mergePlanMirror({ base, local: ours, incoming: theirs });
+    expect(merge.conflicts.map((c) => [c.nodeId, c.field])).toEqual([[NODE_X, 'title']]);
+  });
+
+  it('re-renders plan.md from the merged plan.json even where git merged plan.md cleanly', async () => {
+    const ours = planOf([
+      [NODE_X, 'X ours'],
+      [NODE_Y, 'Y'],
+    ]);
+    const theirs = planOf([
+      [NODE_X, 'X theirs'],
+      [NODE_Y, 'Y'],
+    ]);
+    const { local, wt } = await relatedPair(base, ours, theirs);
+    await write(wt, PLAN_MD, 'same on both sides\n');
+    await commitAll(wt, 'md');
+    const remoteDir = (await git(local, ['remote', 'get-url', 'origin'])).trim();
+    await write(remoteDir, PLAN_MD, 'same on both sides\n');
+    await commitAll(remoteDir, 'md');
+    await git(local, ['fetch', 'origin', 'main']);
+    const { committed, attempt } = await mergeAndCommit(local, wt);
+    expect(attempt.autoResolved).toEqual([PLAN_JSON, PLAN_MD]);
+    const plan = parsePlan(await committed(PLAN_JSON));
+    expect(await committed(PLAN_MD)).toBe(renderPlanMarkdownFromMirror(plan));
+  });
+
+  it('merges an add/add with no base instead of taking theirs', async () => {
+    const { local, wt } = await relatedPair(
+      null,
+      planOf([[NODE_X, 'X ours']]),
+      planOf([[NODE_Y, 'Y theirs']]),
+    );
+    const { attempt, committed } = await mergeAndCommit(local, wt);
+
+    expect(attempt.autoResolved).toContain(PLAN_JSON);
+    expect(attempt.clean).toBe(true);
+    const plan = parsePlan(await committed(PLAN_JSON));
+    expect(nodeOf(plan, NODE_X)?.title).toBe('X ours');
+    expect(nodeOf(plan, NODE_Y)?.title).toBe('Y theirs');
+    expect(await committed(PLAN_MD)).toBe(renderPlanMarkdownFromMirror(plan));
+  });
+
+  it('keeps the modified side when the other side deleted plan.json', async () => {
+    const modified = planOf([
+      [NODE_X, 'X modified'],
+      [NODE_Y, 'Y'],
+    ]);
+    for (const [ours, theirs] of [
+      [modified, null],
+      [null, modified],
+    ] as const) {
+      const { local, wt } = await relatedPair(base, ours, theirs);
+      const { attempt, committed } = await mergeAndCommit(local, wt);
+
+      expect(attempt.clean).toBe(true);
+      expect(attempt.warnings.join('\n')).toContain('one side deleted it');
+      const plan = parsePlan(await committed(PLAN_JSON));
+      expect(nodeOf(plan, NODE_X)?.title).toBe('X modified');
+      expect(await committed(PLAN_MD)).toBe(renderPlanMarkdownFromMirror(plan));
+    }
+  });
+
+  it('falls back to theirs with a warning when a side does not parse', async () => {
+    const theirs = planOf([[NODE_Y, 'Y theirs']]);
+    const { local, wt } = await relatedPair(base, planOf([[NODE_X, 'X ours']]), theirs);
+    await removePlanMergeWorktree(local);
+    await write(local, PLAN_JSON, '{"nodes":["local"]}\n');
+    await commitAll(local, 'garbled');
+    const fresh = await ensurePlanMergeWorktree(local);
+    expect(fresh).toBe(wt);
+    const { attempt, committed } = await mergeAndCommit(local, fresh);
+
+    expect(attempt.clean).toBe(true);
+    expect(attempt.warnings.some((w) => w.startsWith(PLAN_JSON))).toBe(true);
+    expect(await committed(PLAN_JSON)).toBe(serializePlanMirror(theirs));
+  });
+
+  it('falls back to theirs with a warning when the roots differ', async () => {
+    const other = planOf([[NODE_Y, 'Y other']]);
+    other.nodes[0] = { ...other.nodes[0]!, id: NODE_W };
+    other.nodes[1] = { ...other.nodes[1]!, parentId: NODE_W };
+    const { local, wt } = await relatedPair(base, planOf([[NODE_X, 'X ours']]), other);
+    const { attempt, committed } = await mergeAndCommit(local, wt);
+
+    expect(attempt.warnings.join('\n')).toContain('different roots');
+    expect(await committed(PLAN_JSON)).toBe(serializePlanMirror(other));
   });
 });
 

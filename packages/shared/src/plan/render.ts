@@ -1,8 +1,9 @@
 import type { Database } from '@haive/database';
-import type { PlanEdgeKind } from '../schemas/plan.js';
+import type { PlanEdgeKind, PlanNodeKind, PlanNodeStatus } from '../schemas/plan.js';
+import type { PlanMirror, PlanMirrorPayload } from '../types/index.js';
 import { collapseToLine } from '../utils/collapse-line.js';
 import { loadPlanEdges, loadPlanNodes, indexChildren, type PlanNodeRecord } from './read.js';
-import { planNodeDepth } from './paths.js';
+import { planNodeDepth, planNodePath } from './paths.js';
 import { computePlanSequence } from './sequence.js';
 
 /**
@@ -151,4 +152,52 @@ export async function renderPlanMarkdown(
     loadPlanEdges(db, repositoryId),
   ]);
   return renderPlanMarkdownFrom(nodes, edges, opts);
+}
+
+/** plan.json exactly as the flush writes it. */
+export function serializePlanMirror(mirror: PlanMirror): string {
+  return `${JSON.stringify(mirror, null, 2)}\n`;
+}
+
+/** plan.md for a mirror payload: the bytes the flush writes for the plan the payload holds. */
+export function renderPlanMarkdownFromMirror(payload: PlanMirrorPayload): string {
+  const ordered = payload.nodes
+    .map((n, rank) => ({ n, rank }))
+    .sort((a, b) => a.n.ordinal - b.n.ordinal || a.rank - b.rank)
+    .map(({ n }) => n);
+  const byId = new Map(ordered.map((n) => [n.id, n]));
+  const pathOf = (id: string): string => {
+    const chain = [id];
+    const seen = new Set(chain);
+    for (
+      let parent = byId.get(id)?.parentId ?? null;
+      parent !== null && byId.has(parent) && !seen.has(parent);
+      parent = byId.get(parent)?.parentId ?? null
+    ) {
+      chain.push(parent);
+      seen.add(parent);
+    }
+    return chain.reduceRight<string | null>((path, nodeId) => planNodePath(path, nodeId), null)!;
+  };
+  const nodes: PlanNodeRecord[] = ordered.map((n) => ({
+    id: n.id,
+    parentId: n.parentId,
+    path: pathOf(n.id),
+    ordinal: n.ordinal,
+    title: n.title,
+    kind: n.kind as PlanNodeKind,
+    body: n.body,
+    status: n.status as PlanNodeStatus,
+    taskable: n.taskable,
+    version: 0,
+    createdBy: 'user',
+    sourceTaskId: null,
+    lastReviewedAt: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+  }));
+  return renderPlanMarkdownFrom(
+    nodes,
+    payload.edges.map((e) => ({ ...e, kind: e.kind as PlanEdgeKind })),
+  );
 }

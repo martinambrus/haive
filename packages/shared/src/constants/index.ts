@@ -150,8 +150,7 @@ export interface PlanMirrorJobResult {
 /** A merge the mirror could not finish on its own. */
 export interface PlanMergeConflict {
   /** Unmerged paths a person has to decide. `.haive-data/plan.{json,md}` never
-   *  appear: the database reconcile is the real merge for those two, so they are
-   *  resolved to the incoming side before this is built. */
+   *  appear: they are merged three-way before this is built. */
   paths: string[];
   /** True when the two sides share no commit — a blank repository pushed at a
    *  forge-initialised one. Worth saying out loud, because every file present on

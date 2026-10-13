@@ -1,10 +1,10 @@
-import { HAIVE_DATA_FILES } from '@haive/shared';
+import { HAIVE_DATA_FILES, logger } from '@haive/shared';
 import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js';
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 import { abortMerge as abortGitMerge, openMerge, utf8Name } from '../step-engine/git-merge.js';
-import { PLAN_SNAPSHOT_GIT_PATHS } from './snapshot-git.js';
+import { resolveHaiveProjectionConflicts } from './projection-merge.js';
 import type { Database } from '@haive/database';
 
 /**
@@ -175,38 +175,6 @@ export async function conflictedPaths(worktreePath: string): Promise<ConflictedP
   return found;
 }
 
-const PLAN_PATHS = new Set<string>(PLAN_SNAPSHOT_GIT_PATHS);
-
-/**
- * Resolve a conflict in the plan mirror's OWN two files by taking the incoming side.
- *
- * Not a guess, and not a preference for the remote: `reconcilePlanFromCheckout` reads
- * `.haive-data/plan.json` out of the checkout and merges it into the DATABASE
- * against the copy it last read — keeping every local-only node and local edit — and
- * the files are then rewritten from the database. So the incoming side is what the real merge needs to see, and
- * whatever lands in the file here survives only until that rewrite. Asking a person
- * or an agent to hand-merge two thousand-node JSON documents would be work whose
- * result is discarded seconds later.
- *
- * `plan.md` has no reader at all — it is a rendering of the same data — so it takes
- * the incoming side purely to let the merge close.
- */
-export async function autoResolvePlanFiles(worktreePath: string): Promise<string[]> {
-  const resolved: string[] = [];
-  for (const path of (await conflictedPaths(worktreePath)).paths) {
-    if (!PLAN_PATHS.has(path)) continue;
-    // --theirs on a conflicted path is the incoming side. An add/add where OUR side
-    // is the only one present cannot be checked out that way, so a failure here
-    // leaves the path conflicted for the caller to report rather than throwing.
-    const take = await gitRun(worktreePath, ['checkout', '--theirs', '--', path]);
-    if (take.code !== 0) continue;
-    const add = await gitRun(worktreePath, ['add', '--', path]);
-    if (add.code !== 0) continue;
-    resolved.push(path);
-  }
-  return resolved;
-}
-
 export interface PlanMergeAttempt {
   /** Clean once no path is left unmerged — the plan files having been auto-resolved. */
   clean: boolean;
@@ -218,6 +186,8 @@ export interface PlanMergeAttempt {
   undecodableShown: string[];
   /** Plan-mirror files resolved automatically, reported so the caller can say so. */
   autoResolved: string[];
+  /** Plan-mirror files that fell back to the incoming side, or kept the side that was not deleted. */
+  warnings: string[];
   unrelated: boolean;
 }
 
@@ -247,6 +217,7 @@ export async function mergeOriginInto(
       undecodable: 0,
       undecodableShown: [],
       autoResolved: [],
+      warnings: [],
       unrelated,
     };
   }
@@ -254,7 +225,9 @@ export async function mergeOriginInto(
   if (opened.kind === 'refused') {
     throw new Error(`git merge could not start: ${opened.detail}`);
   }
-  const autoResolved = await autoResolvePlanFiles(worktreePath);
+  const { resolved: autoResolved, warnings } = await resolveHaiveProjectionConflicts(worktreePath);
+  if (warnings.length > 0)
+    logger.warn({ worktreePath, warnings }, 'plan merge fell back on a file');
   const left = await conflictedPaths(worktreePath);
   return {
     clean: conflictCount(left) === 0,
@@ -262,6 +235,7 @@ export async function mergeOriginInto(
     undecodable: left.undecodable,
     undecodableShown: left.undecodableShown,
     autoResolved,
+    warnings,
     unrelated,
   };
 }
