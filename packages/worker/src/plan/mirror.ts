@@ -929,15 +929,46 @@ async function convergePlanQuestions(tx: PlanMirrorTx, repositoryId: string): Pr
   // A node both sides added joins the base once its last question settles, under a base parent.
   const inBase = new Set(base.data.nodes.map((n) => n.id));
   const stillAsked = new Set(asked.filter((q) => !closed.has(q.row.id)).map((q) => q.nodeId));
-  const joining = (local?.nodes ?? []).filter(
-    (n) =>
-      !inBase.has(n.id) &&
-      !stillAsked.has(n.id) &&
-      asked.some((q) => q.nodeId === n.id) &&
-      (n.parentId === null || inBase.has(n.parentId)),
+  const joinedIds = new Set(
+    (local?.nodes ?? [])
+      .filter(
+        (n) =>
+          !inBase.has(n.id) &&
+          !stillAsked.has(n.id) &&
+          asked.some((q) => q.nodeId === n.id) &&
+          (n.parentId === null || inBase.has(n.parentId)),
+      )
+      .map((n) => n.id),
   );
+  // Its new subtree, which left the base with it, comes back with it.
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const n of local?.nodes ?? []) {
+      if (inBase.has(n.id) || joinedIds.has(n.id) || stillAsked.has(n.id)) continue;
+      if (n.parentId !== null && joinedIds.has(n.parentId)) {
+        joinedIds.add(n.id);
+        grew = true;
+      }
+    }
+  }
+  const joining = (local?.nodes ?? []).filter((n) => joinedIds.has(n.id));
+  const present = new Set([...inBase, ...joinedIds]);
+  const edgeKeyOf = (e: { fromNodeId: string; toNodeId: string; kind: string }) =>
+    JSON.stringify([e.fromNodeId, e.toNodeId, e.kind]);
+  const baseEdges = new Set(base.data.edges.map(edgeKeyOf));
+  const joiningEdges = (local?.edges ?? []).filter(
+    (e) =>
+      (joinedIds.has(e.fromNodeId) || joinedIds.has(e.toNodeId)) &&
+      present.has(e.fromNodeId) &&
+      present.has(e.toNodeId) &&
+      !baseEdges.has(edgeKeyOf(e)),
+  );
+  const joiningLinks =
+    'codeLinks' in base.data && local ? local.codeLinks.filter((l) => joinedIds.has(l.nodeId)) : [];
   const snapshot = {
     ...base.data,
+    edges: [...base.data.edges, ...joiningEdges],
+    ...('codeLinks' in base.data ? { codeLinks: [...base.data.codeLinks, ...joiningLinks] } : {}),
     nodes: [
       ...base.data.nodes.map((n) => {
         const patched: Record<string, unknown> = { ...n };
@@ -1577,6 +1608,30 @@ export async function stampPlanMirrorHashesAtBoot(db: Database): Promise<number>
     }
   }
   return stamped;
+}
+
+/** Before a Pull moves the checkout: a row stamped before 0196 stores the bytes it last read as its
+ *  base while they are still on disk, since the reconcile after the move can no longer see them. */
+export async function seedPlanBaseFromCheckout(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await lockPlanMirror(tx, repositoryId);
+    const [state] = await tx
+      .select({
+        syncedHash: schema.planMirrorState.syncedHash,
+        hasBase: sql<boolean>`${schema.planMirrorState.syncedSnapshot} is not null`,
+      })
+      .from(schema.planMirrorState)
+      .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+      .limit(1);
+    if (!state?.syncedHash || state.hasBase) return;
+    const bytes = await readPlanJson(repoPath);
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) return;
+    if (hashBytes(bytes) === state.syncedHash) await seedBaseFrom(tx, repositoryId, bytes);
+  });
 }
 
 /** For a reconcile no caller retries (a rescan): the reason is kept and the row left dirty, so the

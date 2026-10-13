@@ -27,6 +27,7 @@ import {
   flushPlanMirrorForRepository,
   recordPlanMirrorError,
   reconcilePlanFromCheckout,
+  seedPlanBaseFromCheckout,
   stampPlanMirrorHashesAtBoot,
 } from '../plan/mirror.js';
 import { commitPlanSnapshotFiles } from '../plan/snapshot-git.js';
@@ -364,6 +365,7 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     });
     const identity =
       Object.keys(resolvedIdentity).length > 0 ? resolvedIdentity : FALLBACK_GIT_IDENTITY;
+    await seedPlanBaseFromCheckout(db, repo.id, repoPath);
     // A real merge, not --ff-only. Refusing a diverged branch was defensible while
     // nothing could resolve one; it also meant a plan could never reach a repository
     // that had a README before Haive did.

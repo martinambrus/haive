@@ -40,6 +40,7 @@ import {
   advancePlanBaseToPushed,
   importPlanMirror,
   reconcilePlanFromCheckout,
+  seedPlanBaseFromCheckout,
   stampPlanMirrorHashesAtBoot,
   writePlanMirror,
 } from '../src/plan/mirror.js';
@@ -2639,6 +2640,17 @@ async function main(): Promise<void> {
   );
   await arrive(theirs);
 
+  // Before a Pull moves the checkout, a stamped row with no base takes the file on disk as its base.
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedSnapshot: null })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await seedPlanBaseFromCheckout(db, sId, sDir);
+  check(
+    'three-way: a Pull seeds a missing base from the stamped file first',
+    (await baseOf()) != null,
+  );
+
   // A row stamped before 0196 takes the bytes it already read as its base.
   await db
     .update(schema.planMirrorState)
@@ -2796,9 +2808,10 @@ async function main(): Promise<void> {
   await editS(yId, { title: 'Y there' });
   await writePlanMirror(db, sId, sDir);
   check(
-    'three-way: a node both sides added joins the base once its question settles',
+    'three-way: a node both sides added joins the base with its new subtree once its question settles',
     !(await pendingPlanRows(sId)).some((r) => r.unit === `plan/${yId}#title`) &&
-      (await baseOf())?.nodes.find((n) => n.id === yId)?.title === 'Y there',
+      (await baseOf())?.nodes.find((n) => n.id === yId)?.title === 'Y there' &&
+      (await baseOf())?.nodes.some((n) => n.id === y1Id) === true,
     await baseOf(),
   );
   await applyPlanPatch(
