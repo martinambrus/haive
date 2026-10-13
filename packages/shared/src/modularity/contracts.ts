@@ -113,6 +113,7 @@ export const composableStepEntrySchema = z
     closes: z.boolean().optional(),
     precedes: z.array(z.string()).optional(),
     removes: z.array(z.string()).optional(),
+    entails: z.array(z.string()).optional(),
     integrations: z.array(integrationRequirementSchema).optional(),
   })
   .refine(

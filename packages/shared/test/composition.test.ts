@@ -162,6 +162,20 @@ describe('validateComposition', () => {
     ]);
   });
 
+  it('reports a step whose entailed token no later step provides', () => {
+    const catalog = catalogOf(
+      { ...entry('declare'), entails: ['image'] },
+      entry('build', { provides: ['image'] }),
+    );
+    expect(validateComposition(['declare'], catalog)).toEqual([
+      { kind: 'unfulfilled', index: 0, stepId: 'declare', token: 'image' },
+    ]);
+    expect(validateComposition(['build', 'declare'], catalog)).toEqual([
+      { kind: 'unfulfilled', index: 1, stepId: 'declare', token: 'image' },
+    ]);
+    expect(validateComposition(['declare', 'build'], catalog)).toEqual([]);
+  });
+
   it('withdraws a token a step removes', () => {
     const catalog = catalogOf(
       entry('cut', { provides: ['worktree'] }),

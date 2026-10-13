@@ -4,6 +4,7 @@ export type CompositionIssue =
   | { kind: 'unknown-step'; index: number; stepId: string }
   | { kind: 'unmet-need'; index: number; stepId: string; needs: string; reason: string }
   | { kind: 'too-late'; index: number; stepId: string; token: string }
+  | { kind: 'unfulfilled'; index: number; stepId: string; token: string }
   | { kind: 'missing-loop-target'; index: number; stepId: string; target: string }
   | { kind: 'duplicate-step'; index: number; stepId: string }
   | { kind: 'loop-after-closing'; index: number; stepId: string; closingStepId: string }
@@ -52,6 +53,14 @@ export function validateComposition(
       everProvided.add(token);
     }
     for (const token of entry.removes ?? []) provided.delete(token);
+  });
+  stepIds.forEach((stepId, index) => {
+    for (const token of catalog.get(stepId)?.entails ?? []) {
+      const later = stepIds
+        .slice(index + 1)
+        .some((id) => catalog.get(id)?.provides.includes(token));
+      if (!later) issues.push({ kind: 'unfulfilled', index, stepId, token });
+    }
   });
   return issues;
 }
