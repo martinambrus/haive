@@ -206,7 +206,7 @@ as a pair with teal-600 against `#0a0a0a`.
 ## Agents, skills and MCP tools
 
 `GET /stats/tool-usage` and `GET /tasks/:id/tool-usage` read `cli_invocations.tool_usage` through
-ONE SQL rollup (`api/src/lib/tool-usage-rollup.ts`). The caller composes the predicate and the
+ONE SQL rollup (`shared/src/stats-server/tool-usage-rollup.ts`). The caller composes the predicate and the
 rollup never decides which rows count; its LATERAL `jsonb_array_elements` / `jsonb_each_text`
 reads are guarded INSIDE the function argument because both throw on a JSON null, which `loaded`
 IS for every codex, amp and gemini row. `invocationAttributionFilter` APPLIES, as on `/steps`: a
@@ -224,7 +224,7 @@ per-step rows with `sumToolUsageSteps` (`@haive/shared/stats`), so the browser d
 arithmetic.
 
 **The unused report compares what is installed with what the runs used, and it reads the
-installed half from disk by NAME only.** `api/src/lib/tool-inventory.ts` walks the catalog's
+installed half from disk by NAME only.** `shared/src/stats-server/tool-inventory.ts` walks the catalog's
 `projectAgentsDir` / `projectSkillsDir` union through `@haive/shared/fs-safe` from the repository
 root (`storagePath ?? localPath`, never a task worktree): a symlink anywhere is counted under
 `skippedLinks` and never followed, no file content is opened, and an anchor that is not a
