@@ -82,7 +82,10 @@ run continuously during implementation. Both models ran at low reasoning effort.
 Pick one finished workflow task with a detailed spec on a NON-DDEV repository with declared verify
 and test commands and its test framework at the repository root, so every command can run inside
 the sandbox from 07's working directory and P0 needs no bridge (P1 covers DDEV and frameworks below
-the root). Re-run it from the same base on the dev install, 07 on a cheaper model, in two arms:
+the root). The repository is one the user owns and trusts: in both arms its code runs inside 07's
+credentialed CLI container, as it already does whenever an agent runs the project's tests, so P0
+adds no exposure, but it is not the credential-free boundary P1 needs for any repository. Re-run
+it from the same base on the dev install, 07 on a cheaper model, in two arms:
 
 - **A:** as today, which includes the default rules' generic "Own the verification" instruction
   (F1). A therefore measures generic verification, not none; the comparison is generic against
@@ -105,8 +108,11 @@ Only then is cost compared, as whole-task spend per ACCEPTED outcome (total spen
 runs divided by its accepted runs), not spend per attempt. When acceptance is equal the two agree;
 when B accepts more, per-attempt spend would reject the article's own result for the cheap model
 (~$0.09 to ~$0.27 per attempt, but ~$0.29 to ~$0.27 per accepted run, at 3/10 against 10/10). B
-is worth building if its spend per accepted outcome falls or stays flat. A cheaper 07 alone does
-not count, since
+is worth building if its spend per accepted outcome falls or stays flat. That ratio needs an
+accepted run in each arm: an arm with none gets more runs, up to the article's 10. If A still
+accepts none and B accepts at least three, acceptance decides and B's spend is reported, not
+compared; if both accept none, or B accepts fewer than three, P0 is inconclusive and the fixture is
+too hard for this comparison. A cheaper 07 alone does not count, since
 the article's harness costs 3-4× more inside the implementation step. Local only: the patch and any
 CLI preference change are snapshotted and reverted after. Rollback: revert the local patch.
 
