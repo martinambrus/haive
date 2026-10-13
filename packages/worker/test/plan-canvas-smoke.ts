@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 // Subpath, not the root barrel: the plan applier reaches the database, and the
@@ -26,13 +26,21 @@ import {
   loadPlanEdges,
   loadPlanNodes,
   loadPlanSkeletons,
+  markPlanMirrorDirty,
   renderPlanMarkdownFrom,
   toNodeViews,
 } from '@haive/shared/plan';
 import { markPlanCodeLinksStale } from '../src/plan/code-link-staleness.js';
 import { HAIVE_DATA_FILES, PLAN_MIRROR_SCHEMA_VERSION, type PlanMirror } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
-import { importPlanMirror, reconcilePlanMirror, writePlanMirror } from '../src/plan/mirror.js';
+import { gitRun } from '../src/repo/git-exec.js';
+import { sweepDirtyPlanMirrors } from '../src/queues/plan-mirror-queue.js';
+import {
+  importPlanMirror,
+  reconcilePlanMirror,
+  stampPlanMirrorHashesAtBoot,
+  writePlanMirror,
+} from '../src/plan/mirror.js';
 import { completePlanNodesForTask } from '../src/plan/task-link.js';
 import { resolveAffectedComponents } from '../src/step-engine/steps/workflow/_affected-components.js';
 import { loadSeededPlanNodes } from '../src/step-engine/steps/workflow/_plan-task-nodes.js';
@@ -1813,6 +1821,255 @@ async function main(): Promise<void> {
   );
   await rm(pullDir, { recursive: true, force: true }).catch(() => {});
   await rm(emptyDir, { recursive: true, force: true }).catch(() => {});
+
+  /* --- 12.6 a flush never overwrites a plan.json it has not read in -------- */
+
+  // B restored a plan, A changed node X and pushed, B fast-forwarded with plain git (not through
+  // Haive), and B then edited node Y. The flush used to write B's render over the checkout and
+  // drop A's X'; it must hold, keep the file, keep the database edit, and stay dirty.
+  const GIT_ID = {
+    GIT_AUTHOR_NAME: 'Smoke',
+    GIT_AUTHOR_EMAIL: 'smoke@haive.local',
+    GIT_COMMITTER_NAME: 'Smoke',
+    GIT_COMMITTER_EMAIL: 'smoke@haive.local',
+  };
+  const git = async (cwd: string, args: string[]) => {
+    const res = await gitRun(cwd, args, GIT_ID);
+    if (res.code !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
+    return res.stdout.trim();
+  };
+  const holdRoot = await mkdtemp(path.join(os.tmpdir(), 'plan-hold-'));
+  const originDir = path.join(holdRoot, 'origin.git');
+  const bDir = path.join(holdRoot, 'b');
+  const aDir = path.join(holdRoot, 'a');
+  await git(holdRoot, ['init', '-q', '--bare', '-b', 'main', originDir]);
+  await git(holdRoot, ['init', '-q', '-b', 'main', bDir]);
+
+  const [holdRepo] = await db
+    .insert(schema.repositories)
+    .values({ userId, name: 'plan-hold-fixture', source: 'blank', status: 'ready' })
+    .returning();
+  const holdId = holdRepo!.id;
+  const holdBuilt = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'hroot', parentRef: null, title: 'Hold root' },
+        { op: 'upsert', nodeRef: 'hx', parentRef: 'hroot', title: 'X' },
+        { op: 'upsert', nodeRef: 'hy', parentRef: 'hroot', title: 'Y' },
+      ],
+    },
+    { repositoryId: holdId, origin: 'user' },
+  );
+  const hxId = holdBuilt.refs['hx']!;
+  const hyId = holdBuilt.refs['hy']!;
+  const planFile = path.join(bDir, HAIVE_DATA_FILES.plan);
+  const titleIn = async (file: string, id: string): Promise<string | undefined> =>
+    (JSON.parse(await readFile(file, 'utf8')) as PlanMirror).nodes.find((n) => n.id === id)?.title;
+  const holdState = () =>
+    db.query.planMirrorState.findFirst({ where: eq(schema.planMirrorState.repositoryId, holdId) });
+  const editTitle = async (id: string, title: string) => {
+    const [row] = await db
+      .select({ version: schema.planNodes.version })
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.id, id));
+    await applyPlanPatch(
+      db,
+      { ops: [{ op: 'upsert', nodeRef: id, title, expectedVersion: row!.version }] },
+      { repositoryId: holdId, origin: 'user' },
+    );
+  };
+  const flushOutcome = async (dir: string): Promise<'wrote' | 'held' | 'threw'> => {
+    try {
+      await writePlanMirror(db, holdId, dir);
+      return 'wrote';
+    } catch (err) {
+      return (err as Error).name === 'PlanMirrorHeldError' ? 'held' : 'threw';
+    }
+  };
+
+  await writePlanMirror(db, holdId, bDir);
+  await git(bDir, ['add', '-A']);
+  await git(bDir, ['commit', '-q', '-m', 'plan']);
+  await git(bDir, ['remote', 'add', 'origin', originDir]);
+  await git(bDir, ['push', '-q', 'origin', 'main']);
+  await git(holdRoot, ['clone', '-q', originDir, aDir]);
+  const aPlan = path.join(aDir, HAIVE_DATA_FILES.plan);
+  const aMirror = JSON.parse(await readFile(aPlan, 'utf8')) as PlanMirror;
+  await writeFile(
+    aPlan,
+    `${JSON.stringify(
+      { ...aMirror, nodes: aMirror.nodes.map((n) => (n.id === hxId ? { ...n, title: "X'" } : n)) },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+  await git(aDir, ['commit', '-q', '-am', 'A edits X']);
+  await git(aDir, ['push', '-q', 'origin', 'main']);
+  await git(bDir, ['pull', '-q', '--ff-only', 'origin', 'main']);
+  await editTitle(hyId, "Y'");
+
+  const held = await flushOutcome(bDir);
+  const heldState = await holdState();
+  check('C1: the flush holds a plan.json it has not read in', held === 'held', held);
+  check("C1: the checkout keeps A's X'", (await titleIn(planFile, hxId)) === "X'");
+  check(
+    "C1: the database keeps B's Y'",
+    (await loadPlanNodes(db, holdId)).some((n) => n.id === hyId && n.title === "Y'"),
+  );
+  check(
+    'C1: the row stays dirty and says to pull',
+    !!heldState &&
+      heldState.revision > heldState.writtenRevision &&
+      (heldState.lastError ?? '').includes('Pull the plan'),
+    heldState,
+  );
+
+  await reconcilePlanMirror(db, holdId, bDir);
+  check('C1: after a pull the flush writes again', (await flushOutcome(bDir)) === 'wrote');
+  check(
+    "C1: the pull brings A's X' into the database and the file",
+    (await titleIn(planFile, hxId)) === "X'" &&
+      (await loadPlanNodes(db, holdId)).some((n) => n.id === hxId && n.title === "X'"),
+  );
+  const clean = await holdState();
+  check('C1: the row is clean again', !!clean && clean.revision === clean.writtenRevision, clean);
+
+  // C3: two edits, each flushed, never hold on Haive's own bytes.
+  await editTitle(hyId, 'Y2');
+  const first = await flushOutcome(bDir);
+  await editTitle(hyId, 'Y3');
+  const second = await flushOutcome(bDir);
+  check(
+    'C3: two edits each flushed both write',
+    first === 'wrote' && second === 'wrote' && (await titleIn(planFile, hyId)) === 'Y3',
+    { first, second },
+  );
+
+  // C2: a merge open in the checkout.
+  await git(bDir, ['commit', '-q', '-am', 'plan Y3']);
+  await git(bDir, ['checkout', '-q', '-b', 'side']);
+  await writeFile(path.join(bDir, 'conflict.txt'), 'side\n', 'utf8');
+  await git(bDir, ['add', 'conflict.txt']);
+  await git(bDir, ['commit', '-q', '-m', 'side']);
+  await git(bDir, ['checkout', '-q', 'main']);
+  await writeFile(path.join(bDir, 'conflict.txt'), 'main\n', 'utf8');
+  await git(bDir, ['add', 'conflict.txt']);
+  await git(bDir, ['commit', '-q', '-m', 'main']);
+  const mergeRes = await gitRun(bDir, ['merge', 'side'], GIT_ID);
+  check('C2: the fixture merge is open', mergeRes.code !== 0, mergeRes);
+  await editTitle(hyId, 'Y4');
+  const beforeMerge = await readFile(planFile, 'utf8');
+  const midMerge = await flushOutcome(bDir);
+  const midState = await holdState();
+  check(
+    'C2: a flush with a merge open writes nothing and keeps the row dirty',
+    midMerge === 'held' &&
+      (await readFile(planFile, 'utf8')) === beforeMerge &&
+      !!midState &&
+      midState.revision > midState.writtenRevision,
+    { midMerge, midState },
+  );
+  await git(bDir, ['merge', '--abort']);
+  check(
+    'C2: the flush writes once the merge is gone',
+    (await flushOutcome(bDir)) === 'wrote' && (await titleIn(planFile, hyId)) === 'Y4',
+  );
+
+  // C4: rows the sweep holds go to the back, so 25 of them cannot starve the dirty row behind.
+  const stuckIds: string[] = [];
+  const newSweepRepo = async (name: string, dir: string) => {
+    await mkdir(dir, { recursive: true });
+    const [r] = await db
+      .insert(schema.repositories)
+      .values({ userId, name, source: 'blank', status: 'ready', storagePath: dir })
+      .returning();
+    await applyPlanPatch(
+      db,
+      { ops: [{ op: 'upsert', nodeRef: 'sroot', parentRef: null, title: name }] },
+      { repositoryId: r!.id, origin: 'user' },
+    );
+    return r!.id;
+  };
+  const stuckFile = '{"unread":true}\n';
+  for (let i = 0; i < 26; i++) {
+    const dir = path.join(holdRoot, `stuck-${i}`);
+    await mkdir(path.join(dir, '.haive-data'), { recursive: true });
+    const id = await newSweepRepo(`plan-stuck-${i}`, dir);
+    await writeFile(path.join(dir, HAIVE_DATA_FILES.plan), stuckFile, 'utf8');
+    await db
+      .update(schema.planMirrorState)
+      .set({ syncedHash: 'not-the-hash-of-the-file' })
+      .where(eq(schema.planMirrorState.repositoryId, id));
+    stuckIds.push(id);
+  }
+  const nextDir = path.join(holdRoot, 'next');
+  const nextId = await newSweepRepo('plan-next', nextDir);
+  await db
+    .update(schema.planMirrorState)
+    .set({ writtenRevision: schema.planMirrorState.revision })
+    .where(notInArray(schema.planMirrorState.repositoryId, [...stuckIds, nextId]));
+  await sweepDirtyPlanMirrors();
+  const stuckKept = (
+    await Promise.all(
+      stuckIds.map(async (_, i) =>
+        readFile(path.join(holdRoot, `stuck-${i}`, HAIVE_DATA_FILES.plan), 'utf8'),
+      ),
+    )
+  ).every((text) => text === stuckFile);
+  check('C4: a sweep over held rows writes none of them', stuckKept);
+  await sweepDirtyPlanMirrors();
+  check(
+    'C4: the next sweep reaches the dirty row behind 25 held ones',
+    (await readFile(path.join(nextDir, HAIVE_DATA_FILES.plan), 'utf8').catch(() => null)) !== null,
+  );
+  await db
+    .delete(schema.repositories)
+    .where(inArray(schema.repositories.id, [...stuckIds, nextId]));
+
+  // Boot pass: a clean unstamped row is stamped only where its file already is the render.
+  const legacyMatch = await newSweepRepo('plan-legacy-match', path.join(holdRoot, 'legacy-match'));
+  const legacyDiffers = await newSweepRepo(
+    'plan-legacy-differs',
+    path.join(holdRoot, 'legacy-diff'),
+  );
+  await writePlanMirror(db, legacyMatch, path.join(holdRoot, 'legacy-match'));
+  await writePlanMirror(db, legacyDiffers, path.join(holdRoot, 'legacy-diff'));
+  await writeFile(path.join(holdRoot, 'legacy-diff', HAIVE_DATA_FILES.plan), '{"hand":"edit"}\n');
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedHash: null })
+    .where(inArray(schema.planMirrorState.repositoryId, [legacyMatch, legacyDiffers]));
+  await stampPlanMirrorHashesAtBoot(db);
+  const hashOf = async (id: string) =>
+    (
+      await db.query.planMirrorState.findFirst({
+        where: eq(schema.planMirrorState.repositoryId, id),
+      })
+    )?.syncedHash ?? null;
+  check(
+    'boot pass stamps a clean row whose file is the render',
+    (await hashOf(legacyMatch)) !== null,
+  );
+  check(
+    'boot pass leaves a row whose file differs unstamped',
+    (await hashOf(legacyDiffers)) === null,
+  );
+  await markPlanMirrorDirty(db, legacyDiffers);
+  await writePlanMirror(db, legacyDiffers, path.join(holdRoot, 'legacy-diff'));
+  check(
+    'an unstamped row adopts the file as before and is stamped by the write',
+    (await readFile(path.join(holdRoot, 'legacy-diff', HAIVE_DATA_FILES.plan), 'utf8')).includes(
+      'plan-legacy-differs',
+    ) && (await hashOf(legacyDiffers)) !== null,
+  );
+  await db
+    .delete(schema.repositories)
+    .where(inArray(schema.repositories.id, [legacyMatch, legacyDiffers]));
+
+  await db.delete(schema.repositories).where(eq(schema.repositories.id, holdId));
+  await rm(holdRoot, { recursive: true, force: true }).catch(() => {});
 
   /* --- 13. deleting the ROOT clears every attached table ------------------- */
 
