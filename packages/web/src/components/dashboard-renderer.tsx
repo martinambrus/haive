@@ -23,7 +23,10 @@ const DashboardChart = dynamic(() => import('./dashboard-chart'), {
 
 /** True when the endpoint, resolved the way fetch resolves it, stays on the api origin inside
  *  /m/<moduleId>; encoded or literal dot segments are collapsed by the URL parser before the check. */
-const KPI_NUMBER = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
+const KPI_NUMBER = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 2,
+  signDisplay: 'negative',
+});
 
 export function formatKpiValue(value: number | string): string {
   return typeof value === 'number' ? KPI_NUMBER.format(value) : value;

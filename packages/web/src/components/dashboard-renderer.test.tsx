@@ -16,6 +16,8 @@ describe('formatKpiValue', () => {
     expect(formatKpiValue(21862837)).toBe('21,862,837');
     expect(formatKpiValue(9.53245082)).toBe('9.53');
     expect(formatKpiValue('n/a')).toBe('n/a');
+    expect(formatKpiValue(-0.001)).toBe('0');
+    expect(formatKpiValue(-2.5)).toBe('-2.5');
   });
 });
 
