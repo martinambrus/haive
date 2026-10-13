@@ -74,6 +74,10 @@ services:
       dockerfile: packages/api/Dockerfile
       target: deps
     container_name: ${HAIVE_INSTALL_ID:-haive}-dev-libs
+    # web-kit and modules/* resolve their dependencies through the tree db-migrate installs.
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
     working_dir: /app
     volumes:
       - .:/app
