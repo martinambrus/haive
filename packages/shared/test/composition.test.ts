@@ -194,6 +194,19 @@ describe('validateComposition', () => {
     ]);
   });
 
+  it('checks a loop against the latest closing step, not only the first', () => {
+    const catalog = catalogOf(
+      entry('close-a', { closes: true }),
+      entry('target'),
+      entry('close-b', { closes: true }),
+      entry('emitter', { loop: 'target' }),
+    );
+    expect(validateComposition(['close-a', 'target', 'close-b', 'emitter'], catalog)).toEqual([
+      { kind: 'loop-after-closing', index: 3, stepId: 'emitter', closingStepId: 'close-b' },
+    ]);
+    expect(validateComposition(['close-a', 'target', 'emitter', 'close-b'], catalog)).toEqual([]);
+  });
+
   it('treats a step that both closes and loops as its own barrier', () => {
     const catalog = catalogOf(
       entry('impl', { provides: ['implementation'] }),

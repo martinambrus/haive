@@ -42,7 +42,7 @@ export function validateComposition(
         target: entry.loopTargetStepId,
       });
     }
-    if (entry.closes) closing ??= { stepId, index };
+    if (entry.closes) closing = { stepId, index };
     const targetIndex =
       entry.loopTargetStepId === undefined ? undefined : (seen.get(entry.loopTargetStepId) ?? -1);
     if (targetIndex !== undefined && closing !== undefined && targetIndex < closing.index) {
