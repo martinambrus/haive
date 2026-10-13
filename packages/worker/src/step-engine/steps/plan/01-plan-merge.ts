@@ -47,6 +47,7 @@ import {
   type PriorResolution,
 } from '../../../plan/merge-prior.js';
 import {
+  advancePlanBaseFromHead,
   flushPlanMirrorForRepository,
   reconcilePlanFromCheckout,
   writePlanMirror,
@@ -638,6 +639,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       userId: ctx.userId,
     });
     result.pushed = true;
+    await advancePlanBaseFromHead(ctx.db, d.repositoryId, ctx.repoPath);
 
     // Only now is the scratch worktree disposable. Removed on the success path only —
     // an abandoned conversation keeps it, which is what makes it resumable.

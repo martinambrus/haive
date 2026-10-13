@@ -37,6 +37,7 @@ import {
   planConflictUnit,
   sameValue,
 } from '@haive/shared/project-state';
+import { gitRun } from '../repo/git-exec.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 
 /**
@@ -378,6 +379,7 @@ async function writePlanMirrorLocked(
       }
     }
   }
+  await convergePlanQuestions(db, repositoryId);
   const targetRevision = Math.max(1, state?.revision ?? 1);
 
   if (!rendered) {
@@ -788,6 +790,37 @@ export async function advancePlanBaseToPushed(
   });
 }
 
+/** Run after a push of the checkout's branch: the plan.json at HEAD is what was pushed. The push
+ *  already landed, so a base left behind is logged and only asks one question again later. */
+export async function advancePlanBaseFromHead(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+): Promise<void> {
+  try {
+    const atHead = await gitRun(repoPath, ['show', `HEAD:${HAIVE_DATA_FILES.plan}`]);
+    if (atHead.code === 0) await advancePlanBaseToPushed(db, repositoryId, atHead.stdout);
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'plan base not advanced after push');
+  }
+}
+
+/** A pending question whose field this plan now holds at the incoming value was settled here. */
+async function convergePlanQuestions(tx: PlanMirrorTx, repositoryId: string): Promise<void> {
+  const asked = await loadPendingPlanQuestions(tx, repositoryId);
+  if (asked.length === 0) return;
+  const local = (await renderPlanMirror(tx, repositoryId))?.mirror;
+  const byId = new Map((local?.nodes ?? []).map((n) => [n.id, n as Record<string, unknown>]));
+  for (const q of asked) {
+    const node = byId.get(q.nodeId);
+    if (!node || !sameValue(conflictSide(node[q.field]), q.row.incoming)) continue;
+    await tx
+      .update(schema.projectStateConflicts)
+      .set({ resolution: 'converged', resolvedAt: new Date() })
+      .where(eq(schema.projectStateConflicts.id, q.row.id));
+  }
+}
+
 /** `bytes` is the plan.json read under the plan-mirror lock the caller holds; the stamp is its hash. */
 async function reconcilePlanLocked(
   tx: PlanMirrorTx,
@@ -804,7 +837,10 @@ async function reconcilePlanLocked(
     .where(eq(schema.planMirrorState.repositoryId, repositoryId))
     .limit(1);
   const hash = hashBytes(bytes);
-  if (state?.syncedHash === hash) return noOutcome(null);
+  if (state?.syncedHash === hash) {
+    await convergePlanQuestions(tx, repositoryId);
+    return noOutcome(null);
+  }
   const raw = bytes.toString('utf8');
   if (opts.requireStamp && !state?.syncedHash) return noOutcome(null);
 

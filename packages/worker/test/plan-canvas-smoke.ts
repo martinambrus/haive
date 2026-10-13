@@ -2355,6 +2355,11 @@ async function main(): Promise<void> {
     pushedBase,
   );
   await editS(pId, { title: 'P by A' });
+  await writePlanMirror(db, sId, sDir);
+  check(
+    'three-way: a local edit to the incoming value settles the question at the next flush',
+    (await pendingPlanRows(sId)).length === 0,
+  );
   await arrive(theirs);
   const closed = await db
     .select({ resolution: schema.projectStateConflicts.resolution })
