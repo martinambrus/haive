@@ -187,6 +187,14 @@ task's existing surface, or a file-based request the step polls) is D3. Rules th
   result names the change's own violations. An unscoped failure is returned marked unscoped, with
   its output, and the prompt tells the agent to fix only violations at lines it changed and to
   leave the rest, as 08's own diagnosis does for pre-existing phpcs violations.
+- The task's own verify selections win. A slot is available only where the repository setting is on
+  AND `06-run-config`'s per-task checkbox for it (`verifyRunTest`, `verifyRunLint`,
+  `verifyRunTypecheck`) is checked; an unchecked slot answers NOT RUN, "turned off for this task",
+  and never runs.
+- Check output is repository-controlled text and is contained like any other: bounded, and wrapped
+  by `fencedAgentBlock` before it reaches the agent, with Haive's verdict (passed, failed, NOT RUN,
+  unscoped) and its instructions outside the fence, as the fix loop keeps `guidance` outside the
+  diagnosis fence (`docs/architecture/prompt-containment.md`). Every D3 transport must do this.
 - The prompt says not to weaken a check to make it pass; P6 records whether that held.
 - 08, 08b and the reviewers still run as today: the final gate stays independent of what the
   implementer ran and reported.
