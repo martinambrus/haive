@@ -227,7 +227,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
     targetType: 'task_type',
     metadata: { slug: body.slug, stepCount: body.stepIds.length },
   });
-  return c.json({ taskType: created }, 201);
+  return c.json({ taskType: { ...created, editableFields: editableFieldsOf(created) } }, 201);
 });
 
 adminTaskTypeRoutes.patch('/:slug', async (c) => {
@@ -286,13 +286,14 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
   });
   if ('invalid' in outcome) return c.json(outcome.invalid, 400);
   const updated = outcome.updated;
+  if (!updated) throw new HttpError(404, 'Task type not found');
   await recordAuditEvent(db, {
     actorUserId: c.get('userId'),
     action: 'task_type.update',
     targetType: 'task_type',
     metadata: { slug, fields },
   });
-  return c.json({ taskType: updated });
+  return c.json({ taskType: { ...updated, editableFields: editableFieldsOf(updated) } });
 });
 
 adminTaskTypeRoutes.delete('/:slug', async (c) => {

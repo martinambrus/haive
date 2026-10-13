@@ -589,6 +589,17 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         expect([...one.taskType.editableFields].sort()).toEqual(fields(slug));
       }
     });
+
+    it('returns them from a create and an update too', async () => {
+      const created = await send('POST', '/admin/task-types', valid('tt-write'));
+      expect(created.status).toBe(201);
+      const c = (await created.json()) as { taskType: { editableFields: string[] } };
+      expect([...c.taskType.editableFields].sort()).toEqual(CUSTOM_FIELDS);
+      const updated = await send('PATCH', '/admin/task-types/tt-write', { displayName: 'W' });
+      expect(updated.status).toBe(200);
+      const u = (await updated.json()) as { taskType: { editableFields: string[] } };
+      expect([...u.taskType.editableFields].sort()).toEqual(CUSTOM_FIELDS);
+    });
   });
 
   describe('public traits', () => {
