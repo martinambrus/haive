@@ -359,6 +359,20 @@ async function main(): Promise<void> {
       );
     }
 
+    {
+      const id = await makeTask('start-redelivered-running', {
+        status: 'running',
+        snapshot: ['p4b-a', GONE],
+      });
+      await run(TASK_JOB_NAMES.START, { taskId: id, userId });
+      const v = await view(id);
+      check(
+        'a redelivered START on a task already running leaves it alive',
+        v.deadAt === null && v.status === 'running',
+        v,
+      );
+    }
+
     // --- ADVANCE --------------------------------------------------------------------
     {
       const id = await makeTask('advance-unknown-current', { currentStepId: GONE });

@@ -621,7 +621,13 @@ export async function markTaskDead(
   db: Database | DbHandle,
   taskId: string,
   reason: string,
-  fence: { epoch: number; unresolved?: string[]; stepId?: string; round?: number },
+  fence: {
+    epoch: number;
+    unresolved?: string[];
+    stepId?: string;
+    round?: number;
+    statuses?: readonly TaskStatus[];
+  },
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
     const [dead] = await tx
@@ -631,6 +637,7 @@ export async function markTaskDead(
         and(
           taskWriteTarget(taskId, { epoch: fence.epoch, reviveFailed: true }),
           isNull(schema.tasks.deadAt),
+          ...(fence.statuses ? [inArray(schema.tasks.status, [...fence.statuses])] : []),
         ),
       )
       .returning({ id: schema.tasks.id });
@@ -2166,9 +2173,11 @@ async function handleStartTask(
     steps = await buildRunList(ctx, db);
   } catch (err) {
     if (!(err instanceof UnresolvedStepError)) throw err;
+    // Before the claim, so a redelivered START on a task already running must not touch it.
     await markTaskDead(db, ctx.taskId, deadReasonFor(err.ids), {
       epoch: ctx.orchestrationEpoch,
       unresolved: err.ids,
+      statuses: STARTABLE_TASK_STATUSES,
     });
     return;
   }
