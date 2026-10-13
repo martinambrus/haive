@@ -125,7 +125,7 @@ two structural reasons:
   either, and both can change while the agent works.
 
 So each check is resolved and classified by the code its owning step uses, never a second resolver
-or classifier (where it executes is the lease rule below): lint, typecheck and the full test
+or classifier (where it executes is D5): lint, typecheck and the full test
 command as 08's `execSlot` resolves and classifies them, and the
 selective test run as 08b's `runTestCommand` builds it, from a structured `TestCommand` (kind,
 args, and a `cwd` for a framework below the root). 08b persists only the flattened display string
@@ -133,17 +133,29 @@ args, and a `cwd` for a framework below the root). 08b persists only the flatten
 structured command it ran. Two inputs those runners take from earlier steps do not exist yet on
 07's initial pass, and the request path supplies them itself:
 
-- **The agent-pool lease.** A step command reserves a slot of the agent pool
-  (`runStepCommandInSandbox`, `docs/architecture/runtime-capacity.md`), and the requesting 07
-  invocation already holds one until it finishes. A check that reserved a second slot would wait on
-  capacity its own caller is holding: at `MAX_PARALLEL_AGENTS=1`, or with every slot held by 07
-  runs, it would time out as NOT RUN every time. Sharing the caller's lease is not the answer
-  either: `runStepCommandInSandbox` starts a second sandbox container, and counting two
-  agent-sized containers under one lease breaks the pool's RAM cap. So a non-DDEV check executes
-  INSIDE the requesting invocation's own container, which admission already counted, with the
-  command resolved and the result classified exactly as 08 and 08b do; only the transport differs
-  from their `runStepCommandInSandbox`. A DDEV check runs in the task's runner through `ddevExec`,
-  which the runtime budget already counts. Neither starts an uncounted workload.
+- **Where a non-DDEV check executes, and under what capacity.** This is open (D5). A DDEV check
+  runs in the task's runner through `ddevExec`, which the runtime budget already counts and which
+  holds no CLI credentials. A non-DDEV check has no such home, and every obvious transport breaks
+  one of four constraints any answer must meet:
+  1. **No self-deadlock.** A step command reserves an agent-pool slot (`runStepCommandInSandbox`,
+     `docs/architecture/runtime-capacity.md`) while the requesting 07 invocation holds its own
+     until it finishes. A second reservation waits on its own caller's capacity: at
+     `MAX_PARALLEL_AGENTS=1`, or with every slot held by 07 runs, it times out as NOT RUN.
+  2. **No uncounted workload.** Sharing the caller's lease still starts a second sandbox
+     container, two agent-sized workloads under one lease, which breaks the pool's RAM cap.
+  3. **No credentials.** Project commands run with no auth volume and no provider env, since the
+     project's own code runs there (`docs/architecture/sandbox.md`, "A step's project commands run
+     in the sandbox"). 07's own container has both, and clearing the exec's env leaves the mounted
+     credentials readable, so executing inside 07's container is out.
+  4. **Killable.** A timed-out or cancelled check must stop without stopping 07, and must not keep
+     writing the worktree or holding capacity after its result is returned. The current runner
+     gets that by force-removing its disposable container; a killed `docker exec` client leaves
+     its process running (`runtime-capacity.md`, "A runner is settled only when nothing runs in
+     it").
+  The candidate that meets all four: a disposable, credential-free check container as today,
+  whose capacity is reserved when 07 is admitted with the setting on (the invocation is admitted
+  at the weight of both), so the check never queues behind its caller. Whether admission can
+  carry that combined weight is what D5 settles before P1 is built.
 - **The test framework.** 08 reads it from 08b's persisted detect (`08-phase-5-verify.ts`), which
   does not exist before 08b runs. Without it a Playwright slot gets no browser provisioning and
   `classifyTestEnvFailure` runs with `null`, so a missing browser would come back failed rather
@@ -171,7 +183,8 @@ Verification: prompt tests for both setting values; a selective test request for
 the root runs from that framework's directory, as 08b ran it; a check request on a fixture repository runs
 exactly the command 08 runs for that slot; a missing program and a test-environment failure each
 come back NOT RUN, not failed; a check requested at `MAX_PARALLEL_AGENTS=1` runs rather than
-waiting on its own caller's slot, and starts no second container; a DDEV repository's check runs host-side and returns; one live task
+waiting on its own caller's slot, sees no CLI credentials, and leaves no process behind after a
+timeout or a Stop; a DDEV repository's check runs host-side and returns; one live task
 with the setting on, where 07's transcript shows the requests and their results, and 08 still runs
 its own checks. Rollback: the
 setting is additive; off restores today's prompt.
@@ -195,6 +208,11 @@ for it must not rely on the framework's error wording.
 - **D4.** DAG coders: leave them to the final gate, or run their checks against the requesting
   issue's own worktree, which needs that worktree's path (and, for DDEV, a runtime bound to it)
   carried into the request.
+- **D5.** Where a non-DDEV requested check executes. It must meet P1's four constraints (no
+  self-deadlock, no uncounted workload, no credentials, killable). The candidate is a disposable
+  credential-free container whose capacity 07 reserves at admission; the alternative is a separate
+  check lane in admission. Rejected, each for one constraint: a second lease (1), sharing 07's
+  lease (2), executing inside 07's container (3 and 4).
 
 ## Decided
 
