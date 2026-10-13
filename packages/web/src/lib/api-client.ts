@@ -767,6 +767,8 @@ export interface Task {
    *  an older api, where callers fall back to `cliProviderId`. */
   currentStepCliProviderIds?: string[];
   type: WorkflowType;
+  /** The step ids the task was created with; null on a task created before snapshots. */
+  runListSnapshot?: string[] | null;
   /** Execution path chosen at the 00-triage step (workflow tasks only). null until
    *  triage records it, and on non-workflow tasks. */
   executionPath?: ExecutionPath | null;

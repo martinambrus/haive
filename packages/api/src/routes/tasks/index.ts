@@ -1051,6 +1051,7 @@ taskRoutes.get('/:id', async (c) => {
     task.type,
     stepRows.map((s) => s.stepId),
     task.ignoreSavedStepClis,
+    task.runListSnapshot,
   );
   return c.json({
     task: taskWithActive,
