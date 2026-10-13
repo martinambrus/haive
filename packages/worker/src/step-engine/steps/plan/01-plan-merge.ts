@@ -47,7 +47,7 @@ import {
   type PriorResolution,
 } from '../../../plan/merge-prior.js';
 import {
-  advancePlanBaseFromHead,
+  advancePlanBaseFromCommit,
   flushPlanMirrorForRepository,
   reconcilePlanFromCheckout,
   writePlanMirror,
@@ -630,6 +630,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       columns: { credentialsSecretId: true },
     });
     const upstream = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
+    const pushedHead = await gitRun(ctx.repoPath, ['rev-parse', 'HEAD']);
     await pushBranch({
       cwd: ctx.repoPath,
       branch: d.branch,
@@ -639,7 +640,12 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       userId: ctx.userId,
     });
     result.pushed = true;
-    await advancePlanBaseFromHead(ctx.db, d.repositoryId, ctx.repoPath);
+    await advancePlanBaseFromCommit(
+      ctx.db,
+      d.repositoryId,
+      ctx.repoPath,
+      pushedHead.code === 0 ? pushedHead.stdout.trim() : null,
+    );
 
     // Only now is the scratch worktree disposable. Removed on the success path only —
     // an abandoned conversation keeps it, which is what makes it resumable.

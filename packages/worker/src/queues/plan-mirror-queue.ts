@@ -23,7 +23,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
 import {
   PlanMirrorHeldError,
-  advancePlanBaseFromHead,
+  advancePlanBaseFromCommit,
   flushPlanMirrorForRepository,
   recordPlanMirrorError,
   reconcilePlanFromCheckout,
@@ -278,6 +278,7 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         await commitPlanSnapshotFiles({ repoPath, message, identity });
       }
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
+      const pushedHead = await gitRun(repoPath, ['rev-parse', 'HEAD']);
       await pushBranch({
         cwd: repoPath,
         branch,
@@ -287,7 +288,12 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         userId: payload.userId,
       });
       pushed = true;
-      await advancePlanBaseFromHead(getDb(), repo.id, repoPath);
+      await advancePlanBaseFromCommit(
+        getDb(),
+        repo.id,
+        repoPath,
+        pushedHead.code === 0 ? pushedHead.stdout.trim() : null,
+      );
     }
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });

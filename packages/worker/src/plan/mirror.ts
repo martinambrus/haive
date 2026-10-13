@@ -792,35 +792,63 @@ export async function advancePlanBaseToPushed(
   });
 }
 
-/** Run after a push of the checkout's branch: the plan.json at HEAD is what was pushed. The push
- *  already landed, so a base left behind is logged and only asks one question again later. */
-export async function advancePlanBaseFromHead(
+/** Run after a push with the commit read before it: the push carried at least that commit, so its
+ *  plan.json is shared. The push already landed, so a base left behind is only logged. */
+export async function advancePlanBaseFromCommit(
   db: Database,
   repositoryId: string,
   repoPath: string,
+  commit: string | null,
 ): Promise<void> {
+  if (!commit) return;
   try {
-    const atHead = await gitRun(repoPath, ['show', `HEAD:${HAIVE_DATA_FILES.plan}`]);
-    if (atHead.code === 0) await advancePlanBaseToPushed(db, repositoryId, atHead.stdout);
+    const pushed = await gitRun(repoPath, ['show', `${commit}:${HAIVE_DATA_FILES.plan}`]);
+    if (pushed.code === 0) await advancePlanBaseToPushed(db, repositoryId, pushed.stdout);
   } catch (err) {
     logger.warn({ err, repositoryId }, 'plan base not advanced after push');
   }
 }
 
-/** A pending question whose field this plan now holds at the incoming value was settled here. */
+/** A pending question settles once its node is gone, or once this plan holds the field at the
+ *  incoming value; the base then takes that value, since both sides now agree on it. */
 async function convergePlanQuestions(tx: PlanMirrorTx, repositoryId: string): Promise<void> {
   const asked = await loadPendingPlanQuestions(tx, repositoryId);
   if (asked.length === 0) return;
   const local = (await renderPlanMirror(tx, repositoryId))?.mirror;
   const byId = new Map((local?.nodes ?? []).map((n) => [n.id, n as Record<string, unknown>]));
+  const agreed = new Map<string, unknown>();
   for (const q of asked) {
     const node = byId.get(q.nodeId);
-    if (!node || !sameValue(conflictSide(node[q.field]), q.row.incoming)) continue;
+    if (node && !sameValue(conflictSide(node[q.field]), q.row.incoming)) continue;
+    if (node) agreed.set(`${q.nodeId}\0${q.field}`, node[q.field]);
     await tx
       .update(schema.projectStateConflicts)
       .set({ resolution: 'converged', resolvedAt: new Date() })
       .where(eq(schema.projectStateConflicts.id, q.row.id));
   }
+  if (agreed.size === 0) return;
+  const [state] = await tx
+    .select({ syncedSnapshot: schema.planMirrorState.syncedSnapshot })
+    .from(schema.planMirrorState)
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+    .limit(1);
+  const base = planMirrorPayloadSchema.safeParse(state?.syncedSnapshot);
+  if (!base.success) return;
+  const snapshot = {
+    ...base.data,
+    nodes: base.data.nodes.map((n) => {
+      const patched: Record<string, unknown> = { ...n };
+      for (const field of PLAN_MIRROR_ASKED_FIELDS) {
+        const key = `${n.id}\0${field}`;
+        if (agreed.has(key)) patched[field] = agreed.get(key);
+      }
+      return patched;
+    }),
+  } as PlanMirrorPayload;
+  await tx
+    .update(schema.planMirrorState)
+    .set({ syncedSnapshot: snapshot })
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId));
 }
 
 /** `bytes` is the plan.json read under the plan-mirror lock the caller holds; the stamp is its hash. */
@@ -999,6 +1027,7 @@ async function reconcilePlanLocked(
       )
       .returning({ id: schema.planNodes.id });
     if (updated.length === 0) throw new PlanMirrorHeldError(HELD_RACED);
+    versionOf.set(node.id, (versionOf.get(node.id) ?? 0) + 1);
     nodesUpdated++;
   }
 
@@ -1034,10 +1063,18 @@ async function reconcilePlanLocked(
   for (const row of stored) {
     const expected = pathById.get(row.id);
     if (expected !== undefined && expected !== row.path) {
-      await tx
+      // A node created by this reconcile has no read version, and nobody else can see it yet.
+      const read = versionOf.get(row.id);
+      const repaired = await tx
         .update(schema.planNodes)
         .set({ path: expected })
-        .where(eq(schema.planNodes.id, row.id));
+        .where(
+          read === undefined
+            ? eq(schema.planNodes.id, row.id)
+            : and(eq(schema.planNodes.id, row.id), eq(schema.planNodes.version, read)),
+        )
+        .returning({ id: schema.planNodes.id });
+      if (repaired.length === 0) throw new PlanMirrorHeldError(HELD_RACED);
     }
   }
 

@@ -2410,6 +2410,11 @@ async function main(): Promise<void> {
     'three-way: a local edit to the incoming value settles the question at the next flush',
     (await pendingPlanRows(sId)).length === 0,
   );
+  check(
+    'three-way: a settled question moves the base to the value both sides now hold',
+    (await baseOf())?.nodes.find((n) => n.id === pId)?.title === 'P by A',
+    await baseOf(),
+  );
   await arrive(theirs);
   const closed = await db
     .select({ resolution: schema.projectStateConflicts.resolution })
@@ -2422,6 +2427,40 @@ async function main(): Promise<void> {
       closed[0]!.resolution === 'converged',
     closed,
   );
+
+  // A path repair waits on a row a canvas write holds, and holds once that write commits.
+  const r1Before = await sNode(r1Id);
+  let moving: Promise<string> | undefined;
+  await db.transaction(async (edit) => {
+    await edit
+      .update(schema.planNodes)
+      .set({ version: r1Before!.version + 1 })
+      .where(eq(schema.planNodes.id, r1Id));
+    moving = arrive({
+      ...theirs,
+      nodes: theirs.nodes.map((n) => (n.id === rId ? { ...n, parentId: pId } : n)),
+    }).then(
+      () => 'merged',
+      (err: Error) => err.name,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  });
+  const rAfterRace = (await nodeRows()).find((n) => n.id === rId);
+  check(
+    'three-way: a descendant path repair racing a canvas write holds and moves nothing',
+    (await moving) === 'PlanMirrorHeldError' &&
+      (
+        await db
+          .select({ parentId: schema.planNodes.parentId })
+          .from(schema.planNodes)
+          .where(eq(schema.planNodes.id, rId))
+      )[0]?.parentId !== pId,
+    rAfterRace,
+  );
+  await arrive({
+    ...theirs,
+    nodes: theirs.nodes.map((n) => (n.id === rId ? { ...n, parentId: sBuilt.refs['sroot']! } : n)),
+  });
 
   // A node the other side deleted and nobody here touched is deleted here, its subtree with it.
   await db.insert(schema.planNodeEdges).values({
@@ -2450,6 +2489,22 @@ async function main(): Promise<void> {
         .from(schema.planNodeEdges)
         .where(eq(schema.planNodeEdges.repositoryId, sId))
     ).length === 0,
+  );
+
+  // A question whose node is deleted here closes.
+  await editS(qId, { title: 'Q local, soon gone' });
+  await arrive(retitled(theirs, qId, 'Q remote, soon gone'));
+  const askedBeforeGone = (await pendingPlanRows(sId)).length;
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: qId, expectedVersion: (await sNode(qId))!.version }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+  await writePlanMirror(db, sId, sDir);
+  check(
+    'three-way: a question whose node was deleted here closes at the next flush',
+    askedBeforeGone === 1 && (await pendingPlanRows(sId)).length === 0,
+    askedBeforeGone,
   );
 
   // A file whose plan has another root shares no history with this one, and deletes nothing here.
