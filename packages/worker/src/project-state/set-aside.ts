@@ -75,7 +75,7 @@ const NOT_HAIVE = 'holds changes Haive did not write';
 
 const sha256 = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
 
-/** Every projection path that differs from HEAD or is untracked, and whether git sees a conflict. */
+/** Every projection path that differs from HEAD, is untracked or is ignored, and whether git sees a conflict. */
 async function dirtyProjections(repoPath: string): Promise<{ paths: string[]; unmerged: boolean }> {
   const res = await gitRun(repoPath, [
     '--no-optional-locks',
@@ -90,6 +90,23 @@ async function dirtyProjections(repoPath: string): Promise<{ paths: string[]; un
   ]);
   if (res.code !== 0) throw new Error(`git status failed: ${res.stderr.trim().slice(0, 300)}`);
   const paths = new Set<string>();
+  // status --ignored lists an ignored directory whole; ls-files names each file in it.
+  const ignored = await gitRun(repoPath, [
+    '--no-optional-locks',
+    'ls-files',
+    '-z',
+    '-o',
+    '-i',
+    '--exclude-standard',
+    '--',
+    PROJECT_STATE_DIR,
+    HAIVE_DATA_FILES.plan,
+    HAIVE_DATA_FILES.planMarkdown,
+  ]);
+  if (ignored.code !== 0) {
+    throw new Error(`git ls-files failed: ${ignored.stderr.trim().slice(0, 300)}`);
+  }
+  for (const path of ignored.stdout.split('\0')) if (path.length > 0) paths.add(path);
   let unmerged = false;
   const fields = res.stdout.split('\0');
   for (let i = 0; i < fields.length; i++) {

@@ -683,6 +683,56 @@ async function main(): Promise<void> {
       );
     }
 
+    // 11d2. A projection file the repository's .gitignore hides is judged like an untracked one: a
+    // hand edit the incoming commit would overwrite refuses the move, and Haive's own copy does not.
+    for (const via of ['refresh', '00a'] as const) {
+      for (const handEdited of [true, false]) {
+        const kind = handEdited ? 'hand-edited' : 'Haive-written';
+        const origin3 = path.join(tmp, `origin-ignored-${via}-${handEdited}.git`);
+        git(tmp, 'init', '-q', '--bare', '-b', 'main', origin3);
+        const seed3 = path.join(tmp, `seed-ignored-${via}-${handEdited}`);
+        git(tmp, 'clone', '-q', `file://${origin3}`, seed3);
+        await commitFile(seed3, 'README.md', 'seed\n', 'seed');
+        await commitFile(seed3, '.gitignore', '.haive-data/\n', 'ignore the data directory');
+        git(seed3, 'push', '-q', 'origin', 'HEAD:main');
+        const c = await cloned(origin3);
+        const id = c.payload.repositoryId;
+        await db
+          .update(schema.repositories)
+          .set({ renderContext: column() })
+          .where(eq(schema.repositories.id, id));
+        await markProjectStateDirty(db, id);
+        await sweepDirtyProjectStates(db);
+        const handBytes = '{ edited by hand';
+        if (handEdited) await writeFile(path.join(c.dest, RENDER_REL), handBytes);
+        const ignored = git(c.dest, 'status', '--porcelain', '--ignored', '--', RENDER_REL);
+        const before = git(c.dest, 'rev-parse', 'HEAD');
+        await writeRecord(seed3, { acceptedAgentIds: ['a'] });
+        git(seed3, 'add', '-f', '.haive-data/state');
+        git(seed3, 'commit', '-q', '-m', 'a teammate commits a record');
+        git(seed3, 'push', '-q', 'origin', 'HEAD:main');
+        const upstream = git(seed3, 'rev-parse', 'HEAD');
+        const moved = await moveVia(via, c);
+        const now = await readFile(path.join(c.dest, RENDER_REL), 'utf8');
+        if (handEdited) {
+          check(
+            `I1: ${via}: an ignored ${kind} state file the incoming commit adds refuses the move, is named, and keeps its bytes`,
+            ignored.startsWith('!!') &&
+              git(c.dest, 'rev-parse', 'HEAD') === before &&
+              moved.message.includes(RENDER_REL) &&
+              now === handBytes,
+            { ignored, moved, now },
+          );
+        } else {
+          check(
+            `I2: ${via}: an ignored ${kind} state file the incoming commit adds does not refuse the move`,
+            ignored.startsWith('!!') && git(c.dest, 'rev-parse', 'HEAD') === upstream,
+            { ignored, moved },
+          );
+        }
+      }
+    }
+
     // 11e. A task that becomes checkout-holding after the first check and before the set-aside leaves
     // Haive's projection files exactly as they were, and the refresh answers with the task count.
     {
