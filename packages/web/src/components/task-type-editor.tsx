@@ -1,0 +1,307 @@
+'use client';
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import type { CompositionIssue } from '@haive/shared/modularity';
+import {
+  createTaskType,
+  getAdminTaskType,
+  getTaskTypeCatalog,
+  updateTaskType,
+  type AdminTaskType,
+  type ApiError,
+  type TaskTypeCatalog,
+} from '@/lib/api-client';
+import {
+  catalogEntries,
+  compositionProblems,
+  describeAvailability,
+  describeDefaultsIssue,
+  splitServerIssues,
+} from '@/lib/composition-messages';
+import {
+  buildCreateBody,
+  buildUpdateBody,
+  slugProblem,
+  taskTypeFormSchema,
+} from '@/lib/task-type-form';
+import { usePageTitle } from '@/lib/use-page-title';
+import type { TaskTypeAvailability } from '@haive/shared/modularity';
+import { FormRenderer, type FormValues } from '@/components/form-renderer';
+import { TaskTypeComposer } from '@/components/task-type-composer';
+import { TaskTypeDeleteDialog } from '@/components/task-type-delete-dialog';
+import { Badge, Button, Card, FormError } from '@/components/ui';
+
+const NEW_TYPE_DEFAULTS: FormValues = {
+  slug: '',
+  displayName: '',
+  description: '',
+  requiresRepository: true,
+  enabled: true,
+  selectable: true,
+  sortOrder: 0,
+};
+
+const CREATE_FIELDS = [
+  'displayName',
+  'description',
+  'stepIds',
+  'preAnswerDefaults',
+  'stepLoopLimitDefaults',
+  'requiresRepository',
+  'selectable',
+  'enabled',
+  'sortOrder',
+];
+
+function sourceLabel(source: string): string {
+  if (source === 'admin') return 'Custom';
+  if (source === 'builtin') return 'Built-in';
+  return `Module ${source.replace(/^module:/, '')}`;
+}
+
+function initialValuesOf(row: AdminTaskType): FormValues {
+  return {
+    displayName: row.displayName,
+    description: row.description ?? '',
+    requiresRepository: row.requiresRepository,
+    enabled: row.enabled,
+    selectable: row.selectable,
+    sortOrder: row.sortOrder,
+  };
+}
+
+export function TaskTypeEditor({ slug }: { slug: string | null }) {
+  const router = useRouter();
+  const creating = slug === null;
+  usePageTitle(creating ? 'New task type' : `Task type ${slug}`);
+
+  const [catalog, setCatalog] = useState<TaskTypeCatalog | null>(null);
+  const [row, setRow] = useState<AdminTaskType | null>(null);
+  const [availability, setAvailability] = useState<TaskTypeAvailability | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [stepIds, setStepIds] = useState<string[]>([]);
+  const [loopLimits, setLoopLimits] = useState<Record<string, number>>({});
+  const [values, setValues] = useState<FormValues>(creating ? NEW_TYPE_DEFAULTS : {});
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [serverIssues, setServerIssues] = useState<CompositionIssue[]>([]);
+  const [saved, setSaved] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [cat, one] = await Promise.all([
+        getTaskTypeCatalog(),
+        slug === null ? null : getAdminTaskType(slug),
+      ]);
+      setCatalog(cat);
+      if (one) {
+        setRow(one.taskType);
+        setAvailability(one.availability);
+        setStepIds(one.taskType.stepIds ?? []);
+        setLoopLimits(one.taskType.stepLoopLimitDefaults);
+        setValues(initialValuesOf(one.taskType));
+      }
+    } catch (err) {
+      setLoadError((err as ApiError).message ?? 'Failed to load the task type');
+    }
+  }, [slug]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const editableFields = creating ? CREATE_FIELDS : (row?.editableFields ?? []);
+  const composable = editableFields.includes('stepIds');
+  const entries = useMemo(() => (catalog ? catalogEntries(catalog) : null), [catalog]);
+  const requiresRepository = values.requiresRepository === true;
+  const clientProblems = useMemo(
+    () =>
+      composable && entries
+        ? compositionProblems({ stepIds, loopLimits, catalog: entries, requiresRepository })
+        : { composition: [], defaults: [] },
+    [composable, entries, stepIds, loopLimits, requiresRepository],
+  );
+  const blocked =
+    composable &&
+    (clientProblems.composition.length > 0 ||
+      clientProblems.defaults.length > 0 ||
+      catalog?.synced === false);
+  const schema = useMemo(
+    () => taskTypeFormSchema(editableFields, creating ? 'create' : 'edit'),
+    [editableFields, creating],
+  );
+  const initialValues = useMemo(
+    () => (creating ? NEW_TYPE_DEFAULTS : row ? initialValuesOf(row) : undefined),
+    [creating, row],
+  );
+
+  function touch() {
+    setSaved(false);
+    setSaveError(null);
+    setServerIssues([]);
+  }
+
+  async function submit(submitted: FormValues) {
+    setSaving(true);
+    setSaveError(null);
+    setSaved(false);
+    try {
+      if (creating) {
+        const problem = slugProblem(String(submitted.slug ?? '').trim());
+        if (problem) {
+          setSaveError(problem);
+          return;
+        }
+        const body = buildCreateBody(submitted, { stepIds, loopLimits });
+        await createTaskType(body);
+        router.push(`/admin/task-types/${encodeURIComponent(body.slug)}`);
+        return;
+      }
+      const body = buildUpdateBody(
+        submitted,
+        editableFields,
+        composable
+          ? { stepIds, loopLimits, preAnswerDefaults: row?.preAnswerDefaults ?? {} }
+          : null,
+      );
+      const res = await updateTaskType(row!.slug, body);
+      setRow(res.taskType);
+      setSaved(true);
+      const fresh = await getAdminTaskType(row!.slug);
+      setAvailability(fresh.availability);
+    } catch (err) {
+      const error = err as ApiError;
+      const issues = splitServerIssues((error.body as { issues?: unknown } | undefined)?.issues);
+      setServerIssues(issues.composition);
+      const lines = [
+        ...(issues.composition.length > 0
+          ? ['The server rejected this step list; the marked rows say why.']
+          : []),
+        ...(entries ? issues.defaults.map((i) => describeDefaultsIssue(i, entries)) : []),
+      ];
+      setSaveError(lines.length > 0 ? lines.join(' ') : (error.message ?? 'Failed to save'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loadError) {
+    return (
+      <div className="flex flex-col gap-3">
+        <FormError message={loadError} />
+        <Link href="/admin/task-types" className="text-sm text-indigo-300 hover:underline">
+          Back to task types
+        </Link>
+      </div>
+    );
+  }
+  if (!catalog || !entries || (!creating && !row)) {
+    return <p className="text-sm text-neutral-400">Loading…</p>;
+  }
+
+  const lastField = schema.fields.at(-1)?.id;
+  const composer = (readOnly: boolean) => (
+    <TaskTypeComposer
+      catalog={catalog}
+      stepIds={readOnly ? (row?.stepIds ?? null) : stepIds}
+      loopLimits={loopLimits}
+      requiresRepository={requiresRepository}
+      readOnly={readOnly}
+      serverIssues={serverIssues}
+      onStepIdsChange={(next) => {
+        touch();
+        setStepIds(next);
+      }}
+      onLoopLimitsChange={(next) => {
+        touch();
+        setLoopLimits(next);
+      }}
+    />
+  );
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <Link href="/admin/task-types" className="text-sm text-indigo-300 hover:underline">
+          ← Task types
+        </Link>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <h2 className="text-xl font-semibold text-neutral-50 [overflow-wrap:anywhere]">
+            {creating ? 'New task type' : row!.displayName}
+          </h2>
+          {row && <Badge>{sourceLabel(row.source)}</Badge>}
+        </div>
+        {row && (
+          <p className="mt-1 font-mono text-xs text-neutral-500 [overflow-wrap:anywhere]">
+            {row.slug}
+          </p>
+        )}
+        {availability && !availability.available && (
+          <p className="mt-2 text-sm text-amber-300">{describeAvailability(availability)}</p>
+        )}
+        {row && !composable && (
+          <p className="mt-2 text-sm text-neutral-400">
+            Only some fields of this task type can be changed. Its steps are fixed.
+          </p>
+        )}
+        {catalog.synced === false && composable && (
+          <p className="mt-2 text-sm text-amber-300">
+            The step catalog has not been synced yet, so a step list cannot be saved.
+          </p>
+        )}
+      </div>
+      <Card>
+        <FormRenderer
+          key={row?.slug ?? 'new'}
+          schema={schema}
+          hideTitle
+          initialValues={initialValues}
+          submitting={saving}
+          submitDisabled={blocked}
+          errorMessage={saveError}
+          onSubmit={submit}
+          onValuesChange={(next) => {
+            setValues((prev) => ({ ...prev, ...next }));
+            setSaved(false);
+          }}
+          renderAfterField={(fieldId) =>
+            fieldId === lastField && composable ? (
+              <div className="mt-6">
+                <h3 className="mb-2 text-sm font-semibold text-neutral-200">Steps</h3>
+                {composer(false)}
+              </div>
+            ) : null
+          }
+        />
+        {saved && <p className="mt-3 text-xs text-emerald-400">Saved.</p>}
+      </Card>
+      {!composable && row && (
+        <Card>
+          <h3 className="mb-2 text-sm font-semibold text-neutral-200">Steps</h3>
+          {composer(true)}
+        </Card>
+      )}
+      {row?.source === 'admin' && (
+        <div>
+          <Button
+            type="button"
+            variant="destructive"
+            className="h-11"
+            onClick={() => setDeleteOpen(true)}
+          >
+            Delete task type
+          </Button>
+        </div>
+      )}
+      <TaskTypeDeleteDialog
+        slug={deleteOpen && row ? row.slug : null}
+        displayName={row?.displayName ?? ''}
+        onClose={() => setDeleteOpen(false)}
+        onDeleted={() => router.push('/admin/task-types')}
+      />
+    </div>
+  );
+}
