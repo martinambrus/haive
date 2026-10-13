@@ -926,7 +926,17 @@ async function convergePlanQuestions(tx: PlanMirrorTx, repositoryId: string): Pr
   const agreed = new Map<string, unknown>();
   for (const q of asked) {
     const node = byId.get(q.nodeId);
-    if (node && !sameValue(conflictSide(node[q.field]), q.row.incoming)) continue;
+    if (node && !sameValue(conflictSide(node[q.field]), q.row.incoming)) {
+      // Still asked, but this side may have moved to a third value: the question shows the current one.
+      const local = conflictSide(node[q.field]);
+      if (!sameValue(local, q.row.local)) {
+        await tx
+          .update(schema.projectStateConflicts)
+          .set({ local })
+          .where(eq(schema.projectStateConflicts.id, q.row.id));
+      }
+      continue;
+    }
     if (node) agreed.set(`${q.nodeId}\0${q.field}`, node[q.field]);
     await tx
       .update(schema.projectStateConflicts)

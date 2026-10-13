@@ -2903,6 +2903,13 @@ async function main(): Promise<void> {
       (await sNode(yId))?.title === 'Y third',
     await pendingPlanRows(sId),
   );
+  check(
+    "three-way: a question shows this side's current value after it moved to a third one",
+    (await pendingPlanRows(sId)).some(
+      (r) => r.unit === `plan/${yId}#title` && JSON.stringify(r.local) === '{"v":"Y third"}',
+    ),
+    await pendingPlanRows(sId),
+  );
 
   // Settled on the incoming value, the question closes; the node stays out of the base, since only
   // the asked field is known to be shared.
