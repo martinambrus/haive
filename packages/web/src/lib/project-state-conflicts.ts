@@ -169,7 +169,7 @@ export function answerConfirmation(
       : {
           title: "Take the other install's value",
           confirmLabel: 'Take theirs',
-          body: `This plan switches to your teammate's value, and \`${PLAN_FILE}\` is rewritten with it. Its own value is dropped.`,
+          body: `This plan switches to your teammate's value, and \`${PLAN_FILE}\` is rewritten with it. This install's own value is dropped.`,
         };
   }
   if (unit === RTK_ENABLED_UNIT) {
@@ -195,7 +195,7 @@ export function answerConfirmation(
   return {
     title: "Take the other install's value",
     confirmLabel: 'Take theirs',
-    body: `This install switches to your teammate's value for ${label}. Its own value is dropped. No repository file is written.`,
+    body: `This install switches to your teammate's value for ${label}. This install's own value is dropped. No repository file is written.`,
   };
 }
 
