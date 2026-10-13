@@ -310,7 +310,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
   notional spend, price feeds, FX. `resolveCostDecision`, `model-prices.ts`.
 - [Statistics](docs/architecture/statistics.md): the statistics module's `/m/statistics` api, day bucketing, charts,
   per-step spend, tool usage, throughput.
-  `@haive/shared/stats`, `components/stats/`, `summarizeThroughput`.
+  `@haive/shared/stats`, `modules/statistics/`, `summarizeThroughput`.
 
 ### Sandbox and runtime
 
