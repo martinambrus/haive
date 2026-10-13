@@ -20,6 +20,7 @@ export function validateComposition(
   const everProvided = new Set<string>();
   const seen = new Map<string, number>();
   let closing: { stepId: string; index: number } | undefined;
+  const entailed: { index: number; stepId: string; token: string }[] = [];
   stepIds.forEach((stepId, index) => {
     if (seen.has(stepId)) issues.push({ kind: 'duplicate-step', index, stepId });
     if (!seen.has(stepId)) seen.set(stepId, index);
@@ -27,6 +28,11 @@ export function validateComposition(
     if (!entry) {
       issues.push({ kind: 'unknown-step', index, stepId });
       return;
+    }
+    for (const token of entry.entails ?? []) entailed.push({ index, stepId, token });
+    for (const rule of entry.entailsWhen ?? []) {
+      if (!everProvided.has(rule.provided)) continue;
+      for (const token of rule.entails) entailed.push({ index, stepId, token });
     }
     for (const token of entry.precedes ?? []) {
       if (everProvided.has(token)) issues.push({ kind: 'too-late', index, stepId, token });
@@ -54,13 +60,9 @@ export function validateComposition(
     }
     for (const token of entry.removes ?? []) provided.delete(token);
   });
-  stepIds.forEach((stepId, index) => {
-    for (const token of catalog.get(stepId)?.entails ?? []) {
-      const later = stepIds
-        .slice(index + 1)
-        .some((id) => catalog.get(id)?.provides.includes(token));
-      if (!later) issues.push({ kind: 'unfulfilled', index, stepId, token });
-    }
-  });
+  for (const { index, stepId, token } of entailed) {
+    const later = stepIds.slice(index + 1).some((id) => catalog.get(id)?.provides.includes(token));
+    if (!later) issues.push({ kind: 'unfulfilled', index, stepId, token });
+  }
   return issues;
 }

@@ -317,6 +317,7 @@ describe('core composable catalog', () => {
       '01c-ddev-env',
       '01c1-restore-database',
       '07-phase-2-implement',
+      '07c-ddev-reconcile',
       '10-gate-3-commit',
     ];
     expect(
@@ -330,10 +331,10 @@ describe('core composable catalog', () => {
         [...head, '11g-save-database', '11a-gate-4-push', '12-worktree-cleanup'],
         catalog,
       ),
-    ).toContainEqual({ kind: 'too-late', index: 6, stepId: '11a-gate-4-push', token: 'db-saved' });
+    ).toContainEqual({ kind: 'too-late', index: 7, stepId: '11a-gate-4-push', token: 'db-saved' });
     expect(
       validateComposition([...head, '12-worktree-cleanup', '11g-save-database'], catalog),
-    ).toContainEqual({ kind: 'too-late', index: 6, stepId: '11g-save-database', token: 'cleaned' });
+    ).toContainEqual({ kind: 'too-late', index: 7, stepId: '11g-save-database', token: 'cleaned' });
   });
 
   it('needs the skill sync before the knowledge commit and the scope picker before re-indexing', () => {
@@ -395,6 +396,7 @@ describe('core composable catalog', () => {
     expect(validateComposition(base, catalog)).toEqual([
       { kind: 'unfulfilled', index: 1, stepId: '01c-ddev-env', token: 'db-restored' },
       { kind: 'unfulfilled', index: 1, stepId: '01c-ddev-env', token: 'db-saved' },
+      { kind: 'unfulfilled', index: 2, stepId: '07-phase-2-implement', token: 'reconciled' },
     ]);
     expect(
       validateComposition(
@@ -403,6 +405,7 @@ describe('core composable catalog', () => {
           '01c-ddev-env',
           '01c1-restore-database',
           '07-phase-2-implement',
+          '07c-ddev-reconcile',
           '10-gate-3-commit',
           '11g-save-database',
         ],

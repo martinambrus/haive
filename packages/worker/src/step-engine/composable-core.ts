@@ -250,6 +250,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['implementation'],
+    entailsWhen: [{ provided: 'ddev', entails: ['reconciled'] }],
     removes: ['clean-tree'],
     precedes: EDITS_PRECEDE,
   },

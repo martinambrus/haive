@@ -176,6 +176,19 @@ describe('validateComposition', () => {
     expect(validateComposition(['declare', 'build'], catalog)).toEqual([]);
   });
 
+  it('entails a token only when its condition token was provided earlier', () => {
+    const catalog = catalogOf(
+      entry('runtime', { provides: ['ddev'] }),
+      { ...entry('implement'), entailsWhen: [{ provided: 'ddev', entails: ['reconciled'] }] },
+      entry('reconcile', { provides: ['reconciled'] }),
+    );
+    expect(validateComposition(['implement'], catalog)).toEqual([]);
+    expect(validateComposition(['runtime', 'implement'], catalog)).toEqual([
+      { kind: 'unfulfilled', index: 1, stepId: 'implement', token: 'reconciled' },
+    ]);
+    expect(validateComposition(['runtime', 'implement', 'reconcile'], catalog)).toEqual([]);
+  });
+
   it('withdraws a token a step removes', () => {
     const catalog = catalogOf(
       entry('cut', { provides: ['worktree'] }),
