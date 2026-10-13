@@ -77,16 +77,20 @@ export function resolveTaskTypeAvailability(
 
 const preAnswerDefaultsSchema = z.record(z.string(), z.record(z.string(), z.unknown()));
 
-export const customTaskTypeCreateSchema = z.object({
-  slug: z.string().regex(CUSTOM_TASK_TYPE_SLUG_PATTERN),
-  displayName: z.string().min(1),
-  description: z.string().optional(),
-  stepIds: z.array(z.string().min(1)).min(1),
-  preAnswerDefaults: preAnswerDefaultsSchema.optional(),
-  stepLoopLimitDefaults: stepLoopLimitsSchema,
-  requiresRepository: z.boolean(),
-  sortOrder: z.number().int().optional(),
-});
+export const customTaskTypeCreateSchema = z
+  .object({
+    slug: z.string().regex(CUSTOM_TASK_TYPE_SLUG_PATTERN),
+    displayName: z.string().min(1),
+    description: z.string().optional(),
+    stepIds: z.array(z.string().min(1)).min(1),
+    preAnswerDefaults: preAnswerDefaultsSchema.optional(),
+    stepLoopLimitDefaults: stepLoopLimitsSchema,
+    requiresRepository: z.boolean(),
+    selectable: z.boolean().optional(),
+    enabled: z.boolean().optional(),
+    sortOrder: z.number().int().optional(),
+  })
+  .strict();
 export type CustomTaskTypeCreate = z.infer<typeof customTaskTypeCreateSchema>;
 
 export const taskTypeUpdateSchema = customTaskTypeCreateSchema
