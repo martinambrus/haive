@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -114,5 +114,18 @@ describe('bytes that decode alike', () => {
       writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(synced)),
     ).rejects.toBeInstanceOf(PlanMirrorHeldError);
     expect(await readFile(path.join(repo, HAIVE_DATA_FILES.plan))).toEqual(malformed);
+  });
+});
+
+describe('a plan.json past the cap', () => {
+  it('is held without being read in', async () => {
+    const repo = await repoWith('{"synced":1}\n');
+    await truncate(path.join(repo, HAIVE_DATA_FILES.plan), 17 * 1024 * 1024);
+    await expect(
+      writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha('{"synced":1}\n')),
+    ).rejects.toBeInstanceOf(PlanMirrorHeldError);
+    await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).rejects.toBeInstanceOf(
+      PlanMirrorHeldError,
+    );
   });
 });

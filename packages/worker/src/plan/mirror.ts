@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
   readFileNoFollow,
-  readTextNoFollow,
   removeNoFollow,
   removeFileIfNoFollow,
   rewriteFileIfNoFollow,
@@ -49,6 +48,19 @@ export class PlanMirrorHeldError extends Error {
   override readonly name = 'PlanMirrorHeldError';
 }
 
+// A plan this size is far past any real plan; a larger file is held rather than buffered.
+const PLAN_JSON_MAX_BYTES = 16 * 1024 * 1024;
+const PLAN_TOO_LARGE = `the committed plan snapshot is larger than ${PLAN_JSON_MAX_BYTES / 1024 / 1024} MiB`;
+
+/** plan.json's bytes, `'too-large'` past the cap (nothing beyond it is read), or null when absent. */
+async function readPlanJson(anchor: string): Promise<Buffer | 'too-large' | null> {
+  const read = await readFileNoFollow(anchor, HAIVE_DATA_FILES.plan, {
+    maxBytes: PLAN_JSON_MAX_BYTES,
+  });
+  if (read === null) return null;
+  return read.truncated ? 'too-large' : read.data;
+}
+
 const hashBytes = (bytes: string | Buffer): string =>
   createHash('sha256').update(bytes).digest('hex');
 
@@ -66,9 +78,9 @@ async function assertFlushMayWrite(
   nextJson: string | null,
 ): Promise<void> {
   if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
-  const onDisk = await readFileNoFollow(repoPath, HAIVE_DATA_FILES.plan);
+  const onDisk = await readPlanJson(repoPath);
   if (onDisk === null) return;
-  if (!flushMayReplace(repoPath, onDisk.data, syncedHash, nextJson)) {
+  if (onDisk === 'too-large' || !flushMayReplace(repoPath, onDisk, syncedHash, nextJson)) {
     throw new PlanMirrorHeldError(HELD_UNIMPORTED);
   }
 }
@@ -93,10 +105,15 @@ export async function removePlanJsonIfUnchanged(
   syncedHash: string | null,
 ): Promise<void> {
   let operation = false;
-  const outcome = await removeFileIfNoFollow(repoPath, HAIVE_DATA_FILES.plan, async (data) => {
-    operation = await gitOperationInProgress(repoPath);
-    return !operation && flushMayReplace(repoPath, data, syncedHash, null);
-  });
+  const outcome = await removeFileIfNoFollow(
+    repoPath,
+    HAIVE_DATA_FILES.plan,
+    async (data) => {
+      operation = await gitOperationInProgress(repoPath);
+      return !operation && flushMayReplace(repoPath, data, syncedHash, null);
+    },
+    { maxBytes: PLAN_JSON_MAX_BYTES },
+  );
   if (outcome === 'kept') {
     throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
   }
@@ -115,11 +132,16 @@ export async function writePlanJsonIfUnchanged(
   const bytes = Buffer.from(json, 'utf8');
   let operation = false;
   // The merge check is repeated here, after the file is parked, so it sits next to the replace.
-  const outcome = await rewriteFileIfNoFollow(repoPath, HAIVE_DATA_FILES.plan, async (data) => {
-    operation = await gitOperationInProgress(repoPath);
-    if (operation) return null;
-    return flushMayReplace(repoPath, data, syncedHash, json) ? bytes : null;
-  });
+  const outcome = await rewriteFileIfNoFollow(
+    repoPath,
+    HAIVE_DATA_FILES.plan,
+    async (data) => {
+      operation = await gitOperationInProgress(repoPath);
+      if (operation) return null;
+      return flushMayReplace(repoPath, data, syncedHash, json) ? bytes : null;
+    },
+    { maxBytes: PLAN_JSON_MAX_BYTES },
+  );
   if (outcome === 'kept') {
     throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
   }
@@ -368,8 +390,9 @@ export async function importPlanMirror(
   try {
     // null is absence OR a refusal — a link, a non-regular file — and both mean there is no mirror
     // to import, which is exactly what the `catch` concluded for an unreadable path.
-    const raw = (await readFileNoFollow(storagePath, HAIVE_DATA_FILES.plan))?.data ?? null;
+    const raw = await readPlanJson(storagePath);
     if (raw === null) return { imported: false, code: 'no_mirror', reason: 'no plan mirror' };
+    if (raw === 'too-large') return refused(PLAN_TOO_LARGE);
     rawBytes = raw;
     rawPayload = JSON.parse(raw.toString('utf8')) as unknown;
   } catch {
@@ -616,8 +639,9 @@ export async function reconcilePlanMirror(
   let rawPayload: unknown;
   let rawBytes: Buffer;
   try {
-    const raw = (await readFileNoFollow(storagePath, HAIVE_DATA_FILES.plan))?.data ?? null;
+    const raw = await readPlanJson(storagePath);
     if (raw === null) return empty('this repository has no committed plan snapshot');
+    if (raw === 'too-large') return empty(PLAN_TOO_LARGE);
     rawBytes = raw;
     rawPayload = JSON.parse(raw.toString('utf8')) as unknown;
   } catch {
@@ -651,8 +675,8 @@ export async function reconcilePlanMirror(
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
     // A flush that held the lock first may have replaced the file this read; stamping the older
     // bytes would make the next flush hold on a file Haive wrote.
-    const now = (await readFileNoFollow(storagePath, HAIVE_DATA_FILES.plan))?.data ?? null;
-    if (now === null || !now.equals(rawBytes)) {
+    const now = await readPlanJson(storagePath);
+    if (!Buffer.isBuffer(now) || !now.equals(rawBytes)) {
       throw new Error('the plan snapshot changed while it was being read; try again');
     }
 
@@ -903,11 +927,17 @@ export async function stampPlanMirrorHashesAtBoot(db: Database): Promise<number>
         const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
         if (!repoPath) return false;
         const rendered = await renderPlanMirrorFiles(tx, repositoryId);
-        const onDisk = await readTextNoFollow(repoPath, HAIVE_DATA_FILES.plan);
+        const onDisk = await readPlanJson(repoPath);
         const matches =
-          rendered === null ? onDisk === null : onDisk !== null && onDisk === rendered.json;
+          rendered === null
+            ? onDisk === null
+            : Buffer.isBuffer(onDisk) && onDisk.equals(Buffer.from(rendered.json, 'utf8'));
         if (!matches) return false;
-        await stampSyncedHash(tx, repositoryId, hashBytes(onDisk ?? ''));
+        await stampSyncedHash(
+          tx,
+          repositoryId,
+          Buffer.isBuffer(onDisk) ? hashBytes(onDisk) : ABSENT_HASH,
+        );
         return true;
       });
       if (done) stamped++;
