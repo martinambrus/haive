@@ -13,6 +13,7 @@ build/
 packages/api/src/modules.generated.ts
 packages/worker/src/modules.generated.ts
 packages/web/src/generated/module-pages.ts
+packages/web/src/generated/module-dashboard.ts
 
 # Environment
 .env

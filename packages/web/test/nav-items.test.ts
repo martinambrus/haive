@@ -18,12 +18,13 @@ const mod = (id: string, nav: ModuleSummary['nav']): ModuleSummary => ({
 });
 
 const hrefs = (items: { href: string }[]) => items.map((i) => i.href);
+const rendered = BASE_NAV_ITEMS.map(({ order: _order, ...item }) => item);
 
 describe('navItemsFor', () => {
   it('is exactly today list when no modules are installed', () => {
-    expect(navItemsFor('user')).toEqual(BASE_NAV_ITEMS);
-    expect(navItemsFor('user', [])).toEqual(BASE_NAV_ITEMS);
-    expect(navItemsFor('admin', [])).toEqual([...BASE_NAV_ITEMS, ADMIN_NAV_ITEM]);
+    expect(navItemsFor('user')).toEqual(rendered);
+    expect(navItemsFor('user', [])).toEqual(rendered);
+    expect(navItemsFor('admin', [])).toEqual([...rendered, ADMIN_NAV_ITEM]);
   });
 
   it('puts module items after the base items and before Admin', () => {
@@ -38,10 +39,10 @@ describe('navItemsFor', () => {
     const items = navItemsFor('user', [
       mod('x', [
         { href: '/m/x/z', label: 'Zeta' },
-        { href: '/m/x/b2', label: 'Beta', order: 2 },
+        { href: '/m/x/b2', label: 'Beta', order: 102 },
         { href: '/m/x/a', label: 'Alpha' },
       ]),
-      mod('y', [{ href: '/m/y/b1', label: 'First', order: 1 }]),
+      mod('y', [{ href: '/m/y/b1', label: 'First', order: 101 }]),
     ]);
     expect(hrefs(items).slice(BASE_NAV_ITEMS.length)).toEqual([
       '/m/y/b1',
@@ -54,14 +55,42 @@ describe('navItemsFor', () => {
   it('resolves a known icon name and falls back to a generic icon', () => {
     const items = navItemsFor('user', [
       mod('a', [
-        { href: '/m/a/1', label: 'One', icon: 'FolderGit2', order: 1 },
-        { href: '/m/a/2', label: 'Two', icon: 'no-such-icon', order: 2 },
-        { href: '/m/a/3', label: 'Three', order: 3 },
+        { href: '/m/a/1', label: 'One', icon: 'FolderGit2', order: 101 },
+        { href: '/m/a/2', label: 'Two', icon: 'no-such-icon', order: 102 },
+        { href: '/m/a/3', label: 'Three', order: 103 },
       ]),
     ]);
     const [one, two, three] = items.slice(BASE_NAV_ITEMS.length);
     expect(one!.icon).toBe(FolderGit2);
     expect(two!.icon).toBe(Puzzle);
     expect(three!.icon).toBe(Puzzle);
+  });
+
+  describe('module items among the built-ins', () => {
+    const labelsWith = (order: number | undefined) =>
+      navItemsFor('admin', [mod('a', [{ href: '/m/a', label: 'Mod', order }])]).map((i) => i.label);
+
+    it('lands order 45 between CLI Providers and Statistics', () => {
+      const labels = labelsWith(45);
+      expect(labels.indexOf('Mod')).toBe(labels.indexOf('CLI Providers') + 1);
+      expect(labels.indexOf('Mod')).toBe(labels.indexOf('Statistics') - 1);
+    });
+
+    it('lands order 50 right after Statistics', () => {
+      const labels = labelsWith(50);
+      expect(labels.indexOf('Mod')).toBe(labels.indexOf('Statistics') + 1);
+    });
+
+    it('lands no order after Settings, and Admin stays last', () => {
+      const labels = labelsWith(undefined);
+      expect(labels.indexOf('Mod')).toBe(labels.indexOf('Settings') + 1);
+      expect(labels.at(-1)).toBe('Admin');
+      expect(labelsWith(45).at(-1)).toBe('Admin');
+      expect(labelsWith(50).at(-1)).toBe('Admin');
+    });
+
+    it('does not put order on the rendered items', () => {
+      for (const item of navItemsFor('user')) expect(item).not.toHaveProperty('order');
+    });
   });
 });

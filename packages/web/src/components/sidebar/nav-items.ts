@@ -22,13 +22,21 @@ export interface NavItem {
   icon: LucideIcon;
 }
 
-export const BASE_NAV_ITEMS: NavItem[] = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/tasks', label: 'Tasks', icon: ListChecks },
-  { href: '/repos', label: 'Repositories', icon: FolderGit2 },
-  { href: '/cli-providers', label: 'CLI Providers', icon: SquareTerminal },
-  { href: '/stats', label: 'Statistics', icon: ChartBar },
-  { href: '/settings/account', label: 'Settings', section: '/settings', icon: Settings },
+type OrderedNavItem = NavItem & { order: number };
+
+export const BASE_NAV_ITEMS: OrderedNavItem[] = [
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, order: 10 },
+  { href: '/tasks', label: 'Tasks', icon: ListChecks, order: 20 },
+  { href: '/repos', label: 'Repositories', icon: FolderGit2, order: 30 },
+  { href: '/cli-providers', label: 'CLI Providers', icon: SquareTerminal, order: 40 },
+  { href: '/stats', label: 'Statistics', icon: ChartBar, order: 50 },
+  {
+    href: '/settings/account',
+    label: 'Settings',
+    section: '/settings',
+    icon: Settings,
+    order: 60,
+  },
 ];
 
 export const ADMIN_NAV_ITEM: NavItem = { href: '/admin', label: 'Admin', icon: ShieldCheck };
@@ -49,21 +57,29 @@ function moduleIcon(name: string | undefined): LucideIcon {
   return MODULE_ICONS[(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')] ?? Puzzle;
 }
 
-function moduleNavItems(modules: readonly ModuleSummary[]): NavItem[] {
+function moduleNavItems(modules: readonly ModuleSummary[]): OrderedNavItem[] {
   return modules
     .flatMap((m) => m.nav)
     .sort((a, b) => {
       const [ao, bo] = [a.order ?? Infinity, b.order ?? Infinity];
       return ao === bo ? a.label.localeCompare(b.label) : ao < bo ? -1 : 1;
     })
-    .map((item) => ({ href: item.href, label: item.label, icon: moduleIcon(item.icon) }));
+    .map((item) => ({
+      href: item.href,
+      label: item.label,
+      icon: moduleIcon(item.icon),
+      order: item.order ?? Infinity,
+    }));
 }
 
 export function navItemsFor(
   role: 'admin' | 'user',
   modules: readonly ModuleSummary[] = [],
 ): NavItem[] {
-  const items = [...BASE_NAV_ITEMS, ...moduleNavItems(modules)];
+  // Array.sort is stable and the built-ins come first, so a module item with a built-in's order lands after it.
+  const items = [...BASE_NAV_ITEMS, ...moduleNavItems(modules)]
+    .sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0))
+    .map(({ order: _order, ...item }) => item);
   return role === 'admin' ? [...items, ADMIN_NAV_ITEM] : items;
 }
 

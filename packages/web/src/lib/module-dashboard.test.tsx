@@ -1,0 +1,36 @@
+import { describe, expect, it } from 'vitest';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { ModuleDashboardWidgets } from './module-dashboard';
+
+const Alpha = ({ moduleId }: { moduleId: string }) => <p>alpha-{moduleId}</p>;
+const Beta = ({ moduleId }: { moduleId: string }) => <p>beta-{moduleId}</p>;
+
+describe('ModuleDashboardWidgets', () => {
+  it('renders nothing for an empty list', () => {
+    expect(renderToStaticMarkup(<ModuleDashboardWidgets widgets={[]} />)).toBe('');
+  });
+
+  it('renders each widget with its module id, in order', () => {
+    const html = renderToStaticMarkup(
+      <ModuleDashboardWidgets
+        widgets={[
+          { moduleId: 'stats', id: 'a', Component: Alpha },
+          { moduleId: 'other', id: 'b', Component: Beta },
+        ]}
+      />,
+    );
+    expect(html).toBe('<p>alpha-stats</p><p>beta-other</p>');
+  });
+
+  it('accepts two widgets with the same id from different modules', () => {
+    const html = renderToStaticMarkup(
+      <ModuleDashboardWidgets
+        widgets={[
+          { moduleId: 'x', id: 'w', Component: Alpha },
+          { moduleId: 'y', id: 'w', Component: Alpha },
+        ]}
+      />,
+    );
+    expect(html).toBe('<p>alpha-x</p><p>alpha-y</p>');
+  });
+});
