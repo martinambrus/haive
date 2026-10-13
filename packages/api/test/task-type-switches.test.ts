@@ -56,7 +56,7 @@ const handle = (rows: unknown[]) =>
       from: (table: unknown) =>
         table === schema.stepCatalog
           ? Promise.resolve([])
-          : { where: () => ({ limit: async () => rows }) },
+          : { where: () => ({ limit: () => ({ for: async () => rows }) }) },
     }),
   }) as unknown as Pick<Database, 'select'>;
 

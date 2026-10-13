@@ -75,11 +75,13 @@ export async function definitionForCreate(
   slug: string,
   opts: { generic: boolean },
 ): Promise<TaskTypeDefinitionForCreate> {
+  // FOR SHARE holds the row until the caller's insert commits, so a concurrent delete waits and then sees the task.
   const [def] = await handle
     .select()
     .from(schema.taskTypeDefinitions)
     .where(eq(schema.taskTypeDefinitions.slug, slug))
-    .limit(1);
+    .limit(1)
+    .for('share');
   if (!def) {
     // The worker seeds the built-ins at boot; until it has, a built-in keeps today's live run list.
     if (!BUILTIN_TASK_TYPES.has(slug)) throw new HttpError(404, `Unknown task type ${slug}`);
