@@ -400,6 +400,31 @@ describe('task type schemas', () => {
     expect(taskTypeUpdateSchema.safeParse({ stepIds: [] }).success).toBe(false);
   });
 
+  it('carries prompt steps keyed by their slug on create and update', () => {
+    const step = { slug: 'review', title: 'Review', template: 'Review it', timeoutMs: 300_000 };
+    const withStep = {
+      ...valid,
+      stepIds: ['custom.my-type.review'],
+      promptSteps: { review: step },
+    };
+    const parsed = customTaskTypeCreateSchema.safeParse(withStep);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.promptSteps?.review?.capabilities).toEqual([]);
+    expect(taskTypeUpdateSchema.safeParse({ promptSteps: { review: step } }).success).toBe(true);
+    expect(taskTypeUpdateSchema.safeParse({ promptSteps: {} }).success).toBe(true);
+    for (const promptSteps of [
+      { other: step },
+      { review: { ...step, template: '' } },
+      { review: { ...step, timeoutMs: 1 } },
+      { 'bad slug': { ...step, slug: 'bad slug' } },
+    ]) {
+      expect(customTaskTypeCreateSchema.safeParse({ ...withStep, promptSteps }).success).toBe(
+        false,
+      );
+      expect(taskTypeUpdateSchema.safeParse({ promptSteps }).success).toBe(false);
+    }
+  });
+
   it('public dto carries available and an optional reason', () => {
     const dto = {
       slug: 'workflow',

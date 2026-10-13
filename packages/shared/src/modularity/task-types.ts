@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 import { validateComposition, type CompositionIssue } from './composition.js';
 import { RESERVED_TASK_TYPE_SLUGS, type ComposableStepEntry } from './contracts.js';
+import { promptStepEntrySchema } from './prompt-steps.js';
 
 export const CUSTOM_TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -80,6 +81,13 @@ export function resolveTaskTypeAvailability(
 
 const preAnswerDefaultsSchema = z.record(z.string(), z.record(z.string(), z.unknown()));
 
+const promptStepsSchema = z
+  .record(z.string(), promptStepEntrySchema)
+  .refine(
+    (steps) => Object.entries(steps).every(([key, entry]) => key === entry.slug),
+    'Each prompt step must be keyed by its slug',
+  );
+
 export const customTaskTypeCreateSchema = z
   .object({
     slug: z
@@ -91,6 +99,7 @@ export const customTaskTypeCreateSchema = z
     stepIds: z.array(z.string().min(1)).min(1),
     preAnswerDefaults: preAnswerDefaultsSchema.optional(),
     stepLoopLimitDefaults: stepLoopLimitsSchema,
+    promptSteps: promptStepsSchema.optional(),
     requiresRepository: z.boolean(),
     selectable: z.boolean().optional(),
     enabled: z.boolean().optional(),
