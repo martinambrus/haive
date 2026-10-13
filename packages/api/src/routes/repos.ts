@@ -35,6 +35,7 @@ import {
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
+import { ROOT_WRITING_STEP_IDS } from '../lib/task-type-definition.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
@@ -1070,7 +1071,7 @@ const WORKTREE_PAIR_STEP_IDS = [WORKFLOW_SKILL_STEP_ID, WORKTREE_CLEANUP_STEP_ID
  *  11d's skills in the root — a merge that completes mid-sweep leaves that workflow without the
  *  artifacts it just merged. `loadOnboardingTaskFacts` sees neither: it is filtered to
  *  `onboarding` because it also answers the ONBOARDED verdict. */
-const OTHER_ROOT_WRITER_TASK_TYPES = ['onboarding_upgrade', 'workflow'] as const;
+const OTHER_ROOT_WRITER_TASK_TYPES: readonly string[] = ['onboarding_upgrade', 'workflow'];
 const PROVENANCE_STEP_IDS = [
   AGENT_TARGETS_STEP_ID,
   SKILL_MIRROR_STEP_ID,
@@ -1158,18 +1159,28 @@ export async function loadLiveRootWriters(
   userId: string,
   repositoryId: string,
 ): Promise<Array<{ id: string }>> {
-  return db
-    .select({ id: schema.tasks.id })
+  const live = await db
+    .select({
+      id: schema.tasks.id,
+      type: schema.tasks.type,
+      runListSnapshot: schema.tasks.runListSnapshot,
+    })
     .from(schema.tasks)
     .where(
       and(
         eq(schema.tasks.userId, userId),
         eq(schema.tasks.repositoryId, repositoryId),
-        inArray(schema.tasks.type, OTHER_ROOT_WRITER_TASK_TYPES),
         inArray(schema.tasks.status, LIVE_TASK_STATUSES),
       ),
+    );
+  return live
+    .filter(
+      (t) =>
+        OTHER_ROOT_WRITER_TASK_TYPES.includes(t.type) ||
+        ROOT_WRITING_STEP_IDS.some((id) => t.runListSnapshot?.includes(id) === true),
     )
-    .limit(1);
+    .slice(0, 1)
+    .map((t) => ({ id: t.id }));
 }
 
 /**

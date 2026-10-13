@@ -55,13 +55,13 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
   });
 
   it('copies the step list of a static type', async () => {
-    expect(await definitionForCreate(db, 'ttd-static', { generic: true })).toEqual({
+    expect(await definitionForCreate(db, 'ttd-static', { generic: true })).toMatchObject({
       runListSnapshot: STEPS,
     });
   });
 
   it('pins nothing for a dynamic type', async () => {
-    expect(await definitionForCreate(db, 'ttd-dynamic', { generic: true })).toEqual({
+    expect(await definitionForCreate(db, 'ttd-dynamic', { generic: true })).toMatchObject({
       runListSnapshot: null,
     });
   });
@@ -69,13 +69,13 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
   it('refuses an unseeded built-in on the generic route unless it is a generic type', async () => {
     const err = await refusal(definitionForCreate(db, 'plan_merge', { generic: true }));
     expect([err.status, err.message]).toEqual([403, 'Task type plan_merge cannot be created here']);
-    await expect(definitionForCreate(db, 'onboarding', { generic: true })).resolves.toEqual({
+    await expect(definitionForCreate(db, 'onboarding', { generic: true })).resolves.toMatchObject({
       runListSnapshot: null,
     });
   });
 
   it('lets a built-in type through with no snapshot before the worker has seeded it', async () => {
-    await expect(definitionForCreate(db, 'plan_merge', { generic: false })).resolves.toEqual({
+    await expect(definitionForCreate(db, 'plan_merge', { generic: false })).resolves.toMatchObject({
       runListSnapshot: null,
     });
   });
@@ -95,7 +95,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
   it('refuses a type that is not selectable only on the generic path', async () => {
     const err = await refusal(definitionForCreate(db, 'ttd-hidden', { generic: true }));
     expect([err.status, err.message]).toEqual([403, 'Task type ttd-hidden cannot be created here']);
-    expect(await definitionForCreate(db, 'ttd-hidden', { generic: false })).toEqual({
+    expect(await definitionForCreate(db, 'ttd-hidden', { generic: false })).toMatchObject({
       runListSnapshot: STEPS,
     });
   });
@@ -104,7 +104,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
     await expect(
       db.transaction(async (tx) => {
         await tx.insert(schema.taskTypeDefinitions).values(row('ttd-in-tx'));
-        expect(await definitionForCreate(tx, 'ttd-in-tx', { generic: true })).toEqual({
+        expect(await definitionForCreate(tx, 'ttd-in-tx', { generic: true })).toMatchObject({
           runListSnapshot: STEPS,
         });
         const outside = await db

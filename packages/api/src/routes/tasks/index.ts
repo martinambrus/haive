@@ -494,6 +494,11 @@ taskRoutes.post('/', async (c) => {
     if (!provider) throw new HttpError(404, 'Summary CLI provider not found');
   }
 
+  const definition = await definitionForCreate(db, body.type, { generic: true });
+  if (definition.requiresRepository && !body.repositoryId) {
+    throw new HttpError(400, `${body.type} tasks require a repositoryId`);
+  }
+
   if (body.databaseSnapshotId && body.dbUploadId) {
     throw new HttpError(400, 'Select either a saved database or an uploaded dump');
   }
@@ -510,7 +515,8 @@ taskRoutes.post('/', async (c) => {
 
   if (
     body.databaseSnapshotId &&
-    (!body.repositoryId || !['workflow', 'run_app'].includes(body.type))
+    (!body.repositoryId ||
+      !(['workflow', 'run_app'].includes(body.type) || definition.restoresDatabase))
   ) {
     throw new HttpError(
       400,
@@ -630,7 +636,20 @@ taskRoutes.post('/', async (c) => {
   if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
 
   const insertTask = async (handle: typeof db | DbTx) => {
-    const { runListSnapshot } = await definitionForCreate(handle, body.type, { generic: true });
+    const locked = await definitionForCreate(handle, body.type, { generic: true });
+    // The lock and database decisions above came from the preflight read; refuse if an edit changed them since.
+    if (
+      locked.takesRootLock !== definition.takesRootLock ||
+      locked.pinsDatabase !== definition.pinsDatabase ||
+      locked.restoresDatabase !== definition.restoresDatabase ||
+      locked.requiresRepository !== definition.requiresRepository
+    ) {
+      throw new HttpError(
+        409,
+        'The task type changed while this task was being created; try again',
+      );
+    }
+    const { runListSnapshot, preAnswers, stepLoopLimits, simplifyCode } = locked;
     return await handle
       .insert(schema.tasks)
       .values({
@@ -654,7 +673,7 @@ taskRoutes.post('/', async (c) => {
         summaryCliChoiceRecorded:
           body.summaryCliProviderId !== undefined || body.summaryLlmEnabled !== undefined,
         dbUploadId: body.dbUploadId ?? null,
-        simplifyCode: body.simplifyCode ?? false,
+        simplifyCode: simplifyCode || (body.simplifyCode ?? false),
         adversarialQaLevel:
           body.adversarialQaLevel && body.adversarialQaLevel !== 'none'
             ? body.adversarialQaLevel
@@ -662,7 +681,8 @@ taskRoutes.post('/', async (c) => {
         broadAudit: body.broadAudit ?? true,
         memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
         cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
-        stepLoopLimits: body.stepLoopLimits ?? {},
+        stepLoopLimits: { ...stepLoopLimits, ...body.stepLoopLimits },
+        preAnswers,
         autoContinue: body.autoContinue ?? true,
         ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
@@ -684,7 +704,7 @@ taskRoutes.post('/', async (c) => {
     handle: typeof db | DbTx,
     created: typeof schema.tasks.$inferSelect,
   ) => {
-    if (created.type === 'workflow' || created.type === 'run_app') {
+    if (created.type === 'workflow' || created.type === 'run_app' || definition.pinsDatabase) {
       try {
         await initializeTaskDatabaseState(handle, created, {
           sourceSnapshotId: body.databaseSnapshotId,
@@ -738,10 +758,11 @@ taskRoutes.post('/', async (c) => {
       await pinDatabase(tx, row);
       return { task: row, queued: await settle(tx, row) };
     };
-    // A workflow writes into the repository root, so it is created under the same lock a reset
-    // claims the root with: a live claim refuses it, and a later claim finds it among the writers.
+    // A task that sets up a worktree writes into the repository root, so it is created under the
+    // same lock a reset claims the root with: a live claim refuses it, and a later claim finds it
+    // among the writers.
     ({ task, queued } =
-      body.type === 'workflow' && body.repositoryId
+      definition.takesRootLock && body.repositoryId
         ? await withRepositoryTaskLock(db, body.repositoryId, create)
         : await db.transaction(create));
   }

@@ -17,7 +17,10 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 
 vi.mock('../src/lib/task-type-definition.js', () => ({
-  definitionForCreate: async () => ({ runListSnapshot: null }),
+  definitionForCreate: async (_handle: unknown, type: string) => ({
+    runListSnapshot: null,
+    takesRootLock: type === 'workflow',
+  }),
 }));
 
 import { Hono } from 'hono';

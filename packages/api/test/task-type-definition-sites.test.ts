@@ -110,11 +110,26 @@ describe('POST /tasks pins the run list', () => {
   it('stores a null snapshot when the helper returns none', async () => {
     const { created } = world();
     h.definition.mockResolvedValueOnce({ runListSnapshot: null });
+    h.definition.mockResolvedValueOnce({ runListSnapshot: null });
     expect(
       (await post('/tasks', { type: 'workflow', title: 't', description: 'd', repositoryId: REPO }))
         .status,
     ).toBe(201);
     expect(created()[0]).toMatchObject({ runListSnapshot: null });
+  });
+
+  it('refuses, creating nothing, when an edit changed the type between its two reads', async () => {
+    const { created } = world();
+    h.definition.mockResolvedValueOnce({ runListSnapshot: null, takesRootLock: false });
+    h.definition.mockResolvedValueOnce({ runListSnapshot: null, takesRootLock: true });
+    const res = await post('/tasks', {
+      type: 'workflow',
+      title: 't',
+      description: 'd',
+      repositoryId: REPO,
+    });
+    expect(res.status).toBe(409);
+    expect(created()).toHaveLength(0);
   });
 
   it('creates nothing when the type is refused', async () => {
