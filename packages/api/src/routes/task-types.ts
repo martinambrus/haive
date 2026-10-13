@@ -20,9 +20,6 @@ import { HttpError, type AppEnv } from '../context.js';
 
 const log = logger.child({ module: 'task-types' });
 
-/** Workers cannot give a custom type a scratch workspace yet (P7), so it must name a repository. */
-const REPO_LESS_UNSUPPORTED = 'Custom task types without a repository are not supported yet';
-
 const BUILTIN_SLUGS: ReadonlySet<string> = new Set(schema.workflowTypeEnum.enumValues);
 
 type Db = ReturnType<typeof getDb>;
@@ -176,7 +173,6 @@ adminTaskTypeRoutes.post('/', async (c) => {
     throw new HttpError(409, 'That slug belongs to a built-in type');
   }
   const body = customTaskTypeCreateSchema.parse(raw);
-  if (body.requiresRepository === false) throw new HttpError(400, REPO_LESS_UNSUPPORTED);
   const db = getDb();
   if (await findDefinition(db, body.slug)) throw new HttpError(409, 'That slug is already taken');
   const catalog = await loadCatalog(db);
@@ -222,7 +218,6 @@ adminTaskTypeRoutes.post('/', async (c) => {
 adminTaskTypeRoutes.patch('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const body = taskTypeUpdateSchema.parse(await c.req.json());
-  if (body.requiresRepository === false) throw new HttpError(400, REPO_LESS_UNSUPPORTED);
   const db = getDb();
   const fields = Object.keys(body);
   // Locked and reread, so two concurrent edits cannot each validate against the same stale row.
@@ -240,13 +235,14 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     }
     if (
       body.stepIds !== undefined ||
+      body.requiresRepository !== undefined ||
       body.preAnswerDefaults !== undefined ||
       body.stepLoopLimitDefaults !== undefined
     ) {
       const catalog = await loadCatalog(db);
       requireSynced(catalog);
       const stepIds = body.stepIds ?? row.stepIds ?? [];
-      if (body.stepIds !== undefined) {
+      if (body.stepIds !== undefined || body.requiresRepository !== undefined) {
         const issues = validateComposition(stepIds, catalog.composable, {
           requiresRepository: body.requiresRepository ?? row.requiresRepository,
         });

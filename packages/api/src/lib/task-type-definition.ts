@@ -25,6 +25,8 @@ const DATABASE_PIN_STEP_IDS = ['01c1-restore-database', '11g-save-database'];
 export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
   requiresRepository: boolean;
+  /** True when a SEEDED definition needs no repository, so the task records whether it was anchored. */
+  repoOptional: boolean;
   preAnswers: Record<string, Record<string, unknown>> | null;
   stepLoopLimits: Record<string, number>;
   /** True forces the flag on; false leaves it to the request, as for every built-in. */
@@ -39,6 +41,7 @@ export interface TaskTypeDefinitionForCreate {
 const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
   runListSnapshot: null,
   requiresRepository: false,
+  repoOptional: false,
   preAnswers: null,
   stepLoopLimits: {},
   simplifyCode: false,
@@ -133,9 +136,6 @@ export async function definitionForCreate(
     }
   }
   const custom = def.source === 'admin';
-  if (custom && !def.requiresRepository) {
-    throw new HttpError(409, `Task type ${slug} needs no repository, which workers cannot run yet`);
-  }
   let snapshot = def.runListStrategy === 'static' ? def.stepIds : null;
   if (
     custom &&
@@ -149,6 +149,7 @@ export async function definitionForCreate(
   return {
     runListSnapshot: snapshot,
     requiresRepository: custom && def.requiresRepository,
+    repoOptional: !def.requiresRepository,
     preAnswers:
       custom && Object.keys(def.preAnswerDefaults).length > 0 ? def.preAnswerDefaults : null,
     stepLoopLimits: custom ? def.stepLoopLimitDefaults : {},
