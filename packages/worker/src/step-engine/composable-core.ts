@@ -182,6 +182,9 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       'cleaned',
       'discovery',
       'spec',
+      'commit',
+      'learnings',
+      'skills-synced',
     ],
   },
   {
@@ -191,7 +194,16 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'ddev', reason: 'Runs migrations inside the DDEV project.' }],
     provides: ['db-migrated'],
-    precedes: ['implementation', 'tests', 'verification', 'db-saved', 'cleaned'],
+    precedes: [
+      'implementation',
+      'tests',
+      'verification',
+      'db-saved',
+      'cleaned',
+      'commit',
+      'learnings',
+      'skills-synced',
+    ],
   },
   {
     stepId: '03-phase-0a-discovery',

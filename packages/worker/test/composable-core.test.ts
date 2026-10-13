@@ -234,6 +234,8 @@ describe('core composable catalog', () => {
     ['01b-install-plugins', '01a-app-boot', 'app-runtime'],
     ['01c1-restore-database', '04-phase-0b-pre-planning', 'spec'],
     ['01c1-restore-database', '03-phase-0a-discovery', 'discovery'],
+    ['01c1-restore-database', '11-phase-8-learning', 'learnings'],
+    ['06a-db-migrate', '11-phase-8-learning', 'learnings'],
     ['11b-kb-commit', '11b1-rag-source-selection', 'rag-scope'],
     ['11d-skill-sync', '11a-gate-4-push', 'pushed'],
   ])('rejects %s placed after %s', (early, late, token) => {
