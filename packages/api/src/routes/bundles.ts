@@ -20,6 +20,7 @@ import {
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { getDb } from '../db.js';
 import { getBundleQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -263,6 +264,13 @@ bundleRoutes.get('/:id', async (c) => {
   });
 });
 
+async function deleteBundleRow(bundleId: string, repositoryId: string): Promise<void> {
+  await getDb().transaction(async (tx) => {
+    await tx.delete(schema.customBundles).where(eq(schema.customBundles.id, bundleId));
+    await markProjectStateDirty(tx, repositoryId);
+  });
+}
+
 bundleRoutes.post('/', async (c) => {
   const userId = c.get('userId');
   const body = createGitBundleRequestSchema.parse(await c.req.json());
@@ -271,22 +279,25 @@ bundleRoutes.post('/', async (c) => {
   await assertRepositoryOwned(userId, body.repositoryId);
   if (body.gitCredentialsId) await assertCredentialsOwned(userId, body.gitCredentialsId);
 
-  const inserted = await db
-    .insert(schema.customBundles)
-    .values({
-      userId,
-      repositoryId: body.repositoryId,
-      name: body.name,
-      sourceType: 'git',
-      gitUrl: body.gitUrl,
-      gitBranch: body.gitBranch ?? 'main',
-      gitCredentialsId: body.gitCredentialsId ?? null,
-      storageRoot: '',
-      enabledKinds: body.enabledKinds,
-      status: 'syncing',
-    })
-    .returning();
-  const bundle = inserted[0]!;
+  const bundle = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(schema.customBundles)
+      .values({
+        userId,
+        repositoryId: body.repositoryId,
+        name: body.name,
+        sourceType: 'git',
+        gitUrl: body.gitUrl,
+        gitBranch: body.gitBranch ?? 'main',
+        gitCredentialsId: body.gitCredentialsId ?? null,
+        storageRoot: '',
+        enabledKinds: body.enabledKinds,
+        status: 'syncing',
+      })
+      .returning();
+    await markProjectStateDirty(tx, body.repositoryId);
+    return row!;
+  });
 
   const storageRoot = path.join(bundleDirFor(userId, bundle.id), 'extracted');
   await db
@@ -483,21 +494,24 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
 
   // Create the bundle row first so we know the bundleId; then move the staged
   // archive into the bundle's per-bundle directory.
-  const inserted = await db
-    .insert(schema.customBundles)
-    .values({
-      userId,
-      repositoryId: row.repositoryId,
-      name: row.name,
-      sourceType: 'zip',
-      archiveFilename: row.filename,
-      archiveFormat: row.archiveFormat,
-      storageRoot: '',
-      enabledKinds: row.enabledKinds,
-      status: 'syncing',
-    })
-    .returning();
-  const bundle = inserted[0]!;
+  const bundle = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(schema.customBundles)
+      .values({
+        userId,
+        repositoryId: row.repositoryId,
+        name: row.name,
+        sourceType: 'zip',
+        archiveFilename: row.filename,
+        archiveFormat: row.archiveFormat,
+        storageRoot: '',
+        enabledKinds: row.enabledKinds,
+        status: 'syncing',
+      })
+      .returning();
+    await markProjectStateDirty(tx, row.repositoryId);
+    return created!;
+  });
 
   const bundleDir = bundleDirFor(userId, bundle.id);
   const finalRel = bundleRel(
@@ -513,7 +527,7 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     // did — and both rels sit under the same anchor, so this move cannot cross a filesystem.
     await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
   } catch (err) {
-    await db.delete(schema.customBundles).where(eq(schema.customBundles.id, bundle.id));
+    await deleteBundleRow(bundle.id, bundle.repositoryId);
     throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
   }
 
@@ -836,7 +850,6 @@ bundleRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const bundleId = c.req.param('id');
   const row = await loadBundle(userId, bundleId);
-  const db = getDb();
 
   // Wipe on-disk artefacts before dropping the row so a partial cleanup can
   // be retried by the user via the same DELETE.
@@ -845,6 +858,6 @@ bundleRoutes.delete('/:id', async (c) => {
     repairPermissions: true,
   }).catch(() => {});
 
-  await db.delete(schema.customBundles).where(eq(schema.customBundles.id, row.id));
+  await deleteBundleRow(row.id, row.repositoryId);
   return c.json({ ok: true });
 });

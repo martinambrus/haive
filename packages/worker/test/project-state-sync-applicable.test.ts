@@ -274,6 +274,7 @@ async function setup(seed: Seed = {}) {
     taskSteps: schema.taskSteps,
     repositories,
     projectStateSync: sync,
+    projectStateOutbox: schema.projectStateOutbox,
     onboardingArtifacts,
     cliProviders,
     customBundles: schema.customBundles,

@@ -444,6 +444,9 @@ describe('the upgrade backfills a clone from the completed context', () => {
     }
     expect(plan.fake.rows(schema.repositories)[0]!.applicableTemplateIds).toEqual(APPLICABLE_IDS);
     expect(await readFile(join(repo, '.claude/workflow-config.json'), 'utf8')).toContain('drupal');
+    expect(plan.fake.rows(schema.projectStateOutbox)).toMatchObject([
+      { revision: 1, writtenRevision: 0 },
+    ]);
   });
 });
 

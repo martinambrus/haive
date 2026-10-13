@@ -6,7 +6,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,8 +26,13 @@ import {
 } from '@haive/shared/project-state';
 import { applyPlanPatch } from '@haive/shared/plan';
 import { upgradeAdmission } from '@haive/shared/onboarding-admission';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { handleClone, handleScan } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
+import {
+  markProjectStatesDirtyAtBoot,
+  sweepDirtyProjectStates,
+} from '../src/project-state/refresh.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import { writeProjectStateRecord } from '../src/project-state/write.js';
@@ -1143,6 +1148,198 @@ async function main(): Promise<void> {
     await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
     const dirty = git(a.repoPath, 'status', '--porcelain');
     check("a second 12 run leaves A's checkout clean", dirty === '', dirty.split('\n'));
+
+    // ---- the sweep keeps the record current between steps (B1.8a) ------------------------------
+    const outboxA = async () => {
+      const got = await rowsOf<{
+        revision: number;
+        written_revision: number;
+        last_error: string | null;
+      }>(
+        a.db,
+        sql`select revision, written_revision, last_error from project_state_outbox where repository_id = ${a.repositoryId}`,
+      );
+      return 'rows' in got ? (got.rows[0] ?? null) : null;
+    };
+    const clean = async () => {
+      const row = await outboxA();
+      return row !== null && row.written_revision === row.revision;
+    };
+    const descriptorOf = (name: string) => {
+      const source = `zip:${encodeURIComponent(name)}`;
+      return {
+        rel: `.haive-data/state/${bundleFileName(source)}`,
+        text: renderProjectState({ ...emptyProjectState(), bundles: [{ source, name }] }).get(
+          bundleFileName(source),
+        ),
+      };
+    };
+    const addBundle = async (name: string) => {
+      await a.db.transaction(async (tx) => {
+        await tx.insert(schema.customBundles).values({
+          userId: a.userId,
+          repositoryId: a.repositoryId,
+          name,
+          sourceType: 'zip',
+          storageRoot: path.join(tmp!, 'bundles', name),
+        });
+        await markProjectStateDirty(tx, a.repositoryId);
+      });
+    };
+    const dropBundle = async (name: string) => {
+      await a.db.transaction(async (tx) => {
+        await tx
+          .delete(schema.customBundles)
+          .where(
+            and(
+              eq(schema.customBundles.repositoryId, a.repositoryId),
+              eq(schema.customBundles.name, name),
+            ),
+          );
+        await markProjectStateDirty(tx, a.repositoryId);
+      });
+    };
+    const diskText = (rel: string) =>
+      readFile(path.join(a.repoPath, rel), 'utf8').then(
+        (text) => text,
+        () => null,
+      );
+
+    await markProjectStateDirty(a.db, a.repositoryId);
+    check('a mark leaves the outbox dirty', !(await clean()), await outboxA());
+    await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
+    check("12's record write leaves the outbox clean", await clean(), await outboxA());
+    check(
+      'and the next sweep tick writes nothing',
+      (await sweepDirtyProjectStates(a.db)) === 0,
+      await outboxA(),
+    );
+
+    const sweepKit = descriptorOf('sweep-kit');
+    await addBundle('sweep-kit');
+    check(
+      'A creates a bundle after 12 and one sweep tick writes its descriptor',
+      (await sweepDirtyProjectStates(a.db)) === 1 &&
+        (await diskText(sweepKit.rel)) === sweepKit.text,
+      { descriptor: await diskText(sweepKit.rel), want: sweepKit.text },
+    );
+    check('and the tick leaves the outbox clean', await clean(), await outboxA());
+    const afterTick = git(a.repoPath, 'status', '--porcelain');
+    check(
+      'and commits nothing: the descriptor is the only change in the checkout',
+      afterTick === `?? ${sweepKit.rel}`,
+      afterTick.split('\n'),
+    );
+
+    const identityOf = async (rel: string) => {
+      const info = await stat(path.join(a.repoPath, rel), { bigint: true });
+      return `${info.ino}:${info.mtimeNs}`;
+    };
+    const before = await Promise.all([sweepKit.rel, RECORD_RENDER, RECORD_FORMAT].map(identityOf));
+    await markProjectStateDirty(a.db, a.repositoryId);
+    const swept = await sweepDirtyProjectStates(a.db);
+    const after = await Promise.all([sweepKit.rel, RECORD_RENDER, RECORD_FORMAT].map(identityOf));
+    check(
+      'a sweep over an unchanged record rewrites no file',
+      swept === 1 && isDeepStrictEqual(before, after) && (await clean()),
+      { swept, before, after },
+    );
+
+    const formatText = (await diskText(RECORD_FORMAT))!;
+    const blocked = descriptorOf('blocked-kit');
+    await writeFile(path.join(a.repoPath, RECORD_FORMAT), '{"schemaVersion":99}\n');
+    await addBundle('blocked-kit');
+    const newerSwept = await sweepDirtyProjectStates(a.db);
+    check(
+      'a newer record format on disk is left untouched and the outbox says why',
+      newerSwept === 0 &&
+        (await diskText(blocked.rel)) === null &&
+        (await diskText(RECORD_FORMAT)) === '{"schemaVersion":99}\n' &&
+        (await outboxA())?.last_error != null &&
+        !(await clean()),
+      { newerSwept, outbox: await outboxA() },
+    );
+    await writeFile(path.join(a.repoPath, RECORD_FORMAT), formatText);
+    check(
+      'and once it is the current format again the next tick writes',
+      (await sweepDirtyProjectStates(a.db)) === 1 &&
+        (await diskText(blocked.rel)) === blocked.text &&
+        (await clean()) &&
+        (await outboxA())?.last_error === null,
+      await outboxA(),
+    );
+
+    const mergeKit = descriptorOf('merge-kit');
+    const mergeHeadFile = path.join(a.repoPath, '.git', 'MERGE_HEAD');
+    await writeFile(mergeHeadFile, `${git(a.repoPath, 'rev-parse', 'HEAD')}\n`);
+    await addBundle('merge-kit');
+    const midMerge = await sweepDirtyProjectStates(a.db);
+    check(
+      'a merge in progress in the checkout gets no write',
+      midMerge === 0 && (await diskText(mergeKit.rel)) === null && !(await clean()),
+      await outboxA(),
+    );
+    await rm(mergeHeadFile);
+    check(
+      'and the tick after it ends writes',
+      (await sweepDirtyProjectStates(a.db)) === 1 &&
+        (await diskText(mergeKit.rel)) === mergeKit.text,
+      await outboxA(),
+    );
+
+    const gateKit = descriptorOf('gate-kit');
+    const [liveOnboarding] = await a.db
+      .insert(schema.tasks)
+      .values({
+        userId: a.userId,
+        repositoryId: a.repositoryId,
+        type: 'onboarding',
+        title: 'two-install-smoke sweep',
+        status: 'running',
+      })
+      .returning({ id: schema.tasks.id });
+    await addBundle('gate-kit');
+    const whileOnboarding = await sweepDirtyProjectStates(a.db);
+    check(
+      'a live onboarding task gets no write, and the outbox says why',
+      whileOnboarding === 0 &&
+        (await diskText(gateKit.rel)) === null &&
+        (await outboxA())?.last_error != null,
+      await outboxA(),
+    );
+    await a.db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: new Date() })
+      .where(eq(schema.tasks.id, liveOnboarding!.id));
+    check(
+      'and the tick after it ends writes',
+      (await sweepDirtyProjectStates(a.db)) === 1 && (await diskText(gateKit.rel)) === gateKit.text,
+      await outboxA(),
+    );
+
+    for (const name of ['sweep-kit', 'blocked-kit', 'merge-kit', 'gate-kit'])
+      await dropBundle(name);
+    const removed = await sweepDirtyProjectStates(a.db);
+    const left = git(a.repoPath, 'status', '--porcelain');
+    check(
+      'deleting the bundles and one tick takes their descriptors back out',
+      removed === 1 && left === '' && (await clean()),
+      { removed, left: left.split('\n') },
+    );
+
+    await markProjectStatesDirtyAtBoot(a.db);
+    const booted = await outboxA();
+    await markProjectStatesDirtyAtBoot(a.db);
+    check(
+      'a boot marks a repository with a render context dirty, and a row still dirty once',
+      booted !== null &&
+        !(await clean()) &&
+        (await outboxA())?.revision === booted.revision &&
+        (await sweepDirtyProjectStates(a.db)) === 1 &&
+        (await clean()) &&
+        git(a.repoPath, 'status', '--porcelain') === '',
+      { booted, now: await outboxA() },
+    );
 
     // ---- a teammate's render change reaches a repository with claims (B1.4d) ----------------
     // The seed clone pulls A's commit and commits a record that adds an agent A did not accept and

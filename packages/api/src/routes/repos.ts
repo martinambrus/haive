@@ -2909,6 +2909,9 @@ async function runOnboardingArtifactReset(
     await tx
       .delete(schema.projectStateConflicts)
       .where(eq(schema.projectStateConflicts.repositoryId, id));
+    await tx
+      .delete(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, id));
   });
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 }

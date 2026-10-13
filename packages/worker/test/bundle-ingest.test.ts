@@ -8,6 +8,7 @@ import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   classified: null as unknown,
   user: '00000000-0000-4000-8000-0000000000a1',
+  removed: 0,
 }));
 
 // Parsing proper reads the repository's CLI providers through a join; the classifier it starts
@@ -18,7 +19,7 @@ vi.mock('../src/bundle-parser/index.js', () => ({
     h.classified = await classifyBundle(root, `${h.user}/${bundleId}/extracted`);
     return { items: [], ambiguous: [], dropped: [] };
   },
-  persistBundleItems: async () => ({ inserted: 0, updated: 0, removed: 0 }),
+  persistBundleItems: async () => ({ inserted: 0, updated: 0, removed: h.removed }),
 }));
 
 import { schema } from '@haive/database';
@@ -111,17 +112,24 @@ describe('bundle-ingest: zip extraction', () => {
 describe('handleIngestZip', () => {
   const BUNDLE = '00000000-0000-4000-8000-0000000000b1';
 
+  const REPOSITORY = '00000000-0000-4000-8000-0000000000c1';
+  let outbox: () => unknown[] = () => [];
+
   async function ingest(files: Record<string, string>): Promise<ClassifiedBundle> {
     const zip = new JSZip();
     for (const [name, body] of Object.entries(files)) zip.file(name, body);
     await mkdir(path.join(tmpRoot, h.user, BUNDLE), { recursive: true });
     const archivePath = path.join(tmpRoot, h.user, BUNDLE, 'source.zip');
     await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer' }));
-    const fake = createFakeDb({ customBundles: schema.customBundles });
+    const fake = createFakeDb({
+      customBundles: schema.customBundles,
+      projectStateOutbox: schema.projectStateOutbox,
+    });
+    outbox = () => fake.rows(schema.projectStateOutbox);
     fake.insert(schema.customBundles, {
       id: BUNDLE,
       userId: h.user,
-      repositoryId: '00000000-0000-4000-8000-0000000000c1',
+      repositoryId: REPOSITORY,
       name: 'bundle',
       sourceType: 'zip',
       archivePath,
@@ -151,6 +159,19 @@ describe('handleIngestZip', () => {
     expect(out.agents).toEqual([
       { kind: 'agent', sourceFormat: 'gemini-md', sourcePath: '.gemini/agents/reviewer.md' },
     ]);
+  });
+
+  it('marks the project state record dirty when the ingest removed items, and not otherwise', async () => {
+    await ingest({ 'agents/reviewer.md': agent });
+    expect(outbox()).toEqual([]);
+
+    h.removed = 2;
+    try {
+      await ingest({ 'agents/reviewer.md': agent });
+    } finally {
+      h.removed = 0;
+    }
+    expect(outbox()).toMatchObject([{ repositoryId: REPOSITORY, revision: 1, writtenRevision: 0 }]);
   });
 
   it('still unwraps a folder the bundle was zipped in, so item paths do not move', async () => {

@@ -524,6 +524,27 @@ descriptor file the base never named is not touched, like a claim file. The sync
 into the base as the checkout holds them and leaves them out of the merge: a conflict row on one could
 not be answered by anybody, and `upgradeAdmission` would hold every upgrade for it.
 
+**The record is kept current by an outbox, not only by 12, 02 and 04.** `project_state_outbox`
+(migration 0194, one row per repository, mirroring `plan_mirror_state`) carries `revision`,
+`written_revision` and `last_error`. A mutation of something the record holds calls
+`markProjectStateDirty` (`@haive/shared/project-state-outbox`, a subpath of its own so the web's
+import of `project-state` stays free of drizzle) in its own transaction: a bundle created, deleted
+or uploaded (api `bundles.ts`), the items an ingest removed (`bundle-ingest.ts`), and 01's backfill
+rows. The reset deletes the row, and the boot marks every repository with a render context dirty
+once (`markProjectStatesDirtyAtBoot`), since a release that writes more of the record has no other
+signal. The writer reads the row's `revision` under `lockProjectState`, before it looks at the
+database, and stamps `written_revision` to what it read when it finishes, so 12, 02 and 04 leave the
+row clean and a mutation that lands during a write stays dirty. The 10 s plan-mirror sweep calls
+`sweepDirtyProjectStates` (`project-state/refresh.ts`, at most 25 rows with a render context, each
+sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, runs the sync first,
+writes nothing and keeps the row dirty with `last_error` when the sync was refused (a record in a
+newer format included), deferred (a live onboarding task) or superseded, and otherwise writes with
+`expectedColumns` set to the column it read, a column that moved waiting for the next tick. It
+writes and never commits; 12, 03 or the person carries the files. `writeProjectStateRecord` keeps
+its signature and is the column check around `writeProjectStateColumn`. The writer reads a file
+through fs-safe and does not rewrite one holding the bytes, but still lists it in `written`, since a
+commit step stages from that list and the file may never have been staged.
+
 **`.haive/install.json` is retired, not written.** Nothing read it, and a second 12 run changed it
 (`appliedAt`, `lastTaskId`) so an identical re-run dirtied a clean checkout. 12, 02 and 04 now delete
 it through `retireInstallManifest` (`_retire-install-manifest.ts`) only after their

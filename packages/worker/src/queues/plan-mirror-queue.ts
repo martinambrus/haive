@@ -16,6 +16,7 @@ import type {
   ProjectStateResolveResult,
 } from '@haive/shared/project-state';
 import { resolveProjectStateConflict } from '../project-state/resolve.js';
+import { markProjectStatesDirtyAtBoot, sweepDirtyProjectStates } from '../project-state/refresh.js';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
@@ -420,7 +421,25 @@ export async function sweepDirtyPlanMirrors(): Promise<number> {
   return flushed;
 }
 
+async function sweepAll(): Promise<number> {
+  let swept = 0;
+  try {
+    swept += await sweepDirtyPlanMirrors();
+  } catch (err) {
+    logger.warn({ err }, 'plan mirror sweep failed');
+  }
+  try {
+    swept += await sweepDirtyProjectStates(getDb());
+  } catch (err) {
+    logger.warn({ err }, 'project state sweep failed');
+  }
+  return swept;
+}
+
 export async function schedulePlanMirrorSweep(): Promise<void> {
+  await markProjectStatesDirtyAtBoot(getDb()).catch((err) => {
+    logger.warn({ err }, 'project states not marked dirty at boot');
+  });
   const queue = new Queue(QUEUE_NAMES.PLAN_MIRROR, { connection: getBullRedis() });
   await queue.upsertJobScheduler(
     SWEEP_JOB_ID,
@@ -457,7 +476,7 @@ export function startPlanMirrorWorker(): Worker<
         case PLAN_MIRROR_JOB_NAMES.PULL:
           return pull(data);
         case PLAN_MIRROR_JOB_NAMES.SWEEP:
-          return sweepDirtyPlanMirrors();
+          return sweepAll();
         default:
           throw new Error(`unknown plan-mirror job: ${job.name}`);
       }

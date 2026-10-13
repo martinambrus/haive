@@ -200,6 +200,7 @@ async function setup(root: string, snapshot: Record<string, unknown> = {}) {
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateSync: schema.projectStateSync,
     projectStateConflicts: schema.projectStateConflicts,
+    projectStateOutbox: schema.projectStateOutbox,
     customBundles: schema.customBundles,
   });
   const context = {
@@ -227,6 +228,7 @@ async function setup(root: string, snapshot: Record<string, unknown> = {}) {
       repositoryId: id,
       baseSnapshot: { render: context, ...snapshot },
     });
+    fake.insert(schema.projectStateOutbox, { repositoryId: id, revision: 2, writtenRevision: 1 });
     fake.insert(schema.projectStateConflicts, {
       repositoryId: id,
       unit: 'project/render.json#framework',
@@ -346,6 +348,16 @@ describe('resetting a repository through the route', () => {
     expect((await reset()).status).toBe(200);
 
     expect(fake.rows(schema.projectStateSync).map((r) => r.repositoryId)).toEqual([OTHER]);
+  });
+});
+
+describe('resetting a repository with a dirty project state outbox', () => {
+  it('deletes its outbox row, and only that repository’s', async () => {
+    const fake = await setup(await repoRoot());
+
+    expect((await reset()).status).toBe(200);
+
+    expect(fake.rows(schema.projectStateOutbox).map((r) => r.repositoryId)).toEqual([OTHER]);
   });
 });
 
