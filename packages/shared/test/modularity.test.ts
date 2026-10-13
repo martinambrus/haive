@@ -342,6 +342,7 @@ describe('taskTypeDefinitionSeedSchema', () => {
 
   it('accepts a static seed with steps', () => {
     expect(taskTypeDefinitionSeedSchema.safeParse(base).success).toBe(true);
+    expect(taskTypeDefinitionSeedSchema.safeParse({ ...base, slug: 'new' }).success).toBe(false);
   });
 
   it('rejects static without steps', () => {

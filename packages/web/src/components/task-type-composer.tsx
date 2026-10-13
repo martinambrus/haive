@@ -284,7 +284,9 @@ export function TaskTypeComposer({
                 }
                 className={cn(
                   'rounded-md border bg-neutral-950/60 px-3 py-2',
-                  rowIssues.length > 0 || !entry ? 'border-red-800/70' : 'border-neutral-800',
+                  rowIssues.length > 0 || (!entry && !readOnly)
+                    ? 'border-red-800/70'
+                    : 'border-neutral-800',
                   rowShadow(index),
                 )}
               >
@@ -325,12 +327,15 @@ export function TaskTypeComposer({
                         <StepFacts entry={entry} />
                       </>
                     ) : (
-                      <p className="text-[11px] text-neutral-500">Not in the step catalog</p>
+                      <p className="text-[11px] text-neutral-500">
+                        {readOnly ? 'Built-in step, not composable' : 'Not in the step catalog'}
+                      </p>
                     )}
                     {entry?.loopTargetStepId !== undefined && (
-                      <p className="mt-1 text-xs text-neutral-400">
-                        {`Fix loops return to ${stepLabel(entry.loopTargetStepId, entries)}`}
-                      </p>
+                      <InlineMarkdown
+                        body={`Fix loops return to ${stepLabel(entry.loopTargetStepId, entries)}`}
+                        className="mt-1 text-xs text-neutral-400"
+                      />
                     )}
                     {limitEditable && (
                       <label className="mt-2 flex items-center gap-2 text-xs text-neutral-400">

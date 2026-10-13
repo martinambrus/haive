@@ -1,11 +1,9 @@
 import { z } from 'zod';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 import { validateComposition, type CompositionIssue } from './composition.js';
-import type { ComposableStepEntry } from './contracts.js';
+import { RESERVED_TASK_TYPE_SLUGS, type ComposableStepEntry } from './contracts.js';
 
 export const CUSTOM_TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
-/** Slugs a custom type may not take: `new` is the admin create page's path. */
-export const RESERVED_TASK_TYPE_SLUGS: readonly string[] = ['new'];
 
 export const COMPOSABLE_STEP_GROUPS = [
   { id: 'env', label: 'Environment', order: 0 },
