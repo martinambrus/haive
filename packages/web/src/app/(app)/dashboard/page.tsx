@@ -14,6 +14,8 @@ import {
 import { Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { StatTile } from '@/components/stats/stat-tile';
 import { ActivityHeatmap } from '@/components/stats/activity-heatmap';
+import { moduleDashboardWidgets } from '@/generated/module-dashboard';
+import { ModuleDashboardWidgets } from '@/lib/module-dashboard';
 import { usePageTitle } from '@/lib/use-page-title';
 import { formatDuration } from '@/lib/format-duration';
 import { formatCost } from '@/lib/format-cost';
@@ -200,6 +202,8 @@ export default function DashboardPage() {
           </ul>
         )}
       </Card>
+
+      <ModuleDashboardWidgets widgets={moduleDashboardWidgets} />
 
       {loading && <div className="text-sm text-neutral-500">Loading...</div>}
 
