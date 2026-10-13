@@ -47,11 +47,19 @@ run continuously during implementation. Both models ran at low reasoning effort.
   fix round (`browserVerify`). The checks run afterwards as separate steps (07b review, 07c DDEV
   reconcile, 08b tests, 08 verify, 08c review) and reach 07 only through `loop_back`, one round
   later, in a fresh CLI process (`docs/architecture/fix-loop.md`). That is the article's frontier
-  arrangement, applied to every model. An agent may still run tests on its own initiative from the
-  repository's own instructions; Haive neither asks for it nor records it.
-- **F2. The commands to hand over already exist.** A repository's declared commands are read by
-  `loadDeclaredVerifyCommands` (`_task-meta.ts`) and shown by `06-run-config`; 08 resolves detected
-  ones (`08-phase-5-verify.ts`); 08b builds a file-scoped selective test command. None reaches 07.
+  arrangement, applied to every model. What 07 does get is generic: the default agent rules
+  prepended to every prompt dispatch (`docs/architecture/agent-rules.md`) include "Own the
+  verification" (`DEFAULT_AGENT_RULES`, `shared/src/constants/default-agent-rules.ts`), which asks
+  the agent to run the tests and a type check this environment can run. So the gap is not "no
+  verification asked" but "no exact commands, and nothing Haive classifies or records": the agent
+  guesses the commands, and for a DDEV repository it cannot run them at all, since the sandbox has
+  no `ddev exec` (`docs/architecture/ddev-runtime.md`).
+- **F2. Some of the commands to hand over exist before 07, some do not.** A repository's declared
+  commands are read by `loadDeclaredVerifyCommands` (`_task-meta.ts`) and shown by `06-run-config`;
+  08 resolves detected ones (`08-phase-5-verify.ts`). Both exist before 07 runs. 08b's file-scoped
+  selective test command does NOT: `buildSelectiveCommand` takes the files 08b's own tester reported
+  creating or updating, so it exists only after 08b has run, and reaches a later fix round as
+  `testRun.command` in the diagnosis. None reaches 07's initial pass.
 - **F3. Haive has no notion of a model tier.** No symbol classifies a model as frontier or cheap.
   Deriving one from a model id would key logic on a value that changes with every release, so a
   tier has to be an explicit setting, not a lookup.
@@ -60,7 +68,8 @@ run continuously during implementation. Both models ran at low reasoning effort.
   comparison (acceptance, tokens, time, cost per arm) can be read from existing rows.
 - **F5. Checks no agent can repair already stay out of the loop**: `classifyTestEnvFailure`, the
   enumerate guard, and the NOT RUN verify slots. The article does not address this; Haive is ahead
-  here, and P1 must keep it: a check that would be NOT RUN at 08 must not become a demand on 07.
+  here, and P1 must keep it: a check that is NOT RUN at 08 must reach 07 as NOT RUN, never as a
+  defect to fix.
 - **F6. Expectation weakening is `aide2-harness-lessons` P6.** 08b's `DECIDE_PER_FAILURE` lets the
   tester decide the test is wrong. P6's cheap half (a prompt line plus a host-side record of test
   edits per fix pass, shown at gate 2) is the plan for that; this article is a second source for it,
@@ -70,13 +79,17 @@ run continuously during implementation. Both models ran at low reasoning effort.
 
 ### P0. Measure the gap before building anything
 
-Pick one finished workflow task with a detailed spec on a repository with declared verify and test
-commands. Re-run it from the same base on the dev install, 07 on a cheaper model, in two arms:
+Pick one finished workflow task with a detailed spec on a NON-DDEV repository with declared verify
+and test commands, so every command can run inside the sandbox and P0 needs no bridge (P1 covers
+DDEV). Re-run it from the same base on the dev install, 07 on a cheaper model, in two arms:
 
-- **A:** as today.
-- **B:** 07's prompt extended by hand (a local patch, never committed) with the declared and
-  detected verify commands and 08b's selective test command, and the instruction to run them before
-  finishing.
+- **A:** as today, which includes the default rules' generic "Own the verification" instruction
+  (F1). A therefore measures generic verification, not none; the comparison is generic against
+  exact commands. The rule is not disabled in A, since that is not a state any user runs.
+- **B:** 07's prompt extended by hand (a local patch, never committed) with the commands 08 would
+  resolve for this repository (declared, else detected) and the full test command, and the
+  instruction to run them before finishing. 08b's selective command is not available on an initial
+  pass (F2); on a fix round B also names the last `testRun.command`.
 
 At least three runs per arm, each on its own copy of the repository state (the AIDE² P1 rule). Read
 per arm: `fix_loop.requested` rounds, which step sent each one back, gate-2 outcome, and tokens,
@@ -91,24 +104,38 @@ CLI preference change are snapshotted and reverted after. Rollback: revert the l
 ### P1. Checks inside implementation, as an explicit per-step setting (conditional on P0)
 
 A per-repository setting on the Tooling page, beside the declared commands: "Run checks during
-implementation", default off. When on, 07 (initial and fix passes) and the DAG coder get one block
-naming the commands to run before finishing and what a red result means. The commands are the ones
-08 and 08b would run, resolved by the same functions, never a second resolver. Rules the block keeps:
+implementation", default off. When on, 07 (initial and fix passes) and the DAG coder can ask Haive
+to run a check by slot (lint, typecheck, tests, and on a fix round the last selective test run)
+and get its classified result back. The agent never receives a raw command to run itself, for two
+structural reasons:
 
-- A command that would read as NOT RUN at 08 (missing program, lost runner, a test environment
-  `classifyTestEnvFailure` rejects) is left out, or named as unavailable, never handed over as a
-  demand.
+- **DDEV.** 08's DDEV slots run host-side through `ddevExec`; the sandbox has no `ddev exec`
+  (F1), so a handed-over command cannot run there.
+- **NOT RUN is decided after the run, not before.** `classifyTestEnvFailure(framework, output)`
+  reads the run's own output, and runner loss is read from `ddevRunnerLife` before and after a
+  non-zero exit (`execSlot`, `08-phase-5-verify.ts`). A prompt built before the run cannot know
+  either, and both can change while the agent works.
+
+So the check runs host-side through 08's own `execSlot` and the same classifiers, never a second
+resolver or runner, and returns one of: passed, failed with its scoped output, or NOT RUN with the
+reason. A NOT RUN result tells the agent the check is unavailable and not its to fix, which keeps
+the fix-loop rule that no agent effort goes to a failure no agent can repair. How the agent asks
+(an MCP tool on the task's existing surface, or a file-based request the step polls) is D3. Rules
+the result keeps:
+
 - Lint is scoped as 08 scopes it: only violations at lines the change wrote are the agent's to fix.
-- The block says not to weaken a check to make it pass; P6 records whether that held.
+- The prompt says not to weaken a check to make it pass; P6 records whether that held.
 - 08, 08b and the reviewers still run as today: the final gate stays independent of what the
   implementer ran and reported.
 
 Why a setting and not a tier lookup: F3. Whether the default should flip, or the setting should
 follow the step's chosen CLI and model, is D1.
 
-Verification: prompt tests for both setting values and for a NOT RUN command left out; a fixture
-repository whose declared commands reach 07's prompt exactly as 08 runs them; one live task with the
-setting on, where 07's transcript shows the commands run, and 08 still runs them. Rollback: the
+Verification: prompt tests for both setting values; a check request on a fixture repository runs
+exactly the command 08 runs for that slot; a missing program and a test-environment failure each
+come back NOT RUN, not failed; a DDEV repository's check runs host-side and returns; one live task
+with the setting on, where 07's transcript shows the requests and their results, and 08 still runs
+its own checks. Rollback: the
 setting is additive; off restores today's prompt.
 
 ### P2. Config-name mismatch check (parked)
@@ -122,7 +149,11 @@ for it must not rely on the framework's error wording.
 
 - **D1.** P1's default and scope: off for everyone, or on when the step's CLI preference is a model
   the user marked as cost-optimised. Decided by P0's numbers.
-- **D2.** Whether P1's block also goes to 08b's tester passes, or stays with the implementer only.
+- **D2.** Whether P1's check requests are also open to 08b's tester passes, or stay with the
+  implementer only.
+- **D3.** How the agent asks Haive to run a check in P1: an MCP tool on the task's existing MCP
+  surface (`mcp-surface.ts`), or a request file the step watches. Either way the run is host-side
+  through `execSlot`, and every CLI 07 can run on must be able to make the request.
 
 ## Decided
 
