@@ -15,8 +15,8 @@ const replace = (stepId: string, patch: Partial<ComposableStepEntry>): Composabl
 describe('core composable catalog', () => {
   beforeAll(() => registerStepsOnce());
 
-  it('holds the 31 curated steps and passes the assert on the real registry', () => {
-    expect(CORE_COMPOSABLE_STEPS).toHaveLength(31);
+  it('holds the 32 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(32);
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
   });
 
@@ -220,6 +220,66 @@ describe('core composable catalog', () => {
     expect(issues).toContainEqual(
       expect.objectContaining({ kind: 'too-late', stepId: early, token }),
     );
+  });
+
+  it('keeps the built-in workflow tree committed before push and cleanup', () => {
+    const order = stepRegistry
+      .listByWorkflow('workflow')
+      .map((s) => s.metadata.id)
+      .filter((id) => catalog.has(id));
+    expect(
+      validateComposition(order, catalog).filter(
+        (i) => i.kind === 'unmet-need' && i.needs === 'clean-tree',
+      ),
+    ).toEqual([]);
+  });
+
+  it('refuses push and cleanup over learning files nobody committed', () => {
+    const head = [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+      '11-phase-8-learning',
+    ];
+    const tail = ['11a-gate-4-push', '12-worktree-cleanup'];
+    expect(validateComposition([...head, ...tail], catalog)).toEqual([
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '11a-gate-4-push',
+        needs: 'clean-tree',
+      }),
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '12-worktree-cleanup',
+        needs: 'clean-tree',
+      }),
+    ]);
+    expect(validateComposition([...head, '11b-kb-commit', ...tail], catalog)).toEqual([]);
+  });
+
+  it('places the database save after the push and before cleanup', () => {
+    const head = [
+      '01-declare-deps',
+      '01-worktree-setup',
+      '01c-ddev-env',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+    ];
+    expect(
+      validateComposition(
+        [...head, '11a-gate-4-push', '11g-save-database', '12-worktree-cleanup'],
+        catalog,
+      ),
+    ).toEqual([]);
+    expect(
+      validateComposition(
+        [...head, '11g-save-database', '11a-gate-4-push', '12-worktree-cleanup'],
+        catalog,
+      ),
+    ).toContainEqual({ kind: 'too-late', index: 6, stepId: '11a-gate-4-push', token: 'db-saved' });
+    expect(
+      validateComposition([...head, '12-worktree-cleanup', '11g-save-database'], catalog),
+    ).toContainEqual({ kind: 'too-late', index: 6, stepId: '11g-save-database', token: 'cleaned' });
   });
 
   it('remembers a capability cleanup removed when checking precedence', () => {
