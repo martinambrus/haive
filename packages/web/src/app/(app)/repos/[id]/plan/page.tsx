@@ -63,6 +63,7 @@ import { PlanMergePanel } from '@/components/plan/plan-merge-panel';
 import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
 import { pullReportLines } from '@/lib/plan-pull-report';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 /**
  * The plan canvas.
@@ -1071,6 +1072,7 @@ export default function PlanPage() {
         key={questionsKey}
         repositoryId={repositoryId}
         scope="plan"
+        pollMs={SNAPSHOT_POLL_MS}
         onAnswered={() => void refresh()}
       />
 
@@ -1098,7 +1100,7 @@ export default function PlanPage() {
                 pullReport,
                 (id) => tree.find((node) => node.id === id)?.title ?? null,
               ).map((line) => (
-                <p key={line}>{line}</p>
+                <InlineMarkdown key={line} body={line} />
               ))}
               {pullReport.previousCommit && (
                 <p className="text-neutral-500">

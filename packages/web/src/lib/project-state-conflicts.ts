@@ -22,7 +22,7 @@ export const RECORD_FILE = '.haive-data/state/project/render.json';
 
 export const PLAN_FILE = '.haive-data/plan.json';
 
-function inlineCode(raw: string): string {
+export function inlineCode(raw: string): string {
   const text = raw.replace(/[\r\n]+/g, ' ');
   const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
   const fence = '`'.repeat(longest + 1);

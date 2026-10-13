@@ -145,12 +145,15 @@ export interface ProjectStateConflictsBannerProps {
   scope?: ConflictScope;
   /** Called once an answer has landed, for a page that shows what the answer changed. */
   onAnswered?: () => void;
+  /** Re-reads the questions this often, for a page where background work can ask new ones. */
+  pollMs?: number;
 }
 
 export function ProjectStateConflictsBanner({
   repositoryId,
   scope = 'project',
   onAnswered,
+  pollMs,
 }: ProjectStateConflictsBannerProps) {
   const [conflicts, setConflicts] = useState<ProjectStateConflictBody[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -283,6 +286,14 @@ export function ProjectStateConflictsBanner({
       pollLoop.current = false;
     };
   }, [load]);
+
+  useEffect(() => {
+    if (!pollMs) return;
+    const timer = setInterval(() => {
+      if (!pollLoop.current) void load(true);
+    }, pollMs);
+    return () => clearInterval(timer);
+  }, [load, pollMs]);
 
   async function confirm() {
     if (!confirming || busyId) return;

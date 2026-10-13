@@ -26,11 +26,19 @@ describe('pullReportLines', () => {
       titleOf,
     );
     expect(lines).toEqual([
-      '1 node(s) were deleted here because the other side deleted them and nobody here had changed them: 22222222.',
-      '1 change(s) were made differently on both sides and wait for your answer: "Billing" title.',
-      '"Billing" was kept: the other side deleted it, but this install had changed it.',
+      '1 node(s) were deleted here because the other side deleted them and nobody here had changed them: `22222222`.',
+      '1 change(s) were made differently on both sides and wait for your answer: `Billing` title.',
+      '`Billing` was kept: the other side deleted it, but this install had changed it.',
       "The note of a link between two nodes was changed on both sides; this install's was kept.",
     ]);
+  });
+
+  it('quotes a node title as code, so markdown in it is shown as written', () => {
+    const lines = pullReportLines(
+      { conflicts: [{ nodeId: 'n1', field: 'title' }] },
+      () => '**bold** `tick`',
+    );
+    expect(lines[0]).toContain('`` **bold** `tick` `` title');
   });
 
   it('lists at most eight decisions and counts the rest', () => {

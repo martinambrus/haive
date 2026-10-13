@@ -1,4 +1,5 @@
 import type { PlanPullOutcome } from '@/lib/api-client';
+import { inlineCode } from '@/lib/project-state-conflicts';
 
 const SHOWN = 8;
 
@@ -16,7 +17,7 @@ function subjectLabel(subject: string, titleOf: (id: string) => string | null): 
   if (subject.startsWith('edge:')) return 'a link between two nodes';
   if (subject.startsWith('code-link:')) return 'a code link';
   const title = titleOf(subject);
-  return title !== null ? `"${title}"` : `a node (${subject.slice(0, 8)})`;
+  return title !== null ? inlineCode(title) : `a node (${inlineCode(subject.slice(0, 8))})`;
 }
 
 function listed(items: string[]): string {
@@ -24,7 +25,7 @@ function listed(items: string[]): string {
   return items.length > SHOWN ? `${head} and ${items.length - SHOWN} more` : head;
 }
 
-/** What a Pull decided without asking, and what it left to a person, as plain sentences. */
+/** What a Pull decided without asking, and what it left to a person, as markdown sentences. */
 export function pullReportLines(
   report: Pick<PlanPullOutcome, 'nodesDeleted' | 'conflicts' | 'reported'>,
   titleOf: (id: string) => string | null,
@@ -33,7 +34,7 @@ export function pullReportLines(
   const deleted = report.nodesDeleted ?? [];
   if (deleted.length > 0) {
     lines.push(
-      `${deleted.length} node(s) were deleted here because the other side deleted them and nobody here had changed them: ${listed(deleted.map((id) => id.slice(0, 8)))}.`,
+      `${deleted.length} node(s) were deleted here because the other side deleted them and nobody here had changed them: ${listed(deleted.map((id) => inlineCode(id.slice(0, 8))))}.`,
     );
   }
   const asked = report.conflicts ?? [];
