@@ -34,6 +34,16 @@ describe('gitOperationInProgress', () => {
     expect(await gitOperationInProgress(repo)).toBe(false);
   });
 
+  it('reads a git dir outside the checkout as an open operation, never anchoring there', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'git-operation-gitdir-'));
+    try {
+      git(repo, 'init', '-q', '--separate-git-dir', join(outside, 'git'));
+      expect(await gitOperationInProgress(repo)).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('sees a merge left open by a conflict', async () => {
     git(repo, 'checkout', '-q', '-b', 'other');
     writeFileSync(join(repo, 'a.txt'), 'theirs\n');

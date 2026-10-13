@@ -1,4 +1,4 @@
-import { basename, dirname, isAbsolute } from 'node:path';
+import { isAbsolute, relative } from 'node:path';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { gitRun } from './git-exec.js';
 
@@ -10,10 +10,10 @@ export async function gitOperationInProgress(repoPath: string): Promise<boolean>
     if (located.code !== 0) continue;
     const path = located.stdout.trim();
     if (!path) continue;
-    const entry = isAbsolute(path)
-      ? await lstatNoFollow(dirname(path), basename(path))
-      : await lstatNoFollow(repoPath, path);
-    if (entry !== null) return true;
+    const rel = isAbsolute(path) ? relative(repoPath, path) : path;
+    // A git dir outside the checkout cannot be read from its anchor; treat it as open, which writes nothing.
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return true;
+    if ((await lstatNoFollow(repoPath, rel)) !== null) return true;
   }
   return false;
 }

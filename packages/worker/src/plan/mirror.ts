@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { readTextNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import {
+  readTextNoFollow,
+  removeNoFollow,
+  rewriteFileIfNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { and, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -60,16 +65,49 @@ async function assertFlushMayWrite(
   if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
   const onDisk = await readTextNoFollow(repoPath, HAIVE_DATA_FILES.plan);
   if (onDisk === null) return;
-  const diskHash = hashBytes(onDisk);
-  if (diskHash === syncedHash || (nextJson !== null && diskHash === hashBytes(nextJson))) return;
-  if (syncedHash === null) {
-    logger.warn(
-      { repoPath },
-      'plan.json differs from the database and was never stamped; adopting',
-    );
-    return;
+  if (!flushMayReplace(repoPath, onDisk, syncedHash, nextJson)) {
+    throw new PlanMirrorHeldError(HELD_UNIMPORTED);
   }
-  throw new PlanMirrorHeldError(HELD_UNIMPORTED);
+}
+
+function flushMayReplace(
+  repoPath: string,
+  onDisk: string,
+  syncedHash: string | null,
+  nextJson: string | null,
+): boolean {
+  const diskHash = hashBytes(onDisk);
+  if (diskHash === syncedHash || (nextJson !== null && diskHash === hashBytes(nextJson)))
+    return true;
+  if (syncedHash !== null) return false;
+  logger.warn({ repoPath }, 'plan.json differs from the database and was never stamped; adopting');
+  return true;
+}
+
+/** Replaces plan.json only while it still holds bytes the flush may replace, judged on the file it
+ *  holds, so bytes a pull lands after the early check are never written over. */
+export async function writePlanJsonIfUnchanged(
+  repoPath: string,
+  json: string,
+  syncedHash: string | null,
+): Promise<void> {
+  const bytes = Buffer.from(json, 'utf8');
+  const outcome = await rewriteFileIfNoFollow(repoPath, HAIVE_DATA_FILES.plan, (data) =>
+    flushMayReplace(repoPath, data.toString('utf8'), syncedHash, json) ? bytes : null,
+  );
+  if (outcome === 'kept') throw new PlanMirrorHeldError(HELD_UNIMPORTED);
+  if (outcome === 'rewritten') return;
+  try {
+    await writeFileNoFollow(repoPath, HAIVE_DATA_FILES.plan, bytes, {
+      mode: 'create-exclusive',
+      createParents: true,
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new PlanMirrorHeldError(HELD_UNIMPORTED);
+    }
+    throw err;
+  }
 }
 
 async function stampSyncedHash(
@@ -237,7 +275,9 @@ async function writePlanMirrorLocked(
     changes?.written.push(rel);
   };
 
-  await write(HAIVE_DATA_FILES.plan, rendered.json);
+  await writePlanJsonIfUnchanged(repoPath, rendered.json, state?.syncedHash ?? null);
+  written.push(HAIVE_DATA_FILES.plan);
+  changes?.written.push(HAIVE_DATA_FILES.plan);
   await stampSyncedHash(db, repositoryId, hashBytes(rendered.json));
   await write(HAIVE_DATA_FILES.planMarkdown, rendered.markdown);
   // Conditional on the revision we rendered. A mutation that raced the file
