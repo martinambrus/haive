@@ -788,6 +788,26 @@ async function seedBaseFrom(tx: PlanMirrorTx, repositoryId: string, bytes: Buffe
   if (parsed.success) await storeAgreedBase(tx, repositoryId, parsed.data);
 }
 
+/** A node both sides added with an asked field set differently had no base: it stays out of the
+ *  next one so the question is asked again, unless another base node sits under it. */
+function withoutAbsentAsked(
+  payload: PlanMirrorPayload,
+  absent: ReadonlySet<string>,
+): PlanMirrorPayload {
+  if (absent.size === 0) return payload;
+  const parents = new Set(payload.nodes.map((n) => n.parentId).filter((id) => id !== null));
+  const drop = new Set([...absent].filter((id) => !parents.has(id)));
+  if (drop.size === 0) return payload;
+  return {
+    ...payload,
+    nodes: payload.nodes.filter((n) => !drop.has(n.id)),
+    edges: payload.edges.filter((e) => !drop.has(e.fromNodeId) && !drop.has(e.toNodeId)),
+    ...('codeLinks' in payload
+      ? { codeLinks: payload.codeLinks.filter((l) => !drop.has(l.nodeId)) }
+      : {}),
+  } as PlanMirrorPayload;
+}
+
 /** Both sides hold `agreed`, so it becomes the base; a field still asked about keeps its old base. */
 async function storeAgreedBase(
   tx: PlanMirrorTx,
@@ -803,7 +823,8 @@ async function storeAgreedBase(
   const old = planMirrorPayloadSchema.safeParse(state.syncedSnapshot);
   const oldById = new Map(old.success ? old.data.nodes.map((n) => [n.id, n]) : []);
   const asked = await loadPendingPlanQuestions(tx, repositoryId);
-  const snapshot =
+  const unbased = new Set(asked.filter((q) => !oldById.has(q.nodeId)).map((q) => q.nodeId));
+  const snapshot = withoutAbsentAsked(
     asked.length === 0
       ? agreed
       : ({
@@ -816,7 +837,9 @@ async function storeAgreedBase(
             }
             return patched;
           }),
-        } as PlanMirrorPayload);
+        } as PlanMirrorPayload),
+    unbased,
+  );
   await tx
     .update(schema.planMirrorState)
     .set({ syncedSnapshot: snapshot })
@@ -1320,7 +1343,7 @@ async function reconcilePlanLocked(
       .filter((c) => c.base !== undefined)
       .map((c) => [`${c.nodeId}\0${c.field}`, c.base]),
   );
-  const snapshot: PlanMirrorPayload =
+  const snapshot: PlanMirrorPayload = withoutAbsentAsked(
     atBase.size === 0
       ? incoming
       : ({
@@ -1333,7 +1356,9 @@ async function reconcilePlanLocked(
             }
             return patched;
           }),
-        } as PlanMirrorPayload);
+        } as PlanMirrorPayload),
+    new Set(merge.conflicts.filter((c) => c.base === undefined).map((c) => c.nodeId)),
+  );
 
   // Dirty when the file no longer says what the database does.
   const after = await renderPlanMirrorFiles(tx, repositoryId);

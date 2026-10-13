@@ -2737,6 +2737,39 @@ async function main(): Promise<void> {
     { repositoryId: sId, origin: 'user' },
   );
 
+  // A node both sides added with different titles stays out of the base, so the question survives.
+  const yAdded = await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: 'tmp-y', parentRef: sBuilt.refs['sroot']!, title: 'Y' }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+  const yId = yAdded.created[0]!;
+  await writePlanMirror(db, sId, sDir);
+  const withY = await readMirror();
+  const withoutY = { ...withY, nodes: withY.nodes.filter((n) => n.id !== yId) };
+  theirs = withoutY;
+  await advancePlanBaseToPushed(db, sId, JSON.stringify(withoutY));
+  await editS(yId, { title: 'Y here' });
+  await arrive(retitled(withY, yId, 'Y there'));
+  const yBase = await baseOf();
+  await arrive({
+    ...theirs,
+    nodes: theirs.nodes.map((n) => (n.parentId === null ? { ...n, body: 'unrelated change' } : n)),
+  });
+  check(
+    'three-way: a node added on both sides with different titles stays out of the base and stays asked',
+    !yBase?.nodes.some((n) => n.id === yId) &&
+      (await pendingPlanRows(sId)).some((r) => r.unit === `plan/${yId}#title`),
+    { yBase: yBase?.nodes.map((n) => n.id), rows: await pendingPlanRows(sId) },
+  );
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: yId, expectedVersion: (await sNode(yId))!.version }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+  await writePlanMirror(db, sId, sDir);
+  theirs = await readMirror();
+
   // Deleting the plan closes its questions and drops the base.
   await editS(pId, { title: 'P local 3' });
   await arrive(retitled(theirs, pId, 'P by A 3'));
