@@ -10,6 +10,8 @@ export const CORE_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 export const PERSONA_ID_PATTERN_SOURCE = '[a-z0-9-]+';
 const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_PATTERN_SOURCE}$`);
 const TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+/** Slugs no task type may take: `new` is the admin create page and `catalog` the step catalog route. */
+export const RESERVED_TASK_TYPE_SLUGS: readonly string[] = ['new', 'catalog'];
 
 export const CORE_INTEGRATION_CATEGORIES = [
   'rich-documents',
@@ -139,7 +141,10 @@ export type ComposableStepEntry = z.infer<typeof composableStepEntrySchema>;
 
 export const taskTypeDefinitionSeedSchema = z
   .object({
-    slug: z.string().regex(TASK_TYPE_SLUG_PATTERN),
+    slug: z
+      .string()
+      .regex(TASK_TYPE_SLUG_PATTERN)
+      .refine((slug) => !RESERVED_TASK_TYPE_SLUGS.includes(slug), 'This slug is reserved'),
     displayName: z.string().min(1),
     description: z.string().optional(),
     runListStrategy: z.enum(['static', 'workflow_paths', 'run_app_modes']),

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { FormSchema } from '@haive/shared';
-import { FormRenderer } from './form-renderer';
+import { FormRenderer, isSubmitBlocked } from './form-renderer';
 
 const schema: FormSchema = {
   title: 'Statistics',
@@ -22,5 +22,22 @@ describe('FormRenderer title', () => {
     );
     expect(html).not.toContain('<h3');
     expect(html).toContain('How the statistics pages behave.');
+  });
+});
+
+describe('isSubmitBlocked', () => {
+  it('blocks a submit the button would not allow, so Enter in a field cannot send it', () => {
+    expect(isSubmitBlocked({ disabled: false, submitting: false, submitDisabled: true })).toBe(
+      true,
+    );
+    expect(isSubmitBlocked({ disabled: true, submitting: false, submitDisabled: false })).toBe(
+      true,
+    );
+    expect(isSubmitBlocked({ disabled: false, submitting: true, submitDisabled: false })).toBe(
+      true,
+    );
+    expect(isSubmitBlocked({ disabled: false, submitting: false, submitDisabled: false })).toBe(
+      false,
+    );
   });
 });

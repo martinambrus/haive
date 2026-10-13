@@ -10,6 +10,7 @@ const ADMIN_TABS = [
   { label: 'Settings', href: '/admin' },
   { label: 'Users', href: '/admin/users' },
   { label: 'Pricing', href: '/admin/pricing' },
+  { label: 'Task types', href: '/admin/task-types' },
   { label: 'Maintenance', href: '/admin/maintenance' },
   { label: 'Audit log', href: '/admin/audit' },
 ];
@@ -17,7 +18,7 @@ const ADMIN_TABS = [
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   // Longest match, not a prefix test: '/admin' prefixes every sub-page, so a prefix rule would
-  // light Settings on all five.
+  // light Settings on all of them.
   const active =
     ADMIN_TABS.map((t) => t.href)
       .filter((href) => pathname === href || pathname.startsWith(`${href}/`))

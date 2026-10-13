@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 import { validateComposition, type CompositionIssue } from './composition.js';
-import type { ComposableStepEntry } from './contracts.js';
+import { RESERVED_TASK_TYPE_SLUGS, type ComposableStepEntry } from './contracts.js';
 
 export const CUSTOM_TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -82,7 +82,10 @@ const preAnswerDefaultsSchema = z.record(z.string(), z.record(z.string(), z.unkn
 
 export const customTaskTypeCreateSchema = z
   .object({
-    slug: z.string().regex(CUSTOM_TASK_TYPE_SLUG_PATTERN),
+    slug: z
+      .string()
+      .regex(CUSTOM_TASK_TYPE_SLUG_PATTERN)
+      .refine((slug) => !RESERVED_TASK_TYPE_SLUGS.includes(slug), 'This slug is reserved'),
     displayName: z.string().min(1),
     description: z.string().optional(),
     stepIds: z.array(z.string().min(1)).min(1),

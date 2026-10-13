@@ -47,6 +47,8 @@ interface FormRendererProps {
   onSkip?: () => void;
   skipLabel?: string;
   skipDisabled?: boolean;
+  /** Disables the submit button alone, leaving the fields editable. */
+  submitDisabled?: boolean;
   /** When set, the status table + infoSections disclosures remember their open/closed
    *  state across reloads, keyed under this prefix (e.g. `task-ui:<taskId>:<stepId>`). */
   persistPrefix?: string;
@@ -251,6 +253,14 @@ function buildInitial(schema: FormSchema, overrides?: FormValues): FormValues {
   return base;
 }
 
+export function isSubmitBlocked(state: {
+  disabled: boolean;
+  submitting: boolean;
+  submitDisabled: boolean;
+}): boolean {
+  return state.disabled || state.submitting || state.submitDisabled;
+}
+
 export function FormRenderer({
   schema,
   onSubmit,
@@ -266,6 +276,7 @@ export function FormRenderer({
   onSkip,
   skipLabel,
   skipDisabled = false,
+  submitDisabled = false,
   persistPrefix,
   hideTitle = false,
 }: FormRendererProps) {
@@ -284,7 +295,7 @@ export function FormRenderer({
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (disabled || submitting) return;
+    if (isSubmitBlocked({ disabled, submitting, submitDisabled })) return;
     const required = validateRequired(schema, values);
     if (required) {
       setLocalError(required);
@@ -333,7 +344,7 @@ export function FormRenderer({
       </div>
       <FormError message={localError ?? errorMessage ?? null} />
       <div className="flex items-center gap-3">
-        <Button type="submit" disabled={disabled || submitting}>
+        <Button type="submit" disabled={isSubmitBlocked({ disabled, submitting, submitDisabled })}>
           {submitting ? 'Submitting...' : (schema.submitLabel ?? 'Submit')}
         </Button>
         {onSkip && (

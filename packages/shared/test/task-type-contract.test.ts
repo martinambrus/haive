@@ -358,6 +358,14 @@ describe('task type schemas', () => {
     requiresRepository: true,
   };
 
+  it('refuses a reserved slug', () => {
+    expect(customTaskTypeCreateSchema.safeParse({ ...valid, slug: 'new' }).success).toBe(false);
+    expect(customTaskTypeCreateSchema.safeParse({ ...valid, slug: 'catalog' }).success).toBe(false);
+    expect(customTaskTypeCreateSchema.safeParse({ ...valid, slug: 'new-thing' }).success).toBe(
+      true,
+    );
+  });
+
   it('accepts a minimal create body and the optional fields', () => {
     expect(customTaskTypeCreateSchema.safeParse(valid).success).toBe(true);
     expect(
