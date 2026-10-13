@@ -43,7 +43,7 @@ import {
   type ToolUsageStepRow,
 } from '@haive/shared/stats';
 import { getDb } from '../../db.js';
-import { rollupToolUsage } from '../../lib/tool-usage-rollup.js';
+import { rollupToolUsage } from '@haive/shared/stats-server';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';

@@ -111,7 +111,7 @@ import {
   hasArtifactsSinceReset,
 } from '../lib/onboarding-state.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
-import { inventoryDirsFromCatalog } from '../lib/tool-inventory.js';
+import { inventoryDirsFromCatalog } from '@haive/shared/stats-server';
 
 function maxUploadBytes(): number {
   const raw = process.env.MAX_UPLOAD_BYTES;

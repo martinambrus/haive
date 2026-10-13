@@ -94,8 +94,8 @@ import {
   resolveCurrentStepCliProviderIds,
   sumTaskTokens,
   sumTaskProviderBreakdown,
-  resolveCostDisplay,
 } from './_helpers.js';
+import { resolveCostDisplay } from '@haive/shared/stats-server';
 import { fileRoutes } from './files.js';
 import { retryTaskAtStep, stepRoutes } from './steps.js';
 import {

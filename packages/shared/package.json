@@ -171,6 +171,10 @@
       "types": "./dist/module-host/index.d.ts",
       "import": "./dist/module-host/index.js"
     },
+    "./stats-server": {
+      "types": "./dist/stats-server/index.d.ts",
+      "import": "./dist/stats-server/index.js"
+    },
     "./system": {
       "types": "./dist/system/index.d.ts",
       "import": "./dist/system/index.js"
