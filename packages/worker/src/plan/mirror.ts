@@ -1046,7 +1046,13 @@ async function reconcilePlanLocked(
   }
 
   if (merge.deleted.length > 0) {
-    // A child added meanwhile under a deleted node would go with it by cascade.
+    // A child added meanwhile under a deleted node would go with it by cascade. Locking the parents
+    // first makes a child insert (which key-share locks its parent) wait, so the check stays true.
+    await tx
+      .select({ id: schema.planNodes.id })
+      .from(schema.planNodes)
+      .where(inArray(schema.planNodes.id, merge.deleted))
+      .for('update');
     const [stray] = await tx
       .select({ id: schema.planNodes.id })
       .from(schema.planNodes)
@@ -1303,7 +1309,10 @@ async function reconcilePlanLocked(
 
   // Dirty when the file no longer says what the database does.
   const after = await renderPlanMirrorFiles(tx, repositoryId);
-  if (after === null || hashBytes(after.json) !== hash) await markPlanMirrorDirty(tx, repositoryId);
+  // A question leaves plan.json as read but plan.md on this side's value, so it is written too.
+  if (after === null || hashBytes(after.json) !== hash || merge.conflicts.length > 0) {
+    await markPlanMirrorDirty(tx, repositoryId);
+  }
   await tx
     .insert(schema.planMirrorState)
     .values({

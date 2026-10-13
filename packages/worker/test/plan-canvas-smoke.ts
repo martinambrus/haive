@@ -2358,7 +2358,10 @@ async function main(): Promise<void> {
   );
 
   // The same field changed on both sides is asked, the database keeps its value and the file the other's.
+  // The other side's file is this side's flushed render but for the one contested title.
   await editS(pId, { title: 'P local 2' });
+  await writePlanMirror(db, sId, sDir);
+  theirs = await readMirror();
   const asked = await arrive(retitled(theirs, pId, 'P by A'));
   const rowsAsked = await pendingPlanRows(sId);
   check(
@@ -2372,6 +2375,14 @@ async function main(): Promise<void> {
     { rowsAsked, asked },
   );
   check('three-way: the database keeps its own title', (await sNode(pId))?.title === 'P local 2');
+  const askedState = await db.query.planMirrorState.findFirst({
+    where: eq(schema.planMirrorState.repositoryId, sId),
+  });
+  check(
+    'three-way: a pull that only asks leaves the mirror dirty so plan.md is rewritten',
+    !!askedState && askedState.revision > askedState.writtenRevision,
+    askedState,
+  );
   await writePlanMirror(db, sId, sDir);
   check(
     "three-way: the flush writes the other side's title into plan.json and the database's into plan.md",
@@ -2503,6 +2514,39 @@ async function main(): Promise<void> {
     ...theirs,
     edges: theirs.edges.map((e) => (e.toNodeId === r1Id ? { ...e, note: 'from the canvas' } : e)),
   });
+  // A child a canvas patch adds under a node the other side deleted is not taken by the cascade.
+  let childId: string | undefined;
+  let dropping: Promise<string> | undefined;
+  const dropFile = {
+    ...theirs,
+    nodes: theirs.nodes.filter((n) => n.id !== rId && n.id !== r1Id),
+    edges: theirs.edges.filter((e) => e.toNodeId !== r1Id),
+  };
+  await db.transaction(async (edit) => {
+    const added = await applyPlanPatch(
+      edit,
+      { ops: [{ op: 'upsert', nodeRef: 'tmp-late-child', parentRef: rId, title: 'Late child' }] },
+      { repositoryId: sId, origin: 'user' },
+    );
+    childId = added.created[0];
+    dropping = arrive(dropFile).then(
+      () => 'merged',
+      (err: Error) => err.name,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  });
+  check(
+    'three-way: a child added under a node being deleted holds the reconcile and survives',
+    (await dropping) === 'PlanMirrorHeldError' && (await sNode(childId!)) !== undefined,
+    await dropping,
+  );
+  await applyPlanPatch(
+    db,
+    {
+      ops: [{ op: 'delete', nodeRef: childId!, expectedVersion: (await sNode(childId!))!.version }],
+    },
+    { repositoryId: sId, origin: 'user' },
+  );
   const dropR = await arrive({
     ...theirs,
     nodes: theirs.nodes.filter((n) => n.id !== rId && n.id !== r1Id),
