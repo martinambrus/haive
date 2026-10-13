@@ -509,3 +509,36 @@ describe('the persona marker pattern', () => {
     expect([...'[[HAIVE_TEMPLATE_PERSONA:a]]'.matchAll(NEW_BUILT_IN)]).toEqual([]);
   });
 });
+
+describe('review round 1', () => {
+  const accordionForm = {
+    title: 'P',
+    fields: [
+      {
+        id: 'more',
+        type: 'accordion' as const,
+        label: 'More',
+        items: [
+          { title: 'Item', fields: [{ id: 'inner', type: 'text' as const, label: 'Inner' }] },
+        ],
+      },
+    ],
+  };
+
+  it('counts a field inside an accordion item as declared, and not the accordion itself', () => {
+    expect(kinds(entry({ template: '{{field:inner}}', paramFormSchema: accordionForm }))).toEqual(
+      [],
+    );
+    expect(kinds(entry({ template: '{{field:more}}', paramFormSchema: accordionForm }))).toEqual([
+      'field-not-declared',
+    ]);
+  });
+
+  it('accepts only the "*" agent pool', () => {
+    const base = { slug: 'check-a', title: 'Check A', template: 'Do it', timeoutMs: 120_000 };
+    expect(promptStepEntrySchema.safeParse({ ...base, agentPool: '*' }).success).toBe(true);
+    expect(promptStepEntrySchema.safeParse({ ...base, agentPool: 'reviewers' }).success).toBe(
+      false,
+    );
+  });
+});

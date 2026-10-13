@@ -36,7 +36,7 @@ export const promptStepEntrySchema = z.object({
   paramFormSchema: formSchemaSchema.optional(),
   capabilities: z.array(z.enum(PROMPT_STEP_CAPABILITIES)).default([]),
   timeoutMs: z.number().int().min(PROMPT_STEP_TIMEOUT_MIN_MS).max(PROMPT_STEP_TIMEOUT_MAX_MS),
-  agentPool: z.string().optional(),
+  agentPool: z.literal('*').optional(),
 });
 export type PromptStepEntry = z.infer<typeof promptStepEntrySchema>;
 
@@ -243,7 +243,13 @@ export function validatePromptStep(
   const { tokens, unknown } = scanTemplate(entry.template);
   for (const u of unknown) add('unknown-token', u.message, u);
 
-  const declared = new Set((entry.paramFormSchema?.fields ?? []).map((f) => f.id));
+  const declared = new Set(
+    (entry.paramFormSchema?.fields ?? []).flatMap((f) =>
+      f.type === 'accordion'
+        ? f.items.flatMap((item) => item.fields.map((leaf) => leaf.id))
+        : [f.id],
+    ),
+  );
   const earlier = new Set(ctx.stepIdsBefore);
   for (const token of tokens) {
     switch (token.kind) {
