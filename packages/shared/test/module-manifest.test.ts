@@ -4,6 +4,12 @@ import {
   dashboardSpecSchema,
   dashboardWidgetSchema,
   moduleManifestSchema,
+  chartResponseSchema,
+  kpiResponseSchema,
+  meterResponseSchema,
+  statusResponseSchema,
+  tableResponseSchema,
+  widgetResponseSchema,
 } from '../src/modularity/index.js';
 
 const form = {
@@ -107,6 +113,8 @@ describe('moduleManifestSchema', () => {
     expect(ok({ ...manifest, nav: [{ href: '/m/acmeX', label: 'x' }] })).toBe(false);
     expect(ok({ ...manifest, nav: [{ href: '/settings', label: 'x' }] })).toBe(false);
     expect(ok({ ...manifest, nav: [{ href: '/m/acme/a/b', label: 'x' }] })).toBe(true);
+    expect(ok({ ...manifest, nav: [{ href: '/m/acme/%2e%2e/admin', label: 'x' }] })).toBe(false);
+    expect(ok({ ...manifest, nav: [{ href: '/m/acme/a\\b', label: 'x' }] })).toBe(false);
   });
 
   it('rejects a dotted or invalid composable step id', () => {
@@ -191,6 +199,93 @@ describe('dashboardWidgetSchema exactly-one rule', () => {
       expect(widgetOk({ type: 'status', endpoint })).toBe(false);
     }
     expect(widgetOk({ type: 'status', endpoint: '/m/acme/x?y=1' })).toBe(true);
+  });
+});
+
+describe('widget endpoint confinement', () => {
+  const withEndpoint = (endpoint: string) =>
+    ok({
+      ...manifest,
+      pages: { home: { title: 'H', widgets: [{ type: 'kpi', label: 'L', endpoint }] } },
+    });
+
+  it('accepts the module prefix and its sub-paths', () => {
+    expect(withEndpoint('/m/acme')).toBe(true);
+    expect(withEndpoint('/m/acme/load')).toBe(true);
+    expect(withEndpoint('/m/acme/load?x=1')).toBe(true);
+  });
+
+  it.each([
+    '/m/acme/%2e%2e/admin',
+    '/m/acme/%2E%2E/%2e%2e/admin/users',
+    '/admin/users',
+    '/m/other/x',
+    '/m/acmeX/x',
+    '/m/acme\\..\\admin',
+    '/m/acme/a\\b',
+  ])('refuses %s', (endpoint) => {
+    expect(withEndpoint(endpoint)).toBe(false);
+  });
+
+  it('refuses a status or chart endpoint outside the prefix', () => {
+    const bad = (widget: unknown) =>
+      ok({ ...manifest, pages: { p: { title: 'P', widgets: [widget] } } });
+    expect(bad({ type: 'status', endpoint: '/admin/users' })).toBe(false);
+    expect(
+      bad({
+        type: 'chart',
+        kind: 'bar',
+        xKey: 'x',
+        series: [{ key: 'n', label: 'N' }],
+        endpoint: '/m/other/x',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('widget response schemas', () => {
+  const pass = (schema: { safeParse: (v: unknown) => { success: boolean } }, v: unknown) =>
+    schema.safeParse(v).success;
+
+  it('kpi', () => {
+    expect(pass(kpiResponseSchema, { value: 4 })).toBe(true);
+    expect(pass(kpiResponseSchema, { value: 'high', unit: 'pcs' })).toBe(true);
+    expect(pass(kpiResponseSchema, { value: null })).toBe(false);
+    expect(pass(kpiResponseSchema, {})).toBe(false);
+  });
+
+  it('table', () => {
+    expect(pass(tableResponseSchema, { rows: [{ a: 'x', b: null, c: 1 }] })).toBe(true);
+    expect(pass(tableResponseSchema, { rows: [{ a: { nested: 1 } }] })).toBe(false);
+    expect(pass(tableResponseSchema, { rows: 'x' })).toBe(false);
+  });
+
+  it('meter', () => {
+    expect(pass(meterResponseSchema, { value: 3, max: 10 })).toBe(true);
+    expect(pass(meterResponseSchema, { value: 3 })).toBe(false);
+    expect(pass(meterResponseSchema, { value: '3', max: 10 })).toBe(false);
+  });
+
+  it('status', () => {
+    expect(pass(statusResponseSchema, { items: [{ label: 'Tests', status: 'pass' }] })).toBe(true);
+    expect(pass(statusResponseSchema, { items: [{ label: 'Tests', status: 'bogus' }] })).toBe(
+      false,
+    );
+    expect(pass(statusResponseSchema, { items: [{ label: '', status: 'pass' }] })).toBe(false);
+  });
+
+  it('chart', () => {
+    expect(pass(chartResponseSchema, { data: [{ day: 'mon', n: 1 }] })).toBe(true);
+    expect(pass(chartResponseSchema, { data: [{ day: ['mon'] }] })).toBe(false);
+    expect(pass(chartResponseSchema, { rows: [] })).toBe(false);
+  });
+
+  it('looks a schema up by widget type', () => {
+    expect(widgetResponseSchema('kpi')).toBe(kpiResponseSchema);
+    expect(widgetResponseSchema('table')).toBe(tableResponseSchema);
+    expect(widgetResponseSchema('meter')).toBe(meterResponseSchema);
+    expect(widgetResponseSchema('status')).toBe(statusResponseSchema);
+    expect(widgetResponseSchema('chart')).toBe(chartResponseSchema);
   });
 });
 

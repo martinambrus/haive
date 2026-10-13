@@ -114,8 +114,10 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         id: manifest.id,
         name: manifest.name,
         version: manifest.version,
-        nav: (manifest.nav ?? []).filter((item) => isAdmin || item.adminOnly !== true),
-        pages: manifest.pages ?? {},
+        nav: (manifest.nav ?? []).filter(
+          (item) => isAdmin || (item.adminOnly !== true && manifest.apiRequiresAdmin !== true),
+        ),
+        pages: isAdmin || manifest.apiRequiresAdmin !== true ? (manifest.pages ?? {}) : {},
         hasGlobalSettings: manifest.globalSettings !== undefined,
         hasAdminSettings: isAdmin && manifest.adminSettings !== undefined,
       })),
