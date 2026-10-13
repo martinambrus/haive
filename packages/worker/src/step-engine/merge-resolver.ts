@@ -31,6 +31,7 @@ import {
   type SecretMaskSource,
 } from './git-merge.js';
 import { resolveHaiveProjectionConflicts } from '../plan/projection-merge.js';
+import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import {
   claimMergeDir,
   releaseMergeDir,
@@ -879,6 +880,25 @@ export async function resolveMergePhase(
         `Task "${claim.holder.title}" (${claim.holder.id}) is still merging into ${state.baseBranch} in ${state.mergeDir}; retry once it finishes.`,
         'merge dir in use',
       );
+    }
+    // A plan row stamped before 0196 takes its base from the checkout before the merge moves it.
+    if (pending.mode === 'same-branch' && !(await peekOpenMerge(pending.mergeDir))) {
+      const task = await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, params.taskId),
+        columns: { repositoryId: true },
+      });
+      if (task?.repositoryId) {
+        try {
+          await seedPlanBaseFromCheckout(db, task.repositoryId, pending.mergeDir);
+        } catch (err) {
+          return haltFailed(
+            db,
+            current,
+            `The plan's base could not be read from the checkout (${(err as Error).message}); nothing was merged. Retry this step.`,
+            'plan base unread',
+          );
+        }
+      }
     }
     const attempt = await section(pending.mergeDir, async (tx) => {
       // Every task creates or removes the shared base worktree only in a section.

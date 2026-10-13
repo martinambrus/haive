@@ -444,7 +444,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
 
 // In-memory db backing merge_resolve_state for the divergence merge (mirrors the
 // 12-worktree-cleanup test's stub, trimmed to the clean-merge path).
-function makeMergeDb() {
+function makeMergeDb(repositoryId: string | null = null) {
   let mergeState: unknown = null;
   const setPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState;
@@ -454,7 +454,7 @@ function makeMergeDb() {
     // resolveGitEnv walks tasks -> repositories before users; an unlinked task means
     // the merge commit uses merge-resolver's FALLBACK_GIT_IDENTITY, as before.
     query: {
-      tasks: { findFirst: async () => ({ repositoryId: null }) },
+      tasks: { findFirst: async () => ({ repositoryId }) },
       repositories: { findFirst: async () => undefined },
       users: { findFirst: async () => undefined },
     },
@@ -477,6 +477,50 @@ function makeMergeDb() {
 }
 
 describe('00a-sync-base divergence (real git + merge phase)', () => {
+  it('diverged → the merge phase seeds the plan base from the checkout before it merges', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await writeFile(path.join(local, 'local.txt'), 'L\n', 'utf8');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'local work']);
+    await advanceOrigin(seed, 'origin.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      let atSeed: string | null = null;
+      projections.seed.mockImplementation(async () => {
+        atSeed = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      });
+      const d = await syncBaseStep.detect!(mkCtx(local));
+      const h = makeMergeDb('repo-1');
+      const step = syncBaseStep as unknown as StepDefinition;
+      const current = {
+        id: 'step1',
+        detectOutput: d,
+        formValues: { base: 'main', syncAction: 'merge' },
+        mergeResolveState: null,
+        status: 'running',
+      } as never;
+      const params = {
+        db: h.db,
+        taskId: 't1',
+        userId: 'u1',
+        repoPath: '',
+        workspacePath: '',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        stepDef: step,
+      } as never;
+      const merge = await resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
+      expect(merge.resolved).toBe(true);
+      expect(projections.seed).toHaveBeenCalledWith(h.db, 'repo-1', local);
+      expect(atSeed).toBe(before);
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
   it('diverged → the reused merge phase merges origin/main into main (clean)', async () => {
     const { bare, seed } = await seedOrigin();
     const local = await cloneLocal(bare);
