@@ -55,6 +55,11 @@ export async function mountModules(
       );
     }
     const manifest = parsed.data;
+    if (entry.packageName !== `@haive/module-${manifest.id}`) {
+      throw new Error(
+        `Module ${entry.packageName} declares id "${manifest.id}"; its package must be named @haive/module-${manifest.id}`,
+      );
+    }
     if (seen.has(manifest.id)) {
       throw new Error(`Duplicate module id "${manifest.id}" (${entry.packageName})`);
     }

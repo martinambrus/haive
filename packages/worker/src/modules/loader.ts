@@ -55,6 +55,11 @@ export function registerModuleSteps(
           .join('; ')}`,
       );
     }
+    if (entry.packageName !== `@haive/module-${parsed.data.id}`) {
+      throw new Error(
+        `Module ${entry.packageName} declares id "${parsed.data.id}"; its package must be named @haive/module-${parsed.data.id}`,
+      );
+    }
     if (seen.has(parsed.data.id)) {
       throw new Error(`Duplicate module id "${parsed.data.id}" (${entry.packageName})`);
     }

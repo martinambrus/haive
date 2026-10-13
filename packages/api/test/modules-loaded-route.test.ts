@@ -38,11 +38,11 @@ async function buildApp() {
   const app = new Hono<AppEnv>();
   const loaded = await mountModules(app, [
     {
-      packageName: '@acme/with-routes',
+      packageName: '@haive/module-with-routes',
       manifest: manifestOf('with-routes'),
       routes: () => new Hono<AppEnv>(),
     },
-    { packageName: '@acme/no-routes', manifest: manifestOf('no-routes') },
+    { packageName: '@haive/module-no-routes', manifest: manifestOf('no-routes') },
   ]);
   app.route('/modules', moduleRoutes(loaded));
   app.onError(errorHandler);
@@ -58,7 +58,7 @@ describe('GET /modules/loaded', () => {
     h.role = 'admin';
     const worker = {
       at: '2026-10-12T00:00:00.000Z',
-      modules: [{ id: 'with-routes', packageName: '@acme/with-routes', version: '1.2.3' }],
+      modules: [{ id: 'with-routes', packageName: '@haive/module-with-routes', version: '1.2.3' }],
     };
     h.workerValue = JSON.stringify(worker);
     const res = await (await buildApp()).request('/modules/loaded');
@@ -68,11 +68,16 @@ describe('GET /modules/loaded', () => {
         modules: [
           {
             id: 'with-routes',
-            packageName: '@acme/with-routes',
+            packageName: '@haive/module-with-routes',
             version: '1.2.3',
             hasRoutes: true,
           },
-          { id: 'no-routes', packageName: '@acme/no-routes', version: '1.2.3', hasRoutes: false },
+          {
+            id: 'no-routes',
+            packageName: '@haive/module-no-routes',
+            version: '1.2.3',
+            hasRoutes: false,
+          },
         ],
       },
       worker,
