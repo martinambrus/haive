@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { inArray } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StepRegistry } from './registry.js';
 
@@ -79,6 +79,7 @@ export async function syncTaskTypeDefinitions(db: Database, registry: StepRegist
             requiresRepository: row.requiresRepository,
             updatedAt: now,
           },
+          setWhere: eq(schema.taskTypeDefinitions.source, 'builtin'),
         });
     }
 
