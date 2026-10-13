@@ -359,6 +359,11 @@ async function writePlanMirrorLocked(
     const diskHash = hashBytes(onDiskBytes);
     // Haive never writes an empty plan.json; older rows stamped absence as the hash of zero bytes.
     const synced = onDiskBytes.length > 0 && diskHash === (state?.syncedHash ?? null);
+    if (!synced && rendered !== null && diskHash === hashBytes(rendered.json)) {
+      // The checkout reached this plan on its own: what both hold is agreed, so it is the base.
+      const agreed = planMirrorPayloadSchema.safeParse(JSON.parse(rendered.json) as unknown);
+      if (agreed.success) await storeAgreedBase(db, repositoryId, agreed.data);
+    }
     if (!synced && !(rendered !== null && diskHash === hashBytes(rendered.json))) {
       if (state?.syncedHash == null) {
         logger.warn(
@@ -762,34 +767,43 @@ export async function advancePlanBaseToPushed(
   if (!parsed.success) return;
   await db.transaction(async (tx) => {
     await lockPlanMirror(tx, repositoryId);
-    const [state] = await tx
-      .select({ syncedSnapshot: schema.planMirrorState.syncedSnapshot })
-      .from(schema.planMirrorState)
-      .where(eq(schema.planMirrorState.repositoryId, repositoryId))
-      .limit(1);
-    if (!state) return;
-    const old = planMirrorPayloadSchema.safeParse(state.syncedSnapshot);
-    const oldById = new Map(old.success ? old.data.nodes.map((n) => [n.id, n]) : []);
-    const asked = await loadPendingPlanQuestions(tx, repositoryId);
-    const snapshot =
-      asked.length === 0
-        ? parsed.data
-        : ({
-            ...parsed.data,
-            nodes: parsed.data.nodes.map((n) => {
-              const patched: Record<string, unknown> = { ...n };
-              const before = oldById.get(n.id) as Record<string, unknown> | undefined;
-              for (const q of asked) {
-                if (q.nodeId === n.id && before) patched[q.field] = before[q.field];
-              }
-              return patched;
-            }),
-          } as PlanMirrorPayload);
-    await tx
-      .update(schema.planMirrorState)
-      .set({ syncedSnapshot: snapshot })
-      .where(eq(schema.planMirrorState.repositoryId, repositoryId));
+    await storeAgreedBase(tx, repositoryId, parsed.data);
   });
+}
+
+/** Both sides hold `agreed`, so it becomes the base; a field still asked about keeps its old base. */
+async function storeAgreedBase(
+  tx: PlanMirrorTx,
+  repositoryId: string,
+  agreed: PlanMirrorPayload,
+): Promise<void> {
+  const [state] = await tx
+    .select({ syncedSnapshot: schema.planMirrorState.syncedSnapshot })
+    .from(schema.planMirrorState)
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+    .limit(1);
+  if (!state) return;
+  const old = planMirrorPayloadSchema.safeParse(state.syncedSnapshot);
+  const oldById = new Map(old.success ? old.data.nodes.map((n) => [n.id, n]) : []);
+  const asked = await loadPendingPlanQuestions(tx, repositoryId);
+  const snapshot =
+    asked.length === 0
+      ? agreed
+      : ({
+          ...agreed,
+          nodes: agreed.nodes.map((n) => {
+            const patched: Record<string, unknown> = { ...n };
+            const before = oldById.get(n.id) as Record<string, unknown> | undefined;
+            for (const q of asked) {
+              if (q.nodeId === n.id && before) patched[q.field] = before[q.field];
+            }
+            return patched;
+          }),
+        } as PlanMirrorPayload);
+  await tx
+    .update(schema.planMirrorState)
+    .set({ syncedSnapshot: snapshot })
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId));
 }
 
 /** Run after a push with the commit read before it: the push carried at least that commit, so its
@@ -1063,8 +1077,10 @@ async function reconcilePlanLocked(
   for (const row of stored) {
     const expected = pathById.get(row.id);
     if (expected !== undefined && expected !== row.path) {
-      // A node created by this reconcile has no read version, and nobody else can see it yet.
+      // A node created by this reconcile has no read version, and nobody else can see it yet; any
+      // other row without one appeared after the versions were read.
       const read = versionOf.get(row.id);
+      if (read === undefined && !createdIds.has(row.id)) throw new PlanMirrorHeldError(HELD_RACED);
       const repaired = await tx
         .update(schema.planNodes)
         .set({ path: expected })

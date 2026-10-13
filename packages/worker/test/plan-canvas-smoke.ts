@@ -2525,6 +2525,22 @@ async function main(): Promise<void> {
     ).length === 0,
   );
 
+  // A checkout that reached this plan's bytes on its own agrees with it, so that becomes the base.
+  await editS(qId, { title: 'Q reached on both sides' });
+  await writePlanMirror(db, sId, sDir);
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedHash: 'stamped-before-the-other-side-agreed' })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await markPlanMirrorDirty(db, sId);
+  await writePlanMirror(db, sId, sDir);
+  check(
+    'three-way: plan.json that independently equals the render moves the base to it',
+    (await baseOf())?.nodes.find((n) => n.id === qId)?.title === 'Q reached on both sides',
+    await baseOf(),
+  );
+  theirs = await readMirror();
+
   // A question whose node is deleted here closes.
   await editS(qId, { title: 'Q local, soon gone' });
   await arrive(retitled(theirs, qId, 'Q remote, soon gone'));
