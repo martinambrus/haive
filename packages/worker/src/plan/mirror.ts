@@ -892,13 +892,14 @@ export async function advancePlanBaseFromCommit(
   try {
     const pushed = await gitRun(repoPath, ['show', `${commit}:${HAIVE_DATA_FILES.plan}`]);
     if (pushed.code !== 0) return;
+    // Shared once the remote holds it; current only while the tip still carries its plan.json,
+    // so a slower Save never moves the base back over a later push.
+    const remote = `refs/remotes/origin/${branch}`;
     await advancePlanBaseToPushed(db, repositoryId, pushed.stdout, async () => {
-      const tip = await gitRun(repoPath, [
-        'rev-parse',
-        '--verify',
-        `refs/remotes/origin/${branch}`,
-      ]);
-      return tip.code === 0 && tip.stdout.trim() === commit;
+      const held = await gitRun(repoPath, ['merge-base', '--is-ancestor', commit, remote]);
+      if (held.code !== 0) return false;
+      const atTip = await gitRun(repoPath, ['show', `${remote}:${HAIVE_DATA_FILES.plan}`]);
+      return atTip.code === 0 && atTip.stdout === pushed.stdout;
     });
   } catch (err) {
     logger.warn({ err, repositoryId }, 'plan base not advanced after push');

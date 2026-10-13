@@ -525,6 +525,21 @@ describe('mergePlanMirror: ordering and shape', () => {
     expect(r.merged.nodes.map((x) => x.title)).toEqual(['R', 'A', 'C', 'I', 'L', 'B']);
   });
 
+  it('keeps local code links when the incoming snapshot is v1, which cannot carry them', () => {
+    const links = [link('A', 'src/a.ts'), link('C', 'src/c.ts')];
+    const r = mergePlanMirror({
+      base: mirror(baseNodes(), [], links),
+      local: mirror(baseNodes(), [], links),
+      incoming: {
+        schemaVersion: 1,
+        nodes: baseNodes().map((x) => ({ ...x, createdBy: 'import' })),
+        edges: [],
+      },
+    });
+    expect(r.merged.codeLinks).toEqual(links);
+    expect(r.reported).toEqual([]);
+  });
+
   it('accepts v1 payloads, ignoring createdBy and having no code links', () => {
     const v1 = (nodes: N[]): PlanMirrorPayload => ({
       schemaVersion: 1,

@@ -182,7 +182,11 @@ function mergeKeyed<T extends object>(
 export function mergePlanMirror(input: PlanMirrorMergeInput): PlanMirrorMerge {
   const base = input.base ? readSide(input.base) : null;
   const local = readSide(input.local);
-  const incoming = readSide(input.incoming);
+  // A v1 snapshot predates code links: it says nothing about them, so it keeps local's.
+  const incoming =
+    input.incoming.schemaVersion === 2
+      ? readSide(input.incoming)
+      : { ...readSide(input.incoming), links: local.links };
   const conflicts: PlanMirrorConflict[] = [];
   const reported: PlanMirrorReport[] = [];
   const resurrected: string[] = [];

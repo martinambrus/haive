@@ -37,6 +37,7 @@ import { gitRun } from '../src/repo/git-exec.js';
 import { sweepDirtyPlanMirrors } from '../src/queues/plan-mirror-queue.js';
 import { persistDetection } from '../src/repo/clone.js';
 import {
+  advancePlanBaseFromCommit,
   advancePlanBaseToPushed,
   importPlanMirror,
   reconcilePlanFromCheckout,
@@ -2157,6 +2158,77 @@ async function main(): Promise<void> {
   await db
     .delete(schema.repositories)
     .where(inArray(schema.repositories.id, [legacyMatch, legacyDiffers]));
+
+  /* --- 12.6b a push the remote has already moved past ---------------------- */
+
+  const advOrigin = path.join(holdRoot, 'adv-origin.git');
+  const advDir = path.join(holdRoot, 'adv');
+  await git(holdRoot, ['init', '-q', '--bare', '-b', 'main', advOrigin]);
+  await git(holdRoot, ['init', '-q', '-b', 'main', advDir]);
+  await git(advDir, ['remote', 'add', 'origin', advOrigin]);
+  const [advRepo] = await db
+    .insert(schema.repositories)
+    .values({ userId, name: 'plan-adv', source: 'blank', status: 'ready', storagePath: advDir })
+    .returning();
+  const advId = advRepo!.id;
+  const advBuilt = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'aroot', parentRef: null, title: 'Adv root' },
+        { op: 'upsert', nodeRef: 'ax', parentRef: 'aroot', title: 'AX' },
+      ],
+    },
+    { repositoryId: advId, origin: 'user' },
+  );
+  const axId = advBuilt.refs['ax']!;
+  const advBase = async () =>
+    (
+      await db.query.planMirrorState.findFirst({
+        where: eq(schema.planMirrorState.repositoryId, advId),
+      })
+    )?.syncedSnapshot as PlanMirror | null;
+  const clearAdvBase = () =>
+    db
+      .update(schema.planMirrorState)
+      .set({ syncedSnapshot: null })
+      .where(eq(schema.planMirrorState.repositoryId, advId));
+  await writePlanMirror(db, advId, advDir);
+  await git(advDir, ['add', '-A']);
+  await git(advDir, ['commit', '-q', '-m', 'plan']);
+  const pushedX = await git(advDir, ['rev-parse', 'HEAD']);
+  await git(advDir, ['push', '-q', 'origin', 'main']);
+  await writeFile(path.join(advDir, 'other.txt'), 'later\n', 'utf8');
+  await git(advDir, ['add', 'other.txt']);
+  await git(advDir, ['commit', '-q', '-m', 'unrelated']);
+  await git(advDir, ['push', '-q', 'origin', 'main']);
+  await clearAdvBase();
+  await advancePlanBaseFromCommit(db, advId, advDir, pushedX, 'main');
+  check(
+    'a push the remote moved past with the same plan.json still becomes the base',
+    (await advBase())?.nodes.some((n) => n.id === axId && n.title === 'AX') === true,
+    await advBase(),
+  );
+  const [axRow] = await db
+    .select({ version: schema.planNodes.version })
+    .from(schema.planNodes)
+    .where(eq(schema.planNodes.id, axId));
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: axId, title: 'AX later', expectedVersion: axRow!.version }] },
+    { repositoryId: advId, origin: 'user' },
+  );
+  await writePlanMirror(db, advId, advDir);
+  await git(advDir, ['commit', '-q', '-am', 'plan later']);
+  await git(advDir, ['push', '-q', 'origin', 'main']);
+  await clearAdvBase();
+  await advancePlanBaseFromCommit(db, advId, advDir, pushedX, 'main');
+  check(
+    'an older push never becomes the base once a later push changed plan.json',
+    (await advBase()) === null,
+    await advBase(),
+  );
+  await db.delete(schema.repositories).where(eq(schema.repositories.id, advId));
 
   /* --- 12.7 the three-way reconcile ---------------------------------------- */
 
