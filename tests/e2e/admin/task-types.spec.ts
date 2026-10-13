@@ -103,7 +103,7 @@ test.describe('admin task types', () => {
       for (const label of [STEP.discovery, STEP.prePlanning, STEP.specQuality, STEP.gate1]) {
         await addStep(page, label);
       }
-      await expect(page.getByText('No problems')).toBeVisible();
+      await expect(page.getByText('No problems', { exact: true })).toBeVisible();
       await page.getByRole('button', { name: 'Create task type' }).click();
 
       await expect(page).toHaveURL(new RegExp(`/admin/task-types/${slug}$`), { timeout: 30_000 });
@@ -142,7 +142,7 @@ test.describe('admin task types', () => {
       await expect(page.getByRole('button', { name: 'Create task type' })).toBeDisabled();
 
       await page.getByRole('button', { name: `Move ${STEP.specQuality} down` }).click();
-      await expect(page.getByText('No problems')).toBeVisible();
+      await expect(page.getByText('No problems', { exact: true })).toBeVisible();
       await expect(row(page, 1)).toContainText(STEP.specQuality);
       await expect(page.getByRole('button', { name: `Move ${STEP.specQuality} up` })).toBeFocused();
       await expect(page.getByRole('button', { name: 'Create task type' })).toBeEnabled();

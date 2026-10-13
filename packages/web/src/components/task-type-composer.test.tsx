@@ -101,4 +101,40 @@ describe('TaskTypeComposer', () => {
     expect(html.indexOf('Specification')).toBeLessThan(html.indexOf('Build'));
     expect(html).toContain('aria-label="Add Phase 2: Implement"');
   });
+  it('renders an issue message as markdown, in a row', () => {
+    const catalog = {
+      ...TEST_CATALOG,
+      steps: TEST_CATALOG.steps.map((s) =>
+        s.stepId === '05-phase-0b5-spec-quality'
+          ? {
+              ...s,
+              entry: {
+                ...s.entry,
+                requires: [{ needs: 'spec', reason: 'Reviews the **pre-planning** spec' }],
+              },
+            }
+          : s,
+      ),
+    };
+    const html = renderToStaticMarkup(
+      <TaskTypeComposer {...base} catalog={catalog} stepIds={['05-phase-0b5-spec-quality']} />,
+    );
+    expect(html).toContain('<strong>pre-planning</strong>');
+    expect(html).not.toContain('**pre-planning**');
+  });
+
+  it('makes every control inert while disabled', () => {
+    const html = renderToStaticMarkup(
+      <TaskTypeComposer
+        {...base}
+        disabled
+        loopLimits={{ '05-phase-0b5-spec-quality': 4 }}
+        stepIds={['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality']}
+      />,
+    );
+    const controls = html.match(/<(button|input)\b[^>]*>/g) ?? [];
+    expect(controls.length).toBeGreaterThan(5);
+    for (const tag of controls) expect(tag).toContain('disabled=""');
+    expect(html).not.toContain('draggable="true"');
+  });
 });

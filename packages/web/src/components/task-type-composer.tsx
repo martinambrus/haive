@@ -23,6 +23,7 @@ import {
 import { dropIntentFromY } from '@/lib/sidebar-tree';
 import { cn } from '@/lib/cn';
 import { Badge, Button, Input } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 interface TaskTypeComposerProps {
   catalog: TaskTypeCatalog;
@@ -30,6 +31,7 @@ interface TaskTypeComposerProps {
   loopLimits: Record<string, number>;
   requiresRepository: boolean;
   readOnly?: boolean;
+  disabled?: boolean;
   serverIssues?: CompositionIssue[];
   onStepIdsChange: (stepIds: string[]) => void;
   onLoopLimitsChange: (limits: Record<string, number>) => void;
@@ -102,6 +104,7 @@ export function TaskTypeComposer({
   loopLimits,
   requiresRepository,
   readOnly = false,
+  disabled = false,
   serverIssues = [],
   onStepIdsChange,
   onLoopLimitsChange,
@@ -229,9 +232,13 @@ export function TaskTypeComposer({
               {summary}
             </p>
             {generalIssues.map((issue) => (
-              <p key={issue.kind} className="text-sm text-red-300">
-                {describeIssue(issue, { stepIds, catalog: entries, requiresRepository }).message}
-              </p>
+              <InlineMarkdown
+                key={issue.kind}
+                className="text-sm text-red-300"
+                body={
+                  describeIssue(issue, { stepIds, catalog: entries, requiresRepository }).message
+                }
+              />
             ))}
             {defaults.map((issue) => (
               <p key={`${issue.kind}-${issue.stepId}`} className="text-sm text-red-300">
@@ -283,7 +290,7 @@ export function TaskTypeComposer({
                   {!readOnly && (
                     <span
                       aria-hidden
-                      draggable
+                      draggable={!disabled}
                       title="Drag to reorder"
                       onDragStart={(e) => {
                         const li = e.currentTarget.closest('li');
@@ -335,6 +342,7 @@ export function TaskTypeComposer({
                           placeholder="default"
                           value={loopLimits[stepId] ?? ''}
                           onChange={(e) => setLimit(stepId, e.target.value)}
+                          disabled={disabled}
                           className="h-11 w-24"
                         />
                       </label>
@@ -351,7 +359,7 @@ export function TaskTypeComposer({
                         className={ICON_BUTTON}
                         data-act="up"
                         aria-label={`Move ${label} up`}
-                        disabled={index === 0}
+                        disabled={disabled || index === 0}
                         onClick={() => move(index, index - 1)}
                       >
                         ↑
@@ -362,7 +370,7 @@ export function TaskTypeComposer({
                         className={ICON_BUTTON}
                         data-act="down"
                         aria-label={`Move ${label} down`}
-                        disabled={index === stepIds.length - 1}
+                        disabled={disabled || index === stepIds.length - 1}
                         onClick={() => move(index, index + 1)}
                       >
                         ↓
@@ -373,6 +381,7 @@ export function TaskTypeComposer({
                         className={cn(ICON_BUTTON, 'text-red-300')}
                         data-act="remove"
                         aria-label={`Remove ${label}`}
+                        disabled={disabled}
                         onClick={() => remove(index)}
                       >
                         ×
@@ -390,7 +399,7 @@ export function TaskTypeComposer({
                   const suggestions = view.providedBy.filter((p) => !stepIds.includes(p.stepId));
                   return (
                     <div key={JSON.stringify(issue)} className="mt-2 text-xs text-red-300">
-                      <p className="[overflow-wrap:anywhere]">{view.message}</p>
+                      <InlineMarkdown className="[overflow-wrap:anywhere]" body={view.message} />
                       {view.providedBy.length > 0 && issue.kind !== 'missing-loop-target' && (
                         <p className="mt-0.5 text-neutral-400">
                           {`Provided by: ${view.providedBy.map((p) => p.label).join(', ')}`}
@@ -404,6 +413,7 @@ export function TaskTypeComposer({
                               type="button"
                               variant="secondary"
                               className="h-11 whitespace-normal py-1 text-xs"
+                              disabled={disabled}
                               onClick={() => addSuggestion(p, index, addAfter)}
                             >
                               {`Add ${p.label} ${addAfter ? 'after' : 'before'} this`}
@@ -429,6 +439,7 @@ export function TaskTypeComposer({
             variant="secondary"
             className="h-11 w-full lg:hidden"
             aria-expanded={paletteOpen}
+            disabled={disabled}
             onClick={() => setPaletteOpen((o) => !o)}
           >
             {paletteOpen ? 'Hide step palette' : 'Add steps'}
@@ -440,6 +451,7 @@ export function TaskTypeComposer({
               placeholder="Search steps"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              disabled={disabled}
               className="h-11"
             />
             <div className="mt-3 flex flex-col gap-3 lg:max-h-[70vh] lg:overflow-y-auto">
@@ -468,6 +480,7 @@ export function TaskTypeComposer({
                             className="h-11 min-w-16 shrink-0"
                             aria-label={`Add ${s.entry.label}`}
                             aria-disabled={added}
+                            disabled={disabled}
                             onClick={() => add(s.stepId)}
                           >
                             {added ? 'Added' : 'Add'}

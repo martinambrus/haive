@@ -88,6 +88,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [serverIssues, setServerIssues] = useState<CompositionIssue[]>([]);
   const [saved, setSaved] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   const load = useCallback(async () => {
@@ -140,6 +141,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
 
   function touch() {
     setSaved(false);
+    setRefreshError(null);
     setSaveError(null);
     setServerIssues([]);
   }
@@ -148,6 +150,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setSaving(true);
     setSaveError(null);
     setSaved(false);
+    setRefreshError(null);
     try {
       if (creating) {
         const problem = slugProblem(String(submitted.slug ?? '').trim());
@@ -170,8 +173,12 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       const res = await updateTaskType(row!.slug, body);
       setRow(res.taskType);
       setSaved(true);
-      const fresh = await getAdminTaskType(row!.slug);
-      setAvailability(fresh.availability);
+      try {
+        const fresh = await getAdminTaskType(row!.slug);
+        setAvailability(fresh.availability);
+      } catch (err) {
+        setRefreshError((err as ApiError).message ?? 'Failed to refresh availability');
+      }
     } catch (err) {
       const error = err as ApiError;
       const issues = splitServerIssues((error.body as { issues?: unknown } | undefined)?.issues);
@@ -210,6 +217,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       loopLimits={loopLimits}
       requiresRepository={requiresRepository}
       readOnly={readOnly}
+      disabled={saving}
       serverIssues={serverIssues}
       onStepIdsChange={(next) => {
         touch();
@@ -277,6 +285,11 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           }
         />
         {saved && <p className="mt-3 text-xs text-emerald-400">Saved.</p>}
+        {refreshError && (
+          <p className="mt-1 text-xs text-amber-300">
+            {`Availability could not be refreshed: ${refreshError}`}
+          </p>
+        )}
       </Card>
       {!composable && row && (
         <Card>
