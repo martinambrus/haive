@@ -347,25 +347,20 @@ taskTypeRoutes.get('/', async (c) => {
     loadCatalog(db),
     readSwitches(),
   ]);
-  const taskTypes = rows
-    .filter((row) => {
-      if (row.source === 'admin') return switches.customEnabled;
-      if (row.source.startsWith('module:')) return switches.moduleEnabled;
-      return true;
-    })
-    .map((row) => {
-      const availability = availabilityOf(row, switches, catalog);
-      return publicTaskTypeSchema.parse({
-        slug: row.slug,
-        displayName: row.displayName,
-        description: row.description,
-        requiresRepository: row.requiresRepository,
-        sortOrder: row.sortOrder,
-        restoresDatabase: acceptsSavedDatabase(row.slug, restoresDatabase(row)),
-        dispatchesCli: dispatchesCliOf(row, catalog),
-        available: availability.available,
-        ...(availability.available ? {} : { reason: availability.reason }),
-      });
+  // Rows behind a switch that is off stay listed, unavailable with that reason, so the form can say why.
+  const taskTypes = rows.map((row) => {
+    const availability = availabilityOf(row, switches, catalog);
+    return publicTaskTypeSchema.parse({
+      slug: row.slug,
+      displayName: row.displayName,
+      description: row.description,
+      requiresRepository: row.requiresRepository,
+      sortOrder: row.sortOrder,
+      restoresDatabase: acceptsSavedDatabase(row.slug, restoresDatabase(row)),
+      dispatchesCli: dispatchesCliOf(row, catalog),
+      available: availability.available,
+      ...(availability.available ? {} : { reason: availability.reason }),
     });
+  });
   return c.json({ taskTypes });
 });
