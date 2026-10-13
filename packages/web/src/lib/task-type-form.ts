@@ -133,8 +133,11 @@ export function buildUpdateBody(
     loopLimits: Record<string, number>;
     preAnswerDefaults: Record<string, Record<string, unknown>>;
   } | null,
+  saved: { requiresRepository: boolean },
 ): TaskTypeUpdate {
   const body = flatValues(values, editableFields);
+  // The api re-checks the composition whenever requiresRepository is present.
+  if (body.requiresRepository === saved.requiresRepository) delete body.requiresRepository;
   if (composition && editableFields.includes('stepIds')) {
     const listed = new Set(composition.stepIds);
     body.stepIds = composition.stepIds;

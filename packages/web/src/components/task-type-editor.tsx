@@ -176,6 +176,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         composable && compositionEdited
           ? { stepIds, loopLimits, preAnswerDefaults: row?.preAnswerDefaults ?? {} }
           : null,
+        { requiresRepository: row!.requiresRepository },
       );
       const res = await updateTaskType(row!.slug, body);
       setRow(res.taskType);

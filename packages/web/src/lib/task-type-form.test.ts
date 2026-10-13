@@ -95,9 +95,23 @@ describe('buildUpdateBody', () => {
     selectable: true,
     sortOrder: 4,
   };
+  const SAVED = { requiresRepository: true };
+
+  it('leaves an unchanged requiresRepository out of a flat edit, since the api re-checks the steps for it', () => {
+    const body = buildUpdateBody(values, ADMIN_FIELDS, null, SAVED);
+    expect(body).not.toHaveProperty('requiresRepository');
+    expect(body.enabled).toBe(false);
+  });
+
+  it('sends requiresRepository when it changed', () => {
+    const body = buildUpdateBody(values, ADMIN_FIELDS, null, { requiresRepository: false });
+    expect(body.requiresRepository).toBe(true);
+  });
 
   it('sends only editable fields for a built-in row', () => {
-    expect(buildUpdateBody(values, ['displayName', 'description', 'sortOrder'], null)).toEqual({
+    expect(
+      buildUpdateBody(values, ['displayName', 'description', 'sortOrder'], null, SAVED),
+    ).toEqual({
       displayName: 'Renamed',
       description: 'd',
       sortOrder: 4,
@@ -105,11 +119,16 @@ describe('buildUpdateBody', () => {
   });
 
   it('sends the composition for a custom row and drops answers for removed steps', () => {
-    const body = buildUpdateBody(values, ADMIN_FIELDS, {
-      stepIds: ['a'],
-      loopLimits: { a: 2 },
-      preAnswerDefaults: { a: { x: 1 }, gone: { y: 2 } },
-    });
+    const body = buildUpdateBody(
+      values,
+      ADMIN_FIELDS,
+      {
+        stepIds: ['a'],
+        loopLimits: { a: 2 },
+        preAnswerDefaults: { a: { x: 1 }, gone: { y: 2 } },
+      },
+      SAVED,
+    );
     expect(body.stepIds).toEqual(['a']);
     expect(body.stepLoopLimitDefaults).toEqual({ a: 2 });
     expect(body.preAnswerDefaults).toEqual({ a: { x: 1 } });
