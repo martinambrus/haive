@@ -6,7 +6,7 @@ import { expect, test } from '../helpers/fixtures.js';
 import { seedSpend } from '../helpers/spend.js';
 
 /**
- * What /stats/tool-usage and /tasks/:id/tool-usage report, from rows whose records are known
+ * What /m/statistics/tool-usage and /tasks/:id/tool-usage report, from rows whose records are known
  * in advance.
  *
  * The tally itself has unit tests in the worker and the per-step merge in `@haive/shared/stats`.
@@ -157,7 +157,7 @@ test.describe('tool-usage statistics', () => {
       { endedMinutesAgo: 60 },
     );
 
-    const res = await page.request.get(`${API_BASE}/stats/tool-usage`);
+    const res = await page.request.get(`${API_BASE}/m/statistics/tool-usage`);
     expect(res.status()).toBe(200);
     const body = (await res.json()) as ToolUsageStats;
 
@@ -218,7 +218,7 @@ test.describe('tool-usage statistics', () => {
     // answers, never a 404: a repository outside the caller's scope, and one whose path this
     // container cannot read (the fixture's `/tmp/e2e-fake` exists nowhere).
     const withUnknownRepo = await page.request.get(
-      `${API_BASE}/stats/tool-usage?repositoryId=${randomUUID()}`,
+      `${API_BASE}/m/statistics/tool-usage?repositoryId=${randomUUID()}`,
     );
     expect(withUnknownRepo.status()).toBe(200);
     expect(((await withUnknownRepo.json()) as ToolUsageStats).unused).toEqual({
@@ -227,7 +227,7 @@ test.describe('tool-usage statistics', () => {
     });
     const repo = await seedRepoFixture(sql, userId, 'stats-tools');
     const withRepo = await page.request.get(
-      `${API_BASE}/stats/tool-usage?repositoryId=${repo.repoId}`,
+      `${API_BASE}/m/statistics/tool-usage?repositoryId=${repo.repoId}`,
     );
     expect(withRepo.status()).toBe(200);
     expect(((await withRepo.json()) as ToolUsageStats).unused).toEqual({
@@ -296,7 +296,7 @@ test.describe('tool-usage statistics', () => {
     );
 
     await users.register(strangerCtx, { prefix: 'tools-stranger' });
-    const stats = await strangerCtx.get(`${API_BASE}/stats/tool-usage`);
+    const stats = await strangerCtx.get(`${API_BASE}/m/statistics/tool-usage`);
     expect(stats.status()).toBe(200);
     const body = (await stats.json()) as ToolUsageStats;
     expect(body.coverage.total).toBe(0);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { HttpError } from '../src/context.js';
-import { DEFAULT_RANGE_DAYS, MAX_RANGE_DAYS, parseStatsQuery } from '../src/routes/stats/_query.js';
+import { HttpError } from '@haive/shared/module-host';
+import { DEFAULT_RANGE_DAYS, MAX_RANGE_DAYS, parseStatsQuery } from '../src/query.js';
 
 const DAY_MS = 86_400_000;
 const NOW = Date.parse('2026-09-06T12:00:00Z');

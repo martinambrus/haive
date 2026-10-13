@@ -2318,7 +2318,7 @@ export function putModuleSettings(
 // Local mirrors of the /stats response shapes. Web keeps its own copies of API response
 // types rather than importing the @haive/shared barrel (which drags ioredis/dns into the
 // bundle) — the same convention as OpenRouterModelEntry above. Keep in sync with
-// packages/api/src/routes/stats/index.ts.
+// modules/statistics/src/routes.ts.
 
 /** Period-over-period comparison. `changeRatio` is null when there is no baseline to divide
  *  by — growth from zero has no ratio, and `direction` carries the meaning there. */
@@ -2370,7 +2370,7 @@ export interface StatsProviderUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
-  /** The four raw columns above, normalised. Attached by /stats/summary only — the task page's
+  /** The four raw columns above, normalised. Attached by /m/statistics/summary only — the task page's
    *  own copy of this shape does not carry it. */
   tokens: StatsNormalizedTokens;
   costUsd: number;
@@ -2504,11 +2504,11 @@ function statsQueryString(params: StatsQueryParams): string {
 }
 
 export async function getStatsSummary(params: StatsQueryParams = {}): Promise<StatsSummary> {
-  return api.get<StatsSummary>(`/stats/summary${statsQueryString(params)}`);
+  return api.get<StatsSummary>(`/m/statistics/summary${statsQueryString(params)}`);
 }
 
 export async function getStatsTimeline(params: StatsQueryParams = {}): Promise<StatsTimeline> {
-  return api.get<StatsTimeline>(`/stats/timeline${statsQueryString(params)}`);
+  return api.get<StatsTimeline>(`/m/statistics/timeline${statsQueryString(params)}`);
 }
 
 export interface StatsReliability {
@@ -2573,15 +2573,15 @@ export interface StatsEstimates {
 export async function getStatsReliability(
   params: StatsQueryParams = {},
 ): Promise<StatsReliability> {
-  return api.get<StatsReliability>(`/stats/reliability${statsQueryString(params)}`);
+  return api.get<StatsReliability>(`/m/statistics/reliability${statsQueryString(params)}`);
 }
 
 export async function getStatsQuality(params: StatsQueryParams = {}): Promise<StatsQuality> {
-  return api.get<StatsQuality>(`/stats/quality${statsQueryString(params)}`);
+  return api.get<StatsQuality>(`/m/statistics/quality${statsQueryString(params)}`);
 }
 
 export async function getStatsEstimates(params: StatsQueryParams = {}): Promise<StatsEstimates> {
-  return api.get<StatsEstimates>(`/stats/estimates${statsQueryString(params)}`);
+  return api.get<StatsEstimates>(`/m/statistics/estimates${statsQueryString(params)}`);
 }
 
 /** One task's share of the window's agent time.
@@ -2616,7 +2616,7 @@ export interface StatsTaskTime {
 }
 
 export async function getStatsTaskTime(params: StatsQueryParams = {}): Promise<StatsTaskTime> {
-  return api.get<StatsTaskTime>(`/stats/tasks${statsQueryString(params)}`);
+  return api.get<StatsTaskTime>(`/m/statistics/tasks${statsQueryString(params)}`);
 }
 
 export interface StatsPlanRepository {
@@ -2656,7 +2656,7 @@ export interface StatsPlan {
 }
 
 export async function getStatsPlan(params: StatsQueryParams = {}): Promise<StatsPlan> {
-  return api.get<StatsPlan>(`/stats/plan${statsQueryString(params)}`);
+  return api.get<StatsPlan>(`/m/statistics/plan${statsQueryString(params)}`);
 }
 
 /** One step id's share of the window. `agentMs` is summed and never unioned — the busy-span
@@ -2704,7 +2704,7 @@ export interface StatsSteps {
 }
 
 export async function getStatsSteps(params: StatsQueryParams = {}): Promise<StatsSteps> {
-  return api.get<StatsSteps>(`/stats/steps${statsQueryString(params)}`);
+  return api.get<StatsSteps>(`/m/statistics/steps${statsQueryString(params)}`);
 }
 
 /** One capped, ranked list: the rows shown, how many there were, and whether the cap cut any. */
@@ -2836,7 +2836,7 @@ export type StatsUnusedReport =
     };
 
 export async function getStatsToolUsage(params: StatsQueryParams = {}): Promise<StatsToolUsage> {
-  return api.get<StatsToolUsage>(`/stats/tool-usage${statsQueryString(params)}`);
+  return api.get<StatsToolUsage>(`/m/statistics/tool-usage${statsQueryString(params)}`);
 }
 
 /** GET /auth/registration-status — unauthenticated, because an install with no users has nobody
