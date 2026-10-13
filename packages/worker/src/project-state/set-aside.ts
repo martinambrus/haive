@@ -5,6 +5,7 @@ import { schema, type Database } from '@haive/database';
 import { HAIVE_DATA_FILES, logger } from '@haive/shared';
 import {
   readFileNoFollow,
+  lstatNoFollow,
   readdirNoFollow,
   removeFileIfNoFollow,
   removeNoFollow,
@@ -202,6 +203,15 @@ async function modeChanges(
       if (/^0+$/.test(m[1]!) && m[2] === '100644') continue;
       changed.set(fields[i + 1]!, `${side}:${m[1]}>${m[2]}`);
     }
+  }
+  // A path neither HEAD nor the index holds shows its type and mode only on disk.
+  for (const path of paths) {
+    if (changed.has(path) || (await headEntry(repoPath, path)) !== null) continue;
+    if ((await indexEntry(repoPath, path)) !== null) continue;
+    const entry = await lstatNoFollow(repoPath, path).catch(() => null);
+    if (entry === null) continue;
+    if (entry.kind !== 'file') changed.set(path, `tree:${entry.kind}`);
+    else if ((Number(entry.stats.mode) & 0o111) !== 0) changed.set(path, 'tree:executable');
   }
   return changed;
 }
@@ -401,7 +411,7 @@ async function restoreJudged(
   await guard.lock(tx);
   const dirty = await dirtyProjections(repoPath);
   const mine = dirty.paths.filter((path) => guard.owns(path));
-  for (const path of mine) {
+  for (const path of new Set([...mine, ...judged.prints.keys()])) {
     if (judged.prints.get(path) !== (await fingerprint(repoPath, path))) return { changed: path };
   }
   if (judged.generation !== (await guard.generation(tx)))

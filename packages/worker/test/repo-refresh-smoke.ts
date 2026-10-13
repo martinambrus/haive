@@ -1568,6 +1568,30 @@ async function main(): Promise<void> {
         { asideR2, stagedR2 },
       );
 
+      // M4. A projection neither HEAD nor the index holds shows its mode only on disk: an executable
+      // plan.json with Haive's bytes refuses the set-aside and keeps its mode.
+      const m4 = await cloned();
+      const m4Id = m4.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: m4Id, origin: 'user' },
+      );
+      await writePlanMirror(db, m4Id, m4.dest);
+      const m4Plan = path.join(m4.dest, PLAN_REL);
+      await chmod(m4Plan, 0o755);
+      const m4Tracked = git(m4.dest, 'ls-files', '--', PLAN_REL);
+      const asideM4 = await setAsideHaiveProjections(db, m4Id, m4.dest);
+      const m4Mode = ((await stat(m4Plan).catch(() => null))?.mode ?? 0) & 0o777;
+      check(
+        'M4: an untracked executable plan.json refuses the set-aside and keeps its mode',
+        m4Tracked === '' &&
+          asideM4.outcome === 'refused' &&
+          asideM4.file === PLAN_REL &&
+          m4Mode === 0o755,
+        { m4Tracked, asideM4, m4Mode: m4Mode.toString(8) },
+      );
+
       // 11l-2. A mode change is not in the blob id: a staged chmod, or one only in the working tree, on a
       // file holding Haive's bytes is a person's change, and returning the path to HEAD would lose it.
       const indexMode = (dir: string, rel: string) =>
