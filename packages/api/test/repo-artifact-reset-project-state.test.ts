@@ -37,6 +37,9 @@ const PROJECT_DIR = '.haive-data/state/project';
 const STATE_DIR = '.haive-data/state';
 const ARTIFACTS_DIR = '.haive-data/state/artifacts';
 const BUNDLES_DIR = '.haive-data/state/bundles';
+const SETTINGS_DIR = '.haive-data/state/settings';
+const ENVIRONMENT = '.haive-data/state/project/environment.json';
+const setting = (name: string) => `${SETTINGS_DIR}/${name}.json`;
 const AGENT = '.claude/agents/code-reviewer.md';
 const claimFile = (diskPath: string) => `${STATE_DIR}/${claimFileName(diskPath)}`;
 const bundleFile = (source: string) => `${STATE_DIR}/${bundleFileName(source)}`;
@@ -190,6 +193,46 @@ describe('the reset takes back the bundle descriptors of the record', () => {
   });
 });
 
+describe('the reset takes back the settings and the environment of the record', () => {
+  it('removes the environment, every settings file this release writes and the directories that held them', async () => {
+    const root = await repoRoot({
+      [ENVIRONMENT]: '{}\n',
+      [setting('scope-exclude-globs')]: '[]\n',
+      [setting('rtk-enabled')]: 'true\n',
+    });
+
+    const { removed } = await resetOnboardingArtifacts(root, noProvenance);
+
+    for (const rel of [ENVIRONMENT, setting('scope-exclude-globs'), SETTINGS_DIR, STATE_DIR]) {
+      expect(await exists(root, rel), rel).toBe(false);
+      expect(removed, rel).toContain(rel);
+    }
+  });
+
+  it('removes a settings file only the sync base names', async () => {
+    const root = await repoRoot({ [setting('from-a-newer-release')]: '1\n' });
+
+    await resetOnboardingArtifacts(root, {
+      ...noProvenance,
+      settingNames: ['from-a-newer-release'],
+    });
+
+    expect(await exists(root, setting('from-a-newer-release'))).toBe(false);
+    expect(await exists(root, SETTINGS_DIR)).toBe(false);
+    expect(await exists(root, STATE_DIR)).toBe(false);
+  });
+
+  it('leaves a settings file nothing names, and the directories around it', async () => {
+    const root = await repoRoot({ [setting('from-a-newer-release')]: '1\n' });
+
+    const { removed } = await resetOnboardingArtifacts(root, noProvenance);
+
+    expect(await exists(root, setting('from-a-newer-release'))).toBe(true);
+    expect(removed).not.toContain(SETTINGS_DIR);
+    expect(removed).not.toContain(STATE_DIR);
+  });
+});
+
 /** The statements the route's closing transaction makes, against the fake. The provenance query joins
  *  `task_steps` to `tasks`, which the fake has no builder for; a repository with no onboarding run
  *  has no rows to read there. */
@@ -326,6 +369,22 @@ describe('resetting a repository through the route', () => {
     expect(await exists(root, bundleFile(ZIP_SOURCE))).toBe(false);
     expect(await exists(root, bundleFile(BASE_SOURCE))).toBe(false);
     expect(await exists(root, BUNDLES_DIR)).toBe(false);
+    expect(await exists(root, STATE_DIR)).toBe(false);
+  });
+
+  it('takes the settings and the environment off the checkout, the base’s unknown names too, so a later sync finds no record', async () => {
+    const root = await repoRoot({
+      [ENVIRONMENT]: '{}\n',
+      [setting('rtk-enabled')]: 'true\n',
+      [setting('from-a-newer-release')]: '1\n',
+    });
+    await setup(root, { settings: { 'from-a-newer-release': 1 } });
+
+    expect((await reset()).status).toBe(200);
+
+    expect(await exists(root, ENVIRONMENT)).toBe(false);
+    expect(await exists(root, setting('rtk-enabled'))).toBe(false);
+    expect(await exists(root, setting('from-a-newer-release'))).toBe(false);
     expect(await exists(root, STATE_DIR)).toBe(false);
   });
 

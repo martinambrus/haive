@@ -119,6 +119,7 @@ function setup(
 ) {
   const fake = createFakeDb({
     repositories: schema.repositories,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, {

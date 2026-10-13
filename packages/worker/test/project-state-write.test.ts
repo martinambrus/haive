@@ -1295,3 +1295,156 @@ describe('writeProjectStateColumn: a write that fails', () => {
     expect(s.columnOf(REPO)).toEqual(column());
   });
 });
+
+describe('writeProjectStateRecord: the portable settings and the environment', () => {
+  const SETTINGS = `${STATE_DIR}/settings`;
+  const ENVIRONMENT = `${STATE_DIR}/project/environment.json`;
+  const settingFiles = async (root: string) =>
+    (await listFiles(root)).filter((f) => f.startsWith(`${SETTINGS}/`));
+  const read = (root: string, rel: string) =>
+    JSON.parse(readFileSync(join(root, rel), 'utf8')) as unknown;
+  const baseOf = (s: Awaited<ReturnType<typeof setup>>) =>
+    s.syncRows()[0]![s.col.baseSnapshot] as {
+      settings: Record<string, unknown>;
+      environment: unknown;
+    };
+  const setColumns = (s: Awaited<ReturnType<typeof setup>>, values: Record<string, unknown>) =>
+    s.fake.db.update(schema.repositories).set(values).where(eq(schema.repositories.id, REPO));
+  const ENV_MIRROR = {
+    schemaVersion: 1,
+    envDetectData: { project: { name: 'acme' } },
+    confirmedValues: { webserver: 'nginx-fpm' },
+  };
+
+  it('writes one file per setting the repository holds, and carries them in the base', async () => {
+    const s = await setup();
+    await setColumns(s, {
+      scopeExcludeGlobs: ['vendor', 'node_modules'],
+      rtkEnabled: false,
+      rtkVersion: '0.42.4',
+      lspServers: ['vtsls'],
+      lspServerVersions: { vtsls: '1.0.0' },
+      chromeDevtoolsMcpVersion: '0.9.0',
+      reviewDimensions: ['security'],
+    });
+
+    const { written } = await s.writeFull(context(), true);
+
+    expect(await settingFiles(s.root)).toEqual(
+      [
+        'chrome-devtools-mcp-version',
+        'lsp-server-versions',
+        'lsp-servers',
+        'review-dimensions',
+        'rtk-enabled',
+        'rtk-version',
+        'scope-exclude-globs',
+      ].map((name) => `${SETTINGS}/${name}.json`),
+    );
+    expect(read(s.root, `${SETTINGS}/scope-exclude-globs.json`)).toEqual([
+      'node_modules',
+      'vendor',
+    ]);
+    expect(read(s.root, `${SETTINGS}/rtk-enabled.json`)).toBe(false);
+    expect(written).toContain(`${SETTINGS}/rtk-version.json`);
+    expect(Object.keys(baseOf(s).settings).sort()).toHaveLength(7);
+    expect(baseOf(s).settings['rtk-version']).toBe('0.42.4');
+  });
+
+  it('writes no file for a column that holds nothing', async () => {
+    const s = await setup();
+
+    await s.writeFull(context(), true);
+
+    expect(await settingFiles(s.root)).toEqual([]);
+    expect(baseOf(s).settings).toEqual({});
+    expect(baseOf(s).environment).toBeNull();
+  });
+
+  it('never writes the app login or the verify commands', async () => {
+    const s = await setup();
+    await setColumns(s, {
+      scopeExcludeGlobs: ['vendor'],
+      appAuth: { loginUrl: 'https://evil.example/login' },
+      verifyCommands: { test: 'rm -rf /' },
+    });
+
+    await s.writeFull(context(), true);
+
+    const all = await listFiles(s.root);
+    expect(all.filter((f) => /app-auth|verify/.test(f))).toEqual([]);
+    const text = all.map((f) => readFileSync(join(s.root, f), 'utf8')).join('\n');
+    expect(text).not.toMatch(/evil\.example|rm -rf/);
+    expect(JSON.stringify(baseOf(s))).not.toMatch(/evil\.example|rm -rf/);
+  });
+
+  it('removes the file of a setting unset since the last write, and reports it', async () => {
+    const s = await setup();
+    await setColumns(s, { scopeExcludeGlobs: ['vendor'], rtkVersion: '0.42.4' });
+    await s.writeFull(context(), true);
+    await setColumns(s, { scopeExcludeGlobs: null });
+
+    const { written, removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([`${SETTINGS}/scope-exclude-globs.json`]);
+    expect(written).not.toContain(`${SETTINGS}/scope-exclude-globs.json`);
+    expect(await settingFiles(s.root)).toEqual([`${SETTINGS}/rtk-version.json`]);
+    expect(Object.keys(baseOf(s).settings)).toEqual(['rtk-version']);
+  });
+
+  it('leaves a settings file the previous base never named', async () => {
+    const s = await setup();
+    await mkdir(join(s.root, SETTINGS), { recursive: true });
+    await writeFile(join(s.root, `${SETTINGS}/from-a-newer-release.json`), '1\n');
+
+    const { removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([]);
+    expect(await settingFiles(s.root)).toEqual([`${SETTINGS}/from-a-newer-release.json`]);
+  });
+
+  it('writes the environment without its schema version, and removes it once the column is gone', async () => {
+    const s = await setup();
+    await setColumns(s, { onboardingEnvironment: ENV_MIRROR });
+
+    const first = await s.writeFull(context(), true);
+
+    expect(first.written).toContain(ENVIRONMENT);
+    expect(read(s.root, ENVIRONMENT)).toEqual({
+      envDetectData: ENV_MIRROR.envDetectData,
+      confirmedValues: ENV_MIRROR.confirmedValues,
+    });
+    expect(baseOf(s).environment).toEqual({
+      envDetectData: ENV_MIRROR.envDetectData,
+      confirmedValues: ENV_MIRROR.confirmedValues,
+    });
+
+    await setColumns(s, { onboardingEnvironment: null });
+    const second = await s.writeFull(context(), true);
+
+    expect(second.removed).toEqual([ENVIRONMENT]);
+    expect(existsSync(join(s.root, ENVIRONMENT))).toBe(false);
+    expect(baseOf(s).environment).toBeNull();
+  });
+
+  it('writes no environment for a mirror of another schema version', async () => {
+    const s = await setup();
+    await setColumns(s, { onboardingEnvironment: { ...ENV_MIRROR, schemaVersion: 2 } });
+
+    await s.writeFull(context(), true);
+
+    expect(existsSync(join(s.root, ENVIRONMENT))).toBe(false);
+  });
+
+  it('writes the column’s RTK value while the RTK question is pending, and leaves the question pending', async () => {
+    const s = await setup();
+    await setColumns(s, { rtkEnabled: true });
+    s.pend('settings/rtk-enabled.json', { base: true, local: true, incoming: false });
+
+    await s.writeFull(context(), true);
+
+    expect(read(s.root, `${SETTINGS}/rtk-enabled.json`)).toBe(true);
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(row).toMatchObject({ unit: 'settings/rtk-enabled.json', resolvedAt: null });
+  });
+});

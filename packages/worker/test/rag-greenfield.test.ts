@@ -80,6 +80,7 @@ let worktree: string;
 let repo: Record<string, unknown>;
 let onboarding: { id: string } | null;
 let writes: Record<string, unknown>[];
+let marks: unknown[];
 let warnings: Array<string | null>;
 let inserts: unknown[][];
 let order: string[];
@@ -132,6 +133,7 @@ beforeEach(async () => {
   priorSteps = new Map();
   executionPath = 'full_workflow';
   writes = [];
+  marks = [];
   warnings = [];
   inserts = [];
   order = [];
@@ -245,6 +247,15 @@ beforeEach(async () => {
         },
       },
     },
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
+    insert: (table: unknown) => ({
+      values: (values: unknown) => ({
+        onConflictDoUpdate: async () => {
+          if (table === schema.projectStateOutbox) marks.push(values);
+          return [];
+        },
+      }),
+    }),
     // Scope and plan-link queries have no rows for this new repository.
     select: () => ({
       from: (table: unknown) => ({
@@ -451,6 +462,7 @@ describe('greenfield RAG initialization at 11c', () => {
       ]),
     );
     expect(writes).toHaveLength(1);
+    expect(marks).toEqual([expect.objectContaining({ repositoryId: 'repo-1' })]);
     expect(mocks.ensure).toHaveBeenCalledOnce();
     expect(mocks.close).toHaveBeenCalledOnce();
     const search = await resolveTaskStackContext(ctx.db, 'later-task');

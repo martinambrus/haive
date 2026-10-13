@@ -38,6 +38,7 @@ import {
   type RepoJobPayload,
 } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
 import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
@@ -211,6 +212,13 @@ async function importHaiveDataMirror(
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(schema.repositories.id, repositoryId));
     if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, null);
+    if (
+      updates.scopeExcludeGlobs !== undefined ||
+      updates.rtkEnabled !== undefined ||
+      updates.onboardingEnvironment !== undefined
+    ) {
+      await markProjectStateDirty(tx, repositoryId);
+    }
   });
   logger.info(
     { repositoryId, imported: Object.keys(updates) },

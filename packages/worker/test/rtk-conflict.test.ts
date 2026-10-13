@@ -81,6 +81,7 @@ function setup(
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     projectStateConflicts: schema.projectStateConflicts,
+    projectStateOutbox: schema.projectStateOutbox,
   });
   for (const r of repos) {
     fake.insert(schema.repositories, {

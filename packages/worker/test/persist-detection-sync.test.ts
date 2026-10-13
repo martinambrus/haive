@@ -41,7 +41,10 @@ describe('persistDetection and the project state sync', () => {
         join(root, '.haive-data/exclusions.json'),
         '{"schemaVersion":1,"scopeExcludeGlobs":["vendor/**"]}',
       );
-      const fake = createFakeDb({ repositories: schema.repositories });
+      const fake = createFakeDb({
+        repositories: schema.repositories,
+        projectStateOutbox: schema.projectStateOutbox,
+      });
       fake.insert(schema.repositories, {
         id: REPO,
         userId: USER,
@@ -82,7 +85,10 @@ describe('persistDetection and a plan snapshot it leaves alone', () => {
   ] as const)('%s, worded "%s": recorded as an error = %s', async (code, reason, recorded) => {
     const root = await mkdtemp(join(tmpdir(), 'persist-detection-'));
     dirs.push(root);
-    const fake = createFakeDb({ repositories: schema.repositories });
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      projectStateOutbox: schema.projectStateOutbox,
+    });
     fake.insert(schema.repositories, {
       id: REPO,
       userId: USER,

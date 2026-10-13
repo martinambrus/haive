@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { logger } from '@haive/shared';
 import type { TreeNode } from '@haive/shared';
 import { KB_DIR, LEARNINGS_DIR, MANAGED_KNOWLEDGE_BADGE } from '@haive/shared/knowledge-paths';
@@ -83,5 +85,44 @@ describe('09_7-rag-source-selection apply', () => {
     })) as { excludeGlobs: string[] };
 
     expect(out.excludeGlobs).toEqual(['vendor']);
+  });
+});
+
+describe('09_7-rag-source-selection apply and the project state record', () => {
+  const USER = '00000000-0000-4000-8000-0000000000a1';
+  const TASK = '00000000-0000-4000-8000-0000000000c1';
+  const REPO = '00000000-0000-4000-8000-0000000000b1';
+  const OTHER = '00000000-0000-4000-8000-0000000000b2';
+
+  it('stores the deny list and marks the record of that repository dirty', async () => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      repositories: schema.repositories,
+      projectStateOutbox: schema.projectStateOutbox,
+    });
+    for (const id of [REPO, OTHER]) {
+      fake.insert(schema.repositories, { id, userId: USER, name: id, source: 'blank' });
+    }
+    fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO });
+
+    await ragSourceSelectionStep.apply({ ...fakeCtx(), db: fake.db, taskId: TASK } as never, {
+      iteration: 0,
+      previousIterations: [],
+      detected: {
+        framework: null,
+        tree: TREE,
+        defaultExcludeGlobs: [],
+        extensionSet: ['.ts'],
+        totalCodeFiles: 912,
+      },
+      formValues: { selectedDirs: SELECTED },
+    });
+
+    expect(fake.rows(schema.repositories).find((r) => r.id === REPO)?.scopeExcludeGlobs).toEqual([
+      'vendor',
+    ]);
+    expect(fake.rows(schema.projectStateOutbox)).toEqual([
+      expect.objectContaining({ repositoryId: REPO, revision: 1, writtenRevision: 0 }),
+    ]);
   });
 });

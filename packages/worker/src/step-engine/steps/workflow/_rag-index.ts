@@ -14,6 +14,7 @@ import {
 } from '@haive/shared/knowledge-paths';
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import { fenceRagStore, type RagSyncLock } from '@haive/shared/rag';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import type { StepContext } from '../../step-definition.js';
 import { acquireRepoRagSyncLock } from '../_rag-sync-lock.js';
 import { gitRun } from '../../../repo/git-push.js';
@@ -378,6 +379,7 @@ export async function initializeRagSyncPrefs(
     columns: { repositoryId: true },
   });
   if (!task?.repositoryId || !detected.ragToolingPrefs) return resolveRagSyncPrefs(ctx);
+  const repositoryId = task.repositoryId;
 
   const tooling: OnboardingToolingMirror = {
     schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
@@ -388,24 +390,27 @@ export async function initializeRagSyncPrefs(
     envDetectData: { project: { name: detected.projectName } },
     confirmedValues: {},
   };
-  await ctx.db
-    .update(schema.repositories)
-    .set({
-      onboardingTooling: tooling as unknown as Record<string, unknown>,
-      onboardingEnvironment: environment as unknown as Record<string, unknown>,
-    })
-    .where(
-      and(
-        eq(schema.repositories.id, task.repositoryId),
-        eq(schema.repositories.source, 'blank'),
-        isNull(schema.repositories.onboardingTooling),
-        isNull(schema.repositories.onboardingEnvironment),
-        isNull(schema.repositories.onboardingResetAt),
-        sql`NOT EXISTS (SELECT 1 FROM ${schema.tasks}
-        WHERE ${schema.tasks.repositoryId} = ${task.repositoryId}
+  await ctx.db.transaction(async (tx) => {
+    await tx
+      .update(schema.repositories)
+      .set({
+        onboardingTooling: tooling as unknown as Record<string, unknown>,
+        onboardingEnvironment: environment as unknown as Record<string, unknown>,
+      })
+      .where(
+        and(
+          eq(schema.repositories.id, repositoryId),
+          eq(schema.repositories.source, 'blank'),
+          isNull(schema.repositories.onboardingTooling),
+          isNull(schema.repositories.onboardingEnvironment),
+          isNull(schema.repositories.onboardingResetAt),
+          sql`NOT EXISTS (SELECT 1 FROM ${schema.tasks}
+        WHERE ${schema.tasks.repositoryId} = ${repositoryId}
           AND ${schema.tasks.type} = 'onboarding')`,
-      ),
-    );
+        ),
+      );
+    await markProjectStateDirty(tx, repositoryId);
+  });
   return resolveRagSyncPrefs(ctx);
 }
 

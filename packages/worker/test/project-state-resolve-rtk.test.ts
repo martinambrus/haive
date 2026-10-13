@@ -19,6 +19,7 @@ function setup(over: { rtkEnabled?: boolean; incoming?: unknown } = {}) {
     repositories: schema.repositories,
     projectStateSync: schema.projectStateSync,
     projectStateConflicts: schema.projectStateConflicts,
+    projectStateOutbox: schema.projectStateOutbox,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     onboardingArtifacts: schema.onboardingArtifacts,
@@ -52,7 +53,8 @@ function setup(over: { rtkEnabled?: boolean; incoming?: unknown } = {}) {
     resolveProjectStateConflict(db, { repositoryId: REPO, userId, conflictId: id, answer: a });
   const repo = () => fake.rows(schema.repositories)[0]!;
   const row = () => fake.rows(schema.projectStateConflicts)[0]!;
-  return { fake, id, answer, repo, row };
+  const outbox = () => fake.rows(schema.projectStateOutbox);
+  return { fake, id, answer, repo, row, outbox };
 }
 
 describe('answering the RTK question: take theirs', () => {
@@ -129,6 +131,30 @@ describe('answering the RTK question: keep mine', () => {
     expect(await s.answer('keep_mine')).toEqual(first);
     expect(await s.answer('take_theirs')).toEqual({ kind: 'settled', resolution: 'keep_mine' });
     expect(s.repo().rtkEnabled).toBe(true);
+  });
+});
+
+describe('answering the RTK question: the record', () => {
+  it.each(['take_theirs', 'keep_mine'] as const)(
+    'marks the project state record dirty on %s, once',
+    async (answer) => {
+      const s = setup();
+
+      await s.answer(answer);
+      await s.answer(answer);
+
+      expect(s.outbox()).toEqual([
+        expect.objectContaining({ repositoryId: REPO, revision: 1, writtenRevision: 0 }),
+      ]);
+    },
+  );
+
+  it('marks nothing for an answer that is refused', async () => {
+    const s = setup({ incoming: 'off' });
+
+    await s.answer('take_theirs');
+
+    expect(s.outbox()).toEqual([]);
   });
 });
 

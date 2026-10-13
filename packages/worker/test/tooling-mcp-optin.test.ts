@@ -35,7 +35,11 @@ async function fixture() {
   const writeServers = (servers: Record<string, unknown>) =>
     writeFile(settings, JSON.stringify({ mcpServers: { ...managed, ...servers } }));
   await writeServers({ postgres });
-  const fake = createFakeDb({ tasks: schema.tasks, repositories: schema.repositories });
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    repositories: schema.repositories,
+    projectStateOutbox: schema.projectStateOutbox,
+  });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'r', onboardingTooling: null });
   fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO });
   const noop = () => undefined;

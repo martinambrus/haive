@@ -8,6 +8,7 @@ import {
   sha256Hex,
 } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import type { DetectResult, FormSchema, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { DEFAULT_MCP_SETTINGS_JSON, mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
@@ -512,6 +513,7 @@ export const toolingInfrastructureStep: StepDefinition<
           })
           .where(eq(schema.repositories.id, repositoryId));
         if (!rtkEnabled) await convergeRtkQuestion(tx, repositoryId, ctx.userId);
+        await markProjectStateDirty(tx, repositoryId);
       });
     } else {
       ctx.logger.warn(

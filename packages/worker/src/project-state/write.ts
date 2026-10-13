@@ -10,18 +10,23 @@ import {
   conflictSide,
   conflictSideValue,
   emptyProjectState,
+  environmentUnitOf,
   isClaimablePath,
   isClaimUnit,
   isRenderUnit,
   sameValue,
   normalizeProjectState,
+  isRecordName,
   portableBundleSource,
   portableRender,
+  portableSettingsOf,
+  settingFileName,
   portableTemplateId,
   recordReadable,
   renderContextColumnSchema,
   renderProjectState,
   type NamedLocalBundle,
+  type ProjectEnvironment,
   type ProjectRender,
   type ProjectStateBundle,
   type ProjectStateClaim,
@@ -62,11 +67,19 @@ interface Look {
   pendingClaims: PendingClaimConflict[];
   claims: ProjectStateClaim[];
   bundles: ProjectStateBundle[];
+  settings: Record<string, unknown>;
+  environment: ProjectEnvironment | null;
   baseFiles: string[];
 }
 
-const OWNED_FILE_PREFIXES = [`${PROJECT_STATE_DIR}/artifacts/`, `${PROJECT_STATE_DIR}/bundles/`];
-const isOwnedFile = (path: string): boolean => OWNED_FILE_PREFIXES.some((p) => path.startsWith(p));
+const ENVIRONMENT_FILE = `${PROJECT_STATE_DIR}/project/environment.json`;
+const OWNED_FILE_PREFIXES = [
+  `${PROJECT_STATE_DIR}/artifacts/`,
+  `${PROJECT_STATE_DIR}/bundles/`,
+  `${PROJECT_STATE_DIR}/settings/`,
+];
+const isOwnedFile = (path: string): boolean =>
+  path === ENVIRONMENT_FILE || OWNED_FILE_PREFIXES.some((p) => path.startsWith(p));
 
 /** The column moved past what the writer planned against, so its record would undo a newer one. */
 export class ProjectStateMovedError extends Error {
@@ -297,8 +310,8 @@ export async function loadRecordClaims(
   return claims;
 }
 
-/** The files the sync base names, claims and bundle descriptors: the ones this install holds,
- *  whoever wrote them. */
+/** The files the sync base names, claims, bundle descriptors, settings and the environment: the
+ *  ones this install holds, whoever wrote them. */
 async function loadBase(
   db: Database | Tx,
   repositoryId: string,
@@ -308,8 +321,20 @@ async function loadBase(
     .from(schema.projectStateSync)
     .where(eq(schema.projectStateSync.repositoryId, repositoryId))
     .limit(1);
-  const snapshot = row?.baseSnapshot as { claims?: unknown; bundles?: unknown } | null | undefined;
+  const snapshot = row?.baseSnapshot as
+    | { claims?: unknown; bundles?: unknown; settings?: unknown; environment?: unknown }
+    | null
+    | undefined;
   const files: string[] = [];
+  const settings = snapshot?.settings;
+  if (settings !== null && typeof settings === 'object' && !Array.isArray(settings)) {
+    for (const name of Object.keys(settings)) {
+      if (isRecordName(name)) files.push(`${PROJECT_STATE_DIR}/${settingFileName(name)}`);
+    }
+  }
+  if (snapshot?.environment !== null && typeof snapshot?.environment === 'object') {
+    files.push(ENVIRONMENT_FILE);
+  }
   if (Array.isArray(snapshot?.claims)) {
     for (const claim of snapshot.claims) {
       const path = (claim as { path?: unknown } | null)?.path;
@@ -381,19 +406,39 @@ export async function writeProjectStateColumn(
         render: overlayRender(portable, look.pending, 'incoming'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'incoming'),
         bundles: look.bundles,
+        settings: look.settings,
+        environment: look.environment,
       },
       baseSnapshot: normalizeProjectState({
         ...emptyProjectState(),
         render: overlayRender(portable, look.pending, 'base'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'base'),
         bundles: look.bundles,
+        settings: look.settings,
+        environment: look.environment,
       }),
     });
     const lookAt = async (reader: Database | Tx): Promise<Look> => {
       const pendingClaims = await loadPendingClaimConflicts(reader, repositoryId);
       const claims = await loadRecordClaims(reader, repositoryId);
       const base = await loadBase(reader, repositoryId);
+      const [repo] = await reader
+        .select({
+          scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
+          rtkEnabled: schema.repositories.rtkEnabled,
+          rtkVersion: schema.repositories.rtkVersion,
+          lspServers: schema.repositories.lspServers,
+          lspServerVersions: schema.repositories.lspServerVersions,
+          chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
+          reviewDimensions: schema.repositories.reviewDimensions,
+          onboardingEnvironment: schema.repositories.onboardingEnvironment,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
       return {
+        settings: repo ? portableSettingsOf(repo) : emptyProjectState().settings,
+        environment: repo ? environmentUnitOf(repo.onboardingEnvironment) : null,
         pending: await loadPendingRenderConflicts(reader, repositoryId),
         pendingClaims,
         claims,
@@ -408,7 +453,15 @@ export async function writeProjectStateColumn(
     // A first look only, so its failure must not clear the column: the files then wait for the locked read.
     let seen: Look | null = expectedColumns ? null : await lookAt(db).catch(() => null);
     let plan = planFor(
-      seen ?? { pending: [], pendingClaims: [], claims: [], bundles: [], baseFiles: [] },
+      seen ?? {
+        pending: [],
+        pendingClaims: [],
+        claims: [],
+        bundles: [],
+        settings: emptyProjectState().settings,
+        environment: null,
+        baseFiles: [],
+      },
     );
     const writeFiles = async (baseFiles: readonly string[]): Promise<void> => {
       const files = renderProjectState(plan.record);

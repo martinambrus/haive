@@ -16,6 +16,7 @@ import {
   type ToolName,
 } from '@haive/shared';
 import { rtkEnabledUpdate, convergeRtkQuestion } from '@haive/shared/rtk-enabled';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import {
   RAG_TABLE,
   openExistingRagDatabase,
@@ -244,15 +245,18 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   // staleDockerfile check re-renders + rebuilds the env image (and the composed
   // image rebuilds on its hash change). No eager build is triggered.
   if (applied.length > 0) {
-    await db
-      .update(schema.repositories)
-      .set({
-        rtkVersion: nextRtk,
-        lspServerVersions: nextLsp,
-        chromeDevtoolsMcpVersion: nextChrome,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.repositories.id, repositoryId));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.repositories)
+        .set({
+          rtkVersion: nextRtk,
+          lspServerVersions: nextLsp,
+          chromeDevtoolsMcpVersion: nextChrome,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.repositories.id, repositoryId));
+      await markProjectStateDirty(tx, repositoryId);
+    });
   }
 
   return c.json({ repositoryId, applied, rebuildOnNextTask: applied.length > 0 });
@@ -632,6 +636,15 @@ function normalizeAppAuth(raw: unknown): typeof schema.repositories.$inferInsert
     : null;
 }
 
+const PORTABLE_SETTING_UPDATE_KEYS = [
+  'rtkEnabled',
+  'rtkVersion',
+  'lspServers',
+  'lspServerVersions',
+  'chromeDevtoolsMcpVersion',
+  'reviewDimensions',
+] as const;
+
 /** Update per-repo tooling: enable/disable RTK + LSP servers and pin versions.
  *  Only writes repo columns; the env image rebuilds on the next task (via
  *  01-declare-deps re-injection). Disabling RTK flips rtk_enabled; the upgrade
@@ -870,6 +883,9 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         .set(updates)
         .where(eq(schema.repositories.id, repositoryId));
       if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, userId);
+      if (PORTABLE_SETTING_UPDATE_KEYS.some((key) => key in updates)) {
+        await markProjectStateDirty(tx, repositoryId);
+      }
     });
     // A sync can write fallback rows between the probe and the clear; look once more after it.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {

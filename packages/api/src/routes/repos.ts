@@ -65,11 +65,14 @@ import {
   type ArchiveFormat,
 } from '@haive/shared';
 import {
+  PORTABLE_SETTING_NAMES,
   PROJECT_STATE_DIR,
   bundleFileName,
   claimFileName,
   isClaimablePath,
+  isRecordName,
   portableBundleSource,
+  settingFileName,
 } from '@haive/shared/project-state';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { parseScpLikeGitUrl } from '@haive/shared/schemas';
@@ -80,6 +83,7 @@ import {
   trimGlobSlashes,
   tagManagedKnowledgeNodes,
 } from '@haive/shared/knowledge-paths';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
@@ -935,11 +939,15 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     Array.from(new Set(body.scopeExcludeGlobs.map(trimGlobSlashes).filter((p) => p.length > 0))),
   ).sort();
 
-  const updated = await db
-    .update(schema.repositories)
-    .set({ scopeExcludeGlobs, updatedAt: new Date() })
-    .where(eq(schema.repositories.id, id))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    const rows = await tx
+      .update(schema.repositories)
+      .set({ scopeExcludeGlobs, updatedAt: new Date() })
+      .where(eq(schema.repositories.id, id))
+      .returning();
+    await markProjectStateDirty(tx, id);
+    return rows;
+  });
   const { fileTree: _drop, ...rest } = updated[0]!;
   return c.json({ repository: rest });
 });
@@ -1570,6 +1578,7 @@ const ONBOARDING_RESET_FILES = [
   INSTALL_MANIFEST_PATH,
   `${PROJECT_STATE_DIR}/format.json`,
   `${PROJECT_STATE_DIR}/project/render.json`,
+  `${PROJECT_STATE_DIR}/project/environment.json`,
 ];
 
 /** What the record files above leave behind, and removed only once empty: a file somebody put
@@ -1578,6 +1587,7 @@ const ONBOARDING_RESET_EMPTY_DIRS = [
   `${PROJECT_STATE_DIR}/project`,
   `${PROJECT_STATE_DIR}/artifacts`,
   `${PROJECT_STATE_DIR}/bundles`,
+  `${PROJECT_STATE_DIR}/settings`,
   PROJECT_STATE_DIR,
 ];
 
@@ -1913,6 +1923,8 @@ export interface OnboardingResetProvenance {
   haiveEntries: ReadonlyMap<string, string | null>;
   /** The sources of the bundle descriptors the record holds: the sync base's and the local bundles'. */
   bundleSources?: readonly string[];
+  /** The names of the settings files the sync base holds, beside the ones this release writes. */
+  settingNames?: readonly string[];
 }
 
 /**
@@ -2389,6 +2401,9 @@ export async function resetOnboardingArtifacts(
   for (const source of provenance.bundleSources ?? []) {
     await remove(`${PROJECT_STATE_DIR}/${bundleFileName(source)}`, false);
   }
+  for (const name of new Set([...PORTABLE_SETTING_NAMES, ...(provenance.settingNames ?? [])])) {
+    await remove(`${PROJECT_STATE_DIR}/${settingFileName(name)}`, false);
+  }
   for (const rel of ONBOARDING_RESET_EMPTY_DIRS) await removeIfEmpty(rel);
 
   for (const rel of ONBOARDING_RULES_FILES) {
@@ -2829,7 +2844,14 @@ async function runOnboardingArtifactReset(
     .from(schema.projectStateSync)
     .where(eq(schema.projectStateSync.repositoryId, id))
     .limit(1);
-  const baseBundles = (syncRow?.baseSnapshot as { bundles?: unknown } | null | undefined)?.bundles;
+  const baseRecord = syncRow?.baseSnapshot as
+    { bundles?: unknown; settings?: unknown } | null | undefined;
+  const baseBundles = baseRecord?.bundles;
+  const baseSettings = baseRecord?.settings;
+  const settingNames =
+    baseSettings !== null && typeof baseSettings === 'object' && !Array.isArray(baseSettings)
+      ? Object.keys(baseSettings).filter(isRecordName)
+      : [];
   const localBundles = await db
     .select({
       name: schema.customBundles.name,
@@ -2852,6 +2874,7 @@ async function runOnboardingArtifactReset(
       haiveDirs: written.dirs,
       haiveEntries: written.entries,
       bundleSources: [...bundleSources],
+      settingNames,
     },
   );
 

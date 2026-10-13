@@ -2,6 +2,7 @@ import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { rtkEnabledUpdate } from '@haive/shared/rtk-enabled';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { isUtf8 } from 'node:buffer';
 import {
   isPathContainmentError,
@@ -161,7 +162,7 @@ async function putBackIfPending(db: Database, conflictId: string, putBack: PutBa
 }
 
 /** Keep mine leaves the column; take theirs switches RTK off as the tooling page does. No file is
- *  written: the question names a setting, not a record file. */
+ *  written here: the question names a setting, and the sweep brings the record file to the column. */
 async function answerRtkQuestion(
   tx: Tx,
   {
@@ -184,6 +185,7 @@ async function answerRtkQuestion(
       .set(rtkEnabledUpdate(incoming))
       .where(eq(schema.repositories.id, repositoryId));
   }
+  await markProjectStateDirty(tx, repositoryId);
   const now = new Date();
   const [closed] = await tx
     .update(schema.projectStateConflicts)
