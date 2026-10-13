@@ -478,6 +478,11 @@ export async function setAsideHaiveProjections(
   fence?: CheckoutFence,
 ): Promise<SetAsideResult> {
   const restored = new Set<string>();
+  // A stop after one domain was restored writes that domain back, since no move follows.
+  const stop = async (result: SetAsideResult): Promise<SetAsideResult> => {
+    if (restored.size > 0) await resyncHaiveProjections(db, repositoryId, repoPath);
+    return result;
+  };
   let busy = '';
   for (let attempt = 1; attempt <= MOVE_ATTEMPTS; attempt++) {
     const result = await setAsideOnce(db, repositoryId, repoPath, restored, fence);
@@ -485,13 +490,12 @@ export async function setAsideHaiveProjections(
       if (result.outcome === 'clean' && restored.size > 0) {
         return { outcome: 'set-aside', paths: [...restored].sort() };
       }
-      return result;
+      return result.outcome === 'held' || result.outcome === 'refused' ? stop(result) : result;
     }
     busy = result.changed;
   }
-  return refuse(
-    busy,
-    'was rewritten again while it was set aside; the move was not attempted, retry',
+  return stop(
+    refuse(busy, 'was rewritten again while it was set aside; the move was not attempted, retry'),
   );
 }
 

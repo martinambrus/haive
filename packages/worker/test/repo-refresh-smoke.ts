@@ -804,6 +804,46 @@ async function main(): Promise<void> {
       );
     }
 
+    // 11e2. A task that starts after the state files were set aside and before the plan's were: the held
+    // result puts the state files back, so the task finds Haive's projections as they were.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const target = path.join(c.dest, RENDER_REL);
+      const before = await readFile(target);
+      const headRender = execFileSync('git', ['show', `HEAD:${RENDER_REL}`], {
+        cwd: c.dest,
+        env: gitEnv,
+      });
+      let started = false;
+      const aside = await setAsideHaiveProjections(db, id, c.dest, async (conn) => {
+        if (!started && (await readFile(target)).equals(headRender)) {
+          started = true;
+          await db.insert(schema.tasks).values({
+            userId,
+            repositoryId: id,
+            type: 'workflow',
+            title: 'repo-refresh-smoke',
+            status: 'running',
+          });
+        }
+        return checkoutHoldingTasks(conn, id);
+      });
+      const after = await readFile(target);
+      await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      check(
+        'a task that starts between the state and the plan set-aside gets the state files put back',
+        aside.outcome === 'held' && started && after.equals(before),
+        { aside, started, atHead: after.equals(headRender) },
+      );
+    }
+
     // 11f. A conflict is pending on a render key: the writer renders the incoming side into the file and
     // the base side into the sync base, and the file it wrote is still Haive's, so the move is not refused.
     for (const via of ['refresh', '00a'] as const) {
