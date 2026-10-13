@@ -689,6 +689,7 @@ export async function importPlanMirror(
           syncedSnapshot: mirror,
         },
       });
+    await assertCheckoutStillHolds(storagePath, rawBytes);
   });
 
   logger.info(
@@ -747,11 +748,17 @@ export async function reconcilePlanFromCheckout(
     }
     if (bytes === null) return noOutcome(NO_SNAPSHOT);
     const outcome = await reconcilePlanLocked(tx, repositoryId, bytes, opts);
-    // The lock does not hold git off the checkout; what was read must still be there to commit.
-    const now = await readPlanJson(repoPath);
-    if (!Buffer.isBuffer(now) || !now.equals(bytes)) throw new PlanMirrorHeldError(HELD_MOVED);
+    await assertCheckoutStillHolds(repoPath, bytes);
     return outcome;
   });
+}
+
+/** The lock does not hold git off the checkout: what was read must still be there, and no merge or
+ *  rebase may have opened since, or the bytes read in may be ones an abort takes back. */
+async function assertCheckoutStillHolds(repoPath: string, bytes: Buffer): Promise<void> {
+  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  const now = await readPlanJson(repoPath);
+  if (!Buffer.isBuffer(now) || !now.equals(bytes)) throw new PlanMirrorHeldError(HELD_MOVED);
 }
 
 const UNRELATED_ROOT =

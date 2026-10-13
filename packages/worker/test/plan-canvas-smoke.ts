@@ -3026,6 +3026,26 @@ async function main(): Promise<void> {
     { asking: await asking, raceRows },
   );
 
+  // A merge opened while the reconcile waits holds it: an abort could take back what it read.
+  await git(sDir, ['init', '-q', '-b', 'main']);
+  let duringMerge: Promise<string> | undefined;
+  await db.transaction(async (edit) => {
+    await edit.select().from(schema.planNodes).where(eq(schema.planNodes.id, pId)).for('update');
+    duringMerge = arrive(retitled(theirs, pId, 'P while merging')).then(
+      () => 'merged',
+      (err: Error) => err.message,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await writeFile(path.join(sDir, '.git', 'MERGE_HEAD'), `${'0'.repeat(40)}\n`);
+  });
+  check(
+    'three-way: a merge that opens during the reconcile holds it before it commits',
+    /merge or rebase/.test((await duringMerge) ?? '') &&
+      (await sNode(pId))?.title !== 'P while merging',
+    { duringMerge: await duringMerge, title: (await sNode(pId))?.title },
+  );
+  await rm(path.join(sDir, '.git'), { recursive: true, force: true });
+
   // Deleting the plan closes its questions and drops the base.
   await editS(pId, { title: 'P local 3' });
   await arrive(retitled(theirs, pId, 'P by A 3'));
@@ -3069,6 +3089,30 @@ async function main(): Promise<void> {
     { askedAgain, afterWipe },
   );
   await db.delete(schema.repositories).where(eq(schema.repositories.id, sId));
+
+  const mergingDir = path.join(holdRoot, 'import-merging');
+  await mkdir(path.dirname(path.join(mergingDir, HAIVE_DATA_FILES.plan)), { recursive: true });
+  await writeFile(path.join(mergingDir, HAIVE_DATA_FILES.plan), beforeWipe);
+  await git(mergingDir, ['init', '-q', '-b', 'main']);
+  await writeFile(path.join(mergingDir, '.git', 'MERGE_HEAD'), `${'0'.repeat(40)}\n`);
+  const [mergingRepo] = await db
+    .insert(schema.repositories)
+    .values({ userId, name: 'plan-import-merging', source: 'blank', status: 'ready' })
+    .returning();
+  const mergingImport = await importPlanMirror(db, mergingRepo!.id, mergingDir).then(
+    () => 'imported',
+    (err: Error) => err.message,
+  );
+  const mergingNodes = await db
+    .select({ id: schema.planNodes.id })
+    .from(schema.planNodes)
+    .where(eq(schema.planNodes.repositoryId, mergingRepo!.id));
+  check(
+    'an import while a merge is open reads nothing in',
+    /merge or rebase/.test(mergingImport) && mergingNodes.length === 0,
+    { mergingImport, nodes: mergingNodes.length },
+  );
+  await db.delete(schema.repositories).where(eq(schema.repositories.id, mergingRepo!.id));
 
   await db.delete(schema.repositories).where(eq(schema.repositories.id, holdId));
   await rm(holdRoot, { recursive: true, force: true }).catch(() => {});
