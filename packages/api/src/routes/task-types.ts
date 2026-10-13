@@ -20,6 +20,9 @@ import { HttpError, type AppEnv } from '../context.js';
 
 const log = logger.child({ module: 'task-types' });
 
+/** Workers cannot give a custom type a scratch workspace yet (P7), so it must name a repository. */
+const REPO_LESS_UNSUPPORTED = 'Custom task types without a repository are not supported yet';
+
 const BUILTIN_SLUGS: ReadonlySet<string> = new Set(schema.workflowTypeEnum.enumValues);
 
 type Db = ReturnType<typeof getDb>;
@@ -93,11 +96,15 @@ async function findDefinition(db: Db, slug: string): Promise<DefinitionRow | und
 
 const BUILTIN_FIELDS = ['displayName', 'description', 'sortOrder'];
 const MODULE_FIELDS = ['enabled', 'sortOrder', 'displayName'];
+/** The New Task page infers these from the repository's onboarding state, so neither may be switched off. */
+const ENABLE_LOCKED_BUILTINS: ReadonlySet<string> = new Set(['onboarding', 'workflow']);
 
 function allowedFields(row: DefinitionRow): string[] | null {
   if (row.source === 'admin') return null;
   if (row.source === 'builtin')
-    return row.selectable ? [...BUILTIN_FIELDS, 'enabled'] : BUILTIN_FIELDS;
+    return row.selectable && !ENABLE_LOCKED_BUILTINS.has(row.slug)
+      ? [...BUILTIN_FIELDS, 'enabled']
+      : BUILTIN_FIELDS;
   return MODULE_FIELDS;
 }
 
@@ -167,6 +174,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
     throw new HttpError(409, 'That slug belongs to a built-in type');
   }
   const body = customTaskTypeCreateSchema.parse(raw);
+  if (body.requiresRepository === false) throw new HttpError(400, REPO_LESS_UNSUPPORTED);
   const db = getDb();
   if (await findDefinition(db, body.slug)) throw new HttpError(409, 'That slug is already taken');
   const catalog = await loadCatalog(db);
@@ -210,6 +218,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
 adminTaskTypeRoutes.patch('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const body = taskTypeUpdateSchema.parse(await c.req.json());
+  if (body.requiresRepository === false) throw new HttpError(400, REPO_LESS_UNSUPPORTED);
   const db = getDb();
   const row = await findDefinition(db, slug);
   if (!row) throw new HttpError(404, 'Task type not found');

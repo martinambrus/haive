@@ -121,7 +121,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       .where(like(schema.taskTypeDefinitions.slug, 'tt-%'));
     await db
       .delete(schema.taskTypeDefinitions)
-      .where(inArray(schema.taskTypeDefinitions.slug, ['workflow', 'plan_merge']));
+      .where(inArray(schema.taskTypeDefinitions.slug, ['workflow', 'plan_merge', 'run_app']));
     await db.delete(schema.auditEvents).where(eq(schema.auditEvents.targetType, 'task_type'));
   };
   const seedCatalog = async () => {
@@ -314,9 +314,29 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       );
       expect((await row('plan_merge'))?.enabled).toBe(true);
       expect((await send('PATCH', '/admin/task-types/workflow', { enabled: false })).status).toBe(
+        400,
+      );
+      expect((await row('workflow'))?.enabled).toBe(true);
+      await db.insert(schema.taskTypeDefinitions).values(builtin('run_app', { sortOrder: 3 }));
+      expect((await send('PATCH', '/admin/task-types/run_app', { enabled: false })).status).toBe(
         200,
       );
-      expect((await row('workflow'))?.enabled).toBe(false);
+      expect((await row('run_app'))?.enabled).toBe(false);
+    });
+
+    it('refuses a custom type without a repository until workers support one', async () => {
+      const res = await send(
+        'POST',
+        '/admin/task-types',
+        valid('tt-norepo', { requiresRepository: false }),
+      );
+      expect(res.status).toBe(400);
+      expect(await row('tt-norepo')).toBeUndefined();
+      expect((await send('POST', '/admin/task-types', valid('tt-repo'))).status).toBe(201);
+      expect(
+        (await send('PATCH', '/admin/task-types/tt-repo', { requiresRepository: false })).status,
+      ).toBe(400);
+      expect((await row('tt-repo'))?.requiresRepository).toBe(true);
     });
 
     it('edits a custom type, revalidating the composition and the defaults', async () => {
@@ -334,7 +354,6 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       const ok = await send('PATCH', '/admin/task-types/tt-edit', {
         stepIds: ['ta-a'],
         displayName: 'Edited',
-        requiresRepository: false,
         enabled: false,
         selectable: false,
       });
@@ -342,7 +361,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect(await row('tt-edit')).toMatchObject({
         stepIds: ['ta-a'],
         displayName: 'Edited',
-        requiresRepository: false,
+        requiresRepository: true,
         enabled: false,
         selectable: false,
         source: 'admin',
