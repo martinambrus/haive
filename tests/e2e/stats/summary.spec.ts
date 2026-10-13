@@ -48,7 +48,7 @@ test.describe('statistics', () => {
       ],
     );
 
-    const res = await page.request.get(`${API_BASE}/stats/summary`);
+    const res = await page.request.get(`${API_BASE}/m/statistics/summary`);
     expect(res.status()).toBe(200);
     const body = (await res.json()) as {
       spend: { realUsd: number; invocations: number };
@@ -78,7 +78,7 @@ test.describe('statistics', () => {
     // The scoping is a join predicate rather than a filter applied afterwards, so it is worth
     // an assertion of its own: a stats page that leaked across accounts would leak spend.
     await users.register(strangerCtx, { prefix: 'stats-stranger' });
-    const res = await strangerCtx.get(`${API_BASE}/stats/summary`);
+    const res = await strangerCtx.get(`${API_BASE}/m/statistics/summary`);
     expect(res.status()).toBe(200);
     const body = (await res.json()) as {
       spend: { realUsd: number; invocations: number };

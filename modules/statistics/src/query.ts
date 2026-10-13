@@ -1,5 +1,5 @@
 import { isTaskClass, type TaskClass } from '@haive/shared/stats';
-import { HttpError } from '../../context.js';
+import { HttpError } from '@haive/shared/module-host';
 
 /** Window used when the caller names no range. Thirty days is the dashboard's fixed window,
  *  and the most common thing to want: long enough to smooth a quiet week, short enough that

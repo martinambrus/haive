@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -18,7 +18,20 @@ import { describe, expect, it } from 'vitest';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
 const BASELINE = path.join(HERE, 'fs-ratchet.json');
-const SCAN_ROOTS = ['packages/api/src', 'packages/worker/src', 'packages/shared/src'];
+const SCAN_ROOTS = [
+  'packages/api/src',
+  'packages/worker/src',
+  'packages/shared/src',
+  ...moduleSourceRoots(),
+];
+function moduleSourceRoots(): string[] {
+  return readdirSync(path.join(REPO_ROOT, 'modules'), { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isDirectory() && existsSync(path.join(REPO_ROOT, 'modules', entry.name, 'src')),
+    )
+    .map((entry) => `modules/${entry.name}/src`);
+}
 /** The one file whose whole job is to make these calls. */
 const SCAN_EXCLUDE = new Set(['packages/shared/src/fs-safe.ts']);
 

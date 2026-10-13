@@ -84,7 +84,7 @@ test.describe('app layout and navigation', () => {
     try {
       const email = uniqueEmail('dash-cards');
       userId = (await registerUser(sql, page.request, { email })).userId;
-      await page.route('**/stats/summary**', (route) => route.abort());
+      await page.route('**/m/statistics/summary**', (route) => route.abort());
 
       await page.goto('/dashboard');
 
