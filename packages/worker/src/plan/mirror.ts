@@ -1266,6 +1266,8 @@ async function reconcilePlanLocked(
       )
       .onConflictDoNothing()
       .returning({ id: schema.planNodeEdges.id });
+    // A row that already existed was added by a patch since the read; its note was never merged.
+    if (inserted.length < newEdges.length) throw new PlanMirrorHeldError(HELD_RACED);
     edgesAdded = inserted.length;
   }
 
@@ -1365,6 +1367,7 @@ async function reconcilePlanLocked(
       )
       .onConflictDoNothing()
       .returning({ id: schema.planNodeCodeLinks.id });
+    if (inserted.length < newLinks.length) throw new PlanMirrorHeldError(HELD_RACED);
     codeLinksAdded = inserted.length;
   }
 

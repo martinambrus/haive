@@ -2516,6 +2516,48 @@ async function main(): Promise<void> {
     ...theirs,
     edges: theirs.edges.map((e) => (e.toNodeId === r1Id ? { ...e, note: 'from the canvas' } : e)),
   });
+  // An edge a canvas patch inserts while the reconcile adds the same one holds the reconcile.
+  let edging: Promise<string> | undefined;
+  await db.transaction(async (edit) => {
+    await edit.insert(schema.planNodeEdges).values({
+      repositoryId: sId,
+      fromNodeId: pId,
+      toNodeId: r1Id,
+      kind: 'depends_on',
+      note: 'from the canvas',
+    });
+    edging = arrive({
+      ...theirs,
+      edges: [
+        ...theirs.edges,
+        { fromNodeId: pId, toNodeId: r1Id, kind: 'depends_on', note: 'from the file' },
+      ],
+    }).then(
+      () => 'merged',
+      (err: Error) => err.name,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  });
+  const depends = await db
+    .select({ note: schema.planNodeEdges.note })
+    .from(schema.planNodeEdges)
+    .where(
+      and(eq(schema.planNodeEdges.repositoryId, sId), eq(schema.planNodeEdges.kind, 'depends_on')),
+    );
+  check(
+    'three-way: an edge a canvas patch inserted during the reconcile keeps its note and holds the reconcile',
+    (await edging) === 'PlanMirrorHeldError' &&
+      depends.length === 1 &&
+      depends[0]!.note === 'from the canvas',
+    { edging: await edging, depends },
+  );
+  await db
+    .delete(schema.planNodeEdges)
+    .where(
+      and(eq(schema.planNodeEdges.repositoryId, sId), eq(schema.planNodeEdges.kind, 'depends_on')),
+    );
+  await arrive(theirs);
+
   // A child a canvas patch adds under a node the other side deleted is not taken by the cascade.
   let childId: string | undefined;
   let dropping: Promise<string> | undefined;
