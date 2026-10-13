@@ -328,7 +328,8 @@ async function planOffender(
 /** Test seam: a function here runs at its point of the restore and may throw to stand for a crash. */
 export const restoreFaults: {
   afterBase?: () => void | Promise<void>;
-  afterRestore?: () => void;
+  afterRestore?: () => void | Promise<void>;
+  beforeResync?: (domain: 'state' | 'plan') => void;
 } = {};
 
 interface RestoreGuard {
@@ -391,7 +392,7 @@ async function restoreJudged(
   const holding = guard.fence ? await guard.fence(tx) : 0;
   if (holding > 0) return { outcome: 'held', holding };
   await restoreFromHead(repoPath, mine);
-  restoreFaults.afterRestore?.();
+  await restoreFaults.afterRestore?.();
   await after?.(tx);
   return null;
 }
@@ -604,19 +605,38 @@ export async function resyncHaiveProjections(
   repoPath: string,
 ): Promise<void> {
   try {
+    restoreFaults.beforeResync?.('state');
     await syncProjectStateFromCheckout(db, { repositoryId, repoPath });
     if (await isDirty(db, schema.projectStateOutbox, repositoryId)) {
       await refreshProjectState(db, repositoryId);
     }
   } catch (err) {
     logger.warn({ err, repositoryId }, 'project state not re-synced after a checkout move');
+    await raiseMarkAfterFailure(db, schema.projectStateOutbox, repositoryId, markProjectStateDirty);
   }
   try {
+    restoreFaults.beforeResync?.('plan');
     await syncPlanFromCheckout(db, repositoryId, repoPath);
     if (await isDirty(db, schema.planMirrorState, repositoryId)) {
       await flushPlanMirrorForRepository(db, repositoryId);
     }
   } catch (err) {
     logger.warn({ err, repositoryId }, 'plan not re-synced after a checkout move');
+    await raiseMarkAfterFailure(db, schema.planMirrorState, repositoryId, markPlanMirrorDirty);
+  }
+}
+
+/** A failed re-sync leaves the domain's mark raised so the sweep retries it; a repository with no row
+ *  has nothing Haive writes there yet, and gets none. */
+async function raiseMarkAfterFailure(
+  db: Database,
+  table: typeof schema.projectStateOutbox | typeof schema.planMirrorState,
+  repositoryId: string,
+  mark: (db: Database, repositoryId: string) => Promise<void>,
+): Promise<void> {
+  try {
+    if ((await readMark(db, table, repositoryId)) !== null) await mark(db, repositoryId);
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'stale mark not raised after a failed re-sync');
   }
 }

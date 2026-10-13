@@ -22,6 +22,7 @@ import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
 import {
   restoreFaults,
   restoreProjectionsInTx,
+  resyncHaiveProjections,
   setAsideHaiveProjections,
 } from '../src/project-state/set-aside.js';
 import { lockProjectState, writeProjectStateColumn } from '../src/project-state/write.js';
@@ -841,6 +842,87 @@ async function main(): Promise<void> {
         'a task that starts between the state and the plan set-aside gets the state files put back',
         aside.outcome === 'held' && started && after.equals(before),
         { aside, started, atHead: after.equals(headRender) },
+      );
+    }
+
+    // 11e3. A refresh whose move check asked for a retry, and whose next set-aside is then held, puts back
+    // what the first set-aside restored: the state file is Haive's again, not HEAD's.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      const renderBefore = await readFile(path.join(c.dest, RENDER_REL));
+      const planBytes = await readFile(path.join(c.dest, PLAN_REL));
+      let restores = 0;
+      restoreFaults.afterRestore = async () => {
+        restores += 1;
+        if (restores !== 2) return;
+        await writeFile(path.join(c.dest, PLAN_REL), planBytes);
+        await db.insert(schema.tasks).values({
+          userId,
+          repositoryId: id,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        });
+      };
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      }
+      const message = (await statusOf(id)).statusMessage ?? '';
+      const renderAfter = await readFile(path.join(c.dest, RENDER_REL));
+      check(
+        'a refresh held after a retried move puts back the state files its first set-aside restored',
+        restores >= 2 &&
+          /1 task is using this repository/.test(message) &&
+          renderAfter.equals(renderBefore),
+        { restores, message, back: renderAfter.equals(renderBefore) },
+      );
+    }
+
+    // 11e4. A re-sync that fails after a clean move raises the domain's mark, so the sweep retries it.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await sweepDirtyProjectStates(db);
+      const markOf = async () => {
+        const [row] = await db
+          .select({
+            revision: schema.projectStateOutbox.revision,
+            written: schema.projectStateOutbox.writtenRevision,
+          })
+          .from(schema.projectStateOutbox)
+          .where(eq(schema.projectStateOutbox.repositoryId, id))
+          .limit(1);
+        return row ?? null;
+      };
+      const clean = await markOf();
+      restoreFaults.beforeResync = (domain) => {
+        if (domain === 'state') throw new Error('transient sync failure');
+      };
+      try {
+        await resyncHaiveProjections(db, id, c.dest);
+      } finally {
+        delete restoreFaults.beforeResync;
+      }
+      const after = await markOf();
+      check(
+        'a failed re-sync after a clean move leaves the project-state mark raised',
+        clean !== null &&
+          clean.written === clean.revision &&
+          after !== null &&
+          after.written < after.revision,
+        { clean, after },
       );
     }
 

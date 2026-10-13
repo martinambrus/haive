@@ -154,6 +154,9 @@ async function fastForward(
   let asided = false;
   for (let attempt = 1; ; attempt++) {
     const aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
+    if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
+      await resyncHaiveProjections(db, payload.repositoryId, dest);
+    }
     if (aside.outcome === 'refused') {
       return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
     }
