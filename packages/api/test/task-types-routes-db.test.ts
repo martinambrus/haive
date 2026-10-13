@@ -642,7 +642,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect(traits('tt-agent-t')).toEqual({ restoresDatabase: false, dispatchesCli: true });
       expect(traits('tt-both-t')).toEqual({ restoresDatabase: true, dispatchesCli: true });
       expect(traits('tt-mod-restore')).toEqual({ restoresDatabase: false, dispatchesCli: false });
-      expect(traits('workflow')).toEqual({ restoresDatabase: false, dispatchesCli: true });
+      expect(traits('workflow')).toEqual({ restoresDatabase: true, dispatchesCli: true });
     });
   });
 

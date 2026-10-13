@@ -77,7 +77,7 @@ import {
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
-import { definitionForCreate } from '../../lib/task-type-definition.js';
+import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
@@ -521,8 +521,7 @@ taskRoutes.post('/', async (c) => {
 
   if (
     body.databaseSnapshotId &&
-    (!body.repositoryId ||
-      !(['workflow', 'run_app'].includes(body.type) || definition.restoresDatabase))
+    (!body.repositoryId || !acceptsSavedDatabase(body.type, definition.restoresDatabase))
   ) {
     throw new HttpError(
       400,

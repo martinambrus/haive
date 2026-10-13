@@ -40,6 +40,13 @@ export function restoresDatabase(def: {
   );
 }
 
+const SAVED_DATABASE_BUILTINS = ['workflow', 'run_app'];
+
+/** Whether a task of this type may be created from a saved database. */
+export function acceptsSavedDatabase(slug: string, restores: boolean): boolean {
+  return SAVED_DATABASE_BUILTINS.includes(slug) || restores;
+}
+
 export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
   requiresRepository: boolean;

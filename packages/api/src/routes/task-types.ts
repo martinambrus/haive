@@ -15,7 +15,7 @@ import {
 } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
-import { restoresDatabase } from '../lib/task-type-definition.js';
+import { acceptsSavedDatabase, restoresDatabase } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -360,7 +360,7 @@ taskTypeRoutes.get('/', async (c) => {
         description: row.description,
         requiresRepository: row.requiresRepository,
         sortOrder: row.sortOrder,
-        restoresDatabase: restoresDatabase(row),
+        restoresDatabase: acceptsSavedDatabase(row.slug, restoresDatabase(row)),
         dispatchesCli: dispatchesCliOf(row, catalog),
         available: availability.available,
         ...(availability.available ? {} : { reason: availability.reason }),
