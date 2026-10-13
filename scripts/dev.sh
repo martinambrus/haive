@@ -112,7 +112,7 @@ APP_SERVICES=(api worker web)
 # prevents the parallel-tsc corruption when several services build it at once.
 build_libs() {
   say "Building @haive/database + @haive/shared (single writer)..."
-  dc run --rm --no-deps dev-libs
+  dc run --rm dev-libs
 }
 
 rebuild_one() {
