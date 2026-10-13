@@ -94,3 +94,11 @@ export function toDatetimeLocal(ms: number): string {
 export function isRangePresetId(v: unknown): v is RangePresetId {
   return typeof v === 'string' && RANGE_PRESETS.some((p) => p.id === v);
 }
+
+/** The preset the page opens with: a valid one in the URL wins, then the module's
+ *  `defaultWindow` setting (never 'custom'), then 30 days. */
+export function pickPreset(urlValue: string | null, setting: unknown): RangePresetId {
+  if (isRangePresetId(urlValue)) return urlValue;
+  if (isRangePresetId(setting) && setting !== 'custom') return setting;
+  return '30d';
+}

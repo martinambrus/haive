@@ -58,6 +58,7 @@ import { isHeatMetric, localDayRange, type HeatMetric } from './lib/heat-scale.j
 import {
   isRangePresetId,
   parseCustomRange,
+  pickPreset,
   presetIsRedundant,
   RANGE_PRESETS,
   resolvePreset,
@@ -306,9 +307,10 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
 
   // URL is the source of truth for every filter, so a view is shareable and the back button
   // works — the same arrangement the tasks listing uses.
-  const preset: RangePresetId = isRangePresetId(searchParams.get('preset'))
-    ? (searchParams.get('preset') as RangePresetId)
-    : '30d';
+  const [defaultWindow, setDefaultWindow] = useState<unknown>(undefined);
+  const [windowReady, setWindowReady] = useState(false);
+  const urlHasPreset = isRangePresetId(searchParams.get('preset'));
+  const preset: RangePresetId = pickPreset(searchParams.get('preset'), defaultWindow);
   const tab: Tab = isTab(searchParams.get('tab')) ? (searchParams.get('tab') as Tab) : 'money';
   const heatMetric: HeatMetric = isHeatMetric(searchParams.get('heat'))
     ? (searchParams.get('heat') as HeatMetric)
@@ -360,6 +362,13 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
         // A failed preference read is not a reason to show nothing.
         setTimeZone(browserZone);
       });
+    api
+      .get<{ values: Record<string, unknown> }>(`/modules/${moduleId}/settings/global`)
+      .then((r) => setDefaultWindow(r.values.defaultWindow))
+      .catch(() => {
+        /* a failed settings read falls back to 30 days */
+      })
+      .finally(() => setWindowReady(true));
     // Inline rather than a named wrapper, matching how the repos and new-task pages fetch it.
     api
       .get<{ repositories: Repository[] }>('/repos')
@@ -385,7 +394,8 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
   }
 
   const range = useMemo(() => {
-    if (nowMs === null) return null;
+    // Without a URL preset the window is the setting, so wait for it rather than request 30 days first.
+    if (nowMs === null || (!urlHasPreset && !windowReady)) return null;
     if (preset === 'custom') {
       // An incomplete custom range falls back to 30 days rather than requesting something the
       // API will reject while the user is still typing the second date.
@@ -394,7 +404,7 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
     return resolvePreset(preset, nowMs);
     // `filterKey` deliberately drives this rather than the individual params.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterKey, nowMs]);
+  }, [filterKey, nowMs, windowReady]);
 
   const params: StatsQueryParams | null = useMemo(
     () =>
