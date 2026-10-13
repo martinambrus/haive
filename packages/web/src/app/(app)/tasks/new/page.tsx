@@ -14,15 +14,23 @@ import {
   type LastSummaryCliChoice,
 } from '@/lib/last-cli-choice';
 import type { PlanNodeTaskRole, PlanTaskProposal } from '@haive/shared';
+import type { PublicTaskType } from '@haive/shared/modularity';
 import { describePlanNodesForTask } from '@haive/shared/plan-describe';
 import { taskProposal } from '@/components/plan/plan-chat-turn';
 import { HoursMinutesInput } from '@/components/hours-minutes-input';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import {
+  buildNewTaskBody,
+  buildNewTaskTypeOptions,
+  cliMemoryRepositoryId,
+  newTaskFields,
+} from '@/lib/new-task-type';
+import {
   api,
   API_BASE_URL,
   getPlanMessages,
   getPlanNode,
+  listTaskTypes,
   attachmentUploadName,
   uploadTaskAttachment,
   type CliProvider,
@@ -112,8 +120,14 @@ export default function NewTaskPage() {
   const queryRepoId = searchParams.get('repositoryId');
   // run_app: a deterministic "run this repository" task (no implementation pipeline).
   // Preset from the repo card's "Run app" button (?mode=run_app); also selectable
-  // here via the task-type toggle below.
-  const [isRunApp, setIsRunApp] = useState(searchParams.get('mode') === 'run_app');
+  // here via the task-type select below.
+  const [taskType, setTaskType] = useState(
+    searchParams.get('mode') === 'run_app' ? 'run_app' : 'workflow',
+  );
+  const [taskTypeRows, setTaskTypeRows] = useState<PublicTaskType[]>([]);
+  const typeOptions = useMemo(() => buildNewTaskTypeOptions(taskTypeRows), [taskTypeRows]);
+  const selectedType = typeOptions.find((o) => o.value === taskType) ?? typeOptions[0]!;
+  const isRunApp = selectedType.kind === 'run_app';
   /** Set by the plan canvas's "Create a task from this" button. Recorded on the
    *  task so its completion greens the plan node; carried in the query rather
    *  than picked here, because the node is chosen ON the canvas where its
@@ -187,6 +201,17 @@ export default function NewTaskPage() {
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  // Only a Workflow choice is inferred from the repository; a custom type is exactly what was picked.
+  const inferredType: WorkflowType | null = isRunApp
+    ? 'run_app'
+    : selectedType.kind !== 'workflow'
+      ? null
+      : onboardingStatus
+        ? onboardingStatus.onboarded || onboardingStatus.nothingToOnboard
+          ? 'workflow'
+          : 'onboarding'
+        : null;
+  const fields = newTaskFields(selectedType, inferredType);
 
   const [resetting, setResetting] = useState(false);
   const [resetNote, setResetNote] = useState<string | null>(null);
@@ -235,6 +260,13 @@ export default function NewTaskPage() {
       }
     }
     void load();
+    void listTaskTypes()
+      .then((res) => {
+        if (!cancelled) setTaskTypeRows(res.taskTypes);
+      })
+      .catch(() => {
+        /* non-fatal: Workflow and Run the app need no list */
+      });
     return () => {
       cancelled = true;
     };
@@ -268,8 +300,8 @@ export default function NewTaskPage() {
   }, [queryRepoId, repos]);
 
   useEffect(() => {
-    void refreshStatus(repositoryId);
-  }, [repositoryId, refreshStatus]);
+    void refreshStatus(fields.onboardingStatus ? repositoryId : '');
+  }, [repositoryId, refreshStatus, fields.onboardingStatus]);
 
   /**
    * The proposal a plan chat made, read back from the turn that made it.
@@ -355,21 +387,22 @@ export default function NewTaskPage() {
   // recorded choice resolves to the default, so switching repositories never carries
   // the previous one's pick over. Waits for `providers` so a provider deleted since
   // that task falls back instead of selecting a dead option.
+  const memoryRepositoryId = cliMemoryRepositoryId(fields, repositoryId);
   useEffect(() => {
-    if (!repositoryId || !providers) return;
+    if (!memoryRepositoryId || !providers) return;
     let cancelled = false;
     void api
       .get<{ cliChoice: LastCliChoice; summaryChoice: LastSummaryCliChoice }>(
-        `/tasks/last-cli?repositoryId=${encodeURIComponent(repositoryId)}`,
+        `/tasks/last-cli?repositoryId=${encodeURIComponent(memoryRepositoryId)}`,
       )
       .then((res) => {
         if (cancelled) return;
         const ids = providers.map((p) => p.id);
-        if (cliPickedFor.current !== repositoryId) {
+        if (cliPickedFor.current !== memoryRepositoryId) {
           cliPickedFor.current = null;
           setCliProviderId(resolveCliChoiceValue(res.cliChoice, ids));
         }
-        if (summaryCliPickedFor.current !== repositoryId) {
+        if (summaryCliPickedFor.current !== memoryRepositoryId) {
           summaryCliPickedFor.current = null;
           setSummaryCliProviderId(resolveSummaryChoiceValue(res.summaryChoice, ids));
         }
@@ -380,7 +413,7 @@ export default function NewTaskPage() {
     return () => {
       cancelled = true;
     };
-  }, [repositoryId, providers]);
+  }, [memoryRepositoryId, providers]);
 
   // Feature/area autocomplete: once >=2 chars are typed and a repo is selected,
   // fetch prior feature names for that repo (substring match) so the user reuses
@@ -520,17 +553,21 @@ export default function NewTaskPage() {
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!repositoryId) {
+    if (selectedType.disabled) {
+      setError(`${selectedType.label} is unavailable: ${selectedType.reason}`);
+      return;
+    }
+    if (fields.repository === 'required' && !repositoryId) {
       setError('Repository is required');
       return;
     }
-    if (!isRunApp && !onboardingStatus) {
+    if (fields.onboardingGate && !onboardingStatus) {
       setError('Waiting for onboarding status check');
       return;
     }
     // The inferred type here is `onboarding`, and the API refuses a second run on a repo
     // that already has one in flight — so say why instead of posting into a 409.
-    if (!isRunApp && onboardingStatus?.onboardingTaskId) {
+    if (fields.onboardingGate && onboardingStatus?.onboardingTaskId) {
       setError('Onboarding is still running on this repository. Open that task or wait for it.');
       return;
     }
@@ -538,11 +575,14 @@ export default function NewTaskPage() {
     // repository created empty can never run a workflow task, because a missing
     // knowledge base forces the first task to be an onboarding pass over a tree
     // with nothing in it.
-    const type: WorkflowType = isRunApp
-      ? 'run_app'
-      : onboardingStatus?.onboarded || onboardingStatus?.nothingToOnboard
-        ? 'workflow'
-        : 'onboarding';
+    const type: string =
+      selectedType.kind === 'custom'
+        ? selectedType.value
+        : isRunApp
+          ? 'run_app'
+          : onboardingStatus?.onboarded || onboardingStatus?.nothingToOnboard
+            ? 'workflow'
+            : 'onboarding';
     const repoName = repos?.find((r) => r.id === repositoryId)?.name;
     const finalTitle =
       title.trim() || (isRunApp ? (repoName ? `run ${repoName} app` : 'Run app') : '');
@@ -554,7 +594,7 @@ export default function NewTaskPage() {
       setError('Description is required for workflow tasks');
       return;
     }
-    if (planBlockers && planBlockers.length > 0 && !overrideBlocked) {
+    if (fields.planNodeLink && planBlockers && planBlockers.length > 0 && !overrideBlocked) {
       setError('This plan node is waiting on other work. Tick "start it anyway" to go ahead.');
       return;
     }
@@ -562,43 +602,27 @@ export default function NewTaskPage() {
     setError(null);
     setSubmitting(true);
     try {
-      const body: Record<string, unknown> = {
+      const body = buildNewTaskBody({
         type,
+        fields: newTaskFields(selectedType, type),
         title: finalTitle,
         repositoryId,
-      };
-      if (description.trim()) body.description = description.trim();
-      if (estimatedTime !== '' && Number.isFinite(estimatedTime) && estimatedTime > 0) {
-        body.estimatedTimeHours = estimatedTime;
-      }
-      // Always sent, empty included: naming the field is how the server learns the
-      // choice was stated rather than defaulted, which is what makes it stick for the
-      // next task on this repo (tasks.cli_choice_recorded).
-      body.cliProviderId = cliProviderId || null;
-      if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
-      body.summaryLlmEnabled = summaryCliProviderId !== SUMMARY_CLI_OFF;
-      body.summaryCliProviderId =
-        summaryCliProviderId && summaryCliProviderId !== SUMMARY_CLI_OFF
-          ? summaryCliProviderId
-          : null;
-      if (planNodeIds.length > 0) {
-        body.planNodeIds = planNodeIds;
-        body.planNodeRole = planNodeRole;
-        if (overrideBlocked) body.overrideBlocked = true;
-      }
-      if (fromPlanChat) body.fromPlanChat = true;
-      if (type === 'workflow') {
-        body.isBugFix = isBugFix;
-        if (feature.trim()) body.feature = feature.trim();
-        const clients = affectedClients
-          .split(',')
-          .map((c) => c.trim())
-          .filter(Boolean);
-        if (clients.length > 0) body.affectedClients = clients;
-        if (isBugFix && parentTaskId) body.parentTaskId = parentTaskId;
-      }
+        description,
+        estimatedTime,
+        cliProviderId,
+        ignoreSavedStepClis,
+        summaryCliProviderId,
+        planNodeIds,
+        planNodeRole,
+        overrideBlocked,
+        fromPlanChat,
+        isBugFix,
+        feature,
+        affectedClients,
+        parentTaskId,
+      });
 
-      if ((type === 'workflow' || type === 'run_app') && dumpFile) {
+      if (newTaskFields(selectedType, type).dumpUpload && dumpFile) {
         setDumpUploading(true);
         try {
           body.dbUploadId = await chunkedUploadDbDump({
@@ -635,13 +659,6 @@ export default function NewTaskPage() {
   }
 
   const readyRepos = repos?.filter((r) => r.status === 'ready') ?? [];
-  const inferredType: WorkflowType | null = isRunApp
-    ? 'run_app'
-    : onboardingStatus
-      ? onboardingStatus.onboarded || onboardingStatus.nothingToOnboard
-        ? 'workflow'
-        : 'onboarding'
-      : null;
 
   return (
     <div className="flex max-w-2xl flex-col gap-6">
@@ -650,14 +667,20 @@ export default function NewTaskPage() {
           <h1 className="text-2xl font-bold text-neutral-50">
             {isRunApp ? 'Run app' : 'New task'}
           </h1>
-          <p className="text-sm text-neutral-400">
-            {isRunApp
-              ? 'Bring this repository’s app up so you can browse, test, and edit it live. Optionally restore a database dump. Nothing in your repo changes unless you commit at the end.'
-              : 'Workflow type is auto-detected from the selected repository. Onboarded repos run the autonomous workflow; fresh repos run onboarding.'}
-          </p>
+          {!isRunApp && selectedType.kind === 'custom' && selectedType.description ? (
+            <InlineMarkdown body={selectedType.description} className="text-sm text-neutral-400" />
+          ) : (
+            <p className="text-sm text-neutral-400">
+              {isRunApp
+                ? 'Bring this repository’s app up so you can browse, test, and edit it live. Optionally restore a database dump. Nothing in your repo changes unless you commit at the end.'
+                : selectedType.kind === 'custom'
+                  ? `Create a ${selectedType.label} task.`
+                  : 'Workflow type is auto-detected from the selected repository. Onboarded repos run the autonomous workflow; fresh repos run onboarding.'}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          {onboardingStatus?.onboarded && (
+          {fields.onboardingStatus && onboardingStatus?.onboarded && (
             <Button
               type="button"
               variant="secondary"
@@ -668,7 +691,7 @@ export default function NewTaskPage() {
               {resetting ? 'Resetting...' : 'Re-run onboarding'}
             </Button>
           )}
-          {onboardingStatus?.canMarkOnboarded && (
+          {fields.onboardingStatus && onboardingStatus?.canMarkOnboarded && (
             <Button
               type="button"
               variant="secondary"
@@ -698,22 +721,45 @@ export default function NewTaskPage() {
           attribute before hydration and tripped a hydration mismatch. */}
       <form onSubmit={handleSubmit} autoComplete="off" className="flex flex-col gap-5">
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="repositoryId">Repository</Label>
+          <Label htmlFor="taskType">Task type</Label>
+          <select
+            id="taskType"
+            value={selectedType.value}
+            onChange={(e) => setTaskType(e.target.value)}
+            className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+          >
+            {typeOptions.map((o) => (
+              <option key={o.value} value={o.value} disabled={o.disabled}>
+                {o.disabled ? `${o.label} (unavailable: ${o.reason})` : o.label}
+              </option>
+            ))}
+          </select>
+          {selectedType.kind !== 'custom' && (
+            <p className="text-xs text-neutral-500">{selectedType.description}</p>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="repositoryId">
+            Repository{fields.repository === 'optional' ? ' (optional)' : ''}
+          </Label>
           <select
             id="repositoryId"
             value={repositoryId}
             onChange={(e) => setRepositoryId(e.target.value)}
             className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-            required
+            required={fields.repository === 'required'}
           >
-            <option value="">(select a repository)</option>
+            <option value="">
+              {fields.repository === 'required' ? '(select a repository)' : '(no repository)'}
+            </option>
             {readyRepos.map((repo) => (
               <option key={repo.id} value={repo.id}>
                 {repo.name} {repo.detectedFramework ? `(${repo.detectedFramework})` : ''}
               </option>
             ))}
           </select>
-          {repos && readyRepos.length === 0 && (
+          {repos && readyRepos.length === 0 && fields.repository === 'required' && (
             <p className="text-xs text-neutral-500">
               No ready repositories.{' '}
               <Link href="/repos/new" className="underline">
@@ -722,7 +768,7 @@ export default function NewTaskPage() {
               first.
             </p>
           )}
-          {repositoryId && (
+          {repositoryId && fields.onboardingStatus && (
             <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs">
               {statusLoading && <span className="text-neutral-400">Checking onboarding...</span>}
               {statusError && <span className="text-red-400">{statusError}</span>}
@@ -805,40 +851,7 @@ export default function NewTaskPage() {
           )}
         </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label>What to do with this repository</Label>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setIsRunApp(false)}
-              className={`flex-1 rounded-md border px-3 py-2 text-sm transition-colors ${
-                !isRunApp
-                  ? 'border-indigo-500 bg-indigo-950/40 text-indigo-200'
-                  : 'border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-700'
-              }`}
-            >
-              Run the workflow
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsRunApp(true)}
-              className={`flex-1 rounded-md border px-3 py-2 text-sm transition-colors ${
-                isRunApp
-                  ? 'border-indigo-500 bg-indigo-950/40 text-indigo-200'
-                  : 'border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-700'
-              }`}
-            >
-              Just run the app
-            </button>
-          </div>
-          <p className="text-xs text-neutral-500">
-            {isRunApp
-              ? 'Bring the app up (DDEV / container) so you can browse, test, and edit it live. No code changes unless you commit at the end.'
-              : 'Run the autonomous workflow — onboarding for a fresh repo, the implementation workflow once onboarded.'}
-          </p>
-        </div>
-
-        {planNodeIds.length > 0 && (
+        {fields.planNodeLink && planNodeIds.length > 0 && (
           <div className="flex flex-col gap-2 rounded border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
             <p className="font-medium">
               Linked to {planNodeIds.length} plan node{planNodeIds.length === 1 ? '' : 's'}
@@ -891,7 +904,8 @@ export default function NewTaskPage() {
           </div>
         )}
 
-        {planNodeIds.length > 0 &&
+        {fields.planNodeLink &&
+          planNodeIds.length > 0 &&
           planNodeRole === 'implements' &&
           planBlockers &&
           planBlockers.length > 0 && (
@@ -928,11 +942,13 @@ export default function NewTaskPage() {
                   setTitle(e.target.value);
                 }}
                 placeholder={
-                  inferredType === 'run_app'
-                    ? 'Run app'
-                    : inferredType === 'workflow'
-                      ? 'Implement feature X'
-                      : 'Onboard repo'
+                  selectedType.kind === 'custom'
+                    ? selectedType.label
+                    : inferredType === 'run_app'
+                      ? 'Run app'
+                      : inferredType === 'workflow'
+                        ? 'Implement feature X'
+                        : 'Onboard repo'
                 }
                 required={!isRunApp}
               />
@@ -973,101 +989,105 @@ export default function NewTaskPage() {
           </>
         )}
 
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center justify-between gap-2">
-            <Label htmlFor="cliProviderId">CLI provider (optional)</Label>
-            <Link href="/cli-providers">
-              <Button type="button" variant="primary" size="sm">
-                Add a CLI
-              </Button>
-            </Link>
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              id="cliProviderId"
-              value={cliProviderId}
-              onChange={(e) => {
-                cliPickedFor.current = repositoryId;
-                setCliProviderId(e.target.value);
-              }}
-              className="h-10 min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-            >
-              <option value="">(none — deterministic steps only)</option>
-              {(providers ?? []).map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label} ({p.name})
-                </option>
-              ))}
-            </select>
-            {/* Two-state lock: on = force this CLI on every step for this task
+        {fields.cliPickers && (
+          <>
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="cliProviderId">CLI provider (optional)</Label>
+                <Link href="/cli-providers">
+                  <Button type="button" variant="primary" size="sm">
+                    Add a CLI
+                  </Button>
+                </Link>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  id="cliProviderId"
+                  value={cliProviderId}
+                  onChange={(e) => {
+                    cliPickedFor.current = repositoryId;
+                    setCliProviderId(e.target.value);
+                  }}
+                  className="h-10 min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="">(none — deterministic steps only)</option>
+                  {(providers ?? []).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} ({p.name})
+                    </option>
+                  ))}
+                </select>
+                {/* Two-state lock: on = force this CLI on every step for this task
                 only (ignoreSavedStepClis). Styled HTML tooltip (not the native
                 title attr) mirrors InfoTooltip in form-renderer; anchored right-0
                 so it stays inside the form. */}
-            <span className="group/lock relative inline-flex shrink-0">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={ignoreSavedStepClis}
-                aria-label="Use this CLI for every step (this task only)"
-                onClick={() => setIgnoreSavedStepClis((v) => !v)}
-                className={`inline-flex h-10 w-10 items-center justify-center rounded-md border transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 ${
-                  ignoreSavedStepClis
-                    ? 'border-amber-600 bg-amber-950/30 text-amber-300'
-                    : 'border-indigo-500 bg-indigo-950/40 text-indigo-300 hover:border-indigo-400 hover:bg-indigo-950/60 hover:text-indigo-200'
-                }`}
-              >
-                {ignoreSavedStepClis ? (
-                  <Lock className="h-4 w-4" />
-                ) : (
-                  <Unlock className="h-4 w-4" />
-                )}
-              </button>
-              <span
-                role="tooltip"
-                className="pointer-events-none absolute right-0 top-full z-30 mt-2 w-64 whitespace-pre-line rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs font-normal leading-relaxed text-neutral-200 opacity-0 shadow-xl transition-opacity duration-150 group-hover/lock:opacity-100"
-              >
-                {ignoreSavedStepClis
-                  ? 'Locked: using this CLI for every step (this task only). Click to unlock.'
-                  : 'Unlocked: use this CLI for every step (this task only). Click to lock.'}
-              </span>
-            </span>
-          </div>
-          <p className="text-xs text-neutral-500">
-            Ignores your saved per-step CLI choices and defaults every step to the CLI above, for
-            this task only — your saved choices are left untouched. A step you change during the
-            task runs on its new CLI.
-          </p>
-        </div>
+                <span className="group/lock relative inline-flex shrink-0">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={ignoreSavedStepClis}
+                    aria-label="Use this CLI for every step (this task only)"
+                    onClick={() => setIgnoreSavedStepClis((v) => !v)}
+                    className={`inline-flex h-10 w-10 items-center justify-center rounded-md border transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 ${
+                      ignoreSavedStepClis
+                        ? 'border-amber-600 bg-amber-950/30 text-amber-300'
+                        : 'border-indigo-500 bg-indigo-950/40 text-indigo-300 hover:border-indigo-400 hover:bg-indigo-950/60 hover:text-indigo-200'
+                    }`}
+                  >
+                    {ignoreSavedStepClis ? (
+                      <Lock className="h-4 w-4" />
+                    ) : (
+                      <Unlock className="h-4 w-4" />
+                    )}
+                  </button>
+                  <span
+                    role="tooltip"
+                    className="pointer-events-none absolute right-0 top-full z-30 mt-2 w-64 whitespace-pre-line rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs font-normal leading-relaxed text-neutral-200 opacity-0 shadow-xl transition-opacity duration-150 group-hover/lock:opacity-100"
+                  >
+                    {ignoreSavedStepClis
+                      ? 'Locked: using this CLI for every step (this task only). Click to unlock.'
+                      : 'Unlocked: use this CLI for every step (this task only). Click to lock.'}
+                  </span>
+                </span>
+              </div>
+              <p className="text-xs text-neutral-500">
+                Ignores your saved per-step CLI choices and defaults every step to the CLI above,
+                for this task only — your saved choices are left untouched. A step you change during
+                the task runs on its new CLI.
+              </p>
+            </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="summaryCliProviderId">Summary CLI (optional)</Label>
-          <select
-            id="summaryCliProviderId"
-            value={summaryCliProviderId}
-            onChange={(e) => {
-              summaryCliPickedFor.current = repositoryId;
-              setSummaryCliProviderId(e.target.value);
-            }}
-            className="h-10 min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-          >
-            <option value="">(inherit — same CLI as the step)</option>
-            {(providers ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label} ({p.name})
-              </option>
-            ))}
-            <option value={SUMMARY_CLI_OFF}>(off — no AI summary)</option>
-          </select>
-          <p className="text-xs text-neutral-500">
-            Writes only the short &ldquo;What the agent did&rdquo; recap on each step — never any of
-            the work. Steps that already produce their own recap never call it. Left on inherit it
-            uses the step&rsquo;s own CLI, so a coding model writes three sentences; a small fast
-            model does the job for a fraction of the cost. Its tokens and cost count toward this
-            task&rsquo;s totals either way.
-          </p>
-        </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="summaryCliProviderId">Summary CLI (optional)</Label>
+              <select
+                id="summaryCliProviderId"
+                value={summaryCliProviderId}
+                onChange={(e) => {
+                  summaryCliPickedFor.current = repositoryId;
+                  setSummaryCliProviderId(e.target.value);
+                }}
+                className="h-10 min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              >
+                <option value="">(inherit — same CLI as the step)</option>
+                {(providers ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label} ({p.name})
+                  </option>
+                ))}
+                <option value={SUMMARY_CLI_OFF}>(off — no AI summary)</option>
+              </select>
+              <p className="text-xs text-neutral-500">
+                Writes only the short &ldquo;What the agent did&rdquo; recap on each step — never
+                any of the work. Steps that already produce their own recap never call it. Left on
+                inherit it uses the step&rsquo;s own CLI, so a coding model writes three sentences;
+                a small fast model does the job for a fraction of the cost. Its tokens and cost
+                count toward this task&rsquo;s totals either way.
+              </p>
+            </div>
+          </>
+        )}
 
-        {(inferredType === 'workflow' || inferredType === 'run_app') && (
+        {fields.dumpUpload && (
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="dbDump">Database dump (optional)</Label>
             <input
@@ -1136,7 +1156,7 @@ export default function NewTaskPage() {
           </div>
         )}
 
-        {inferredType === 'workflow' && (
+        {fields.workflowFields && (
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="feature">Feature / area (optional)</Label>
             <div className="relative">
@@ -1184,7 +1204,7 @@ export default function NewTaskPage() {
           </div>
         )}
 
-        {inferredType === 'workflow' && (
+        {fields.workflowFields && (
           <div className="flex flex-col gap-1.5">
             <label className="flex items-center gap-2 text-sm text-neutral-100">
               <input
@@ -1259,8 +1279,9 @@ export default function NewTaskPage() {
             type="submit"
             disabled={
               submitting ||
-              (!isRunApp && !onboardingStatus) ||
-              (!isRunApp && !!onboardingStatus?.onboardingTaskId)
+              selectedType.disabled ||
+              (fields.onboardingGate && !onboardingStatus) ||
+              (fields.onboardingGate && !!onboardingStatus?.onboardingTaskId)
             }
           >
             {submitting
