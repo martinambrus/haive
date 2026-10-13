@@ -6,6 +6,7 @@ import {
   type LoadedWorkerModule,
   type WorkerModuleEntry,
 } from '../modules/loader.js';
+import { syncModuleIntent } from '../modules/intent.js';
 import { getRedis } from '../redis.js';
 import { assertCoreComposableCatalog } from './composable-core.js';
 import { stepRegistry } from './registry.js';
@@ -44,6 +45,7 @@ export async function bootStepEngine(
   await syncStepCatalog(db, stepRegistry, composables);
   await syncTaskTypeDefinitions(db, stepRegistry);
   const schemas = await ensureModuleSchemas(db, loaded, entries);
+  await syncModuleIntent(db, loaded);
   await publishWorkerBootReport(getRedis(), loaded, schemas);
   return { loaded, entries };
 }

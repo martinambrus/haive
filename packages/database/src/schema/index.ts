@@ -24,3 +24,4 @@ export * from './merge-dir-claims.js';
 export * from './step-catalog.js';
 export * from './task-types.js';
 export * from './integrations.js';
+export * from './modules.js';
