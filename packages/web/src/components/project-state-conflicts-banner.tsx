@@ -167,6 +167,8 @@ export function ProjectStateConflictsBanner({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
   const pendingRef = useRef<string[]>([]);
+  const onAnsweredRef = useRef(onAnswered);
+  onAnsweredRef.current = onAnswered;
   const pendingAnswers = useRef<Record<string, ProjectStateAnswer>>({});
   const recordAnswers = useCallback((items: { answer: ProjectStateAnswer; unit: string }[]) => {
     const plan = items.filter(isPlanConflict).map((i) => i.answer);
@@ -249,6 +251,7 @@ export function ProjectStateConflictsBanner({
         if (l.answer) answers.push({ answer: l.answer, unit: l.unit });
       }
       recordAnswers(answers);
+      if (answers.length > 0) onAnsweredRef.current?.();
     }
     remaining.push(...unconfirmed);
     remaining.push(...pendingRef.current.filter((id) => !before.includes(id)));
@@ -311,7 +314,7 @@ export function ProjectStateConflictsBanner({
     } else {
       await load();
     }
-    if (out.kind === 'resolved' || (out.kind === 'error' && out.landed)) onAnswered?.();
+    if (out.kind === 'resolved' || (out.kind === 'error' && out.landed)) onAnsweredRef.current?.();
   }
 
   const confirmation = confirming

@@ -456,6 +456,7 @@ export default function PlanPage() {
       setError(e instanceof Error ? e.message : 'Failed to save the plan snapshot');
     } finally {
       setSnapshotBusy(false);
+      setQuestionsKey((k) => k + 1);
     }
   }
 
@@ -988,6 +989,7 @@ export default function PlanPage() {
         onChanged={() => void refreshMerge()}
         onSettled={() => {
           setConflict(null);
+          setQuestionsKey((k) => k + 1);
           void refreshMerge();
           void refresh();
           void getPlanSnapshot(repositoryId)
