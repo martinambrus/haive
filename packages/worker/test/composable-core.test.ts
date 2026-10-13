@@ -260,6 +260,27 @@ describe('core composable catalog', () => {
     ).toEqual([]);
   });
 
+  it.each(['01a-app-boot', '01c-ddev-env'])('treats %s as a tree editor', (stepId) => {
+    const order = [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+      stepId,
+      '11a-gate-4-push',
+    ];
+    const issues = validateComposition(order, catalog);
+    expect(issues).toContainEqual(
+      expect.objectContaining({ kind: 'too-late', stepId, token: 'commit' }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '11a-gate-4-push',
+        needs: 'clean-tree',
+      }),
+    );
+  });
+
   it('refuses push and cleanup over learning files nobody committed', () => {
     const head = [
       '01-worktree-setup',
