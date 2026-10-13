@@ -817,11 +817,22 @@ function withoutAbsentAsked(
     for (const n of subtree) if (!oldBase.has(n)) drop.add(n);
   }
   if (drop.size === 0) return payload;
+  const nodes = payload.nodes
+    .filter((n) => !drop.has(n.id))
+    .map((n) => (n.parentId !== null && drop.has(n.parentId) ? oldBase.get(n.id)! : n));
+  // A restored node's old ancestors come back too, where the other side has since deleted them.
+  const present = new Set(nodes.map((n) => n.id));
+  for (let i = 0; i < nodes.length; i++) {
+    const parentId = nodes[i]!.parentId;
+    const parent = parentId === null || present.has(parentId) ? undefined : oldBase.get(parentId);
+    if (parent) {
+      nodes.push(parent);
+      present.add(parent.id);
+    }
+  }
   return {
     ...payload,
-    nodes: payload.nodes
-      .filter((n) => !drop.has(n.id))
-      .map((n) => (n.parentId !== null && drop.has(n.parentId) ? oldBase.get(n.id)! : n)),
+    nodes,
     edges: payload.edges.filter((e) => !drop.has(e.fromNodeId) && !drop.has(e.toNodeId)),
     ...('codeLinks' in payload
       ? { codeLinks: payload.codeLinks.filter((l) => !drop.has(l.nodeId)) }

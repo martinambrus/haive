@@ -2840,10 +2840,16 @@ async function main(): Promise<void> {
   const y1Id = yAdded.refs['tmp-y1']!;
   const zAdded = await applyPlanPatch(
     db,
-    { ops: [{ op: 'upsert', nodeRef: 'tmp-z', parentRef: sBuilt.refs['sroot']!, title: 'Z' }] },
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'tmp-w', parentRef: sBuilt.refs['sroot']!, title: 'W' },
+        { op: 'upsert', nodeRef: 'tmp-z', parentRef: 'tmp-w', title: 'Z' },
+      ],
+    },
     { repositoryId: sId, origin: 'user' },
   );
-  const zId = zAdded.created[0]!;
+  const wId = zAdded.refs['tmp-w']!;
+  const zId = zAdded.refs['tmp-z']!;
   await writePlanMirror(db, sId, sDir);
   const withY = await readMirror();
   const withoutY = {
@@ -2853,18 +2859,19 @@ async function main(): Promise<void> {
   theirs = withoutY;
   await advancePlanBaseToPushed(db, sId, JSON.stringify(withoutY));
   await editS(yId, { title: 'Y here' });
-  // The other side also moved Z, which is in the base, under its own Y.
+  // The other side also moved Z, which is in the base, under its own Y, and deleted Z's old parent W.
   await arrive({
     ...retitled(withY, yId, 'Y there'),
-    nodes: retitled(withY, yId, 'Y there').nodes.map((n) =>
-      n.id === zId ? { ...n, parentId: yId } : n,
-    ),
+    nodes: retitled(withY, yId, 'Y there')
+      .nodes.filter((n) => n.id !== wId)
+      .map((n) => (n.id === zId ? { ...n, parentId: yId } : n)),
   });
   const yBase = await baseOf();
   check(
-    'three-way: an old node moved under a node both sides added keeps its old place in the base',
+    'three-way: an old node moved under a node both sides added keeps its old place in the base, its deleted old parent with it',
     !yBase?.nodes.some((n) => n.id === yId) &&
-      yBase?.nodes.find((n) => n.id === zId)?.parentId === sBuilt.refs['sroot'],
+      yBase?.nodes.find((n) => n.id === zId)?.parentId === wId &&
+      yBase?.nodes.some((n) => n.id === wId) === true,
     yBase?.nodes.map((n) => [n.id, n.parentId]),
   );
   await arrive({
