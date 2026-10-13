@@ -542,3 +542,28 @@ describe('review round 1', () => {
     );
   });
 });
+
+describe('review round 2', () => {
+  it('does not count display-only fields as declared', () => {
+    const form = {
+      title: 'P',
+      fields: [
+        { id: 'instructions', type: 'note' as const, label: 'Read me', body: 'x' },
+        {
+          id: 'more',
+          type: 'accordion' as const,
+          label: 'More',
+          items: [
+            { title: 'I', fields: [{ id: 'kb', type: 'global-kb-status' as const, label: 'KB' }] },
+          ],
+        },
+      ],
+    };
+    expect(kinds(entry({ template: '{{field:instructions}}', paramFormSchema: form }))).toEqual([
+      'field-not-declared',
+    ]);
+    expect(kinds(entry({ template: '{{field:kb}}', paramFormSchema: form }))).toEqual([
+      'field-not-declared',
+    ]);
+  });
+});

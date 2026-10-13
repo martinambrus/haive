@@ -40,6 +40,9 @@ export const promptStepEntrySchema = z.object({
 });
 export type PromptStepEntry = z.infer<typeof promptStepEntrySchema>;
 
+/** Fields the form shows but never submits (validateFormValues drops them), so a template cannot read them. */
+const DISPLAY_ONLY_FIELD_TYPES: ReadonlySet<string> = new Set(['note', 'global-kb-status']);
+
 export function promptStepId(typeSlug: string, stepSlug: string): string {
   return `custom.${typeSlug}.${stepSlug}`;
 }
@@ -244,11 +247,10 @@ export function validatePromptStep(
   for (const u of unknown) add('unknown-token', u.message, u);
 
   const declared = new Set(
-    (entry.paramFormSchema?.fields ?? []).flatMap((f) =>
-      f.type === 'accordion'
-        ? f.items.flatMap((item) => item.fields.map((leaf) => leaf.id))
-        : [f.id],
-    ),
+    (entry.paramFormSchema?.fields ?? [])
+      .flatMap((f) => (f.type === 'accordion' ? f.items.flatMap((item) => item.fields) : [f]))
+      .filter((f) => !DISPLAY_ONLY_FIELD_TYPES.has(f.type))
+      .map((f) => f.id),
   );
   const earlier = new Set(ctx.stepIdsBefore);
   for (const token of tokens) {
