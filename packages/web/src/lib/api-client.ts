@@ -1,6 +1,7 @@
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
 import type { FormSchema } from '@haive/shared';
+import type { DashboardSpec } from '@haive/shared/modularity';
 import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 
 // A real runtime import, unlike the type-only ones above. `api-origin` has no imports of its own,
@@ -2292,7 +2293,7 @@ export interface ModuleSummary {
   name: string;
   version: string;
   nav: ModuleNavEntry[];
-  pages: Record<string, unknown>;
+  pages: Record<string, DashboardSpec>;
   hasGlobalSettings: boolean;
   hasAdminSettings: boolean;
 }

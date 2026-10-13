@@ -5,12 +5,13 @@ import { api } from '@/lib/api-client';
 import ModulePage from './page';
 
 const received: ModulePageProps[] = [];
+const route = vi.hoisted(() => ({ moduleId: 'stats', page: ['detail'] as string[] }));
 
 vi.mock('next/navigation', () => ({
   notFound: () => {
     throw new Error('not found');
   },
-  useParams: () => ({ moduleId: 'stats', page: ['detail'] }),
+  useParams: () => route,
 }));
 
 vi.mock('@/generated/module-pages', () => ({
@@ -31,5 +32,16 @@ describe('module route page', () => {
     expect(received[0]!.moduleId).toBe('stats');
     expect(received[0]!.path).toEqual(['detail']);
     expect(received[0]!.api).toBe(api);
+  });
+
+  it('shows a loading state, not a 404, for a path no compiled page owns', () => {
+    route.moduleId = 'acme';
+    route.page = ['overview'];
+    try {
+      expect(renderToStaticMarkup(<ModulePage />)).toContain('Loading...');
+    } finally {
+      route.moduleId = 'stats';
+      route.page = ['detail'];
+    }
   });
 });
