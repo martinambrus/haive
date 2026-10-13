@@ -94,6 +94,12 @@ export async function syncTaskTypeDefinitions(db: Database, registry: StepRegist
       );
     const storedBySlug = new Map(stored.map((r) => [r.slug, r]));
     for (const row of wanted) {
+      const holder = storedBySlug.get(row.slug)?.source;
+      if (holder !== 'builtin') {
+        throw new Error(
+          `task_type_definitions slug ${row.slug} is held by a ${holder} row, not the built-in`,
+        );
+      }
       const got = storedBySlug.get(row.slug)?.stepIds ?? null;
       if (JSON.stringify(got) !== JSON.stringify(row.stepIds)) {
         throw new Error(
