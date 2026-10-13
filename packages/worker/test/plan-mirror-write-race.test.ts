@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { HAIVE_DATA_FILES } from '@haive/shared';
-import { PlanMirrorHeldError, writePlanJsonIfUnchanged } from '../src/plan/mirror.js';
+import {
+  PlanMirrorHeldError,
+  removePlanJsonIfUnchanged,
+  writePlanJsonIfUnchanged,
+} from '../src/plan/mirror.js';
 
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 const dirs: string[] = [];
@@ -43,5 +47,26 @@ describe('writePlanJsonIfUnchanged', () => {
     const repo = await repoWith(null);
     await writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(''));
     expect(await onDisk(repo)).toBe('{"next":1}\n');
+  });
+});
+
+describe('removePlanJsonIfUnchanged', () => {
+  it('removes the bytes it last synced', async () => {
+    const repo = await repoWith('{"synced":1}\n');
+    await removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'));
+    await expect(access(path.join(repo, HAIVE_DATA_FILES.plan))).rejects.toThrow();
+  });
+
+  it('holds and keeps bytes that arrived after the last sync', async () => {
+    const repo = await repoWith('{"teammate":1}\n');
+    await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).rejects.toBeInstanceOf(
+      PlanMirrorHeldError,
+    );
+    expect(await onDisk(repo)).toBe('{"teammate":1}\n');
+  });
+
+  it('is a no-op when the file is already gone', async () => {
+    const repo = await repoWith(null);
+    await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).resolves.toBeUndefined();
   });
 });

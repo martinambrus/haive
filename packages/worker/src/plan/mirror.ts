@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   readTextNoFollow,
   removeNoFollow,
+  removeFileIfNoFollow,
   rewriteFileIfNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
@@ -82,6 +83,17 @@ function flushMayReplace(
   if (syncedHash !== null) return false;
   logger.warn({ repoPath }, 'plan.json differs from the database and was never stamped; adopting');
   return true;
+}
+
+/** Removes plan.json only while it still holds bytes the flush may replace, judged on the file removed. */
+export async function removePlanJsonIfUnchanged(
+  repoPath: string,
+  syncedHash: string | null,
+): Promise<void> {
+  const outcome = await removeFileIfNoFollow(repoPath, HAIVE_DATA_FILES.plan, (data) =>
+    flushMayReplace(repoPath, data.toString('utf8'), syncedHash, null),
+  );
+  if (outcome === 'kept') throw new PlanMirrorHeldError(HELD_UNIMPORTED);
 }
 
 /** Replaces plan.json only while it still holds bytes the flush may replace, judged on the file it
@@ -238,15 +250,10 @@ async function writePlanMirrorLocked(
   await assertFlushMayWrite(repoPath, state?.syncedHash ?? null, rendered?.json ?? null);
 
   if (!rendered) {
-    // Both settle before a failure propagates, so a removal that landed is always reported.
-    const removals = await Promise.allSettled(
-      [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown].map(async (rel) => {
-        await removeNoFollow(repoPath, rel);
-        changes?.removed.push(rel);
-      }),
-    );
-    const refused = removals.find((r) => r.status === 'rejected');
-    if (refused) throw refused.reason;
+    await removePlanJsonIfUnchanged(repoPath, state?.syncedHash ?? null);
+    changes?.removed.push(HAIVE_DATA_FILES.plan);
+    await removeNoFollow(repoPath, HAIVE_DATA_FILES.planMarkdown);
+    changes?.removed.push(HAIVE_DATA_FILES.planMarkdown);
     await stampSyncedHash(db, repositoryId, ABSENT_HASH);
     await db
       .update(schema.planMirrorState)
