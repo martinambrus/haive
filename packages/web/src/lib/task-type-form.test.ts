@@ -104,6 +104,19 @@ describe('buildUpdateBody', () => {
     expect(body.enabled).toBe(false);
   });
 
+  it('sends only the fields that differ from the saved row, so a stale page cannot undo another edit', () => {
+    const saved = {
+      displayName: 'Old name',
+      description: 'd',
+      requiresRepository: true,
+      enabled: false,
+      selectable: true,
+      sortOrder: 1,
+    };
+    const stale = { ...saved, sortOrder: 4 };
+    expect(buildUpdateBody(stale, ADMIN_FIELDS, null, saved)).toEqual({ sortOrder: 4 });
+  });
+
   it('sends requiresRepository when it changed', () => {
     const body = buildUpdateBody(values, ADMIN_FIELDS, null, { requiresRepository: false });
     expect(body.requiresRepository).toBe(true);

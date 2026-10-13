@@ -123,7 +123,7 @@ export function buildCreateBody(
   };
 }
 
-/** Only fields the api lets this row change are sent, since it refuses the whole request over any other. */
+/** Only changed fields the api lets this row change are sent, since it refuses the whole request over any other. */
 export function buildUpdateBody(
   values: FormValues,
   editableFields: readonly string[],
@@ -132,11 +132,14 @@ export function buildUpdateBody(
     loopLimits: Record<string, number>;
     preAnswerDefaults: Record<string, Record<string, unknown>>;
   } | null,
-  saved: { requiresRepository: boolean },
+  saved: Partial<Record<(typeof FLAT_FIELDS)[number], unknown>>,
 ): TaskTypeUpdate {
   const body = flatValues(values, editableFields);
-  // The api re-checks the composition whenever requiresRepository is present.
-  if (body.requiresRepository === saved.requiresRepository) delete body.requiresRepository;
+  // Unchanged fields stay out: a stale page must not undo another edit, and the api
+  // re-checks the composition whenever requiresRepository is present.
+  for (const field of FLAT_FIELDS) {
+    if (field in body && body[field] === saved[field]) delete body[field];
+  }
   if (composition && editableFields.includes('stepIds')) {
     const listed = new Set(composition.stepIds);
     body.stepIds = composition.stepIds;
