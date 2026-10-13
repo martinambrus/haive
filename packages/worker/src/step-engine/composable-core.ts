@@ -58,7 +58,15 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'env-image', reason: 'Checks the built, ready image.' }],
     provides: [],
-    precedes: ['app-runtime', 'implementation'],
+    precedes: [
+      'app-runtime',
+      'implementation',
+      'discovery',
+      'spec',
+      'commit',
+      'learnings',
+      'skills-synced',
+    ],
   },
   {
     stepId: '00a-sync-base',
@@ -93,7 +101,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [needWorktree],
     provides: [],
-    precedes: ['discovery', 'spec', 'implementation', 'commit', 'learnings'],
+    precedes: ['discovery', 'spec', 'implementation', 'commit', 'learnings', 'skills-synced'],
   },
   {
     stepId: '01d-browser-access',
@@ -111,7 +119,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [needWorktree],
     provides: ['ddev', 'app-runtime'],
-    precedes: ['implementation', 'commit'],
+    precedes: ['implementation', 'commit', 'rag-scope', 'reindexed', 'learnings'],
   },
   {
     stepId: '01a-app-boot',

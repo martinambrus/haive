@@ -222,6 +222,10 @@ describe('core composable catalog', () => {
     ['07b-phase-4-validate', '07c-ddev-reconcile', 'reconciled'],
     ['07-phase-2-implement', '11b1-rag-source-selection', 'rag-scope'],
     ['04-verify-environment', '07-phase-2-implement', 'implementation'],
+    ['04-verify-environment', '03-phase-0a-discovery', 'discovery'],
+    ['04-verify-environment', '04-phase-0b-pre-planning', 'spec'],
+    ['01c-ddev-env', '11b1-rag-source-selection', 'rag-scope'],
+    ['01b-install-plugins', '11d-skill-sync', 'skills-synced'],
     ['11d-skill-sync', '11a-gate-4-push', 'pushed'],
   ])('rejects %s placed after %s', (early, late, token) => {
     const setup = [
