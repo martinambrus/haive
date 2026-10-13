@@ -408,9 +408,10 @@ export function TaskTypeComposer({
                     <div key={JSON.stringify(issue)} className="mt-2 text-xs text-red-300">
                       <InlineMarkdown className="[overflow-wrap:anywhere]" body={view.message} />
                       {view.providedBy.length > 0 && issue.kind !== 'missing-loop-target' && (
-                        <p className="mt-0.5 text-neutral-400">
-                          {`Provided by: ${view.providedBy.map((p) => p.label).join(', ')}`}
-                        </p>
+                        <InlineMarkdown
+                          className="mt-0.5 text-neutral-400 [overflow-wrap:anywhere]"
+                          body={`Provided by: ${view.providedBy.map((p) => p.label).join(', ')}`}
+                        />
                       )}
                       {suggestions.length > 0 && (
                         <div className="mt-1 flex flex-wrap gap-2">

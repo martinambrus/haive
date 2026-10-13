@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { deleteTaskType, type ApiError } from '@/lib/api-client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Button, FormError } from '@/components/ui';
 
 interface TaskTypeDeleteDialogProps {
@@ -22,6 +23,7 @@ export function TaskTypeDeleteDialog({
   const [error, setError] = useState<string | null>(null);
 
   function close() {
+    if (deleting) return;
     setError(null);
     onClose();
   }
@@ -45,13 +47,20 @@ export function TaskTypeDeleteDialog({
       <DialogContent role="alertdialog" aria-labelledby="delete-task-type-title">
         <DialogHeader>
           <DialogTitle id="delete-task-type-title">Delete task type</DialogTitle>
-          <p className="text-sm text-neutral-300">
-            {`Delete "${displayName}"? This cannot be undone. A type that tasks already use cannot be deleted; disable it instead.`}
-          </p>
+          <InlineMarkdown
+            className="text-sm text-neutral-300 [overflow-wrap:anywhere]"
+            body={`Delete "${displayName}"? This cannot be undone. A type that tasks already use cannot be deleted; disable it instead.`}
+          />
         </DialogHeader>
         <FormError message={error} />
         <div className="mt-4 flex justify-end gap-2">
-          <Button type="button" variant="secondary" className="h-11" onClick={close}>
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-11"
+            disabled={deleting}
+            onClick={close}
+          >
             Cancel
           </Button>
           <Button
