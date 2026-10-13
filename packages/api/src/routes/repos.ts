@@ -35,6 +35,7 @@ import {
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
+import { ROOT_WRITING_STEP_IDS } from '../lib/task-type-definition.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
@@ -1071,8 +1072,6 @@ const WORKTREE_PAIR_STEP_IDS = [WORKFLOW_SKILL_STEP_ID, WORKTREE_CLEANUP_STEP_ID
  *  artifacts it just merged. `loadOnboardingTaskFacts` sees neither: it is filtered to
  *  `onboarding` because it also answers the ONBOARDED verdict. */
 const OTHER_ROOT_WRITER_TASK_TYPES: readonly string[] = ['onboarding_upgrade', 'workflow'];
-/** A custom type whose run list sets up a worktree merges it into the root like a workflow does. */
-const ROOT_WRITER_SNAPSHOT_STEP = '01-worktree-setup';
 const PROVENANCE_STEP_IDS = [
   AGENT_TARGETS_STEP_ID,
   SKILL_MIRROR_STEP_ID,
@@ -1178,7 +1177,7 @@ export async function loadLiveRootWriters(
     .filter(
       (t) =>
         OTHER_ROOT_WRITER_TASK_TYPES.includes(t.type) ||
-        t.runListSnapshot?.includes(ROOT_WRITER_SNAPSHOT_STEP) === true,
+        ROOT_WRITING_STEP_IDS.some((id) => t.runListSnapshot?.includes(id) === true),
     )
     .slice(0, 1)
     .map((t) => ({ id: t.id }));

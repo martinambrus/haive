@@ -14,7 +14,12 @@ const GENERIC_BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(workflowTypeSche
 
 const MODEL_HEALTH_STEP_ID = '00-model-health-workflow';
 const SIMPLIFY_STEP_ID = '07a-code-simplify';
-const ROOT_LOCK_STEP_ID = '01-worktree-setup';
+/** Steps that write at the repository root: the base sync, the worktree add, and the cleanup merge. */
+export const ROOT_WRITING_STEP_IDS: readonly string[] = [
+  '00a-sync-base',
+  '01-worktree-setup',
+  '12-worktree-cleanup',
+];
 const DATABASE_PIN_STEP_IDS = ['01c1-restore-database', '11g-save-database'];
 
 export interface TaskTypeDefinitionForCreate {
@@ -123,6 +128,9 @@ export async function definitionForCreate(
     }
   }
   const custom = def.source === 'admin';
+  if (custom && !def.requiresRepository) {
+    throw new HttpError(409, `Task type ${slug} needs no repository, which workers cannot run yet`);
+  }
   let snapshot = def.runListStrategy === 'static' ? def.stepIds : null;
   if (
     custom &&
@@ -135,12 +143,12 @@ export async function definitionForCreate(
   const has = (id: string) => snapshot?.includes(id) === true;
   return {
     runListSnapshot: snapshot,
-    requiresRepository: def.requiresRepository,
+    requiresRepository: custom && def.requiresRepository,
     preAnswers:
       custom && Object.keys(def.preAnswerDefaults).length > 0 ? def.preAnswerDefaults : null,
     stepLoopLimits: custom ? def.stepLoopLimitDefaults : {},
     simplifyCode: custom && has(SIMPLIFY_STEP_ID),
-    takesRootLock: slug === 'workflow' || has(ROOT_LOCK_STEP_ID),
+    takesRootLock: slug === 'workflow' || ROOT_WRITING_STEP_IDS.some(has),
     pinsDatabase: custom && DATABASE_PIN_STEP_IDS.some(has),
   };
 }

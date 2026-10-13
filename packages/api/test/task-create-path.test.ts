@@ -40,6 +40,7 @@ const SLUGS = [
   'cp-defaults',
   'cp-repo',
   'cp-norepo',
+  'cp-sync',
   'cp-pin',
   'cp-restore',
   'cp-invalid',
@@ -50,6 +51,7 @@ const STEP_IDS = [
   'cp-plain',
   'cp-needs',
   LOCK_STEP,
+  '00a-sync-base',
   '07a-code-simplify',
   '01c1-restore-database',
   '11g-save-database',
@@ -92,7 +94,7 @@ const typeRow = (
   runListStrategy: 'static' as const,
   stepIds,
   source: 'admin',
-  requiresRepository: false,
+  requiresRepository: true,
   ...over,
 });
 
@@ -175,6 +177,7 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       }),
       typeRow('cp-repo', ['cp-plain'], { requiresRepository: true }),
       typeRow('cp-norepo', ['cp-plain'], { requiresRepository: false }),
+      typeRow('cp-sync', ['00a-sync-base', 'cp-plain']),
       typeRow('cp-pin', ['cp-plain', '11g-save-database']),
       typeRow('cp-restore', ['01c1-restore-database']),
       typeRow('cp-invalid', ['cp-needs']),
@@ -220,6 +223,7 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
     await claimRoot(true);
     expect((await post({ type: 'cp-lock', repositoryId: REPO })).status).toBe(409);
     expect((await post({ type: 'cp-plain', repositoryId: REPO })).status).toBe(201);
+    expect((await post({ type: 'cp-sync', repositoryId: REPO })).status).toBe(409);
   });
 
   it('counts a live custom task with 01-worktree-setup as a root writer, and not one without', async () => {
@@ -246,7 +250,8 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
   it('refuses a type that requires a repository when the request names none', async () => {
     expect((await post({ type: 'cp-repo' })).status).toBe(400);
     expect((await post({ type: 'cp-repo', repositoryId: REPO })).status).toBe(201);
-    expect((await post({ type: 'cp-norepo' })).status).toBe(201);
+    expect((await post({ type: 'cp-norepo' })).status).toBe(409);
+    expect((await post({ type: 'cp-norepo', repositoryId: REPO })).status).toBe(409);
   });
 
   it('pins a database for a custom type with 01c1-restore-database or 11g-save-database', async () => {
