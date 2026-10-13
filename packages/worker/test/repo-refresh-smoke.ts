@@ -3,17 +3,25 @@
  * real git repositories. One throwaway user and temp directory, deleted after.
  */
 import { execFileSync } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual as isDeepEqual } from 'node:util';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { HAIVE_DATA_FILES, logger, type RepoJobPayload } from '@haive/shared';
+import { applyPlanPatch } from '@haive/shared/plan';
+import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase, getDb } from '../src/db.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
-import { lockProjectState } from '../src/project-state/write.js';
+import { lockProjectState, writeProjectStateColumn } from '../src/project-state/write.js';
+import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import { writePlanMirror } from '../src/plan/mirror.js';
+import { syncBaseStep } from '../src/step-engine/steps/workflow/00a-sync-base.js';
+import type { StepContext } from '../src/step-engine/step-definition.js';
 
 const log = logger.child({ module: 'repo-refresh-smoke' });
 
@@ -336,29 +344,17 @@ async function main(): Promise<void> {
     {
       const { payload, dest } = await cloned();
       const before = git(dest, 'rev-parse', 'HEAD');
-      const planBytes = `${JSON.stringify({
-        schemaVersion: 2,
-        nodes: [
-          {
-            id: randomUUID(),
-            parentId: null,
-            ordinal: 0,
-            title: 'Root',
-            kind: 'component',
-            body: null,
-            status: 'todo',
-            taskable: true,
-          },
-        ],
-        edges: [],
-        codeLinks: [],
-      })}\n`;
-      await mkdir(path.dirname(path.join(dest, HAIVE_DATA_FILES.plan)), { recursive: true });
-      await writeFile(path.join(dest, HAIVE_DATA_FILES.plan), planBytes);
-      await db.insert(schema.planMirrorState).values({
-        repositoryId: payload.repositoryId,
-        syncedHash: createHash('sha256').update(planBytes).digest('hex'),
-      });
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: payload.repositoryId, origin: 'user' },
+      );
+      await writePlanMirror(db, payload.repositoryId, dest);
+      // A row stamped before 0196 holds the hash of the bytes it wrote, and no base.
+      await db
+        .update(schema.planMirrorState)
+        .set({ syncedSnapshot: null })
+        .where(eq(schema.planMirrorState.repositoryId, payload.repositoryId));
       await push('after-plan.txt', 'x\n');
       const fn = `refresh_smoke_refuse_${randomBytes(4).toString('hex')}`;
       await db.execute(
@@ -386,6 +382,296 @@ async function main(): Promise<void> {
         'and the next refresh seeds the base, then moves it',
         seeded?.syncedSnapshot != null && git(dest, 'rev-parse', 'HEAD') !== before,
         seeded,
+      );
+    }
+
+    // 10-13. A checkout move sets Haive's own pending projection files aside, then re-renders them
+    // over the new head (docs/plans/two-install-project-sync.md, B3.1).
+    const RENDER_REL = '.haive-data/state/project/render.json';
+    const PLAN_REL = HAIVE_DATA_FILES.plan;
+    const column = (over: Record<string, unknown> = {}) => ({
+      projectInfo: { name: 'repo-refresh-smoke' },
+      framework: null,
+      acceptedAgentIds: ['a'],
+      customAgentSpecs: [],
+      lspLanguages: [],
+      rtkChoiceRecorded: true,
+      ...over,
+    });
+    const writeRecord = async (
+      dir: string,
+      over: Record<string, unknown>,
+      settings: Record<string, unknown> = {},
+    ) => {
+      const files = renderProjectState({
+        ...emptyProjectState(),
+        render: column(over) as never,
+        settings,
+      });
+      for (const [rel, text] of files) {
+        await mkdir(path.dirname(path.join(dir, '.haive-data/state', rel)), { recursive: true });
+        await writeFile(path.join(dir, '.haive-data/state', rel), text);
+      }
+    };
+    const upstreamCommit = (message: string, ...paths: string[]) => {
+      git(seed, 'add', ...paths);
+      git(seed, 'commit', '-q', '-m', message);
+      git(seed, 'push', '-q', 'origin', 'HEAD:main');
+      return git(seed, 'rev-parse', 'HEAD');
+    };
+    const columnOf = async (id: string) =>
+      (
+        await db.query.repositories.findFirst({
+          where: eq(schema.repositories.id, id),
+          columns: { renderContext: true },
+        })
+      )?.renderContext as { acceptedAgentIds?: string[]; lspLanguages?: string[] } | null;
+    /** A cloned repository whose record is committed, then one pending change of Haive's own,
+     *  written to render.json by the sweep. */
+    const withPendingRender = async () => {
+      const c = await cloned();
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column() })
+        .where(eq(schema.repositories.id, c.payload.repositoryId));
+      await writeProjectStateColumn(db, {
+        repositoryId: c.payload.repositoryId,
+        repoPath: c.dest,
+        column: column(),
+      });
+      git(c.dest, 'add', '.haive-data/state');
+      git(c.dest, 'commit', '-q', '-m', 'record');
+      git(c.dest, 'push', '-q', 'origin', 'HEAD:main');
+      git(seed, 'pull', '-q', '--ff-only', 'origin', 'main');
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column({ lspLanguages: ['php'] }) })
+        .where(eq(schema.repositories.id, c.payload.repositoryId));
+      await markProjectStateDirty(db, c.payload.repositoryId);
+      await sweepDirtyProjectStates(db);
+      return c;
+    };
+    const taskCtx = (dest: string, taskId: string): StepContext =>
+      ({
+        round: 0,
+        taskId,
+        taskStepId: randomUUID(),
+        userId,
+        repoPath: dest,
+        workspacePath: dest,
+        sandboxWorkdir: '/haive/workdir',
+        cliProviderId: null,
+        db,
+        logger: log.child({ step: '00a-sync-base' }),
+        signal: new AbortController().signal,
+        throwIfCancelled: () => undefined,
+        async emitProgress() {},
+      }) as StepContext;
+    const moveVia = async (via: 'refresh' | '00a', c: Awaited<ReturnType<typeof cloned>>) => {
+      if (via === 'refresh') {
+        await handleRefresh(c.payload, db, storage);
+        return { message: (await statusOf(c.payload.repositoryId)).statusMessage ?? '' };
+      }
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: c.payload.repositoryId,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id });
+      try {
+        const ctx = taskCtx(c.dest, task!.id);
+        const detected = await syncBaseStep.detect!(ctx);
+        const out = await syncBaseStep.apply(ctx, {
+          detected,
+          formValues: { base: 'main' },
+          iteration: 0,
+          previousIterations: [],
+        });
+        return { message: out.reason ?? '', strategy: out.strategy };
+      } finally {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, task!.id));
+      }
+    };
+
+    for (const via of ['refresh', '00a'] as const) {
+      // 10. Haive's pending change to a state file, an incoming commit touching the same file.
+      {
+        const c = await withPendingRender();
+        const pending = git(c.dest, 'status', '--porcelain', '--', RENDER_REL);
+        check(
+          `${via}: Haive's pending change leaves render.json modified`,
+          pending.startsWith('M') &&
+            (await readFile(path.join(c.dest, RENDER_REL), 'utf8')).includes('php'),
+          pending,
+        );
+        await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+        const upstream = upstreamCommit('a teammate adds an agent', '.haive-data/state');
+        const moved = await moveVia(via, c);
+        const now = JSON.parse(await readFile(path.join(c.dest, RENDER_REL), 'utf8')) as {
+          acceptedAgentIds: string[];
+          lspLanguages: string[];
+        };
+        const col = await columnOf(c.payload.repositoryId);
+        check(
+          `${via}: the checkout moves to the incoming commit past a pending change to a file it touches`,
+          git(c.dest, 'rev-parse', 'HEAD') === upstream,
+          moved,
+        );
+        check(
+          `${via}: the incoming agent is imported and the pending change survives, in the database and re-rendered over the new head`,
+          isDeepEqual(col?.acceptedAgentIds, ['a', 'b']) &&
+            isDeepEqual(col?.lspLanguages, ['php']) &&
+            isDeepEqual(now.acceptedAgentIds, ['a', 'b']) &&
+            isDeepEqual(now.lspLanguages, ['php']),
+          { col, now },
+        );
+      }
+
+      // 11. The same file edited by hand: the move is refused naming it, and nothing moves.
+      {
+        const c = await withPendingRender();
+        const before = git(c.dest, 'rev-parse', 'HEAD');
+        await writeFile(path.join(c.dest, RENDER_REL), '{ edited by hand');
+        await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+        upstreamCommit('a teammate adds an agent', '.haive-data/state');
+        const moved = await moveVia(via, c);
+        check(
+          `${via}: a hand-edited state file refuses the move and the message names the file`,
+          git(c.dest, 'rev-parse', 'HEAD') === before &&
+            moved.message.includes(RENDER_REL) &&
+            !/git refused|fast-forward failed/.test(moved.message) &&
+            (await readFile(path.join(c.dest, RENDER_REL), 'utf8')) === '{ edited by hand',
+          moved,
+        );
+      }
+    }
+
+    // 11b. A state file Haive wrote that is not in HEAD yet, which the incoming commit also adds: the
+    // untracked copy is set aside, and the two lists are merged rather than one lost.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const SCOPE_REL = '.haive-data/state/settings/scope-exclude-globs.json';
+      await db
+        .update(schema.repositories)
+        .set({ scopeExcludeGlobs: ['a/**'] })
+        .where(eq(schema.repositories.id, id));
+      await markProjectStateDirty(db, id);
+      await sweepDirtyProjectStates(db);
+      const untracked = git(c.dest, 'status', '--porcelain', '--', SCOPE_REL);
+      await writeRecord(seed, {}, { 'scope-exclude-globs': ['b/**'] });
+      const upstream = upstreamCommit('a teammate sets the scope', '.haive-data/state');
+      await handleRefresh(c.payload, db, storage);
+      const repo = await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, id),
+        columns: { scopeExcludeGlobs: true },
+      });
+      const open = await db.query.projectStateConflicts.findMany({
+        where: eq(schema.projectStateConflicts.repositoryId, id),
+      });
+      check(
+        'an untracked state file the incoming commit also adds is set aside and the checkout moves',
+        untracked.startsWith('??') && git(c.dest, 'rev-parse', 'HEAD') === upstream,
+        untracked,
+      );
+      check(
+        "and the two scope lists are merged, this install's entry kept, with nothing asked",
+        isDeepEqual([...(repo?.scopeExcludeGlobs ?? [])].sort(), ['a/**', 'b/**']) &&
+          open.every((r) => r.unit !== 'settings/scope-exclude-globs.json'),
+        { repo, open: open.map((r) => r.unit) },
+      );
+    }
+
+    // 11c. A valid hand edit is read in by the sync that runs first, so the database holds it and the
+    // set-aside loses nothing.
+    {
+      const c = await cloned();
+      const id = c.payload.repositoryId;
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column() })
+        .where(eq(schema.repositories.id, id));
+      await writeProjectStateColumn(db, { repositoryId: id, repoPath: c.dest, column: column() });
+      git(c.dest, 'add', '.haive-data/state');
+      git(c.dest, 'commit', '-q', '--allow-empty', '-m', 'record');
+      git(c.dest, 'push', '-q', 'origin', 'HEAD:main');
+      git(seed, 'pull', '-q', '--ff-only', 'origin', 'main');
+      await writeRecord(c.dest, { lspLanguages: ['go'] });
+      const upstream = await push('elsewhere.txt', 'x\n');
+      await handleRefresh(c.payload, db, storage);
+      const col = await columnOf(id);
+      const now = JSON.parse(await readFile(path.join(c.dest, RENDER_REL), 'utf8')) as {
+        lspLanguages: string[];
+      };
+      check(
+        'a valid hand edit of a state file is read in, and survives a move that does not touch it',
+        git(c.dest, 'rev-parse', 'HEAD') === upstream &&
+          isDeepEqual(col?.lspLanguages, ['go']) &&
+          isDeepEqual(now.lspLanguages, ['go']),
+        { col, now },
+      );
+    }
+
+    // 12. plan.json holding the bytes Haive last wrote is set aside, then re-rendered over the new head.
+    {
+      const c = await cloned();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        {
+          ops: [
+            { op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Plan' },
+            { op: 'upsert', nodeRef: 'one', parentRef: 'root', title: 'One' },
+            { op: 'upsert', nodeRef: 'two', parentRef: 'root', title: 'Two' },
+          ],
+        },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      git(c.dest, 'add', '.haive-data');
+      git(c.dest, 'commit', '-q', '-m', 'plan');
+      git(c.dest, 'push', '-q', 'origin', 'HEAD:main');
+      git(seed, 'pull', '-q', '--ff-only', 'origin', 'main');
+      const titles = (text: string) =>
+        (JSON.parse(text) as { nodes: { title: string }[] }).nodes.map((n) => n.title).sort();
+      const nodes = await db.query.planNodes.findMany({
+        where: eq(schema.planNodes.repositoryId, id),
+      });
+      const one = nodes.find((n) => n.title === 'One')!;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: one.id, title: 'One, edited here' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const pending = git(c.dest, 'status', '--porcelain', '--', PLAN_REL);
+      const theirs = JSON.parse(await readFile(path.join(seed, PLAN_REL), 'utf8')) as {
+        nodes: { title: string }[];
+      };
+      theirs.nodes.find((n) => n.title === 'Two')!.title = 'Two, edited there';
+      await writeFile(path.join(seed, PLAN_REL), `${JSON.stringify(theirs, null, 2)}\n`);
+      const upstream = upstreamCommit('a teammate edits the plan', PLAN_REL);
+      await handleRefresh(c.payload, db, storage);
+      const now = titles(await readFile(path.join(c.dest, PLAN_REL), 'utf8'));
+      const inDb = (
+        await db.query.planNodes.findMany({ where: eq(schema.planNodes.repositoryId, id) })
+      )
+        .map((n) => n.title)
+        .sort();
+      check(
+        'a plan.json holding what Haive last wrote is set aside for the move',
+        pending.startsWith('M') && git(c.dest, 'rev-parse', 'HEAD') === upstream,
+        { pending },
+      );
+      check(
+        'and the plan is read in and re-rendered with both edits, in the database and in plan.json',
+        isDeepEqual(inDb, ['One, edited here', 'Plan', 'Two, edited there']) &&
+          isDeepEqual(now, ['One, edited here', 'Plan', 'Two, edited there']),
+        { inDb, now },
       );
     }
 

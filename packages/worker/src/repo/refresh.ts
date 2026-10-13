@@ -11,6 +11,7 @@ import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
 import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
 import { lockProjectState } from '../project-state/write.js';
+import { resyncHaiveProjections, setAsideHaiveProjections } from '../project-state/set-aside.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-push.js';
 
@@ -133,6 +134,11 @@ async function fastForward(
   }
   if (behind === 0) return null;
 
+  const aside = await setAsideHaiveProjections(db, payload.repositoryId, dest);
+  if (aside.outcome === 'refused') {
+    return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
+  }
+
   // Under the project-state lock, and only while no task holds the checkout: an upgrade that is
   // still writing its record takes that lock, and refuses once its task is no longer holding.
   const merged = await db.transaction(async (tx) => {
@@ -140,6 +146,9 @@ async function fastForward(
     if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) return null;
     return gitRun(dest, ['merge', '--ff-only', target]);
   });
+  if (merged?.code === 0 || aside.outcome === 'set-aside') {
+    await resyncHaiveProjections(db, payload.repositoryId, dest);
+  }
   if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
   if (merged.code !== 0) {
     return `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`;

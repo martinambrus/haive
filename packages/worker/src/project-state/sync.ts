@@ -769,3 +769,51 @@ export async function syncProjectStateFromCheckout(
     return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged' };
   });
 }
+
+/** Points the sync base at the record the checkout holds now, so a sync after the checkout moves merges
+ *  this install's pending changes against the record they were made on. A checkout holding no readable
+ *  record leaves no base, which the next sync reads as a first one. */
+export async function rebaseProjectStateOnCheckout(
+  db: Database,
+  { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
+): Promise<void> {
+  const checkout = await readCheckout(repoPath);
+  await db.transaction(async (tx) => {
+    await lockProjectState(tx, repositoryId);
+    if (checkout.kind !== 'record') {
+      await tx
+        .delete(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, repositoryId));
+      return;
+    }
+    const [repo] = await tx
+      .select({ renderContext: schema.repositories.renderContext })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .limit(1);
+    const rtkKept =
+      (repo?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true ||
+      (repo?.renderContext ?? null) === null;
+    const settings = Object.create(null) as Record<string, unknown>;
+    for (const [name, value] of Object.entries(intakeSettings(checkout.settings, {}).accepted)) {
+      if (rtkKept || name !== 'rtk-enabled') settings[name] = value;
+    }
+    const tooling = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
+    if (tooling) settings[TOOLING_UNIT_NAME] = tooling;
+    const synced = {
+      baseSnapshot: normalizeProjectState({
+        ...recordOf(checkout.render),
+        claims: checkout.claims,
+        bundles: checkout.bundles,
+        settings,
+        environment: checkout.environment && normalizeEnvironment(checkout.environment),
+      }),
+      lastError: null,
+      updatedAt: new Date(),
+    };
+    await tx
+      .insert(schema.projectStateSync)
+      .values({ repositoryId, ...synced })
+      .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
+  });
+}

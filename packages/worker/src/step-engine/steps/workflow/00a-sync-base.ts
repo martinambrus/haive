@@ -11,6 +11,11 @@ import {
 } from '../../../repo/git-push.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
+import {
+  resyncHaiveProjections,
+  setAsideHaiveProjections,
+  type SetAsideResult,
+} from '../../../project-state/set-aside.js';
 
 // Pre-branch base sync. Runs after the model-health canary and before triage (the
 // explicit pull in orderWorkflowRunList places it there). Brings the LOCAL base
@@ -88,6 +93,14 @@ async function countCommits(repoPath: string, range: string): Promise<number> {
   if (res.code !== 0) return 0;
   const n = Number.parseInt(res.stdout.trim() || '0', 10);
   return Number.isFinite(n) ? n : 0;
+}
+
+async function taskRepositoryId(ctx: StepContext): Promise<string | null> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { repositoryId: true },
+  });
+  return task?.repositoryId ?? null;
 }
 
 export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
@@ -332,6 +345,10 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     // Divergence was analyzed for the default base (d.baseBranch). When the user kept
     // it, the merge phase already merged origin in (syncAction=merge) or they skipped.
     if (base === d.baseBranch && d.diverged) {
+      if (values.syncAction === 'merge') {
+        const repositoryId = await taskRepositoryId(ctx);
+        if (repositoryId) await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+      }
       return values.syncAction === 'merge'
         ? { synced: true, base, strategy: 'merge', behindBy: d.behindBy, reason: null }
         : {
@@ -361,6 +378,21 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
             `refs/heads/${base}:refs/heads/${base}`,
           ]);
 
+    const repositoryId = onCurrent ? await taskRepositoryId(ctx) : null;
+    let aside: SetAsideResult = { outcome: 'clean' };
+    if (repositoryId) {
+      aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+      if (aside.outcome === 'refused') {
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `${aside.reason}; the base was not moved. Commit or discard that change, then Retry this step.`,
+        };
+      }
+    }
+
     let res = await ff();
     if (res.code !== 0) {
       await gitRun(ctx.repoPath, [
@@ -371,6 +403,9 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         `refs/heads/${base}`,
       ]);
       res = await ff();
+    }
+    if (repositoryId && (res.code === 0 || aside.outcome === 'set-aside')) {
+      await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
     }
     if (res.code !== 0) {
       ctx.logger.warn(
