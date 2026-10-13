@@ -110,6 +110,7 @@ export const composableStepEntrySchema = z
     paramFormSchema: formSchemaSchema.optional(),
     loopBudgetEditable: z.boolean().optional(),
     loopTargetStepId: stepIdSchema.optional(),
+    closes: z.boolean().optional(),
     integrations: z.array(integrationRequirementSchema).optional(),
   })
   .refine(

@@ -12,6 +12,8 @@ import { openModuleDatabase, type ModuleSchemaContext } from '@haive/shared/modu
 import { getBullRedis } from '../redis.js';
 import type { StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
+import { emitsLoop } from '../step-engine/steps/index.js';
+import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
 
 export type { ModuleSchemaContext };
 
@@ -63,7 +65,7 @@ export function registerModuleSteps(
   return entries.map((entry, index) => {
     const manifest = manifests[index]!;
     const moduleId = manifest.id;
-    const localIds = new Set<string>();
+    const localDefs = new Map<string, StepDefinition>();
     const stepIds: string[] = [];
     for (const def of entry.steps ?? []) {
       const localId = def.metadata.id;
@@ -84,23 +86,31 @@ export function registerModuleSteps(
           { cause: err },
         );
       }
-      localIds.add(localId);
+      localDefs.set(localId, def);
       stepIds.push(id);
     }
 
     const composable = (manifest.composableSteps ?? []).map((composableEntry) => {
-      if (!localIds.has(composableEntry.stepId)) {
+      const def = localDefs.get(composableEntry.stepId);
+      if (!def) {
         throw new Error(
           `Module ${moduleId} composable step "${composableEntry.stepId}" is not one of its steps`,
         );
       }
-      return {
-        ...composableEntry,
-        stepId: namespaced(moduleId, composableEntry.stepId),
-        ...(composableEntry.loopTargetStepId === undefined
-          ? {}
-          : { loopTargetStepId: namespaced(moduleId, composableEntry.loopTargetStepId) }),
-      };
+      const named = `Module ${moduleId} composable step "${composableEntry.stepId}"`;
+      // The runner still routes loop_back to the core implement step whatever a catalog entry says.
+      if (def.reviseLoop) {
+        throw new Error(`${named} uses reviseLoop, which cannot be composed yet`);
+      }
+      if (emitsLoop(def) && composableEntry.loopTargetStepId !== FIX_LOOP_TARGET_STEP_ID) {
+        throw new Error(
+          `${named} loops back to ${FIX_LOOP_TARGET_STEP_ID}; declare that as loopTargetStepId`,
+        );
+      }
+      if (!emitsLoop(def) && composableEntry.loopTargetStepId !== undefined) {
+        throw new Error(`${named} declares a loop target but does not loop`);
+      }
+      return { ...composableEntry, stepId: namespaced(moduleId, composableEntry.stepId) };
     });
 
     return { packageName: entry.packageName, manifest, stepIds, composable };

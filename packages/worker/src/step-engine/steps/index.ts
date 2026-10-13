@@ -29,6 +29,10 @@ export function dispatchesCli(def: StepDefinition): boolean {
   return Boolean(def.llm || def.agentMining || def.dagExecute);
 }
 
+export function emitsLoop(def: StepDefinition): boolean {
+  return Boolean(def.fixLoop || def.fixLoopOnError || def.reviseLoop || def.restartLoop);
+}
+
 export function registerAllSteps(registry: StepRegistry): void {
   registerOnboardingSteps(registry);
   registerEnvReplicateSteps(registry);
