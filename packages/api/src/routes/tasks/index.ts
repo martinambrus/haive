@@ -1642,19 +1642,16 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
   // fail->retry wait as idle. Per-row update because each contributes differently; this
   // path also zeroes user_active_ms (the old blanket update omitted it, leaving a stale
   // value that the fold now carries over correctly).
+  const providerSensitiveIds = [...(await loadStepFlags(db)).values()]
+    .filter((f) => f.providerSensitive)
+    .map((f) => f.stepId);
   const invalidated = await db
     .select()
     .from(schema.taskSteps)
     .where(
       and(
         eq(schema.taskSteps.taskId, id),
-        inArray(
-          schema.taskSteps.stepId,
-          db
-            .select({ stepId: schema.stepCatalog.stepId })
-            .from(schema.stepCatalog)
-            .where(eq(schema.stepCatalog.providerSensitive, true)),
-        ),
+        inArray(schema.taskSteps.stepId, providerSensitiveIds),
         inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
       ),
     );
