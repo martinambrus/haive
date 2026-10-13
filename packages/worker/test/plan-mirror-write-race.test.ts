@@ -85,6 +85,17 @@ describe('a merge open when the file is judged', () => {
     );
     expect(await onDisk(repo)).toBe('{"synced":1}\n');
   });
+
+  it('holds creating or removing an absent plan.json too', async () => {
+    const repo = await repoWith(null);
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    await writeFile(path.join(repo, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n');
+    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(''))).rejects.toThrow(
+      /merge or rebase/,
+    );
+    await expect(removePlanJsonIfUnchanged(repo, sha(''))).rejects.toThrow(/merge or rebase/);
+    await expect(access(path.join(repo, HAIVE_DATA_FILES.plan))).rejects.toThrow();
+  });
 });
 
 describe('bytes that decode alike', () => {

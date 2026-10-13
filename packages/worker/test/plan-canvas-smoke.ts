@@ -2102,6 +2102,37 @@ async function main(): Promise<void> {
       () => false,
     ),
   );
+  // An imported plan.json is stamped with the hash of its bytes, not of the text they decode to.
+  let copied = await readFile(path.join(mdDir, HAIVE_DATA_FILES.plan), 'utf8');
+  for (const n of (JSON.parse(copied) as PlanMirror).nodes)
+    copied = copied.replaceAll(n.id, randomUUID());
+  const [badHead, badTail] = copied.split('retitled again') as [string, string];
+  const malformed = Buffer.concat([
+    Buffer.from(`${badHead}bad `),
+    Buffer.from([0xff]),
+    Buffer.from(badTail),
+  ]);
+  const badDir = path.join(holdRoot, 'malformed');
+  await mkdir(path.join(badDir, '.haive-data'), { recursive: true });
+  await writeFile(path.join(badDir, HAIVE_DATA_FILES.plan), malformed);
+  const [badRepo] = await db
+    .insert(schema.repositories)
+    .values({
+      userId,
+      name: 'plan-malformed',
+      source: 'blank',
+      status: 'ready',
+      storagePath: badDir,
+    })
+    .returning();
+  const badImport = await importPlanMirror(db, badRepo!.id, badDir);
+  check(
+    'an imported plan.json is stamped with the hash of its raw bytes',
+    badImport.imported &&
+      (await hashOf(badRepo!.id)) === createHash('sha256').update(malformed).digest('hex'),
+    badImport,
+  );
+  await db.delete(schema.repositories).where(eq(schema.repositories.id, badRepo!.id));
   await db
     .delete(schema.repositories)
     .where(inArray(schema.repositories.id, [legacyMatch, legacyDiffers]));

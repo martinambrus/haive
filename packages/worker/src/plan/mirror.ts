@@ -100,6 +100,9 @@ export async function removePlanJsonIfUnchanged(
   if (outcome === 'kept') {
     throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
   }
+  if (outcome === 'absent' && (await gitOperationInProgress(repoPath))) {
+    throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  }
 }
 
 /** Replaces plan.json only while it still holds bytes the flush may replace, judged on the file it
@@ -121,6 +124,7 @@ export async function writePlanJsonIfUnchanged(
     throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
   }
   if (outcome === 'rewritten') return;
+  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
   try {
     await writeFileNoFollow(repoPath, HAIVE_DATA_FILES.plan, bytes, {
       mode: 'create-exclusive',
@@ -360,14 +364,14 @@ export async function importPlanMirror(
   storagePath: string,
 ): Promise<PlanMirrorImport> {
   let rawPayload: unknown;
-  let rawText: string;
+  let rawBytes: Buffer;
   try {
     // null is absence OR a refusal — a link, a non-regular file — and both mean there is no mirror
     // to import, which is exactly what the `catch` concluded for an unreadable path.
-    const raw = await readTextNoFollow(storagePath, HAIVE_DATA_FILES.plan);
+    const raw = (await readFileNoFollow(storagePath, HAIVE_DATA_FILES.plan))?.data ?? null;
     if (raw === null) return { imported: false, code: 'no_mirror', reason: 'no plan mirror' };
-    rawText = raw;
-    rawPayload = JSON.parse(raw) as unknown;
+    rawBytes = raw;
+    rawPayload = JSON.parse(raw.toString('utf8')) as unknown;
   } catch {
     return { imported: false, code: 'no_mirror', reason: 'no plan mirror' };
   }
@@ -541,7 +545,7 @@ export async function importPlanMirror(
         revision,
         writtenRevision: revision,
         writtenAt: new Date(),
-        syncedHash: hashBytes(rawText),
+        syncedHash: hashBytes(rawBytes),
       })
       .onConflictDoUpdate({
         target: schema.planMirrorState.repositoryId,
@@ -551,7 +555,7 @@ export async function importPlanMirror(
           lastError: null,
           writtenAt: new Date(),
           updatedAt: new Date(),
-          syncedHash: hashBytes(rawText),
+          syncedHash: hashBytes(rawBytes),
         },
       });
   });
@@ -610,12 +614,12 @@ export async function reconcilePlanMirror(
   });
 
   let rawPayload: unknown;
-  let rawText: string;
+  let rawBytes: Buffer;
   try {
-    const raw = await readTextNoFollow(storagePath, HAIVE_DATA_FILES.plan);
+    const raw = (await readFileNoFollow(storagePath, HAIVE_DATA_FILES.plan))?.data ?? null;
     if (raw === null) return empty('this repository has no committed plan snapshot');
-    rawText = raw;
-    rawPayload = JSON.parse(raw) as unknown;
+    rawBytes = raw;
+    rawPayload = JSON.parse(raw.toString('utf8')) as unknown;
   } catch {
     return empty('this repository has no committed plan snapshot');
   }
@@ -647,7 +651,8 @@ export async function reconcilePlanMirror(
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
     // A flush that held the lock first may have replaced the file this read; stamping the older
     // bytes would make the next flush hold on a file Haive wrote.
-    if ((await readTextNoFollow(storagePath, HAIVE_DATA_FILES.plan)) !== rawText) {
+    const now = (await readFileNoFollow(storagePath, HAIVE_DATA_FILES.plan))?.data ?? null;
+    if (now === null || !now.equals(rawBytes)) {
       throw new Error('the plan snapshot changed while it was being read; try again');
     }
 
@@ -824,10 +829,10 @@ export async function reconcilePlanMirror(
     }
     await tx
       .insert(schema.planMirrorState)
-      .values({ repositoryId, revision: 0, writtenRevision: 0, syncedHash: hashBytes(rawText) })
+      .values({ repositoryId, revision: 0, writtenRevision: 0, syncedHash: hashBytes(rawBytes) })
       .onConflictDoUpdate({
         target: schema.planMirrorState.repositoryId,
-        set: { syncedHash: hashBytes(rawText) },
+        set: { syncedHash: hashBytes(rawBytes) },
       });
 
     logger.info(
