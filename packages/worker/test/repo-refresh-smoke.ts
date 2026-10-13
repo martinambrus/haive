@@ -18,6 +18,7 @@ import { initDatabase, getDb } from '../src/db.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
 import {
+  restoreFaults,
   restoreProjectionsInTx,
   setAsideHaiveProjections,
 } from '../src/project-state/set-aside.js';
@@ -946,6 +947,79 @@ async function main(): Promise<void> {
           dirty.written < dirty.revision &&
           (await readFile(path.join(c.dest, RENDER_REL), 'utf8')).trim() === headRender.trim(),
         { restored, clean, dirty },
+      );
+    }
+
+    // 11k. A crash at any point of the restore never loses the pending value: the sync base is committed at
+    // HEAD's record before the files move, so a sweep that finds the files at HEAD or still pending merges
+    // them against a base that agrees with them.
+    {
+      const crash = new Error('crash inside the restore');
+      const crashing = async (
+        point: 'afterBase' | 'afterRestore',
+        run: (c: Awaited<ReturnType<typeof withPendingRender>>) => Promise<unknown>,
+      ) => {
+        const c = await withPendingRender();
+        restoreFaults[point] = () => {
+          throw crash;
+        };
+        let thrown: unknown = null;
+        try {
+          await run(c);
+        } catch (err) {
+          thrown = err;
+        } finally {
+          delete restoreFaults[point];
+        }
+        const onDisk = () => readFile(path.join(c.dest, RENDER_REL), 'utf8');
+        const crashed = await onDisk();
+        await sweepDirtyProjectStates(db);
+        return {
+          c,
+          thrown,
+          crashed,
+          col: await columnOf(c.payload.repositoryId),
+          disk: await onDisk(),
+        };
+      };
+      const survived = (r: Awaited<ReturnType<typeof crashing>>) =>
+        r.thrown === crash &&
+        isDeepEqual(r.col?.lspLanguages, ['php']) &&
+        JSON.parse(r.disk).lspLanguages?.includes('php') === true;
+
+      const k1 = await crashing('afterRestore', (c) =>
+        setAsideHaiveProjections(db, c.payload.repositoryId, c.dest),
+      );
+      check(
+        'K1: a crash after the set-aside restored the files keeps the pending value, in the database and on disk',
+        survived(k1) && !k1.crashed.includes('php'),
+        { thrown: String(k1.thrown), crashed: k1.crashed, col: k1.col, disk: k1.disk },
+      );
+
+      const k2 = await crashing('afterRestore', (c) =>
+        db.transaction((tx) => restoreProjectionsInTx(db, tx, c.payload.repositoryId, c.dest)),
+      );
+      check(
+        'K2: a crash after the restore inside the move transaction keeps the pending value, in the database and on disk',
+        survived(k2) && !k2.crashed.includes('php'),
+        { thrown: String(k2.thrown), crashed: k2.crashed, col: k2.col, disk: k2.disk },
+      );
+
+      const k3 = await crashing('afterBase', (c) =>
+        setAsideHaiveProjections(db, c.payload.repositoryId, c.dest),
+      );
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      const upstream = upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      const moved = await moveVia('refresh', k3.c);
+      const after = await columnOf(k3.c.payload.repositoryId);
+      check(
+        'K3: a crash after the base commit and before the restore keeps the pending value, and the next set-aside and move succeed',
+        survived(k3) &&
+          k3.crashed.includes('php') &&
+          git(k3.c.dest, 'rev-parse', 'HEAD') === upstream &&
+          isDeepEqual(after?.lspLanguages, ['php']) &&
+          isDeepEqual(after?.acceptedAgentIds, ['a', 'b']),
+        { thrown: String(k3.thrown), col: k3.col, disk: k3.disk, moved, after },
       );
     }
 

@@ -51,6 +51,7 @@ import {
   resolveRenderContext,
   unionExpandedFor,
 } from '../step-engine/_upgrade-render.js';
+import { readStateTree } from '../plan/projection-merge.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { claimDiskHash } from './claim-disk.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
@@ -159,11 +160,12 @@ type Checkout =
       environment: ProjectEnvironment | null;
     };
 
+const notRead = (detail: string): Checkout => ({
+  kind: 'refused',
+  reason: `the checkout's record was not read: ${oneLine(detail)}`,
+});
+
 async function readCheckout(repoPath: string): Promise<Checkout> {
-  const notRead = (detail: string): Checkout => ({
-    kind: 'refused',
-    reason: `the checkout's record was not read: ${oneLine(detail)}`,
-  });
   let files: Map<string, string> | null;
   try {
     files = await readStateFiles(repoPath);
@@ -171,6 +173,10 @@ async function readCheckout(repoPath: string): Promise<Checkout> {
     if (err instanceof Refusal || isPathContainmentError(err)) return notRead(err.message);
     throw err;
   }
+  return checkoutOf(files);
+}
+
+function checkoutOf(files: Map<string, string> | null): Checkout {
   if (files === null) return { kind: 'absent' };
   const parsed = parseProjectState(files);
   if (!parsed.ok) return notRead(listed(parsed.problems));
@@ -782,6 +788,23 @@ export async function rebaseProjectStateOnCheckout(
   await db.transaction((tx) => rebaseLocked(tx, args.repositoryId, checkout));
 }
 
+/** The rebase onto the record HEAD commits, read from the commit and written on the pool without the
+ *  project-state lock, which the caller holds on another connection and which this write must not wait
+ *  for. Run before the files move, so a crash leaves the base at HEAD with the files pending or at HEAD. */
+export async function rebaseProjectStateOnHeadUnlocked(
+  db: Database,
+  { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
+): Promise<void> {
+  let checkout: Checkout;
+  try {
+    const files = await readStateTree(repoPath, 'HEAD');
+    checkout = checkoutOf(files.size === 0 ? null : files);
+  } catch (err) {
+    checkout = notRead((err as Error).message);
+  }
+  await db.transaction((tx) => applyRebase(tx, repositoryId, checkout));
+}
+
 /** The same rebase inside a transaction the caller already holds. */
 export async function rebaseProjectStateOnCheckoutLocked(
   tx: Tx,
@@ -796,6 +819,14 @@ async function rebaseLocked(
   checkout: Awaited<ReturnType<typeof readCheckout>>,
 ): Promise<void> {
   await lockProjectState(tx, repositoryId);
+  await applyRebase(tx, repositoryId, checkout);
+}
+
+async function applyRebase(
+  tx: Tx,
+  repositoryId: string,
+  checkout: Awaited<ReturnType<typeof readCheckout>>,
+): Promise<void> {
   if (checkout.kind === 'refused') {
     const row = await readSyncRow(tx, repositoryId);
     if (row !== null && row.lastError !== checkout.reason) {

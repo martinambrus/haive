@@ -23,7 +23,11 @@ import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { gitRun } from '../repo/git-exec.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { refreshProjectState } from './refresh.js';
-import { rebaseProjectStateOnCheckoutLocked, syncProjectStateFromCheckout } from './sync.js';
+import {
+  rebaseProjectStateOnCheckoutLocked,
+  rebaseProjectStateOnHeadUnlocked,
+  syncProjectStateFromCheckout,
+} from './sync.js';
 import {
   loadPendingClaimConflicts,
   loadPendingRenderConflicts,
@@ -184,15 +188,20 @@ async function planOffender(
   return held ? null : HAIVE_DATA_FILES.plan;
 }
 
+/** Test seam: a function here runs at its point of the restore and may throw to stand for a crash. */
+export const restoreFaults: { afterBase?: () => void; afterRestore?: () => void } = {};
+
 interface RestoreGuard {
   lock: (tx: Tx) => Promise<unknown>;
   offender: (tx: Tx) => Promise<string | null>;
   mark: (tx: DbOrTx) => Promise<unknown>;
+  base?: (db: Database) => Promise<unknown>;
   fence: CheckoutFence | undefined;
 }
 
-/** The restore with the domain's lock held: the fence read there and the stale mark raised first, on
- *  the pool, so a crash after the files moved and before `tx` commits still finds the mark. */
+/** The restore with the domain's lock held: the fence read there, then the stale mark and the sync base
+ *  at HEAD's record committed on the pool, so a crash after the files moved and before `tx` commits finds
+ *  the mark and a base the pending value still merges against. */
 async function restoreLocked(
   db: Database,
   tx: Tx,
@@ -205,7 +214,10 @@ async function restoreLocked(
   const holding = guard.fence ? await guard.fence(tx) : 0;
   if (holding > 0) return { outcome: 'held' as const, holding };
   await guard.mark(db);
+  await guard.base?.(db);
+  restoreFaults.afterBase?.();
   await restoreFromHead(repoPath, paths);
+  restoreFaults.afterRestore?.();
   return null;
 }
 
@@ -234,6 +246,7 @@ const stateGuard = (
   lock: (tx) => lockProjectState(tx, repositoryId),
   offender: (tx) => stateOffender(tx, repositoryId, repoPath, state),
   mark: (tx) => markProjectStateDirty(tx, repositoryId),
+  base: (pool) => rebaseProjectStateOnHeadUnlocked(pool, { repositoryId, repoPath }),
   fence,
 });
 
