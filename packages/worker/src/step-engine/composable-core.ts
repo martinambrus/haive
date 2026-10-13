@@ -1,11 +1,9 @@
 import { composableStepEntrySchema, type ComposableStepEntry } from '@haive/shared/modularity';
 import type { StepRegistry } from './registry.js';
-import { dispatchesCli, emitsLoop } from './steps/index.js';
+import { dispatchesAnyCli, emitsLoop } from './steps/index.js';
 import { FIX_LOOP_TARGET_STEP_ID } from './steps/workflow/_fix-loop.js';
 
 const IMPLEMENT = '07-phase-2-implement';
-
-export const MERGE_CAPABLE_STEP_IDS: readonly string[] = ['00a-sync-base', '12-worktree-cleanup'];
 
 const needWorktree = { needs: 'worktree', reason: 'Works inside the task worktree.' };
 const EDITS_PRECEDE = [
@@ -467,7 +465,7 @@ export function assertCoreComposableCatalog(
     }
     const def = registry.get(entry.stepId);
     if (!def) throw new Error(`Composable core entry ${entry.stepId} is not a registered step`);
-    const expected = MERGE_CAPABLE_STEP_IDS.includes(entry.stepId) ? true : dispatchesCli(def);
+    const expected = dispatchesAnyCli(def);
     if (entry.dispatchesCli !== expected) {
       throw new Error(
         `Composable core entry ${entry.stepId} declares dispatchesCli=${entry.dispatchesCli}, expected ${expected}`,

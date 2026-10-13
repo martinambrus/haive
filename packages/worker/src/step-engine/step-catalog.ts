@@ -3,7 +3,7 @@ import { schema, type Database } from '@haive/database';
 import { parseStepId, type ComposableStepEntry } from '@haive/shared/modularity';
 import type { StepRegistry } from './registry.js';
 import { CORE_COMPOSABLE_STEPS } from './composable-core.js';
-import { dispatchesCli } from './steps/index.js';
+import { dispatchesAnyCli } from './steps/index.js';
 
 export async function syncStepCatalog(
   db: Database,
@@ -28,7 +28,7 @@ export async function syncStepCatalog(
         source: parsed?.kind === 'module' ? `module:${parsed.moduleId}` : 'core',
         title: meta.title,
         workflowType: meta.workflowType,
-        dispatchesCli: dispatchesCli(def),
+        dispatchesCli: dispatchesAnyCli(def),
         allowSkip: meta.allowSkip === true,
         providerSensitive: meta.providerSensitive === true,
         cliRoles: meta.cliRoles ?? null,

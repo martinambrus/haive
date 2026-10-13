@@ -41,7 +41,8 @@ describe.skipIf(!url)('step catalog sync on Postgres', () => {
       expect(r.source).toBe('core');
       expect(r.allowSkip).toBe(SKIPPABLE_STEP_IDS.includes(r.stepId));
       expect(r.providerSensitive).toBe(PROVIDER_SENSITIVE_STEP_IDS.includes(r.stepId));
-      expect(r.dispatchesCli).toBe(CLI_DISPATCH_STEP_IDS.includes(r.stepId));
+      const merges = stepRegistry.get(r.stepId as never)?.mergeResolve !== undefined;
+      expect(r.dispatchesCli).toBe(CLI_DISPATCH_STEP_IDS.includes(r.stepId) || merges);
       expect(r.cliRoles).toEqual(STEP_CLI_ROLES[r.stepId] ?? null);
     }
   });

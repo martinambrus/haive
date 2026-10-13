@@ -4,9 +4,9 @@ import { registerStepsOnce } from '../src/step-engine/boot.js';
 import {
   assertCoreComposableCatalog,
   CORE_COMPOSABLE_STEPS,
-  MERGE_CAPABLE_STEP_IDS,
 } from '../src/step-engine/composable-core.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
+import { dispatchesAnyCli } from '../src/step-engine/steps/index.js';
 import { orderWorkflowRunList } from '../src/orchestrator/execution-paths.js';
 
 const catalog = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e] as const));
@@ -21,8 +21,13 @@ describe('core composable catalog', () => {
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
   });
 
-  it('lists the two merge-capable steps explicitly', () => {
-    expect([...MERGE_CAPABLE_STEP_IDS].sort()).toEqual(['00a-sync-base', '12-worktree-cleanup']);
+  it('counts the merge-fixer steps as CLI work', () => {
+    const merging = stepRegistry
+      .all()
+      .filter((d) => d.mergeResolve !== undefined)
+      .map((d) => d.metadata.id);
+    expect(merging).toEqual(expect.arrayContaining(['00a-sync-base', '12-worktree-cleanup']));
+    for (const id of merging) expect(dispatchesAnyCli(stepRegistry.get(id)!)).toBe(true);
   });
 
   it('throws naming a step that is not registered', () => {
