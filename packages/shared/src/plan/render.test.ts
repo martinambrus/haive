@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { parsePlanNodeRefs, renderPlanMarkdownFrom } from './render.js';
+import {
+  parsePlanNodeRefs,
+  renderPlanMarkdownFrom,
+  renderPlanMarkdownFromMirror,
+  serializePlanMirror,
+} from './render.js';
 import { planNodePath } from './paths.js';
 import type { PlanNodeRecord } from './read.js';
 
@@ -214,5 +219,53 @@ describe('one-line headings and list items', () => {
     expect(lines.some((l) => l.includes('A PI') && l.includes('first second'))).toBe(true);
     expect(lines.some((l) => l.startsWith('second'))).toBe(false);
     expect(lines.some((l) => l.startsWith('PI'))).toBe(false);
+  });
+});
+
+describe('renderPlanMarkdownFromMirror', () => {
+  const edges = [
+    { fromNodeId: AUTH, toNodeId: DB, kind: 'depends_on' as const, note: 'needs it\nfirst' },
+    { fromNodeId: API, toNodeId: AUTH, kind: 'affects' as const, note: null },
+  ];
+  const withBodies: PlanNodeRecord[] = WITH_SIBLING.map((n, i) => ({
+    ...n,
+    body: i === 3 ? 'Auth body.' : n.body,
+  }));
+
+  it('renders the bytes the flush renders for the same plan', () => {
+    const next = new Map<string, number>();
+    const mirror = {
+      schemaVersion: 2 as const,
+      nodes: withBodies.map((n) => {
+        const key = n.parentId ?? '<root>';
+        const ordinal = next.get(key) ?? 0;
+        next.set(key, ordinal + 1);
+        return {
+          id: n.id,
+          parentId: n.parentId,
+          ordinal,
+          title: n.title,
+          kind: n.kind,
+          body: n.body,
+          status: n.status,
+          taskable: n.taskable,
+        };
+      }),
+      edges,
+      codeLinks: [],
+    };
+    const flush = renderPlanMarkdownFrom(withBodies, edges);
+
+    expect(renderPlanMarkdownFromMirror(mirror)).toBe(flush);
+    expect(renderPlanMarkdownFromMirror({ ...mirror, nodes: [...mirror.nodes].reverse() })).toBe(
+      flush,
+    );
+  });
+
+  it('serializes with two-space indent and a trailing newline', () => {
+    const json = serializePlanMirror({ schemaVersion: 2, nodes: [], edges: [], codeLinks: [] });
+    expect(json).toBe(
+      '{\n  "schemaVersion": 2,\n  "nodes": [],\n  "edges": [],\n  "codeLinks": []\n}\n',
+    );
   });
 });

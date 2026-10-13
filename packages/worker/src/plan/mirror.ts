@@ -23,6 +23,7 @@ import {
   markPlanMirrorDirty,
   renderPlanMarkdownFrom,
   planNodePath,
+  serializePlanMirror,
 } from '@haive/shared/plan';
 import {
   PLAN_MIRROR_ASKED_FIELDS,
@@ -229,7 +230,7 @@ async function renderPlanMirrorFiles(
           }),
         };
   return {
-    json: `${JSON.stringify(mirror, null, 2)}\n`,
+    json: serializePlanMirror(mirror),
     markdown: renderPlanMarkdownFrom(rendered.nodes, rendered.edges),
   };
 }
