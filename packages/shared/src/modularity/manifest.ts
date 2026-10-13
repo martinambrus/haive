@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { formSchemaSchema, type FormSchema } from '../schemas/form.js';
+import { formSchemaSchema, statusSummaryItemSchema, type FormSchema } from '../schemas/form.js';
 import {
   composableStepEntrySchema,
   isCoreStepId,
@@ -12,7 +12,13 @@ const PAGE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 const endpointSchema = z
   .string()
   .refine(
-    (e) => e.startsWith('/') && !e.includes('..') && !e.includes('://') && !/\s/.test(e),
+    (e) =>
+      e.startsWith('/') &&
+      !e.includes('..') &&
+      !e.includes('://') &&
+      !e.includes('%') &&
+      !e.includes('\\') &&
+      !/\s/.test(e),
     'endpoint must be a relative api path',
   );
 
@@ -87,6 +93,29 @@ const chartWidgetSchema = z
     message: 'exactly one of data or endpoint is required',
   });
 
+export const kpiResponseSchema = z.object({
+  value: z.union([z.number(), z.string()]),
+  unit: z.string().optional(),
+});
+export const tableResponseSchema = z.object({ rows: z.array(rowSchema) });
+export const meterResponseSchema = z.object({ value: z.number(), max: z.number() });
+export const statusResponseSchema = z.object({ items: z.array(statusSummaryItemSchema) });
+export const chartResponseSchema = z.object({ data: z.array(rowSchema) });
+
+const WIDGET_RESPONSE_SCHEMAS = {
+  kpi: kpiResponseSchema,
+  table: tableResponseSchema,
+  meter: meterResponseSchema,
+  status: statusResponseSchema,
+  chart: chartResponseSchema,
+} as const;
+
+export function widgetResponseSchema<T extends keyof typeof WIDGET_RESPONSE_SCHEMAS>(
+  type: T,
+): (typeof WIDGET_RESPONSE_SCHEMAS)[T] {
+  return WIDGET_RESPONSE_SCHEMAS[type];
+}
+
 export const dashboardWidgetSchema = z.discriminatedUnion('type', [
   kpiWidgetSchema,
   tableWidgetSchema,
@@ -105,7 +134,7 @@ export const dashboardSpecSchema = z.object({
 export type DashboardSpec = z.infer<typeof dashboardSpecSchema>;
 
 export const moduleNavItemSchema = z.object({
-  href: z.string().min(1),
+  href: endpointSchema,
   label: z.string().min(1),
   icon: z.string().optional(),
   adminOnly: z.boolean().optional(),
@@ -160,6 +189,19 @@ export const moduleManifestSchema = z
   .refine(
     (m) => (m.nav ?? []).every((n) => n.href === `/m/${m.id}` || n.href.startsWith(`/m/${m.id}/`)),
     { message: 'every nav href must be /m/<id> or start with /m/<id>/', path: ['nav'] },
+  )
+  .refine(
+    (m) =>
+      Object.values(m.pages ?? {}).every((page) =>
+        page.widgets.every(
+          (w) =>
+            !('endpoint' in w) ||
+            w.endpoint === undefined ||
+            w.endpoint === `/m/${m.id}` ||
+            w.endpoint.startsWith(`/m/${m.id}/`),
+        ),
+      ),
+    { message: 'every widget endpoint must be /m/<id> or start with /m/<id>/', path: ['pages'] },
   )
   .refine((m) => (m.composableSteps ?? []).every((s) => isCoreStepId(s.stepId)), {
     message: 'composable step ids must be local (no module. or custom. prefix)',

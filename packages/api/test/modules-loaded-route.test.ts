@@ -134,3 +134,62 @@ describe('GET /modules/loaded', () => {
     expect(((await res.json()) as { worker: unknown }).worker).toBeNull();
   });
 });
+
+describe('GET /modules pages', () => {
+  const pages = {
+    home: { title: 'Home', widgets: [{ type: 'markdown', body: 'hi' }] },
+    load: { title: 'Load', widgets: [{ type: 'kpi', label: 'Load', endpoint: '/m/dash/load' }] },
+  };
+
+  async function appWith(apiRequiresAdmin: boolean) {
+    const app = new Hono<AppEnv>();
+    const loaded = await mountModules(
+      app,
+      [
+        {
+          packageName: '@haive/module-dash',
+          manifest: moduleManifestSchema.parse({
+            id: 'dash',
+            name: 'dash',
+            version: '1.0.0',
+            schemaVersion: 1,
+            pages,
+            nav: [{ href: '/m/dash/home', label: 'Dash' }],
+            apiRequiresAdmin,
+          }),
+        },
+      ],
+      { db: {} as Database },
+    );
+    app.route('/modules', moduleRoutes(loaded));
+    app.onError(errorHandler);
+    return app;
+  }
+
+  const pagesFor = async (app: Hono<AppEnv>) =>
+    ((await (await app.request('/modules')).json()) as { modules: { pages: unknown }[] })
+      .modules[0]!.pages;
+  const navFor = async (app: Hono<AppEnv>) =>
+    ((await (await app.request('/modules')).json()) as { modules: { nav: unknown[] }[] })
+      .modules[0]!.nav;
+
+  it("leaves nav to each item's adminOnly, whatever the api requires", async () => {
+    h.role = 'user';
+    expect(await navFor(await appWith(true))).toHaveLength(1);
+  });
+
+  it('hides from a user only the pages of an admin-only module that call its api', async () => {
+    h.role = 'user';
+    expect(await pagesFor(await appWith(true))).toEqual({ home: pages.home });
+  });
+
+  it('gives an admin the pages of an admin-only module', async () => {
+    h.role = 'admin';
+    expect(await pagesFor(await appWith(true))).toEqual(pages);
+  });
+
+  it('gives a user the pages of a module whose api is open', async () => {
+    h.role = 'user';
+    expect(await pagesFor(await appWith(false))).toEqual(pages);
+  });
+});
