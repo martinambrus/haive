@@ -190,6 +190,14 @@ export interface PlanPullOutcome {
   nodesDeleted?: string[];
   /** Fields both sides changed differently: the database kept its value and asks. */
   conflicts?: { nodeId: string; field: string }[];
+  /** Decisions the merge made without asking: a parent, ordinal, edge or code-link change both
+   *  sides made differently kept this side's, or a deletion lost to a modification. */
+  reported?: {
+    kind: string;
+    subject: string;
+    field?: string;
+    deletedBy?: 'local' | 'incoming';
+  }[];
   /** Set when nothing was reconciled and why: no snapshot in the repo, or one
    *  that is byte-identical to what this plan already says. */
   skipped: string | null;

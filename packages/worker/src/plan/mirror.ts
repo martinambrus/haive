@@ -1353,6 +1353,12 @@ async function reconcilePlanLocked(
     skipped: null,
     nodesDeleted: merge.deleted,
     conflicts: merge.conflicts.map((c) => ({ nodeId: c.nodeId, field: c.field })),
+    reported: merge.reported.map((r) => ({
+      kind: r.kind,
+      subject: r.subject,
+      ...(r.field ? { field: r.field } : {}),
+      ...(r.deletedBy ? { deletedBy: r.deletedBy } : {}),
+    })),
   } satisfies PlanPullOutcome;
 }
 

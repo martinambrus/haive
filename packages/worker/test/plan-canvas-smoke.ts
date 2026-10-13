@@ -2672,6 +2672,32 @@ async function main(): Promise<void> {
   );
   await arrive(external);
 
+  // A deletion the other side made loses to an edit here, and the outcome says so.
+  const xAdded = await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: 'tmp-x', parentRef: sBuilt.refs['sroot']!, title: 'X' }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+  const xId = xAdded.created[0]!;
+  await writePlanMirror(db, sId, sDir);
+  theirs = await readMirror();
+  await advancePlanBaseToPushed(db, sId, await readFile(sPlanFile, 'utf8'));
+  await editS(xId, { title: 'X edited here' });
+  const xKept = await arrive({ ...theirs, nodes: theirs.nodes.filter((n) => n.id !== xId) });
+  check(
+    'three-way: a deletion lost to a local edit is reported in the outcome',
+    (await sNode(xId)) !== undefined &&
+      (xKept.reported ?? []).some(
+        (r) => r.kind === 'kept-modified' && r.subject === xId && r.deletedBy === 'incoming',
+      ),
+    xKept.reported,
+  );
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: xId, expectedVersion: (await sNode(xId))!.version }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+
   // Deleting the plan closes its questions and drops the base.
   await editS(pId, { title: 'P local 3' });
   await arrive(retitled(theirs, pId, 'P by A 3'));
