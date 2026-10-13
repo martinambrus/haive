@@ -158,7 +158,9 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
   const [catalog, switches] = await Promise.all([loadCatalog(db), readSwitches()]);
   const compositionIssues =
     row.source === 'admin' && catalog.synced
-      ? validateComposition(row.stepIds ?? [], catalog.composable)
+      ? validateComposition(row.stepIds ?? [], catalog.composable, {
+          requiresRepository: row.requiresRepository,
+        })
       : [];
   return c.json({
     taskType: row,
@@ -179,7 +181,9 @@ adminTaskTypeRoutes.post('/', async (c) => {
   if (await findDefinition(db, body.slug)) throw new HttpError(409, 'That slug is already taken');
   const catalog = await loadCatalog(db);
   requireSynced(catalog);
-  const issues = validateComposition(body.stepIds, catalog.composable);
+  const issues = validateComposition(body.stepIds, catalog.composable, {
+    requiresRepository: body.requiresRepository,
+  });
   if (issues.length > 0) return c.json({ error: 'Invalid step composition', issues }, 400);
   const defaultIssues = validateTaskTypeDefaults(body, catalog.composable);
   if (defaultIssues.length > 0) {
@@ -243,7 +247,9 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       requireSynced(catalog);
       const stepIds = body.stepIds ?? row.stepIds ?? [];
       if (body.stepIds !== undefined) {
-        const issues = validateComposition(stepIds, catalog.composable);
+        const issues = validateComposition(stepIds, catalog.composable, {
+          requiresRepository: body.requiresRepository ?? row.requiresRepository,
+        });
         if (issues.length > 0) {
           return { invalid: { error: 'Invalid step composition', issues } } as const;
         }

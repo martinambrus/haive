@@ -1,10 +1,15 @@
-import { composableStepEntrySchema, type ComposableStepEntry } from '@haive/shared/modularity';
+import {
+  composableStepEntrySchema,
+  IMPLICIT_COMPOSITION_TOKENS,
+  type ComposableStepEntry,
+} from '@haive/shared/modularity';
 import type { StepRegistry } from './registry.js';
 import { dispatchesAnyCli, emitsLoop } from './steps/index.js';
 import { FIX_LOOP_TARGET_STEP_ID } from './steps/workflow/_fix-loop.js';
 
 const IMPLEMENT = '07-phase-2-implement';
 
+const needRepository = (reason: string) => ({ needs: 'repository', reason });
 const needWorktree = { needs: 'worktree', reason: 'Works inside the task worktree.' };
 const EDITS_PRECEDE = [
   'validation',
@@ -25,7 +30,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Declare dependencies',
     group: 'env',
     dispatchesCli: false,
-    requires: [],
+    requires: [needRepository('Reads the dependencies declared by the repository.')],
     provides: ['env-deps'],
     entails: ['env-image'],
     precedes: ['worktree', 'discovery', 'spec', 'cleaned'],
@@ -72,7 +77,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Sync base with origin',
     group: 'setup',
     dispatchesCli: true,
-    requires: [],
+    requires: [needRepository('Syncs the repository base branch with origin.')],
     provides: [],
     precedes: ['worktree', 'discovery', 'spec', 'env-deps', 'env-dockerfile', 'env-image'],
   },
@@ -81,7 +86,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Worktree setup',
     group: 'setup',
     dispatchesCli: false,
-    requires: [],
+    requires: [needRepository('Cuts the worktree from the repository.')],
     provides: ['worktree', 'clean-tree'],
   },
   {
@@ -472,7 +477,7 @@ export function assertCoreComposableCatalog(
       );
     }
     for (const { needs } of entry.requires) {
-      if (!provided.has(needs)) {
+      if (!provided.has(needs) && !IMPLICIT_COMPOSITION_TOKENS.has(needs)) {
         throw new Error(
           `Composable core entry ${entry.stepId} needs "${needs}", which no entry provides`,
         );
