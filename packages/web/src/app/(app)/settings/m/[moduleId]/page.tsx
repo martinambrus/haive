@@ -19,10 +19,12 @@ import { Card, FormError } from '@/components/ui';
 
 function SettingsSection({
   moduleId,
+  moduleName,
   kind,
   editable,
 }: {
   moduleId: string;
+  moduleName: string;
   kind: ModuleSettingsKind;
   editable: boolean;
 }) {
@@ -59,6 +61,7 @@ function SettingsSection({
     <Card>
       <FormRenderer
         schema={payload.form}
+        hideTitle={payload.form.title === moduleName}
         initialValues={payload.values}
         disabled={!editable}
         submitting={saving}
@@ -103,8 +106,17 @@ export default function ModuleSettingsPage() {
       {!isAdmin && (
         <p className="text-sm text-neutral-400">Only administrators can change these settings.</p>
       )}
-      {showGlobal && <SettingsSection moduleId={module.id} kind="global" editable={isAdmin} />}
-      {showAdmin && <SettingsSection moduleId={module.id} kind="admin" editable />}
+      {showGlobal && (
+        <SettingsSection
+          moduleId={module.id}
+          moduleName={module.name}
+          kind="global"
+          editable={isAdmin}
+        />
+      )}
+      {showAdmin && (
+        <SettingsSection moduleId={module.id} moduleName={module.name} kind="admin" editable />
+      )}
     </div>
   );
 }

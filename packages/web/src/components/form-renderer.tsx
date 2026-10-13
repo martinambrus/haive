@@ -50,6 +50,8 @@ interface FormRendererProps {
   /** When set, the status table + infoSections disclosures remember their open/closed
    *  state across reloads, keyed under this prefix (e.g. `task-ui:<taskId>:<stepId>`). */
   persistPrefix?: string;
+  /** Hides the title heading, e.g. where the page already shows the same name above the form. */
+  hideTitle?: boolean;
 }
 
 /** Read-only render of a form's infoSections (the disclosures that show specs /
@@ -265,6 +267,7 @@ export function FormRenderer({
   skipLabel,
   skipDisabled = false,
   persistPrefix,
+  hideTitle = false,
 }: FormRendererProps) {
   const initial = useMemo(() => buildInitial(schema, initialValues), [schema, initialValues]);
   const [values, setValues] = useState<FormValues>(initial);
@@ -294,7 +297,7 @@ export function FormRenderer({
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-5">
       <div>
-        <h3 className="text-lg font-semibold text-neutral-50">{schema.title}</h3>
+        {!hideTitle && <h3 className="text-lg font-semibold text-neutral-50">{schema.title}</h3>}
         {schema.description && (
           <InlineMarkdown body={schema.description} className="mt-1 text-sm text-neutral-400" />
         )}
