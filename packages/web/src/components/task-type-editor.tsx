@@ -91,6 +91,16 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [saved, setSaved] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [formRevision, setFormRevision] = useState(0);
+
+  const applyRow = useCallback((taskType: AdminTaskType) => {
+    setRow(taskType);
+    setStepIds(taskType.stepIds ?? []);
+    setCompositionEdited(false);
+    setLoopLimits(taskType.stepLoopLimitDefaults);
+    setValues(initialValuesOf(taskType));
+    setFormRevision((n) => n + 1);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -100,17 +110,13 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       ]);
       setCatalog(cat);
       if (one) {
-        setRow(one.taskType);
+        applyRow(one.taskType);
         setAvailability(one.availability);
-        setStepIds(one.taskType.stepIds ?? []);
-        setCompositionEdited(false);
-        setLoopLimits(one.taskType.stepLoopLimitDefaults);
-        setValues(initialValuesOf(one.taskType));
       }
     } catch (err) {
       setLoadError((err as ApiError).message ?? 'Failed to load the task type');
     }
-  }, [slug]);
+  }, [slug, applyRow]);
 
   useEffect(() => {
     void load();
@@ -179,8 +185,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         initialValuesOf(row!),
       );
       const res = await updateTaskType(row!.slug, body);
-      setRow(res.taskType);
-      setCompositionEdited(false);
+      applyRow(res.taskType);
       setSaved(true);
       try {
         const fresh = await getAdminTaskType(row!.slug);
@@ -274,7 +279,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       </div>
       <Card>
         <FormRenderer
-          key={row?.slug ?? 'new'}
+          key={`${row?.slug ?? 'new'}:${formRevision}`}
           schema={schema}
           hideTitle
           initialValues={initialValues}
@@ -284,7 +289,8 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           onSubmit={submit}
           onValuesChange={(next) => {
             setValues((prev) => ({ ...prev, ...next }));
-            setSaved(false);
+            const current = row ? initialValuesOf(row) : {};
+            if (Object.keys(next).some((k) => next[k] !== current[k])) setSaved(false);
           }}
           renderAfterField={(fieldId) =>
             fieldId === lastField && composable ? (
