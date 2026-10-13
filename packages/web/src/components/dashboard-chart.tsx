@@ -47,17 +47,29 @@ export default function DashboardChart({ kind, xKey, series, data }: DashboardCh
     return <div className="h-[220px] text-sm text-neutral-500">No data.</div>;
   }
   if (kind === 'pie') {
-    const value = series[0]!;
+    // One ring per series, innermost first, so every declared series is drawn.
+    const ring = 70 / series.length;
     return (
       <ResponsiveContainer width="100%" height={220}>
         <PieChart>
           <Tooltip contentStyle={tooltipStyle} />
           <Legend wrapperStyle={legendStyle} verticalAlign="bottom" />
-          <Pie data={data} dataKey={value.key} nameKey={xKey} name={value.label} outerRadius={70}>
-            {data.map((_, i) => (
-              <Cell key={i} fill={colorAt(i)} stroke="none" />
-            ))}
-          </Pie>
+          {series.map((s, si) => (
+            <Pie
+              key={s.key}
+              data={data}
+              dataKey={s.key}
+              nameKey={xKey}
+              name={s.label}
+              innerRadius={si === 0 ? 0 : ring * si + 2}
+              outerRadius={ring * (si + 1)}
+              legendType={si === 0 ? undefined : 'none'}
+            >
+              {data.map((_, i) => (
+                <Cell key={i} fill={colorAt(i)} stroke="none" />
+              ))}
+            </Pie>
+          ))}
         </PieChart>
       </ResponsiveContainer>
     );
