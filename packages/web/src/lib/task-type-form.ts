@@ -167,9 +167,10 @@ export function buildUpdateBody(
     if (!sameIds(composition.stepIds, was.stepIds ?? [])) {
       const listed = new Set(composition.stepIds);
       body.stepIds = composition.stepIds;
-      body.preAnswerDefaults = Object.fromEntries(
-        Object.entries(was.preAnswerDefaults).filter(([id]) => listed.has(id)),
-      );
+      const kept = Object.entries(was.preAnswerDefaults).filter(([id]) => listed.has(id));
+      if (kept.length < Object.keys(was.preAnswerDefaults).length) {
+        body.preAnswerDefaults = Object.fromEntries(kept);
+      }
     }
     if (!sameLimits(composition.loopLimits, was.stepLoopLimitDefaults)) {
       body.stepLoopLimitDefaults = composition.loopLimits;

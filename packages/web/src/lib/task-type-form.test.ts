@@ -153,6 +153,25 @@ describe('buildUpdateBody', () => {
     expect(body).not.toHaveProperty('preAnswerDefaults');
   });
 
+  it('leaves preset answers out of a reorder that removes no preset step', () => {
+    const body = buildUpdateBody(
+      values,
+      ADMIN_FIELDS,
+      {
+        stepIds: ['b', 'a', 'c'],
+        loopLimits: {},
+        saved: {
+          stepIds: ['a', 'b'],
+          stepLoopLimitDefaults: {},
+          preAnswerDefaults: { a: { x: 1 } },
+        },
+      },
+      SAVED,
+    );
+    expect(body.stepIds).toEqual(['b', 'a', 'c']);
+    expect(body).not.toHaveProperty('preAnswerDefaults');
+  });
+
   it('sends the composition for a custom row and drops answers for removed steps', () => {
     const body = buildUpdateBody(
       values,
