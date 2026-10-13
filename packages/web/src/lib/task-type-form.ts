@@ -123,6 +123,20 @@ export function buildCreateBody(
   };
 }
 
+export function compositionChanged(
+  current: { stepIds: readonly string[]; loopLimits: Record<string, number> },
+  saved: { stepIds: readonly string[] | null; stepLoopLimitDefaults: Record<string, number> },
+): boolean {
+  const savedIds = saved.stepIds ?? [];
+  if (current.stepIds.length !== savedIds.length) return true;
+  if (current.stepIds.some((id, i) => id !== savedIds[i])) return true;
+  const keys = new Set([
+    ...Object.keys(current.loopLimits),
+    ...Object.keys(saved.stepLoopLimitDefaults),
+  ]);
+  return [...keys].some((k) => current.loopLimits[k] !== saved.stepLoopLimitDefaults[k]);
+}
+
 /** Only changed fields the api lets this row change are sent, since it refuses the whole request over any other. */
 export function buildUpdateBody(
   values: FormValues,

@@ -23,6 +23,7 @@ import {
 import {
   buildCreateBody,
   buildUpdateBody,
+  compositionChanged,
   slugProblem,
   taskTypeFormSchema,
 } from '@/lib/task-type-form';
@@ -82,7 +83,6 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [availability, setAvailability] = useState<TaskTypeAvailability | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [stepIds, setStepIds] = useState<string[]>([]);
-  const [compositionEdited, setCompositionEdited] = useState(false);
   const [loopLimits, setLoopLimits] = useState<Record<string, number>>({});
   const [values, setValues] = useState<FormValues>(creating ? NEW_TYPE_DEFAULTS : {});
   const [saving, setSaving] = useState(false);
@@ -96,7 +96,6 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const applyRow = useCallback((taskType: AdminTaskType) => {
     setRow(taskType);
     setStepIds(taskType.stepIds ?? []);
-    setCompositionEdited(false);
     setLoopLimits(taskType.stepLoopLimitDefaults);
     setValues(initialValuesOf(taskType));
     setFormRevision((n) => n + 1);
@@ -133,6 +132,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         : { composition: [], defaults: [] },
     [composable, entries, stepIds, loopLimits, requiresRepository],
   );
+  const compositionEdited = row !== null && compositionChanged({ stepIds, loopLimits }, row);
   // A flat-only edit is not re-checked by the api, so only an edit that touches the composition waits on it.
   const compositionTouched =
     creating || compositionEdited || requiresRepository !== row?.requiresRepository;
@@ -235,12 +235,10 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       serverIssues={serverIssues}
       onStepIdsChange={(next) => {
         touch();
-        setCompositionEdited(true);
         setStepIds(next);
       }}
       onLoopLimitsChange={(next) => {
         touch();
-        setCompositionEdited(true);
         setLoopLimits(next);
       }}
     />

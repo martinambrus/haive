@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildCreateBody,
   buildUpdateBody,
+  compositionChanged,
   slugProblem,
   taskTypeFormSchema,
 } from './task-type-form';
@@ -147,5 +148,19 @@ describe('buildUpdateBody', () => {
     expect(body.stepLoopLimitDefaults).toEqual({ a: 2 });
     expect(body.preAnswerDefaults).toEqual({ a: { x: 1 } });
     expect(body.enabled).toBe(false);
+  });
+});
+
+describe('compositionChanged', () => {
+  const saved = { stepIds: ['a', 'b'], stepLoopLimitDefaults: { a: 2 } };
+
+  it('is false for a list moved and moved back', () => {
+    expect(compositionChanged({ stepIds: ['a', 'b'], loopLimits: { a: 2 } }, saved)).toBe(false);
+  });
+
+  it('is true for a new order or a new loop limit', () => {
+    expect(compositionChanged({ stepIds: ['b', 'a'], loopLimits: { a: 2 } }, saved)).toBe(true);
+    expect(compositionChanged({ stepIds: ['a', 'b'], loopLimits: { a: 3 } }, saved)).toBe(true);
+    expect(compositionChanged({ stepIds: ['a', 'b'], loopLimits: {} }, saved)).toBe(true);
   });
 });
