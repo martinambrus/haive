@@ -2,9 +2,22 @@ import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { DashboardSpec } from '@haive/shared/modularity';
 import type { HostApi } from '@haive/web-kit/host';
-import { DashboardRenderer, fetchWidgetData, isModuleEndpoint } from './dashboard-renderer';
+import {
+  DashboardRenderer,
+  fetchWidgetData,
+  formatKpiValue,
+  isModuleEndpoint,
+} from './dashboard-renderer';
 
 const BASE = 'http://localhost:3001';
+
+describe('formatKpiValue', () => {
+  it('groups thousands and rounds to two decimals, and leaves text alone', () => {
+    expect(formatKpiValue(21862837)).toBe('21,862,837');
+    expect(formatKpiValue(9.53245082)).toBe('9.53');
+    expect(formatKpiValue('n/a')).toBe('n/a');
+  });
+});
 
 describe('isModuleEndpoint', () => {
   it('accepts the module prefix and anything below it', () => {

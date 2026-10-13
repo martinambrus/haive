@@ -23,6 +23,12 @@ const DashboardChart = dynamic(() => import('./dashboard-chart'), {
 
 /** True when the endpoint, resolved the way fetch resolves it, stays on the api origin inside
  *  /m/<moduleId>; encoded or literal dot segments are collapsed by the URL parser before the check. */
+const KPI_NUMBER = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
+
+export function formatKpiValue(value: number | string): string {
+  return typeof value === 'number' ? KPI_NUMBER.format(value) : value;
+}
+
 export function isModuleEndpoint(moduleId: string, endpoint: string, apiBase: string): boolean {
   let url: URL;
   try {
@@ -129,7 +135,7 @@ function WidgetView({
           >
             {(d) => (
               <div className="mt-1 break-words text-2xl font-semibold text-neutral-50">
-                {d.value}
+                {formatKpiValue(d.value)}
                 {(d.unit ?? widget.unit) && (
                   <span className="ml-1 text-sm font-normal text-neutral-400">
                     {d.unit ?? widget.unit}
