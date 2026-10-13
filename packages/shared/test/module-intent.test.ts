@@ -116,12 +116,18 @@ describe('diffModuleIntent', () => {
     expect(none.rows[0]!.workerVersion).toBeNull();
   });
 
-  it.each([undefined, 'junk', 7, {}, { at: 3, modules: 'x' }, { modules: [null, { id: 4 }] }])(
-    'treats a malformed worker report %j as no report',
-    (worker) => {
-      const result = diffModuleIntent([], [api('m')], worker);
-      expect(result.workerAt).toBeNull();
-      expect(stateOf(result, 'm')).toBe('unrecorded');
-    },
-  );
+  it.each([
+    undefined,
+    'junk',
+    7,
+    {},
+    { at: 3, modules: 'x' },
+    { modules: [null, { id: 4 }] },
+    { at: '2026-10-13T10:00:00.000Z' },
+    { at: '2026-10-13T10:00:00.000Z', modules: 'x' },
+  ])('treats a malformed worker report %j as no report', (worker) => {
+    const result = diffModuleIntent([], [api('m')], worker);
+    expect(result.workerAt).toBeNull();
+    expect(stateOf(result, 'm')).toBe('unrecorded');
+  });
 });
