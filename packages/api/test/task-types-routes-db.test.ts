@@ -684,12 +684,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
   });
 
   describe('GET /task-types', () => {
-    const slugs = async () =>
-      (
-        (await (await send('GET', '/task-types')).json()) as { taskTypes: { slug: string }[] }
-      ).taskTypes.map((t) => t.slug);
-
-    it('shows a regular user what they may start, gated by the install switches', async () => {
+    it('lists a type behind an off switch as unavailable with that reason, not hidden', async () => {
       await send('POST', '/admin/task-types', valid('tt-pub'));
       await send('POST', '/admin/task-types', valid('tt-off', { enabled: false }));
       await send('POST', '/admin/task-types', valid('tt-hidden', { selectable: false }));
@@ -702,11 +697,27 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       });
       h.role = 'user';
 
-      expect(await slugs()).toEqual(['workflow']);
+      const rows = async () =>
+        Object.fromEntries(
+          (
+            (await (await send('GET', '/task-types')).json()) as {
+              taskTypes: { slug: string; available: boolean; reason?: string }[];
+            }
+          ).taskTypes.map((t) => [t.slug, t.available ? 'available' : t.reason]),
+        );
+
+      expect(await rows()).toEqual({
+        'tt-mod': 'module-types-off',
+        'tt-pub': 'custom-types-off',
+        workflow: 'available',
+      });
       h.flags.set(CUSTOM_KEY, true);
-      expect(await slugs()).toEqual(['tt-pub', 'workflow']);
       h.flags.set(MODULE_KEY, true);
-      expect(await slugs()).toEqual(['tt-mod', 'tt-pub', 'workflow']);
+      expect(await rows()).toEqual({
+        'tt-mod': 'available',
+        'tt-pub': 'available',
+        workflow: 'available',
+      });
     });
 
     it('flags a type whose step has left the catalog instead of hiding it', async () => {
