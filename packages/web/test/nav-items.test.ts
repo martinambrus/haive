@@ -70,15 +70,15 @@ describe('navItemsFor', () => {
     const labelsWith = (order: number | undefined) =>
       navItemsFor('admin', [mod('a', [{ href: '/m/a', label: 'Mod', order }])]).map((i) => i.label);
 
-    it('lands order 45 between CLI Providers and Statistics', () => {
+    it('lands order 45 between CLI Providers and Settings', () => {
       const labels = labelsWith(45);
       expect(labels.indexOf('Mod')).toBe(labels.indexOf('CLI Providers') + 1);
-      expect(labels.indexOf('Mod')).toBe(labels.indexOf('Statistics') - 1);
+      expect(labels.indexOf('Mod')).toBe(labels.indexOf('Settings') - 1);
     });
 
-    it('lands order 50 right after Statistics', () => {
-      const labels = labelsWith(50);
-      expect(labels.indexOf('Mod')).toBe(labels.indexOf('Statistics') + 1);
+    it('lands order 60 right after Settings', () => {
+      const labels = labelsWith(60);
+      expect(labels.indexOf('Mod')).toBe(labels.indexOf('Settings') + 1);
     });
 
     it('lands no order after Settings, and Admin stays last', () => {
@@ -86,7 +86,7 @@ describe('navItemsFor', () => {
       expect(labels.indexOf('Mod')).toBe(labels.indexOf('Settings') + 1);
       expect(labels.at(-1)).toBe('Admin');
       expect(labelsWith(45).at(-1)).toBe('Admin');
-      expect(labelsWith(50).at(-1)).toBe('Admin');
+      expect(labelsWith(60).at(-1)).toBe('Admin');
     });
 
     it('does not put order on the rendered items', () => {

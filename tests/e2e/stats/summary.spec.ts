@@ -99,7 +99,7 @@ test.describe('statistics', () => {
       [{ durationMs: 20 * 60_000, costUsd: 4.2, totalTokens: 12_345 }],
     );
 
-    await page.goto('/stats');
+    await page.goto('/m/statistics');
     await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
 
     // The page resolves its time zone and relative-preset clock on the CLIENT and leaves both

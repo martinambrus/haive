@@ -4,8 +4,15 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { useRouter, useSearchParams } from 'next/navigation';
+import type { HostApi, ModulePageProps } from '@haive/web-kit/host';
+import { Card, CardDescription, CardHeader, CardTitle, Input } from '@haive/web-kit/ui';
+import { TabNav } from '@haive/web-kit/tabs';
+import { usePageTitle } from '@haive/web-kit/use-page-title';
+import { formatDuration } from '@haive/web-kit/format-duration';
+import { formatCost } from '@haive/web-kit/format-cost';
+import { formatTokens } from '@haive/web-kit/format-tokens';
+import { formatSampledTps } from '@haive/web-kit/format-throughput';
 import {
-  api,
   getStatsEstimates,
   getStatsPlan,
   getStatsQuality,
@@ -32,19 +39,12 @@ import {
   type StatsToolUsage,
   type UiPrefs,
   type StatsUnusedReport,
-} from '@/lib/api-client';
-import { Card, CardDescription, CardHeader, CardTitle, Input } from '@/components/ui';
-import { TabNav } from '@/components/tabs';
-import { StatTile } from '@/components/stats/stat-tile';
-import { ActivityHeatmap } from '@/components/stats/activity-heatmap';
-import { StackedShareBar } from '@/components/stats/stacked-share-bar';
-import { RankedBars, InlineBar } from '@/components/stats/ranked-bars';
-import { CHART_COLORS, TOKEN_COLORS } from '@/components/stats/palette';
-import { usePageTitle } from '@/lib/use-page-title';
-import { formatDuration } from '@/lib/format-duration';
-import { formatCost } from '@/lib/format-cost';
-import { formatTokens } from '@/lib/format-tokens';
-import { formatSampledTps } from '@/lib/format-throughput';
+} from './api.js';
+import { StatTile } from './components/stat-tile.js';
+import { ActivityHeatmap } from './components/activity-heatmap.js';
+import { StackedShareBar } from './components/stacked-share-bar.js';
+import { RankedBars, InlineBar } from './components/ranked-bars.js';
+import { CHART_COLORS, TOKEN_COLORS } from './components/palette.js';
 import {
   formatAgentHours,
   formatConcurrency,
@@ -53,8 +53,8 @@ import {
   formatProjection,
   formatSampledRatio,
   isUnderSampled,
-} from '@/lib/stats/format-stats';
-import { isHeatMetric, localDayRange, type HeatMetric } from '@/lib/stats/heat-scale';
+} from './lib/format-stats.js';
+import { isHeatMetric, localDayRange, type HeatMetric } from './lib/heat-scale.js';
 import {
   isRangePresetId,
   parseCustomRange,
@@ -63,28 +63,25 @@ import {
   resolvePreset,
   toDatetimeLocal,
   type RangePresetId,
-} from '@/lib/stats/range-presets';
+} from './lib/range-presets.js';
 
-const SpendChart = dynamic(() => import('@/components/stats/charts').then((m) => m.SpendChart), {
+const SpendChart = dynamic(() => import('./components/charts.js').then((m) => m.SpendChart), {
   ssr: false,
   loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
 });
-const ActivityChart = dynamic(
-  () => import('@/components/stats/charts').then((m) => m.ActivityChart),
-  {
-    ssr: false,
-    loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
-  },
-);
+const ActivityChart = dynamic(() => import('./components/charts.js').then((m) => m.ActivityChart), {
+  ssr: false,
+  loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
+});
 const ThroughputChart = dynamic(
-  () => import('@/components/stats/charts').then((m) => m.ThroughputChart),
+  () => import('./components/charts.js').then((m) => m.ThroughputChart),
   {
     ssr: false,
     loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
   },
 );
 const PlanVelocityChart = dynamic(
-  () => import('@/components/stats/charts').then((m) => m.PlanVelocityChart),
+  () => import('./components/charts.js').then((m) => m.PlanVelocityChart),
   {
     ssr: false,
     loading: () => <div className="h-[220px] text-sm text-neutral-500">Loading chart...</div>,
@@ -292,17 +289,17 @@ function isTab(v: string | null): v is Tab {
   return !!v && (TABS as readonly string[]).includes(v);
 }
 
-export default function StatsPage() {
+export function StatsPage({ moduleId, api }: ModulePageProps) {
   return (
     // useSearchParams needs a Suspense boundary to keep the route from opting the whole page
     // out of static rendering.
     <Suspense fallback={<div className="text-sm text-neutral-500">Loading...</div>}>
-      <StatsPageInner />
+      <StatsPageInner moduleId={moduleId} api={api} />
     </Suspense>
   );
 }
 
-function StatsPageInner() {
+function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
   usePageTitle('Statistics');
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -354,7 +351,7 @@ function StatsPageInner() {
   useEffect(() => {
     setNowMs(Date.now());
     const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    getUiPrefs()
+    getUiPrefs(api)
       .then((p) => {
         prefsRef.current = { ...p, ...prefsRef.current };
         setTimeZone(p.statsTimeZone || browserZone);
@@ -374,7 +371,7 @@ function StatsPageInner() {
 
   const persistTimeZone = useCallback((tz: string) => {
     prefsRef.current = { ...prefsRef.current, statsTimeZone: tz };
-    void patchUiPrefs({ statsTimeZone: tz }).catch(() => {
+    void patchUiPrefs(api, { statsTimeZone: tz }).catch(() => {
       /* a failed preference write must not break the page */
     });
   }, []);
@@ -384,7 +381,7 @@ function StatsPageInner() {
     if (value) params.set(key, value);
     else params.delete(key);
     const qs = params.toString();
-    router.replace(qs ? `/stats?${qs}` : '/stats', { scroll: false });
+    router.replace(qs ? `/m/${moduleId}?${qs}` : `/m/${moduleId}`, { scroll: false });
   }
 
   const range = useMemo(() => {
@@ -421,7 +418,10 @@ function StatsPageInner() {
     setLoading(true);
     (async () => {
       try {
-        const [s, t] = await Promise.all([getStatsSummary(params), getStatsTimeline(params)]);
+        const [s, t] = await Promise.all([
+          getStatsSummary(api, params),
+          getStatsTimeline(api, params),
+        ]);
         if (cancelled) return;
         setSummary(s);
         setTimeline(t);
@@ -441,37 +441,37 @@ function StatsPageInner() {
     if (!params) return;
     let cancelled = false;
     if (tab === 'reliability' && !reliability) {
-      getStatsReliability(params)
+      getStatsReliability(api, params)
         .then((d) => !cancelled && setReliability(d))
         .catch(() => undefined);
     }
     if (tab === 'quality' && !quality) {
-      getStatsQuality(params)
+      getStatsQuality(api, params)
         .then((d) => !cancelled && setQuality(d))
         .catch(() => undefined);
     }
     if (tab === 'estimates' && !estimates) {
-      getStatsEstimates(params)
+      getStatsEstimates(api, params)
         .then((d) => !cancelled && setEstimates(d))
         .catch(() => undefined);
     }
     if (tab === 'plan' && !plan) {
-      getStatsPlan(params)
+      getStatsPlan(api, params)
         .then((d) => !cancelled && setPlan(d))
         .catch(() => undefined);
     }
     if (tab === 'time' && !taskTime) {
-      getStatsTaskTime(params)
+      getStatsTaskTime(api, params)
         .then((d) => !cancelled && setTaskTime(d))
         .catch(() => undefined);
     }
     if (tab === 'steps' && !steps) {
-      getStatsSteps(params)
+      getStatsSteps(api, params)
         .then((d) => !cancelled && setSteps(d))
         .catch(() => undefined);
     }
     if (tab === 'tools' && !toolUsage) {
-      getStatsToolUsage(params)
+      getStatsToolUsage(api, params)
         .then((d) => !cancelled && setToolUsage(d))
         .catch(() => undefined);
     }

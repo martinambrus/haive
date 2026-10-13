@@ -77,7 +77,7 @@ const PROTECTED_WEB_PATHS = [
   '/cli-providers',
   '/cli-providers/new?name=claude-code',
   `/cli-providers/${FAKE_UUID}`,
-  '/stats',
+  '/m/statistics',
   '/settings',
   '/settings/account',
   // The console was absent from this sweep entirely. Signed OUT it must behave like any other

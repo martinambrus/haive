@@ -1,4 +1,4 @@
-import type { StatsTimelineDay } from '@/lib/api-client';
+import type { StatsTimelineDay } from '../api.js';
 
 /**
  * The arithmetic behind the activity heatmap: which shade a day gets, and how the days lay out

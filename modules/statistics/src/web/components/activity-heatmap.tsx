@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { cn } from '@/lib/cn';
-import { HEAT_EMPTY, HEAT_RAMP } from './palette';
+import { cn } from '@haive/web-kit/cn';
+import { HEAT_EMPTY, HEAT_RAMP } from './palette.js';
 import {
   calendarMonths,
   heatStep,
@@ -10,9 +10,9 @@ import {
   HEAT_METRICS,
   WEEKDAY_LABELS,
   type HeatMetric,
-} from '@/lib/stats/heat-scale';
-import { formatAgentHours, formatBucketLabel, formatCount } from '@/lib/stats/format-stats';
-import type { StatsTimelineDay } from '@/lib/api-client';
+} from '../lib/heat-scale.js';
+import { formatAgentHours, formatBucketLabel, formatCount } from '../lib/format-stats.js';
+import type { StatsTimelineDay } from '../api.js';
 
 /**
  * Calendar heatmap of the window, one block per month.

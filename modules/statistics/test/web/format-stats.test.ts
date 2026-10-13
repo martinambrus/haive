@@ -11,7 +11,7 @@ import {
   formatSampledRatio,
   isUnderSampled,
   STATS_DASH,
-} from './format-stats';
+} from '../../src/web/lib/format-stats.js';
 
 const delta = (current: number, previous: number, changeRatio: number | null) => ({
   current,

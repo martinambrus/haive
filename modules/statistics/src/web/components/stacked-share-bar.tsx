@@ -1,4 +1,4 @@
-import { cn } from '@/lib/cn';
+import { cn } from '@haive/web-kit/cn';
 
 /**
  * A part-to-whole bar: one track, one segment per component, widths proportional to value.

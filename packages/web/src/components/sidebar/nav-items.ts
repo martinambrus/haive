@@ -29,7 +29,6 @@ export const BASE_NAV_ITEMS: OrderedNavItem[] = [
   { href: '/tasks', label: 'Tasks', icon: ListChecks, order: 20 },
   { href: '/repos', label: 'Repositories', icon: FolderGit2, order: 30 },
   { href: '/cli-providers', label: 'CLI Providers', icon: SquareTerminal, order: 40 },
-  { href: '/stats', label: 'Statistics', icon: ChartBar, order: 50 },
   {
     href: '/settings/account',
     label: 'Settings',

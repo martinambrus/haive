@@ -1,4 +1,4 @@
-import type { SampledRatio, StatsDelta } from '@/lib/api-client';
+import type { SampledRatio, StatsDelta } from '../api.js';
 
 /**
  * Formatting for statistics figures.

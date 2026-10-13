@@ -275,7 +275,7 @@ test.describe('tool-usage statistics', () => {
       [{ durationMs: 10 * 60_000, costUsd: 0.1, totalTokens: 1_000, toolUsage: OBSERVED }],
     );
 
-    await page.goto('/stats?tab=tools');
+    await page.goto('/m/statistics?tab=tools');
     await expect(page.getByRole('heading', { level: 1 }).first()).toBeVisible();
     // The page resolves its zone and clock on the client and gates the first fetch on them,
     // so the figures land a beat after the heading (see summary.spec.ts).

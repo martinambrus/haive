@@ -8,7 +8,7 @@ import {
   RANGE_PRESETS,
   resolvePreset,
   toDatetimeLocal,
-} from './range-presets';
+} from '../../src/web/lib/range-presets.js';
 
 const DAY = 86_400_000;
 const NOW = Date.parse('2026-09-06T12:00:00Z');
