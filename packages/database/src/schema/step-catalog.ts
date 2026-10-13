@@ -1,4 +1,12 @@
-import { pgTable, text, varchar, boolean, jsonb, timestamp } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  text,
+  varchar,
+  boolean,
+  jsonb,
+  timestamp,
+  doublePrecision,
+} from 'drizzle-orm/pg-core';
 
 /** Refreshed by the worker at every boot; `composable` and `entry` come from the code-owned core catalog and module manifests. */
 export const stepCatalog = pgTable('step_catalog', {
@@ -13,4 +21,6 @@ export const stepCatalog = pgTable('step_catalog', {
   composable: boolean('composable').notNull().default(false),
   entry: jsonb('entry'),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  dispatchesStepCli: boolean('dispatches_step_cli').notNull().default(false),
+  stepIndex: doublePrecision('step_index'),
 });

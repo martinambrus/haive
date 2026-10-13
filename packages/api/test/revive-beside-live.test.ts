@@ -25,6 +25,7 @@ import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { withRepositoryTaskLock } from '../src/routes/upgrades.js';
 import type { AppEnv } from '../src/context.js';
+import { seedStepCatalog } from './step-flags-fixture.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000c1';
 const TASK = '00000000-0000-4000-8000-000000000001';
@@ -130,7 +131,9 @@ function setup(
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateConflicts: schema.projectStateConflicts,
+    stepCatalog: schema.stepCatalog,
   });
+  seedStepCatalog(fake);
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,
