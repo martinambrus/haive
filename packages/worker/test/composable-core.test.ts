@@ -229,6 +229,7 @@ describe('core composable catalog', () => {
     ['11b-kb-commit', '11c-rag-reindex', 'reindexed'],
     ['04-verify-environment', '00a-sync-base', 'base-synced'],
     ['03-build-image', '00a-sync-base', 'base-synced'],
+    ['01b-install-plugins', '01a-app-boot', 'app-runtime'],
     ['11b-kb-commit', '11b1-rag-source-selection', 'rag-scope'],
     ['11d-skill-sync', '11a-gate-4-push', 'pushed'],
   ])('rejects %s placed after %s', (early, late, token) => {

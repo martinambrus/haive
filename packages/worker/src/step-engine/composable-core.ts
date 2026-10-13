@@ -103,7 +103,15 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [needWorktree],
     provides: [],
-    precedes: ['discovery', 'spec', 'implementation', 'commit', 'learnings', 'skills-synced'],
+    precedes: [
+      'discovery',
+      'spec',
+      'implementation',
+      'commit',
+      'learnings',
+      'skills-synced',
+      'app-runtime',
+    ],
   },
   {
     stepId: '01d-browser-access',
