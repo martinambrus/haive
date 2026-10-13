@@ -18,7 +18,7 @@ test.describe('task detail page', () => {
 
     // status + type badges
     await expect(page.getByText('failed', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText('workflow', { exact: true })).toBeVisible();
+    await expect(page.getByText('Workflow', { exact: true })).toBeVisible();
 
     // all 3 steps render
     await expect(page.getByRole('heading', { level: 3, name: 'Failing step' })).toBeVisible();

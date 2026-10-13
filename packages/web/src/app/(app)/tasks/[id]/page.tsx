@@ -116,6 +116,7 @@ import {
 import { usePageTitle } from '@/lib/use-page-title';
 import { taskOrigin, taskTitleOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { taskUsesWorktree } from '@/lib/task-worktree';
+import { taskTypeLabel } from '@/lib/task-type-label';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { refreshUsageWindow, useUsageWindow } from '@/lib/use-usage-window';
 
@@ -1728,7 +1729,7 @@ export default function TaskDetailPage() {
                     {task.status}
                   </Badge>
                 )}
-                <Badge className="shrink-0">{task.type}</Badge>
+                <Badge className="shrink-0">{taskTypeLabel(task)}</Badge>
                 {task.executionPath && (
                   <Badge variant={executionPathVariant(task.executionPath)} className="shrink-0">
                     {EXECUTION_PATH_LABELS[task.executionPath]}
