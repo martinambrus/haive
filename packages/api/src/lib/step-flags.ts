@@ -1,5 +1,11 @@
 import { schema } from '@haive/database';
-import type { CliRoleDescriptor } from '@haive/shared';
+import {
+  CLI_DISPATCH_STEPS,
+  PROVIDER_SENSITIVE_STEP_IDS,
+  SKIPPABLE_STEP_IDS,
+  STEP_CLI_ROLES,
+  type CliRoleDescriptor,
+} from '@haive/shared';
 import {
   composableStepEntrySchema,
   validateComposition,
@@ -21,7 +27,8 @@ export interface StepFlags {
   composable: ComposableStepEntry | null;
 }
 
-/** Keyed by step id. A step the catalog does not hold has no entry, and every reader treats that as no flags. */
+/** Keyed by step id. A step the catalog does not hold has no entry, and every reader treats that as no flags.
+ *  A catalog the worker has not fully synced yet is answered from the static lists and not cached. */
 export type StepFlagMap = ReadonlyMap<string, StepFlags>;
 
 const CACHE_TTL_MS = 30_000;
@@ -32,12 +39,48 @@ export function resetStepFlagsCache(): void {
   cached = null;
 }
 
+/** What the api read before the catalog existed. Stands in until the worker has synced it. */
+function staticStepFlags(): StepFlagMap {
+  const out = new Map<string, StepFlags>();
+  const get = (stepId: string): StepFlags => {
+    let flags = out.get(stepId);
+    if (!flags) {
+      flags = {
+        stepId,
+        title: stepId,
+        workflowType: 'workflow',
+        allowSkip: false,
+        dispatchesStepCli: false,
+        providerSensitive: false,
+        cliRoles: null,
+        stepIndex: null,
+        composable: null,
+      };
+      out.set(stepId, flags);
+    }
+    return flags;
+  };
+  CLI_DISPATCH_STEPS.forEach((s, i) => {
+    Object.assign(get(s.id), {
+      title: s.title,
+      workflowType: s.workflowType,
+      dispatchesStepCli: true,
+      stepIndex: i,
+    });
+  });
+  for (const id of SKIPPABLE_STEP_IDS) get(id).allowSkip = true;
+  for (const id of PROVIDER_SENSITIVE_STEP_IDS) get(id).providerSensitive = true;
+  for (const [id, roles] of Object.entries(STEP_CLI_ROLES)) get(id).cliRoles = roles;
+  return out;
+}
+
 export async function loadStepFlags(
   db: Pick<ReturnType<typeof getDb>, 'select'>,
   now: number = Date.now(),
 ): Promise<StepFlagMap> {
   if (cached && now - cached.at < CACHE_TTL_MS) return cached.flags;
   const rows = await db.select().from(schema.stepCatalog);
+  if (rows.length === 0 || rows.some((row) => row.stepIndex === null)) return staticStepFlags();
   const flags = new Map<string, StepFlags>();
   for (const row of rows) {
     const entry = row.composable ? composableStepEntrySchema.safeParse(row.entry) : null;
@@ -53,7 +96,7 @@ export async function loadStepFlags(
       composable: entry?.success ? entry.data : null,
     });
   }
-  if (flags.size > 0) cached = { at: now, flags };
+  cached = { at: now, flags };
   return flags;
 }
 

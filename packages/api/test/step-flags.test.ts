@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { CLI_DISPATCH_STEPS, SKIPPABLE_STEP_IDS } from '@haive/shared';
 import { loadStepFlags, resetStepFlagsCache } from '../src/lib/step-flags.js';
 import { buildUpcomingCliSteps, enrichStepsWithCliUsage } from '../src/routes/tasks/_helpers.js';
 import { currentStepLabel } from '../src/routes/tasks/_step-label.js';
@@ -13,7 +14,7 @@ const row = (stepId: string, over: Record<string, unknown> = {}) => ({
   allowSkip: false,
   providerSensitive: false,
   cliRoles: null,
-  stepIndex: null,
+  stepIndex: 0,
   composable: false,
   entry: null,
   ...over,
@@ -82,15 +83,47 @@ describe('loadStepFlags', () => {
   it('never keeps an empty result', async () => {
     let rows: unknown[] = [];
     const { db, state } = fakeDb(() => rows);
-    expect((await loadStepFlags(db)).size).toBe(0);
+    expect((await loadStepFlags(db)).size).toBeGreaterThan(0);
     rows = [row('a')];
-    expect((await loadStepFlags(db)).size).toBe(1);
+    expect([...(await loadStepFlags(db)).keys()]).toEqual(['a']);
     expect(state.selects).toBe(2);
   });
 
-  it('lists no upcoming step for an empty catalog', async () => {
+  describe('a catalog the worker has not synced yet', () => {
+    const skipId = SKIPPABLE_STEP_IDS[0]!;
+    const cliStep = CLI_DISPATCH_STEPS.find((s) => s.workflowType === 'workflow')!;
+
+    function expectStaticFlags(flags: Awaited<ReturnType<typeof loadStepFlags>>) {
+      expect(flags.has('01-worktree-setup')).toBe(false);
+      expect(flags.get(skipId)?.allowSkip).toBe(true);
+      expect(flags.get(cliStep.id)).toMatchObject({
+        dispatchesStepCli: true,
+        stepIndex: CLI_DISPATCH_STEPS.indexOf(cliStep),
+        composable: null,
+      });
+    }
+
+    it('gives the static flags for an empty catalog, and does not keep them', async () => {
+      const { db, state } = fakeDb(() => []);
+      expectStaticFlags(await loadStepFlags(db));
+      expectStaticFlags(await loadStepFlags(db));
+      expect(state.selects).toBe(2);
+    });
+
+    it('gives the static flags while any row has no step index, and does not keep them', async () => {
+      const { db, state } = fakeDb(() => [row('a'), row('b', { stepIndex: null })]);
+      const flags = await loadStepFlags(db);
+      expectStaticFlags(flags);
+      expect(flags.has('a')).toBe(false);
+      await loadStepFlags(db);
+      expect(state.selects).toBe(2);
+    });
+  });
+
+  it('lists the static upcoming steps for an empty catalog', async () => {
     const flags = await loadStepFlags(fakeDb(() => []).db);
     const db = { select: () => ({ from: () => ({ where: async () => [] }) }) } as never;
-    expect(await buildUpcomingCliSteps(db, flags, 'u', 't', 'workflow', [])).toEqual([]);
+    const upcoming = await buildUpcomingCliSteps(db, flags, 'u', 't', 'workflow', []);
+    expect(upcoming.length).toBeGreaterThan(0);
   });
 });
