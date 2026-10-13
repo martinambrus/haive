@@ -4,6 +4,36 @@ export default {
   version: '0.1.0',
   schemaVersion: 1,
   nav: [{ href: '/m/statistics', label: 'Statistics', icon: 'chartbar', order: 50 }],
+  pages: {
+    overview: {
+      title: 'Overview',
+      description: 'Headline figures and daily task activity over the default time window.',
+      widgets: [
+        {
+          type: 'kpi' as const,
+          label: 'Tasks completed',
+          endpoint: '/m/statistics/overview/kpi/tasks-completed',
+        },
+        {
+          type: 'kpi' as const,
+          label: 'Notional spend',
+          endpoint: '/m/statistics/overview/kpi/spend',
+        },
+        { type: 'kpi' as const, label: 'Tokens', endpoint: '/m/statistics/overview/kpi/tokens' },
+        {
+          type: 'chart' as const,
+          title: 'Tasks per day',
+          kind: 'line' as const,
+          xKey: 'day',
+          series: [
+            { key: 'tasksStarted', label: 'Started' },
+            { key: 'tasksCompleted', label: 'Completed' },
+          ],
+          endpoint: '/m/statistics/overview/activity',
+        },
+      ],
+    },
+  },
   globalSettings: {
     form: {
       title: 'Statistics',

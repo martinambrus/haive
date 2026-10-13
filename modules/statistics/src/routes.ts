@@ -28,7 +28,12 @@ import {
   type Delta,
   type TaskClass,
 } from '@haive/shared/stats';
-import { HttpError, type AppEnv, type ModuleRouteContext } from '@haive/shared/module-host';
+import {
+  HttpError,
+  moduleSettingKey,
+  type AppEnv,
+  type ModuleRouteContext,
+} from '@haive/shared/module-host';
 import {
   realCostRowSql,
   realCostUsdSql,
@@ -46,7 +51,7 @@ import {
   InventoryAnchorError,
   scanInstalledTooling,
 } from '@haive/shared/stats-server';
-import { parseStatsQuery, type StatsQuery } from './query.js';
+import { DEFAULT_RANGE_DAYS, MAX_RANGE_DAYS, parseStatsQuery, type StatsQuery } from './query.js';
 
 /** Task statuses that mean "this task produced nothing".
  *
@@ -88,6 +93,67 @@ function taskScopeFilter(q: StatsQuery, userId: string): SQL[] {
     );
   }
   return terms;
+}
+
+/** The attribution-filtered invocation predicate for the half-open window [lo, hi). */
+function invocationWindowFilter(q: StatsQuery, userId: string, lo: Date, hi: Date): SQL {
+  const providerTerm = q.cliProviderId
+    ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
+    : [];
+  return and(
+    ...taskScopeFilter(q, userId),
+    ...providerTerm,
+    invocationAttributionFilter(),
+    gte(schema.cliInvocations.startedAt, lo),
+    lt(schema.cliInvocations.startedAt, hi),
+  )!;
+}
+
+/** Tasks COMPLETED in [from, to) — the population effort and estimates are measured over. */
+async function completedTasksOver(db: Database, scope: SQL[], from: Date, to: Date) {
+  return db
+    .select({
+      id: schema.tasks.id,
+      completedAt: schema.tasks.completedAt,
+      estimatedTimeHours: schema.tasks.estimatedTimeHours,
+      aiEstimatedTimeHours: schema.tasks.aiEstimatedTimeHours,
+    })
+    .from(schema.tasks)
+    .where(
+      and(
+        ...scope,
+        eq(schema.tasks.status, 'completed'),
+        isNotNull(schema.tasks.completedAt),
+        gte(schema.tasks.completedAt, from),
+        lt(schema.tasks.completedAt, to),
+      ),
+    );
+}
+
+const DEFAULT_WINDOW_KEY = moduleSettingKey('statistics', 'global', 'defaultWindow');
+const WINDOW_DAYS = new Map([
+  ['7d', 7],
+  ['30d', 30],
+  ['90d', 90],
+  ['1y', 365],
+  ['all', MAX_RANGE_DAYS],
+]);
+
+/** The overview page's query: the caller's own rows over the module's `defaultWindow`, in UTC. */
+async function overviewQuery(): Promise<StatsQuery> {
+  const raw = await configService.getFresh(DEFAULT_WINDOW_KEY);
+  let setting: unknown = null;
+  try {
+    setting = raw === null ? null : JSON.parse(raw);
+  } catch {
+    // A non-JSON value is treated as absent, as the settings route does.
+  }
+  const days = (typeof setting === 'string' && WINDOW_DAYS.get(setting)) || DEFAULT_RANGE_DAYS;
+  const now = Date.now();
+  return parseStatsQuery(
+    { from: new Date(now - days * 86_400_000).toISOString(), to: new Date(now).toISOString() },
+    now,
+  );
 }
 
 interface TaskClassCount {
@@ -468,20 +534,10 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
     const prevTo = new Date(prev.toMs);
 
     const scope = taskScopeFilter(q, userId);
-    const providerTerm = q.cliProviderId
-      ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
-      : [];
 
     // Half-open [from, to): a row exactly on the boundary belongs to one window only, so the
     // current and previous windows can never double-count it.
-    const invocationWindow = (lo: Date, hi: Date): SQL =>
-      and(
-        ...scope,
-        ...providerTerm,
-        invocationAttributionFilter(),
-        gte(schema.cliInvocations.startedAt, lo),
-        lt(schema.cliInvocations.startedAt, hi),
-      )!;
+    const invocationWindow = (lo: Date, hi: Date): SQL => invocationWindowFilter(q, userId, lo, hi);
 
     const [spend, prevSpend, breakdown, busy, prevBusy] = await Promise.all([
       spendOver(db, invocationWindow(from, to)),
@@ -552,23 +608,7 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
       );
 
     // Tasks COMPLETED in the window — the population effort and estimates are measured over.
-    const completedRows = await db
-      .select({
-        id: schema.tasks.id,
-        completedAt: schema.tasks.completedAt,
-        estimatedTimeHours: schema.tasks.estimatedTimeHours,
-        aiEstimatedTimeHours: schema.tasks.aiEstimatedTimeHours,
-      })
-      .from(schema.tasks)
-      .where(
-        and(
-          ...scope,
-          eq(schema.tasks.status, 'completed'),
-          isNotNull(schema.tasks.completedAt),
-          gte(schema.tasks.completedAt, from),
-          lt(schema.tasks.completedAt, to),
-        ),
-      );
+    const completedRows = await completedTasksOver(db, scope, from, to);
 
     const prevCompletedRows = await db
       .select({ id: schema.tasks.id, completedAt: schema.tasks.completedAt })
@@ -680,12 +720,7 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
    * their correct totals; only the within-day split differs, which is why no per-day
    * concurrency ratio is exposed.
    */
-  statsRoutes.get('/timeline', async (c) => {
-    const userId = c.get('userId');
-    const q = parseStatsQuery(c.req.query());
-    if (q.allUsers && c.get('userRole') !== 'admin') {
-      throw new HttpError(403, 'Admin access required for install-wide statistics');
-    }
+  const timelineFor = async (q: StatsQuery, userId: string) => {
     const db = ctx.db;
 
     const from = new Date(q.fromMs);
@@ -822,7 +857,7 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
         };
       });
 
-    return c.json({
+    return {
       range: { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone },
       totals: {
         realUsd: series.reduce((n, d) => n + d.realUsd, 0),
@@ -835,6 +870,55 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
         dutyCycle: busy.dutyCycle,
       },
       days: series,
+    };
+  };
+
+  statsRoutes.get('/timeline', async (c) => {
+    const userId = c.get('userId');
+    const q = parseStatsQuery(c.req.query());
+    if (q.allUsers && c.get('userRole') !== 'admin') {
+      throw new HttpError(403, 'Admin access required for install-wide statistics');
+    }
+    return c.json(await timelineFor(q, userId));
+  });
+
+  statsRoutes.get('/overview/kpi/tasks-completed', async (c) => {
+    const q = await overviewQuery();
+    const rows = await completedTasksOver(
+      ctx.db,
+      taskScopeFilter(q, c.get('userId')),
+      new Date(q.fromMs),
+      new Date(q.toMs),
+    );
+    return c.json({ value: rows.length });
+  });
+
+  statsRoutes.get('/overview/kpi/spend', async (c) => {
+    const q = await overviewQuery();
+    const spend = await spendOver(
+      ctx.db,
+      invocationWindowFilter(q, c.get('userId'), new Date(q.fromMs), new Date(q.toMs)),
+    );
+    return c.json({ value: spend.notionalUsd, unit: 'USD' });
+  });
+
+  statsRoutes.get('/overview/kpi/tokens', async (c) => {
+    const q = await overviewQuery();
+    const breakdown = await sumProviderBreakdownWhere(
+      ctx.db,
+      invocationWindowFilter(q, c.get('userId'), new Date(q.fromMs), new Date(q.toMs)),
+    );
+    return c.json({ value: normalizeBreakdown(breakdown).totalTokens });
+  });
+
+  statsRoutes.get('/overview/activity', async (c) => {
+    const timeline = await timelineFor(await overviewQuery(), c.get('userId'));
+    return c.json({
+      data: timeline.days.map((d) => ({
+        day: d.bucket,
+        tasksStarted: d.tasksStarted,
+        tasksCompleted: d.tasksCompleted,
+      })),
     });
   });
 

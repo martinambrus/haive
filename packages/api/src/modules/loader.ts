@@ -7,7 +7,11 @@ import {
   moduleManifestSchema,
   type ModuleManifest,
 } from '@haive/shared/modularity';
-import type { ModuleRouteContext } from '@haive/shared/module-host';
+import {
+  moduleSettingKey,
+  type ModuleRouteContext,
+  type ModuleSettingsKind,
+} from '@haive/shared/module-host';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
@@ -25,18 +29,13 @@ export type LoadedApiModule = {
   hasRoutes: boolean;
 };
 
-type SettingsKind = 'global' | 'admin';
-
 const putBodySchema = z.object({ values: z.record(z.string(), z.unknown()) });
 
-const settingsKey = (id: string, kind: SettingsKind, field: string) =>
-  `config:module:${id}:${kind}:${field}`;
-
-function settingsOf(manifest: ModuleManifest, kind: SettingsKind) {
+function settingsOf(manifest: ModuleManifest, kind: ModuleSettingsKind) {
   return kind === 'global' ? manifest.globalSettings : manifest.adminSettings;
 }
 
-function parseKind(raw: string): SettingsKind {
+function parseKind(raw: string): ModuleSettingsKind {
   if (raw === 'global' || raw === 'admin') return raw;
   throw new HttpError(404, 'Unknown settings kind');
 }
@@ -87,7 +86,7 @@ export async function mountModules(
       const defaults = settingsOf(manifest, kind)?.defaults ?? {};
       for (const [field, value] of Object.entries(defaults)) {
         await configService.setIfAbsent(
-          settingsKey(manifest.id, kind, field),
+          moduleSettingKey(manifest.id, kind, field),
           JSON.stringify(value),
         );
       }
@@ -100,7 +99,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
   const routes = new Hono<AppEnv>();
   routes.use('*', requireAuth);
 
-  const settingsFor = (id: string, kind: SettingsKind) => {
+  const settingsFor = (id: string, kind: ModuleSettingsKind) => {
     const module = loaded.find((m) => m.manifest.id === id);
     const settings = module ? settingsOf(module.manifest, kind) : undefined;
     if (!module || !settings) throw new HttpError(404, 'Module settings not found');
@@ -165,7 +164,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       ...Object.keys(settings.defaults),
       ...collectFieldIds(settings.form),
     ])) {
-      const stored = await configService.getFresh(settingsKey(id, kind, field));
+      const stored = await configService.getFresh(moduleSettingKey(id, kind, field));
       if (stored !== null) {
         try {
           values[field] = JSON.parse(stored);
@@ -186,7 +185,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     const result = validateFormValues(settings.form, body.values);
     if (!result.success) throw new HttpError(400, result.issues.join('; '));
     for (const [field, value] of Object.entries(result.data)) {
-      await configService.set(settingsKey(id, kind, field), JSON.stringify(value));
+      await configService.set(moduleSettingKey(id, kind, field), JSON.stringify(value));
     }
     return c.json({ values: result.data });
   });

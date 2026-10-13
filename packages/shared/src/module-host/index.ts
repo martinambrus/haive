@@ -27,3 +27,9 @@ export class HttpError extends Error {
 export type ModuleRouteContext = {
   db: Database;
 };
+
+export type ModuleSettingsKind = 'global' | 'admin';
+
+/** The ConfigService key a module setting is stored under; the api's settings routes write it. */
+export const moduleSettingKey = (moduleId: string, kind: ModuleSettingsKind, field: string) =>
+  `config:module:${moduleId}:${kind}:${field}`;

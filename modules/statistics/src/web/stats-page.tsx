@@ -550,6 +550,9 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
           Every figure is scoped to the window and filters below. Ratios built from too few
           observations show their sample count instead of a percentage.
         </p>
+        <Link href={`/m/${moduleId}/overview`} className="text-sm text-indigo-400 underline">
+          Overview
+        </Link>
       </div>
 
       <Card className="flex flex-col gap-3 py-4">
