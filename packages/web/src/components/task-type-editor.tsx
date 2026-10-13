@@ -179,9 +179,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       const body = buildUpdateBody(
         submitted,
         editableFields,
-        composable && compositionEdited
-          ? { stepIds, loopLimits, preAnswerDefaults: row?.preAnswerDefaults ?? {} }
-          : null,
+        composable && compositionEdited ? { stepIds, loopLimits, saved: row! } : null,
         initialValuesOf(row!),
       );
       const res = await updateTaskType(row!.slug, body);

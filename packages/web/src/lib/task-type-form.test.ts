@@ -133,6 +133,26 @@ describe('buildUpdateBody', () => {
     });
   });
 
+  it("sends only the composition field that changed, so a stale page keeps another admin's order", () => {
+    const body = buildUpdateBody(
+      values,
+      ADMIN_FIELDS,
+      {
+        stepIds: ['a', 'b'],
+        loopLimits: { a: 3 },
+        saved: {
+          stepIds: ['a', 'b'],
+          stepLoopLimitDefaults: { a: 2 },
+          preAnswerDefaults: { a: { x: 1 } },
+        },
+      },
+      SAVED,
+    );
+    expect(body.stepLoopLimitDefaults).toEqual({ a: 3 });
+    expect(body).not.toHaveProperty('stepIds');
+    expect(body).not.toHaveProperty('preAnswerDefaults');
+  });
+
   it('sends the composition for a custom row and drops answers for removed steps', () => {
     const body = buildUpdateBody(
       values,
@@ -140,7 +160,11 @@ describe('buildUpdateBody', () => {
       {
         stepIds: ['a'],
         loopLimits: { a: 2 },
-        preAnswerDefaults: { a: { x: 1 }, gone: { y: 2 } },
+        saved: {
+          stepIds: ['a', 'gone'],
+          stepLoopLimitDefaults: {},
+          preAnswerDefaults: { a: { x: 1 }, gone: { y: 2 } },
+        },
       },
       SAVED,
     );

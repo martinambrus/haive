@@ -123,18 +123,22 @@ export function buildCreateBody(
   };
 }
 
+const sameIds = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((id, i) => id === b[i]);
+
+function sameLimits(a: Record<string, number>, b: Record<string, number>): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every((k) => a[k] === b[k]);
+}
+
 export function compositionChanged(
   current: { stepIds: readonly string[]; loopLimits: Record<string, number> },
   saved: { stepIds: readonly string[] | null; stepLoopLimitDefaults: Record<string, number> },
 ): boolean {
-  const savedIds = saved.stepIds ?? [];
-  if (current.stepIds.length !== savedIds.length) return true;
-  if (current.stepIds.some((id, i) => id !== savedIds[i])) return true;
-  const keys = new Set([
-    ...Object.keys(current.loopLimits),
-    ...Object.keys(saved.stepLoopLimitDefaults),
-  ]);
-  return [...keys].some((k) => current.loopLimits[k] !== saved.stepLoopLimitDefaults[k]);
+  return (
+    !sameIds(current.stepIds, saved.stepIds ?? []) ||
+    !sameLimits(current.loopLimits, saved.stepLoopLimitDefaults)
+  );
 }
 
 /** Only changed fields the api lets this row change are sent, since it refuses the whole request over any other. */
@@ -144,7 +148,11 @@ export function buildUpdateBody(
   composition: {
     stepIds: string[];
     loopLimits: Record<string, number>;
-    preAnswerDefaults: Record<string, Record<string, unknown>>;
+    saved: {
+      stepIds: readonly string[] | null;
+      stepLoopLimitDefaults: Record<string, number>;
+      preAnswerDefaults: Record<string, Record<string, unknown>>;
+    };
   } | null,
   saved: Partial<Record<(typeof FLAT_FIELDS)[number], unknown>>,
 ): TaskTypeUpdate {
@@ -155,12 +163,17 @@ export function buildUpdateBody(
     if (field in body && body[field] === saved[field]) delete body[field];
   }
   if (composition && editableFields.includes('stepIds')) {
-    const listed = new Set(composition.stepIds);
-    body.stepIds = composition.stepIds;
-    body.stepLoopLimitDefaults = composition.loopLimits;
-    body.preAnswerDefaults = Object.fromEntries(
-      Object.entries(composition.preAnswerDefaults).filter(([id]) => listed.has(id)),
-    );
+    const { saved: was } = composition;
+    if (!sameIds(composition.stepIds, was.stepIds ?? [])) {
+      const listed = new Set(composition.stepIds);
+      body.stepIds = composition.stepIds;
+      body.preAnswerDefaults = Object.fromEntries(
+        Object.entries(was.preAnswerDefaults).filter(([id]) => listed.has(id)),
+      );
+    }
+    if (!sameLimits(composition.loopLimits, was.stepLoopLimitDefaults)) {
+      body.stepLoopLimitDefaults = composition.loopLimits;
+    }
   }
   return body;
 }
