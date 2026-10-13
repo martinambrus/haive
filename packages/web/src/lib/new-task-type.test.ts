@@ -42,6 +42,16 @@ describe('buildNewTaskTypeOptions', () => {
     ]);
   });
 
+  it('disables Run the app, with the reason, once a loaded list lacks it', () => {
+    const loaded = BUILTIN_ROWS.filter((r) => r.slug !== 'run_app');
+    const [workflow, runApp] = buildNewTaskTypeOptions(loaded);
+    expect(workflow).toMatchObject({ value: 'workflow', disabled: false, reason: null });
+    expect(runApp).toMatchObject({ value: 'run_app', disabled: true });
+    expect(runApp!.reason).toMatch(/turned off/i);
+    expect(buildNewTaskTypeOptions(BUILTIN_ROWS)[1]).toMatchObject({ disabled: false });
+    expect(buildNewTaskTypeOptions([])[1]).toMatchObject({ disabled: false });
+  });
+
   it('sorts custom types by sortOrder, then slug', () => {
     const options = buildNewTaskTypeOptions([
       row({ slug: 'zeta', sortOrder: 1 }),

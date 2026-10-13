@@ -676,7 +676,7 @@ export default function NewTaskPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {onboardingStatus?.onboarded && (
+          {fields.onboardingStatus && onboardingStatus?.onboarded && (
             <Button
               type="button"
               variant="secondary"
@@ -687,7 +687,7 @@ export default function NewTaskPage() {
               {resetting ? 'Resetting...' : 'Re-run onboarding'}
             </Button>
           )}
-          {onboardingStatus?.canMarkOnboarded && (
+          {fields.onboardingStatus && onboardingStatus?.canMarkOnboarded && (
             <Button
               type="button"
               variant="secondary"
@@ -764,7 +764,7 @@ export default function NewTaskPage() {
               first.
             </p>
           )}
-          {repositoryId && (
+          {repositoryId && fields.onboardingStatus && (
             <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs">
               {statusLoading && <span className="text-neutral-400">Checking onboarding...</span>}
               {statusError && <span className="text-red-400">{statusError}</span>}

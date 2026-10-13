@@ -69,7 +69,14 @@ export function buildNewTaskTypeOptions(rows: readonly PublicTaskType[]): NewTas
       restoresDatabase: r.restoresDatabase,
       dispatchesCli: r.dispatchesCli,
     }));
-  return [...FIXED_OPTIONS, ...custom];
+  // An empty list is one that has not loaded; a loaded one always carries the locked Workflow row.
+  const runAppOff = rows.length > 0 && !rows.some((r) => r.slug === 'run_app');
+  const fixed = FIXED_OPTIONS.map((o) =>
+    o.kind === 'run_app' && runAppOff
+      ? { ...o, disabled: true, reason: UNAVAILABLE_REASON_TEXT.disabled }
+      : o,
+  );
+  return [...fixed, ...custom];
 }
 
 export interface NewTaskFields {

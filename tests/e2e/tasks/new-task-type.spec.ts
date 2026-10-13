@@ -163,7 +163,7 @@ test.describe('New Task type select', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.type).toBe(lab.repoLess);
     expect(rows[0]!.repository_id).toBeNull();
-    expect(rows[0]!.run_list_snapshot).toEqual(SPEC_STEPS);
+    expect(rows[0]!.run_list_snapshot).toEqual(['00-model-health-workflow', ...SPEC_STEPS]);
   });
 
   test('a custom type that needs a repository is blocked without one', async ({
