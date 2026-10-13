@@ -789,14 +789,29 @@ async function seedBaseFrom(tx: PlanMirrorTx, repositoryId: string, bytes: Buffe
 }
 
 /** A node both sides added with an asked field set differently had no base: it stays out of the
- *  next one so the question is asked again, unless another base node sits under it. */
+ *  next one, with whatever new subtree hangs under it, so the question is asked again. A node
+ *  with an old base node under it stays, since the base must still parse. */
 function withoutAbsentAsked(
   payload: PlanMirrorPayload,
   absent: ReadonlySet<string>,
+  oldBase: ReadonlySet<string>,
 ): PlanMirrorPayload {
   if (absent.size === 0) return payload;
-  const parents = new Set(payload.nodes.map((n) => n.parentId).filter((id) => id !== null));
-  const drop = new Set([...absent].filter((id) => !parents.has(id)));
+  const children = new Map<string, string[]>();
+  for (const n of payload.nodes) {
+    if (n.parentId !== null) children.set(n.parentId, [...(children.get(n.parentId) ?? []), n.id]);
+  }
+  const drop = new Set<string>();
+  for (const id of absent) {
+    const subtree: string[] = [];
+    const queue = [id];
+    while (queue.length > 0) {
+      const next = queue.pop()!;
+      subtree.push(next);
+      queue.push(...(children.get(next) ?? []));
+    }
+    if (!subtree.some((n) => oldBase.has(n))) for (const n of subtree) drop.add(n);
+  }
   if (drop.size === 0) return payload;
   return {
     ...payload,
@@ -839,6 +854,7 @@ async function storeAgreedBase(
           }),
         } as PlanMirrorPayload),
     unbased,
+    new Set(oldById.keys()),
   );
   await tx
     .update(schema.planMirrorState)
@@ -877,13 +893,26 @@ export async function advancePlanBaseFromCommit(
 async function convergePlanQuestions(tx: PlanMirrorTx, repositoryId: string): Promise<void> {
   const asked = await loadPendingPlanQuestions(tx, repositoryId);
   if (asked.length === 0) return;
+  // Locked before the render, so a canvas edit cannot land between the judgement and the close.
+  await tx
+    .select({ id: schema.planNodes.id })
+    .from(schema.planNodes)
+    .where(
+      inArray(
+        schema.planNodes.id,
+        asked.map((q) => q.nodeId),
+      ),
+    )
+    .for('update');
   const local = (await renderPlanMirror(tx, repositoryId))?.mirror;
   const byId = new Map((local?.nodes ?? []).map((n) => [n.id, n as Record<string, unknown>]));
   const agreed = new Map<string, unknown>();
+  const closed = new Set<string>();
   for (const q of asked) {
     const node = byId.get(q.nodeId);
     if (node && !sameValue(conflictSide(node[q.field]), q.row.incoming)) continue;
     if (node) agreed.set(`${q.nodeId}\0${q.field}`, node[q.field]);
+    closed.add(q.row.id);
     await tx
       .update(schema.projectStateConflicts)
       .set({ resolution: 'converged', resolvedAt: new Date() })
@@ -897,16 +926,29 @@ async function convergePlanQuestions(tx: PlanMirrorTx, repositoryId: string): Pr
     .limit(1);
   const base = planMirrorPayloadSchema.safeParse(state?.syncedSnapshot);
   if (!base.success) return;
+  // A node both sides added joins the base once its last question settles, under a base parent.
+  const inBase = new Set(base.data.nodes.map((n) => n.id));
+  const stillAsked = new Set(asked.filter((q) => !closed.has(q.row.id)).map((q) => q.nodeId));
+  const joining = (local?.nodes ?? []).filter(
+    (n) =>
+      !inBase.has(n.id) &&
+      !stillAsked.has(n.id) &&
+      asked.some((q) => q.nodeId === n.id) &&
+      (n.parentId === null || inBase.has(n.parentId)),
+  );
   const snapshot = {
     ...base.data,
-    nodes: base.data.nodes.map((n) => {
-      const patched: Record<string, unknown> = { ...n };
-      for (const field of PLAN_MIRROR_ASKED_FIELDS) {
-        const key = `${n.id}\0${field}`;
-        if (agreed.has(key)) patched[field] = agreed.get(key);
-      }
-      return patched;
-    }),
+    nodes: [
+      ...base.data.nodes.map((n) => {
+        const patched: Record<string, unknown> = { ...n };
+        for (const field of PLAN_MIRROR_ASKED_FIELDS) {
+          const key = `${n.id}\0${field}`;
+          if (agreed.has(key)) patched[field] = agreed.get(key);
+        }
+        return patched;
+      }),
+      ...joining,
+    ],
   } as PlanMirrorPayload;
   await tx
     .update(schema.planMirrorState)
@@ -1358,6 +1400,7 @@ async function reconcilePlanLocked(
           }),
         } as PlanMirrorPayload),
     new Set(merge.conflicts.filter((c) => c.base === undefined).map((c) => c.nodeId)),
+    new Set(baseParsed.success ? baseParsed.data.nodes.map((n) => n.id) : []),
   );
 
   // Dirty when the file no longer says what the database does.

@@ -2737,16 +2737,26 @@ async function main(): Promise<void> {
     { repositoryId: sId, origin: 'user' },
   );
 
-  // A node both sides added with different titles stays out of the base, so the question survives.
+  // A node both sides added with different titles stays out of the base, with its new subtree, so
+  // the question survives an unrelated pull.
   const yAdded = await applyPlanPatch(
     db,
-    { ops: [{ op: 'upsert', nodeRef: 'tmp-y', parentRef: sBuilt.refs['sroot']!, title: 'Y' }] },
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'tmp-y', parentRef: sBuilt.refs['sroot']!, title: 'Y' },
+        { op: 'upsert', nodeRef: 'tmp-y1', parentRef: 'tmp-y', title: 'Y1' },
+      ],
+    },
     { repositoryId: sId, origin: 'user' },
   );
-  const yId = yAdded.created[0]!;
+  const yId = yAdded.refs['tmp-y']!;
+  const y1Id = yAdded.refs['tmp-y1']!;
   await writePlanMirror(db, sId, sDir);
   const withY = await readMirror();
-  const withoutY = { ...withY, nodes: withY.nodes.filter((n) => n.id !== yId) };
+  const withoutY = {
+    ...withY,
+    nodes: withY.nodes.filter((n) => n.id !== yId && n.id !== y1Id),
+  };
   theirs = withoutY;
   await advancePlanBaseToPushed(db, sId, JSON.stringify(withoutY));
   await editS(yId, { title: 'Y here' });
@@ -2758,9 +2768,38 @@ async function main(): Promise<void> {
   });
   check(
     'three-way: a node added on both sides with different titles stays out of the base and stays asked',
-    !yBase?.nodes.some((n) => n.id === yId) &&
+    !yBase?.nodes.some((n) => n.id === yId || n.id === y1Id) &&
       (await pendingPlanRows(sId)).some((r) => r.unit === `plan/${yId}#title`),
     { yBase: yBase?.nodes.map((n) => n.id), rows: await pendingPlanRows(sId) },
+  );
+
+  // A canvas edit that lands while a question is being settled keeps it open.
+  await editS(yId, { title: 'Y there' });
+  let settling: Promise<unknown> | undefined;
+  await db.transaction(async (edit) => {
+    await edit
+      .update(schema.planNodes)
+      .set({ title: 'Y third' })
+      .where(eq(schema.planNodes.id, yId));
+    settling = writePlanMirror(db, sId, sDir).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  });
+  await settling;
+  check(
+    'three-way: a question is not settled on a value a concurrent edit replaced',
+    (await pendingPlanRows(sId)).some((r) => r.unit === `plan/${yId}#title`) &&
+      (await sNode(yId))?.title === 'Y third',
+    await pendingPlanRows(sId),
+  );
+
+  // Settled on the incoming value, the node both sides added joins the base.
+  await editS(yId, { title: 'Y there' });
+  await writePlanMirror(db, sId, sDir);
+  check(
+    'three-way: a node both sides added joins the base once its question settles',
+    !(await pendingPlanRows(sId)).some((r) => r.unit === `plan/${yId}#title`) &&
+      (await baseOf())?.nodes.find((n) => n.id === yId)?.title === 'Y there',
+    await baseOf(),
   );
   await applyPlanPatch(
     db,
