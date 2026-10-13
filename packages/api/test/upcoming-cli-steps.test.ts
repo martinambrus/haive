@@ -65,3 +65,53 @@ describe('buildUpcomingCliSteps', () => {
     expect(await ids('workflow', every)).toEqual([]);
   });
 });
+
+describe('buildUpcomingCliSteps for a task with a run list snapshot', () => {
+  const CUSTOM = ['01-worktree-setup', '07-phase-2-implement', '08c-code-review'];
+  const bySnapshot = async (
+    taskType: string,
+    snapshot: string[] | null,
+    started: string[] = [],
+  ): Promise<string[]> =>
+    (
+      await buildUpcomingCliSteps(
+        makeFakeDb(),
+        'user-1',
+        'task-1',
+        taskType,
+        started,
+        false,
+        snapshot,
+      )
+    ).map((s) => s.stepId);
+
+  it('offers the CLI steps a custom task will run, and no others', async () => {
+    const out = await bySnapshot('review_only', CUSTOM);
+    expect(out).toContain('07-phase-2-implement');
+    expect(out).toContain('08c-code-review');
+    expect(out).not.toContain('01-worktree-setup');
+    expect(out).not.toContain('08a-browser-verify');
+  });
+
+  it('drops a snapshot step that already has a row, and the model-health canary', async () => {
+    const out = await bySnapshot(
+      'review_only',
+      ['00-model-health-workflow', ...CUSTOM],
+      ['07-phase-2-implement'],
+    );
+    expect(out).toEqual(['08c-code-review']);
+  });
+
+  it('answers a task without a snapshot by its type, as before', async () => {
+    expect(await bySnapshot('workflow', null)).toEqual(await ids('workflow'));
+    expect(await bySnapshot('kb_author', null)).toEqual(['01-kb-enrich']);
+    expect(await bySnapshot('review_only', null)).toEqual([]);
+  });
+
+  it('answers a built-in static type with its own steps the same either way', async () => {
+    const onboarding = CLI_DISPATCH_STEPS.filter((s) => s.workflowType === 'onboarding').map(
+      (s) => s.id,
+    );
+    expect(await bySnapshot('onboarding', onboarding)).toEqual(await ids('onboarding'));
+  });
+});

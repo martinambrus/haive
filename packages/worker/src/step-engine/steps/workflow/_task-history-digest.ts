@@ -1,4 +1,4 @@
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   coerceReviewSeverity,
@@ -186,7 +186,11 @@ export async function buildTaskHistoryDigest(
     .select()
     .from(schema.taskSteps)
     .where(eq(schema.taskSteps.taskId, taskId))
-    .orderBy(asc(schema.taskSteps.stepIndex), asc(schema.taskSteps.round));
+    .orderBy(
+      sql`${schema.taskSteps.runSeq} ASC NULLS LAST`,
+      asc(schema.taskSteps.stepIndex),
+      asc(schema.taskSteps.round),
+    );
   const events = await db
     .select()
     .from(schema.taskEvents)

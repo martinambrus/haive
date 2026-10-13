@@ -292,11 +292,16 @@ export class TerminalSessionManager {
       if (task.status === 'completed' || task.status === 'cancelled') {
         return { ok: false, error: `task is ${task.status} - terminal disabled` };
       }
-      // Worktree-gated like the Editor tab: workflow/run_app shells must wait until
-      // 01-worktree-setup has run. Opening earlier would create the persistent tmux
-      // session in the repo root (wrong branch) and it would never move to the
-      // worktree. 'skipped' counts as ready (run_app may run from the repo root).
-      if (task.type === 'workflow' || task.type === 'run_app') {
+      // Worktree-gated like the Editor tab: workflow/run_app shells, and those of a custom
+      // type whose run list sets a worktree up, must wait until 01-worktree-setup has run.
+      // Opening earlier would create the persistent tmux session in the repo root (wrong
+      // branch) and it would never move to the worktree. 'skipped' counts as ready (run_app
+      // may run from the repo root).
+      if (
+        task.type === 'workflow' ||
+        task.type === 'run_app' ||
+        task.runListSnapshot?.includes('01-worktree-setup') === true
+      ) {
         const wt = await this.db.query.taskSteps.findFirst({
           where: and(
             eq(schema.taskSteps.taskId, taskId),

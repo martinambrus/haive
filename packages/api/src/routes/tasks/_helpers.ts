@@ -903,7 +903,8 @@ const MODEL_HEALTH_STEP_ID_SET = new Set<string>(MODEL_HEALTH_STEP_IDS);
  *  that function needs only `stepId`, and already resolves roles, fan-out seats and the
  *  ignore_saved_step_clis gating. Two copies of that resolution would drift.
  *
- *  Filtered by workflowType, which OVER-lists rather than under-lists: a workflow task's
+ *  Filtered by the task's run list snapshot when it has one (a custom type's steps belong to
+ *  several workflowTypes), else by workflowType, which OVER-lists rather than under-lists: a workflow task's
  *  execution_path can drop steps (orchestrator/execution-paths.ts is worker-side and not
  *  mirrored here), and a stored preference for a step that never runs is inert. The
  *  model-health canary is excluded — a CLI change there is a task-level decision that
@@ -916,10 +917,14 @@ export async function buildUpcomingCliSteps(
   taskType: string,
   existingStepIds: Iterable<string>,
   ignoreSaved = false,
+  runListSnapshot: readonly string[] | null = null,
 ) {
   const started = new Set<string>(existingStepIds);
   const upcoming = CLI_DISPATCH_STEPS.filter(
-    (s) => s.workflowType === taskType && !MODEL_HEALTH_STEP_ID_SET.has(s.id) && !started.has(s.id),
+    (s) =>
+      (runListSnapshot ? runListSnapshot.includes(s.id) : s.workflowType === taskType) &&
+      !MODEL_HEALTH_STEP_ID_SET.has(s.id) &&
+      !started.has(s.id),
   ).map((s) => ({ stepId: s.id, title: s.title }));
   if (upcoming.length === 0) return [];
   return enrichStepsWithCliPreferences(db, userId, upcoming, taskId, ignoreSaved);

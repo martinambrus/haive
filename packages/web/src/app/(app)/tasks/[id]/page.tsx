@@ -115,6 +115,7 @@ import {
 } from '@/lib/terminal-autoscroll';
 import { usePageTitle } from '@/lib/use-page-title';
 import { taskOrigin, taskTitleOrigin, rememberTaskOrigin } from '@/lib/task-origin';
+import { taskUsesWorktree } from '@/lib/task-worktree';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { refreshUsageWindow, useUsageWindow } from '@/lib/use-usage-window';
 
@@ -1125,7 +1126,7 @@ export default function TaskDetailPage() {
   //    (onboarding) edit the repo root and have no worktree step, so they are not
   //    worktree-gated.
   // Switch away if the user is sitting on the Editor tab while it is (or becomes) disabled.
-  const usesWorktree = task?.type === 'workflow' || task?.type === 'run_app';
+  const usesWorktree = taskUsesWorktree(task);
   const worktreeReady =
     !usesWorktree ||
     steps.some(

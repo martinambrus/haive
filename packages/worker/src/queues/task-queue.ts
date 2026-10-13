@@ -96,6 +96,7 @@ import {
   taskTypeAllowsNoRepository,
   taskWasCreatedRepoLess,
 } from '../repo/scratch-workspace.js';
+import { gitRun } from '../repo/git-exec.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { splitRepoStoragePath } from '../repo/worktree-paths.js';
 import { pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
@@ -696,6 +697,79 @@ export function setContainerCleanupRunner(runner: ContainerCleanupRunner | null)
   containerCleanupRunner = runner;
 }
 
+/** True unless the worktree is known to hold nothing uncommitted: a missing record or an unreadable status keeps it. */
+async function worktreeMayHoldWork(worktreePath: string | null, taskId: string): Promise<boolean> {
+  if (!worktreePath) return true;
+  const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
+  if (status.code === 0 && status.stdout.trim() === '') return false;
+  logger.warn(
+    { taskId, worktreePath, code: status.code },
+    'worktree kept on completion: uncommitted changes or unreadable status',
+  );
+  return true;
+}
+
+/** The worktree half of task cleanup, split out so its decision is testable without docker. */
+export async function releaseTaskWorktree(
+  db: Database,
+  taskId: string,
+  reason: 'completed' | 'failed' | 'cancelled',
+): Promise<void> {
+  // Remove the feature worktree. On cancel: always (a task cancelled before its
+  // worktree-cleanup step would leak the dir into the haive_repos volume). On
+  // completion: only for a task whose run list has no worktree-cleanup step of its own.
+  let completed: {
+    type: string;
+    runListSnapshot: string[] | null;
+    worktreePath: string | null;
+  } | null = null;
+  if (reason === 'completed') {
+    const t = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { type: true, runListSnapshot: true, worktreePath: true },
+    });
+    completed = t ?? null;
+  }
+
+  // run_app has no 12-worktree-cleanup, so its Finish would otherwise leak the
+  // worktree; workflow completion still defers to step 12 (whose `keep` choice must
+  // be respected). A custom type that sets a worktree up and has no step 12 leaks it
+  // the same way, but unlike run_app it is only reaped while clean. On 'failed' the
+  // runtime is kept for recovery, so a later cancel reaps it then.
+  const runList = completed?.runListSnapshot ?? [];
+  const customWithoutCleanup =
+    completed !== null &&
+    completed.type !== 'run_app' &&
+    completed.type !== 'workflow' &&
+    runList.includes('01-worktree-setup') &&
+    !runList.includes('12-worktree-cleanup');
+  let removeWorktree = reason === 'cancelled' || completed?.type === 'run_app';
+  if (customWithoutCleanup) {
+    removeWorktree = !(await worktreeMayHoldWork(completed?.worktreePath ?? null, taskId));
+  }
+  if (removeWorktree) {
+    try {
+      const wt = await removeTaskWorktree(db, taskId);
+      if (wt.removed) {
+        await appendEvent(db, taskId, null, 'worktree.removed', {
+          reason,
+          worktreePath: wt.worktreePath,
+          method: wt.method,
+          branch: wt.branch,
+          branchDeleted: wt.branchDeleted,
+        });
+      } else if (wt.error) {
+        logger.warn(
+          { taskId, worktreePath: wt.worktreePath, err: wt.error },
+          'worktree removal failed',
+        );
+      }
+    } catch (err) {
+      logger.warn({ err, taskId, reason }, 'cleanup-task-worktree failed');
+    }
+  }
+}
+
 async function cleanupTaskContainers(
   db: Database,
   taskId: string,
@@ -808,45 +882,7 @@ async function cleanupTaskContainers(
   // run — a throw there turns it `failed`, whose recovery surfaces need the workspace. The call
   // lives at the end of markTaskCompleted and on the cancel path instead.
 
-  // Remove the feature worktree. On cancel: always (a task cancelled before its
-  // worktree-cleanup step would leak the dir into the haive_repos volume). On
-  // completion: only for task types with NO worktree-cleanup step of their own —
-  // A few completion-time cleanups depend on the task type — fetch it once.
-  let completedType: string | null = null;
-  if (reason === 'completed') {
-    const t = await db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, taskId),
-      columns: { type: true },
-    });
-    completedType = t?.type ?? null;
-  }
-
-  // run_app has no 12-worktree-cleanup, so its Finish would otherwise leak the
-  // worktree; workflow completion still defers to step 12 (whose `keep` choice must
-  // be respected). On 'failed' the runtime is kept for recovery, so a later cancel
-  // reaps it then.
-  const removeWorktree = reason === 'cancelled' || completedType === 'run_app';
-  if (removeWorktree) {
-    try {
-      const wt = await removeTaskWorktree(db, taskId);
-      if (wt.removed) {
-        await appendEvent(db, taskId, null, 'worktree.removed', {
-          reason,
-          worktreePath: wt.worktreePath,
-          method: wt.method,
-          branch: wt.branch,
-          branchDeleted: wt.branchDeleted,
-        });
-      } else if (wt.error) {
-        logger.warn(
-          { taskId, worktreePath: wt.worktreePath, err: wt.error },
-          'worktree removal failed',
-        );
-      }
-    } catch (err) {
-      logger.warn({ err, taskId, reason }, 'cleanup-task-worktree failed');
-    }
-  }
+  await releaseTaskWorktree(db, taskId, reason);
 
   // Reap the env template + image ONLY on cancel. cleanupTaskEnvImage deletes the
   // env_templates ROW (not just the docker image), and that row is a reusable
