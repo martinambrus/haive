@@ -6,7 +6,8 @@
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo"
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
