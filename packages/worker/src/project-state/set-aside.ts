@@ -6,7 +6,9 @@ import { HAIVE_DATA_FILES, logger } from '@haive/shared';
 import {
   readFileNoFollow,
   readdirNoFollow,
+  removeFileIfNoFollow,
   removeNoFollow,
+  rewriteFileIfNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { markPlanMirrorDirty } from '@haive/shared/plan';
@@ -709,11 +711,27 @@ export async function putBackProjections(
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
       await lockPlanMirror(tx, repositoryId);
-      const dirty = new Set((await dirtyProjections(repoPath)).paths);
+      // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
       for (const [path, bytes] of kept) {
-        if (dirty.has(path)) continue;
-        if (bytes === null) await removeNoFollow(repoPath, path);
-        else await writeFileNoFollow(repoPath, path, bytes, { createParents: true });
+        const head = await readBlob(repoPath, `HEAD:${path}`);
+        const maxBytes = Math.max(head?.length ?? 0, bytes?.length ?? 0) + 1;
+        if (head === null) {
+          if (bytes === null) continue;
+          try {
+            await writeFileNoFollow(repoPath, path, bytes, {
+              mode: 'create-exclusive',
+              createParents: true,
+            });
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+          }
+        } else if (bytes === null) {
+          await removeFileIfNoFollow(repoPath, path, (now) => now.equals(head), { maxBytes });
+        } else {
+          await rewriteFileIfNoFollow(repoPath, path, (now) => (now.equals(head) ? bytes : null), {
+            maxBytes,
+          });
+        }
       }
     });
   } catch (err) {

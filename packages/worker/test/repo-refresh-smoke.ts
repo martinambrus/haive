@@ -1024,6 +1024,48 @@ async function main(): Promise<void> {
       );
     }
 
+    // 11e6. A person who edits a restored file before the put-back keeps their bytes: the put-back swaps
+    // a file only while it still holds what the restore left.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const target = path.join(c.dest, RENDER_REL);
+      let restores = 0;
+      restoreFaults.afterRestore = async () => {
+        restores += 1;
+        if (restores !== 1) return;
+        await writeFile(target, '{"edited":"by a person"}\n');
+        await db.insert(schema.tasks).values({
+          userId,
+          repositoryId: id,
+          type: 'onboarding',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        });
+      };
+      let aside;
+      try {
+        aside = await setAsideHaiveProjections(db, id, c.dest, (conn) =>
+          checkoutHoldingTasks(conn, id),
+        );
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      }
+      const now = await readFile(target, 'utf8');
+      check(
+        "a person's edit made before the put-back survives it",
+        aside.outcome === 'held' && now === '{"edited":"by a person"}\n',
+        { aside, now },
+      );
+    }
+
     // 11e4. A re-sync that fails after a clean move raises the domain's mark, so the sweep retries it.
     {
       const c = await withPendingRender();
