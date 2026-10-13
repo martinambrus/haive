@@ -2266,6 +2266,29 @@ async function main(): Promise<void> {
     { same, sameBefore, sameAfter },
   );
 
+  // A canvas edit that commits while a reconcile waits on its row wins; the reconcile holds.
+  const qBefore = await sNode(qId);
+  let racing: Promise<string> | undefined;
+  await db.transaction(async (edit) => {
+    await edit
+      .update(schema.planNodes)
+      .set({ title: 'Q edited on the canvas', version: qBefore!.version + 1 })
+      .where(eq(schema.planNodes.id, qId));
+    racing = arrive(retitled(theirs, qId, 'Q from the file')).then(
+      () => 'merged',
+      (err: Error) => err.name,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  });
+  check(
+    'three-way: a canvas edit committed during a reconcile is kept and the reconcile holds',
+    (await racing) === 'PlanMirrorHeldError' &&
+      (await sNode(qId))?.title === 'Q edited on the canvas',
+    await sNode(qId),
+  );
+  await writeFile(sPlanFile, JSON.stringify(retitled(theirs, qId, 'Q edited on the canvas')));
+  await arrive(retitled(theirs, qId, 'Q edited on the canvas'));
+
   // A status the other side changed lands with its done_at, and leaving done clears it.
   const toDone = await arrive({
     ...theirs,

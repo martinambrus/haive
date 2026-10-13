@@ -6,7 +6,7 @@ import {
   rewriteFileIfNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { and, eq, gte, inArray, isNull, like, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, like, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   HAIVE_DATA_FILES,
@@ -87,6 +87,8 @@ const HELD_GIT_OPERATION =
   'a merge or rebase is open in the checkout; nothing was written. The plan is written again once it finishes.';
 const HELD_NO_BASE =
   "the checkout's plan.json holds changes Haive has not read in, and this plan has unwritten changes of its own with no earlier copy to tell them apart; Pull the plan to bring them in. Nothing was written.";
+const HELD_RACED =
+  "the plan was edited while the checkout's plan.json was being merged in; nothing was merged. It is merged again on the next pass.";
 const HELD_MOVED =
   "the checkout's plan.json changed while the plan was being written; nothing was written. It is written again on the next pass.";
 const heldUnreadable = (reason: string): string =>
@@ -871,6 +873,16 @@ async function reconcilePlanLocked(
     }
   }
 
+  // Read before the render: every write below is fenced on these, so an edit committed after
+  // this point makes the reconcile hold instead of overwriting it.
+  const versionOf = new Map(
+    (
+      await tx
+        .select({ id: schema.planNodes.id, version: schema.planNodes.version })
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.repositoryId, repositoryId))
+    ).map((r) => [r.id, r.version]),
+  );
   const localRender = await renderPlanMirror(tx, repositoryId);
   const local = localRender?.mirror ?? EMPTY_PLAN;
   const localRoot = local.nodes.find((n) => n.parentId === null);
@@ -976,15 +988,42 @@ async function reconcilePlanLocked(
       if (node.status === 'done') set.doneAt = new Date();
       else if (before.status === 'done') set.doneAt = null;
     }
-    await tx
+    const updated = await tx
       .update(schema.planNodes)
       .set({ ...set, version: sql`${schema.planNodes.version} + 1`, updatedAt: new Date() })
-      .where(eq(schema.planNodes.id, node.id));
+      .where(
+        and(
+          eq(schema.planNodes.id, node.id),
+          eq(schema.planNodes.version, versionOf.get(node.id) ?? -1),
+        ),
+      )
+      .returning({ id: schema.planNodes.id });
+    if (updated.length === 0) throw new PlanMirrorHeldError(HELD_RACED);
     nodesUpdated++;
   }
 
   if (merge.deleted.length > 0) {
-    await tx.delete(schema.planNodes).where(inArray(schema.planNodes.id, merge.deleted));
+    // A child added meanwhile under a deleted node would go with it by cascade.
+    const [stray] = await tx
+      .select({ id: schema.planNodes.id })
+      .from(schema.planNodes)
+      .where(
+        and(
+          inArray(schema.planNodes.parentId, merge.deleted),
+          notInArray(schema.planNodes.id, merge.deleted),
+        ),
+      )
+      .limit(1);
+    if (stray) throw new PlanMirrorHeldError(HELD_RACED);
+    for (const id of merge.deleted) {
+      const gone = await tx
+        .delete(schema.planNodes)
+        .where(
+          and(eq(schema.planNodes.id, id), eq(schema.planNodes.version, versionOf.get(id) ?? -1)),
+        )
+        .returning({ id: schema.planNodes.id });
+      if (gone.length === 0) throw new PlanMirrorHeldError(HELD_RACED);
+    }
   }
 
   // A moved subtree changes its descendants' ancestry, so every stored path is checked.
