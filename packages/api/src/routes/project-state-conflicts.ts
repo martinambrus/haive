@@ -36,7 +36,9 @@ async function withNodeTitles(
   repositoryId: string,
   rows: (typeof schema.projectStateConflicts.$inferSelect)[],
 ): Promise<ProjectStateConflictBody[]> {
-  const nodeIds = rows.flatMap((row) => parsePlanConflictUnit(row.unit)?.nodeId ?? []);
+  const nodeIds = [
+    ...new Set(rows.flatMap((row) => parsePlanConflictUnit(row.unit)?.nodeId ?? [])),
+  ];
   const titles = new Map<string, string>();
   if (nodeIds.length > 0) {
     const nodes = await getDb()
