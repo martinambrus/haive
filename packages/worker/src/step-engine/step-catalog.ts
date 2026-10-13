@@ -2,6 +2,7 @@ import { notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { parseStepId, type ComposableStepEntry } from '@haive/shared/modularity';
 import type { StepRegistry } from './registry.js';
+import { CORE_COMPOSABLE_STEPS } from './composable-core.js';
 import { dispatchesCli } from './steps/index.js';
 
 export async function syncStepCatalog(
@@ -11,19 +12,18 @@ export async function syncStepCatalog(
 ): Promise<void> {
   const now = new Date();
   const defs = registry.all();
+  const coreComposables = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e] as const));
   const liveIds = defs.map((d) => d.metadata.id);
 
   await db.transaction(async (tx) => {
     for (const def of defs) {
       const meta = def.metadata;
       const parsed = parseStepId(meta.id);
-      const moduleRow =
-        parsed?.kind === 'module'
-          ? {
-              composable: moduleComposables.has(meta.id),
-              entry: moduleComposables.get(meta.id) ?? null,
-            }
-          : {};
+      const composables = parsed?.kind === 'module' ? moduleComposables : coreComposables;
+      const composableRow = {
+        composable: composables.has(meta.id),
+        entry: composables.get(meta.id) ?? null,
+      };
       const row = {
         source: parsed?.kind === 'module' ? `module:${parsed.moduleId}` : 'core',
         title: meta.title,
@@ -33,7 +33,7 @@ export async function syncStepCatalog(
         providerSensitive: meta.providerSensitive === true,
         cliRoles: meta.cliRoles ?? null,
         updatedAt: now,
-        ...moduleRow,
+        ...composableRow,
       };
       await tx
         .insert(schema.stepCatalog)

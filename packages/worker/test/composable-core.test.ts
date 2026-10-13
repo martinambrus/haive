@@ -1,0 +1,131 @@
+import { beforeAll, describe, expect, it } from 'vitest';
+import { validateComposition, type ComposableStepEntry } from '@haive/shared/modularity';
+import { registerStepsOnce } from '../src/step-engine/boot.js';
+import {
+  assertCoreComposableCatalog,
+  CORE_COMPOSABLE_STEPS,
+  MERGE_CAPABLE_STEP_IDS,
+} from '../src/step-engine/composable-core.js';
+import { stepRegistry } from '../src/step-engine/registry.js';
+
+const catalog = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e] as const));
+const replace = (stepId: string, patch: Partial<ComposableStepEntry>): ComposableStepEntry[] =>
+  CORE_COMPOSABLE_STEPS.map((e) => (e.stepId === stepId ? { ...e, ...patch } : e));
+
+describe('core composable catalog', () => {
+  beforeAll(() => registerStepsOnce());
+
+  it('holds the 30 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(30);
+    expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
+  });
+
+  it('lists the two merge-capable steps explicitly', () => {
+    expect([...MERGE_CAPABLE_STEP_IDS].sort()).toEqual(['00a-sync-base', '12-worktree-cleanup']);
+  });
+
+  it('throws naming a step that is not registered', () => {
+    const bad = replace('01-debug-mode', { stepId: '99-not-a-step' });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(/99-not-a-step/);
+  });
+
+  it('throws naming a step whose dispatchesCli disagrees with the registry', () => {
+    const bad = replace('01-debug-mode', { dispatchesCli: true });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(/01-debug-mode/);
+  });
+
+  it('throws for a merge-capable step marked not dispatching', () => {
+    const bad = replace('12-worktree-cleanup', { dispatchesCli: false });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(/12-worktree-cleanup/);
+  });
+
+  it('throws naming a need that no entry provides', () => {
+    const bad = replace('04-verify-environment', {
+      requires: [{ needs: 'nobody-provides-this', reason: 'x' }],
+    });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(
+      /04-verify-environment.*nobody-provides-this/,
+    );
+  });
+
+  it('throws naming a loop target that is not in the catalog', () => {
+    const bad = replace('08-phase-5-verify', { loopTargetStepId: '99-not-in-catalog' });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(/08-phase-5-verify/);
+  });
+
+  it('throws naming an entry the schema rejects', () => {
+    const bad = replace('01-debug-mode', { label: '' });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(/01-debug-mode/);
+  });
+
+  it('throws when a looping step declares no loop target', () => {
+    const bad = replace('08-phase-5-verify', { loopTargetStepId: undefined });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(
+      /08-phase-5-verify must declare a loop target exactly when its step loops/,
+    );
+  });
+
+  it('throws when a fix-loop step targets anything but the implement step', () => {
+    const bad = replace('08-phase-5-verify', { loopTargetStepId: '04-phase-0b-pre-planning' });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(
+      /08-phase-5-verify loops back to 07-phase-2-implement/,
+    );
+  });
+
+  it('marks the four finish steps as closing', () => {
+    const closing = CORE_COMPOSABLE_STEPS.filter((e) => e.closes).map((e) => e.stepId);
+    expect(closing.sort()).toEqual(
+      ['10-gate-3-commit', '11a-gate-4-push', '12-worktree-cleanup', '13-pr-wait'].sort(),
+    );
+  });
+
+  it('rejects a verify step placed after the commit', () => {
+    const order = [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+      '08-phase-5-verify',
+    ];
+    expect(validateComposition(order, catalog)).toEqual([
+      {
+        kind: 'loop-after-closing',
+        index: 3,
+        stepId: '08-phase-5-verify',
+        closingStepId: '10-gate-3-commit',
+      },
+    ]);
+  });
+
+  it('accepts a worktree, implement, verify, commit order', () => {
+    const order = [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '08-phase-5-verify',
+      '10-gate-3-commit',
+    ];
+    expect(validateComposition(order, catalog)).toEqual([]);
+  });
+
+  it('rejects verify without implement earlier', () => {
+    const issues = validateComposition(['01-worktree-setup', '08-phase-5-verify'], catalog);
+    expect(issues).toEqual([
+      {
+        kind: 'missing-loop-target',
+        index: 1,
+        stepId: '08-phase-5-verify',
+        target: '07-phase-2-implement',
+      },
+    ]);
+  });
+
+  it('rejects implement before the worktree step', () => {
+    const issues = validateComposition(['07-phase-2-implement', '01-worktree-setup'], catalog);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      kind: 'unmet-need',
+      index: 0,
+      stepId: '07-phase-2-implement',
+      needs: 'worktree',
+    });
+  });
+});
