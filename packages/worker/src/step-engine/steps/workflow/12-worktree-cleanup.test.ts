@@ -19,6 +19,7 @@ import {
 } from '@haive/shared/project-state';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 import { loadOutstandingMergeGuidance, resolveMergePhase } from '../../merge-resolver.js';
+import { HAIVE_OWN_FILES_LINE } from '../../git-merge.js';
 import { StepSupersededError } from '../../step-ownership.js';
 import { resolveTaskDispatch } from '../../../orchestrator/dispatcher.js';
 import { OUTPUT_TRUNCATION_HEADLINE } from '../../../queues/cli-exec/failure-class.js';
@@ -1766,7 +1767,8 @@ describe("12 merge phase: Haive's own files merge before any agent", () => {
       expect(buildFixPrompt.mock.calls[0]![0].conflictFiles).toEqual(['base.txt']);
       const call = vi.mocked(resolveTaskDispatch).mock.calls.at(-1);
       const prompt = (call?.[2] as { input: { prompt: string } }).input.prompt;
-      expect(prompt).toContain('Leave `.haive/**` and `.haive-data/**` alone');
+      expect(prompt).toContain(HAIVE_OWN_FILES_LINE);
+      expect(prompt).not.toContain('.haive-data/**');
       expect(await git(parent, ['show', ':3:base.txt'])).toBe('feature-edit\n');
       expect(await git(parent, ['show', `:${PLAN_JSON}`])).toContain('Theirs');
     } finally {

@@ -1151,7 +1151,7 @@ export function fixerLeftoversWarning(taskId: string, leftovers: FixerLeftovers)
 }
 
 export const HAIVE_OWN_FILES_LINE =
-  'Leave `.haive/**` and `.haive-data/**` alone: Haive merges and rewrites them itself.';
+  'Leave `.haive-data/plan.json`, `.haive-data/plan.md` and everything under `.haive-data/state/` alone: Haive merges those itself. Every other conflicted file is yours to resolve.';
 
 /** Build the conflict-resolution agent's prompt. `title` is an optional
  *  human-readable label for the branch; `guidance` is the user's free-text answer

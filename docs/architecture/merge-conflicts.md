@@ -196,8 +196,9 @@ three-way merge of `.haive-data/plan.{json,md}` and of the `.haive-data/state/` 
 dir. A merge left with nothing else unmerged is committed host-side and finishes as a clean one does,
 with no fixer and no form; otherwise the list the fixer and the clarification form get omits the
 paths already resolved. A side it fell back on is logged and added to the step's warning. The fixer
-prompts (the three merge steps' and `01-plan-merge`'s) say to leave `.haive/**` and `.haive-data/**`
-alone (`HAIVE_OWN_FILES_LINE`). The DAG level merge does not do this yet, so its prompt omits the line.
+prompts (the three merge steps' and `01-plan-merge`'s) say to leave exactly the files the resolver
+merges alone — `.haive-data/plan.json`, `plan.md` and `.haive-data/state/` (`HAIVE_OWN_FILES_LINE`);
+any other Haive path that conflicts stays the fixer's to resolve, or the merge could never close. The DAG level merge does not do this yet, so its prompt omits the line.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.
