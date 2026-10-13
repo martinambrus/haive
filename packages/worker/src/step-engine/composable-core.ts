@@ -328,7 +328,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'skills-synced', reason: 'Commits the skill files the learning step approved.' },
     ],
     provides: ['clean-tree'],
-    precedes: ['pushed'],
+    precedes: ['pushed', 'rag-scope', 'reindexed'],
   },
   {
     stepId: '11b1-rag-source-selection',
