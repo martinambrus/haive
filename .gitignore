@@ -12,6 +12,7 @@ build/
 # Generated module registries
 packages/api/src/modules.generated.ts
 packages/worker/src/modules.generated.ts
+packages/web/src/generated/module-pages.ts
 
 # Environment
 .env

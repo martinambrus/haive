@@ -20,6 +20,7 @@ COPY packages/database/package.json ./packages/database/
 COPY packages/api/package.json ./packages/api/
 COPY packages/worker/package.json ./packages/worker/
 COPY packages/web/package.json ./packages/web/
+COPY modules ./modules
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
@@ -29,11 +30,13 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY packages/shared ./packages/shared
 COPY packages/database ./packages/database
 COPY packages/web ./packages/web
+COPY scripts/gen-modules.mjs ./scripts/gen-modules.mjs
 # @haive/shared imports @haive/database, so database's dist must exist before
 # shared (and web) build; build it first. Without this the builder fails with
 # TS2307 "Cannot find module '@haive/database'".
 RUN pnpm --filter @haive/database build \
  && pnpm --filter @haive/shared build \
+ && pnpm --filter './modules/*' build \
  && pnpm --filter @haive/web build
 
 FROM base AS production
