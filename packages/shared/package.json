@@ -67,6 +67,10 @@
       "types": "./dist/project-state/index.d.ts",
       "import": "./dist/project-state/index.js"
     },
+    "./project-state-outbox": {
+      "types": "./dist/project-state/outbox.d.ts",
+      "import": "./dist/project-state/outbox.js"
+    },
     "./rtk-enabled": {
       "types": "./dist/tooling/rtk-enabled.d.ts",
       "import": "./dist/tooling/rtk-enabled.js"

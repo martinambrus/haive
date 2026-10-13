@@ -314,6 +314,33 @@ export const projectStateConflicts = pgTable(
   ],
 );
 
+/** Revisioned outbox for the project state record: a mutation of anything the record carries bumps
+ *  `revision` in its own transaction, and a record write advances `written_revision` to the revision
+ *  it read. `revision > written_revision` is the durable retry signal the worker's sweep reads. */
+export const projectStateOutbox = pgTable(
+  'project_state_outbox',
+  {
+    repositoryId: uuid('repository_id')
+      .primaryKey()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull().default(0),
+    writtenRevision: integer('written_revision').notNull().default(0),
+    lastError: text('last_error'),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    check('project_state_outbox_revision_nonnegative', sql`${table.revision} >= 0`),
+    check('project_state_outbox_written_nonnegative', sql`${table.writtenRevision} >= 0`),
+    check(
+      'project_state_outbox_written_not_ahead',
+      sql`${table.writtenRevision} <= ${table.revision}`,
+    ),
+    index('project_state_outbox_dirty_idx')
+      .on(table.repositoryId)
+      .where(sql`${table.writtenRevision} < ${table.revision}`),
+  ],
+);
+
 export const repoUploads = pgTable(
   'repo_uploads',
   {

@@ -83,6 +83,7 @@ describe('12-post-onboarding: a claim file a person deleted by hand', () => {
     const fake = createFakeDb({
       repositories: schema.repositories,
       projectStateSync: schema.projectStateSync,
+      projectStateOutbox: schema.projectStateOutbox,
       projectStateConflicts: schema.projectStateConflicts,
       onboardingArtifacts: schema.onboardingArtifacts,
       customBundles: schema.customBundles,

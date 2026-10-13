@@ -3,6 +3,7 @@ import path from 'node:path';
 import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type ArchiveFormat, type BundleJobPayload } from '@haive/shared';
 import { isBundleRootDir } from '../bundle-parser/classifier.js';
 import { parseBundle, persistBundleItems } from '../bundle-parser/index.js';
@@ -105,6 +106,15 @@ async function loadBundle(
   return row;
 }
 
+/** A claim naming a removed item no longer reaches the record, so the record is stale. */
+async function markIfItemsRemoved(
+  db: Database,
+  repositoryId: string,
+  removed: number,
+): Promise<void> {
+  if (removed > 0) await markProjectStateDirty(db, repositoryId);
+}
+
 async function setBundleActive(
   db: Database,
   bundleId: string,
@@ -166,6 +176,7 @@ export async function handleIngestZip(
       .where(eq(schema.customBundles.id, bundle.id));
     const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
     const counts = await persistBundleItems(db, bundle.id, parsed);
+    await markIfItemsRemoved(db, bundle.repositoryId, counts.removed);
     await setBundleActive(db, bundle.id, {
       storageRoot: dest,
       lastSyncAt: new Date(),
@@ -225,6 +236,7 @@ export async function handleIngestGit(
       .where(eq(schema.customBundles.id, bundle.id));
     const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
     const counts = await persistBundleItems(db, bundle.id, parsed);
+    await markIfItemsRemoved(db, bundle.repositoryId, counts.removed);
     await setBundleActive(db, bundle.id, {
       storageRoot: dest,
       lastSyncAt: new Date(),
@@ -283,6 +295,7 @@ export async function handleResyncGit(
     const head = await gitRevParseHead(dest);
     const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
     const counts = await persistBundleItems(db, bundle.id, parsed);
+    await markIfItemsRemoved(db, bundle.repositoryId, counts.removed);
     await setBundleActive(db, bundle.id, {
       lastSyncAt: new Date(),
       lastSyncCommit: head,

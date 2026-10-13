@@ -74,6 +74,7 @@ async function setup(seedColumn: Context | null = null) {
   const fake = createFakeDb({
     repositories,
     projectStateSync: sync,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
     onboardingArtifacts: schema.onboardingArtifacts,
     customBundles: schema.customBundles,

@@ -25,6 +25,7 @@ export function newDb() {
     cliProviders: schema.cliProviders,
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
+    projectStateOutbox: schema.projectStateOutbox,
   });
 }
 export type Fake = ReturnType<typeof newDb>;

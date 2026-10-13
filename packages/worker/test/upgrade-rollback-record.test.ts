@@ -62,6 +62,7 @@ async function rollback(older: Record<string, unknown> | null, installJson?: str
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateSync: schema.projectStateSync,
+    projectStateOutbox: schema.projectStateOutbox,
     taskSteps: schema.taskSteps,
     projectStateConflicts: schema.projectStateConflicts,
     customBundles: schema.customBundles,

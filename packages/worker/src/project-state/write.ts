@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { removeFileIfNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { readFileNoFollow, removeFileIfNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
   RENDER_UNIT,
@@ -38,18 +38,23 @@ export async function lockProjectState(tx: Tx, repositoryId: string): Promise<vo
   );
 }
 
-export interface ProjectStateRecordInput {
+type RenderContextColumn = ReturnType<typeof renderContextColumnFor>;
+
+interface ProjectStateColumnInput {
   repositoryId: string;
   repoPath: string;
-  context: TemplateRenderContext;
-  /** Whether `context.rtkEnabled` is a choice somebody made, rather than a default. */
-  rtkChoiceRecorded: boolean;
   /** The columns the writer planned against; a column found holding anything else (null aside)
    *  refuses the write before a file changes. Omitted: written whatever the column holds. */
   expectedColumns?: unknown[];
   /** The task writing the record. Its write is refused once the task no longer holds the checkout,
    *  since a refresh may then have fast-forwarded the record files under it. */
   holdingTaskId?: string;
+}
+
+export interface ProjectStateRecordInput extends ProjectStateColumnInput {
+  context: TemplateRenderContext;
+  /** Whether `context.rtkEnabled` is a choice somebody made, rather than a default. */
+  rtkChoiceRecorded: boolean;
 }
 
 interface Look {
@@ -329,25 +334,45 @@ async function loadBase(
 /** Writes the record holding the context's render unit, one claim per live ledger row and one
  *  descriptor per bundle source, then moves the repository's render context and the sync base to it in
  *  one transaction. A claim or descriptor file the previous base named and the record no longer holds
- *  is removed; one it never named is not touched.
+ *  is removed; one it never named is not touched. A file already holding the bytes is not rewritten
+ *  but is still listed, since whoever commits the repository may not have staged it yet.
  *  Returns the repository-relative paths written and removed. */
 export async function writeProjectStateRecord(
+  db: Database,
+  { context, rtkChoiceRecorded, ...rest }: ProjectStateRecordInput,
+): Promise<ProjectStateWriteResult> {
+  let column: RenderContextColumn;
+  try {
+    // Refused before anything is written, so the column only ever holds what reads back.
+    column = renderContextColumnFor(context, rtkChoiceRecorded);
+  } catch (err) {
+    const cleared = await clearRenderContext(db, rest.repositoryId, rest.expectedColumns, null);
+    throw new ProjectStateWriteError(err, [], !cleared, []);
+  }
+  return writeProjectStateColumn(db, { ...rest, column });
+}
+
+/** The record for a render context column that already reads back: what the sweep writes from the
+ *  column a sync or a writer left. */
+export async function writeProjectStateColumn(
   db: Database,
   {
     repositoryId,
     repoPath,
-    context,
-    rtkChoiceRecorded,
+    column,
     expectedColumns,
     holdingTaskId,
-  }: ProjectStateRecordInput,
+    keepColumnOnFailure,
+  }: ProjectStateColumnInput & {
+    column: RenderContextColumn;
+    /** The column is what it was before the write, so a failure leaves it rather than clearing it. */
+    keepColumnOnFailure?: boolean;
+  },
 ): Promise<ProjectStateWriteResult> {
   const written: string[] = [];
   const removed: string[] = [];
   let attempted: ProjectRender | null = null;
   try {
-    // Refused before anything is written, so the column only ever holds what reads back.
-    const column = renderContextColumnFor(context, rtkChoiceRecorded);
     const portable = portableRender(column);
     attempted = portable;
     const planFor = (look: Look) => ({
@@ -393,7 +418,9 @@ export async function writeProjectStateRecord(
       for (const [rel, text] of files) {
         const path = `${PROJECT_STATE_DIR}/${rel}`;
         produced.add(path);
-        await writeFileNoFollow(repoPath, path, text, { createParents: true });
+        if (!(await holdsBytes(repoPath, path, text))) {
+          await writeFileNoFollow(repoPath, path, text, { createParents: true });
+        }
         if (!written.includes(path)) written.push(path);
         const back = removed.indexOf(path);
         if (back >= 0) removed.splice(back, 1);
@@ -416,6 +443,8 @@ export async function writeProjectStateRecord(
         await refuseMovedColumn(tx, repositoryId, expectedColumns);
         if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId);
       }
+      // Read before the look: a mutation after this read stays above `written_revision`.
+      const revision = await readOutboxRevision(tx, repositoryId);
       const now = await lookAt(tx);
       if (expectedColumns || seen === null || !sameValue(now, seen)) {
         seen = now;
@@ -432,18 +461,47 @@ export async function writeProjectStateRecord(
         .insert(schema.projectStateSync)
         .values({ repositoryId, ...synced })
         .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
+      if (revision !== null) await stampOutbox(tx, repositoryId, revision);
     });
   } catch (err) {
     if (err instanceof ProjectStateMovedError) throw err;
-    const cleared = await clearRenderContext(
-      db,
-      repositoryId,
-      expectedColumns,
-      written.includes(`${PROJECT_STATE_DIR}/${RENDER_UNIT}`) ? attempted : null,
-    );
+    const cleared =
+      keepColumnOnFailure === true ||
+      (await clearRenderContext(
+        db,
+        repositoryId,
+        expectedColumns,
+        written.includes(`${PROJECT_STATE_DIR}/${RENDER_UNIT}`) ? attempted : null,
+      ));
     throw new ProjectStateWriteError(err, written, !cleared, removed);
   }
   return { written, removed };
+}
+
+async function holdsBytes(repoPath: string, path: string, text: string): Promise<boolean> {
+  const bytes = Buffer.from(text, 'utf8');
+  const held = await readFileNoFollow(repoPath, path, { maxBytes: bytes.length + 1 });
+  return held !== null && !held.truncated && held.data.equals(bytes);
+}
+
+async function readOutboxRevision(tx: Tx, repositoryId: string): Promise<number | null> {
+  const [row] = await tx
+    .select({ revision: schema.projectStateOutbox.revision })
+    .from(schema.projectStateOutbox)
+    .where(eq(schema.projectStateOutbox.repositoryId, repositoryId))
+    .limit(1);
+  return row?.revision ?? null;
+}
+
+async function stampOutbox(tx: Tx, repositoryId: string, revision: number): Promise<void> {
+  await tx
+    .update(schema.projectStateOutbox)
+    .set({
+      writtenRevision: sql`LEAST(${schema.projectStateOutbox.revision}, GREATEST(${schema.projectStateOutbox.writtenRevision}, ${revision}))`,
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
 }
 
 async function refuseReleasedCheckout(tx: Tx, taskId: string): Promise<void> {

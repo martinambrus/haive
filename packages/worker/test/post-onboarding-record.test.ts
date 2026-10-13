@@ -52,6 +52,7 @@ async function setup(failure: 'none' | 'artifact-rows', detect: Record<string, u
     cliProviders: schema.cliProviders,
     users: schema.users,
     projectStateSync: schema.projectStateSync,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'upload' });

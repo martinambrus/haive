@@ -40,6 +40,7 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
     projectStateSync: schema.projectStateSync,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, {

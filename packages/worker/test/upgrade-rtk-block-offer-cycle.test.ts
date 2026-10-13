@@ -55,6 +55,7 @@ async function cycle(agents: string, rtkOnAtApply: boolean) {
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     projectStateSync: schema.projectStateSync,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
   });
   const loose = fake as unknown as Parameters<typeof seedProviders>[0];

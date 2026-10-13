@@ -55,7 +55,9 @@ repo, bundle, runtime/ide ensure, ddev control, usage and PR polling, and plan m
 - `env-replicate-queue` runs Dockerfile builds for environment replication.
 - `plan-mirror-queue` reconciles the repository-backed plan snapshot: a `refresh` rewrites
   `.haive-data/plan.{json,md}`, a `save` also commits and optionally pushes, and a 10s
-  scheduled sweep drains `plan_mirror_state` rows whose `written_revision < revision`.
+  scheduled sweep drains `plan_mirror_state` rows whose `written_revision < revision`. The same
+  sweep rewrites `.haive-data/state/` for `project_state_outbox` rows the same way (write only, never
+  a commit; see [Onboarding template versioning](docs/architecture/onboarding-upgrades.md)).
 
 State source of truth is Postgres. Every step transition, every CLI invocation, every form submission is a row. Crash recovery reads the last row.
 

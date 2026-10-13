@@ -37,6 +37,7 @@ async function setup(installJson?: string) {
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
     projectStateSync: schema.projectStateSync,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });

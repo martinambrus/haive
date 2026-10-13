@@ -223,6 +223,7 @@ async function setup(seed: Seed = {}) {
   const fake = createFakeDb({
     repositories,
     projectStateSync: sync,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: conflicts,
     tasks,
     taskSteps: schema.taskSteps,

@@ -53,6 +53,7 @@ async function setup(claims: number) {
   const fake = createFakeDb({
     repositories: schema.repositories,
     projectStateSync: schema.projectStateSync,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
     onboardingArtifacts: schema.onboardingArtifacts,
     customBundles: schema.customBundles,

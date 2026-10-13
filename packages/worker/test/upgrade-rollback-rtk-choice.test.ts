@@ -43,6 +43,7 @@ function database(plan: Plan) {
     onboardingArtifacts: schema.onboardingArtifacts,
     cliProviders: schema.cliProviders,
     projectStateSync: schema.projectStateSync,
+    projectStateOutbox: schema.projectStateOutbox,
     taskSteps: schema.taskSteps,
     projectStateConflicts: schema.projectStateConflicts,
     customBundles: schema.customBundles,

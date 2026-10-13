@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getTableColumns, getTableName, is, SQL, StringChunk } from 'drizzle-orm';
+import { eq, getTableColumns, getTableName, is, SQL, StringChunk } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
@@ -15,7 +15,12 @@ import {
   normalizeProjectState,
   renderProjectState,
 } from '@haive/shared/project-state';
-import { ProjectStateMovedError, writeProjectStateRecord } from '../src/project-state/write.js';
+import {
+  ProjectStateMovedError,
+  ProjectStateWriteError,
+  writeProjectStateColumn,
+  writeProjectStateRecord,
+} from '../src/project-state/write.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -134,6 +139,7 @@ async function setup() {
   const fake = createFakeDb({
     repositories,
     projectStateSync: sync,
+    projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
     onboardingArtifacts: schema.onboardingArtifacts,
     customBundles: schema.customBundles,
@@ -1223,5 +1229,69 @@ describe('writeProjectStateRecord: one descriptor per bundle source', () => {
 
     expect(removed).toEqual([]);
     expect(descriptorOn(s.root)).toEqual({ source: SOURCE, name: 'theirs' });
+  });
+});
+
+describe('writeProjectStateRecord: a file already holding the bytes', () => {
+  const identity = (path: string) => {
+    const info = statSync(path, { bigint: true });
+    return `${info.ino}:${info.mtimeNs}`;
+  };
+
+  it('is left in place and still listed as written', async () => {
+    const s = await setup();
+    await s.write(context(), true);
+    const before = [FORMAT, RENDER].map((rel) => identity(join(s.root, rel)));
+
+    const second = await s.writeFull(context(), true);
+
+    expect([FORMAT, RENDER].map((rel) => identity(join(s.root, rel)))).toEqual(before);
+    expect(second.written).toEqual(expect.arrayContaining([FORMAT, RENDER]));
+  });
+
+  it('is replaced once its bytes differ', async () => {
+    const s = await setup();
+    await s.write(context(), true);
+    await writeFile(join(s.root, RENDER), 'edited by hand\n');
+
+    await s.write(context(), true);
+
+    expect(s.onDisk().render).toBe(expectedFiles(context()).render);
+  });
+});
+
+describe('writeProjectStateColumn: a write that fails', () => {
+  const column = () => ({ ...portableOnly(), rtkChoiceRecorded: true });
+
+  async function failing(keepColumnOnFailure: boolean) {
+    const s = await setup();
+    await s.fake.db
+      .update(schema.repositories)
+      .set({ renderContext: column() })
+      .where(eq(schema.repositories.id, REPO));
+    await writeFile(join(s.root, '.haive-data'), 'a file where the state directory goes');
+    const error = await writeProjectStateColumn(s.fake.db as unknown as Database, {
+      repositoryId: REPO,
+      repoPath: s.root,
+      column: column() as never,
+      expectedColumns: [column()],
+      keepColumnOnFailure,
+    }).catch((err: unknown) => err);
+    return { s, error };
+  }
+
+  it('clears the column it could not move, as a writer does', async () => {
+    const { s, error } = await failing(false);
+
+    expect(error).toBeInstanceOf(ProjectStateWriteError);
+    expect(s.columnOf(REPO)).toBeNull();
+  });
+
+  it('leaves the column alone when it asks to, since the sweep moved it nowhere', async () => {
+    const { s, error } = await failing(true);
+
+    expect(error).toBeInstanceOf(ProjectStateWriteError);
+    expect((error as ProjectStateWriteError).columnStale).toBe(false);
+    expect(s.columnOf(REPO)).toEqual(column());
   });
 });

@@ -19,6 +19,7 @@ import {
   rtkLeftoversToRemove,
   type ForeignContext,
 } from '@haive/shared/project-state';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandManifestFor,
@@ -532,7 +533,10 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         });
       }
       if (rowsToInsert.length > 0) {
-        await ctx.db.insert(schema.onboardingArtifacts).values(rowsToInsert);
+        await ctx.db.transaction(async (tx) => {
+          await tx.insert(schema.onboardingArtifacts).values(rowsToInsert);
+          await markProjectStateDirty(tx, detected.repositoryId);
+        });
         backfilledRows = rowsToInsert.length;
       }
       ctx.logger.info(
