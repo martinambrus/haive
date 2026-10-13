@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -68,5 +69,20 @@ describe('removePlanJsonIfUnchanged', () => {
   it('is a no-op when the file is already gone', async () => {
     const repo = await repoWith(null);
     await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).resolves.toBeUndefined();
+  });
+});
+
+describe('a merge open when the file is judged', () => {
+  it('holds the write and the removal and keeps the bytes', async () => {
+    const repo = await repoWith('{"synced":1}\n');
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    await writeFile(path.join(repo, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n');
+    await expect(
+      writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha('{"synced":1}\n')),
+    ).rejects.toThrow(/merge or rebase/);
+    await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).rejects.toThrow(
+      /merge or rebase/,
+    );
+    expect(await onDisk(repo)).toBe('{"synced":1}\n');
   });
 });

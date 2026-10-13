@@ -90,10 +90,14 @@ export async function removePlanJsonIfUnchanged(
   repoPath: string,
   syncedHash: string | null,
 ): Promise<void> {
-  const outcome = await removeFileIfNoFollow(repoPath, HAIVE_DATA_FILES.plan, (data) =>
-    flushMayReplace(repoPath, data.toString('utf8'), syncedHash, null),
-  );
-  if (outcome === 'kept') throw new PlanMirrorHeldError(HELD_UNIMPORTED);
+  let operation = false;
+  const outcome = await removeFileIfNoFollow(repoPath, HAIVE_DATA_FILES.plan, async (data) => {
+    operation = await gitOperationInProgress(repoPath);
+    return !operation && flushMayReplace(repoPath, data.toString('utf8'), syncedHash, null);
+  });
+  if (outcome === 'kept') {
+    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
+  }
 }
 
 /** Replaces plan.json only while it still holds bytes the flush may replace, judged on the file it
@@ -104,10 +108,16 @@ export async function writePlanJsonIfUnchanged(
   syncedHash: string | null,
 ): Promise<void> {
   const bytes = Buffer.from(json, 'utf8');
-  const outcome = await rewriteFileIfNoFollow(repoPath, HAIVE_DATA_FILES.plan, (data) =>
-    flushMayReplace(repoPath, data.toString('utf8'), syncedHash, json) ? bytes : null,
-  );
-  if (outcome === 'kept') throw new PlanMirrorHeldError(HELD_UNIMPORTED);
+  let operation = false;
+  // The merge check is repeated here, after the file is parked, so it sits next to the replace.
+  const outcome = await rewriteFileIfNoFollow(repoPath, HAIVE_DATA_FILES.plan, async (data) => {
+    operation = await gitOperationInProgress(repoPath);
+    if (operation) return null;
+    return flushMayReplace(repoPath, data.toString('utf8'), syncedHash, json) ? bytes : null;
+  });
+  if (outcome === 'kept') {
+    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
+  }
   if (outcome === 'rewritten') return;
   try {
     await writeFileNoFollow(repoPath, HAIVE_DATA_FILES.plan, bytes, {
@@ -282,11 +292,13 @@ async function writePlanMirrorLocked(
     changes?.written.push(rel);
   };
 
+  // plan.json last: after it only the stamp is written, so a failure cannot roll the stamp back
+  // under bytes that already landed.
+  await write(HAIVE_DATA_FILES.planMarkdown, rendered.markdown);
   await writePlanJsonIfUnchanged(repoPath, rendered.json, state?.syncedHash ?? null);
   written.push(HAIVE_DATA_FILES.plan);
   changes?.written.push(HAIVE_DATA_FILES.plan);
   await stampSyncedHash(db, repositoryId, hashBytes(rendered.json));
-  await write(HAIVE_DATA_FILES.planMarkdown, rendered.markdown);
   // Conditional on the revision we rendered. A mutation that raced the file
   // write leaves the row dirty and the scheduled sweep immediately retries.
   await db
