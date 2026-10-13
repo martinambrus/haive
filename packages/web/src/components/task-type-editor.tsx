@@ -82,6 +82,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [availability, setAvailability] = useState<TaskTypeAvailability | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [stepIds, setStepIds] = useState<string[]>([]);
+  const [compositionEdited, setCompositionEdited] = useState(false);
   const [loopLimits, setLoopLimits] = useState<Record<string, number>>({});
   const [values, setValues] = useState<FormValues>(creating ? NEW_TYPE_DEFAULTS : {});
   const [saving, setSaving] = useState(false);
@@ -102,6 +103,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         setRow(one.taskType);
         setAvailability(one.availability);
         setStepIds(one.taskType.stepIds ?? []);
+        setCompositionEdited(false);
         setLoopLimits(one.taskType.stepLoopLimitDefaults);
         setValues(initialValuesOf(one.taskType));
       }
@@ -125,8 +127,12 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         : { composition: [], defaults: [] },
     [composable, entries, stepIds, loopLimits, requiresRepository],
   );
+  // A flat-only edit is not re-checked by the api, so only an edit that touches the composition waits on it.
+  const compositionTouched =
+    creating || compositionEdited || requiresRepository !== row?.requiresRepository;
   const blocked =
     composable &&
+    compositionTouched &&
     (clientProblems.composition.length > 0 ||
       clientProblems.defaults.length > 0 ||
       catalog?.synced === false);
@@ -167,12 +173,13 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       const body = buildUpdateBody(
         submitted,
         editableFields,
-        composable
+        composable && compositionEdited
           ? { stepIds, loopLimits, preAnswerDefaults: row?.preAnswerDefaults ?? {} }
           : null,
       );
       const res = await updateTaskType(row!.slug, body);
       setRow(res.taskType);
+      setCompositionEdited(false);
       setSaved(true);
       try {
         const fresh = await getAdminTaskType(row!.slug);
@@ -222,10 +229,12 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       serverIssues={serverIssues}
       onStepIdsChange={(next) => {
         touch();
+        setCompositionEdited(true);
         setStepIds(next);
       }}
       onLoopLimitsChange={(next) => {
         touch();
+        setCompositionEdited(true);
         setLoopLimits(next);
       }}
     />

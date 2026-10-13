@@ -241,9 +241,11 @@ export function TaskTypeComposer({
               />
             ))}
             {defaults.map((issue) => (
-              <p key={`${issue.kind}-${issue.stepId}`} className="text-sm text-red-300">
-                {describeDefaultsIssue(issue, entries)}
-              </p>
+              <InlineMarkdown
+                key={`${issue.kind}-${issue.stepId}`}
+                body={describeDefaultsIssue(issue, entries)}
+                className="text-sm text-red-300"
+              />
             ))}
           </div>
         )}
