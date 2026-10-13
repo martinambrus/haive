@@ -145,9 +145,10 @@ describe('core composable catalog', () => {
     ['01a-app-boot', '01d-browser-access'],
   ])('rejects %s starting before %s, and accepts it without that step', (runtime, choice) => {
     const setup = runtimeSetup[runtime]!;
-    expect(validateComposition([...setup, choice, runtime], catalog)).toEqual([]);
-    expect(validateComposition([...setup, runtime], catalog)).toEqual([]);
-    expect(validateComposition([...setup, runtime, choice], catalog)).toEqual([
+    const tail = runtime === '01c-ddev-env' ? ['01c1-restore-database', '11g-save-database'] : [];
+    expect(validateComposition([...setup, choice, runtime, ...tail], catalog)).toEqual([]);
+    expect(validateComposition([...setup, runtime, ...tail], catalog)).toEqual([]);
+    expect(validateComposition([...setup, runtime, choice, ...tail], catalog)).toEqual([
       { kind: 'too-late', index: setup.length + 1, stepId: choice, token: 'app-runtime' },
     ]);
   });
@@ -307,7 +308,13 @@ describe('core composable catalog', () => {
   });
 
   it('places the database save after the push and before cleanup', () => {
-    const head = ['01-worktree-setup', '01c-ddev-env', '07-phase-2-implement', '10-gate-3-commit'];
+    const head = [
+      '01-worktree-setup',
+      '01c-ddev-env',
+      '01c1-restore-database',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+    ];
     expect(
       validateComposition(
         [...head, '11a-gate-4-push', '11g-save-database', '12-worktree-cleanup'],
@@ -319,10 +326,10 @@ describe('core composable catalog', () => {
         [...head, '11g-save-database', '11a-gate-4-push', '12-worktree-cleanup'],
         catalog,
       ),
-    ).toContainEqual({ kind: 'too-late', index: 5, stepId: '11a-gate-4-push', token: 'db-saved' });
+    ).toContainEqual({ kind: 'too-late', index: 6, stepId: '11a-gate-4-push', token: 'db-saved' });
     expect(
       validateComposition([...head, '12-worktree-cleanup', '11g-save-database'], catalog),
-    ).toContainEqual({ kind: 'too-late', index: 5, stepId: '11g-save-database', token: 'cleaned' });
+    ).toContainEqual({ kind: 'too-late', index: 6, stepId: '11g-save-database', token: 'cleaned' });
   });
 
   it('needs the skill sync before the knowledge commit and the scope picker before re-indexing', () => {
@@ -379,6 +386,27 @@ describe('core composable catalog', () => {
     );
   });
 
+  it('makes every DDEV composition reach the restore and the final save', () => {
+    const base = ['01-worktree-setup', '01c-ddev-env', '07-phase-2-implement', '10-gate-3-commit'];
+    expect(validateComposition(base, catalog)).toEqual([
+      { kind: 'unfulfilled', index: 1, stepId: '01c-ddev-env', token: 'db-restored' },
+      { kind: 'unfulfilled', index: 1, stepId: '01c-ddev-env', token: 'db-saved' },
+    ]);
+    expect(
+      validateComposition(
+        [
+          '01-worktree-setup',
+          '01c-ddev-env',
+          '01c1-restore-database',
+          '07-phase-2-implement',
+          '10-gate-3-commit',
+          '11g-save-database',
+        ],
+        catalog,
+      ),
+    ).toEqual([]);
+  });
+
   it('requires an image build after declaring dependencies', () => {
     expect(validateComposition(['01-declare-deps', '01-worktree-setup'], catalog)).toEqual([
       { kind: 'unfulfilled', index: 0, stepId: '01-declare-deps', token: 'env-image' },
@@ -396,7 +424,16 @@ describe('core composable catalog', () => {
       validateComposition(['01-worktree-setup', '01c-ddev-env', '01d-browser-access'], catalog),
     ).toContainEqual(expect.objectContaining({ kind: 'too-late', stepId: '01d-browser-access' }));
     expect(
-      validateComposition(['01-worktree-setup', '01d-browser-access', '01c-ddev-env'], catalog),
+      validateComposition(
+        [
+          '01-worktree-setup',
+          '01d-browser-access',
+          '01c-ddev-env',
+          '01c1-restore-database',
+          '11g-save-database',
+        ],
+        catalog,
+      ),
     ).toEqual([]);
   });
 

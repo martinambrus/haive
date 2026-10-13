@@ -128,6 +128,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [needWorktree],
     provides: ['ddev', 'app-runtime'],
+    entails: ['db-restored', 'db-saved'],
     removes: ['clean-tree'],
     precedes: [
       'implementation',
@@ -171,7 +172,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'runtime',
     dispatchesCli: false,
     requires: [{ needs: 'ddev', reason: 'Imports the dump into the DDEV project.' }],
-    provides: [],
+    provides: ['db-restored'],
     precedes: ['db-migrated', 'implementation', 'tests', 'verification', 'db-saved', 'cleaned'],
   },
   {
