@@ -1297,6 +1297,53 @@ async function main(): Promise<void> {
         { asideR1, keptR1 },
       );
 
+      // D1. A plan deleted in the database, whose deletion is not committed yet, holds the move: a restore
+      // would bring HEAD's plan back and the sync after the move would read it in as a new plan.
+      const d1 = await cloned();
+      const d1Id = d1.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: d1Id, origin: 'user' },
+      );
+      await writePlanMirror(db, d1Id, d1.dest);
+      git(d1.dest, 'add', '--', PLAN_REL, HAIVE_DATA_FILES.planMarkdown);
+      git(d1.dest, 'commit', '-q', '-m', 'plan');
+      await db.delete(schema.planNodes).where(eq(schema.planNodes.repositoryId, d1Id));
+      await writePlanMirror(db, d1Id, d1.dest);
+      const exists = () =>
+        readFile(path.join(d1.dest, PLAN_REL)).then(
+          () => true,
+          () => false,
+        );
+      const deleted = !(await exists());
+      const asideD1 = await setAsideHaiveProjections(db, d1Id, d1.dest);
+      check(
+        "D1: a plan deleted and not yet saved refuses the set-aside, so HEAD's plan is not brought back",
+        deleted && asideD1.outcome === 'refused' && asideD1.file === PLAN_REL && !(await exists()),
+        { deleted, asideD1, back: await exists() },
+      );
+
+      // R2. A staged plan.md HEAD lacks whose working copy changed again is taken out of the index too.
+      const r2 = await cloned();
+      const r2Id = r2.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: r2Id, origin: 'user' },
+      );
+      await writePlanMirror(db, r2Id, r2.dest);
+      const mdRel = HAIVE_DATA_FILES.planMarkdown;
+      git(r2.dest, 'add', '--', mdRel);
+      await writeFile(path.join(r2.dest, mdRel), '# rewritten after staging\n');
+      const asideR2 = await setAsideHaiveProjections(db, r2Id, r2.dest);
+      const stagedR2 = git(r2.dest, 'ls-files', '-s', '--', mdRel);
+      check(
+        'R2: a staged plan.md whose working copy changed again leaves the index with the set-aside',
+        asideR2.outcome === 'set-aside' && stagedR2 === '',
+        { asideR2, stagedR2 },
+      );
+
       // 11l-2. A mode change is not in the blob id: a staged chmod, or one only in the working tree, on a
       // file holding Haive's bytes is a person's change, and returning the path to HEAD would lose it.
       const indexMode = (dir: string, rel: string) =>

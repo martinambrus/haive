@@ -316,13 +316,20 @@ async function planOffender(
     (bytes) => (bytes === null ? stamp === ABSENT_PLAN_HASH : stamp === sha256(bytes)),
   );
   if (!stagedOk) return HAIVE_DATA_FILES.plan;
-  if (read === null) return null;
   const [held] = await db
     .select({ id: schema.planNodes.id })
     .from(schema.planNodes)
     .where(eq(schema.planNodes.repositoryId, repositoryId))
     .limit(1);
   return held ? null : HAIVE_DATA_FILES.plan;
+}
+
+async function planFilePresent(repoPath: string): Promise<boolean> {
+  try {
+    return (await readFileNoFollow(repoPath, HAIVE_DATA_FILES.plan, { maxBytes: 1 })) !== null;
+  } catch {
+    return true;
+  }
 }
 
 /** Test seam: a function here runs at its point of the restore and may throw to stand for a crash. */
@@ -453,7 +460,18 @@ async function restoreFromHead(repoPath: string, paths: readonly string[]): Prom
     if (res.code !== 0) throw new Error(`git checkout failed: ${res.stderr.trim().slice(0, 300)}`);
   }
   for (const path of own) {
-    await gitRun(repoPath, ['rm', '--cached', '-q', '--ignore-unmatch', '--', path]);
+    const unstaged = await gitRun(repoPath, [
+      'rm',
+      '--cached',
+      '-f',
+      '-q',
+      '--ignore-unmatch',
+      '--',
+      path,
+    ]);
+    if (unstaged.code !== 0) {
+      throw new Error(`git rm --cached failed: ${unstaged.stderr.trim().slice(0, 300)}`);
+    }
     await removeNoFollow(repoPath, path);
     await pruneEmptyStateDirs(repoPath, path);
   }
@@ -534,6 +552,12 @@ async function setAsideOnce(
   const early =
     (await stateOffender(db, repositoryId, repoPath, state)) ??
     (await planOffender(db, repositoryId, repoPath, plan));
+  if (early === HAIVE_DATA_FILES.plan && !(await planFilePresent(repoPath))) {
+    return refuse(
+      early,
+      'was deleted with the plan, and that deletion is not saved yet; save the plan to commit it, then retry',
+    );
+  }
   if (early) return refuse(early, NOT_HAIVE);
 
   if (state.length > 0) {
