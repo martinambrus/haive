@@ -37,6 +37,25 @@ describe('resolveFixLoopTarget', () => {
     });
   });
 
+  it('fails by name when the configured target is another step, even one in the run list', () => {
+    const runList = orderWorkflowRunList(registry.listByWorkflow('workflow'), [], 'full_workflow');
+    const resolved = resolveFixLoopTarget({
+      taskType: 'workflow',
+      fixLoop: {
+        targetStepId: '08c-code-review',
+        humanRejectSourceStepIds: [],
+        honoredConstraintSourceStepIds: [],
+      },
+      runList,
+      registry,
+    });
+    expect(runList.some((s) => s.metadata.id === '08c-code-review')).toBe(true);
+    expect(resolved).toEqual({
+      ok: false,
+      reason: `fix loop target 08c-code-review of task type workflow cannot read the fix diagnosis; only ${FIX_LOOP_TARGET_STEP_ID} can`,
+    });
+  });
+
   it('fails by name when the configured target is not registered', () => {
     const runList = orderWorkflowRunList(registry.listByWorkflow('workflow'), [], 'full_workflow');
     const resolved = resolveFixLoopTarget({
@@ -51,7 +70,7 @@ describe('resolveFixLoopTarget', () => {
     });
     expect(resolved).toEqual({
       ok: false,
-      reason: 'fix loop target 99-ghost is not in the run list of task type workflow',
+      reason: `fix loop target 99-ghost of task type workflow cannot read the fix diagnosis; only ${FIX_LOOP_TARGET_STEP_ID} can`,
     });
   });
 });

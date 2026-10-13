@@ -88,6 +88,13 @@ export function resolveFixLoopTarget(args: {
   registry: Pick<StepRegistry, 'get'>;
 }): { ok: true; def: StepDefinition } | { ok: false; reason: string } {
   const targetId = args.fixLoop?.targetStepId ?? FIX_LOOP_TARGET_STEP_ID;
+  // Only 07 reads the recorded fix_loop.requested diagnosis; another target would re-run blind.
+  if (targetId !== FIX_LOOP_TARGET_STEP_ID) {
+    return {
+      ok: false,
+      reason: `fix loop target ${targetId} of task type ${args.taskType} cannot read the fix diagnosis; only ${FIX_LOOP_TARGET_STEP_ID} can`,
+    };
+  }
   const def = args.registry.get(targetId);
   if (def && args.runList.some((s) => s.metadata.id === targetId)) return { ok: true, def };
   return {
