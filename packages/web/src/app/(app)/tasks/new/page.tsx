@@ -667,13 +667,17 @@ export default function NewTaskPage() {
           <h1 className="text-2xl font-bold text-neutral-50">
             {isRunApp ? 'Run app' : 'New task'}
           </h1>
-          <p className="text-sm text-neutral-400">
-            {isRunApp
-              ? 'Bring this repository’s app up so you can browse, test, and edit it live. Optionally restore a database dump. Nothing in your repo changes unless you commit at the end.'
-              : selectedType.kind === 'custom'
-                ? (selectedType.description ?? `Create a ${selectedType.label} task.`)
-                : 'Workflow type is auto-detected from the selected repository. Onboarded repos run the autonomous workflow; fresh repos run onboarding.'}
-          </p>
+          {!isRunApp && selectedType.kind === 'custom' && selectedType.description ? (
+            <InlineMarkdown body={selectedType.description} className="text-sm text-neutral-400" />
+          ) : (
+            <p className="text-sm text-neutral-400">
+              {isRunApp
+                ? 'Bring this repository’s app up so you can browse, test, and edit it live. Optionally restore a database dump. Nothing in your repo changes unless you commit at the end.'
+                : selectedType.kind === 'custom'
+                  ? `Create a ${selectedType.label} task.`
+                  : 'Workflow type is auto-detected from the selected repository. Onboarded repos run the autonomous workflow; fresh repos run onboarding.'}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {fields.onboardingStatus && onboardingStatus?.onboarded && (

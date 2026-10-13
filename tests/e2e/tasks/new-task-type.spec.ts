@@ -97,6 +97,9 @@ async function rowCount(sql: postgres.Sql, userId: string): Promise<number> {
 }
 
 test.describe('New Task type select', () => {
+  // typeLab flips the instance-wide custom-types switch; parallel tests would race its restore.
+  test.describe.configure({ mode: 'serial' });
+
   test('a user cannot reach the admin task-type api', async ({ page, users }) => {
     await users.register(page.request, { prefix: 'ntt-denied' });
     const res = await page.request.get(`${API_BASE}/admin/task-types`);
