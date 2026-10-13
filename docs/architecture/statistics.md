@@ -1,8 +1,9 @@
 # Statistics
 
-`/stats` (`packages/web/src/app/(app)/stats/page.tsx`) and the smaller `/dashboard` both read
-`packages/api/src/routes/stats/`, which is seven endpoints sharing one query parser
-(`_query.ts`: 30-day default, `MAX_RANGE_DAYS` 731, IANA zone validated against `Intl`, repo /
+`/stats` (`packages/web/src/app/(app)/stats/page.tsx`) and the smaller `/dashboard` both read the
+statistics module's api (`modules/statistics/src/routes.ts`, mounted by the module loader at
+`/m/statistics/*` behind the same auth), nine endpoints sharing one query parser
+(`query.ts`: 30-day default, `MAX_RANGE_DAYS` 731, IANA zone validated against `Intl`, repo /
 task-class / provider facets, and an `allUsers` flag each ROUTE re-checks against the caller's
 role because the parser has no access to it). Every arithmetic answer is a pure function in
 `@haive/shared/stats` — the api fetches and scopes, `computeBusySpan` / `buildTaskTimeBreakdown`
@@ -14,11 +15,11 @@ eventually will not. The correct SQL form is recorded at `index.ts:476-489` for 
 changes, along with the trap: the columns are `timestamp without time zone` holding UTC wall
 clock, so a single `AT TIME ZONE $tz` reads them as already-local and MEASURED moves 5-10% of
 rows into the wrong day. The consequence for new features is that anything day-shaped rides the
-existing `/stats/timeline` payload rather than adding a day-aggregate endpoint.
+existing `/m/statistics/timeline` payload rather than adding a day-aggregate endpoint.
 
 **`/summary` + `/timeline` are fetched for every tab; the other five endpoints are lazy**, so an
 unopened tab costs nothing. A new section belongs on a tab that already pays for its data —
-`/stats/tasks` exists as its own endpoint for exactly this reason rather than as extra fields on
+`/m/statistics/tasks` exists as its own endpoint for exactly this reason rather than as extra fields on
 `/timeline`. Both pages resolve `timeZone` and the relative-preset clock on the CLIENT only and
 leave them null until then, because `Intl` reports the container's zone during SSR and
 `Date.now()` differs by milliseconds; both nulls GATE the first fetch. That mismatch, not a chart
@@ -34,7 +35,7 @@ percent nor 100%.
 
 `ActivityHeatmap` and `StackedShareBar` (`components/stats/`) are plain DOM and STATICALLY
 imported; only the three recharts charts are behind `next/dynamic`, and only because recharts is
-a ~7 MB package with a d3/redux tree. Both render fields `/stats/timeline` and `/stats/summary`
+a ~7 MB package with a d3/redux tree. Both render fields `/m/statistics/timeline` and `/m/statistics/summary`
 had always computed and nothing had ever displayed — the per-day token series, `invocations`,
 `tasksStarted`/`tasksCompleted`, and all four `tokens.*` buckets.
 
@@ -109,7 +110,7 @@ already ordered by tokens, so a second ranking on the same card would compete wi
 `spend.byProvider` ships the RAW `inputTokens` its `TaskProviderUsage` shape has always carried,
 so a bar built from that column would double-count cache reads for exactly the two providers the
 normalisation exists for — MEASURED live, codex reads 46.5% cached raw against 86.9% normalised.
-`/stats/summary` therefore attaches a `tokens` object per provider, and `toRawTotals` is SHARED
+`/m/statistics/summary` therefore attaches a `tokens` object per provider, and `toRawTotals` is SHARED
 between that map and the window total, so Σ the rows equals `tokens` structurally rather than by
 two call sites happening to agree (VERIFIED live: all five fields match exactly). It is attached
 to the response and NOT folded into `TaskProviderUsage`, which the task detail page mirrors and
@@ -124,7 +125,7 @@ than merely inconsistent. The legend is rendered once, on the total.
 
 ## Per-step spend and model identity
 
-`GET /stats/steps` (lazy, behind its own tab) answers the question nothing else could: which
+`GET /m/statistics/steps` (lazy, behind its own tab) answers the question nothing else could: which
 STEP the money and the hours go to. MEASURED on the dev install, `01-plan-build` alone is 38.3
 of ~82 agent-hours.
 
@@ -166,8 +167,8 @@ names. The only signal in that table is failure rate, which belongs on the relia
 ## Throughput
 
 Output tokens per second is reported TWO ways, and neither stands in for the other.
-`summarizeThroughput` (`@haive/shared/stats`) is the one rule, used by `/stats/steps` (per provider
-× served model), `/stats/timeline` (per day) and the task page's per-step badge:
+`summarizeThroughput` (`@haive/shared/stats`) is the one rule, used by `/m/statistics/steps` (per provider
+× served model), `/m/statistics/timeline` (per day) and the task page's per-step badge:
 
 - **Per model second** divides by `cli_invocations.api_duration_ms`: the claude family's
   (claude-code, zai, ollama, muse, grok) own `duration_api_ms`, and for gemini the sum of
@@ -205,7 +206,7 @@ as a pair with teal-600 against `#0a0a0a`.
 
 ## Agents, skills and MCP tools
 
-`GET /stats/tool-usage` and `GET /tasks/:id/tool-usage` read `cli_invocations.tool_usage` through
+`GET /m/statistics/tool-usage` and `GET /tasks/:id/tool-usage` read `cli_invocations.tool_usage` through
 ONE SQL rollup (`shared/src/stats-server/tool-usage-rollup.ts`). The caller composes the predicate and the
 rollup never decides which rows count; its LATERAL `jsonb_array_elements` / `jsonb_each_text`
 reads are guarded INSIDE the function argument because both throw on a JSON null, which `loaded`
