@@ -65,20 +65,28 @@ const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {
 
 /** ctx whose db stubs the credential lookup detect does (no bound credential → a
  *  plain fetch, which works against a file:// origin). */
-function mkCtx(repoPath: string, repositoryId: string | null = null): StepContext {
+function mkCtx(
+  repoPath: string,
+  repositoryId: string | null = null,
+  otherCheckoutTasks: { id: string }[] = [],
+): StepContext {
+  const db = {
+    transaction: async (run: (tx: unknown) => Promise<unknown>) => run(db),
+    query: {
+      tasks: {
+        findFirst: async () => ({ repositoryId }),
+        findMany: async () => otherCheckoutTasks,
+      },
+      repositories: { findFirst: async () => null },
+    },
+  };
   return {
     repoPath,
     sandboxWorkdir: repoPath,
     userId: 'u1',
     taskId: 't1',
     taskStepId: 'step1',
-    db: {
-      transaction: async (run: (tx: unknown) => Promise<unknown>) => run({}),
-      query: {
-        tasks: { findFirst: async () => ({ repositoryId }) },
-        repositories: { findFirst: async () => null },
-      },
-    },
+    db,
     logger,
   } as unknown as StepContext;
 }
@@ -158,7 +166,12 @@ describe('00a-sync-base detect + apply (real git)', () => {
       const d = await syncBaseStep.detect!(ctx);
       const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
       expect(out).toMatchObject({ synced: true, strategy: 'ff' });
-      expect(projections.setAside).toHaveBeenCalledWith(ctx.db, 'repo-1', local);
+      expect(projections.setAside).toHaveBeenCalledWith(
+        ctx.db,
+        'repo-1',
+        local,
+        expect.any(Function),
+      );
       expect(atAside).toBe(before);
       expect(projections.resync).toHaveBeenCalledWith(ctx.db, 'repo-1', local);
       expect(atResync).not.toBe(before);
@@ -211,6 +224,47 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
       expect(out.reason).toContain('plan.json unreadable');
       expect(projections.setAside).not.toHaveBeenCalled();
+      expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('another task working in the checkout holds the set-aside, and the base is not moved', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockResolvedValue({ outcome: 'held', holding: 1 });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
+      expect(out.reason).toContain('working in this checkout');
+      expect(typeof projections.setAside.mock.calls[0]?.[3]).toBe('function');
+      expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a task that starts working in the checkout before the move holds the fast-forward', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      const ctx = mkCtx(local, 'repo-1', [{ id: 'other' }]);
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
+      expect(out.reason).toContain('working in this checkout');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
       await rm(bare, { recursive: true, force: true });

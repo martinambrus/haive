@@ -1174,6 +1174,26 @@ async function main(): Promise<void> {
         { aside2, now: indexed(s2.dest, PLAN_REL), staged: held2.staged },
       );
 
+      const m3 = await cloned();
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: m3.payload.repositoryId, origin: 'user' },
+      );
+      await writePlanMirror(db, m3.payload.repositoryId, m3.dest);
+      const m3InHead = git(m3.dest, 'ls-tree', 'HEAD', '--', PLAN_REL);
+      git(m3.dest, 'add', '--chmod=+x', '--', PLAN_REL);
+      const asideM3 = await setAsideHaiveProjections(db, m3.payload.repositoryId, m3.dest);
+      const m3Mode = git(m3.dest, 'ls-files', '-s', '--', PLAN_REL).split(' ')[0];
+      check(
+        "M3: a projection HEAD lacks, staged executable with Haive's bytes, refuses the set-aside and keeps its mode",
+        m3InHead === '' &&
+          asideM3.outcome === 'refused' &&
+          asideM3.file === PLAN_REL &&
+          m3Mode === '100755',
+        { m3InHead, asideM3, m3Mode },
+      );
+
       // 11l-2. A mode change is not in the blob id: a staged chmod, or one only in the working tree, on a
       // file holding Haive's bytes is a person's change, and returning the path to HEAD would lose it.
       const indexMode = (dir: string, rel: string) =>

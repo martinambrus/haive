@@ -182,7 +182,9 @@ async function modeChanges(
     const fields = res.stdout.split('\0');
     for (let i = 0; i + 1 < fields.length; i += 2) {
       const m = /^:(\d+) (\d+) /.exec(fields[i]!);
-      if (!m || m[1] === m[2] || /^0+$/.test(m[1]!) || /^0+$/.test(m[2]!)) continue;
+      if (!m || m[1] === m[2] || /^0+$/.test(m[2]!)) continue;
+      // A path HEAD lacks is Haive's only as the regular file its writer creates.
+      if (/^0+$/.test(m[1]!) && m[2] === '100644') continue;
       changed.set(fields[i + 1]!, `${side}:${m[1]}>${m[2]}`);
     }
   }

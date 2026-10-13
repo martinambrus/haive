@@ -12,6 +12,7 @@ import {
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
+import { checkoutHoldingTasks } from '../../../repo/refresh.js';
 import {
   MOVE_ATTEMPTS,
   restoreProjectionsInTx,
@@ -386,10 +387,13 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
           ]);
 
     const repositoryId = onCurrent ? await taskRepositoryId(ctx) : null;
+    // Another task working in the checkout itself (no worktree of its own) holds the base where it is.
+    const fence = (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
+      checkoutHoldingTasks(conn, repositoryId!, { excludeTaskId: ctx.taskId, rootOnly: true });
     let asided = false;
     const setAside = async (): Promise<SetAsideResult> => {
       if (!repositoryId) return { outcome: 'clean' };
-      const aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+      const aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
       if (aside.outcome === 'set-aside') asided = true;
       return aside;
     };
@@ -407,6 +411,15 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       }
     }
     const first = await setAside();
+    if (first.outcome === 'held') {
+      return {
+        synced: false,
+        base,
+        strategy: 'skipped',
+        behindBy: d.behindBy,
+        reason: `${first.holding} other task${first.holding === 1 ? ' is' : 's are'} working in this checkout; the base was not moved. Retry this step once ${first.holding === 1 ? 'it finishes' : 'they finish'}.`,
+      };
+    }
     if (first.outcome === 'refused') {
       return {
         synced: false,
@@ -429,9 +442,19 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       for (let attempt = 1; ; attempt++) {
         const moved = await ctx.db.transaction(async (tx) => {
           const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
-          return again.outcome === 'clean' ? { again, res: await ff() } : { again, res: null };
+          if (again.outcome !== 'clean') return { again, res: null, holding: 0 };
+          const holding = await fence(tx);
+          return holding > 0 ? { again, res: null, holding } : { again, res: await ff(), holding };
         });
         if (moved.res) return moved.res;
+        if (moved.holding > 0) {
+          return {
+            code: 1,
+            stderr: `${moved.holding} other task${moved.holding === 1 ? ' is' : 's are'} working in this checkout`,
+            stdout: '',
+            unmoved: true,
+          };
+        }
         if (moved.again.outcome === 'refused') {
           return { code: 1, stderr: moved.again.reason, stdout: '', unmoved: true };
         }
@@ -444,6 +467,14 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
           };
         }
         const again = await setAside();
+        if (again.outcome === 'held') {
+          return {
+            code: 1,
+            stderr: `${again.holding} other task${again.holding === 1 ? ' is' : 's are'} working in this checkout`,
+            stdout: '',
+            unmoved: true,
+          };
+        }
         if (again.outcome === 'refused') {
           return { code: 1, stderr: again.reason, stdout: '', unmoved: true };
         }

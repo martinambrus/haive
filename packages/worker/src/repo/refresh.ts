@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import {
   ensureDirNoFollow,
   lstatNoFollow,
@@ -22,15 +22,19 @@ import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 const firstLine = (text: string): string => text.trim().split('\n')[0] ?? '';
 
-/** Tasks holding this repository's checkout right now. */
+/** Tasks holding this repository's checkout right now. `rootOnly` counts only tasks with no worktree of
+ *  their own, which work in the checkout itself; `excludeTaskId` leaves out the caller's task. */
 export async function checkoutHoldingTasks(
   db: Pick<Database, 'query'>,
   repositoryId: string,
+  opts: { excludeTaskId?: string; rootOnly?: boolean } = {},
 ): Promise<number> {
   const rows = await db.query.tasks.findMany({
     where: and(
       eq(schema.tasks.repositoryId, repositoryId),
       inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+      opts.excludeTaskId ? ne(schema.tasks.id, opts.excludeTaskId) : undefined,
+      opts.rootOnly ? isNull(schema.tasks.worktreePath) : undefined,
     ),
     columns: { id: true },
   });
