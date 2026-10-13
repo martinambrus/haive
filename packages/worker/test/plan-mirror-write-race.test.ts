@@ -142,3 +142,14 @@ describe('an empty plan.json', () => {
     expect(await onDisk(repo)).toBe('');
   });
 });
+
+describe('a render past the cap', () => {
+  it('is never written, since no later read could judge it', async () => {
+    const repo = await repoWith(null);
+    const huge = `{"t":"${'x'.repeat(16 * 1024 * 1024)}"}\n`;
+    await expect(writePlanJsonIfUnchanged(repo, huge, sha(''))).rejects.toBeInstanceOf(
+      PlanMirrorHeldError,
+    );
+    await expect(access(path.join(repo, HAIVE_DATA_FILES.plan))).rejects.toThrow();
+  });
+});

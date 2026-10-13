@@ -50,6 +50,7 @@ export class PlanMirrorHeldError extends Error {
 
 // A plan this size is far past any real plan; a larger file is held rather than buffered.
 const PLAN_JSON_MAX_BYTES = 16 * 1024 * 1024;
+const PLAN_WRITE_TOO_LARGE = `the plan renders to more than ${PLAN_JSON_MAX_BYTES / 1024 / 1024} MiB, so its plan.json is not written; nothing was written.`;
 const PLAN_TOO_LARGE = `the committed plan snapshot is larger than ${PLAN_JSON_MAX_BYTES / 1024 / 1024} MiB`;
 
 /** plan.json's bytes, `'too-large'` past the cap (nothing beyond it is read), or null when absent. */
@@ -132,6 +133,8 @@ export async function writePlanJsonIfUnchanged(
   syncedHash: string | null,
 ): Promise<void> {
   const bytes = Buffer.from(json, 'utf8');
+  // Every read of plan.json stops at the cap, so a larger file Haive wrote could never be judged again.
+  if (bytes.length > PLAN_JSON_MAX_BYTES) throw new PlanMirrorHeldError(PLAN_WRITE_TOO_LARGE);
   let operation = false;
   // The merge check is repeated here, after the file is parked, so it sits next to the replace.
   const outcome = await rewriteFileIfNoFollow(
