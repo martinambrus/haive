@@ -11,6 +11,7 @@ import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
 import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
 import {
+  MOVE_ATTEMPTS,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -142,32 +143,42 @@ async function fastForward(
 
   const fence = (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
     checkoutHoldingTasks(conn, payload.repositoryId);
-  const aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
-  if (aside.outcome === 'refused') {
-    return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
-  }
-  if (aside.outcome === 'held') return holdingRefusal(aside.holding);
-
   // Under both projection locks, and only while no task holds the checkout: an upgrade that is
   // still writing its record takes the project-state lock, and refuses once its task is no longer
-  // holding. The restore runs again here so no sweep can rewrite a file between it and the move.
-  const moved = await db.transaction(async (tx) => {
-    const again = await restoreProjectionsInTx(db, tx, payload.repositoryId, dest, fence);
-    if (again.outcome === 'refused' || again.outcome === 'held') return { again, merge: null };
-    if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) return { again, merge: null };
-    return { again, merge: await gitRun(dest, ['merge', '--ff-only', target]) };
-  });
-  const { again, merge: merged } = moved;
-  if (merged?.code === 0 || aside.outcome === 'set-aside' || again.outcome === 'set-aside') {
-    await resyncHaiveProjections(db, payload.repositoryId, dest);
-  }
-  if (again.outcome === 'refused') {
-    return `Not refreshed: ${again.reason}. The checkout was not moved.`;
-  }
-  if (again.outcome === 'held') return holdingRefusal(again.holding);
-  if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
-  if (merged.code !== 0) {
-    return `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`;
+  // holding. The check runs again here so no sweep can rewrite a file between it and the move; a
+  // file it finds rewritten ends the transaction unmoved and goes back to the set-aside.
+  let asided = false;
+  for (let attempt = 1; ; attempt++) {
+    const aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
+    if (aside.outcome === 'refused') {
+      return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
+    }
+    if (aside.outcome === 'held') return holdingRefusal(aside.holding);
+    if (aside.outcome === 'set-aside') asided = true;
+
+    const { again, merge: merged } = await db.transaction(async (tx) => {
+      const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
+      if (check.outcome !== 'clean') return { again: check, merge: null };
+      if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
+        return { again: check, merge: null };
+      }
+      return { again: check, merge: await gitRun(dest, ['merge', '--ff-only', target]) };
+    });
+    if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
+    if (merged?.code === 0 || asided) {
+      await resyncHaiveProjections(db, payload.repositoryId, dest);
+    }
+    if (again.outcome === 'refused') {
+      return `Not refreshed: ${again.reason}. The checkout was not moved.`;
+    }
+    if (again.outcome === 'retry') {
+      return "Not refreshed: Haive's project files kept changing under the move. The checkout was not moved; refresh again.";
+    }
+    if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
+    if (merged.code !== 0) {
+      return `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`;
+    }
+    break;
   }
   logger.info(
     { repositoryId: payload.repositoryId, branch, commits: behind },

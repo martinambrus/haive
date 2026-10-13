@@ -12,6 +12,7 @@ import {
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import {
+  MOVE_ATTEMPTS,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -384,38 +385,59 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
           ]);
 
     const repositoryId = onCurrent ? await taskRepositoryId(ctx) : null;
-    let aside: SetAsideResult = { outcome: 'clean' };
-    if (repositoryId) {
-      aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
-      if (aside.outcome === 'refused') {
-        return {
-          synced: false,
-          base,
-          strategy: 'skipped',
-          behindBy: d.behindBy,
-          reason: `${aside.reason}; the base was not moved. Commit or discard that change, then Retry this step.`,
-        };
-      }
+    let asided = false;
+    const setAside = async (): Promise<SetAsideResult> => {
+      if (!repositoryId) return { outcome: 'clean' };
+      const aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+      if (aside.outcome === 'set-aside') asided = true;
+      return aside;
+    };
+    const first = await setAside();
+    if (first.outcome === 'refused') {
+      return {
+        synced: false,
+        base,
+        strategy: 'skipped',
+        behindBy: d.behindBy,
+        reason: `${first.reason}; the base was not moved. Commit or discard that change, then Retry this step.`,
+      };
     }
 
-    // Under both projection locks, so no sweep can rewrite a file between the restore and the move.
-    const ffLocked = async (): Promise<{ code: number; stderr: string; stdout: string }> => {
+    // Under both projection locks, so no sweep can rewrite a file between the check and the move. A
+    // file found rewritten ends the transaction unmoved and goes back to the set-aside.
+    const ffLocked = async (): Promise<{
+      code: number;
+      stderr: string;
+      stdout: string;
+      unmoved?: true;
+    }> => {
       if (!repositoryId) return ff();
-      const moved = await ctx.db.transaction(async (tx) => {
-        const again = await restoreProjectionsInTx(ctx.db, tx, repositoryId, ctx.repoPath);
-        return again.outcome === 'refused' ? { again, res: null } : { again, res: await ff() };
-      });
-      if (moved.again.outcome === 'set-aside') aside = moved.again;
-      if (moved.res) return moved.res;
-      return {
-        code: 1,
-        stderr: moved.again.outcome === 'refused' ? moved.again.reason : '',
-        stdout: '',
-      };
+      for (let attempt = 1; ; attempt++) {
+        const moved = await ctx.db.transaction(async (tx) => {
+          const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
+          return again.outcome === 'clean' ? { again, res: await ff() } : { again, res: null };
+        });
+        if (moved.res) return moved.res;
+        if (moved.again.outcome === 'refused') {
+          return { code: 1, stderr: moved.again.reason, stdout: '', unmoved: true };
+        }
+        if (attempt === MOVE_ATTEMPTS) {
+          return {
+            code: 1,
+            stderr: "Haive's project files kept changing under the move; Retry this step",
+            stdout: '',
+            unmoved: true,
+          };
+        }
+        const again = await setAside();
+        if (again.outcome === 'refused') {
+          return { code: 1, stderr: again.reason, stdout: '', unmoved: true };
+        }
+      }
     };
 
     let res = await ffLocked();
-    if (res.code !== 0) {
+    if (res.code !== 0 && !res.unmoved) {
       await gitRun(ctx.repoPath, [
         'fetch',
         '--deepen=50',
@@ -425,7 +447,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       ]);
       res = await ffLocked();
     }
-    if (repositoryId && (res.code === 0 || aside.outcome === 'set-aside')) {
+    if (repositoryId && (res.code === 0 || asided)) {
       await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
     }
     if (res.code !== 0) {

@@ -29,7 +29,7 @@ type Stage = 1 | 2 | 3;
 
 const BYTES = { encoding: 'latin1' as const };
 
-async function readBlob(worktreePath: string, sha: string): Promise<Buffer | null> {
+export async function readBlob(worktreePath: string, sha: string): Promise<Buffer | null> {
   const res = await gitRun(worktreePath, ['cat-file', 'blob', sha], undefined, BYTES);
   return res.code === 0 ? Buffer.from(res.stdout, 'latin1') : null;
 }

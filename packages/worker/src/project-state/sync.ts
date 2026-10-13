@@ -788,11 +788,11 @@ export async function rebaseProjectStateOnCheckout(
   await db.transaction((tx) => rebaseLocked(tx, args.repositoryId, checkout));
 }
 
-/** The rebase onto the record HEAD commits, read from the commit and written on the pool without the
- *  project-state lock, which the caller holds on another connection and which this write must not wait
- *  for. Run before the files move, so a crash leaves the base at HEAD with the files pending or at HEAD. */
-export async function rebaseProjectStateOnHeadUnlocked(
-  db: Database,
+/** The rebase onto the record HEAD commits, read from the commit and written in the transaction the
+ *  caller holds the project-state lock in. Run before the files move, so a crash leaves the base at
+ *  HEAD with the files pending or at HEAD. */
+export async function rebaseProjectStateOnHeadLocked(
+  tx: Tx,
   { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
 ): Promise<void> {
   let checkout: Checkout;
@@ -802,7 +802,12 @@ export async function rebaseProjectStateOnHeadUnlocked(
   } catch (err) {
     checkout = notRead((err as Error).message);
   }
-  await db.transaction((tx) => applyRebase(tx, repositoryId, checkout));
+  await applyRebase(tx, repositoryId, checkout);
+}
+
+/** The sync row as one comparable string, so a caller can tell whether another writer changed it. */
+export async function readProjectStateBase(tx: Tx, repositoryId: string): Promise<string> {
+  return JSON.stringify(await readSyncRow(tx, repositoryId));
 }
 
 /** The same rebase inside a transaction the caller already holds. */

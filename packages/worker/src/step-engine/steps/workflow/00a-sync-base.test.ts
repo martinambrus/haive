@@ -15,6 +15,7 @@ vi.mock('../../../project-state/set-aside.js', () => ({
   setAsideHaiveProjections: projections.setAside,
   resyncHaiveProjections: projections.resync,
   restoreProjectionsInTx: projections.restore,
+  MOVE_ATTEMPTS: 3,
 }));
 vi.mock('../../merge-dir-claim.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../merge-dir-claim.js')>()),
@@ -201,6 +202,49 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
       expect(out.reason).toContain('.haive-data/state/project/render.json');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a file found rewritten under the locks sets aside again, then the fast-forward lands', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [] });
+      projections.restore.mockResolvedValueOnce({ outcome: 'retry' });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: true, strategy: 'ff' });
+      expect(projections.setAside).toHaveBeenCalledTimes(2);
+      expect(projections.restore).toHaveBeenCalledTimes(2);
+      expect(projections.resync).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a file rewritten on every attempt stops the fast-forward unmoved after three', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [] });
+      projections.restore.mockResolvedValue({ outcome: 'retry' });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
+      expect(out.reason).toContain('kept changing');
+      expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+      expect(projections.setAside).toHaveBeenCalledTimes(3);
     } finally {
       await rm(bare, { recursive: true, force: true });
       await rm(seed, { recursive: true, force: true });

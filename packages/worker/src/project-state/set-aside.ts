@@ -19,13 +19,15 @@ import {
   flushPlanMirrorForRepository,
   lockPlanMirror,
 } from '../plan/mirror.js';
+import { readBlob } from '../plan/projection-merge.js';
 import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { gitRun } from '../repo/git-exec.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { refreshProjectState } from './refresh.js';
 import {
+  readProjectStateBase,
   rebaseProjectStateOnCheckoutLocked,
-  rebaseProjectStateOnHeadUnlocked,
+  rebaseProjectStateOnHeadLocked,
   syncProjectStateFromCheckout,
 } from './sync.js';
 import {
@@ -48,13 +50,22 @@ export type SetAsideResult =
   | { outcome: 'refused'; file: string; reason: string }
   | { outcome: 'held'; holding: number };
 
+/** What the check inside the caller's move transaction finds; it writes nothing, so a dirty file is
+ *  `retry`: abort the transaction, set aside again, and try the move again. */
+export type RestoreInTxResult = { outcome: 'clean' } | Refused | { outcome: 'retry' };
+
+/** How many times a set-aside, or a move that finds a file rewritten, goes round before it gives up. */
+export const MOVE_ATTEMPTS = 3;
+
 /** How many tasks hold the checkout now; read inside each lock, before the first file is touched. */
 export type CheckoutFence = (db: DbOrTx) => Promise<number>;
 
 const STATE_PREFIX = `${PROJECT_STATE_DIR}/`;
 const ABSENT_PLAN_HASH = 'absent';
 
-const refuse = (file: string, why: string): SetAsideResult => ({
+type Refused = Extract<SetAsideResult, { outcome: 'refused' }>;
+
+const refuse = (file: string, why: string): Refused => ({
   outcome: 'refused',
   file,
   reason: `${file} ${why}`,
@@ -106,6 +117,67 @@ async function holds(repoPath: string, rel: string, want: Buffer | null, maxByte
   return want !== null && !read.truncated && read.data.equals(want);
 }
 
+const literal = (rel: string): string => `:(literal)${rel}`;
+
+/** The blob the index holds for `rel`: null when it holds none, 'unmerged' when it holds a conflict. */
+async function stagedOid(repoPath: string, rel: string): Promise<string | null | 'unmerged'> {
+  const res = await gitRun(repoPath, [
+    '--no-optional-locks',
+    'ls-files',
+    '-s',
+    '-z',
+    '--',
+    literal(rel),
+  ]);
+  if (res.code !== 0) throw new Error(`git ls-files failed: ${res.stderr.trim().slice(0, 300)}`);
+  let oid: string | null = null;
+  for (const entry of res.stdout.split('\0')) {
+    const m = /^\d+ ([0-9a-f]+) (\d)\t/.exec(entry);
+    if (!m) continue;
+    if (m[2] !== '0') return 'unmerged';
+    oid = m[1]!;
+  }
+  return oid;
+}
+
+async function headOid(repoPath: string, rel: string): Promise<string | null> {
+  const res = await gitRun(repoPath, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`]);
+  return res.code === 0 ? res.stdout.trim() : null;
+}
+
+/** Whether what the index holds for `rel` is HEAD's blob or exactly what Haive writes there, so that
+ *  returning the path to HEAD discards nothing a person staged. */
+async function stagedIsHaives(
+  repoPath: string,
+  rel: string,
+  maxBytes: number,
+  haives: (bytes: Buffer | null) => boolean,
+): Promise<boolean> {
+  const staged = await stagedOid(repoPath, rel);
+  if (staged === 'unmerged') return false;
+  if (staged === (await headOid(repoPath, rel))) return true;
+  if (staged === null) return haives(null);
+  const size = await gitRun(repoPath, ['cat-file', '-s', staged]);
+  if (size.code !== 0 || Number(size.stdout.trim()) > maxBytes) return false;
+  const bytes = await readBlob(repoPath, staged);
+  return bytes !== null && haives(bytes);
+}
+
+/** The working-tree bytes and the index blob of `rel` as one string, to tell later whether either moved. */
+async function fingerprint(repoPath: string, rel: string): Promise<string> {
+  const maxBytes = rel.startsWith(STATE_PREFIX)
+    ? PROJECT_STATE_LIMITS.maxFileBytes
+    : PLAN_JSON_MAX_BYTES;
+  let work = 'unreadable';
+  try {
+    const read = await readFileNoFollow(repoPath, rel, { maxBytes, strict: true });
+    work = read === null ? 'absent' : read.truncated ? 'truncated' : sha256(read.data);
+  } catch {
+    work = 'unreadable';
+  }
+  return `${work}|${await stagedOid(repoPath, rel)}`;
+}
+
 /** The first dirty state file that is not what the sync base renders there, or null. The base is the
  *  record the files were last written from or read in as, with a pending conflict at the incoming
  *  side the writer renders into the file. */
@@ -142,12 +214,13 @@ async function stateOffender(
   }
   for (const path of paths) {
     const want = expected.get(path.slice(STATE_PREFIX.length));
-    const ok = await holds(
-      repoPath,
-      path,
-      want === undefined ? null : Buffer.from(want, 'utf8'),
-      PROJECT_STATE_LIMITS.maxFileBytes,
-    );
+    const wantBytes = want === undefined ? null : Buffer.from(want, 'utf8');
+    const maxBytes = PROJECT_STATE_LIMITS.maxFileBytes;
+    const ok =
+      (await holds(repoPath, path, wantBytes, maxBytes)) &&
+      (await stagedIsHaives(repoPath, path, maxBytes, (bytes) =>
+        bytes === null ? wantBytes === null : wantBytes !== null && bytes.equals(wantBytes),
+      ));
     if (!ok) return path;
   }
   return null;
@@ -178,8 +251,17 @@ async function planOffender(
   } catch {
     return HAIVE_DATA_FILES.plan;
   }
-  if (read === null) return stamp === ABSENT_PLAN_HASH ? null : HAIVE_DATA_FILES.plan;
-  if (read.truncated || stamp !== sha256(read.data)) return HAIVE_DATA_FILES.plan;
+  if (read === null ? stamp !== ABSENT_PLAN_HASH : read.truncated || stamp !== sha256(read.data)) {
+    return HAIVE_DATA_FILES.plan;
+  }
+  const stagedOk = await stagedIsHaives(
+    repoPath,
+    HAIVE_DATA_FILES.plan,
+    PLAN_JSON_MAX_BYTES,
+    (bytes) => (bytes === null ? stamp === ABSENT_PLAN_HASH : stamp === sha256(bytes)),
+  );
+  if (!stagedOk) return HAIVE_DATA_FILES.plan;
+  if (read === null) return null;
   const [held] = await db
     .select({ id: schema.planNodes.id })
     .from(schema.planNodes)
@@ -192,49 +274,81 @@ async function planOffender(
 export const restoreFaults: { afterBase?: () => void; afterRestore?: () => void } = {};
 
 interface RestoreGuard {
+  owns: (path: string) => boolean;
   lock: (tx: Tx) => Promise<unknown>;
   offender: (tx: Tx) => Promise<string | null>;
-  mark: (tx: DbOrTx) => Promise<unknown>;
-  base?: (db: Database) => Promise<unknown>;
+  mark: (tx: Tx) => Promise<unknown>;
+  base?: (tx: Tx) => Promise<unknown>;
+  readBase?: (tx: Tx) => Promise<string>;
   fence: CheckoutFence | undefined;
 }
 
-/** The restore with the domain's lock held: the fence read there, then the stale mark and the sync base
- *  at HEAD's record committed on the pool, so a crash after the files moved and before `tx` commits finds
- *  the mark and a base the pending value still merges against. */
-async function restoreLocked(
-  db: Database,
+type Changed = { changed: string };
+
+/** First transaction, with the domain's lock held: the files judged and the fence read, then the stale
+ *  mark and the sync base at HEAD's record committed, so a crash before the files move finds the mark
+ *  and a base the pending value still merges against. Nothing else is asked of the pool meanwhile. */
+async function judgeAndMark(
   tx: Tx,
   repoPath: string,
   paths: readonly string[],
   guard: RestoreGuard,
-): Promise<SetAsideResult | null> {
+): Promise<{ stopped: SetAsideResult } | { prints: Map<string, string>; base: string | null }> {
+  await guard.lock(tx);
+  const prints = new Map<string, string>();
+  for (const path of paths) prints.set(path, await fingerprint(repoPath, path));
   const offender = await guard.offender(tx);
-  if (offender) return refuse(offender, NOT_HAIVE);
+  if (offender) return { stopped: refuse(offender, NOT_HAIVE) };
   const holding = guard.fence ? await guard.fence(tx) : 0;
-  if (holding > 0) return { outcome: 'held' as const, holding };
-  await guard.mark(db);
-  await guard.base?.(db);
-  restoreFaults.afterBase?.();
-  await restoreFromHead(repoPath, paths);
+  if (holding > 0) return { stopped: { outcome: 'held', holding } };
+  await guard.mark(tx);
+  await guard.base?.(tx);
+  return { prints, base: (await guard.readBase?.(tx)) ?? null };
+}
+
+/** Second transaction: the files are still as the first judged them (or already at HEAD) and the base is
+ *  still the one it committed, then the restore, and `after` in the same transaction. */
+async function restoreJudged(
+  tx: Tx,
+  repoPath: string,
+  judged: { prints: Map<string, string>; base: string | null },
+  guard: RestoreGuard,
+  after?: (tx: Tx) => Promise<void>,
+): Promise<SetAsideResult | Changed | null> {
+  await guard.lock(tx);
+  const dirty = await dirtyProjections(repoPath);
+  const mine = dirty.paths.filter((path) => guard.owns(path));
+  for (const path of mine) {
+    if (judged.prints.get(path) !== (await fingerprint(repoPath, path))) return { changed: path };
+  }
+  if (guard.readBase && judged.base !== (await guard.readBase(tx)))
+    return { changed: [...judged.prints.keys()][0] ?? '' };
+  if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
+    return refuse(
+      mine[0] ?? dirty.paths[0] ?? '',
+      'is part of a merge or rebase that is still open',
+    );
+  }
+  const holding = guard.fence ? await guard.fence(tx) : 0;
+  if (holding > 0) return { outcome: 'held', holding };
+  await restoreFromHead(repoPath, mine);
   restoreFaults.afterRestore?.();
+  await after?.(tx);
   return null;
 }
 
-/** The restore under the domain's lock; `after` runs in the same transaction once the files are restored. */
-async function restoreUnderLock(
+/** The restore of one domain, in two transactions; `after` runs in the second once the files are restored. */
+async function setAsideDomain(
   db: Database,
   repoPath: string,
   paths: readonly string[],
   guard: RestoreGuard,
   after?: (tx: Tx) => Promise<void>,
-): Promise<SetAsideResult | null> {
-  return db.transaction(async (tx) => {
-    await guard.lock(tx);
-    const stopped = await restoreLocked(db, tx, repoPath, paths, guard);
-    if (!stopped) await after?.(tx);
-    return stopped;
-  });
+): Promise<SetAsideResult | Changed | null> {
+  const judged = await db.transaction((tx) => judgeAndMark(tx, repoPath, paths, guard));
+  if ('stopped' in judged) return judged.stopped;
+  restoreFaults.afterBase?.();
+  return db.transaction((tx) => restoreJudged(tx, repoPath, judged, guard, after));
 }
 
 const stateGuard = (
@@ -243,10 +357,12 @@ const stateGuard = (
   state: readonly string[],
   fence?: CheckoutFence,
 ): RestoreGuard => ({
+  owns: (path) => path.startsWith(STATE_PREFIX),
   lock: (tx) => lockProjectState(tx, repositoryId),
   offender: (tx) => stateOffender(tx, repositoryId, repoPath, state),
   mark: (tx) => markProjectStateDirty(tx, repositoryId),
-  base: (pool) => rebaseProjectStateOnHeadUnlocked(pool, { repositoryId, repoPath }),
+  base: (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
+  readBase: (tx) => readProjectStateBase(tx, repositoryId),
   fence,
 });
 
@@ -256,6 +372,7 @@ const planGuard = (
   plan: readonly string[],
   fence?: CheckoutFence,
 ): RestoreGuard => ({
+  owns: (path) => !path.startsWith(STATE_PREFIX),
   lock: (tx) => lockPlanMirror(tx, repositoryId),
   offender: (tx) => planOffender(tx, repositoryId, repoPath, plan),
   mark: (tx) => markPlanMirrorDirty(tx, repositoryId),
@@ -293,14 +410,39 @@ async function pruneEmptyStateDirs(repoPath: string, removed: string): Promise<v
 /** Puts Haive's own pending projection files (`.haive-data/state/**`, `plan.json`, `plan.md`) aside before
  *  a move of the checkout: the database holds what they say, so each one is returned to HEAD and the
  *  mark that says the files are stale is raised first, which a crash then finds. A file that is not what
- *  Haive last wrote refuses the move and is named. After the move, `resyncHaiveProjections` brings the
- *  new head in and writes the pending changes over it. */
+ *  Haive last wrote, in the working tree or in the index, refuses the move and is named. After the move,
+ *  `resyncHaiveProjections` brings the new head in and writes the pending changes over it. */
 export async function setAsideHaiveProjections(
   db: Database,
   repositoryId: string,
   repoPath: string,
   fence?: CheckoutFence,
 ): Promise<SetAsideResult> {
+  const restored = new Set<string>();
+  let busy = '';
+  for (let attempt = 1; attempt <= MOVE_ATTEMPTS; attempt++) {
+    const result = await setAsideOnce(db, repositoryId, repoPath, restored, fence);
+    if (!('changed' in result)) {
+      if (result.outcome === 'clean' && restored.size > 0) {
+        return { outcome: 'set-aside', paths: [...restored].sort() };
+      }
+      return result;
+    }
+    busy = result.changed;
+  }
+  return refuse(
+    busy,
+    'was rewritten again while it was set aside; the move was not attempted, retry',
+  );
+}
+
+async function setAsideOnce(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+  restored: Set<string>,
+  fence?: CheckoutFence,
+): Promise<SetAsideResult | Changed> {
   const dirty = await dirtyProjections(repoPath);
   if (dirty.paths.length === 0) return { outcome: 'clean' };
   const holdingEarly = fence ? await fence(db) : 0;
@@ -322,7 +464,7 @@ export async function setAsideHaiveProjections(
   if (early) return refuse(early, NOT_HAIVE);
 
   if (state.length > 0) {
-    const stopped = await restoreUnderLock(
+    const stopped = await setAsideDomain(
       db,
       repoPath,
       state,
@@ -330,32 +472,33 @@ export async function setAsideHaiveProjections(
       (tx) => rebaseProjectStateOnCheckoutLocked(tx, { repositoryId, repoPath }),
     );
     if (stopped) return stopped;
+    for (const path of state) restored.add(path);
     await markProjectStateDirty(db, repositoryId);
   }
   if (plan.length > 0) {
-    const stopped = await restoreUnderLock(
+    const stopped = await setAsideDomain(
       db,
       repoPath,
       plan,
       planGuard(repositoryId, repoPath, plan, fence),
     );
     if (stopped) return stopped;
+    for (const path of plan) restored.add(path);
     await markPlanMirrorDirty(db, repositoryId);
   }
   return { outcome: 'set-aside', paths: dirty.paths };
 }
 
-/** The restore again, inside the caller's transaction and under both writers' locks, immediately before
+/** The check again, inside the caller's transaction and under both writers' locks, immediately before
  *  the move: a sweep that rewrote a file after `setAsideHaiveProjections` returned cannot do so again
  *  until the transaction ends. Takes the locks in the documented order, project state then plan mirror.
- *  Returns `set-aside` when it restored anything, and never reads the network. */
+ *  It writes nothing: a file still pending is `retry`, and the caller ends its transaction without
+ *  moving, sets aside again, and tries the move again. Never reads the network. */
 export async function restoreProjectionsInTx(
-  db: Database,
   tx: Tx,
   repositoryId: string,
   repoPath: string,
-  fence?: CheckoutFence,
-): Promise<SetAsideResult> {
+): Promise<RestoreInTxResult> {
   await lockProjectState(tx, repositoryId);
   await lockPlanMirror(tx, repositoryId);
   const dirty = await dirtyProjections(repoPath);
@@ -363,30 +506,7 @@ export async function restoreProjectionsInTx(
   if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
     return refuse(dirty.paths[0]!, 'is part of a merge or rebase that is still open');
   }
-  const state = dirty.paths.filter((p) => p.startsWith(STATE_PREFIX));
-  const plan = dirty.paths.filter((p) => !p.startsWith(STATE_PREFIX));
-  if (state.length > 0) {
-    const stopped = await restoreLocked(
-      db,
-      tx,
-      repoPath,
-      state,
-      stateGuard(repositoryId, repoPath, state, fence),
-    );
-    if (stopped) return stopped;
-    await rebaseProjectStateOnCheckoutLocked(tx, { repositoryId, repoPath });
-  }
-  if (plan.length > 0) {
-    const stopped = await restoreLocked(
-      db,
-      tx,
-      repoPath,
-      plan,
-      planGuard(repositoryId, repoPath, plan, fence),
-    );
-    if (stopped) return stopped;
-  }
-  return { outcome: 'set-aside', paths: dirty.paths };
+  return { outcome: 'retry' };
 }
 
 async function isDirty(

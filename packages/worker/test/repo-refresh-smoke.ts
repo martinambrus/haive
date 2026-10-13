@@ -9,6 +9,8 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq, sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 import { schema } from '@haive/database';
 import { HAIVE_DATA_FILES, logger, type RepoJobPayload } from '@haive/shared';
 import { applyPlanPatch } from '@haive/shared/plan';
@@ -859,12 +861,13 @@ async function main(): Promise<void> {
       );
     }
 
-    // 11h. The restore before the move holds the locks the sweeps take: a sweep started while it is open
+    // 11h. The check before the move holds the locks the sweeps take: a sweep started while it is open
     // writes nothing until it ends.
     {
       const c = await withPendingRender();
       const id = c.payload.repositoryId;
       const headRender = git(c.dest, 'show', `HEAD:${RENDER_REL}`);
+      const aside = await setAsideHaiveProjections(db, id, c.dest);
       await db
         .update(schema.repositories)
         .set({ renderContext: column({ lspLanguages: ['ruby'] }) })
@@ -873,21 +876,21 @@ async function main(): Promise<void> {
       let sweep: Promise<number> | null = null;
       let during = '';
       await db.transaction(async (tx) => {
-        const restored = await restoreProjectionsInTx(db, tx, id, c.dest);
+        const checked = await restoreProjectionsInTx(tx, id, c.dest);
         sweep = sweepDirtyProjectStates(db);
         await new Promise((r) => setTimeout(r, 1500));
         during = await readFile(path.join(c.dest, RENDER_REL), 'utf8');
         check(
-          'the restore takes the file back to HEAD',
-          restored.outcome === 'set-aside',
-          restored,
+          'the check finds the files at HEAD after the set-aside',
+          aside.outcome === 'set-aside' && checked.outcome === 'clean',
+          { aside, checked },
         );
       });
       await sweep;
       await sweepDirtyProjectStates(db);
       const after = await readFile(path.join(c.dest, RENDER_REL), 'utf8');
       check(
-        'a sweep started while the restore is open waits for it, then writes',
+        'a sweep started while the check is open waits for it, then writes',
         during.trim() === headRender.trim() && after.includes('ruby'),
         { during, after },
       );
@@ -914,8 +917,9 @@ async function main(): Promise<void> {
       );
     }
 
-    // 11j. The mark that says the files are stale is committed before the files move: a restore inside a
-    // transaction that then fails leaves the files at HEAD and the row dirty, so the sweep is not skipped.
+    // 11j. The mark that says the files are stale is committed before the files move: a set-aside whose
+    // second transaction fails after the restore leaves the files at HEAD and the row dirty, so the sweep
+    // is not skipped.
     {
       const c = await withPendingRender();
       const id = c.payload.repositoryId;
@@ -931,18 +935,20 @@ async function main(): Promise<void> {
       const clean = await rowOf();
       const failure = new Error('crash after the restore');
       let restored = null;
-      await db
-        .transaction(async (tx) => {
-          restored = await restoreProjectionsInTx(db, tx, id, c.dest);
-          throw failure;
-        })
-        .catch((err: unknown) => {
-          if (err !== failure) throw err;
-        });
+      restoreFaults.afterRestore = () => {
+        throw failure;
+      };
+      try {
+        restored = await setAsideHaiveProjections(db, id, c.dest);
+      } catch (err) {
+        if (err !== failure) throw err;
+      } finally {
+        delete restoreFaults.afterRestore;
+      }
       const dirty = await rowOf();
       const headRender = git(c.dest, 'show', `HEAD:${RENDER_REL}`);
       check(
-        'the stale mark survives a transaction that fails after the restore',
+        'the stale mark survives a set-aside that fails after the restore',
         clean.written === clean.revision &&
           dirty.written < dirty.revision &&
           (await readFile(path.join(c.dest, RENDER_REL), 'utf8')).trim() === headRender.trim(),
@@ -956,20 +962,22 @@ async function main(): Promise<void> {
     {
       const crash = new Error('crash inside the restore');
       const crashing = async (
-        point: 'afterBase' | 'afterRestore',
+        point: 'afterBase' | 'afterRestore' | null,
         run: (c: Awaited<ReturnType<typeof withPendingRender>>) => Promise<unknown>,
       ) => {
         const c = await withPendingRender();
-        restoreFaults[point] = () => {
-          throw crash;
-        };
+        if (point) {
+          restoreFaults[point] = () => {
+            throw crash;
+          };
+        }
         let thrown: unknown = null;
         try {
           await run(c);
         } catch (err) {
           thrown = err;
         } finally {
-          delete restoreFaults[point];
+          if (point) delete restoreFaults[point];
         }
         const onDisk = () => readFile(path.join(c.dest, RENDER_REL), 'utf8');
         const crashed = await onDisk();
@@ -996,13 +1004,17 @@ async function main(): Promise<void> {
         { thrown: String(k1.thrown), crashed: k1.crashed, col: k1.col, disk: k1.disk },
       );
 
-      const k2 = await crashing('afterRestore', (c) =>
-        db.transaction((tx) => restoreProjectionsInTx(db, tx, c.payload.repositoryId, c.dest)),
+      let inTx = '';
+      const k2 = await crashing(null, (c) =>
+        db.transaction(async (tx) => {
+          inTx = (await restoreProjectionsInTx(tx, c.payload.repositoryId, c.dest)).outcome;
+          throw crash;
+        }),
       );
       check(
-        'K2: a crash after the restore inside the move transaction keeps the pending value, in the database and on disk',
-        survived(k2) && !k2.crashed.includes('php'),
-        { thrown: String(k2.thrown), crashed: k2.crashed, col: k2.col, disk: k2.disk },
+        'K2: a crash inside the move transaction finds nothing written, and keeps the pending value',
+        survived(k2) && k2.crashed.includes('php') && inTx === 'retry',
+        { thrown: String(k2.thrown), inTx, crashed: k2.crashed, col: k2.col, disk: k2.disk },
       );
 
       const k3 = await crashing('afterBase', (c) =>
@@ -1021,6 +1033,102 @@ async function main(): Promise<void> {
           isDeepEqual(after?.acceptedAgentIds, ['a', 'b']),
         { thrown: String(k3.thrown), col: k3.col, disk: k3.disk, moved, after },
       );
+    }
+
+    // 11l. A foreign edit staged in the index is not Haive's to discard, even when the working tree has
+    // Haive's bytes back: the set-aside refuses, names the file, and leaves the index blob alone.
+    {
+      const indexed = (dir: string, rel: string) => {
+        try {
+          return git(dir, 'rev-parse', `:${rel}`);
+        } catch {
+          return 'absent';
+        }
+      };
+      const stageForeign = async (dir: string, rel: string) => {
+        const target = path.join(dir, rel);
+        const rendered = await readFile(target);
+        await writeFile(target, '{"foreign":true}\n');
+        git(dir, 'add', rel);
+        await writeFile(target, rendered);
+        return { target, rendered, staged: indexed(dir, rel) };
+      };
+
+      const s1 = await withPendingRender();
+      const held1 = await stageForeign(s1.dest, RENDER_REL);
+      const aside1 = await setAsideHaiveProjections(db, s1.payload.repositoryId, s1.dest);
+      check(
+        'S1: a foreign edit staged to render.json refuses the set-aside, names the file, and keeps the index blob',
+        aside1.outcome === 'refused' &&
+          aside1.file === RENDER_REL &&
+          indexed(s1.dest, RENDER_REL) === held1.staged &&
+          (await readFile(held1.target)).equals(held1.rendered),
+        { aside1, now: indexed(s1.dest, RENDER_REL), staged: held1.staged },
+      );
+
+      const s2 = await cloned();
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: s2.payload.repositoryId, origin: 'user' },
+      );
+      await writePlanMirror(db, s2.payload.repositoryId, s2.dest);
+      const held2 = await stageForeign(s2.dest, PLAN_REL);
+      const aside2 = await setAsideHaiveProjections(db, s2.payload.repositoryId, s2.dest);
+      check(
+        'S2: a foreign edit staged to plan.json refuses the set-aside, names the file, and keeps the index blob',
+        aside2.outcome === 'refused' &&
+          aside2.file === PLAN_REL &&
+          indexed(s2.dest, PLAN_REL) === held2.staged &&
+          (await readFile(held2.target)).equals(held2.rendered),
+        { aside2, now: indexed(s2.dest, PLAN_REL), staged: held2.staged },
+      );
+    }
+
+    // 11m. A set-aside never asks the pool for a connection while its own transaction holds one: two of
+    // them on two repositories finish on a pool of two connections. Each waits, inside its transaction,
+    // for the other to be inside its own.
+    {
+      const a = await withPendingRender();
+      const b = await withPendingRender();
+      const capped = postgres(process.env.DATABASE_URL!, { max: 2, onnotice: () => {} });
+      let arrived = 0;
+      let release: () => void = () => undefined;
+      const both = new Promise<void>((resolve) => {
+        release = resolve;
+        setTimeout(resolve, 3000).unref();
+      });
+      const barrier = () => {
+        let calls = 0;
+        return async () => {
+          calls += 1;
+          if (calls === 2) {
+            arrived += 1;
+            if (arrived === 2) release();
+            await both;
+          }
+          return 0;
+        };
+      };
+      const run = (c: typeof a) =>
+        setAsideHaiveProjections(
+          drizzle(capped, { schema }),
+          c.payload.repositoryId,
+          c.dest,
+          barrier(),
+        );
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), 10_000);
+      });
+      const settled = await Promise.race([Promise.all([run(a), run(b)]), timeout]);
+      clearTimeout(timer);
+      check(
+        'P1: two set-asides on a pool of two connections both finish within 10 s',
+        settled !== 'timeout' && settled.every((r) => r.outcome === 'set-aside'),
+        settled,
+      );
+      await capped.end({ timeout: 5 });
     }
 
     // 12. plan.json holding the bytes Haive last wrote is set aside, then re-rendered over the new head.
