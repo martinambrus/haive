@@ -167,6 +167,7 @@ async function redriveTask(
         and(
           eq(schema.tasks.id, c.taskId),
           eq(schema.tasks.status, 'running'),
+          isNull(schema.tasks.deadAt),
           eq(schema.tasks.orchestrationEpoch, c.epoch),
           sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${c.stepId}`,
           eq(schema.tasks.currentRound, c.round),
@@ -256,6 +257,7 @@ export async function redriveStalledTasks(
     .where(
       and(
         eq(schema.tasks.status, 'running'),
+        isNull(schema.tasks.deadAt),
         isNotNull(schema.tasks.currentStepId),
         lt(schema.tasks.updatedAt, cutoff),
         or(
@@ -269,7 +271,13 @@ export async function redriveStalledTasks(
   const unstartedTasks = await db
     .select({ taskId: schema.tasks.id, userId: schema.tasks.userId })
     .from(schema.tasks)
-    .where(and(eq(schema.tasks.status, 'queued'), lt(schema.tasks.updatedAt, cutoff)));
+    .where(
+      and(
+        eq(schema.tasks.status, 'queued'),
+        isNull(schema.tasks.deadAt),
+        lt(schema.tasks.updatedAt, cutoff),
+      ),
+    );
   const parkedSteps = await db
     .select({
       taskStepId: schema.taskSteps.id,
@@ -293,6 +301,7 @@ export async function redriveStalledTasks(
     .where(
       and(
         eq(schema.tasks.status, 'running'),
+        isNull(schema.tasks.deadAt),
         lt(schema.tasks.updatedAt, cutoff),
         eq(schema.taskSteps.status, 'waiting_cli'),
         lt(schema.taskSteps.updatedAt, cutoff),

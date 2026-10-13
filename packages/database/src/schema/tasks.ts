@@ -440,6 +440,11 @@ export const tasks = pgTable(
      *  Migration 0158. */
     summaryCliChoiceAt: timestamp('summary_cli_choice_at'),
     runListSnapshot: jsonb('run_list_snapshot').$type<string[]>(),
+    /** Set when the task's run list names a step this install no longer registers. The structural
+     *  marker every reader keys on; the status stays whatever it was. */
+    deadAt: timestamp('dead_at'),
+    /** Display copy for deadAt, never state. */
+    deadReason: text('dead_reason'),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),

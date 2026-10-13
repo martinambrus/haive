@@ -364,15 +364,15 @@ async function main(): Promise<void> {
     }
 
     // --- Case 3: plain done --------------------------------------------------------------
-    // 04a has no loop hooks and is excluded from quick_bugfix, so the task completes.
+    // 13-pr-wait has no loop hooks and is the last step of quick_bugfix, so the task completes.
     {
       const taskId = await makeTask('plain done dup', {
         executionPath: 'quick_bugfix',
-        currentStepId: '04a-spec-audit',
+        currentStepId: '13-pr-wait',
         currentRound: 0,
       });
-      await insertDoneStep(taskId, '04a-spec-audit', 0, 4.6, {});
-      await enqueueDuplicate(taskId, '04a-spec-audit', 0);
+      await insertDoneStep(taskId, '13-pr-wait', 0, 13, {});
+      await enqueueDuplicate(taskId, '13-pr-wait', 0);
 
       const task = await pollUntil(
         () => loadTask(db, taskId),
