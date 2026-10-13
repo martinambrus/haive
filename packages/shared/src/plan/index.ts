@@ -9,3 +9,4 @@ export * from './apply-patch.js';
 export * from './impact.js';
 export * from './describe.js';
 export * from './merge-lock.js';
+export * from './merge-mirror.js';
