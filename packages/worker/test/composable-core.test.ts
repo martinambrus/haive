@@ -220,6 +220,8 @@ describe('core composable catalog', () => {
     ['08-phase-5-verify', '11-phase-8-learning', 'learnings'],
     ['01b-install-plugins', '07-phase-2-implement', 'implementation'],
     ['07b-phase-4-validate', '07c-ddev-reconcile', 'reconciled'],
+    ['07-phase-2-implement', '11b1-rag-source-selection', 'rag-scope'],
+    ['04-verify-environment', '07-phase-2-implement', 'implementation'],
     ['11d-skill-sync', '11a-gate-4-push', 'pushed'],
   ])('rejects %s placed after %s', (early, late, token) => {
     const setup = [
@@ -330,6 +332,18 @@ describe('core composable catalog', () => {
         .filter((id) => catalog.has(id));
     const order = [...ordered('env_replicate'), ...ordered('workflow')];
     expect(validateComposition(order, catalog)).toEqual([]);
+  });
+
+  it('runs the RAG scope picker inside the worktree', () => {
+    expect(
+      validateComposition(['11b1-rag-source-selection', '01-worktree-setup'], catalog),
+    ).toContainEqual(
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '11b1-rag-source-selection',
+        needs: 'worktree',
+      }),
+    );
   });
 
   it('requires an image build after declaring dependencies', () => {

@@ -18,6 +18,7 @@ const EDITS_PRECEDE = [
   'db-saved',
   'reconciled',
   'learnings',
+  'rag-scope',
 ];
 
 export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
@@ -57,6 +58,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'env-image', reason: 'Checks the built, ready image.' }],
     provides: [],
+    precedes: ['app-runtime', 'implementation'],
   },
   {
     stepId: '00a-sync-base',
@@ -216,6 +218,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       'db-saved',
       'reconciled',
       'learnings',
+      'rag-scope',
     ],
     loopTargetStepId: IMPLEMENT,
     loopBudgetEditable: true,
@@ -241,7 +244,15 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     requires: [needWorktree],
     provides: ['tests'],
     removes: ['clean-tree'],
-    precedes: ['verification', 'review', 'commit', 'reindexed', 'db-saved', 'learnings'],
+    precedes: [
+      'verification',
+      'review',
+      'commit',
+      'reindexed',
+      'db-saved',
+      'learnings',
+      'rag-scope',
+    ],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -282,7 +293,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     requires: [needWorktree],
     provides: ['learnings'],
     removes: ['clean-tree'],
-    precedes: ['pushed', 'reindexed'],
+    precedes: ['pushed', 'reindexed', 'rag-scope'],
     loopTargetStepId: '11-phase-8-learning',
   },
   {
@@ -296,7 +307,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     ],
     provides: ['skills-synced'],
     removes: ['clean-tree'],
-    precedes: ['pushed', 'reindexed'],
+    precedes: ['pushed', 'reindexed', 'rag-scope'],
   },
   {
     stepId: '11b-kb-commit',
@@ -316,7 +327,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Choose RAG index scope',
     group: 'knowledge',
     dispatchesCli: false,
-    requires: [],
+    requires: [needWorktree],
     provides: ['rag-scope'],
   },
   {
