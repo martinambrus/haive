@@ -567,3 +567,15 @@ describe('review round 2', () => {
     ]);
   });
 });
+
+describe('step id length', () => {
+  it('refuses a prompt step whose custom step id would not fit a 128-character step_id column', () => {
+    const longType = 'a'.repeat(60);
+    const fits = { ...ctx, typeSlug: longType };
+    expect(kinds(entry(), fits)).toEqual([]);
+    const slug = 'b'.repeat(128 - `custom.${longType}.`.length + 1);
+    expect(kinds({ ...entry(), slug } as PromptStepValidationInput, fits)).toContain(
+      'step-id-too-long',
+    );
+  });
+});
