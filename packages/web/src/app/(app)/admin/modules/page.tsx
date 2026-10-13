@@ -15,6 +15,7 @@ const STATE_BADGE: Record<
   'api-only': { variant: 'warning', label: 'Api only' },
   'worker-only': { variant: 'warning', label: 'Worker only' },
   unrecorded: { variant: 'info', label: 'Not recorded yet' },
+  unknown: { variant: 'info', label: 'Worker not reported' },
 };
 
 function ago(iso: string): string {

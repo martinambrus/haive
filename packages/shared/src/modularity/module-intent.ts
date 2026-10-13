@@ -4,6 +4,7 @@ export const MODULE_STATES = [
   'api-only',
   'worker-only',
   'unrecorded',
+  'unknown',
 ] as const;
 export type ModuleState = (typeof MODULE_STATES)[number];
 
@@ -57,7 +58,8 @@ function readWorkerReport(raw: unknown): { at: string | null; versions: Map<stri
 
 /**
  * One row per module id seen by the intent table, the api or the worker report. `missing` is the
- * table's structural marker; a recorded row that neither process now loads is shown missing too.
+ * table's structural marker; a recorded row that neither process now loads is shown missing too,
+ * and without a valid worker report a recorded row's worker side is `unknown`.
  */
 export function diffModuleIntent(
   intentRows: readonly ModuleIntentRow[],
@@ -77,7 +79,9 @@ export function diffModuleIntent(
     const inWorker = workerVersion !== null;
     let state: ModuleState;
     if (row === null) state = inApi ? 'unrecorded' : 'worker-only';
-    else if (row.missingAt !== null || (!inApi && !inWorker)) state = 'missing';
+    else if (row.missingAt !== null) state = 'missing';
+    else if (worker.at === null) state = 'unknown';
+    else if (!inApi && !inWorker) state = 'missing';
     else if (inApi && inWorker) state = 'loaded';
     else state = inApi ? 'api-only' : 'worker-only';
     const rowVersion = row?.installedVersion ?? null;
