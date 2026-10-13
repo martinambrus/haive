@@ -7,6 +7,7 @@ import {
   MERGE_CAPABLE_STEP_IDS,
 } from '../src/step-engine/composable-core.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
+import { orderWorkflowRunList } from '../src/orchestrator/execution-paths.js';
 
 const catalog = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e] as const));
 const replace = (stepId: string, patch: Partial<ComposableStepEntry>): ComposableStepEntry[] =>
@@ -227,8 +228,8 @@ describe('core composable catalog', () => {
     ['01c-ddev-env', '11b1-rag-source-selection', 'rag-scope'],
     ['01b-install-plugins', '11d-skill-sync', 'skills-synced'],
     ['11b-kb-commit', '11c-rag-reindex', 'reindexed'],
-    ['04-verify-environment', '00a-sync-base', 'base-synced'],
-    ['03-build-image', '00a-sync-base', 'base-synced'],
+    ['00a-sync-base', '01-declare-deps', 'env-deps'],
+    ['00a-sync-base', '03-build-image', 'env-image'],
     ['01b-install-plugins', '01a-app-boot', 'app-runtime'],
     ['11b-kb-commit', '11b1-rag-source-selection', 'rag-scope'],
     ['11d-skill-sync', '11a-gate-4-push', 'pushed'],
@@ -333,13 +334,15 @@ describe('core composable catalog', () => {
     ).toEqual([]);
   });
 
-  it('raises no issue at all on the environment order followed by the workflow order', () => {
-    const ordered = (type: 'workflow' | 'env_replicate') =>
-      stepRegistry
-        .listByWorkflow(type)
-        .map((s) => s.metadata.id)
-        .filter((id) => catalog.has(id));
-    const order = [...ordered('env_replicate'), ...ordered('workflow')];
+  it('raises no issue at all on the built-in workflow run list, environment prelude included', () => {
+    const order = orderWorkflowRunList(
+      stepRegistry.listByWorkflow('workflow'),
+      stepRegistry.listByWorkflow('env_replicate'),
+      null,
+    )
+      .map((s) => s.metadata.id)
+      .filter((id) => catalog.has(id));
+    expect(order.length).toBeGreaterThan(30);
     expect(validateComposition(order, catalog)).toEqual([]);
   });
 

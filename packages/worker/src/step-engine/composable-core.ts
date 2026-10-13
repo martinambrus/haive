@@ -30,7 +30,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     requires: [],
     provides: ['env-deps'],
     entails: ['env-image'],
-    precedes: ['worktree', 'discovery', 'spec', 'base-synced', 'cleaned'],
+    precedes: ['worktree', 'discovery', 'spec', 'cleaned'],
   },
   {
     stepId: '02-generate-dockerfile',
@@ -49,7 +49,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'env-dockerfile', reason: 'Fails without a generated Dockerfile.' }],
     provides: ['env-image'],
-    precedes: ['worktree', 'discovery', 'spec', 'browser-choice', 'base-synced', 'cleaned'],
+    precedes: ['worktree', 'discovery', 'spec', 'browser-choice', 'cleaned'],
   },
   {
     stepId: '04-verify-environment',
@@ -66,7 +66,6 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       'commit',
       'learnings',
       'skills-synced',
-      'base-synced',
       'cleaned',
     ],
   },
@@ -76,8 +75,8 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'setup',
     dispatchesCli: true,
     requires: [],
-    provides: ['base-synced'],
-    precedes: ['worktree', 'discovery', 'spec'],
+    provides: [],
+    precedes: ['worktree', 'discovery', 'spec', 'env-deps', 'env-dockerfile', 'env-image'],
   },
   {
     stepId: '01-worktree-setup',
