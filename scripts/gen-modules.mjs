@@ -97,6 +97,12 @@ const webPackage = JSON.parse(readFileSync(join(root, 'packages', 'web', 'packag
 const webModules = packages
   .filter((pkg) => pkg.exports?.['./web'] !== undefined)
   .map((pkg) => {
+    if (pkg.exports?.['./manifest'] === undefined) {
+      console.error(
+        `gen-modules: ${pkg.name} exports ./web but no ./manifest; a module needs a manifest`,
+      );
+      process.exit(1);
+    }
     const id = /^@haive\/module-([a-z0-9][a-z0-9-]*)$/.exec(pkg.name)?.[1];
     if (id === undefined) {
       console.error(
