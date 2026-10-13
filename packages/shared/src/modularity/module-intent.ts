@@ -43,7 +43,9 @@ function readWorkerReport(raw: unknown): { at: string | null; versions: Map<stri
   const versions = new Map<string, string>();
   if (typeof raw !== 'object' || raw === null) return { at: null, versions };
   const { at, modules } = raw as { at?: unknown; modules?: unknown };
-  if (typeof at !== 'string' || !Array.isArray(modules)) return { at: null, versions };
+  if (typeof at !== 'string' || Number.isNaN(Date.parse(at)) || !Array.isArray(modules)) {
+    return { at: null, versions };
+  }
   for (const entry of modules as unknown[]) {
     const { id, version } = (entry ?? {}) as { id?: unknown; version?: unknown };
     if (typeof id !== 'string' || typeof version !== 'string')
