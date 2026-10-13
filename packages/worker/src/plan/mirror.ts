@@ -907,12 +907,10 @@ async function convergePlanQuestions(tx: PlanMirrorTx, repositoryId: string): Pr
   const local = (await renderPlanMirror(tx, repositoryId))?.mirror;
   const byId = new Map((local?.nodes ?? []).map((n) => [n.id, n as Record<string, unknown>]));
   const agreed = new Map<string, unknown>();
-  const closed = new Set<string>();
   for (const q of asked) {
     const node = byId.get(q.nodeId);
     if (node && !sameValue(conflictSide(node[q.field]), q.row.incoming)) continue;
     if (node) agreed.set(`${q.nodeId}\0${q.field}`, node[q.field]);
-    closed.add(q.row.id);
     await tx
       .update(schema.projectStateConflicts)
       .set({ resolution: 'converged', resolvedAt: new Date() })
@@ -926,60 +924,18 @@ async function convergePlanQuestions(tx: PlanMirrorTx, repositoryId: string): Pr
     .limit(1);
   const base = planMirrorPayloadSchema.safeParse(state?.syncedSnapshot);
   if (!base.success) return;
-  // A node both sides added joins the base once its last question settles, under a base parent.
-  const inBase = new Set(base.data.nodes.map((n) => n.id));
-  const stillAsked = new Set(asked.filter((q) => !closed.has(q.row.id)).map((q) => q.nodeId));
-  const joinedIds = new Set(
-    (local?.nodes ?? [])
-      .filter(
-        (n) =>
-          !inBase.has(n.id) &&
-          !stillAsked.has(n.id) &&
-          asked.some((q) => q.nodeId === n.id) &&
-          (n.parentId === null || inBase.has(n.parentId)),
-      )
-      .map((n) => n.id),
-  );
-  // Its new subtree, which left the base with it, comes back with it.
-  for (let grew = true; grew;) {
-    grew = false;
-    for (const n of local?.nodes ?? []) {
-      if (inBase.has(n.id) || joinedIds.has(n.id) || stillAsked.has(n.id)) continue;
-      if (n.parentId !== null && joinedIds.has(n.parentId)) {
-        joinedIds.add(n.id);
-        grew = true;
-      }
-    }
-  }
-  const joining = (local?.nodes ?? []).filter((n) => joinedIds.has(n.id));
-  const present = new Set([...inBase, ...joinedIds]);
-  const edgeKeyOf = (e: { fromNodeId: string; toNodeId: string; kind: string }) =>
-    JSON.stringify([e.fromNodeId, e.toNodeId, e.kind]);
-  const baseEdges = new Set(base.data.edges.map(edgeKeyOf));
-  const joiningEdges = (local?.edges ?? []).filter(
-    (e) =>
-      (joinedIds.has(e.fromNodeId) || joinedIds.has(e.toNodeId)) &&
-      present.has(e.fromNodeId) &&
-      present.has(e.toNodeId) &&
-      !baseEdges.has(edgeKeyOf(e)),
-  );
-  const joiningLinks =
-    'codeLinks' in base.data && local ? local.codeLinks.filter((l) => joinedIds.has(l.nodeId)) : [];
+  // A node both sides added stays out even when settled: only the asked field is known to be shared,
+  // and taking this side's copy would make an unpushed edit or child read as shared.
   const snapshot = {
     ...base.data,
-    edges: [...base.data.edges, ...joiningEdges],
-    ...('codeLinks' in base.data ? { codeLinks: [...base.data.codeLinks, ...joiningLinks] } : {}),
-    nodes: [
-      ...base.data.nodes.map((n) => {
-        const patched: Record<string, unknown> = { ...n };
-        for (const field of PLAN_MIRROR_ASKED_FIELDS) {
-          const key = `${n.id}\0${field}`;
-          if (agreed.has(key)) patched[field] = agreed.get(key);
-        }
-        return patched;
-      }),
-      ...joining,
-    ],
+    nodes: base.data.nodes.map((n) => {
+      const patched: Record<string, unknown> = { ...n };
+      for (const field of PLAN_MIRROR_ASKED_FIELDS) {
+        const key = `${n.id}\0${field}`;
+        if (agreed.has(key)) patched[field] = agreed.get(key);
+      }
+      return patched;
+    }),
   } as PlanMirrorPayload;
   await tx
     .update(schema.planMirrorState)

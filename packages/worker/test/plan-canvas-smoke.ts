@@ -2804,14 +2804,14 @@ async function main(): Promise<void> {
     await pendingPlanRows(sId),
   );
 
-  // Settled on the incoming value, the node both sides added joins the base.
+  // Settled on the incoming value, the question closes; the node stays out of the base, since only
+  // the asked field is known to be shared.
   await editS(yId, { title: 'Y there' });
   await writePlanMirror(db, sId, sDir);
   check(
-    'three-way: a node both sides added joins the base with its new subtree once its question settles',
+    'three-way: a settled question on a node both sides added closes and keeps it out of the base',
     !(await pendingPlanRows(sId)).some((r) => r.unit === `plan/${yId}#title`) &&
-      (await baseOf())?.nodes.find((n) => n.id === yId)?.title === 'Y there' &&
-      (await baseOf())?.nodes.some((n) => n.id === y1Id) === true,
+      !(await baseOf())?.nodes.some((n) => n.id === yId || n.id === y1Id),
     await baseOf(),
   );
   await applyPlanPatch(
