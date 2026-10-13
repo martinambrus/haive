@@ -2,10 +2,13 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
-import { stepRegistry } from '../step-engine/registry.js';
+import { stepRegistry, type StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
+import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
 import { builtinTaskTypeRows } from '../step-engine/task-type-seed.js';
+
+export type FixLoopDef = NonNullable<typeof schema.taskTypeDefinitions.$inferSelect.fixLoop>;
 
 export interface ResolvedTaskContext {
   taskId: string;
@@ -35,6 +38,7 @@ export interface ResolvedTaskContext {
   completedAt: Date | null;
   runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
   runListSnapshot: string[] | null;
+  fixLoop?: FixLoopDef | null;
 }
 
 export async function buildRunList(
@@ -63,18 +67,33 @@ export async function buildRunList(
     : stepRegistry.listByWorkflow(ctx.workflowType);
 }
 
-export async function runListStrategyFor(
+export async function taskTypeRuntimeFor(
   db: Database,
   slug: string,
-): Promise<ResolvedTaskContext['runListStrategy']> {
+): Promise<Pick<ResolvedTaskContext, 'runListStrategy' | 'fixLoop'>> {
   const row = await db.query.taskTypeDefinitions.findFirst({
     where: eq(schema.taskTypeDefinitions.slug, slug),
   });
-  if (row) return row.runListStrategy;
+  if (row) return { runListStrategy: row.runListStrategy, fixLoop: row.fixLoop ?? null };
   // Smokes and a fresh install run worker code on a database the boot never seeded.
   const builtin = builtinTaskTypeRows(stepRegistry).find((r) => r.slug === slug);
   if (!builtin) throw new Error(`task type ${slug} has no definition`);
-  return builtin.runListStrategy;
+  return { runListStrategy: builtin.runListStrategy, fixLoop: null };
+}
+
+export function resolveFixLoopTarget(args: {
+  taskType: string;
+  fixLoop: FixLoopDef | null | undefined;
+  runList: readonly StepDefinition[];
+  registry: Pick<StepRegistry, 'get'>;
+}): { ok: true; def: StepDefinition } | { ok: false; reason: string } {
+  const targetId = args.fixLoop?.targetStepId ?? FIX_LOOP_TARGET_STEP_ID;
+  const def = args.registry.get(targetId);
+  if (def && args.runList.some((s) => s.metadata.id === targetId)) return { ok: true, def };
+  return {
+    ok: false,
+    reason: `fix loop target ${targetId} is not in the run list of task type ${args.taskType}`,
+  };
 }
 
 /** Assemble a run_app task's run list. The env + runtime steps are reused BY ID
