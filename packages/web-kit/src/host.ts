@@ -9,7 +9,7 @@ export interface HostApi {
 export interface HostApiError extends Error {
   status: number;
   code?: string;
-  issues?: { path: string; message: string }[];
+  issues?: { path?: string; message?: string }[];
   /** The parsed error body, verbatim. Kept so an endpoint can hand the UI
    *  structured detail its message cannot carry — the plan delete's 409 names
    *  the tasks blocking it, and a list of links beats a sentence telling the

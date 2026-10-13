@@ -25,7 +25,20 @@ export const ROOT_WRITING_STEP_IDS: readonly string[] = [
   '01-worktree-setup',
   '12-worktree-cleanup',
 ];
-const DATABASE_PIN_STEP_IDS = ['01c1-restore-database', '11g-save-database'];
+const RESTORE_DATABASE_STEP_ID = '01c1-restore-database';
+const DATABASE_PIN_STEP_IDS = [RESTORE_DATABASE_STEP_ID, '11g-save-database'];
+
+export function restoresDatabase(def: {
+  source: string;
+  runListStrategy: string;
+  stepIds: readonly string[] | null;
+}): boolean {
+  return (
+    def.source === 'admin' &&
+    def.runListStrategy === 'static' &&
+    def.stepIds?.includes(RESTORE_DATABASE_STEP_ID) === true
+  );
+}
 
 export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
@@ -161,6 +174,6 @@ export async function definitionForCreate(
     simplifyCode: custom && has(SIMPLIFY_STEP_ID),
     takesRootLock: slug === 'workflow' || ROOT_WRITING_STEP_IDS.some(has),
     pinsDatabase: custom && DATABASE_PIN_STEP_IDS.some(has),
-    restoresDatabase: custom && has('01c1-restore-database'),
+    restoresDatabase: restoresDatabase(def),
   };
 }

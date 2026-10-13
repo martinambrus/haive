@@ -108,6 +108,8 @@ export const publicTaskTypeSchema = z.object({
   description: z.string().nullable(),
   requiresRepository: z.boolean(),
   sortOrder: z.number().int(),
+  restoresDatabase: z.boolean(),
+  dispatchesCli: z.boolean(),
   available: z.boolean(),
   reason: z.enum(TASK_TYPE_UNAVAILABLE_REASONS).optional(),
 });

@@ -15,6 +15,7 @@ import {
 } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import { restoresDatabase } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -28,6 +29,7 @@ type DefinitionRow = typeof schema.taskTypeDefinitions.$inferSelect;
 interface Catalog {
   synced: boolean;
   stepIds: Set<string>;
+  dispatchesCli: Set<string>;
   composable: Map<string, ComposableStepEntry>;
   steps: { stepId: string; source: string; title: string; entry: ComposableStepEntry }[];
 }
@@ -37,6 +39,7 @@ async function loadCatalog(db: Db): Promise<Catalog> {
   const catalog: Catalog = {
     synced: rows.length > 0,
     stepIds: new Set(rows.map((r) => r.stepId)),
+    dispatchesCli: new Set(rows.filter((r) => r.dispatchesCli).map((r) => r.stepId)),
     composable: new Map(),
     steps: [],
   };
@@ -105,6 +108,17 @@ function allowedFields(row: DefinitionRow): string[] | null {
   return MODULE_FIELDS;
 }
 
+const UPDATABLE_FIELDS = Object.keys(taskTypeUpdateSchema.shape);
+
+function editableFieldsOf(row: DefinitionRow): string[] {
+  return allowedFields(row) ?? UPDATABLE_FIELDS;
+}
+
+function dispatchesCliOf(row: DefinitionRow, catalog: Catalog): boolean {
+  if (row.runListStrategy !== 'static' || row.stepIds === null) return true;
+  return row.stepIds.some((id) => catalog.dispatchesCli.has(id));
+}
+
 export const adminTaskTypeRoutes = new Hono<AppEnv>();
 adminTaskTypeRoutes.use('*', requireAuth);
 adminTaskTypeRoutes.use('*', requireAdmin);
@@ -128,6 +142,7 @@ adminTaskTypeRoutes.get('/', async (c) => {
     taskTypes: rows.map((row) => ({
       ...row,
       builtin: row.source === 'builtin',
+      editableFields: editableFieldsOf(row),
       availability: availabilityOf(row, switches, catalog),
       taskCount: taskCounts.get(row.slug) ?? 0,
     })),
@@ -160,7 +175,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
         })
       : [];
   return c.json({
-    taskType: row,
+    taskType: { ...row, editableFields: editableFieldsOf(row) },
     availability: availabilityOf(row, switches, catalog),
     compositionIssues,
   });
@@ -344,6 +359,8 @@ taskTypeRoutes.get('/', async (c) => {
         description: row.description,
         requiresRepository: row.requiresRepository,
         sortOrder: row.sortOrder,
+        restoresDatabase: restoresDatabase(row),
+        dispatchesCli: dispatchesCliOf(row, catalog),
         available: availability.available,
         ...(availability.available ? {} : { reason: availability.reason }),
       });

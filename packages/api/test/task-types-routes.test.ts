@@ -124,6 +124,8 @@ describe('GET /task-types', () => {
           description: null,
           requiresRepository: true,
           sortOrder: 1,
+          restoresDatabase: false,
+          dispatchesCli: true,
           available: true,
         },
       ],

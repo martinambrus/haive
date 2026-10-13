@@ -179,7 +179,7 @@ export function CliProviderForm({
     setIssues(undefined);
   }
 
-  const networkIssues = (issues ?? []).filter((i) => i.path.startsWith('networkPolicy'));
+  const networkIssues = (issues ?? []).filter((i) => i.path?.startsWith('networkPolicy') === true);
   const [submitting, setSubmitting] = useState(false);
   const [existingSecrets, setExistingSecrets] = useState<CliProviderSecret[]>([]);
   // The load rewrites the text when it answers, and a save deletes every secret the text does not

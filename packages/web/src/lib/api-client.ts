@@ -1,7 +1,15 @@
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
 import type { FormSchema } from '@haive/shared';
-import type { DashboardSpec } from '@haive/shared/modularity';
+import type {
+  ComposableStepEntry,
+  CompositionIssue,
+  CustomTaskTypeCreate,
+  DashboardSpec,
+  PublicTaskType,
+  TaskTypeAvailability,
+  TaskTypeUpdate,
+} from '@haive/shared/modularity';
 import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 
 // A real runtime import, unlike the type-only ones above. `api-origin` has no imports of its own,
@@ -132,12 +140,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = (await res.json().catch(() => ({}))) as {
       error?: string;
       code?: string;
-      issues?: { path: string; message: string }[];
+      issues?: { path?: string; message?: string }[];
     };
     const baseMsg = body.error ?? `HTTP ${res.status}`;
+    const messaged = (body.issues ?? []).filter((i) => typeof i.message === 'string');
     const issuesMsg =
-      body.issues && body.issues.length > 0
-        ? `: ${body.issues.map((i) => `${i.path || '(root)'} — ${i.message}`).join('; ')}`
+      messaged.length > 0
+        ? `: ${messaged.map((i) => `${i.path || '(root)'} — ${i.message}`).join('; ')}`
         : '';
     const error = new Error(baseMsg + issuesMsg) as ApiError;
     error.status = res.status;
@@ -2422,3 +2431,58 @@ export const maintenanceApi = {
       body,
     ),
 };
+
+export interface AdminTaskType {
+  slug: string;
+  displayName: string;
+  description: string | null;
+  runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
+  stepIds: string[] | null;
+  preAnswerDefaults: Record<string, Record<string, unknown>>;
+  stepLoopLimitDefaults: Record<string, number>;
+  fixLoop: unknown;
+  enabled: boolean;
+  selectable: boolean;
+  source: string;
+  requiresRepository: boolean;
+  sortOrder: number;
+  contentHash: string | null;
+  createdAt: string;
+  updatedAt: string;
+  editableFields: string[];
+}
+
+export type AdminTaskTypeListed = AdminTaskType & {
+  builtin: boolean;
+  availability: TaskTypeAvailability;
+  taskCount: number;
+};
+
+export interface TaskTypeCatalog {
+  steps: { stepId: string; source: string; title: string; entry: ComposableStepEntry }[];
+  groups: { id: string; label: string }[];
+  synced: boolean;
+}
+
+export const listAdminTaskTypes = () =>
+  api.get<{ taskTypes: AdminTaskTypeListed[] }>('/admin/task-types');
+
+export const getAdminTaskType = (slug: string) =>
+  api.get<{
+    taskType: AdminTaskType;
+    availability: TaskTypeAvailability;
+    compositionIssues: CompositionIssue[];
+  }>(`/admin/task-types/${encodeURIComponent(slug)}`);
+
+export const getTaskTypeCatalog = () => api.get<TaskTypeCatalog>('/admin/task-types/catalog');
+
+export const createTaskType = (body: CustomTaskTypeCreate) =>
+  api.post<{ taskType: AdminTaskType }>('/admin/task-types', body);
+
+export const updateTaskType = (slug: string, body: TaskTypeUpdate) =>
+  api.patch<{ taskType: AdminTaskType }>(`/admin/task-types/${encodeURIComponent(slug)}`, body);
+
+export const deleteTaskType = (slug: string) =>
+  api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);
+
+export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');
