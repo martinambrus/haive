@@ -80,8 +80,9 @@ run continuously during implementation. Both models ran at low reasoning effort.
 ### P0. Measure the gap before building anything
 
 Pick one finished workflow task with a detailed spec on a NON-DDEV repository with declared verify
-and test commands, so every command can run inside the sandbox and P0 needs no bridge (P1 covers
-DDEV). Re-run it from the same base on the dev install, 07 on a cheaper model, in two arms:
+and test commands and its test framework at the repository root, so every command can run inside
+the sandbox from 07's working directory and P0 needs no bridge (P1 covers DDEV and frameworks below
+the root). Re-run it from the same base on the dev install, 07 on a cheaper model, in two arms:
 
 - **A:** as today, which includes the default rules' generic "Own the verification" instruction
   (F1). A therefore measures generic verification, not none; the comparison is generic against
@@ -89,7 +90,8 @@ DDEV). Re-run it from the same base on the dev install, 07 on a cheaper model, i
 - **B:** 07's prompt extended by hand (a local patch, never committed) with the commands 08 would
   resolve for this repository (declared, else detected) and the full test command, and the
   instruction to run them before finishing. 08b's selective command is not available on an initial
-  pass (F2); on a fix round B also names the last `testRun.command`.
+  pass (F2); on a fix round B also names the last `testRun.command`, which is a display string that
+  runs correctly from the root only because the fixture's framework sits there.
 
 At least three runs per arm, each on its own copy of the repository state (the AIDE² P1 rule). Read
 per arm: `fix_loop.requested` rounds, which step sent each one back, gate-2 outcome, and tokens,
@@ -127,13 +129,31 @@ lint, typecheck and the full test command through 08's `execSlot` and its classi
 selective test run through 08b's `runTestCommand`, which runs a structured `TestCommand` (kind,
 args, and a `cwd` for a framework below the root). 08b persists only the flattened display string
 (`testRun.command`) today, which cannot rebuild that `cwd`, so P1 has 08b also persist the
-structured command it ran. A check returns one of: passed, failed with its scoped output, or NOT RUN with the
-reason. A NOT RUN result tells the agent the check is unavailable and not its to fix, which keeps
-the fix-loop rule that no agent effort goes to a failure no agent can repair. How the agent asks
-(an MCP tool on the task's existing surface, or a file-based request the step polls) is D3. Rules
-the result keeps:
+structured command it ran. Two inputs those runners take from earlier steps do not exist yet on
+07's initial pass, and the request path supplies them itself:
 
-- Lint is scoped as 08 scopes it: only violations at lines the change wrote are the agent's to fix.
+- **The agent-pool lease.** A step command reserves a slot of the agent pool
+  (`runStepCommandInSandbox`, `docs/architecture/runtime-capacity.md`), and the requesting 07
+  invocation already holds one until it finishes. A check that reserved a second slot would wait on
+  capacity its own caller is holding: at `MAX_PARALLEL_AGENTS=1`, or with every slot held by 07
+  runs, it would time out as NOT RUN every time. A requested check therefore runs under the
+  requesting invocation's lease and never reserves its own.
+- **The test framework.** 08 reads it from 08b's persisted detect (`08-phase-5-verify.ts`), which
+  does not exist before 08b runs. Without it a Playwright slot gets no browser provisioning and
+  `classifyTestEnvFailure` runs with `null`, so a missing browser would come back failed rather
+  than NOT RUN. The request path runs 08b's `scanTestInfra` itself.
+
+A check returns one of: passed, failed with its output, or NOT RUN with the reason. A NOT RUN
+result tells the agent the check is unavailable and not its to fix, which keeps the fix-loop rule
+that no agent effort goes to a failure no agent can repair. How the agent asks (an MCP tool on the
+task's existing surface, or a file-based request the step polls) is D3. Rules the result keeps:
+
+- Lint keeps 08's scoping, which is partial. Only a direct phpcs run is filtered to the lines the
+  change wrote (`_lint-scope.ts`); a package.json or composer lint script and a declared lint
+  command are unscoped, and their exit decides alone (`docs/architecture/fix-loop.md`). A scoped
+  result names the change's own violations. An unscoped failure is returned marked unscoped, with
+  its output, and the prompt tells the agent to fix only violations at lines it changed and to
+  leave the rest, as 08's own diagnosis does for pre-existing phpcs violations.
 - The prompt says not to weaken a check to make it pass; P6 records whether that held.
 - 08, 08b and the reviewers still run as today: the final gate stays independent of what the
   implementer ran and reported.
@@ -144,7 +164,8 @@ follow the step's chosen CLI and model, is D1.
 Verification: prompt tests for both setting values; a selective test request for a framework below
 the root runs from that framework's directory, as 08b ran it; a check request on a fixture repository runs
 exactly the command 08 runs for that slot; a missing program and a test-environment failure each
-come back NOT RUN, not failed; a DDEV repository's check runs host-side and returns; one live task
+come back NOT RUN, not failed; a check requested at `MAX_PARALLEL_AGENTS=1` runs rather than
+waiting on its own caller's slot; a DDEV repository's check runs host-side and returns; one live task
 with the setting on, where 07's transcript shows the requests and their results, and 08 still runs
 its own checks. Rollback: the
 setting is additive; off restores today's prompt.
