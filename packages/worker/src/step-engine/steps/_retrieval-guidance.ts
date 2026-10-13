@@ -1,4 +1,5 @@
 import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { PERSONA_ID_PATTERN_SOURCE } from '@haive/shared/modularity';
 
 /** Shared retrieval guidance spliced into the workflow prompt builders (discovery,
  *  spec-quality, spec-audit, resolve-warnings, dag-execute, implement, ...).
@@ -136,8 +137,10 @@ const PROMPT_VARIANT_TABLE: ReadonlyArray<
 
 const AGENT_GUIDANCE_START = '[[HAIVE_AGENT_DEFINITION:';
 const AGENT_GUIDANCE_END = '[[HAIVE_AGENT_DEFINITION_END]]';
-const AGENT_GUIDANCE_PATTERN =
-  /\[\[HAIVE_AGENT_DEFINITION:([a-z0-9-]+)\]\]\n([\s\S]*?)\n\[\[HAIVE_AGENT_DEFINITION_END\]\]/g;
+const AGENT_GUIDANCE_PATTERN = new RegExp(
+  `\\[\\[HAIVE_AGENT_DEFINITION:(${PERSONA_ID_PATTERN_SOURCE})\\]\\]\\n([\\s\\S]*?)\\n\\[\\[HAIVE_AGENT_DEFINITION_END\\]\\]`,
+  'g',
+);
 
 /** The persona ids a prompt carries as marker blocks — unique, in code-unit order. Read at
  *  DISPATCH, before `adaptPromptForCliCapabilities` rewrites every marker into the pointer
