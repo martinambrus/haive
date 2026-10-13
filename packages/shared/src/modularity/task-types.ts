@@ -33,6 +33,7 @@ export interface TaskTypeAvailabilityInput {
     selectable: boolean;
     runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
     stepIds: readonly string[] | null;
+    requiresRepository: boolean;
   };
   switches: { customEnabled: boolean; moduleEnabled: boolean };
   catalog: {
@@ -69,7 +70,9 @@ export function resolveTaskTypeAvailability(
   const missing = definition.stepIds.filter((id) => !catalog.stepIds.has(id));
   if (missing.length > 0) return { available: false, reason: 'missing-step', stepIds: missing };
   if (definition.source === 'admin') {
-    const issues = validateComposition(definition.stepIds, catalog.composable);
+    const issues = validateComposition(definition.stepIds, catalog.composable, {
+      requiresRepository: definition.requiresRepository,
+    });
     if (issues.length > 0) return { available: false, reason: 'invalid-composition', issues };
   }
   return { available: true };

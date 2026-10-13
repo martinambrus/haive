@@ -1,4 +1,8 @@
-import type { ComposableStepEntry } from './contracts.js';
+import {
+  REPOSITORY_TOKEN,
+  IMPLICIT_COMPOSITION_TOKENS,
+  type ComposableStepEntry,
+} from './contracts.js';
 
 export type CompositionIssue =
   | { kind: 'unknown-step'; index: number; stepId: string }
@@ -13,11 +17,13 @@ export type CompositionIssue =
 export function validateComposition(
   stepIds: readonly string[],
   catalog: ReadonlyMap<string, ComposableStepEntry>,
+  opts: { requiresRepository?: boolean } = {},
 ): CompositionIssue[] {
   if (stepIds.length === 0) return [{ kind: 'empty' }];
   const issues: CompositionIssue[] = [];
-  const provided = new Set<string>();
-  const everProvided = new Set<string>();
+  const initial = opts.requiresRepository === false ? [] : [REPOSITORY_TOKEN];
+  const provided = new Set<string>(initial);
+  const everProvided = new Set<string>(initial);
   const seen = new Map<string, number>();
   let closing: { stepId: string; index: number } | undefined;
   const entailed: { index: number; stepId: string; token: string }[] = [];
@@ -55,6 +61,7 @@ export function validateComposition(
       issues.push({ kind: 'loop-after-closing', index, stepId, closingStepId: closing.stepId });
     }
     for (const token of entry.provides) {
+      if (IMPLICIT_COMPOSITION_TOKENS.has(token)) continue;
       provided.add(token);
       everProvided.add(token);
     }

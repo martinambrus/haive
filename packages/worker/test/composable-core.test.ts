@@ -512,3 +512,46 @@ describe('core composable catalog', () => {
     });
   });
 });
+
+describe('core composable catalog repository token', () => {
+  beforeAll(() => registerStepsOnce());
+  const repoLess = { requiresRepository: false };
+  const unmet = (index: number, stepId: string, needs: string) =>
+    expect.objectContaining({ kind: 'unmet-need', index, stepId, needs });
+
+  it('accepts a spec-only composition for a repo-less type', () => {
+    const order = [
+      '03-phase-0a-discovery',
+      '04-phase-0b-pre-planning',
+      '05-phase-0b5-spec-quality',
+      '06-gate-1-spec-approval',
+    ];
+    expect(validateComposition(order, catalog, repoLess)).toEqual([]);
+    expect(validateComposition(order, catalog)).toEqual([]);
+  });
+
+  it.each(['01-worktree-setup', '00a-sync-base', '01-declare-deps'])(
+    'refuses %s for a repo-less type',
+    (stepId) => {
+      const needs = (opts?: { requiresRepository: boolean }) =>
+        validateComposition([stepId], catalog, opts).filter((i) => i.kind === 'unmet-need');
+      expect(needs(repoLess)).toEqual([unmet(0, stepId, 'repository')]);
+      expect(needs()).toEqual([]);
+    },
+  );
+
+  it('refuses implementation without a worktree for a repo-less type', () => {
+    expect(validateComposition(['07-phase-2-implement'], catalog, repoLess)).toEqual([
+      unmet(0, '07-phase-2-implement', 'worktree'),
+    ]);
+  });
+
+  it('throws for an entry needing an implicit token nobody knows', () => {
+    const bad = replace('01-worktree-setup', {
+      requires: [{ needs: 'unknown-implicit', reason: 'x' }],
+    });
+    expect(() => assertCoreComposableCatalog(stepRegistry, bad)).toThrow(
+      /01-worktree-setup.*unknown-implicit/,
+    );
+  });
+});

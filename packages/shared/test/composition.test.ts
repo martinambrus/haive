@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { validateComposition, type ComposableStepEntry } from '../src/modularity/index.js';
+import {
+  composableStepEntrySchema,
+  validateComposition,
+  type ComposableStepEntry,
+} from '../src/modularity/index.js';
 
 function entry(
   stepId: string,
@@ -189,6 +193,29 @@ describe('validateComposition', () => {
     expect(validateComposition(['runtime', 'implement', 'reconcile'], catalog)).toEqual([]);
   });
 
+  it('never lets a step provide the implicit repository token', () => {
+    const catalog = catalogOf(
+      entry('fake', { provides: ['repository'] }),
+      entry('needs-repo', { needs: ['repository'] }),
+    );
+    expect(
+      validateComposition(['fake', 'needs-repo'], catalog, { requiresRepository: false }),
+    ).toContainEqual(
+      expect.objectContaining({ kind: 'unmet-need', stepId: 'needs-repo', needs: 'repository' }),
+    );
+  });
+
+  it('refuses an entry that declares an implicit token', () => {
+    const base = entry('x');
+    expect(composableStepEntrySchema.safeParse({ ...base, provides: ['repository'] }).success).toBe(
+      false,
+    );
+    expect(composableStepEntrySchema.safeParse({ ...base, removes: ['repository'] }).success).toBe(
+      false,
+    );
+    expect(composableStepEntrySchema.safeParse(base).success).toBe(true);
+  });
+
   it('withdraws a token a step removes', () => {
     const catalog = catalogOf(
       entry('cut', { provides: ['worktree'] }),
@@ -233,5 +260,56 @@ describe('validateComposition', () => {
         closingStepId: 'push-and-check',
       },
     ]);
+  });
+});
+
+describe('validateComposition repository token', () => {
+  const repoCatalog = catalogOf(
+    entry('make-worktree', { needs: ['repository'], provides: ['worktree'] }),
+    entry('use-worktree', { needs: ['worktree'] }),
+    entry('spec-a'),
+    entry('spec-b'),
+  );
+  const unmet = (index: number, stepId: string, needs: string) => ({
+    kind: 'unmet-need',
+    index,
+    stepId,
+    needs,
+    reason: `${stepId} needs ${needs}`,
+  });
+
+  it('accepts steps that need no repository for a repo-less type', () => {
+    expect(
+      validateComposition(['spec-a', 'spec-b'], repoCatalog, { requiresRepository: false }),
+    ).toEqual([]);
+  });
+
+  it('refuses a repository-needing step for a repo-less type', () => {
+    expect(
+      validateComposition(['make-worktree'], repoCatalog, { requiresRepository: false }),
+    ).toEqual([unmet(0, 'make-worktree', 'repository')]);
+  });
+
+  it('refuses a worktree consumer for a repo-less type', () => {
+    expect(
+      validateComposition(['use-worktree'], repoCatalog, { requiresRepository: false }),
+    ).toEqual([unmet(0, 'use-worktree', 'worktree')]);
+  });
+
+  it('treats an omitted option as requiring a repository', () => {
+    expect(validateComposition(['make-worktree', 'use-worktree'], repoCatalog)).toEqual([]);
+    expect(
+      validateComposition(['make-worktree', 'use-worktree'], repoCatalog, {
+        requiresRepository: true,
+      }),
+    ).toEqual([]);
+  });
+
+  it('keeps the repository for the whole composition', () => {
+    const c = catalogOf(
+      entry('make-worktree', { needs: ['repository'], provides: ['worktree'] }),
+      entry('again', { needs: ['repository'] }),
+    );
+    expect(validateComposition(['make-worktree', 'again'], c)).toEqual([]);
   });
 });

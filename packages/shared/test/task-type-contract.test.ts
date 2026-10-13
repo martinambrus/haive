@@ -42,6 +42,7 @@ function definition(over: Record<string, unknown> = {}) {
     selectable: true,
     runListStrategy: 'static' as const,
     stepIds: ['a', 'b'] as string[] | null,
+    requiresRepository: true,
     ...over,
   };
 }
@@ -243,6 +244,57 @@ describe('resolveTaskTypeAvailability', () => {
         definition: definition({ stepIds: ['b', 'a'] }),
         switches: on,
         catalog,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+});
+
+describe('resolveTaskTypeAvailability repository token', () => {
+  const needy = new Map<string, ComposableStepEntry>([
+    [
+      'cut',
+      {
+        ...entry('cut', { provides: ['wt'] }),
+        requires: [{ needs: 'repository', reason: 'cut needs repository' }],
+      },
+    ],
+    ['plain', entry('plain')],
+  ]);
+  const withRepo = { stepIds: new Set(['cut', 'plain']), composable: needy };
+
+  it('lets a repo-requiring admin type use a repository step', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'admin', stepIds: ['cut'], requiresRepository: true }),
+        switches: on,
+        catalog: withRepo,
+        generic: true,
+      }),
+    ).toEqual({ available: true });
+  });
+
+  it('refuses a repository step on a repo-less admin type', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'admin', stepIds: ['cut'], requiresRepository: false }),
+        switches: on,
+        catalog: withRepo,
+        generic: true,
+      }),
+    ).toMatchObject({
+      available: false,
+      reason: 'invalid-composition',
+      issues: [{ kind: 'unmet-need', stepId: 'cut', needs: 'repository' }],
+    });
+  });
+
+  it('accepts a repo-less admin type made of steps that need no repository', () => {
+    expect(
+      resolveTaskTypeAvailability({
+        definition: definition({ source: 'admin', stepIds: ['plain'], requiresRepository: false }),
+        switches: on,
+        catalog: withRepo,
         generic: true,
       }),
     ).toEqual({ available: true });
