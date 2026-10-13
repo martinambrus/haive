@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatTimeoutBudget } from './format-duration';
+import { formatTimeoutBudget } from './format-duration.js';
 
 describe('formatTimeoutBudget', () => {
   it('keeps hour-scale timeout settings in minutes', () => {

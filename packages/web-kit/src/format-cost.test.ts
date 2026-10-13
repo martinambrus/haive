@@ -5,7 +5,7 @@ import {
   formatCost,
   USD_DISPLAY,
   type CostDisplay,
-} from './format-cost';
+} from './format-cost.js';
 
 // Live ECB figure for 2026-08-18: 1 EUR = 1.1576 USD.
 const EUR: CostDisplay = {

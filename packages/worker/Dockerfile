@@ -62,12 +62,14 @@ COPY packages/database/package.json ./packages/database/
 COPY packages/api/package.json ./packages/api/
 COPY packages/worker/package.json ./packages/worker/
 COPY packages/web/package.json ./packages/web/
+COPY packages/web-kit/package.json ./packages/web-kit/
 COPY modules ./modules
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
 COPY packages/shared ./packages/shared
 COPY packages/database ./packages/database
+COPY packages/web-kit ./packages/web-kit
 COPY packages/worker ./packages/worker
 COPY scripts/gen-modules.mjs ./scripts/gen-modules.mjs
 # @haive/shared imports @haive/database, so database's dist must exist before
@@ -75,6 +77,7 @@ COPY scripts/gen-modules.mjs ./scripts/gen-modules.mjs
 # matching .dockerignore **/node_modules fix and packages/web/Dockerfile.
 RUN pnpm --filter @haive/database build \
  && pnpm --filter @haive/shared build \
+ && pnpm --filter @haive/web-kit build \
  && pnpm --filter './modules/*' build \
  && pnpm --filter @haive/worker build
 

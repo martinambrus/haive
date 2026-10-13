@@ -20,12 +20,12 @@
 set -e
 
 APP="${APP_DIR:-/app}"
-DIST_DIRS="$APP/packages/database/dist $APP/packages/shared/dist"
+DIST_DIRS="$APP/packages/database/dist $APP/packages/shared/dist $APP/packages/web-kit/dist"
 
 # Deliberately not `set -e`-fatal: the outputs still need handing back after a FAILED
 # build, or a half-written dist stays root-owned and the next host build cannot repair it.
 rc=0
-pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter './modules/*' build || rc=$?
+pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/web-kit build && pnpm --filter './modules/*' build || rc=$?
 
 # The repo's owner as the container sees it, so no UID/GID has to be plumbed in from the
 # host. A mount that cannot represent ownership makes this a harmless no-op rather than a
