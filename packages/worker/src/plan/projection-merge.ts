@@ -1,9 +1,11 @@
+import { isUtf8 } from 'node:buffer';
 import { HAIVE_DATA_FILES, type PlanMirror, type PlanMirrorPayload } from '@haive/shared';
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
 import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared/plan';
 import { mergePlanMirror } from '@haive/shared/plan-mirror-merge';
 import {
   PROJECT_STATE_DIR,
+  PROJECT_STATE_LIMITS,
   claimFileName,
   bundleFileName,
   emptyProjectState,
@@ -116,25 +118,43 @@ const STATE_PREFIX = `${PROJECT_STATE_DIR}/`;
 const literal = (p: string): string => `:(literal)${p}`;
 const utf8Path = (raw: string): string => Buffer.from(raw, 'latin1').toString('utf8');
 
-/** The record's files in `rev`'s tree, relative to the state directory; empty where it has none. */
+/** The record's files in `rev`'s tree, relative to the state directory; empty where it has none.
+ *  Bounded as the checkout reader is, by the sizes git lists, before any blob is read. */
 async function readStateTree(worktreePath: string, rev: string): Promise<Map<string, string>> {
   const listing = await gitRun(
     worktreePath,
-    ['ls-tree', '-r', '-z', rev, '--', PROJECT_STATE_DIR],
+    ['ls-tree', '-r', '-l', '-z', rev, '--', PROJECT_STATE_DIR],
     undefined,
     BYTES,
   );
   if (listing.code !== 0) throw new Error(`the state directory of ${rev} could not be listed`);
-  const files = new Map<string, string>();
+  const { maxEntries, maxFileBytes, maxTotalBytes } = PROJECT_STATE_LIMITS;
+  const blobs: { sha: string; rel: string }[] = [];
+  const dirs = new Set<string>();
+  let total = 0;
   for (const entry of listing.stdout.split('\0')) {
     if (entry === '') continue;
-    const m = /^100(?:644|755) blob ([0-9a-f]+)\t([\s\S]*)$/.exec(entry);
-    const file = m ? utf8Path(m[2]!) : '';
+    const m = /^100(?:644|755) blob ([0-9a-f]+) +(\d+)\t([\s\S]*)$/.exec(entry);
+    const file = m ? utf8Path(m[3]!) : '';
     if (!m || !file.startsWith(STATE_PREFIX))
       throw new Error(`${rev} holds a state entry git reads as no file`);
-    const bytes = await readBlob(worktreePath, m[1]!);
-    if (!bytes) throw new Error(`${file} of ${rev} could not be read`);
-    files.set(file.slice(STATE_PREFIX.length), bytes.toString('utf8'));
+    const rel = file.slice(STATE_PREFIX.length);
+    const size = Number(m[2]);
+    if (size > maxFileBytes) throw new Error(`${file} of ${rev} is larger than the record allows`);
+    total += size;
+    const parts = rel.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+    if (total > maxTotalBytes || blobs.length + 1 + dirs.size > maxEntries) {
+      throw new Error(`the state directory of ${rev} is larger than the record allows`);
+    }
+    blobs.push({ sha: m[1]!, rel });
+  }
+  const files = new Map<string, string>();
+  for (const { sha, rel } of blobs) {
+    const bytes = await readBlob(worktreePath, sha);
+    if (!bytes) throw new Error(`${STATE_PREFIX}${rel} of ${rev} could not be read`);
+    if (!isUtf8(bytes)) throw new Error(`${STATE_PREFIX}${rel} of ${rev} is not valid UTF-8`);
+    files.set(rel, bytes.toString('utf8'));
   }
   return files;
 }
@@ -196,12 +216,14 @@ function takeIncomingUnits(
   return out;
 }
 
-/** Take the incoming side of a path; where the incoming side deleted it, the existing side stays. */
+/** Take the incoming side of a path, its deletion included. */
 async function takeIncoming(worktreePath: string, path: string): Promise<boolean> {
   const stages = await readStageNumbers(worktreePath, path);
-  const side = stages.has(3) ? '--theirs' : stages.has(2) ? '--ours' : null;
-  if (!side) return false;
-  const take = await gitRun(worktreePath, ['checkout', side, '--', literal(path)]);
+  if (stages.size === 0) return false;
+  if (!stages.has(3)) {
+    return (await gitRun(worktreePath, ['rm', '-f', '-q', '--', literal(path)])).code === 0;
+  }
+  const take = await gitRun(worktreePath, ['checkout', '--theirs', '--', literal(path)]);
   return take.code === 0 && (await gitRun(worktreePath, ['add', '--', literal(path)])).code === 0;
 }
 

@@ -91,10 +91,10 @@ afterEach(async () => {
   }
 });
 
-async function write(dir: string, file: string, body: string): Promise<void> {
+async function write(dir: string, file: string, body: string | Buffer): Promise<void> {
   const full = path.join(dir, file);
   await mkdir(path.dirname(full), { recursive: true });
-  await writeFile(full, body, 'utf8');
+  await writeFile(full, body);
 }
 
 /**
@@ -591,7 +591,7 @@ const recordOf = (over: Partial<ProjectStateRecord> = {}): ProjectStateRecord =>
   ...over,
 });
 
-type Files = Record<string, string | null>;
+type Files = Record<string, string | Buffer | null>;
 
 const stateFiles = (record: ProjectStateRecord): Files =>
   Object.fromEntries(
@@ -755,6 +755,65 @@ describe('mergeOriginInto: the project state record merges three-way', () => {
     expect(attempt.warnings.some((w) => w.includes(PROJECT_STATE_DIR))).toBe(true);
     expect(await unmergedUnderState(wt)).toBe('');
     expect(await committed(RENDER_FILE)).toBe(theirs[RENDER_FILE]);
+  });
+
+  it('falls back without reading a state tree past the record limits', async () => {
+    const theirs = stateFiles(recordOf({ render: baseRender({ framework: 'laravel' }) }));
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }) })),
+      { ...theirs, [`${STATE_PREFIX}huge.json`]: `"${'x'.repeat(1024 * 1024 + 16)}"\n` },
+    );
+    const { attempt, committed } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(attempt.warnings.some((w) => w.includes('larger than the record allows'))).toBe(true);
+    expect(await unmergedUnderState(wt)).toBe('');
+    expect(await committed(RENDER_FILE)).toBe(theirs[RENDER_FILE]);
+  });
+
+  it('falls back rather than decoding a state file that is not UTF-8', async () => {
+    const theirs = stateFiles(recordOf({ render: baseRender({ framework: 'laravel' }) }));
+    const ours = String(
+      stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }) }))[RENDER_FILE],
+    );
+    const at = ours.indexOf('drupal');
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      {
+        [RENDER_FILE]: Buffer.concat([
+          Buffer.from(ours.slice(0, at)),
+          Buffer.from([0xff]),
+          Buffer.from(ours.slice(at + 1)),
+        ]),
+      },
+      theirs,
+    );
+    const { attempt, committed } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(attempt.warnings.some((w) => w.includes('not valid UTF-8'))).toBe(true);
+    expect(await committed(RENDER_FILE)).toBe(theirs[RENDER_FILE]);
+  });
+
+  it('takes the incoming deletion of a state file when the record falls back', async () => {
+    const claim = claimAt('.claude/agents/a.md', 'h0');
+    const file = `${STATE_PREFIX}${claimFileName(claim.path)}`;
+    const theirs = stateFiles(recordOf({ render: baseRender({ framework: 'laravel' }) }));
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(recordOf({ claims: [claim] })),
+      {
+        ...stateFiles(recordOf({ claims: [{ ...claim, writtenHash: 'h-ours' }] })),
+        [RENDER_FILE]: '{ not json\n',
+      },
+      { [RENDER_FILE]: theirs[RENDER_FILE]!, [file]: null },
+    );
+    const { attempt } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(await unmergedUnderState(wt)).toBe('');
+    await expect(lstat(path.join(wt, file))).rejects.toThrow();
+    expect((await git(wt, ['ls-files', '--', file])).trim()).toBe('');
   });
 
   it('commits a merge whose only conflicts are in the state directory', async () => {
