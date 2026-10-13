@@ -11,7 +11,7 @@ role because the parser has no access to it). Every arithmetic answer is a pure 
 
 **ONE BUCKETER.** Day buckets are cut in JS with `Intl` (`dayKey`), never with `date_trunc` in
 SQL, because the busy-span union already needs a bucketer in JS and two that must agree
-eventually will not. The correct SQL form is recorded at `index.ts:476-489` for the day that
+eventually will not. The correct SQL form is recorded in the timeline handler's comment (`modules/statistics/src/routes.ts`) for the day that
 changes, along with the trap: the columns are `timestamp without time zone` holding UTC wall
 clock, so a single `AT TIME ZONE $tz` reads them as already-local and MEASURED moves 5-10% of
 rows into the wrong day. The consequence for new features is that anything day-shaped rides the
