@@ -34,7 +34,11 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
-import { INSTALL_MANIFEST_PATH, retireInstallManifest } from '../../_retire-install-manifest.js';
+import {
+  INSTALL_MANIFEST_PATH,
+  retireInstallManifest,
+  retireLegacyMirrors,
+} from '../../_retire-install-manifest.js';
 import { unionExpandedFor } from '../../_upgrade-render.js';
 import {
   failIfColumnStale,
@@ -1807,6 +1811,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       deletedPaths.push(...state.removed);
       if ((await retireInstallManifest(ctx, warnings)) === 'removed') {
         deletedPaths.push(INSTALL_MANIFEST_PATH);
+      }
+      for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings)) {
+        if (outcome === 'removed') deletedPaths.push(path);
       }
     } catch (err) {
       failIfColumnStale(err);

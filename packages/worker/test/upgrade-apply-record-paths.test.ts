@@ -180,3 +180,99 @@ describe('02 and .haive/install.json', () => {
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
 });
+
+describe('02 and the legacy environment and exclusions mirrors', () => {
+  const ENV_LEGACY = '.haive-data/environment.json';
+  const GLOBS_LEGACY = '.haive-data/exclusions.json';
+  const HAIVE_ENV = JSON.stringify({
+    schemaVersion: 1,
+    envDetectData: { project: { name: 'acme' } },
+    confirmedValues: {},
+  });
+  const HAIVE_GLOBS = JSON.stringify({ schemaVersion: 1, scopeExcludeGlobs: ['vendor/**'] });
+
+  async function withLegacy(files: Record<string, string>, columns: boolean) {
+    const s = await setup();
+    if (columns) {
+      s.fake.patch(schema.repositories, REPO, {
+        onboardingEnvironment: {
+          schemaVersion: 1,
+          envDetectData: { project: { name: 'acme' } },
+          confirmedValues: {},
+        },
+        scopeExcludeGlobs: ['vendor/**'],
+      });
+    }
+    await mkdir(join(s.root, '.haive-data'), { recursive: true });
+    for (const [rel, content] of Object.entries(files)) await writeFile(join(s.root, rel), content);
+    return s;
+  }
+
+  it('retires Haive-shaped ones and lists them for the commit to drop', async () => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
+
+    const out = await s.apply();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(false);
+      expect(out.deletedPaths, rel).toContain(rel);
+    }
+    expect(out.warnings).toEqual([]);
+    expect(out.writtenPaths).toEqual(
+      expect.arrayContaining([
+        '.haive-data/state/project/environment.json',
+        '.haive-data/state/settings/scope-exclude-globs.json',
+      ]),
+    );
+  });
+
+  it('keeps a file that is not Haive’s, lists nothing, and says so', async () => {
+    const s = await withLegacy(
+      { [ENV_LEGACY]: '{"keep":true}', [GLOBS_LEGACY]: '{"keep":true}' },
+      true,
+    );
+
+    const out = await s.apply();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(true);
+      expect(out.deletedPaths ?? [], rel).not.toContain(rel);
+      expect(out.warnings, rel).toContain(
+        `${rel} was left in place: it is not a Haive ${
+          rel === ENV_LEGACY ? 'environment' : 'exclusions'
+        } mirror`,
+      );
+    }
+  });
+
+  it('keeps a mirror whose value the record does not carry', async () => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, false);
+
+    const out = await s.apply();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(true);
+      expect(out.deletedPaths ?? [], rel).not.toContain(rel);
+    }
+    expect(out.warnings).toEqual([]);
+  });
+
+  it('leaves them when the record write failed', async () => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
+    let refused = false;
+    s.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContain('project state record write failed: database refused');
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(true);
+      expect(out.deletedPaths ?? [], rel).not.toContain(rel);
+    }
+  });
+});

@@ -69,8 +69,9 @@ export const repositories = pgTable(
      *  `.data` + 02-detection-confirmation confirmed values), so a workflow task can
      *  resolve the repo's stack WITHOUT looking up the onboarding task's step
      *  outputs — which don't exist after a fresh clone on another machine. Written
-     *  by 02-detection-confirmation.apply, restored on clone from
-     *  `.haive-data/environment.json`. Shape = @haive/shared OnboardingEnvironmentMirror
+     *  by 02-detection-confirmation.apply, carried in the project state record
+     *  (`project/environment.json`; the retired `.haive-data/environment.json` is still read on clone
+     *  when the record holds none). Shape = @haive/shared OnboardingEnvironmentMirror
      *  (kept loose here to avoid a database->shared import cycle). NULL = not onboarded
      *  (consumers fall back to the onboarding-task lookup). */
     onboardingEnvironment: jsonb('onboarding_environment').$type<Record<string, unknown>>(),

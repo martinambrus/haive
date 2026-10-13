@@ -336,8 +336,9 @@ export const ONBOARDING_TOOLING_CONSENT_KEYS = [
 ] as const;
 
 /** Repo-level snapshot of an onboarded repo's detected+confirmed ENVIRONMENT.
- *  Persisted on `repositories.onboarding_environment` and mirrored to
- *  `.haive-data/environment.json`. Stores the RAW structures the stack resolvers
+ *  Persisted on `repositories.onboarding_environment` and carried in the project
+ *  state record (`project/environment.json`); the retired `.haive-data/environment.json` is read on
+ *  clone only when the record holds none. Stores the RAW structures the stack resolvers
  *  already parse (`loadRepoStackAnchors` -> `resolveStackVersions`), so reading the
  *  column is a drop-in for the old "find onboarding task + read its 01/02 outputs"
  *  lookup that returns nothing after a fresh clone. */
@@ -368,9 +369,9 @@ export interface OnboardingToolingMirror {
 
 export const ONBOARDING_EXCLUSIONS_SCHEMA_VERSION = 1;
 
-/** Committed mirror of `repositories.scope_exclude_globs` (`.haive-data/exclusions.json`),
- *  so a fresh clone restores the onboarding/RAG scope denylist. DENYLIST semantics:
- *  unlisted paths stay in scope. Restored into the column on clone by persistDetection. */
+/** The retired legacy mirror of `repositories.scope_exclude_globs` (`.haive-data/exclusions.json`);
+ *  the record carries it as `settings/scope-exclude-globs.json`. DENYLIST semantics: unlisted
+ *  paths stay in scope. Restored into the column on clone by persistDetection when the record holds none. */
 export interface OnboardingExclusionsMirror {
   schemaVersion: number;
   scopeExcludeGlobs: string[];
@@ -381,10 +382,10 @@ export interface OnboardingExclusionsMirror {
  *  `knowledge-paths.ts` for those). Distinct from `.haive/`, which workflow tasks
  *  add to `.git/info/exclude` and which therefore never travels with a clone.
  *
- *  HAIVE_DATA_FILES are the mirror files specifically: written at
- *  12-post-onboarding from the repo's onboarding_* columns and read back on clone
- *  by persistDetection. Kept here so both the writer (worker) and any reader share
- *  one source of truth for the filenames. */
+ *  HAIVE_DATA_FILES are the mirror files specifically: `tooling` and the plan files are written at
+ *  12-post-onboarding and read back on clone by persistDetection; `environment` and `exclusions`
+ *  are retired by a successful record write (the record carries them), and written, read and
+ *  deleted only as the fallback until then. */
 export const HAIVE_DATA_DIR = '.haive-data';
 export const HAIVE_DATA_FILES = {
   environment: `${HAIVE_DATA_DIR}/environment.json`,

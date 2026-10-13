@@ -39,6 +39,7 @@ import {
 } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
+import { ENVIRONMENT_UNIT, PROJECT_STATE_DIR, settingFileName } from '@haive/shared/project-state';
 import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
 import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
@@ -127,7 +128,10 @@ const MIRROR_READ_CAP = 1024 * 1024;
 /** Restore onboarding-derived DB state from a repo's committed `.haive-data/`
  *  mirror (written at 12-post-onboarding), so a repo onboarded on one machine
  *  and cloned to another recovers its scope denylist + stack/tooling without
- *  re-running onboarding. Non-clobbering: only fills columns that are currently
+ *  re-running onboarding. A unit the project state record carries (the environment, the scope
+ *  denylist) is left to the sync that imports the record, whatever a stale legacy file holds; the
+ *  call returns true when it left one, and `afterSync` repeats it as the fallback for a column the
+ *  sync did not fill. Non-clobbering: only fills columns that are currently
  *  NULL, so a live local onboarding (or an earlier import) is never overwritten
  *  and a re-scan/refresh is a no-op once populated. schemaVersion-gated so a
  *  future mirror-format bump is ignored rather than mis-parsed. The tooling
@@ -137,7 +141,8 @@ async function importHaiveDataMirror(
   db: Database,
   repositoryId: string,
   storagePath: string,
-): Promise<void> {
+  afterSync = false,
+): Promise<boolean> {
   const [repo] = await db
     .select({
       onboardingEnvironment: schema.repositories.onboardingEnvironment,
@@ -147,7 +152,7 @@ async function importHaiveDataMirror(
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
-  if (!repo) return;
+  if (!repo) return false;
 
   const readJson = async <T>(rel: string): Promise<T | null> => {
     const read = await readFileNoFollow(storagePath, rel, { maxBytes: MIRROR_READ_CAP }).catch(
@@ -168,7 +173,15 @@ async function importHaiveDataMirror(
     scopeExcludeGlobs: string[];
   }> = {};
 
-  if (repo.onboardingEnvironment == null) {
+  let deferred = false;
+  const recordHolds = async (unit: string): Promise<boolean> => {
+    if (afterSync) return false;
+    const holds = (await lstatNoFollow(storagePath, `${PROJECT_STATE_DIR}/${unit}`)) !== null;
+    if (holds) deferred = true;
+    return holds;
+  };
+
+  if (repo.onboardingEnvironment == null && !(await recordHolds(ENVIRONMENT_UNIT))) {
     const env = await readJson<OnboardingEnvironmentMirror>(HAIVE_DATA_FILES.environment);
     if (env?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION) {
       const data = env.envDetectData as unknown;
@@ -180,7 +193,7 @@ async function importHaiveDataMirror(
     }
   }
   let heldMcpServers: unknown = null;
-  if (repo.onboardingTooling == null) {
+  if (repo.onboardingTooling == null && !afterSync) {
     const tooling = await readJson<OnboardingToolingMirror>(HAIVE_DATA_FILES.tooling);
     if (tooling?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION) {
       const incoming = tooling.tooling;
@@ -195,7 +208,10 @@ async function importHaiveDataMirror(
       updates.onboardingTooling = tooling as unknown as Record<string, unknown>;
     }
   }
-  if (repo.scopeExcludeGlobs == null) {
+  if (
+    repo.scopeExcludeGlobs == null &&
+    !(await recordHolds(settingFileName('scope-exclude-globs')))
+  ) {
     const excl = await readJson<OnboardingExclusionsMirror>(HAIVE_DATA_FILES.exclusions);
     if (
       excl?.schemaVersion === ONBOARDING_EXCLUSIONS_SCHEMA_VERSION &&
@@ -205,7 +221,7 @@ async function importHaiveDataMirror(
     }
   }
 
-  if (Object.keys(updates).length === 0) return;
+  if (Object.keys(updates).length === 0) return deferred;
   await db.transaction(async (tx) => {
     await tx
       .update(schema.repositories)
@@ -230,6 +246,7 @@ async function importHaiveDataMirror(
       'imported MCP servers held until accepted on this install',
     );
   }
+  return deferred;
 }
 
 export async function persistDetection(
@@ -260,8 +277,9 @@ export async function persistDetection(
   // Best-effort: a fresh clone of an already-onboarded repo restores its
   // onboarding-derived columns from the committed .haive-data/ mirror. Never
   // fail the scan/clone over a missing or malformed mirror.
+  let legacyDeferred = false;
   try {
-    await importHaiveDataMirror(db, repositoryId, storagePath);
+    legacyDeferred = await importHaiveDataMirror(db, repositoryId, storagePath);
   } catch (err) {
     logger.warn({ err, repositoryId }, 'haive-data mirror import failed (non-fatal)');
   }
@@ -283,6 +301,14 @@ export async function persistDetection(
     );
   } catch (err) {
     logger.warn({ err, repositoryId }, 'project state sync failed (non-fatal)');
+  }
+
+  if (legacyDeferred) {
+    try {
+      await importHaiveDataMirror(db, repositoryId, storagePath, true);
+    } catch (err) {
+      logger.warn({ err, repositoryId }, 'haive-data mirror fallback import failed (non-fatal)');
+    }
   }
 
   // The plan canvas restores from the same dir but is its own call, not another
