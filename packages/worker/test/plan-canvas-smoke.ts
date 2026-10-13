@@ -2719,6 +2719,25 @@ async function main(): Promise<void> {
   );
   theirs = await readMirror();
 
+  // A rescan with no base and edits not yet written out holds rather than letting incoming win.
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedSnapshot: null, lastError: null })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await editS(pId, { title: 'P unwritten before a rescan' });
+  await writeFile(sPlanFile, JSON.stringify(retitled(theirs, pId, 'P from the rescan')));
+  await persistDetection(db, sId, sDir);
+  const rescanHeld = await db.query.planMirrorState.findFirst({
+    where: eq(schema.planMirrorState.repositoryId, sId),
+  });
+  check(
+    'three-way: a rescan with no base holds instead of overwriting an unwritten edit',
+    (await sNode(pId))?.title === 'P unwritten before a rescan' &&
+      !!rescanHeld?.lastError?.includes('no earlier copy'),
+    { title: (await sNode(pId))?.title, lastError: rescanHeld?.lastError },
+  );
+  await arrive(retitled(theirs, pId, 'P unwritten before a rescan'));
+
   // A plan.json that is not JSON is refused with a reason, not skipped as absent.
   await writeFile(sPlanFile, '{ not json');
   const notJson = await reconcilePlanFromCheckout(db, sId, sDir).then(
@@ -2899,6 +2918,27 @@ async function main(): Promise<void> {
     { ops: [{ op: 'delete', nodeRef: sBuilt.refs['sroot']! }] },
     { repositoryId: sId, origin: 'user' },
   );
+  // With no plan left here the base's root still names this plan, so another root is refused.
+  const beforeWipe = await readFile(sPlanFile);
+  await writeFile(
+    sPlanFile,
+    JSON.stringify({
+      ...theirs,
+      nodes: [{ ...theirs.nodes.find((n) => n.parentId === null)!, id: randomUUID() }],
+      edges: [],
+      codeLinks: [],
+    }),
+  );
+  const wipedForeign = await reconcilePlanFromCheckout(db, sId, sDir).then(
+    () => 'merged',
+    (err: Error) => err.name,
+  );
+  check(
+    'three-way: with no plan here, a plan with a root other than the base is refused',
+    wipedForeign === 'PlanSnapshotError' && (await nodeRows()).length === 0,
+    wipedForeign,
+  );
+  await writeFile(sPlanFile, beforeWipe);
   await writePlanMirror(db, sId, sDir);
   const afterWipe = await db.query.planMirrorState.findFirst({
     where: eq(schema.planMirrorState.repositoryId, sId),

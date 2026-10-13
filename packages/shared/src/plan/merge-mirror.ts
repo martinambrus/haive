@@ -81,7 +81,9 @@ function pick3<T>(base: T | undefined, local: T, incoming: T): { value: T; conte
 }
 
 const nodeModified = (a: MirrorNode, b: MirrorNode): boolean =>
-  a.parentId !== b.parentId || PLAN_MIRROR_ASKED_FIELDS.some((f) => a[f] !== b[f]);
+  a.parentId !== b.parentId ||
+  a.ordinal !== b.ordinal ||
+  PLAN_MIRROR_ASKED_FIELDS.some((f) => a[f] !== b[f]);
 
 type Candidate = 'deleted-by-incoming' | 'deleted-by-local' | null;
 

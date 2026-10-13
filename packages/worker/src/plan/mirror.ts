@@ -971,6 +971,20 @@ async function reconcilePlanLocked(
   }
   const raw = bytes.toString('utf8');
   if (opts.requireStamp && !state?.syncedHash) return noOutcome(null);
+  // A rescan cannot ask: with no base, incoming would win over edits not yet written out.
+  if (opts.requireStamp && state?.syncedSnapshot == null) {
+    const [dirty] = await tx
+      .select({ id: schema.planMirrorState.repositoryId })
+      .from(schema.planMirrorState)
+      .where(
+        and(
+          eq(schema.planMirrorState.repositoryId, repositoryId),
+          sql`${schema.planMirrorState.revision} > ${schema.planMirrorState.writtenRevision}`,
+        ),
+      )
+      .limit(1);
+    if (dirty) throw new PlanMirrorHeldError(HELD_NO_BASE);
+  }
 
   let rawPayload: unknown;
   try {
@@ -1011,10 +1025,13 @@ async function reconcilePlanLocked(
   );
   const localRender = await renderPlanMirror(tx, repositoryId);
   const local = localRender?.mirror ?? EMPTY_PLAN;
-  const localRoot = local.nodes.find((n) => n.parentId === null);
-  const incomingRoot = incoming.nodes.find((n) => n.parentId === null);
-  if (localRoot && incomingRoot?.id !== localRoot.id) throw new PlanSnapshotError(UNRELATED_ROOT);
   const baseParsed = planMirrorPayloadSchema.safeParse(state?.syncedSnapshot);
+  // This plan's root, or with no plan here the base's: a plan with another root shares no history.
+  const knownRoot =
+    local.nodes.find((n) => n.parentId === null) ??
+    (baseParsed.success ? baseParsed.data.nodes.find((n) => n.parentId === null) : undefined);
+  const incomingRoot = incoming.nodes.find((n) => n.parentId === null);
+  if (knownRoot && incomingRoot?.id !== knownRoot.id) throw new PlanSnapshotError(UNRELATED_ROOT);
   const merge = mergePlanMirror({
     base: baseParsed.success ? baseParsed.data : null,
     local,
