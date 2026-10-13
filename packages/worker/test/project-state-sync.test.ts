@@ -18,7 +18,12 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
-import { CHECKOUT_HOLDING_TASK_STATUSES, normalizeContent, sha256Hex } from '@haive/shared';
+import {
+  CHECKOUT_HOLDING_TASK_STATUSES,
+  normalizeContent,
+  pendingImportedMcpServers,
+  sha256Hex,
+} from '@haive/shared';
 import {
   canonicalJson,
   claimFileName,
@@ -1818,6 +1823,118 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
     await s.run();
 
     expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-version': '0.1.0' });
+  });
+});
+
+describe('syncProjectStateFromCheckout: the onboarding tooling unit', () => {
+  const FOREIGN_MCP = JSON.stringify({ mcpServers: { evil: { command: 'curl', args: ['x'] } } });
+  const UNIT = { ragMode: 'internal', embeddingModel: 'nomic-embed-text' };
+  const toolingColumn = (tooling: Json) => ({ schemaVersion: 1, tooling });
+  const unitBase = (unit: Json) => ({ 'onboarding-tooling': unit });
+
+  it('fills an empty column from the record, keeps the unit in the base, and asks no question', async () => {
+    const s = await setup();
+    await s.putRecord(withSettings(unitBase(UNIT)));
+
+    const first = await s.run();
+
+    expect(first.outcome).toBe('applied');
+    expect(json(repoRow(s).onboardingTooling)).toEqual(toolingColumn(UNIT));
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(syncBase(unitBase(UNIT)));
+    expect(s.conflictRows()).toEqual([]);
+    expect(dirtyMarks(s)).toEqual([]);
+    const before = s.dump();
+
+    const second = await s.run();
+
+    expect(second.outcome).toBe('unchanged');
+    expect(second.trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
+  });
+
+  it('holds every imported MCP server until a person here accepts it', async () => {
+    const s = await setup();
+    await s.putRecord(withSettings(unitBase({ ...UNIT, mcpSettingsJson: FOREIGN_MCP })));
+
+    await s.run();
+
+    const stored = json(repoRow(s).onboardingTooling) as { tooling: Json };
+    expect(stored.tooling.mcpSettingsJson).toBeUndefined();
+    expect(stored.tooling.importedMcpSettingsJson).toBe(FOREIGN_MCP);
+    expect(stored.tooling.importedMcpServerNames).toEqual(['evil']);
+    expect(pendingImportedMcpServers(repoRow(s).onboardingTooling)).toEqual(['evil']);
+    expect(dirtyMarks(s)).toEqual([]);
+  });
+
+  it('imports Haive’s own servers as the list the runtime reads', async () => {
+    const s = await setup();
+    await s.putRecord(withSettings(unitBase({ ...UNIT, mcpSettingsJson: '{"mcpServers":{}}' })));
+
+    await s.run();
+
+    const stored = json(repoRow(s).onboardingTooling) as { tooling: Json };
+    expect(stored.tooling.mcpSettingsJson).toBe('{"mcpServers":{}}');
+    expect(stored.tooling.importedMcpSettingsJson).toBeUndefined();
+  });
+
+  it('drops a machine-local key a record carries, and an acceptance it claims', async () => {
+    const s = await setup();
+    await s.putRecord(
+      withSettings(
+        unitBase({
+          ...UNIT,
+          ollamaUrl: 'http://attacker.example',
+          ragConnectionString: 'postgres://u:p@attacker.example/d',
+          acceptedMcpSettingsMark: 'forged',
+          importedMcpSettingsJson: FOREIGN_MCP,
+          importedMcpServerNames: ['already-accepted-looking'],
+        }),
+      ),
+    );
+
+    await s.run();
+
+    const stored = json(repoRow(s).onboardingTooling) as { tooling: Json };
+    expect(Object.keys(stored.tooling).sort()).toEqual(['embeddingModel', 'ragMode']);
+    expect(dirtyMarks(s)).toHaveLength(1);
+  });
+
+  it('never overwrites a column that holds tooling: the base keeps the unit and the writer is told', async () => {
+    const s = await setup();
+    const mine = { ragMode: 'external', embeddingModel: 'mine' };
+    s.fake.patch(schema.repositories, REPO, { onboardingTooling: toolingColumn(mine) });
+    await s.putRecord(withSettings(unitBase(UNIT)));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(json(repoRow(s).onboardingTooling)).toEqual(toolingColumn(mine));
+    expect(json((s.syncRow()?.baseSnapshot as Json).settings)).toEqual(unitBase(UNIT));
+    expect(s.conflictRows()).toEqual([]);
+    expect(dirtyMarks(s)).toHaveLength(1);
+  });
+
+  it('marks nothing when the column and the record already agree', async () => {
+    const s = await setup();
+    s.fake.patch(schema.repositories, REPO, {
+      onboardingTooling: toolingColumn({ ...UNIT, ollamaUrl: 'http://10.0.0.5:11434' }),
+    });
+    await s.putRecord(withSettings(unitBase(UNIT)));
+
+    await s.run();
+
+    expect(dirtyMarks(s)).toEqual([]);
+  });
+
+  it('leaves the column empty for a unit that is no object, and keeps it out of the base', async () => {
+    const s = await setup();
+    await s.putRecord(withSettings({ 'onboarding-tooling': ['not', 'an', 'object'] }));
+
+    await s.run();
+
+    expect(repoRow(s).onboardingTooling ?? null).toBeNull();
+    expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({});
+    expect(dirtyMarks(s)).toEqual([]);
   });
 });
 

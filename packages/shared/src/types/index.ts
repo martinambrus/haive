@@ -323,8 +323,9 @@ export interface RepoJobPayload {
 export const ONBOARDING_ENVIRONMENT_SCHEMA_VERSION = 1;
 export const ONBOARDING_TOOLING_SCHEMA_VERSION = 1;
 
-/** Machine-specific tooling keys stripped from the committed `.haive-data/tooling.json`
- *  mirror (they do not travel between machines). Kept in the DB column for LOCAL use. */
+/** Machine-specific tooling keys stripped from the committed tooling (the record's
+ *  `settings/onboarding-tooling.json` and the legacy `.haive-data/tooling.json` mirror; they do
+ *  not travel between machines). Kept in the DB column for LOCAL use. */
 export const ONBOARDING_TOOLING_INFRA_KEYS = ['ragConnectionString', 'ollamaUrl'] as const;
 
 /** This install's decision about MCP servers that arrived in another install's committed
@@ -359,9 +360,10 @@ export function mirroredEnvDetectData(data: Record<string, unknown>): Record<str
 }
 
 /** Repo-level snapshot of an onboarded repo's TOOLING prefs. Persisted on
- *  `repositories.onboarding_tooling` and mirrored (MINUS `ONBOARDING_TOOLING_INFRA_KEYS`)
- *  to `.haive-data/tooling.json`. `tooling` is the `04-tooling-infrastructure`
- *  `output.tooling` object (ragMode, embeddingModel, embeddingDimensions, ...). */
+ *  `repositories.onboarding_tooling` and carried (MINUS `ONBOARDING_TOOLING_INFRA_KEYS`) in the
+ *  project state record as `settings/onboarding-tooling.json`; the retired
+ *  `.haive-data/tooling.json` mirror is read on clone only when the record holds none. `tooling` is
+ *  the `04-tooling-infrastructure` `output.tooling` object (ragMode, embeddingModel, embeddingDimensions, ...). */
 export interface OnboardingToolingMirror {
   schemaVersion: number;
   tooling: Record<string, unknown>;
@@ -382,10 +384,10 @@ export interface OnboardingExclusionsMirror {
  *  `knowledge-paths.ts` for those). Distinct from `.haive/`, which workflow tasks
  *  add to `.git/info/exclude` and which therefore never travels with a clone.
  *
- *  HAIVE_DATA_FILES are the mirror files specifically: `tooling` and the plan files are written at
- *  12-post-onboarding and read back on clone by persistDetection; `environment` and `exclusions`
- *  are retired by a successful record write (the record carries them), and written, read and
- *  deleted only as the fallback until then. */
+ *  HAIVE_DATA_FILES are the mirror files specifically: the plan files are written at
+ *  12-post-onboarding and read back on clone by persistDetection; `environment`, `exclusions` and
+ *  `tooling` are retired by a successful record write (the record carries them), and written, read
+ *  and deleted only as the fallback until then. */
 export const HAIVE_DATA_DIR = '.haive-data';
 export const HAIVE_DATA_FILES = {
   environment: `${HAIVE_DATA_DIR}/environment.json`,

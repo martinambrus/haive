@@ -691,19 +691,23 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     if (!read || !decided) {
       throw new HttpError(409, 'No imported MCP servers are waiting for a decision');
     }
-    const written = await db
-      .update(schema.repositories)
-      .set({
-        onboardingTooling: decided as unknown as Record<string, unknown>,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.repositories.id, repositoryId),
-          eq(schema.repositories.onboardingTooling, read),
-        ),
-      )
-      .returning({ id: schema.repositories.id });
+    const written = await db.transaction(async (tx) => {
+      const rows = await tx
+        .update(schema.repositories)
+        .set({
+          onboardingTooling: decided as unknown as Record<string, unknown>,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.repositories.id, repositoryId),
+            eq(schema.repositories.onboardingTooling, read),
+          ),
+        )
+        .returning({ id: schema.repositories.id });
+      if (rows.length > 0) await markProjectStateDirty(tx, repositoryId);
+      return rows;
+    });
     if (written.length === 0) {
       throw new HttpError(
         409,

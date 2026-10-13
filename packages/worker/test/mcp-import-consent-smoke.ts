@@ -3,6 +3,7 @@
  * accepts them, against a database. One throwaway user and temp directory, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -16,6 +17,7 @@ import {
   pendingImportedMcpServers,
   sha256Hex,
 } from '@haive/shared';
+import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
 import { initDatabase, getDb } from '../src/db.js';
 import { holdImportedMcpServerLists } from '../src/data-migrations.js';
 import { handleScan } from '../src/repo/clone.js';
@@ -191,6 +193,92 @@ async function main(): Promise<void> {
       (await servers(await task(local))).includes('evil'),
       await column(local),
     );
+
+    const outbox = async (repositoryId: string) =>
+      (
+        await db
+          .select({ revision: schema.projectStateOutbox.revision })
+          .from(schema.projectStateOutbox)
+          .where(eq(schema.projectStateOutbox.repositoryId, repositoryId))
+      )[0]?.revision ?? 0;
+    check(
+      'the boot repair marks the project state record stale in the transaction that held it',
+      (await outbox(legacy)) > 0 && (await outbox(local)) === 0,
+      { held: await outbox(legacy), left: await outbox(local) },
+    );
+
+    // The record path: another install's tooling unit, with no tooling.json beside it.
+    const recordDir = await mkdtemp(path.join(tmpdir(), 'mcp-import-consent-record-'));
+    try {
+      const unit = { ragMode: 'none', mcpSettingsJson: evilJson, ...forgedAcceptance };
+      const files = renderProjectState({
+        ...emptyProjectState(),
+        render: {
+          projectInfo: { name: 'acme' },
+          framework: null,
+          acceptedAgentIds: [],
+          customAgentSpecs: [],
+          lspLanguages: [],
+        },
+        settings: Object.assign(Object.create(null) as Record<string, unknown>, {
+          'onboarding-tooling': unit,
+        }),
+      });
+      for (const [rel, text] of files) {
+        const abs = path.join(recordDir, '.haive-data', 'state', rel);
+        await mkdir(path.dirname(abs), { recursive: true });
+        await writeFile(abs, text);
+      }
+      const viaRecord = await repo(null);
+      await db
+        .update(schema.repositories)
+        .set({ localPath: recordDir })
+        .where(eq(schema.repositories.id, viaRecord));
+      await handleScan(
+        { repositoryId: viaRecord, userId, source: 'local_path', localPath: recordDir },
+        db,
+      );
+      const recordTask = await task(viaRecord);
+      check(
+        'a server that arrived in the record reaches no CLI',
+        (await servers(recordTask)).length === 0,
+        { servers: await servers(recordTask), column: await column(viaRecord) },
+      );
+      check(
+        'and the tooling page is asked about it, whatever acceptance the record claims',
+        JSON.stringify(pendingImportedMcpServers(await column(viaRecord))) === '["evil"]',
+        await column(viaRecord),
+      );
+      await decide(viaRecord, 'accept');
+      check('once accepted it reaches the CLI', (await servers(recordTask)).includes('evil'));
+      await handleScan(
+        { repositoryId: viaRecord, userId, source: 'local_path', localPath: recordDir },
+        db,
+      );
+      check(
+        'a rescan of the record leaves the accepted list alone',
+        (await servers(recordTask)).includes('evil'),
+        await column(viaRecord),
+      );
+
+      const mineJson = { schemaVersion: 1, tooling: { ragMode: 'mine' } };
+      const own = await repo(mineJson);
+      await db
+        .update(schema.repositories)
+        .set({ localPath: recordDir })
+        .where(eq(schema.repositories.id, own));
+      await handleScan(
+        { repositoryId: own, userId, source: 'local_path', localPath: recordDir },
+        db,
+      );
+      check(
+        'tooling this install already holds is not replaced by the record’s',
+        isDeepStrictEqual(await column(own), mineJson),
+        await column(own),
+      );
+    } finally {
+      await rm(recordDir, { recursive: true, force: true });
+    }
 
     if (failures > 0) {
       log.error({ failures, checks }, 'smoke FAILED');

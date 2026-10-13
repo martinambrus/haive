@@ -360,8 +360,10 @@ export default function RepoToolingPage() {
                 MCP servers waiting for your decision
               </h2>
               <p className="mt-1 text-xs text-amber-100/80">
-                This repository&apos;s committed Haive data (<code>.haive-data/tooling.json</code>)
-                names {config.pendingRepoMcpServers.length} MCP server definition
+                This repository&apos;s committed Haive data (
+                <code>.haive-data/state/settings/onboarding-tooling.json</code>, or the older{' '}
+                <code>.haive-data/tooling.json</code>) names {config.pendingRepoMcpServers.length}{' '}
+                MCP server definition
                 {config.pendingRepoMcpServers.length === 1 ? '' : 's'} that{' '}
                 {config.pendingRepoMcpServers.length === 1 ? 'was' : 'were'} not set up on this
                 installation. Each definition is a command the CLI will EXECUTE, so none of them

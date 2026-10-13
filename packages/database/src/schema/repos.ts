@@ -78,8 +78,10 @@ export const repositories = pgTable(
     /** Repo-level snapshot of the onboarding-derived TOOLING prefs (the
      *  04-tooling-infrastructure `output.tooling`: ragMode, embeddingModel, etc. —
      *  incl. machine-specific infra like ollamaUrl for LOCAL use). Written by
-     *  04-tooling-infrastructure.apply, restored on clone from `.haive-data/tooling.json`
-     *  MINUS the infra keys (those don't travel between machines). Shape =
+     *  04-tooling-infrastructure.apply, carried in the project state record
+     *  (`settings/onboarding-tooling.json`) MINUS the infra keys (those don't travel between
+     *  machines); the retired `.haive-data/tooling.json` is still read on clone when the record
+     *  holds none. Shape =
      *  @haive/shared OnboardingToolingMirror. NULL = fall back to the onboarding-task
      *  04-tooling output lookup. */
     onboardingTooling: jsonb('onboarding_tooling').$type<Record<string, unknown>>(),

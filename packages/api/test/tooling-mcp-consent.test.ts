@@ -36,7 +36,10 @@ app.route('/', toolingUpgradeRoutes);
 app.onError(errorHandler);
 
 function setup(onboardingTooling: Record<string, unknown> | null = pending) {
-  const fake = createFakeDb({ repositories: schema.repositories });
+  const fake = createFakeDb({
+    repositories: schema.repositories,
+    projectStateOutbox: schema.projectStateOutbox,
+  });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,
@@ -54,6 +57,8 @@ const patch = (body: Record<string, unknown>) =>
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
+const marks = (fake: ReturnType<typeof setup>) =>
+  fake.rows(schema.projectStateOutbox).map((r) => r.repositoryId);
 const tooling = (fake: ReturnType<typeof setup>) =>
   (fake.rows(schema.repositories)[0]!.onboardingTooling as { tooling: Record<string, unknown> })
     .tooling;
@@ -67,12 +72,14 @@ describe('deciding the MCP servers held from an imported mirror', () => {
       mcpSettingsJson: held,
       acceptedMcpSettingsMark: mcpAcceptanceMark(held, KEY),
     });
+    expect(marks(fake)).toEqual([REPO]);
   });
 
   it('discarding drops them', async () => {
     const fake = setup();
     expect((await patch({ repoMcpServersAction: 'discard' })).status).toBe(200);
     expect(tooling(fake)).toEqual({ ragMode: 'none' });
+    expect(marks(fake)).toEqual([REPO]);
   });
 
   it('decides only in a request of its own', async () => {
@@ -81,6 +88,7 @@ describe('deciding the MCP servers held from an imported mirror', () => {
       const res = await patch({ repoMcpServersAction: 'accept', ...other });
       expect(res.status).toBe(400);
       expect(fake.rows(schema.repositories)[0]!.onboardingTooling).toEqual(pending);
+      expect(marks(fake)).toEqual([]);
     }
   });
 
@@ -100,5 +108,6 @@ describe('deciding the MCP servers held from an imported mirror', () => {
     };
     expect((await patch({ repoMcpServersAction: 'accept' })).status).toBe(409);
     expect(fake.rows(schema.repositories)[0]!.onboardingTooling).toEqual(theirs);
+    expect(marks(fake)).toEqual([]);
   });
 });

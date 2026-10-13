@@ -18,6 +18,7 @@ import {
 } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { TOOLING_ID_PATTERN } from './cli-executor/tool-usage.js';
 import { classifyGlobalKbVectorProvenance } from './global-kb-vector-provenance.js';
@@ -561,13 +562,20 @@ export async function holdImportedMcpServerLists(db: Database): Promise<void> {
     ) {
       continue;
     }
-    const updated = await db
-      .update(schema.repositories)
-      .set({ onboardingTooling: { ...mirror, tooling: held } })
-      .where(
-        and(eq(schema.repositories.id, repo.id), eq(schema.repositories.onboardingTooling, stored)),
-      )
-      .returning({ id: schema.repositories.id });
+    const updated = await db.transaction(async (tx) => {
+      const rows = await tx
+        .update(schema.repositories)
+        .set({ onboardingTooling: { ...mirror, tooling: held } })
+        .where(
+          and(
+            eq(schema.repositories.id, repo.id),
+            eq(schema.repositories.onboardingTooling, stored),
+          ),
+        )
+        .returning({ id: schema.repositories.id });
+      if (rows.length > 0) await markProjectStateDirty(tx, repo.id);
+      return rows;
+    });
     if (updated.length > 0) {
       log.warn(
         { repositoryId: repo.id, servers: held.importedMcpServerNames },

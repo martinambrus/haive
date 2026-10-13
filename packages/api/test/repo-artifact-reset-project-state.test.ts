@@ -199,11 +199,18 @@ describe('the reset takes back the settings and the environment of the record', 
       [ENVIRONMENT]: '{}\n',
       [setting('scope-exclude-globs')]: '[]\n',
       [setting('rtk-enabled')]: 'true\n',
+      [setting('onboarding-tooling')]: '{}\n',
     });
 
     const { removed } = await resetOnboardingArtifacts(root, noProvenance);
 
-    for (const rel of [ENVIRONMENT, setting('scope-exclude-globs'), SETTINGS_DIR, STATE_DIR]) {
+    for (const rel of [
+      ENVIRONMENT,
+      setting('scope-exclude-globs'),
+      setting('onboarding-tooling'),
+      SETTINGS_DIR,
+      STATE_DIR,
+    ]) {
       expect(await exists(root, rel), rel).toBe(false);
       expect(removed, rel).toContain(rel);
     }

@@ -298,12 +298,29 @@ describe('12 retires .haive/install.json', () => {
   });
 });
 
-describe('12 retires the legacy environment and exclusions mirrors', () => {
+describe('12 retires the legacy environment, exclusions and tooling mirrors', () => {
   const git = promisify(execFile);
   const ENV_UNIT = '.haive-data/state/project/environment.json';
   const GLOBS_UNIT = '.haive-data/state/settings/scope-exclude-globs.json';
   const ENV_LEGACY = '.haive-data/environment.json';
   const GLOBS_LEGACY = '.haive-data/exclusions.json';
+  const TOOLING_UNIT = '.haive-data/state/settings/onboarding-tooling.json';
+  const TOOLING_LEGACY = '.haive-data/tooling.json';
+  const TOOLING_COLUMN = {
+    schemaVersion: 1,
+    tooling: {
+      ragMode: 'internal',
+      ollamaUrl: 'http://10.0.0.5:11434',
+      ragConnectionString: 'postgres://u:p@h/d',
+      importedMcpSettingsJson: '{"mcpServers":{"x":{"command":"evil"}}}',
+      importedMcpServerNames: ['x'],
+      acceptedMcpSettingsMark: 'mark',
+    },
+  };
+  const HAIVE_TOOLING = JSON.stringify({
+    schemaVersion: 1,
+    tooling: { ragMode: 'internal' },
+  });
   const ENV_COLUMN = {
     schemaVersion: 1,
     envDetectData: { project: { name: 'acme' } },
@@ -460,4 +477,134 @@ describe('12 retires the legacy environment and exclusions mirrors', () => {
       scopeExcludeGlobs: ['vendor/**'],
     });
   });
+
+  it('drops a tracked Haive-shaped tooling.json and commits the unit without a machine-local key', async () => {
+    const s = await seeded(
+      { [TOOLING_LEGACY]: HAIVE_TOOLING },
+      { onboardingTooling: TOOLING_COLUMN },
+    );
+    expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
+
+    const first = await s.applyCommit();
+
+    expect(first.commitPerformed).toBe(true);
+    const files = await trackedFiles(s.root);
+    expect(files).toContain(TOOLING_UNIT);
+    expect(files).not.toContain(TOOLING_LEGACY);
+    expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(false);
+    expect(JSON.parse(await readFile(join(s.root, TOOLING_UNIT), 'utf8'))).toEqual({
+      ragMode: 'internal',
+      mcpSettingsJson: '{"mcpServers":{"x":{"command":"evil"}}}',
+    });
+    expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+    const head = await gitOut(s.root, 'rev-parse', 'HEAD');
+
+    const second = await s.applyCommit();
+
+    expect(second.commitPerformed).toBe(false);
+    expect(await gitOut(s.root, 'rev-parse', 'HEAD')).toBe(head);
+  });
+
+  it('writes no tooling.json where none existed', async () => {
+    const s = await seeded({}, { onboardingTooling: TOOLING_COLUMN });
+
+    await s.applyCommit();
+
+    expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(false);
+    expect(await trackedFiles(s.root)).toContain(TOOLING_UNIT);
+  });
+
+  it("keeps a tooling.json that is not Haive's, and says so", async () => {
+    const s = await seeded(
+      { [TOOLING_LEGACY]: '{"keep":true}' },
+      { onboardingTooling: TOOLING_COLUMN },
+    );
+
+    const out = await s.applyCommit();
+
+    expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(true);
+    expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
+    expect(out.warnings.some((w) => w.startsWith(`${TOOLING_LEGACY} was left in place`))).toBe(
+      true,
+    );
+  });
+
+  it('keeps tooling.json when the record does not carry the tooling', async () => {
+    const s = await seeded({ [TOOLING_LEGACY]: HAIVE_TOOLING }, { onboardingTooling: null });
+
+    const out = await s.applyCommit();
+
+    expect(existsSync(join(s.root, TOOLING_UNIT))).toBe(false);
+    expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(true);
+    expect(out.warnings.filter((w) => w.includes('was left in place'))).toEqual([]);
+  });
+
+  it('without a render context there is no record: tooling.json is written, stripped, and committed', async () => {
+    const s = await seeded({}, { onboardingTooling: TOOLING_COLUMN }, null);
+
+    const out = await s.applyCommit();
+
+    expect(out.commitPerformed).toBe(true);
+    expect(existsSync(join(s.root, TOOLING_UNIT))).toBe(false);
+    expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
+    expect(JSON.parse(await readFile(join(s.root, TOOLING_LEGACY), 'utf8'))).toEqual({
+      schemaVersion: 1,
+      tooling: { ragMode: 'internal' },
+    });
+  });
+
+  it('writes tooling.json again, and commits it, when the record write failed', async () => {
+    const s = await seeded(
+      { [TOOLING_LEGACY]: HAIVE_TOOLING },
+      { onboardingTooling: TOOLING_COLUMN },
+    );
+    let refused = false;
+    s.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+
+    const out = await s.applyCommit();
+
+    expect(out.warnings).toContain('project state record write failed: database refused');
+    expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
+    expect(JSON.parse(await readFile(join(s.root, TOOLING_LEGACY), 'utf8'))).toEqual({
+      schemaVersion: 1,
+      tooling: { ragMode: 'internal' },
+    });
+  });
+
+  it.each([
+    ['another schema version', { ...TOOLING_COLUMN, schemaVersion: 2 }],
+    [
+      'a unit past the file limit',
+      {
+        schemaVersion: 1,
+        tooling: { ragMode: 'internal', pad: 'x'.repeat(1024 * 1024) },
+      },
+    ],
+  ])(
+    'with %s the record carries no tooling unit: tooling.json is written, committed, and not retired',
+    async (_why, column) => {
+      const stale = JSON.stringify({ schemaVersion: 1, tooling: { ragMode: 'stale' } });
+      const s = await seeded({ [TOOLING_LEGACY]: stale }, { onboardingTooling: column });
+
+      const out = await s.applyCommit();
+
+      expect(out.commitPerformed).toBe(true);
+      expect(existsSync(join(s.root, TOOLING_UNIT))).toBe(false);
+      expect(existsSync(join(s.root, RECORD_FORMAT))).toBe(true);
+      expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
+      const written = JSON.parse(await readFile(join(s.root, TOOLING_LEGACY), 'utf8')) as {
+        schemaVersion: number;
+        tooling: Record<string, unknown>;
+      };
+      expect(written.schemaVersion).toBe(column.schemaVersion);
+      expect(written.tooling.ragMode).toBe('internal');
+      expect(written.tooling.ollamaUrl).toBeUndefined();
+      expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+    },
+  );
 });

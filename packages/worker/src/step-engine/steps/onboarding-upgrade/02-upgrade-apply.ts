@@ -22,6 +22,7 @@ import {
   CLI_RULES_TEMPLATE_KIND,
   extractRegion,
   getHaiveVersion,
+  HAIVE_DATA_FILES,
   normalizeContent,
   sha256Hex,
   upsertRegion,
@@ -38,6 +39,7 @@ import {
   INSTALL_MANIFEST_PATH,
   retireInstallManifest,
   retireLegacyMirrors,
+  toolingOutsideRecord,
 } from '../../_retire-install-manifest.js';
 import { unionExpandedFor } from '../../_upgrade-render.js';
 import {
@@ -1812,7 +1814,10 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if ((await retireInstallManifest(ctx, warnings)) === 'removed') {
         deletedPaths.push(INSTALL_MANIFEST_PATH);
       }
-      for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings)) {
+      const keepTooling = (await toolingOutsideRecord(ctx.db, plan.repositoryId))
+        ? [HAIVE_DATA_FILES.tooling]
+        : [];
+      for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings, keepTooling)) {
         if (outcome === 'removed') deletedPaths.push(path);
       }
     } catch (err) {

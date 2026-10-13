@@ -65,8 +65,10 @@ describe('retireInstallManifest', () => {
 describe('retireLegacyMirrors', () => {
   const ENV_UNIT = '.haive-data/state/project/environment.json';
   const GLOBS_UNIT = '.haive-data/state/settings/scope-exclude-globs.json';
+  const TOOLING_UNIT = '.haive-data/state/settings/onboarding-tooling.json';
   const ENV = { schemaVersion: 1, envDetectData: {}, confirmedValues: {} };
   const GLOBS = { schemaVersion: 1, scopeExcludeGlobs: ['a/**'] };
+  const TOOLING = { schemaVersion: 1, tooling: { ragMode: 'internal' } };
 
   async function retire(files: Record<string, unknown>) {
     const root = await mkdtemp(join(tmpdir(), 'retire-legacy-mirrors-'));
@@ -91,16 +93,20 @@ describe('retireLegacyMirrors', () => {
     const r = await retire({
       '.haive-data/environment.json': ENV,
       '.haive-data/exclusions.json': GLOBS,
+      '.haive-data/tooling.json': TOOLING,
       [ENV_UNIT]: {},
       [GLOBS_UNIT]: [],
+      [TOOLING_UNIT]: {},
     });
 
     expect(r.outcomes).toEqual({
       '.haive-data/environment.json': 'removed',
       '.haive-data/exclusions.json': 'removed',
+      '.haive-data/tooling.json': 'removed',
     });
     expect(r.exists('.haive-data/environment.json')).toBe(false);
     expect(r.exists('.haive-data/exclusions.json')).toBe(false);
+    expect(r.exists('.haive-data/tooling.json')).toBe(false);
     expect(r.warnings).toEqual([]);
   });
 
@@ -108,21 +114,24 @@ describe('retireLegacyMirrors', () => {
     const r = await retire({
       '.haive-data/environment.json': ENV,
       '.haive-data/exclusions.json': GLOBS,
+      '.haive-data/tooling.json': TOOLING,
       [ENV_UNIT]: {},
     });
 
     expect(r.outcomes).toEqual({
       '.haive-data/environment.json': 'removed',
       '.haive-data/exclusions.json': 'kept',
+      '.haive-data/tooling.json': 'kept',
     });
     expect(r.exists('.haive-data/exclusions.json')).toBe(true);
+    expect(r.exists('.haive-data/tooling.json')).toBe(true);
     expect(r.warnings).toEqual([]);
   });
 
   it('reports absent when there is no mirror to remove', async () => {
-    const r = await retire({ [ENV_UNIT]: {}, [GLOBS_UNIT]: [] });
+    const r = await retire({ [ENV_UNIT]: {}, [GLOBS_UNIT]: [], [TOOLING_UNIT]: {} });
 
-    expect(Object.values(r.outcomes)).toEqual(['absent', 'absent']);
+    expect(Object.values(r.outcomes)).toEqual(['absent', 'absent', 'absent']);
   });
 
   it.each([
@@ -133,8 +142,17 @@ describe('retireLegacyMirrors', () => {
     ['exclusions.json', 'another schemaVersion', { ...GLOBS, schemaVersion: 2 }],
     ['exclusions.json', 'a non-string glob', { schemaVersion: 1, scopeExcludeGlobs: [1] }],
     ['exclusions.json', 'someone else’s keys', { keep: true }],
+    ['tooling.json', 'another schemaVersion', { ...TOOLING, schemaVersion: 2 }],
+    ['tooling.json', 'no tooling object', { schemaVersion: 1, tooling: [] }],
+    ['tooling.json', 'someone else’s keys', { keep: true }],
+    ['tooling.json', 'not JSON', '{'],
   ])('keeps %s holding %s, and says so', async (name, _what, content) => {
-    const r = await retire({ [`.haive-data/${name}`]: content, [ENV_UNIT]: {}, [GLOBS_UNIT]: [] });
+    const r = await retire({
+      [`.haive-data/${name}`]: content,
+      [ENV_UNIT]: {},
+      [GLOBS_UNIT]: [],
+      [TOOLING_UNIT]: {},
+    });
 
     expect(r.exists(`.haive-data/${name}`)).toBe(true);
     expect(r.outcomes[`.haive-data/${name}`]).toBe('kept');

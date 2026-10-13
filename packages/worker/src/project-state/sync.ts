@@ -31,6 +31,9 @@ import {
   settingColumnUpdate,
   settingFileName,
   settingsDifferingFrom,
+  toolingUnitFrom,
+  toolingUnitOf,
+  TOOLING_UNIT_NAME,
   withoutUnchosenRtk,
   portableRender,
   renderContextColumnSchema,
@@ -51,6 +54,7 @@ import {
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { claimDiskHash } from './claim-disk.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
+import { toolingColumnFromUnit } from './tooling-import.js';
 import {
   loadPendingRenderConflicts,
   loadRecordClaims,
@@ -568,6 +572,7 @@ export async function syncProjectStateFromCheckout(
         chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
         reviewDimensions: schema.repositories.reviewDimensions,
         onboardingEnvironment: schema.repositories.onboardingEnvironment,
+        onboardingTooling: schema.repositories.onboardingTooling,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
@@ -690,15 +695,37 @@ export async function syncProjectStateFromCheckout(
       });
     }
 
-    const settingsMoved = Object.keys(portable.updates).length > 0;
+    // Never merged: a column that holds tooling stands, and only an empty one takes the checkout's.
+    const toolingUnit = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
+    const toolingImport =
+      repo.onboardingTooling == null && toolingUnit !== null
+        ? toolingColumnFromUnit(toolingUnit)
+        : null;
+    const toolingStale = !sameValue(
+      toolingUnitOf(toolingImport?.column ?? repo.onboardingTooling),
+      toolingUnit,
+    );
+    const updates = {
+      ...portable.updates,
+      ...(toolingImport
+        ? { onboardingTooling: toolingImport.column as unknown as Record<string, unknown> }
+        : {}),
+    };
+    const settingsMoved = Object.keys(updates).length > 0;
     if (settingsMoved) {
       await tx
         .update(schema.repositories)
-        .set({ ...portable.updates, updatedAt: new Date() })
+        .set({ ...updates, updatedAt: new Date() })
         .where(eq(schema.repositories.id, repositoryId));
       if (portable.updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, null);
     }
-    if (portable.stale) await markProjectStateDirty(tx, repositoryId);
+    if (toolingImport?.heldServers) {
+      logger.warn(
+        { repositoryId, servers: toolingImport.heldServers },
+        'imported MCP servers held until accepted on this install',
+      );
+    }
+    if (portable.stale || toolingStale) await markProjectStateDirty(tx, repositoryId);
     if (portable.rejected.length > 0) {
       logger.warn(
         { repositoryId, settings: portable.rejected },
@@ -717,7 +744,10 @@ export async function syncProjectStateFromCheckout(
       claims: keptClaims(incomingClaims, baseClaims, claimConflicts),
       // Never merged: a conflict row on a descriptor could not be answered, and would block upgrades.
       bundles: checkout.bundles,
-      settings: portable.baseSettings,
+      settings: {
+        ...portable.baseSettings,
+        ...(toolingUnit ? { [TOOLING_UNIT_NAME]: toolingUnit } : {}),
+      },
       environment: portable.baseEnvironment,
     });
     if (row === null || row.lastError !== lastError || !sameValue(row.baseSnapshot, baseSnapshot)) {

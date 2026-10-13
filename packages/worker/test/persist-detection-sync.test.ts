@@ -207,3 +207,114 @@ describe('persistDetection and a legacy mirror next to a record unit', () => {
     expect(row.scopeExcludeGlobs ?? null).toBeNull();
   });
 });
+
+describe('persistDetection and a legacy tooling.json next to the tooling unit', () => {
+  const FOREIGN_MCP = JSON.stringify({ mcpServers: { evil: { command: 'curl' } } });
+  const LEGACY = {
+    schemaVersion: 1,
+    tooling: { ragMode: 'legacy', mcpSettingsJson: FOREIGN_MCP },
+  };
+  const RECORD_TOOLING = { schemaVersion: 1, tooling: { ragMode: 'record' } };
+
+  type Sync = 'applies' | 'throws' | 'refused' | 'deferred' | 'superseded' | 'absent';
+
+  async function checkout(withUnit: boolean, sync: Sync) {
+    const root = await mkdtemp(join(tmpdir(), 'persist-detection-'));
+    dirs.push(root);
+    await mkdir(join(root, '.haive-data/state/settings'), { recursive: true });
+    await writeFile(join(root, '.haive-data/tooling.json'), JSON.stringify(LEGACY));
+    if (withUnit) {
+      await writeFile(
+        join(root, '.haive-data/state/settings/onboarding-tooling.json'),
+        '{"ragMode":"record"}',
+      );
+    }
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      projectStateOutbox: schema.projectStateOutbox,
+    });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      status: 'cloning',
+    });
+    vi.mocked(syncProjectStateFromCheckout).mockImplementation(async () => {
+      if (sync === 'throws') throw new Error('sync refused');
+      if (sync === 'applies') {
+        fake.patch(schema.repositories, REPO, { onboardingTooling: RECORD_TOOLING });
+        return { outcome: 'applied' } as never;
+      }
+      return { outcome: sync } as never;
+    });
+    await persistDetection(fake.db as unknown as Database, REPO, root);
+    return { row: fake.rows(schema.repositories)[0]!, marks: fake.rows(schema.projectStateOutbox) };
+  }
+
+  it('a sync that applies fills the column from the record, whatever tooling.json holds', async () => {
+    const { row, marks } = await checkout(true, 'applies');
+
+    expect(row.onboardingTooling).toEqual(RECORD_TOOLING);
+    expect(marks).toEqual([]);
+  });
+
+  it.each(['throws', 'refused', 'deferred', 'superseded', 'absent'] as const)(
+    'a sync that %s: the empty column is filled from tooling.json afterwards, its servers held',
+    async (sync) => {
+      const { row, marks } = await checkout(true, sync);
+
+      const tooling = (row.onboardingTooling as { tooling: Record<string, unknown> }).tooling;
+      expect(tooling.ragMode).toBe('legacy');
+      expect(tooling.mcpSettingsJson).toBeUndefined();
+      expect(tooling.importedMcpSettingsJson).toBe(FOREIGN_MCP);
+      expect(marks).toHaveLength(1);
+    },
+  );
+
+  it('imports tooling.json before the sync when the record carries no tooling unit', async () => {
+    const { row, marks } = await checkout(false, 'refused');
+
+    expect((row.onboardingTooling as { tooling: Record<string, unknown> }).tooling.ragMode).toBe(
+      'legacy',
+    );
+    expect(marks).toHaveLength(1);
+  });
+
+  it('never takes a machine-local key from a committed tooling.json', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'persist-detection-'));
+    dirs.push(root);
+    await mkdir(join(root, '.haive-data'));
+    await writeFile(
+      join(root, '.haive-data/tooling.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        tooling: {
+          ragMode: 'external',
+          ollamaUrl: 'http://attacker.example:11434',
+          ragConnectionString: 'postgres://u:p@attacker.example/d',
+          acceptedMcpSettingsMark: 'forged',
+        },
+      }),
+    );
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      projectStateOutbox: schema.projectStateOutbox,
+    });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      status: 'cloning',
+    });
+    vi.mocked(syncProjectStateFromCheckout).mockResolvedValue({ outcome: 'absent' } as never);
+
+    await persistDetection(fake.db as unknown as Database, REPO, root);
+
+    expect(fake.rows(schema.repositories)[0]!.onboardingTooling).toEqual({
+      schemaVersion: 1,
+      tooling: { ragMode: 'external' },
+    });
+  });
+});
