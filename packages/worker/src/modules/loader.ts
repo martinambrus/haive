@@ -12,6 +12,7 @@ import { openModuleDatabase, type ModuleSchemaContext } from '@haive/shared/modu
 import { getBullRedis } from '../redis.js';
 import type { StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
+import { emitsLoop } from '../step-engine/steps/index.js';
 
 export type { ModuleSchemaContext };
 
@@ -63,7 +64,7 @@ export function registerModuleSteps(
   return entries.map((entry, index) => {
     const manifest = manifests[index]!;
     const moduleId = manifest.id;
-    const localIds = new Set<string>();
+    const localDefs = new Map<string, StepDefinition>();
     const stepIds: string[] = [];
     for (const def of entry.steps ?? []) {
       const localId = def.metadata.id;
@@ -84,14 +85,20 @@ export function registerModuleSteps(
           { cause: err },
         );
       }
-      localIds.add(localId);
+      localDefs.set(localId, def);
       stepIds.push(id);
     }
 
     const composable = (manifest.composableSteps ?? []).map((composableEntry) => {
-      if (!localIds.has(composableEntry.stepId)) {
+      const def = localDefs.get(composableEntry.stepId);
+      if (!def) {
         throw new Error(
           `Module ${moduleId} composable step "${composableEntry.stepId}" is not one of its steps`,
+        );
+      }
+      if (emitsLoop(def) && composableEntry.loopTargetStepId === undefined) {
+        throw new Error(
+          `Module ${moduleId} composable step "${composableEntry.stepId}" loops but declares no loopTargetStepId`,
         );
       }
       return {
