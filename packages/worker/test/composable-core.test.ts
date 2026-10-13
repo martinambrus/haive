@@ -176,6 +176,60 @@ describe('core composable catalog', () => {
     ]);
   });
 
+  it('raises no ordering issue on the built-in workflow and environment orders', () => {
+    const orderKinds = new Set([
+      'too-late',
+      'loop-after-closing',
+      'missing-loop-target',
+      'duplicate-step',
+    ]);
+    for (const workflowType of ['workflow', 'env_replicate'] as const) {
+      const order = stepRegistry
+        .listByWorkflow(workflowType)
+        .map((s) => s.metadata.id)
+        .filter((id) => catalog.has(id));
+      expect(order.length).toBeGreaterThan(3);
+      expect(validateComposition(order, catalog).filter((i) => orderKinds.has(i.kind))).toEqual([]);
+    }
+  });
+
+  it.each([
+    ['07c-ddev-reconcile', '08-phase-5-verify', 'verification'],
+    ['07c-ddev-reconcile', '08b-test-management', 'tests'],
+    ['08b-test-management', '08c-code-review', 'review'],
+    ['07a-code-simplify', '08c-code-review', 'review'],
+    ['07a-code-simplify', '08-phase-5-verify', 'verification'],
+    ['06-gate-1-spec-approval', '07-phase-2-implement', 'implementation'],
+    ['11-phase-8-learning', '11a-gate-4-push', 'pushed'],
+    ['11b-kb-commit', '11a-gate-4-push', 'pushed'],
+  ])('rejects %s placed after %s', (early, late, token) => {
+    const setup = [
+      '04-phase-0b-pre-planning',
+      '01-worktree-setup',
+      '01-declare-deps',
+      '01c-ddev-env',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+    ].filter((id) => id !== early && id !== late);
+    const issues = validateComposition([...setup, late, early], catalog);
+    expect(issues).toContainEqual(
+      expect.objectContaining({ kind: 'too-late', stepId: early, token }),
+    );
+  });
+
+  it('remembers a capability cleanup removed when checking precedence', () => {
+    const order = [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+      '12-worktree-cleanup',
+      '00a-sync-base',
+    ];
+    expect(validateComposition(order, catalog)).toEqual([
+      { kind: 'too-late', index: 4, stepId: '00a-sync-base', token: 'worktree' },
+    ]);
+  });
+
   it('rejects syncing the base after the worktree is cut', () => {
     expect(validateComposition(['00a-sync-base', '01-worktree-setup'], catalog)).toEqual([]);
     expect(validateComposition(['01-worktree-setup', '00a-sync-base'], catalog)).toEqual([

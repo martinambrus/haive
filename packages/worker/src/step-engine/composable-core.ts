@@ -143,6 +143,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'spec', reason: 'Asks for a decision on the spec.' }],
     provides: ['spec-approved'],
+    precedes: ['implementation'],
     loopTargetStepId: '04-phase-0b-pre-planning',
   },
   {
@@ -152,7 +153,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['implementation'],
-    precedes: ['commit'],
+    precedes: ['commit', 'verification', 'review'],
   },
   {
     stepId: '07a-code-simplify',
@@ -164,7 +165,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'implementation', reason: 'Simplifies the implemented changes.' },
     ],
     provides: [],
-    precedes: ['commit'],
+    precedes: ['commit', 'verification', 'review'],
     loopBudgetEditable: true,
   },
   {
@@ -187,6 +188,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'implementation', reason: 'Checks the implemented changes.' },
     ],
     provides: [],
+    precedes: ['tests', 'verification'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -195,7 +197,8 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'check',
     dispatchesCli: true,
     requires: [needWorktree],
-    provides: [],
+    provides: ['tests'],
+    precedes: ['verification', 'review'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -204,7 +207,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'check',
     dispatchesCli: false,
     requires: [needWorktree],
-    provides: [],
+    provides: ['verification'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -213,7 +216,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'check',
     dispatchesCli: true,
     requires: [needWorktree],
-    provides: [],
+    provides: ['review'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -232,6 +235,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['learnings'],
+    precedes: ['pushed'],
     loopTargetStepId: '11-phase-8-learning',
   },
   {
@@ -241,6 +245,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [needWorktree, { needs: 'learnings', reason: 'Commits the captured learnings.' }],
     provides: [],
+    precedes: ['pushed'],
   },
   {
     stepId: '11c-rag-reindex',
@@ -257,7 +262,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'finish',
     dispatchesCli: false,
     requires: [needWorktree, { needs: 'commit', reason: 'Pushes the committed work.' }],
-    provides: [],
+    provides: ['pushed'],
   },
   {
     stepId: '12-worktree-cleanup',

@@ -16,6 +16,7 @@ export function validateComposition(
   if (stepIds.length === 0) return [{ kind: 'empty' }];
   const issues: CompositionIssue[] = [];
   const provided = new Set<string>();
+  const everProvided = new Set<string>();
   const seen = new Map<string, number>();
   let closing: { stepId: string; index: number } | undefined;
   stepIds.forEach((stepId, index) => {
@@ -27,7 +28,7 @@ export function validateComposition(
       return;
     }
     for (const token of entry.precedes ?? []) {
-      if (provided.has(token)) issues.push({ kind: 'too-late', index, stepId, token });
+      if (everProvided.has(token)) issues.push({ kind: 'too-late', index, stepId, token });
     }
     for (const { needs, reason } of entry.requires) {
       if (!provided.has(needs)) issues.push({ kind: 'unmet-need', index, stepId, needs, reason });
@@ -46,7 +47,10 @@ export function validateComposition(
     if (targetIndex !== undefined && closing !== undefined && targetIndex < closing.index) {
       issues.push({ kind: 'loop-after-closing', index, stepId, closingStepId: closing.stepId });
     }
-    for (const token of entry.provides) provided.add(token);
+    for (const token of entry.provides) {
+      provided.add(token);
+      everProvided.add(token);
+    }
     for (const token of entry.removes ?? []) provided.delete(token);
   });
   return issues;
