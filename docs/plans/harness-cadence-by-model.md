@@ -124,9 +124,10 @@ two structural reasons:
   non-zero exit (`execSlot`, `08-phase-5-verify.ts`). A prompt built before the run cannot know
   either, and both can change while the agent works.
 
-So each check runs through the runner its owning step uses, never a second resolver or runner:
-lint, typecheck and the full test command through 08's `execSlot` and its classifiers, and the
-selective test run through 08b's `runTestCommand`, which runs a structured `TestCommand` (kind,
+So each check is resolved and classified by the code its owning step uses, never a second resolver
+or classifier (where it executes is the lease rule below): lint, typecheck and the full test
+command as 08's `execSlot` resolves and classifies them, and the
+selective test run as 08b's `runTestCommand` builds it, from a structured `TestCommand` (kind,
 args, and a `cwd` for a framework below the root). 08b persists only the flattened display string
 (`testRun.command`) today, which cannot rebuild that `cwd`, so P1 has 08b also persist the
 structured command it ran. Two inputs those runners take from earlier steps do not exist yet on
@@ -136,8 +137,13 @@ structured command it ran. Two inputs those runners take from earlier steps do n
   (`runStepCommandInSandbox`, `docs/architecture/runtime-capacity.md`), and the requesting 07
   invocation already holds one until it finishes. A check that reserved a second slot would wait on
   capacity its own caller is holding: at `MAX_PARALLEL_AGENTS=1`, or with every slot held by 07
-  runs, it would time out as NOT RUN every time. A requested check therefore runs under the
-  requesting invocation's lease and never reserves its own.
+  runs, it would time out as NOT RUN every time. Sharing the caller's lease is not the answer
+  either: `runStepCommandInSandbox` starts a second sandbox container, and counting two
+  agent-sized containers under one lease breaks the pool's RAM cap. So a non-DDEV check executes
+  INSIDE the requesting invocation's own container, which admission already counted, with the
+  command resolved and the result classified exactly as 08 and 08b do; only the transport differs
+  from their `runStepCommandInSandbox`. A DDEV check runs in the task's runner through `ddevExec`,
+  which the runtime budget already counts. Neither starts an uncounted workload.
 - **The test framework.** 08 reads it from 08b's persisted detect (`08-phase-5-verify.ts`), which
   does not exist before 08b runs. Without it a Playwright slot gets no browser provisioning and
   `classifyTestEnvFailure` runs with `null`, so a missing browser would come back failed rather
@@ -165,7 +171,7 @@ Verification: prompt tests for both setting values; a selective test request for
 the root runs from that framework's directory, as 08b ran it; a check request on a fixture repository runs
 exactly the command 08 runs for that slot; a missing program and a test-environment failure each
 come back NOT RUN, not failed; a check requested at `MAX_PARALLEL_AGENTS=1` runs rather than
-waiting on its own caller's slot; a DDEV repository's check runs host-side and returns; one live task
+waiting on its own caller's slot, and starts no second container; a DDEV repository's check runs host-side and returns; one live task
 with the setting on, where 07's transcript shows the requests and their results, and 08 still runs
 its own checks. Rollback: the
 setting is additive; off restores today's prompt.
