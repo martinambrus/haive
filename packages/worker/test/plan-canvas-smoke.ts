@@ -2749,6 +2749,20 @@ async function main(): Promise<void> {
     notJson.startsWith('PlanSnapshotError') && notJson.includes('not valid JSON'),
     notJson,
   );
+  await db
+    .update(schema.planMirrorState)
+    .set({ lastError: null, writtenRevision: sql`${schema.planMirrorState.revision}` })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await persistDetection(db, sId, sDir);
+  const malformedRescan = await db.query.planMirrorState.findFirst({
+    where: eq(schema.planMirrorState.repositoryId, sId),
+  });
+  check(
+    'three-way: a rescan of a plan that exists records a non-JSON plan.json and leaves it dirty',
+    !!malformedRescan?.lastError?.includes('not valid JSON') &&
+      malformedRescan.revision > malformedRescan.writtenRevision,
+    malformedRescan,
+  );
   await arrive(theirs);
 
   // No base: the incoming side wins and nothing is deleted, as a reconcile always did.
@@ -2824,6 +2838,12 @@ async function main(): Promise<void> {
   );
   const yId = yAdded.refs['tmp-y']!;
   const y1Id = yAdded.refs['tmp-y1']!;
+  const zAdded = await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: 'tmp-z', parentRef: sBuilt.refs['sroot']!, title: 'Z' }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+  const zId = zAdded.created[0]!;
   await writePlanMirror(db, sId, sDir);
   const withY = await readMirror();
   const withoutY = {
@@ -2833,8 +2853,20 @@ async function main(): Promise<void> {
   theirs = withoutY;
   await advancePlanBaseToPushed(db, sId, JSON.stringify(withoutY));
   await editS(yId, { title: 'Y here' });
-  await arrive(retitled(withY, yId, 'Y there'));
+  // The other side also moved Z, which is in the base, under its own Y.
+  await arrive({
+    ...retitled(withY, yId, 'Y there'),
+    nodes: retitled(withY, yId, 'Y there').nodes.map((n) =>
+      n.id === zId ? { ...n, parentId: yId } : n,
+    ),
+  });
   const yBase = await baseOf();
+  check(
+    'three-way: an old node moved under a node both sides added keeps its old place in the base',
+    !yBase?.nodes.some((n) => n.id === yId) &&
+      yBase?.nodes.find((n) => n.id === zId)?.parentId === sBuilt.refs['sroot'],
+    yBase?.nodes.map((n) => [n.id, n.parentId]),
+  );
   await arrive({
     ...theirs,
     nodes: theirs.nodes.map((n) => (n.parentId === null ? { ...n, body: 'unrelated change' } : n)),

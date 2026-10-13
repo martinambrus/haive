@@ -793,12 +793,12 @@ async function seedBaseFrom(tx: PlanMirrorTx, repositoryId: string, bytes: Buffe
 }
 
 /** A node both sides added with an asked field set differently had no base: it stays out of the
- *  next one, with whatever new subtree hangs under it, so the question is asked again. A node
- *  with an old base node under it stays, since the base must still parse. */
+ *  next one, with whatever new subtree hangs under it, so the question is asked again. An old base
+ *  node moved under it keeps its old base entry, ancestry included. */
 function withoutAbsentAsked(
   payload: PlanMirrorPayload,
   absent: ReadonlySet<string>,
-  oldBase: ReadonlySet<string>,
+  oldBase: ReadonlyMap<string, PlanMirrorPayload['nodes'][number]>,
 ): PlanMirrorPayload {
   if (absent.size === 0) return payload;
   const children = new Map<string, string[]>();
@@ -814,12 +814,14 @@ function withoutAbsentAsked(
       subtree.push(next);
       queue.push(...(children.get(next) ?? []));
     }
-    if (!subtree.some((n) => oldBase.has(n))) for (const n of subtree) drop.add(n);
+    for (const n of subtree) if (!oldBase.has(n)) drop.add(n);
   }
   if (drop.size === 0) return payload;
   return {
     ...payload,
-    nodes: payload.nodes.filter((n) => !drop.has(n.id)),
+    nodes: payload.nodes
+      .filter((n) => !drop.has(n.id))
+      .map((n) => (n.parentId !== null && drop.has(n.parentId) ? oldBase.get(n.id)! : n)),
     edges: payload.edges.filter((e) => !drop.has(e.fromNodeId) && !drop.has(e.toNodeId)),
     ...('codeLinks' in payload
       ? { codeLinks: payload.codeLinks.filter((l) => !drop.has(l.nodeId)) }
@@ -858,7 +860,7 @@ async function storeAgreedBase(
           }),
         } as PlanMirrorPayload),
     unbased,
-    new Set(oldById.keys()),
+    oldById as ReadonlyMap<string, PlanMirrorPayload['nodes'][number]>,
   );
   await tx
     .update(schema.planMirrorState)
@@ -1424,7 +1426,7 @@ async function reconcilePlanLocked(
           }),
         } as PlanMirrorPayload),
     new Set(merge.conflicts.filter((c) => c.base === undefined).map((c) => c.nodeId)),
-    new Set(baseParsed.success ? baseParsed.data.nodes.map((n) => n.id) : []),
+    new Map(baseParsed.success ? baseParsed.data.nodes.map((n) => [n.id, n]) : []),
   );
 
   // Dirty when the file no longer says what the database does.

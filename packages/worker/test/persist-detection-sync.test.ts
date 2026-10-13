@@ -49,6 +49,7 @@ describe('persistDetection and the project state sync', () => {
       const fake = createFakeDb({
         repositories: schema.repositories,
         projectStateOutbox: schema.projectStateOutbox,
+        planNodes: schema.planNodes,
       });
       fake.insert(schema.repositories, {
         id: REPO,
@@ -93,6 +94,7 @@ describe('persistDetection and a plan snapshot it leaves alone', () => {
     const fake = createFakeDb({
       repositories: schema.repositories,
       projectStateOutbox: schema.projectStateOutbox,
+      planNodes: schema.planNodes,
     });
     fake.insert(schema.repositories, {
       id: REPO,
@@ -101,12 +103,29 @@ describe('persistDetection and a plan snapshot it leaves alone', () => {
       source: 'blank',
       status: 'cloning',
     });
+    // A plan is decided by its rows, so has_plan is a repository that already holds one.
+    if (code === 'has_plan') {
+      fake.insert(schema.planNodes, {
+        id: '00000000-0000-4000-8000-0000000000c1',
+        repositoryId: REPO,
+        parentId: null,
+        path: '/00000000-0000-4000-8000-0000000000c1/',
+        ordinal: 0,
+        title: 'Shop',
+        kind: 'component',
+        status: 'todo',
+        taskable: false,
+      });
+    }
     vi.mocked(syncProjectStateFromCheckout).mockResolvedValue({ outcome: 'unchanged' } as never);
-    vi.mocked(importPlanMirror).mockResolvedValueOnce({ imported: false, code, reason });
+    if (code !== 'has_plan') {
+      vi.mocked(importPlanMirror).mockResolvedValueOnce({ imported: false, code, reason });
+    }
     const db = fake.db as unknown as Database;
 
     await persistDetection(db, REPO, root);
 
+    expect(importPlanMirror).toHaveBeenCalledTimes(code === 'has_plan' ? 0 : 1);
     expect(reconcilePlanFromCheckout).toHaveBeenCalledTimes(code === 'has_plan' ? 1 : 0);
     if (code === 'has_plan') {
       expect(reconcilePlanFromCheckout).toHaveBeenCalledWith(db, REPO, root, {
