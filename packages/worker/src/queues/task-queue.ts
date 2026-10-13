@@ -106,7 +106,12 @@ import {
   cleanupRagForRepository,
 } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
-import { buildRunList, runListStrategyFor, type ResolvedTaskContext } from './run-list.js';
+import {
+  buildRunList,
+  resolveFixLoopTarget,
+  taskTypeRuntimeFor,
+  type ResolvedTaskContext,
+} from './run-list.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
@@ -129,7 +134,6 @@ import {
   FIX_LOOP_ACTION_FIELD,
   FIX_LOOP_INSTRUCTION_FIELD,
   FIX_LOOP_GATE_SOURCE,
-  FIX_LOOP_TARGET_STEP_ID,
   DEFAULT_MAX_FIX_ROUNDS,
   HUMAN_REJECT_SOURCES,
 } from '../step-engine/steps/workflow/_fix-loop.js';
@@ -247,7 +251,7 @@ async function resolveTaskContext(
     currentRound: task.currentRound ?? 0,
     status: task.status,
     completedAt: task.completedAt ?? null,
-    runListStrategy: await runListStrategyFor(db, task.type),
+    ...(await taskTypeRuntimeFor(db, task.type)),
     runListSnapshot: task.runListSnapshot ?? null,
   };
 }
@@ -572,6 +576,18 @@ export async function markTaskFailed(
   epoch?: number,
   statuses?: readonly TaskStatus[],
 ): Promise<boolean> {
+  if (!(await writeTaskFailed(db, taskId, message, epoch, statuses))) return false;
+  await settleFailedTask(db, taskId);
+  return true;
+}
+
+async function writeTaskFailed(
+  db: Database | DbHandle,
+  taskId: string,
+  message: string,
+  epoch?: number,
+  statuses?: readonly TaskStatus[],
+): Promise<boolean> {
   const [failed] = await db
     .update(schema.tasks)
     .set({
@@ -589,9 +605,35 @@ export async function markTaskFailed(
       ),
     )
     .returning({ id: schema.tasks.id });
-  if (!failed) return false;
-  await settleFailedTask(db, taskId);
-  return true;
+  return failed !== undefined;
+}
+
+/** The step a fix round re-enters, or null after failing the task because it cannot be reached. */
+async function routableFixLoopTarget(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  sourceRowId: string,
+): Promise<StepDefinition | null> {
+  const resolved = resolveFixLoopTarget({
+    taskType: ctx.workflowType,
+    fixLoop: ctx.fixLoop,
+    runList: await buildRunList(ctx, db),
+    registry: stepRegistry,
+  });
+  if (resolved.ok) return resolved.def;
+  // Taken under the source row like the hand-off it replaces, as a Retry takes the steps first.
+  const failed = await db.transaction(async (tx) => {
+    if (!(await lockOwnedStep(tx, sourceRowId))) return false;
+    if (!(await writeTaskFailed(tx, ctx.taskId, resolved.reason, ctx.orchestrationEpoch))) {
+      return false;
+    }
+    await appendEvent(tx, ctx.taskId, sourceRowId, 'fix_loop.unroutable', {
+      reason: resolved.reason,
+    });
+    return true;
+  });
+  if (failed) await settleFailedTask(db, ctx.taskId);
+  return null;
 }
 
 /** What a task that ended failed releases. */
@@ -1733,7 +1775,8 @@ export async function handleResult(
         });
         return;
       }
-      const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+      const target = await routableFixLoopTarget(db, ctx, result.row.id);
+      if (!target) return;
       // If a prior attempt at this round left a terminal row (e.g. a reaped/failed CLI
       // whose invocation was never superseded — a worker reload mid-CLI), reset it so the
       // re-entry runs a FRESH invocation instead of re-consuming the dead one. Returns null
@@ -1934,7 +1977,8 @@ export async function resolveFixLoopGate(
 
   // 'continue' (default): grant one more round — re-enter implementation at round + 1.
   // The fix request for that round was recorded when the gate was raised.
-  const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+  const target = await routableFixLoopTarget(db, ctx, gateRow.id);
+  if (!target) return;
   const nextRound = round + 1;
   // A directive typed at the gate supersedes that recorded request. Written as a NEW event for
   // the same round rather than mutating the old one: task_events is append-only, and

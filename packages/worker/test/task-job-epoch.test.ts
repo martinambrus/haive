@@ -576,6 +576,17 @@ describe("a failed step's hand-off", () => {
   });
 });
 
+/** The context resolveTaskContext builds for a workflow task: the run-list fields a fix round's
+ *  target is looked up in. */
+const workflowTaskContext = (stepId = 'epoch-job-step') => ({
+  taskId: 'task-1',
+  userId: 'user-1',
+  orchestrationEpoch: 5,
+  workflowType: 'workflow',
+  runListStrategy: 'static',
+  runListSnapshot: ['epoch-job-target', stepId, '07-phase-2-implement'],
+});
+
 describe('a job that resets steps itself', () => {
   const revise = {
     status: 'revise',
@@ -624,7 +635,7 @@ describe('a job that resets steps itself', () => {
       h.state.taskEpoch = 6;
     };
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
-    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
     // No round recorded as requested or started, and nothing queued for it.
@@ -637,7 +648,7 @@ describe('a job that resets steps itself', () => {
     // The Retry has written the steps and not yet the task, so the epoch still matches.
     h.state.sourceOwned = false;
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
-    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
     expect(h.state.taskWrites).toEqual([]);
     expect(h.state.events).toEqual(['step.loop_back']);
@@ -647,7 +658,7 @@ describe('a job that resets steps itself', () => {
   it('enters and records the fix round while the task is still at its epoch', async () => {
     h.state.readsAnswer = true;
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
-    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
     expect(h.state.events).toEqual(['step.loop_back', 'fix_loop.requested', 'fix_loop.started']);
@@ -665,7 +676,7 @@ describe('a job that resets steps itself', () => {
     h.state.onSelect = () => {
       h.state.taskEpoch = 8;
     };
-    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', revise as never);
     expect(h.state.taskWrites).toEqual([{ epochs: [7], landed: false }]);
     expect(h.state.add).not.toHaveBeenCalled();
@@ -677,7 +688,7 @@ describe('a job that resets steps itself', () => {
       h.state.taskEpoch = 7;
       return { downstreamReset: 0, newEpoch: 7 };
     });
-    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', revise as never);
     expect(h.state.taskWrites).toEqual([{ epochs: [7], landed: true }]);
     expect(h.state.add).toHaveBeenCalledTimes(1);
@@ -687,7 +698,7 @@ describe('a job that resets steps itself', () => {
   it('enters no fix round when its reset finds the task moved on', async () => {
     h.state.readsAnswer = true;
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce('superseded');
-    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
     const call = vi.mocked(resetStepAndDownstream).mock.lastCall!;
     expect(call[3]).toBe(1);
@@ -702,7 +713,7 @@ describe('a job that resets steps itself', () => {
 
 describe('the fix request a loop_back records', () => {
   const GUIDANCE = 'Validate each finding against the code before you act on it.';
-  const ctx = () => ({ taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 });
+  const ctx = () => workflowTaskContext();
   const loopBack = (over: Record<string, unknown> = {}) => ({
     status: 'loop_back',
     row: { id: 'ts-1', round: 0 },
@@ -974,6 +985,12 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
     orchestrationEpoch: 5,
     workflowType: 'epoch_chain',
   });
+  /** The run list a task that can re-enter implementation holds. */
+  const withFixTarget = <T extends object>(c: T) => ({
+    ...c,
+    runListStrategy: 'static',
+    runListSnapshot: ['epoch-chain-first', '07-phase-2-implement'],
+  });
   const row = { id: 'ts-1', round: 0 };
   const retryLands = () => {
     h.state.taskEpoch = 6;
@@ -1156,7 +1173,14 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
     it('re-enters implementation only at the epoch the job holds', async () => {
       h.state.readsAnswer = true;
       h.state.onSelect = retryLands;
-      await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'continue', 1, '');
+      await resolveFixLoopGate(
+        db as never,
+        withFixTarget(ctx()) as never,
+        gate as never,
+        'continue',
+        1,
+        '',
+      );
       expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
       expect(h.state.add).not.toHaveBeenCalled();
     });
@@ -1174,7 +1198,14 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
       h.state.readsAnswer = true;
       h.state.taskStatus = 'failed';
       const failedCtx = { ...ctx(), status: 'failed' };
-      await resolveFixLoopGate(db as never, failedCtx as never, gate as never, 'continue', 1, '');
+      await resolveFixLoopGate(
+        db as never,
+        withFixTarget(failedCtx) as never,
+        gate as never,
+        'continue',
+        1,
+        '',
+      );
       expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
       expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: '07-phase-2-implement' });
     });
@@ -1198,14 +1229,28 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
       h.state.onSelect = () => {
         h.state.taskStatus = 'failed';
       };
-      await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'continue', 1, '');
+      await resolveFixLoopGate(
+        db as never,
+        withFixTarget(ctx()) as never,
+        gate as never,
+        'continue',
+        1,
+        '',
+      );
       expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
       expect(h.state.add).not.toHaveBeenCalled();
     });
 
     it('re-enters implementation at the next round while the task is still at its epoch', async () => {
       h.state.readsAnswer = true;
-      await resolveFixLoopGate(db as never, ctx() as never, gate as never, 'continue', 1, '');
+      await resolveFixLoopGate(
+        db as never,
+        withFixTarget(ctx()) as never,
+        gate as never,
+        'continue',
+        1,
+        '',
+      );
       expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
       expect(h.state.add.mock.lastCall?.[1]).toMatchObject({
         stepId: '07-phase-2-implement',
@@ -1717,5 +1762,94 @@ describe('a START job', () => {
     await processTaskJob(advance, 'tok');
     expect(h.state.add).toHaveBeenCalledTimes(1);
     expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: 'epoch-chain-next', epoch: 5 });
+  });
+});
+
+describe('a fix round whose target is not in the task run list', () => {
+  const GATE = { id: 'ts-1', stepId: 'epoch-job-step', round: 1 };
+  const ctx = (snapshot: string[]) => ({
+    taskId: 'task-1',
+    userId: 'user-1',
+    status: 'running',
+    workflowType: 'custom',
+    orchestrationEpoch: 5,
+    runListStrategy: 'static',
+    runListSnapshot: snapshot,
+  });
+  const loopBack = {
+    status: 'loop_back',
+    row: { id: 'ts-1', round: 0 },
+    diagnosis: 'a defect',
+    sourceStepId: 'epoch-job-step',
+    uncapped: true,
+  };
+  const withoutTarget = ['epoch-job-target', 'epoch-job-step'];
+  const failure = () => h.state.landedTaskPatches.find((p) => p.status === 'failed');
+
+  it('fails the task naming the target and queues nothing, on a step fix request', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockClear();
+    await handleResult(
+      db as never,
+      ctx(withoutTarget) as never,
+      'epoch-job-step',
+      loopBack as never,
+    );
+    expect(failure()?.errorMessage).toBe(
+      'fix loop target 07-phase-2-implement is not in the run list of task type custom',
+    );
+    expect(h.state.events).toContain('fix_loop.unroutable');
+    expect(h.state.events).not.toContain('fix_loop.started');
+    expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
+  it('fails the task naming the target and queues nothing, on the round-limit Continue', async () => {
+    h.state.readsAnswer = true;
+    await resolveFixLoopGate(
+      db as never,
+      ctx(withoutTarget) as never,
+      GATE as never,
+      'continue',
+      1,
+      '',
+    );
+    expect(failure()?.errorMessage).toBe(
+      'fix loop target 07-phase-2-implement is not in the run list of task type custom',
+    );
+    expect(h.state.events).toContain('fix_loop.unroutable');
+    expect(h.state.events).not.toContain('fix_loop.continued');
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
+  it('leaves the task alone when a Retry already took the source row', async () => {
+    h.state.readsAnswer = true;
+    h.state.sourceOwned = false;
+    await handleResult(
+      db as never,
+      ctx(withoutTarget) as never,
+      'epoch-job-step',
+      loopBack as never,
+    );
+    expect(failure()).toBeUndefined();
+    expect(h.state.events).not.toContain('fix_loop.unroutable');
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
+  it('still routes a step fix request when the target is in the run list', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    await handleResult(
+      db as never,
+      ctx([...withoutTarget, '07-phase-2-implement']) as never,
+      'epoch-job-step',
+      loopBack as never,
+    );
+    expect(failure()).toBeUndefined();
+    expect(h.state.events).toContain('fix_loop.started');
+    expect(h.state.add.mock.lastCall?.[1]).toMatchObject({
+      stepId: '07-phase-2-implement',
+      round: 1,
+    });
   });
 });
