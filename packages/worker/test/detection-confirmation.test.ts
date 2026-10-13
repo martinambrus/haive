@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { logger } from '@haive/shared';
 import { detectionConfirmationStep } from '../src/step-engine/steps/onboarding/02-detection-confirmation.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -88,5 +90,42 @@ describe('02 detection-confirmation conditional fields', () => {
     expect(ids).toEqual(
       expect.arrayContaining(['projectName', 'framework', 'primaryLanguage', 'databaseType']),
     );
+  });
+});
+
+describe('02 detection-confirmation apply', () => {
+  const TASK = '00000000-0000-4000-8000-0000000000c1';
+  const REPO = '00000000-0000-4000-8000-0000000000b1';
+  const OTHER = '00000000-0000-4000-8000-0000000000b2';
+  const USER = '00000000-0000-4000-8000-0000000000a1';
+
+  it('mirrors the environment onto the repository and marks its project state record dirty', async () => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      repositories: schema.repositories,
+      projectStateOutbox: schema.projectStateOutbox,
+    });
+    for (const id of [REPO, OTHER]) {
+      fake.insert(schema.repositories, { id, userId: USER, name: id, source: 'blank' });
+    }
+    fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO });
+    const withDb = { ...ctx, db: fake.db, taskId: TASK } as unknown as StepContext;
+
+    await detectionConfirmationStep.apply(withDb, {
+      detected: det({}),
+      formValues: { projectName: 'acme' },
+      iteration: 0,
+      previousIterations: [],
+    } as never);
+
+    const repo = fake.rows(schema.repositories).find((r) => r.id === REPO)!;
+    expect(repo.onboardingEnvironment).toMatchObject({
+      schemaVersion: 1,
+      confirmedValues: { projectName: 'acme' },
+    });
+    const outbox = fake.rows(schema.projectStateOutbox);
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]).toMatchObject({ repositoryId: REPO, revision: 1, writtenRevision: 0 });
   });
 });

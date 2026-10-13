@@ -35,6 +35,7 @@ async function scan(rtkEnabled: boolean) {
   const fake = createFakeDb({
     repositories: schema.repositories,
     projectStateConflicts: schema.projectStateConflicts,
+    projectStateOutbox: schema.projectStateOutbox,
   });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -68,5 +69,13 @@ describe('the mirror import writing rtk_enabled and a pending RTK question', () 
 
     expect(fake.rows(schema.repositories)[0]!.rtkEnabled).toBe(true);
     expect(fake.rows(schema.projectStateConflicts)[0]).toMatchObject({ resolution: null });
+  });
+
+  it('marks the project state record dirty when it takes a setting the record holds', async () => {
+    const fake = await scan(false);
+
+    expect(fake.rows(schema.projectStateOutbox)).toEqual([
+      expect.objectContaining({ repositoryId: REPO, revision: 1 }),
+    ]);
   });
 });

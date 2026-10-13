@@ -545,6 +545,22 @@ its signature and is the column check around `writeProjectStateColumn`. The writ
 through fs-safe and does not rewrite one holding the bytes, but still lists it in `written`, since a
 commit step stages from that list and the file may never have been staged.
 
+**The record carries the portable settings and the environment.** `portableSettingsOf`
+(`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:
+`scope-exclude-globs`, `rtk-enabled`, `rtk-version`, `lsp-servers`, `lsp-server-versions`,
+`chrome-devtools-mcp-version` and `review-dimensions`, and nothing else. `app_auth` and
+`verify_commands` stay on the machine, since a committed login URL or command would be typed or run
+on a teammate's. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
+not an empty list), and `environmentUnitOf` gives `project/environment.json` from
+`onboarding_environment` without its schema version. The writer plans them into the record and the
+base, and removes a file the base named that the record no longer holds. The sync reads them but
+imports nothing yet: its base keeps the previous base's settings and environment, a first sync taking
+the checkout's. `settings/rtk-enabled.json` is also the name of the RTK question's conflict unit;
+the writer takes the value from the column and never overlays a pending row there, so the question
+stays open until it is answered. The marks are in `PATCH /repos/:id/exclusions`, `PATCH
+/repos/:id/tooling` (a portable key only) and `POST .../tooling-upgrade`, 02 and 04, 09_7 (and 01g,
+which runs its apply), `initializeRagSyncPrefs`, the clone import and the RTK answer.
+
 **`.haive/install.json` is retired, not written.** Nothing read it, and a second 12 run changed it
 (`appliedAt`, `lastTaskId`) so an identical re-run dirtied a clean checkout. 12, 02 and 04 now delete
 it through `retireInstallManifest` (`_retire-install-manifest.ts`) only after their

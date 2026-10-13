@@ -19,6 +19,7 @@ import {
   renderContextColumnSchema,
   renderProjectState,
   sameValue,
+  type ProjectEnvironment,
   type ProjectRender,
   type ProjectStateBundle,
   type ProjectStateClaim,
@@ -133,6 +134,8 @@ type Checkout =
       render: ProjectRender;
       claims: ProjectStateClaim[];
       bundles: ProjectStateBundle[];
+      settings: Record<string, unknown>;
+      environment: ProjectEnvironment | null;
     };
 
 async function readCheckout(repoPath: string): Promise<Checkout> {
@@ -150,8 +153,10 @@ async function readCheckout(repoPath: string): Promise<Checkout> {
   if (files === null) return { kind: 'absent' };
   const parsed = parseProjectState(files);
   if (!parsed.ok) return notRead(listed(parsed.problems));
-  const { render, claims, bundles } = parsed.record;
-  return render === null ? { kind: 'absent' } : { kind: 'record', render, claims, bundles };
+  const { render, claims, bundles, settings, environment } = parsed.record;
+  return render === null
+    ? { kind: 'absent' }
+    : { kind: 'record', render, claims, bundles, settings, environment };
 }
 
 const recordOf = (render: ProjectRender | null): ProjectStateRecord => ({
@@ -551,11 +556,16 @@ export async function syncProjectStateFromCheckout(
       renderConflicts.length === 0
         ? null
         : `${CONFLICT_ERROR_PREFIX}${renderConflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
+    const previous = row?.baseSnapshot as Partial<ProjectStateRecord> | undefined;
     const baseSnapshot = normalizeProjectState({
       ...recordOf(keptRender(checkout.render, baseRender, renderConflicts)),
       claims: keptClaims(incomingClaims, baseClaims, claimConflicts),
       // Never merged: a conflict row on a descriptor could not be answered, and would block upgrades.
       bundles: checkout.bundles,
+      // Not imported yet, so the base keeps what the last sync or writer left; a first sync takes the checkout's.
+      settings:
+        row === null ? checkout.settings : (previous?.settings ?? emptyProjectState().settings),
+      environment: row === null ? checkout.environment : (previous?.environment ?? null),
     });
     if (row === null || row.lastError !== lastError || !sameValue(row.baseSnapshot, baseSnapshot)) {
       const synced = { baseSnapshot, lastError, updatedAt: new Date() };

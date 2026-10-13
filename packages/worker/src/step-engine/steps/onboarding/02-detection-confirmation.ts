@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { ONBOARDING_ENVIRONMENT_SCHEMA_VERSION, mirroredEnvDetectData } from '@haive/shared';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import type { DetectResult, FormSchema, OnboardingEnvironmentMirror } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
@@ -399,13 +400,16 @@ export const detectionConfirmationStep: StepDefinition<
         .limit(1);
       const repositoryId = taskRow[0]?.repositoryId ?? null;
       if (repositoryId) {
-        await ctx.db
-          .update(schema.repositories)
-          .set({
-            onboardingEnvironment: mirror as unknown as Record<string, unknown>,
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.repositories.id, repositoryId));
+        await ctx.db.transaction(async (tx) => {
+          await tx
+            .update(schema.repositories)
+            .set({
+              onboardingEnvironment: mirror as unknown as Record<string, unknown>,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.repositories.id, repositoryId));
+          await markProjectStateDirty(tx, repositoryId);
+        });
       }
     } catch (err) {
       ctx.logger.warn({ err }, 'detection-confirmation: failed to mirror onboarding_environment');

@@ -1,5 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import type { FormSchema, TreeNode } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveConfirmedProject, loadPreviousStepOutput } from './_helpers.js';
@@ -215,10 +216,13 @@ export const ragSourceSelectionStep: StepDefinition<
 
     const repositoryId = await resolveRepositoryId(ctx.db, ctx.taskId);
     if (repositoryId) {
-      await ctx.db
-        .update(schema.repositories)
-        .set({ scopeExcludeGlobs: excludeGlobs, updatedAt: new Date() })
-        .where(eq(schema.repositories.id, repositoryId));
+      await ctx.db.transaction(async (tx) => {
+        await tx
+          .update(schema.repositories)
+          .set({ scopeExcludeGlobs: excludeGlobs, updatedAt: new Date() })
+          .where(eq(schema.repositories.id, repositoryId));
+        await markProjectStateDirty(tx, repositoryId);
+      });
     } else {
       ctx.logger.warn(
         'rag-source-selection: no repositoryId for task, RAG deny list not persisted',

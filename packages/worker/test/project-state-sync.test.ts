@@ -1477,7 +1477,7 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
     ...over,
   });
 
-  it('are neither applied nor kept in the base, bundle descriptors aside', async () => {
+  it('are not applied; a first sync keeps the checkout settings and environment in the base, and bundle descriptors', async () => {
     const s = await setup();
     await s.putRecord(full());
     const reposBefore = json(s.fake.rows(schema.repositories)) as Json[];
@@ -1487,27 +1487,33 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
     expect(outcome).toBe('applied');
     expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
     const base = json(s.syncRow()?.baseSnapshot) as Json;
-    expect(base).toEqual({ ...(baseOf(BASE) as Json), bundles: full().bundles });
-    expect(base.environment).toBeNull();
+    expect(base).toEqual({
+      ...(baseOf(BASE) as Json),
+      bundles: full().bundles,
+      settings: json(settings),
+      environment: full().environment,
+    });
     expect(base.cli).toEqual([]);
     expect(base.claims).toEqual([]);
-    expect(base.bundles).toEqual(full().bundles);
-    expect(base.settings).toEqual({});
     const after = json(s.fake.rows(schema.repositories)) as Json[];
     const without = (rows: Json[]) => rows.map(({ renderContext: _c, ...rest }) => rest);
     expect(without(after)).toEqual(without(reposBefore));
   });
 
-  it('changing them in the checkout does not make the next sync write anything', async () => {
+  it('changing them in the checkout does not make the next sync write anything, and the base keeps the previous ones', async () => {
     const s = await setup();
     await s.putRecord(full());
     await s.run();
     const before = s.dump();
+    const baseBefore = json(s.syncRow()?.baseSnapshot) as Json;
     await rm(join(s.root, STATE_DIR), { recursive: true });
     await s.putRecord(
       full({
         environment: { envDetectData: { project: { name: 'renamed' } }, confirmedValues: { a: 1 } },
         cli: ['codex'],
+        settings: Object.assign(Object.create(null) as Record<string, unknown>, {
+          'review-dimensions': ['performance'],
+        }),
       }),
     );
 
@@ -1516,6 +1522,23 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
     expect(outcome).toBe('unchanged');
     expect(trace.filter(isWrite)).toEqual([]);
     expect(s.dump()).toEqual(before);
+    const base = json(s.syncRow()?.baseSnapshot) as Json;
+    expect(base.settings).toEqual(json(settings));
+    expect(base.environment).toEqual(baseBefore.environment);
+    expect(base.environment).toEqual(full().environment);
+  });
+});
+
+describe('syncProjectStateFromCheckout: files a reset leaves behind', () => {
+  it('refuses a settings file left without format.json, and finds no record once they are gone', async () => {
+    const s = await setup();
+    await s.put(`${STATE_DIR}/settings/rtk-enabled.json`, 'true\n');
+
+    expect((await s.run()).outcome).toBe('refused');
+
+    await rm(join(s.root, STATE_DIR), { recursive: true });
+
+    expect((await s.run()).outcome).toBe('absent');
   });
 });
 

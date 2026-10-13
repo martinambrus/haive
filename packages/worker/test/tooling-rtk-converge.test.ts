@@ -27,6 +27,7 @@ async function fixture() {
     tasks: schema.tasks,
     repositories: schema.repositories,
     projectStateConflicts: schema.projectStateConflicts,
+    projectStateOutbox: schema.projectStateOutbox,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'r', rtkEnabled: true });
   fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO });
@@ -53,7 +54,8 @@ async function fixture() {
     } as never);
   const repo = () => fake.rows(schema.repositories)[0]!;
   const row = () => fake.rows(schema.projectStateConflicts)[0]!;
-  return { apply, repo, row };
+  const outbox = () => fake.rows(schema.projectStateOutbox);
+  return { apply, repo, row, outbox };
 }
 
 describe('04 saving the RTK choice and a pending RTK question', () => {
@@ -73,5 +75,16 @@ describe('04 saving the RTK choice and a pending RTK question', () => {
 
     expect(f.repo().rtkEnabled).toBe(true);
     expect(f.row()).toMatchObject({ resolution: null, resolvedAt: null });
+  });
+
+  it('marks the project state record dirty, whichever way RTK is saved', async () => {
+    const f = await fixture();
+
+    await f.apply(true);
+    await f.apply(false);
+
+    expect(f.outbox()).toEqual([
+      expect.objectContaining({ repositoryId: REPO, revision: 2, writtenRevision: 0 }),
+    ]);
   });
 });
