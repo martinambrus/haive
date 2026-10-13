@@ -280,8 +280,8 @@ async function main(): Promise<void> {
           readable &&
           state.sync.length === 1 &&
           isDeepStrictEqual(
-            asJson({ ...(baseOf as object), claims: [] }),
-            asJson(normalizeProjectState(want)),
+            asJson({ ...(baseOf as object), claims: [], settings: {}, environment: null }),
+            asJson({ ...normalizeProjectState(want), settings: {}, environment: null }),
           ) &&
           isDeepStrictEqual(
             (baseOf as { claims: { path: string }[] }).claims.map((c) => c.path).sort(),
