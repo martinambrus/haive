@@ -239,6 +239,17 @@ describe('mergePlanMirror: deletion', () => {
     ]);
   });
 
+  it('keeps a node reordered on one side that the other side deleted', () => {
+    const base = mirror(baseNodes());
+    const local = mirror(swap(baseNodes(), 'B', { ordinal: 5 }));
+    const r = mergePlanMirror({ base, local, incoming: mirror(without(baseNodes(), 'B')) });
+    expect(byName(r.merged, 'B')?.ordinal).toBe(5);
+    expect(r.deleted).toEqual([]);
+    expect(r.reported).toEqual([
+      { kind: 'kept-modified', subject: id('B'), deletedBy: 'incoming' },
+    ]);
+  });
+
   it('keeps a locally added child and so its parent the incoming side deleted', () => {
     const base = mirror(baseNodes());
     const local = mirror([...baseNodes(), n('N', 'B', 0)]);
@@ -512,6 +523,21 @@ describe('mergePlanMirror: ordering and shape', () => {
     const incoming = mirror([...baseNodes(), n('I', 'R', 0)]);
     const r = mergePlanMirror({ base, local, incoming });
     expect(r.merged.nodes.map((x) => x.title)).toEqual(['R', 'A', 'C', 'I', 'L', 'B']);
+  });
+
+  it('keeps local code links when the incoming snapshot is v1, which cannot carry them', () => {
+    const links = [link('A', 'src/a.ts'), link('C', 'src/c.ts')];
+    const r = mergePlanMirror({
+      base: mirror(baseNodes(), [], links),
+      local: mirror(baseNodes(), [], links),
+      incoming: {
+        schemaVersion: 1,
+        nodes: baseNodes().map((x) => ({ ...x, createdBy: 'import' })),
+        edges: [],
+      },
+    });
+    expect(r.merged.codeLinks).toEqual(links);
+    expect(r.reported).toEqual([]);
   });
 
   it('accepts v1 payloads, ignoring createdBy and having no code links', () => {

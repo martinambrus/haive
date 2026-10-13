@@ -180,10 +180,10 @@ const PLAN_PATHS = new Set<string>(PLAN_SNAPSHOT_GIT_PATHS);
 /**
  * Resolve a conflict in the plan mirror's OWN two files by taking the incoming side.
  *
- * Not a guess, and not a preference for the remote: `reconcilePlanMirror` reads
+ * Not a guess, and not a preference for the remote: `reconcilePlanFromCheckout` reads
  * `.haive-data/plan.json` out of the checkout and merges it into the DATABASE
- * additively — keeping every local-only node — and the files are then rewritten from
- * the database. So the incoming side is what the real merge needs to see, and
+ * against the copy it last read — keeping every local-only node and local edit — and
+ * the files are then rewritten from the database. So the incoming side is what the real merge needs to see, and
  * whatever lands in the file here survives only until that rewrite. Asking a person
  * or an agent to hand-merge two thousand-node JSON documents would be work whose
  * result is discarded seconds later.

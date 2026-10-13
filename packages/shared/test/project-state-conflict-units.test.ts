@@ -13,6 +13,8 @@ import {
   isRenderUnit,
   isRtkQuestion,
   isSettingUnit,
+  parsePlanConflictUnit,
+  planConflictUnit,
 } from '../src/project-state/conflicts.js';
 import { PORTABLE_SETTING_NAMES } from '../src/project-state/settings.js';
 
@@ -166,5 +168,29 @@ describe('setting and environment units', () => {
       conflictBody({ ...base, unit, resolution: null, resolvedAt: null });
     expect(body('project/environment.json#confirmedValues').key).toBe('confirmedValues');
     expect(body('settings/lsp-servers.json').key).toBeNull();
+  });
+});
+
+describe('plan units', () => {
+  const nodeId = '00000000-0000-4000-8000-0000000000c1';
+
+  it('name one field of one node and read back as it', () => {
+    expect(planConflictUnit(nodeId, 'title')).toBe(`plan/${nodeId}#title`);
+    expect(parsePlanConflictUnit(planConflictUnit(nodeId, 'status'))).toEqual({
+      nodeId,
+      field: 'status',
+    });
+  });
+
+  it('are no unit of the project state record, so the api serves none and no upgrade waits on one', () => {
+    const unit = planConflictUnit(nodeId, 'title');
+    expect(isConflictUnit(unit)).toBe(false);
+    expect(blocksUpgrade(unit)).toBe(false);
+  });
+
+  it('refuse a unit that names no node or no field', () => {
+    for (const unit of ['plan/', `plan/${nodeId}`, `plan/${nodeId}#`, 'plan/#title', RENDER_UNIT]) {
+      expect(parsePlanConflictUnit(unit)).toBeNull();
+    }
   });
 });

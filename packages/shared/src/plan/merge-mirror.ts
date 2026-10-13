@@ -81,7 +81,9 @@ function pick3<T>(base: T | undefined, local: T, incoming: T): { value: T; conte
 }
 
 const nodeModified = (a: MirrorNode, b: MirrorNode): boolean =>
-  a.parentId !== b.parentId || PLAN_MIRROR_ASKED_FIELDS.some((f) => a[f] !== b[f]);
+  a.parentId !== b.parentId ||
+  a.ordinal !== b.ordinal ||
+  PLAN_MIRROR_ASKED_FIELDS.some((f) => a[f] !== b[f]);
 
 type Candidate = 'deleted-by-incoming' | 'deleted-by-local' | null;
 
@@ -180,7 +182,11 @@ function mergeKeyed<T extends object>(
 export function mergePlanMirror(input: PlanMirrorMergeInput): PlanMirrorMerge {
   const base = input.base ? readSide(input.base) : null;
   const local = readSide(input.local);
-  const incoming = readSide(input.incoming);
+  // A v1 snapshot predates code links: it says nothing about them, so it keeps local's.
+  const incoming =
+    input.incoming.schemaVersion === 2
+      ? readSide(input.incoming)
+      : { ...readSide(input.incoming), links: local.links };
   const conflicts: PlanMirrorConflict[] = [];
   const reported: PlanMirrorReport[] = [];
   const resurrected: string[] = [];

@@ -47,8 +47,10 @@ import {
   type PriorResolution,
 } from '../../../plan/merge-prior.js';
 import {
+  advancePlanBaseFromCommit,
   flushPlanMirrorForRepository,
-  reconcilePlanMirror,
+  reconcilePlanFromCheckout,
+  seedPlanBaseFromCheckout,
   writePlanMirror,
 } from '../../../plan/mirror.js';
 import {
@@ -610,13 +612,14 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     });
     const sha = await commitMerge(d.worktreePath, `Merge origin/${d.branch}`, identity);
     if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
+    await seedPlanBaseFromCheckout(ctx.db, d.repositoryId, ctx.repoPath);
     await landPlanMerge(ctx.repoPath, sha);
     result.landed = true;
 
     // The merge brought in the other side's plan.json; fold it into the database and
     // rewrite both files from there, so what is pushed is the union rather than
     // whichever side the text merge happened to keep.
-    await reconcilePlanMirror(ctx.db, d.repositoryId, ctx.repoPath);
+    await reconcilePlanFromCheckout(ctx.db, d.repositoryId, ctx.repoPath);
     await flushPlanMirrorForRepository(ctx.db, d.repositoryId);
     await commitPlanSnapshotFiles({
       repoPath: ctx.repoPath,
@@ -629,7 +632,10 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       columns: { credentialsSecretId: true },
     });
     const upstream = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
+    const head = await gitRun(ctx.repoPath, ['rev-parse', 'HEAD']);
+    const pushedHead = head.code === 0 ? head.stdout.trim() : null;
     await pushBranch({
+      ...(pushedHead ? { sha: pushedHead } : {}),
       cwd: ctx.repoPath,
       branch: d.branch,
       setUpstream: upstream.code !== 0,
@@ -638,6 +644,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       userId: ctx.userId,
     });
     result.pushed = true;
+    await advancePlanBaseFromCommit(ctx.db, d.repositoryId, ctx.repoPath, pushedHead, d.branch);
 
     // Only now is the scratch worktree disposable. Removed on the success path only —
     // an abandoned conversation keeps it, which is what makes it resumable.

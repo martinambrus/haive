@@ -83,7 +83,8 @@ moving a project between installs "must work and be synced correctly and fully".
   resolver (same-branch), plan Pull/Save, 13, refresh, and task end; a 60 s sweep catches moves
   Haive did not make (skips MERGE_HEAD/REBASE_HEAD).
 - **Plan:** a flush never overwrites a `plan.json` it has not imported and never writes mid-merge;
-  a three-way reconcile (base = `plan.json` at `synced_head`) applies remote deletions of untouched
+  a three-way reconcile (base = `plan_mirror_state.synced_snapshot`, the checkout's `plan.json` as
+  Haive last read it in) applies remote deletions of untouched
   nodes when a base exists (additive without one); same-field conflicts go to B-conflicts; a
   stage-level resolver (`:1:`/`:2:`/`:3:`) replaces the wholesale `--theirs` in every merge Haive
   drives.
@@ -514,7 +515,18 @@ Phase 2 (the plan):
   a plain fast-forward, B edits another node: A's change is lost today, both kept after.
 - **B2.2 feat(shared,worker): three-way plan reconcile** [B2.1, B1.5]. Control: a local title edit
   is reverted today; an untouched node deleted remotely is kept today (deleted after); a same-field
-  edit on both sides becomes a pending conflict.
+  edit on both sides becomes a pending conflict. Built in three PRs. B2.2a: the pure
+  `mergePlanMirror`. B2.2b: migration 0196 `synced_snapshot`; `reconcilePlanFromCheckout` replaces
+  `reconcilePlanMirror`, and the B2.1 hold becomes "reconcile, then write" (still a hold while a
+  merge or rebase is open or the file cannot be read as a plan). The base is the checkout's
+  `plan.json` as last read in, never the merged result: a merged base would turn a local-only node
+  into a remote deletion at the next pull. Only changed nodes move `version`/`updated_at`, and a
+  status change keeps the `done_at` contract (both were wrong in `reconcilePlanMirror`). A
+  contested field keeps the database's value, writes a pending `plan/<nodeId>#<field>` row, and is
+  written as the incoming value in `plan.json` until answered; the onboarding reset spares plan
+  rows; deleting the plan closes them and clears the base. Plan units stay out of `isConflictUnit`
+  until B2.2c (answering them: `isPlanUnit`, the label, the answer branch under the plan-mirror
+  lock, the banner).
 - **B2.3 feat(worker): Haive-owned files resolve deterministically in every merge Haive drives**
   [B1.3, B2.2]. The stage-level resolver in `mergeOriginInto`, the merge resolver's pending phase
   and 13; the fix prompt leaves those paths alone. Control (`merge.test.ts`): ours changed node X,

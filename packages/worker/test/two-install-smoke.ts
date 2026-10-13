@@ -32,7 +32,7 @@ import { applyPlanPatch } from '@haive/shared/plan';
 import { upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { handleClone, handleScan } from '../src/repo/clone.js';
-import { writePlanMirror } from '../src/plan/mirror.js';
+import { reconcilePlanFromCheckout, writePlanMirror } from '../src/plan/mirror.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   markProjectStatesDirtyAtBoot,
@@ -2188,6 +2188,69 @@ async function main(): Promise<void> {
         );
       }
     }
+
+    // ---- plan edits on both installs both survive (B2.2b) ---------------------------------
+    const planFileRel = '.haive-data/plan.json';
+    const planMdRel = '.haive-data/plan.md';
+    const titlesOf = async (install: Install): Promise<string[]> =>
+      (await planOf(install)).map((n) => n.title).sort();
+    const nodesNow = await planOf(b);
+    const onB = nodesNow.find((n) => n.title === 'Edited on B')!;
+    const onA = nodesNow.find((n) => n.id !== onB.id && n.parentId !== null)!;
+    await applyPlanPatch(
+      a.db,
+      { ops: [{ op: 'upsert', nodeRef: onA.id, title: 'Edited on A' }] },
+      { repositoryId: a.repositoryId, origin: 'user' },
+    );
+    await writePlanMirror(a.db, a.repositoryId, a.repoPath);
+    git(a.repoPath, 'add', planFileRel, planMdRel);
+    git(a.repoPath, 'commit', '-q', '-m', 'A edits the plan');
+    git(a.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+    await applyPlanPatch(
+      b.db,
+      { ops: [{ op: 'upsert', nodeRef: onB.id, title: 'Edited on B again' }] },
+      { repositoryId: b.repositoryId, origin: 'user' },
+    );
+    await writePlanMirror(b.db, b.repositoryId, b.repoPath);
+    git(b.repoPath, 'checkout', '--', planFileRel, planMdRel);
+    git(b.repoPath, 'pull', '-q', '--ff-only', 'origin', 'main');
+    const bBoth = await writePlanMirror(b.db, b.repositoryId, b.repoPath).then(
+      (files) => files,
+      (err: Error) => err.message,
+    );
+    const filePlanB = await readFile(path.join(b.repoPath, planFileRel), 'utf8');
+    check(
+      "B's write after a plain git pull of A's plan edit keeps both edits, in its database and in plan.json",
+      Array.isArray(bBoth) &&
+        (await titlesOf(b)).includes('Edited on A') &&
+        (await titlesOf(b)).includes('Edited on B again') &&
+        filePlanB.includes('Edited on A') &&
+        filePlanB.includes('Edited on B again'),
+      { bBoth, titles: await titlesOf(b) },
+    );
+    git(b.repoPath, 'add', planFileRel, planMdRel);
+    git(b.repoPath, 'commit', '-q', '-m', 'B merges the plan');
+    git(b.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+    git(a.repoPath, 'pull', '-q', '--ff-only', 'origin', 'main');
+    const aBoth = await reconcilePlanFromCheckout(a.db, a.repositoryId, a.repoPath);
+    check(
+      "A reads B's merged plan and holds both edits",
+      aBoth.skipped === null &&
+        (await titlesOf(a)).includes('Edited on A') &&
+        (await titlesOf(a)).includes('Edited on B again'),
+      { aBoth, titles: await titlesOf(a) },
+    );
+    const askedOnA = await rowsOf<{ unit: string }>(
+      a.db,
+      sql`select unit from project_state_conflicts where unit like 'plan/%' and resolved_at is null`,
+    );
+    check(
+      'and the two installs end with the same plan, nothing asked',
+      isDeepStrictEqual(await titlesOf(a), await titlesOf(b)) &&
+        'rows' in askedOnA &&
+        askedOnA.rows.length === 0,
+      askedOnA,
+    );
 
     for (const name of Object.keys(KNOWN_GAPS)) {
       if (gapsChecked.has(name)) continue;

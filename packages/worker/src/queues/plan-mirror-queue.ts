@@ -23,9 +23,11 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
 import {
   PlanMirrorHeldError,
+  advancePlanBaseFromCommit,
   flushPlanMirrorForRepository,
   recordPlanMirrorError,
-  reconcilePlanMirror,
+  reconcilePlanFromCheckout,
+  seedPlanBaseFromCheckout,
   stampPlanMirrorHashesAtBoot,
 } from '../plan/mirror.js';
 import { commitPlanSnapshotFiles } from '../plan/snapshot-git.js';
@@ -76,6 +78,7 @@ async function resultFor(
 ): Promise<PlanMirrorJobResult> {
   const state = await getDb().query.planMirrorState.findFirst({
     where: eq(schema.planMirrorState.repositoryId, repositoryId),
+    columns: { revision: true, writtenRevision: true },
   });
   return {
     repositoryId,
@@ -271,12 +274,15 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         // The merge brought in the other side's plan; fold it into the database and
         // rewrite the files, exactly as a pull does, so what is pushed is the union
         // rather than only this side.
-        await reconcilePlanMirror(getDb(), repo.id, repoPath);
+        await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
         await flushPlanMirrorForRepository(getDb(), repo.id);
         await commitPlanSnapshotFiles({ repoPath, message, identity });
       }
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
+      const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
+      const pushedHead = head.code === 0 ? head.stdout.trim() : null;
       await pushBranch({
+        ...(pushedHead ? { sha: pushedHead } : {}),
         cwd: repoPath,
         branch,
         setUpstream: upstream.code !== 0,
@@ -285,6 +291,7 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         userId: payload.userId,
       });
       pushed = true;
+      await advancePlanBaseFromCommit(getDb(), repo.id, repoPath, pushedHead, branch);
     }
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });
@@ -358,6 +365,7 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     });
     const identity =
       Object.keys(resolvedIdentity).length > 0 ? resolvedIdentity : FALLBACK_GIT_IDENTITY;
+    await seedPlanBaseFromCheckout(db, repo.id, repoPath);
     // A real merge, not --ff-only. Refusing a diverged branch was defensible while
     // nothing could resolve one; it also meant a plan could never reach a repository
     // that had a README before Haive did.
@@ -382,10 +390,10 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     const after = await gitRun(repoPath, ['rev-parse', 'HEAD']);
     const currentCommit = after.code === 0 ? after.stdout.trim() : null;
 
-    const outcome = await reconcilePlanMirror(db, repo.id, repoPath);
+    const outcome = await reconcilePlanFromCheckout(db, repo.id, repoPath);
     // Files are rewritten from the database afterwards, not trusted as pulled:
-    // the reconcile KEEPS local-only nodes, so the checkout's plan.json is now
-    // missing rows the plan has.
+    // the reconcile keeps local-only nodes and local values under a question, so the
+    // checkout's plan.json no longer says everything the plan does.
     const files = outcome.skipped ? [] : (await flushPlanMirrorForRepository(db, repo.id)).files;
 
     return resultFor(repo.id, files, {
