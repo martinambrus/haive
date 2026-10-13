@@ -54,7 +54,11 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
-import { INSTALL_MANIFEST_PATH, retireInstallManifest } from '../../_retire-install-manifest.js';
+import {
+  INSTALL_MANIFEST_PATH,
+  retireInstallManifest,
+  retireLegacyMirrors,
+} from '../../_retire-install-manifest.js';
 import type { GenerateFilesApply, GenerateFilesDetect } from './07-generate-files.js';
 import { gitExec } from '../../../repo/git-exec.js';
 
@@ -352,12 +356,15 @@ async function recordOnboardingArtifacts(
  *  always (independent of the commit checkbox); the files it lists in `filesWritten`,
  *  which survives a throw, are staged when the user opts into a commit. The
  *  tooling file drops the machine-specific infra keys (ollamaUrl,
- *  ragConnectionString) — those do not move between machines. */
+ *  ragConnectionString) — those do not move between machines. The environment and scope
+ *  exclusion files are written only when `legacyMirrors` is set: a successful project state
+ *  record write carries them and retires those files. */
 async function writeHaiveDataMirror(
   ctx: StepContext,
   repositoryId: string,
   filesWritten: string[],
   filesRemoved: string[],
+  legacyMirrors: boolean,
 ): Promise<{ warnings: string[] }> {
   const warnings: string[] = [];
 
@@ -383,7 +390,7 @@ async function writeHaiveDataMirror(
   };
 
   const env = repo.onboardingEnvironment as OnboardingEnvironmentMirror | null;
-  if (env) await writeJson(HAIVE_DATA_FILES.environment, env);
+  if (env && legacyMirrors) await writeJson(HAIVE_DATA_FILES.environment, env);
 
   const tooling = repo.onboardingTooling as OnboardingToolingMirror | null;
   if (tooling?.tooling) {
@@ -399,7 +406,7 @@ async function writeHaiveDataMirror(
   }
 
   const globs = repo.scopeExcludeGlobs as string[] | null;
-  if (globs) {
+  if (globs && legacyMirrors) {
     const mirror: OnboardingExclusionsMirror = {
       schemaVersion: ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
       scopeExcludeGlobs: globs,
@@ -650,14 +657,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       .limit(1);
     const mirrorRepositoryId = mirrorTaskRow[0]?.repositoryId ?? null;
     if (mirrorRepositoryId) {
-      try {
-        const res = await writeHaiveDataMirror(ctx, mirrorRepositoryId, ownFiles, ownRemoved);
-        warnings.push(...res.warnings);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        warnings.push(`haive-data mirror write failed: ${message}`);
-        ctx.logger.warn({ err }, 'haive-data mirror write failed');
-      }
+      let recorded = false;
       if (renderContext) {
         try {
           const state = await writeProjectStateRecord(ctx.db, {
@@ -666,10 +666,14 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             context: renderContext,
             rtkChoiceRecorded,
           });
+          recorded = true;
           ownFiles.push(...state.written);
           ownRemoved.push(...state.removed);
           if ((await retireInstallManifest(ctx, warnings)) !== 'kept') {
             ownRemoved.push(INSTALL_MANIFEST_PATH);
+          }
+          for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings)) {
+            if (outcome !== 'kept') ownRemoved.push(path);
           }
         } catch (err) {
           failIfColumnStale(err);
@@ -681,6 +685,20 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           warnings.push(`project state record write failed: ${message}`);
           ctx.logger.warn({ err }, 'project state record write failed');
         }
+      }
+      try {
+        const res = await writeHaiveDataMirror(
+          ctx,
+          mirrorRepositoryId,
+          ownFiles,
+          ownRemoved,
+          !recorded,
+        );
+        warnings.push(...res.warnings);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        warnings.push(`haive-data mirror write failed: ${message}`);
+        ctx.logger.warn({ err }, 'haive-data mirror write failed');
       }
     }
 

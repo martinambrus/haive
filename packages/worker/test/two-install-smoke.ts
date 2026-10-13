@@ -5,6 +5,7 @@
  * Track B's plan is docs/plans/two-install-project-sync.md.
  */
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -579,6 +580,18 @@ async function main(): Promise<void> {
       sourceType: 'zip',
       storageRoot: path.join(tmp, 'bundles', 'smoke-kit'),
     });
+    const LEGACY_FILES = ['.haive-data/environment.json', '.haive-data/exclusions.json'];
+    await mkdir(path.join(a.repoPath, '.haive-data'), { recursive: true });
+    await writeFile(
+      path.join(a.repoPath, LEGACY_FILES[0]!),
+      '{"schemaVersion":1,"envDetectData":{},"confirmedValues":{}}\n',
+    );
+    await writeFile(
+      path.join(a.repoPath, LEGACY_FILES[1]!),
+      '{"schemaVersion":1,"scopeExcludeGlobs":[]}\n',
+    );
+    git(a.repoPath, 'add', '-f', ...LEGACY_FILES);
+    git(a.repoPath, 'commit', '-qm', 'legacy mirrors from an older release');
     const posted = await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep), {
       commit: true,
     });
@@ -586,6 +599,15 @@ async function main(): Promise<void> {
       'A commits its onboarding',
       posted.output.commitPerformed && posted.output.commitSha !== null,
       posted.output,
+    );
+    check(
+      "12's commit takes the legacy environment and exclusions mirrors out of HEAD and the disk",
+      LEGACY_FILES.every(
+        (rel) =>
+          git(a.repoPath, 'ls-tree', '-r', '--name-only', 'HEAD', '--', rel) === '' &&
+          !existsSync(path.join(a.repoPath, rel)),
+      ),
+      git(a.repoPath, 'ls-tree', '-r', '--name-only', 'HEAD', '--', ...LEGACY_FILES),
     );
 
     // ---- the project record and render context 12 writes (B1.4a) ----------------------------
@@ -926,12 +948,14 @@ async function main(): Promise<void> {
         repoA.rtkEnabled === false,
       repoA,
     );
-    const mirrorA = JSON.parse(git(a.repoPath, 'show', 'HEAD:.haive-data/environment.json')) as {
+    const mirrorA = JSON.parse(
+      git(a.repoPath, 'show', 'HEAD:.haive-data/state/project/environment.json'),
+    ) as {
       envDetectData?: Record<string, unknown>;
     };
     const mirroredKeys = Object.keys(mirrorA.envDetectData ?? {});
     check(
-      "A's committed environment mirror carries no prompt-only field",
+      "A's committed environment carries no prompt-only field",
       mirroredKeys.length > 0 && !mirroredKeys.some((key) => key.startsWith('__')),
       mirroredKeys,
     );
@@ -1053,7 +1077,7 @@ async function main(): Promise<void> {
     );
     check(
       "B restores A's scope exclusions",
-      isDeepStrictEqual(repoB?.scopeExcludeGlobs, globs),
+      isDeepStrictEqual(repoB?.scopeExcludeGlobs, [...globs].sort()),
       repoB?.scopeExcludeGlobs,
     );
     check("B takes A's RTK switch", repoB?.rtkEnabled === false, repoB?.rtkEnabled);

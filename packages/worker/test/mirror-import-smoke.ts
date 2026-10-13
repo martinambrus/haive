@@ -10,7 +10,12 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
-import { RTK_ENABLED_UNIT } from '@haive/shared/project-state';
+import {
+  PROJECT_STATE_DIR,
+  RTK_ENABLED_UNIT,
+  emptyProjectState,
+  renderProjectState,
+} from '@haive/shared/project-state';
 import { handleScan } from '../src/repo/clone.js';
 import { raiseRtkQuestions } from '../src/project-state/rtk-conflict.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
@@ -233,6 +238,58 @@ async function main(): Promise<void> {
       'a question still pending once RTK is off is closed as converged',
       closedRows.length === 1 && closedRows[0]!.resolution === 'converged',
       closedRows,
+    );
+
+    // E: a checkout holding a record carries its units; a stale legacy file does not outrank them.
+    const withRecord = path.join(tmp, 'with-record');
+    await mkdir(path.join(withRecord, '.haive-data'), { recursive: true });
+    const files = renderProjectState({
+      ...emptyProjectState(),
+      render: {
+        projectInfo: {},
+        framework: 'unknown',
+        acceptedAgentIds: [],
+        customAgentSpecs: [],
+        lspLanguages: [],
+      } as never,
+      settings: { 'scope-exclude-globs': ['record/**'] },
+      environment: { envDetectData: { project: { name: 'record' } }, confirmedValues: {} },
+    });
+    for (const [rel, text] of files) {
+      await mkdir(path.dirname(path.join(withRecord, PROJECT_STATE_DIR, rel)), { recursive: true });
+      await writeFile(path.join(withRecord, PROJECT_STATE_DIR, rel), text);
+    }
+    await writeFile(path.join(withRecord, '.haive-data', 'environment.json'), environment);
+    await writeFile(path.join(withRecord, '.haive-data', 'exclusions.json'), exclusions);
+    const e = await scanned(withRecord);
+    check(
+      'a record unit outranks a stale legacy file',
+      JSON.stringify(e.scopeExcludeGlobs) === '["record/**"]' &&
+        JSON.stringify(
+          (e.onboardingEnvironment as { envDetectData?: unknown } | null)?.envDetectData,
+        ) === '{"project":{"name":"record"}}',
+      e,
+    );
+
+    // F: a record unit file the sync refuses leaves the columns to the legacy files.
+    const refused = path.join(tmp, 'refused-record');
+    await mkdir(path.join(refused, '.haive-data', 'state', 'settings'), { recursive: true });
+    await mkdir(path.join(refused, '.haive-data', 'state', 'project'), { recursive: true });
+    await writeFile(
+      path.join(refused, '.haive-data', 'state', 'settings', 'scope-exclude-globs.json'),
+      '["record/**"]\n',
+    );
+    await writeFile(
+      path.join(refused, '.haive-data', 'state', 'project', 'environment.json'),
+      '{}\n',
+    );
+    await writeFile(path.join(refused, '.haive-data', 'environment.json'), environment);
+    await writeFile(path.join(refused, '.haive-data', 'exclusions.json'), exclusions);
+    const f = await scanned(refused);
+    check(
+      'a record the sync refuses leaves the columns to the legacy files',
+      JSON.stringify(f.scopeExcludeGlobs) === '["vendor/**"]' && f.onboardingEnvironment !== null,
+      f,
     );
 
     if (failures > 0) {

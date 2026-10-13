@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -295,5 +295,169 @@ describe('12 retires .haive/install.json', () => {
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(true);
+  });
+});
+
+describe('12 retires the legacy environment and exclusions mirrors', () => {
+  const git = promisify(execFile);
+  const ENV_UNIT = '.haive-data/state/project/environment.json';
+  const GLOBS_UNIT = '.haive-data/state/settings/scope-exclude-globs.json';
+  const ENV_LEGACY = '.haive-data/environment.json';
+  const GLOBS_LEGACY = '.haive-data/exclusions.json';
+  const ENV_COLUMN = {
+    schemaVersion: 1,
+    envDetectData: { project: { name: 'acme' } },
+    confirmedValues: { name: 'acme' },
+  };
+  const HAIVE_ENV = JSON.stringify(ENV_COLUMN);
+  const HAIVE_GLOBS = JSON.stringify({ schemaVersion: 1, scopeExcludeGlobs: ['vendor/**'] });
+
+  const gitOut = async (root: string, ...args: string[]): Promise<string> =>
+    (await git('git', ['-C', root, ...args])).stdout;
+  const trackedFiles = async (root: string): Promise<string[]> =>
+    (await gitOut(root, 'ls-tree', '-r', '--name-only', 'HEAD')).split('\n').filter(Boolean);
+
+  async function seeded(
+    legacy: Record<string, string>,
+    columns: Record<string, unknown> = {},
+    detect: Record<string, unknown> | null = DETECT,
+  ) {
+    const s = await setup('none', detect as Record<string, unknown>);
+    s.fake.patch(schema.repositories, REPO, {
+      onboardingEnvironment: ENV_COLUMN,
+      scopeExcludeGlobs: ['vendor/**'],
+      ...columns,
+    });
+    await git('git', ['-C', s.root, 'init', '-q', '-b', 'main']);
+    await git('git', ['-C', s.root, 'config', 'user.email', 't@example.com']);
+    await git('git', ['-C', s.root, 'config', 'user.name', 'T']);
+    await git('git', ['-C', s.root, 'config', 'gc.auto', '0']);
+    await writeFile(join(s.root, 'README.md'), 'hi\n');
+    await mkdir(join(s.root, '.haive-data'), { recursive: true });
+    for (const [rel, content] of Object.entries(legacy)) {
+      await writeFile(join(s.root, rel), content);
+    }
+    await git('git', ['-C', s.root, 'add', '-A']);
+    await git('git', ['-C', s.root, 'commit', '-qm', 'seed']);
+    return s;
+  }
+
+  it('drops tracked Haive-shaped mirrors from the commit and the disk, and leaves the checkout clean', async () => {
+    const s = await seeded({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS });
+    expect(await trackedFiles(s.root)).toEqual(expect.arrayContaining([ENV_LEGACY, GLOBS_LEGACY]));
+
+    const first = await s.applyCommit();
+
+    expect(first.commitPerformed).toBe(true);
+    const files = await trackedFiles(s.root);
+    expect(files).toEqual(expect.arrayContaining([ENV_UNIT, GLOBS_UNIT]));
+    expect(files).not.toContain(ENV_LEGACY);
+    expect(files).not.toContain(GLOBS_LEGACY);
+    expect(existsSync(join(s.root, ENV_LEGACY))).toBe(false);
+    expect(existsSync(join(s.root, GLOBS_LEGACY))).toBe(false);
+    expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+    const head = await gitOut(s.root, 'rev-parse', 'HEAD');
+
+    const second = await s.applyCommit();
+
+    expect(second.commitPerformed).toBe(false);
+    expect(await gitOut(s.root, 'rev-parse', 'HEAD')).toBe(head);
+  });
+
+  it('writes neither legacy file where none existed', async () => {
+    const s = await seeded({});
+
+    await s.applyCommit();
+
+    expect(existsSync(join(s.root, ENV_LEGACY))).toBe(false);
+    expect(existsSync(join(s.root, GLOBS_LEGACY))).toBe(false);
+    expect(await trackedFiles(s.root)).toEqual(expect.arrayContaining([ENV_UNIT, GLOBS_UNIT]));
+  });
+
+  it("keeps a file at either name that is not Haive's, and says so", async () => {
+    const s = await seeded({ [ENV_LEGACY]: '{"keep":true}', [GLOBS_LEGACY]: '{"keep":true}' });
+
+    const out = await s.applyCommit();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(true);
+      expect(await trackedFiles(s.root), rel).toContain(rel);
+      expect(
+        out.warnings.some((w) => w.startsWith(`${rel} was left in place`)),
+        rel,
+      ).toBe(true);
+    }
+  });
+
+  it('keeps a mirror whose value the record does not carry', async () => {
+    const s = await seeded(
+      { [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS },
+      { onboardingEnvironment: null, scopeExcludeGlobs: null },
+    );
+
+    const out = await s.applyCommit();
+
+    expect(existsSync(join(s.root, ENV_UNIT))).toBe(false);
+    expect(existsSync(join(s.root, GLOBS_UNIT))).toBe(false);
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(true);
+      expect(await trackedFiles(s.root), rel).toContain(rel);
+    }
+    expect(out.warnings.filter((w) => w.includes('was left in place'))).toEqual([]);
+  });
+
+  it('without a render context there is no record: both mirrors are written and committed', async () => {
+    const s = await seeded({}, {}, null);
+
+    const out = await s.applyCommit();
+
+    expect(out.commitPerformed).toBe(true);
+    expect(existsSync(join(s.root, RECORD_FORMAT))).toBe(false);
+    expect(await trackedFiles(s.root)).toEqual(expect.arrayContaining([ENV_LEGACY, GLOBS_LEGACY]));
+    expect(JSON.parse(await readFile(join(s.root, ENV_LEGACY), 'utf8'))).toEqual(ENV_COLUMN);
+    expect(JSON.parse(await readFile(join(s.root, GLOBS_LEGACY), 'utf8'))).toEqual({
+      schemaVersion: 1,
+      scopeExcludeGlobs: ['vendor/**'],
+    });
+    expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+  });
+
+  it('leaves the mirrors alone when the record write failed', async () => {
+    const s = await seeded({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS });
+    let refused = false;
+    s.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContain('project state record write failed: database refused');
+    expect(existsSync(join(s.root, ENV_LEGACY))).toBe(true);
+    expect(existsSync(join(s.root, GLOBS_LEGACY))).toBe(true);
+  });
+
+  it('writes both mirrors again, and commits them, when the record write failed', async () => {
+    const stale = JSON.stringify({ schemaVersion: 1, scopeExcludeGlobs: ['stale/**'] });
+    const s = await seeded({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: stale });
+    let refused = false;
+    s.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+
+    const out = await s.applyCommit();
+
+    expect(out.warnings).toContain('project state record write failed: database refused');
+    expect(out.commitPerformed).toBe(true);
+    expect(await trackedFiles(s.root)).toEqual(expect.arrayContaining([ENV_LEGACY, GLOBS_LEGACY]));
+    expect(JSON.parse(await readFile(join(s.root, GLOBS_LEGACY), 'utf8'))).toEqual({
+      schemaVersion: 1,
+      scopeExcludeGlobs: ['vendor/**'],
+    });
   });
 });

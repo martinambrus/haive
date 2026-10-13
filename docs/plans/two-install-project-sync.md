@@ -92,8 +92,9 @@ moving a project between installs "must work and be synced correctly and fully".
   `agent_rules_override ?? DEFAULT_AGENT_RULES`.
 - **Legacy:** `.haive/install.json` retired (12, 02 and 04 stop writing it and delete a file of
   Haive's own shape once the record is written; 12 and 03 stage the deletion, never
-  `git rm --cached`); `environment/tooling/exclusions.json` no longer written,
-  still read as the fallback when no record exists. **Version skew:** a newer `format.json`
+  `git rm --cached`); `environment.json` and `exclusions.json` retired the same way once the record
+  carries their units (B1.8d), `tooling.json` still written and read as the fallback when no record
+  unit covers a column. **Version skew:** a newer `format.json`
   refuses import and write; claims from a newer Haive release block upgrades on the older install
   with a banner. **Kill switch:** `CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED` (default on).
 - **Migrations are reversible by design:** imported claims are `source='backfill'` with
@@ -282,8 +283,9 @@ Phase 1 (the record):
   partial record switch the whole legacy import off, so a repository carrying only
   `render.json` would stop importing environment, tooling and exclusions. Each unit the record does
   not cover is filled from its legacy file as today, fill-if-absent, which also keeps B0.1's MCP
-  consent hold and B0.3's `rtkEnabled` in one importer. B1.7 `git rm`s each legacy file in the
-  commit that first carries its unit. The importer re-adds
+  consent hold and B0.3's `rtkEnabled` in one importer. Each legacy file is deleted (never
+  `git rm --cached`) by 12 and 02 once the release whose sync imports its unit has written the
+  record. The importer re-adds
   `ONBOARDING_ENVIRONMENT_SCHEMA_VERSION` when it writes the column, since the record versions
   itself through `format.json` and the column's readers gate on their own version.
   The sync renders its local record before it merges (`renderProjectState`), which applies the
@@ -483,7 +485,13 @@ Phase 1 (the record):
   value would be typed or run on a teammate's. B1.8c: the sync merges them three ways into the
   columns with the routes' normalisers, asks about a contested unit as a pending row, and only an
   RTK row holds upgrades; a base that holds none merges them as no base, so the checkout wins over a
-  default nobody chose. B1.8d: the legacy `environment.json` and `exclusions.json` retire. B1.8e:
+  default nobody chose. B1.8d: the legacy `environment.json` and `exclusions.json` retire per unit: 12 stops writing
+  them whenever its record write succeeded (no render context or a failed write keeps writing and
+  staging them), and then deletes a file of Haive's own shape (like `install.json`, one
+  shared helper) while the record file carrying its value exists; 02 does the same into
+  `deletedPaths`; the clone import skips a column whose record unit file exists, so a stale legacy
+  file never outranks the record, fills it from the legacy file afterwards if the sync did not,
+  and a legacy-only repository imports as before. B1.8e:
   the tooling mirror becomes one whole-value unit with today's importer semantics. Deviation from
   the B1.7 text above: a legacy file is retired only in the release whose sync imports its unit, and
   only from 12 and 02, not wherever the record first carries it. Controls: PATCH exclusions then a

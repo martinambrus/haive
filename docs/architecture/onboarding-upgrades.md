@@ -98,7 +98,7 @@ live artifact rows and `quarantinedAgentFiles`; 08's `written`, `removedPaths` a
 `mirroredDirs` entry (SKILL.md, the `subSkillSlugs`, the dir's README) and 09_5b's repairs, whose
 removals come from git (every file HEAD tracks under a repaired skill's directory that is gone from
 disk, since the repair clears the whole directory); and the
-files 12 writes itself (the `.haive-data` mirror, the project state, and the `.haive/install.json` it retires), kept
+files 12 writes itself (the `.haive-data` tooling and plan mirrors, the project state, and the `.haive/install.json` and legacy mirrors it retires), kept
 even when a write threw after some of the files landed. The plan mirror reports what it wrote and
 removed through an accumulator (`writePlanMirror`'s `changes`), also on a throw, so a plan file the
 refresh never reached (a symlink it refused) is not staged, and a mirror that failed before it knew
@@ -614,6 +614,25 @@ kept, `absent` included, so a Retry after a failed commit still stages a deletio
 made; 02 lists it in `deletedPaths` only when it removed it, and 03 stages it like any removal.
 04 writes no commit, so a tracked copy is left as an unstaged deletion. A reset still removes the
 file, for installs that hold one.
+
+**The legacy `.haive-data/environment.json` and `exclusions.json` are retired per unit.** The record
+carries their values (`project/environment.json`, `settings/scope-exclude-globs.json`) and the sync
+imports them, so a 12 whose record write succeeded no longer writes either file. A 12 with no render
+context, or whose record write failed, writes both exactly as before and stages them: the mirror
+is retired only by a successful record write. After a successful `writeProjectStateRecord`, 12 and
+02 delete each one through `retireLegacyMirrors` (the same `retireHaiveFile` as `retireInstallManifest`,
+`_retire-install-manifest.ts`), and only while the record file that carries its value exists: a
+repository whose column holds nothing keeps its legacy file, which stays the only copy. The shape
+check is the mirror's own (`schemaVersion` 1, the environment's two objects, a list of strings for
+the globs); anything else at the name is the person's, kept and reported in the warnings. 12 lists the
+path in `ownRemoved` unless it was kept, 02 lists it in `deletedPaths` only when it removed it, 04
+does not touch them. The clone import (`importHaiveDataMirror`) decides per unit too: a column is
+left to the sync when the record's unit file exists in the checkout (`lstatNoFollow`, a stale legacy
+file never outranks it); a column the sync then left empty (it threw, or refused, deferred,
+superseded or found no record) is filled from the legacy file afterwards, still fill-if-absent. A
+repository with no record unit is filled from the legacy file as
+before, with B0.1's MCP consent hold and the tooling import untouched. `tooling.json` is not retired
+here; it is the last legacy mirror.
 
 **A row this install cannot manage is `foreign`.** `foreignReason` (shared) names a `custom:` id (a
 bundle item this install holds no bundle for, stored verbatim, never as `foreign`), a marker from a
