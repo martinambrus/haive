@@ -2650,6 +2650,21 @@ async function main(): Promise<void> {
     (await baseOf()) != null,
   );
 
+  // The same row, if a local edit is flushed first, keeps the file before the edit as its base.
+  const pBeforeFlush = (await sNode(pId))?.title;
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedSnapshot: null })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await editS(pId, { title: 'P edited before any pull' });
+  await writePlanMirror(db, sId, sDir);
+  check(
+    'three-way: a flush on a row with no base stores the file it is about to replace as the base',
+    (await baseOf())?.nodes.find((n) => n.id === pId)?.title === pBeforeFlush,
+    await baseOf(),
+  );
+  theirs = await readMirror();
+
   // A plan.json that is not JSON is refused with a reason, not skipped as absent.
   await writeFile(sPlanFile, '{ not json');
   const notJson = await reconcilePlanFromCheckout(db, sId, sDir).then(
