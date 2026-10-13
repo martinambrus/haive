@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { ragUsageStyle } from '@/lib/rag-usage';
 import { useParams } from 'next/navigation';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
 // Import the pure timing helper from its dedicated subpath, NOT the package
 // barrel — the barrel pulls server-only utils (ioredis -> dns) that break the
@@ -72,6 +72,7 @@ import {
 } from '@/components/usage-reconnect-action';
 import { resolveUsageChipState } from '@/lib/usage-chip-state';
 import { stepCliProviderIds } from '@/lib/step-cli-providers';
+import { resolveStepPanels, type PanelContext, type UiPanelSpec } from '@/lib/step-panels';
 import { selectMetersForProviderIds, type StripMeter } from '@/components/usage-strip-select';
 import {
   UsageBars,
@@ -222,6 +223,57 @@ function liveBrowserPanel(
       {dbPanel}
     </>
   );
+}
+
+function renderStepPanels(
+  specs: UiPanelSpec[],
+  step: { id: string; detectOutput: unknown; output: unknown },
+  taskId: string,
+  taskEnded: boolean,
+) {
+  const seen = new Map<string, number>();
+  return specs.map((spec) => {
+    const n = seen.get(spec.kind) ?? 0;
+    seen.set(spec.kind, n + 1);
+    return (
+      <Fragment key={`${spec.kind}-${n}`}>
+        {renderStepPanel(spec, step, taskId, taskEnded)}
+      </Fragment>
+    );
+  });
+}
+
+function renderStepPanel(
+  spec: UiPanelSpec,
+  step: { id: string; detectOutput: unknown; output: unknown },
+  taskId: string,
+  taskEnded: boolean,
+) {
+  switch (spec.kind) {
+    case 'liveBrowser':
+      return liveBrowserPanel(step, taskId, {
+        autoCollapse: taskEnded,
+        ...(spec.title !== undefined ? { title: spec.title } : {}),
+        ...(spec.splitTerminal ? { splitTerminal: true } : {}),
+      });
+    case 'screenshots':
+      return screenshotGallery(step, taskId, spec.from);
+    case 'runAppReady':
+      return <RunAppReadyPanels step={step} taskId={taskId} autoCollapse={taskEnded} />;
+    case 'artifactDiff': {
+      const artifactPath = (
+        step.detectOutput as Record<string, string | null | undefined> | null
+      )?.[spec.key];
+      return artifactPath ? <CommitDiffViewer taskId={taskId} artifactPath={artifactPath} /> : null;
+    }
+    case 'fixerNotice':
+      return (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          The browser test found issues — fixing them in the code now. The live browser is paused;
+          follow the fix in the terminal above.
+        </div>
+      );
+  }
 }
 
 /** run_app hold step (99-run-app-ready): the live-app viewer. The viewing mode was
@@ -3574,6 +3626,16 @@ function StepCardImpl({
   // spam). Failed tasks keep theirs — the runtime may still be up for debugging.
   const runtimeTornDown = taskCancelled || taskStatus === 'completed';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
+  const panelCtx: PanelContext = {
+    formOpen: !!showForm,
+    runtimeTornDown,
+    status: step.status,
+    activeRole: step.activeRole,
+    hasSchema: schema !== null,
+  };
+  const formHeaderPanels = resolveStepPanels(step.stepId, 'formHeader', panelCtx);
+  const formBeforeFieldsPanels = resolveStepPanels(step.stepId, 'formBeforeFields', panelCtx);
+  const cardFooterPanels = resolveStepPanels(step.stepId, 'cardFooter', panelCtx);
   // Auto-skipped steps (shouldRun → false, or detect skipReason) have nothing
   // to retry — they were intentionally bypassed by the runner. Manually-skipped
   // steps remain retryable in case the user changed their mind.
@@ -4123,32 +4185,16 @@ function StepCardImpl({
                 hasConnectionFields || supportsPresets ? renderAfterFieldFn : undefined
               }
               headerSlot={
-                !runtimeTornDown &&
-                step.stepId === '08a-browser-verify' &&
-                step.activeRole !== 'fixer' ? (
-                  <>
-                    {liveBrowserPanel(step, taskId, {
-                      autoCollapse: taskEnded,
-                      splitTerminal: true,
-                    })}
-                    {screenshotGallery(step, taskId, 'output')}
-                  </>
-                ) : undefined
+                formHeaderPanels.length > 0
+                  ? renderStepPanels(formHeaderPanels, step, taskId, taskEnded)
+                  : undefined
               }
               beforeFieldsSlot={
-                !runtimeTornDown && step.stepId === '99-run-app-ready' ? (
-                  <RunAppReadyPanels step={step} taskId={taskId} autoCollapse={taskEnded} />
-                ) : !runtimeTornDown && step.stepId === '09-gate-2-verify-approval' ? (
+                formBeforeFieldsPanels.length > 0 ? (
                   // Gate-2: the live browser (or, in direct mode, the URL info box) sits
                   // BELOW the verification status table but ABOVE the approve/reject
                   // decision — review the results, test, then decide.
-                  <>
-                    {liveBrowserPanel(step, taskId, {
-                      autoCollapse: taskEnded,
-                      title: 'Browser — test the app here',
-                    })}
-                    {screenshotGallery(step, taskId, 'detect')}
-                  </>
+                  renderStepPanels(formBeforeFieldsPanels, step, taskId, taskEnded)
                 ) : step.status === 'waiting_form' &&
                   (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
                     ?.knowledgeDiffArtifactPath ? (
@@ -4301,36 +4347,8 @@ function StepCardImpl({
           card keeps only its evidence gallery — same as Gate 2, whose panel disappears with the
           form when the user submits. Left mounted it read as a browser you could still open,
           and expanding it re-bridged (or cold-booted) a desktop nothing was driving. */}
-      {!runtimeTornDown &&
-        step.stepId === '08a-browser-verify' &&
-        step.status !== 'failed' &&
-        step.status !== 'done' &&
-        step.status !== 'waiting_form' &&
-        step.activeRole !== 'fixer' &&
-        liveBrowserPanel(step, taskId, { autoCollapse: taskEnded, splitTerminal: true })}
 
-      {!runtimeTornDown &&
-        step.stepId === '08a-browser-verify' &&
-        step.status !== 'waiting_form' &&
-        screenshotGallery(step, taskId, 'output')}
-
-      {step.stepId === '08a-browser-verify' && step.activeRole === 'fixer' && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
-          The browser test found issues — fixing them in the code now. The live browser is paused;
-          follow the fix in the terminal above.
-        </div>
-      )}
-
-      {step.stepId === '10-gate-3-commit' &&
-        // The form is built after the pre-form LLM finishes. Keep the diff hidden until
-        // then so mounting the terminal above it does not move an already visible viewer.
-        (schema !== null || step.status === 'done' || step.status === 'skipped') &&
-        (step.detectOutput as { diffArtifactPath?: string | null } | null)?.diffArtifactPath && (
-          <CommitDiffViewer
-            taskId={taskId}
-            artifactPath={(step.detectOutput as { diffArtifactPath: string }).diffArtifactPath}
-          />
-        )}
+      {renderStepPanels(cardFooterPanels, step, taskId, taskEnded)}
     </Card>
   );
 }
