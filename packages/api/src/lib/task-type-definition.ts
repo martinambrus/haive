@@ -1,6 +1,11 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { CONFIG_KEYS, configService, workflowTypeSchema } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  REPO_OPTIONAL_BUILTIN_TASK_TYPES,
+  configService,
+  workflowTypeSchema,
+} from '@haive/shared';
 import {
   composableStepEntrySchema,
   resolveTaskTypeAvailability,
@@ -40,7 +45,7 @@ export interface TaskTypeDefinitionForCreate {
 
 const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
   runListSnapshot: null,
-  requiresRepository: false,
+  requiresRepository: !REPO_OPTIONAL_BUILTIN_TASK_TYPES.has(slug),
   repoOptional: false,
   preAnswers: null,
   stepLoopLimits: {},
@@ -148,7 +153,7 @@ export async function definitionForCreate(
   const has = (id: string) => snapshot?.includes(id) === true;
   return {
     runListSnapshot: snapshot,
-    requiresRepository: custom && def.requiresRepository,
+    requiresRepository: def.requiresRepository,
     repoOptional: !def.requiresRepository,
     preAnswers:
       custom && Object.keys(def.preAnswerDefaults).length > 0 ? def.preAnswerDefaults : null,
