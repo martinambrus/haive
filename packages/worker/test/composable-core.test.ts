@@ -106,6 +106,56 @@ describe('core composable catalog', () => {
     expect(validateComposition(order, catalog)).toEqual([]);
   });
 
+  it('accepts learning capture after the commit, as the built-in workflow runs it', () => {
+    const order = [
+      '01-worktree-setup',
+      '07-phase-2-implement',
+      '10-gate-3-commit',
+      '11-phase-8-learning',
+    ];
+    expect(validateComposition(order, catalog)).toEqual([]);
+  });
+
+  it('rejects plugin installation before the worktree step', () => {
+    const issues = validateComposition(['01b-install-plugins', '01-worktree-setup'], catalog);
+    expect(issues).toEqual([
+      expect.objectContaining({
+        kind: 'unmet-need',
+        stepId: '01b-install-plugins',
+        needs: 'worktree',
+      }),
+    ]);
+  });
+
+  it.each([
+    ['01c-ddev-env', '01-debug-mode', 'debug-choice'],
+    ['01c-ddev-env', '01d-browser-access', 'browser-choice'],
+    ['01a-app-boot', '01-debug-mode', 'debug-choice'],
+    ['01a-app-boot', '01d-browser-access', 'browser-choice'],
+  ])('rejects %s starting before %s', (runtime, choice, token) => {
+    const runtimeSetup: Record<string, string[]> = {
+      '01c-ddev-env': ['01-declare-deps', '01-worktree-setup'],
+      '01a-app-boot': [
+        '01-declare-deps',
+        '02-generate-dockerfile',
+        '03-build-image',
+        '01-worktree-setup',
+      ],
+    };
+    const choices = ['01-debug-mode', '01d-browser-access'];
+    const inOrder = [...runtimeSetup[runtime]!, ...choices, runtime];
+    expect(validateComposition(inOrder, catalog)).toEqual([]);
+    const late = [
+      ...runtimeSetup[runtime]!,
+      ...choices.filter((c) => c !== choice),
+      runtime,
+      choice,
+    ];
+    expect(validateComposition(late, catalog)).toEqual([
+      expect.objectContaining({ kind: 'unmet-need', stepId: runtime, needs: token }),
+    ]);
+  });
+
   it('rejects verify without implement earlier', () => {
     const issues = validateComposition(['01-worktree-setup', '08-phase-5-verify'], catalog);
     expect(issues).toEqual([

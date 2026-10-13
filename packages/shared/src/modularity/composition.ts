@@ -15,11 +15,11 @@ export function validateComposition(
   if (stepIds.length === 0) return [{ kind: 'empty' }];
   const issues: CompositionIssue[] = [];
   const provided = new Set<string>();
-  const seen = new Set<string>();
-  let closingStepId: string | undefined;
+  const seen = new Map<string, number>();
+  let closing: { stepId: string; index: number } | undefined;
   stepIds.forEach((stepId, index) => {
     if (seen.has(stepId)) issues.push({ kind: 'duplicate-step', index, stepId });
-    seen.add(stepId);
+    if (!seen.has(stepId)) seen.set(stepId, index);
     const entry = catalog.get(stepId);
     if (!entry) {
       issues.push({ kind: 'unknown-step', index, stepId });
@@ -36,9 +36,11 @@ export function validateComposition(
         target: entry.loopTargetStepId,
       });
     }
-    if (entry.closes) closingStepId ??= stepId;
-    if (entry.loopTargetStepId !== undefined && closingStepId !== undefined) {
-      issues.push({ kind: 'loop-after-closing', index, stepId, closingStepId });
+    if (entry.closes) closing ??= { stepId, index };
+    const targetIndex =
+      entry.loopTargetStepId === undefined ? undefined : (seen.get(entry.loopTargetStepId) ?? -1);
+    if (targetIndex !== undefined && closing !== undefined && targetIndex < closing.index) {
+      issues.push({ kind: 'loop-after-closing', index, stepId, closingStepId: closing.stepId });
     }
     for (const token of entry.provides) provided.add(token);
   });

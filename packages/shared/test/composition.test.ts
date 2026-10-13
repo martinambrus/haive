@@ -141,6 +141,15 @@ describe('validateComposition', () => {
     expect(validateComposition(['impl', 'verify', 'commit'], catalog)).toEqual([]);
   });
 
+  it('accepts a loop after a closing step whose target also follows it', () => {
+    const catalog = catalogOf(
+      entry('commit', { closes: true }),
+      entry('learn', { loop: 'learn' }),
+      entry('review-learnings', { loop: 'learn' }),
+    );
+    expect(validateComposition(['commit', 'learn', 'review-learnings'], catalog)).toEqual([]);
+  });
+
   it('treats a step that both closes and loops as its own barrier', () => {
     const catalog = catalogOf(
       entry('impl', { provides: ['implementation'] }),
