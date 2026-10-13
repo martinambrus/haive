@@ -45,6 +45,7 @@ import { toolingRoutes } from './routes/tooling.js';
 import { versionRoutes } from './routes/version.js';
 import { maintenanceGate } from './middleware/maintenance.js';
 import { maintenanceRoutes } from './routes/maintenance.js';
+import { adminTaskTypeRoutes, taskTypeRoutes } from './routes/task-types.js';
 import { installModules } from './modules/loader.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -111,6 +112,8 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/terminal-sessions', terminalSessionRoutes);
   app.route('/admin', adminRoutes);
   app.route('/admin/maintenance', maintenanceRoutes);
+  app.route('/admin/task-types', adminTaskTypeRoutes);
+  app.route('/task-types', taskTypeRoutes);
   app.route('/tooling', toolingRoutes);
   app.route('/repositories', upgradeRoutes);
   app.route('/repositories', toolingUpgradeRoutes);
