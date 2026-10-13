@@ -1095,25 +1095,53 @@ async function reconcilePlanLocked(
       .filter((e) => e.fromNodeId !== e.toNodeId)
       .map((e) => [edgeKey(e.fromNodeId, e.toNodeId, e.kind), e]),
   );
+  // Links carry no version, so the rows must still be the ones the render saw; a patch that added
+  // or changed one meanwhile holds the reconcile rather than being undone.
+  const cascaded = new Set(merge.deleted);
+  const renderedEdges = new Map(
+    (localRender?.edges ?? [])
+      .filter((e) => !cascaded.has(e.fromNodeId) && !cascaded.has(e.toNodeId))
+      .map((e) => [e.id, e]),
+  );
+  if (
+    edgeRows.length !== renderedEdges.size ||
+    edgeRows.some((e) => {
+      const seen = renderedEdges.get(e.id);
+      return (
+        !seen ||
+        edgeKey(seen.fromNodeId, seen.toNodeId, seen.kind) !==
+          edgeKey(e.fromNodeId, e.toNodeId, e.kind) ||
+        seen.note !== e.note
+      );
+    })
+  ) {
+    throw new PlanMirrorHeldError(HELD_RACED);
+  }
   const haveEdges = new Map(edgeRows.map((e) => [edgeKey(e.fromNodeId, e.toNodeId, e.kind), e]));
   const staleEdges = edgeRows.filter(
     (e) => !wantedEdges.has(edgeKey(e.fromNodeId, e.toNodeId, e.kind)),
   );
-  if (staleEdges.length > 0) {
-    await tx.delete(schema.planNodeEdges).where(
-      inArray(
-        schema.planNodeEdges.id,
-        staleEdges.map((e) => e.id),
-      ),
+  const edgeAsRead = (e: (typeof edgeRows)[number]) =>
+    and(
+      eq(schema.planNodeEdges.id, e.id),
+      sql`${schema.planNodeEdges.note} is not distinct from ${e.note}`,
     );
+  for (const e of staleEdges) {
+    const gone = await tx
+      .delete(schema.planNodeEdges)
+      .where(edgeAsRead(e))
+      .returning({ id: schema.planNodeEdges.id });
+    if (gone.length === 0) throw new PlanMirrorHeldError(HELD_RACED);
   }
   for (const [key, edge] of wantedEdges) {
     const have = haveEdges.get(key);
     if (have && have.note !== edge.note) {
-      await tx
+      const changed = await tx
         .update(schema.planNodeEdges)
         .set({ note: edge.note })
-        .where(eq(schema.planNodeEdges.id, have.id));
+        .where(edgeAsRead(have))
+        .returning({ id: schema.planNodeEdges.id });
+      if (changed.length === 0) throw new PlanMirrorHeldError(HELD_RACED);
     }
   }
   const newEdges = [...wantedEdges].filter(([key]) => !haveEdges.has(key)).map(([, e]) => e);
@@ -1153,28 +1181,51 @@ async function reconcilePlanLocked(
   const wantedLinks = new Map(
     merged.codeLinks.map((l) => [linkKey(l.nodeId, l.repoPath, l.symbol), l]),
   );
+  const sameLink = (
+    a: { evidence: unknown; derivedAtCommit: unknown; stale: unknown; role: unknown },
+    b: { evidence: unknown; derivedAtCommit: unknown; stale: unknown; role: unknown },
+  ) =>
+    a.evidence === b.evidence &&
+    a.derivedAtCommit === b.derivedAtCommit &&
+    a.stale === b.stale &&
+    a.role === b.role;
+  const renderedLinks = new Map(
+    local.codeLinks
+      .filter((l) => !cascaded.has(l.nodeId))
+      .map((l) => [linkKey(l.nodeId, l.repoPath, l.symbol), l]),
+  );
+  if (
+    linkRows.length !== renderedLinks.size ||
+    linkRows.some((l) => {
+      const seen = renderedLinks.get(linkKey(l.nodeId, l.repoPath, l.symbol));
+      return !seen || !sameLink(seen, l);
+    })
+  ) {
+    throw new PlanMirrorHeldError(HELD_RACED);
+  }
   const haveLinks = new Map(linkRows.map((l) => [linkKey(l.nodeId, l.repoPath, l.symbol), l]));
   const staleLinks = linkRows.filter(
     (l) => !wantedLinks.has(linkKey(l.nodeId, l.repoPath, l.symbol)),
   );
-  if (staleLinks.length > 0) {
-    await tx.delete(schema.planNodeCodeLinks).where(
-      inArray(
-        schema.planNodeCodeLinks.id,
-        staleLinks.map((l) => l.id),
-      ),
+  const linkAsRead = (l: (typeof linkRows)[number]) =>
+    and(
+      eq(schema.planNodeCodeLinks.id, l.id),
+      sql`${schema.planNodeCodeLinks.evidence} is not distinct from ${l.evidence}`,
+      sql`${schema.planNodeCodeLinks.derivedAtCommit} is not distinct from ${l.derivedAtCommit}`,
+      eq(schema.planNodeCodeLinks.stale, l.stale),
+      eq(schema.planNodeCodeLinks.role, l.role),
     );
+  for (const l of staleLinks) {
+    const gone = await tx
+      .delete(schema.planNodeCodeLinks)
+      .where(linkAsRead(l))
+      .returning({ id: schema.planNodeCodeLinks.id });
+    if (gone.length === 0) throw new PlanMirrorHeldError(HELD_RACED);
   }
   for (const [key, link] of wantedLinks) {
     const have = haveLinks.get(key);
-    if (
-      have &&
-      (have.evidence !== link.evidence ||
-        have.derivedAtCommit !== link.derivedAtCommit ||
-        have.stale !== link.stale ||
-        have.role !== link.role)
-    ) {
-      await tx
+    if (have && !sameLink(have, link)) {
+      const changed = await tx
         .update(schema.planNodeCodeLinks)
         .set({
           evidence: link.evidence,
@@ -1183,7 +1234,9 @@ async function reconcilePlanLocked(
           role: link.role as 'implements',
           updatedAt: new Date(),
         })
-        .where(eq(schema.planNodeCodeLinks.id, have.id));
+        .where(linkAsRead(have))
+        .returning({ id: schema.planNodeCodeLinks.id });
+      if (changed.length === 0) throw new PlanMirrorHeldError(HELD_RACED);
     }
   }
   const newLinks = [...wantedLinks].filter(([key]) => !haveLinks.has(key)).map(([, l]) => l);

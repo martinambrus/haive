@@ -2469,6 +2469,40 @@ async function main(): Promise<void> {
     toNodeId: r1Id,
     kind: 'affects',
   });
+  // An edge note a canvas write holds is not overwritten by the reconcile, which holds instead.
+  await writePlanMirror(db, sId, sDir);
+  theirs = await readMirror();
+  await advancePlanBaseToPushed(db, sId, await readFile(sPlanFile, 'utf8'));
+  let noting: Promise<string> | undefined;
+  await db.transaction(async (edit) => {
+    await edit
+      .update(schema.planNodeEdges)
+      .set({ note: 'from the canvas' })
+      .where(eq(schema.planNodeEdges.repositoryId, sId));
+    noting = arrive({
+      ...theirs,
+      edges: theirs.edges.map((e) => (e.toNodeId === r1Id ? { ...e, note: 'from the file' } : e)),
+    }).then(
+      () => 'merged',
+      (err: Error) => err.name,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  });
+  const notes = await db
+    .select({ note: schema.planNodeEdges.note })
+    .from(schema.planNodeEdges)
+    .where(eq(schema.planNodeEdges.repositoryId, sId));
+  check(
+    'three-way: an edge a canvas write changed during a reconcile keeps its note and the reconcile holds',
+    (await noting) === 'PlanMirrorHeldError' &&
+      notes.length === 1 &&
+      notes[0]!.note === 'from the canvas',
+    { notes },
+  );
+  await arrive({
+    ...theirs,
+    edges: theirs.edges.map((e) => (e.toNodeId === r1Id ? { ...e, note: 'from the canvas' } : e)),
+  });
   const dropR = await arrive({
     ...theirs,
     nodes: theirs.nodes.filter((n) => n.id !== rId && n.id !== r1Id),
