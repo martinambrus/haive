@@ -27,6 +27,21 @@ export const isSettingUnit = (unit: string): boolean => {
   return named !== null && isPortableSettingName(named[1]!);
 };
 
+/** The unit of one plan question: a field of one node, `plan/<nodeId>#<field>`. Not a conflict unit
+ *  of the project state record until the api can answer it. */
+export const PLAN_UNIT_PREFIX = 'plan/';
+
+export const planConflictUnit = (nodeId: string, field: string): string =>
+  `${PLAN_UNIT_PREFIX}${nodeId}#${field}`;
+
+export const parsePlanConflictUnit = (unit: string): { nodeId: string; field: string } | null => {
+  if (!unit.startsWith(PLAN_UNIT_PREFIX)) return null;
+  const rest = unit.slice(PLAN_UNIT_PREFIX.length);
+  const hash = rest.indexOf('#');
+  if (hash <= 0 || hash === rest.length - 1) return null;
+  return { nodeId: rest.slice(0, hash), field: rest.slice(hash + 1) };
+};
+
 export const isConflictUnit = (unit: string): boolean =>
   isRenderUnit(unit) ||
   isClaimUnit(unit) ||

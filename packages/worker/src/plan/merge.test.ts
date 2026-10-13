@@ -202,7 +202,7 @@ describe('mergeOriginInto', () => {
     expect(attempt.autoResolved.sort()).toEqual(['.haive-data/plan.json', '.haive-data/plan.md']);
     // Only the real conflict is handed on; the plan files never reach a person.
     expect(attempt.conflicts).toEqual(['README.md']);
-    // Incoming side taken, which is what reconcilePlanMirror has to read.
+    // Incoming side taken, which is what reconcilePlanFromCheckout has to read.
     expect(await readFile(path.join(wt, '.haive-data/plan.json'), 'utf8')).toContain('remote');
   });
 

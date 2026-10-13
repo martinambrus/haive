@@ -435,4 +435,23 @@ describe('resetting a repository with project state conflicts', () => {
 
     expect(fake.rows(schema.projectStateConflicts).map((r) => r.repositoryId)).toEqual([OTHER]);
   });
+
+  it('leaves a plan question alone: the reset takes back files, not the plan', async () => {
+    const fake = await setup(await repoRoot());
+    const unit = 'plan/00000000-0000-4000-8000-0000000000c1#title';
+    fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit,
+      base: { v: 'a' },
+      local: { v: 'b' },
+      incoming: { v: 'c' },
+    });
+
+    expect((await reset()).status).toBe(200);
+
+    expect(fake.rows(schema.projectStateConflicts).map((r) => [r.repositoryId, r.unit])).toEqual([
+      [OTHER, 'project/render.json#framework'],
+      [REPO, unit],
+    ]);
+  });
 });

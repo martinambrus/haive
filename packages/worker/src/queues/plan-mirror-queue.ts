@@ -25,7 +25,7 @@ import {
   PlanMirrorHeldError,
   flushPlanMirrorForRepository,
   recordPlanMirrorError,
-  reconcilePlanMirror,
+  reconcilePlanFromCheckout,
   stampPlanMirrorHashesAtBoot,
 } from '../plan/mirror.js';
 import { commitPlanSnapshotFiles } from '../plan/snapshot-git.js';
@@ -76,6 +76,7 @@ async function resultFor(
 ): Promise<PlanMirrorJobResult> {
   const state = await getDb().query.planMirrorState.findFirst({
     where: eq(schema.planMirrorState.repositoryId, repositoryId),
+    columns: { revision: true, writtenRevision: true },
   });
   return {
     repositoryId,
@@ -271,7 +272,7 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         // The merge brought in the other side's plan; fold it into the database and
         // rewrite the files, exactly as a pull does, so what is pushed is the union
         // rather than only this side.
-        await reconcilePlanMirror(getDb(), repo.id, repoPath);
+        await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
         await flushPlanMirrorForRepository(getDb(), repo.id);
         await commitPlanSnapshotFiles({ repoPath, message, identity });
       }
@@ -382,10 +383,10 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     const after = await gitRun(repoPath, ['rev-parse', 'HEAD']);
     const currentCommit = after.code === 0 ? after.stdout.trim() : null;
 
-    const outcome = await reconcilePlanMirror(db, repo.id, repoPath);
+    const outcome = await reconcilePlanFromCheckout(db, repo.id, repoPath);
     // Files are rewritten from the database afterwards, not trusted as pulled:
-    // the reconcile KEEPS local-only nodes, so the checkout's plan.json is now
-    // missing rows the plan has.
+    // the reconcile keeps local-only nodes and local values under a question, so the
+    // checkout's plan.json no longer says everything the plan does.
     const files = outcome.skipped ? [] : (await flushPlanMirrorForRepository(db, repo.id)).files;
 
     return resultFor(repo.id, files, {

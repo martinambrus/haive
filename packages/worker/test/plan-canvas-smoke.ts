@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray, notInArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, like, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 // Subpath, not the root barrel: the plan applier reaches the database, and the
@@ -37,7 +37,7 @@ import { gitRun } from '../src/repo/git-exec.js';
 import { sweepDirtyPlanMirrors } from '../src/queues/plan-mirror-queue.js';
 import {
   importPlanMirror,
-  reconcilePlanMirror,
+  reconcilePlanFromCheckout,
   stampPlanMirrorHashesAtBoot,
   writePlanMirror,
 } from '../src/plan/mirror.js';
@@ -1739,10 +1739,10 @@ async function main(): Promise<void> {
     'utf8',
   );
 
-  const pulled = await reconcilePlanMirror(db, freshRepoB!.id, pullDir);
+  const pulled = await reconcilePlanFromCheckout(db, freshRepoB!.id, pullDir);
   check(
-    'a pull adds the incoming node and updates the shared ones',
-    pulled.nodesCreated === 1 && pulled.nodesUpdated === mirror.nodes.length,
+    'a pull adds the incoming node and updates only the shared node that changed',
+    pulled.nodesCreated === 1 && pulled.nodesUpdated === 1,
     pulled,
   );
   check(
@@ -1800,7 +1800,7 @@ async function main(): Promise<void> {
   );
   let refused = false;
   try {
-    await reconcilePlanMirror(db, freshRepoB!.id, pullDir);
+    await reconcilePlanFromCheckout(db, freshRepoB!.id, pullDir);
   } catch {
     refused = true;
   }
@@ -1813,7 +1813,7 @@ async function main(): Promise<void> {
   // No snapshot at all is a RESULT, not a failure: a repo that has never had one
   // committed is the common case.
   const emptyDir = await mkdtemp(path.join(os.tmpdir(), 'plan-pull-empty-'));
-  const nothing = await reconcilePlanMirror(db, freshRepoB!.id, emptyDir);
+  const nothing = await reconcilePlanFromCheckout(db, freshRepoB!.id, emptyDir);
   check(
     'a repo with no committed snapshot reports it rather than failing',
     nothing.skipped !== null,
@@ -1868,6 +1868,17 @@ async function main(): Promise<void> {
     (JSON.parse(await readFile(file, 'utf8')) as PlanMirror).nodes.find((n) => n.id === id)?.title;
   const holdState = () =>
     db.query.planMirrorState.findFirst({ where: eq(schema.planMirrorState.repositoryId, holdId) });
+  const pendingPlanRows = (repoId: string) =>
+    db
+      .select()
+      .from(schema.projectStateConflicts)
+      .where(
+        and(
+          eq(schema.projectStateConflicts.repositoryId, repoId),
+          like(schema.projectStateConflicts.unit, 'plan/%'),
+          isNull(schema.projectStateConflicts.resolvedAt),
+        ),
+      );
   const editTitle = async (id: string, title: string) => {
     const [row] = await db
       .select({ version: schema.planNodes.version })
@@ -1893,6 +1904,14 @@ async function main(): Promise<void> {
   await git(bDir, ['commit', '-q', '-m', 'plan']);
   await git(bDir, ['remote', 'add', 'origin', originDir]);
   await git(bDir, ['push', '-q', 'origin', 'main']);
+  // B is an install that restored the plan from this checkout, which is what gives it a base.
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: holdBuilt.refs['hroot']! }] },
+    { repositoryId: holdId, origin: 'user' },
+  );
+  const restoredHold = await importPlanMirror(db, holdId, bDir);
+  check('C1: B restores the plan from the checkout', restoredHold.imported, restoredHold);
   await git(holdRoot, ['clone', '-q', originDir, aDir]);
   const aPlan = path.join(aDir, HAIVE_DATA_FILES.plan);
   const aMirror = JSON.parse(await readFile(aPlan, 'utf8')) as PlanMirror;
@@ -1910,31 +1929,30 @@ async function main(): Promise<void> {
   await git(bDir, ['pull', '-q', '--ff-only', 'origin', 'main']);
   await editTitle(hyId, "Y'");
 
-  const held = await flushOutcome(bDir);
-  const heldState = await holdState();
-  check('C1: the flush holds a plan.json it has not read in', held === 'held', held);
-  check("C1: the checkout keeps A's X'", (await titleIn(planFile, hxId)) === "X'");
+  const merged = await flushOutcome(bDir);
+  const mergedState = await holdState();
   check(
-    "C1: the database keeps B's Y'",
-    (await loadPlanNodes(db, holdId)).some((n) => n.id === hyId && n.title === "Y'"),
+    "C1: a flush after A's X' arrived and B edited Y' reads the checkout in and writes",
+    merged === 'wrote',
+    merged,
   );
   check(
-    'C1: the row stays dirty and says to pull',
-    !!heldState &&
-      heldState.revision > heldState.writtenRevision &&
-      (heldState.lastError ?? '').includes('Pull the plan'),
-    heldState,
+    "C1: the checkout holds both A's X' and B's Y'",
+    (await titleIn(planFile, hxId)) === "X'" && (await titleIn(planFile, hyId)) === "Y'",
   );
-
-  await reconcilePlanMirror(db, holdId, bDir);
-  check('C1: after a pull the flush writes again', (await flushOutcome(bDir)) === 'wrote');
   check(
-    "C1: the pull brings A's X' into the database and the file",
-    (await titleIn(planFile, hxId)) === "X'" &&
-      (await loadPlanNodes(db, holdId)).some((n) => n.id === hxId && n.title === "X'"),
+    'C1: the database holds both',
+    (await loadPlanNodes(db, holdId)).some((n) => n.id === hxId && n.title === "X'") &&
+      (await loadPlanNodes(db, holdId)).some((n) => n.id === hyId && n.title === "Y'"),
   );
-  const clean = await holdState();
-  check('C1: the row is clean again', !!clean && clean.revision === clean.writtenRevision, clean);
+  check(
+    'C1: the row is clean and nothing is asked',
+    !!mergedState &&
+      mergedState.revision === mergedState.writtenRevision &&
+      mergedState.lastError === null &&
+      (await pendingPlanRows(holdId)).length === 0,
+    mergedState,
+  );
 
   // C3: two edits, each flushed, never hold on Haive's own bytes.
   await editTitle(hyId, 'Y2');
@@ -2136,6 +2154,285 @@ async function main(): Promise<void> {
   await db
     .delete(schema.repositories)
     .where(inArray(schema.repositories.id, [legacyMatch, legacyDiffers]));
+
+  /* --- 12.7 the three-way reconcile ---------------------------------------- */
+
+  const sDir = path.join(holdRoot, 's');
+  await mkdir(sDir, { recursive: true });
+  const [sRepo] = await db
+    .insert(schema.repositories)
+    .values({ userId, name: 'plan-three-way', source: 'blank', status: 'ready', storagePath: sDir })
+    .returning();
+  const sId = sRepo!.id;
+  const sBuilt = await applyPlanPatch(
+    db,
+    {
+      ops: [
+        { op: 'upsert', nodeRef: 'sroot', parentRef: null, title: 'Root' },
+        { op: 'upsert', nodeRef: 'sp', parentRef: 'sroot', title: 'P' },
+        { op: 'upsert', nodeRef: 'sq', parentRef: 'sroot', title: 'Q' },
+        { op: 'upsert', nodeRef: 'sr', parentRef: 'sroot', title: 'R' },
+        { op: 'upsert', nodeRef: 'sr1', parentRef: 'sr', title: 'R1' },
+      ],
+    },
+    { repositoryId: sId, origin: 'user' },
+  );
+  const [pId, qId, rId, r1Id] = ['sp', 'sq', 'sr', 'sr1'].map((r) => sBuilt.refs[r]!) as [
+    string,
+    string,
+    string,
+    string,
+  ];
+  await writePlanMirror(db, sId, sDir);
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: sBuilt.refs['sroot']! }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+  check(
+    'three-way: the plan is restored from its checkout',
+    (await importPlanMirror(db, sId, sDir)).imported,
+  );
+  const sPlanFile = path.join(sDir, HAIVE_DATA_FILES.plan);
+  const readMirror = async () => JSON.parse(await readFile(sPlanFile, 'utf8')) as PlanMirror;
+  let theirs = await readMirror();
+  const arrive = async (next: PlanMirror, pretty = true) => {
+    theirs = next;
+    await writeFile(
+      sPlanFile,
+      pretty ? `${JSON.stringify(next, null, 2)}\n` : JSON.stringify(next),
+    );
+    return reconcilePlanFromCheckout(db, sId, sDir);
+  };
+  const retitled = (m: PlanMirror, id: string, title: string): PlanMirror => ({
+    ...m,
+    nodes: m.nodes.map((n) => (n.id === id ? { ...n, title } : n)),
+  });
+  const nodeRows = () =>
+    db
+      .select({
+        id: schema.planNodes.id,
+        title: schema.planNodes.title,
+        status: schema.planNodes.status,
+        version: schema.planNodes.version,
+        doneAt: schema.planNodes.doneAt,
+        updatedAt: schema.planNodes.updatedAt,
+      })
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.repositoryId, sId));
+  const sNode = async (id: string) => (await nodeRows()).find((n) => n.id === id);
+  const editS = async (id: string, set: { title?: string; status?: 'done' | 'todo' }) => {
+    const row = await sNode(id);
+    await applyPlanPatch(
+      db,
+      { ops: [{ op: 'upsert', nodeRef: id, ...set, expectedVersion: row!.version }] },
+      { repositoryId: sId, origin: 'user' },
+    );
+  };
+
+  // A local title edit survives a pull in which the other side changed another node.
+  await editS(pId, { title: 'P local' });
+  const untouchedBefore = await nodeRows();
+  const s1 = await arrive(retitled(theirs, qId, 'Q by A'));
+  const s1After = await nodeRows();
+  check(
+    'three-way: a local title edit survives a pull where the other side changed another node',
+    s1After.find((n) => n.id === pId)?.title === 'P local' &&
+      s1After.find((n) => n.id === qId)?.title === 'Q by A',
+    s1After,
+  );
+  check(
+    'three-way: only the node that changed is updated, and no other version moves',
+    s1.nodesUpdated === 1 &&
+      s1After.every((n) => {
+        const before = untouchedBefore.find((b) => b.id === n.id)!;
+        return n.id === qId
+          ? n.version === before.version + 1
+          : n.version === before.version && n.updatedAt.getTime() === before.updatedAt.getTime();
+      }),
+    { s1, before: untouchedBefore, after: s1After },
+  );
+
+  // A pull with nothing new in it moves no version, whatever bytes it arrives in.
+  const sameBefore = await nodeRows();
+  const same = await arrive(theirs, false);
+  const sameAfter = await nodeRows();
+  check(
+    'three-way: a pull that brings nothing new bumps no node version',
+    same.nodesCreated === 0 &&
+      same.nodesUpdated === 0 &&
+      sameAfter.every((n) => n.version === sameBefore.find((b) => b.id === n.id)!.version),
+    { same, sameBefore, sameAfter },
+  );
+
+  // A status the other side changed lands with its done_at, and leaving done clears it.
+  const toDone = await arrive({
+    ...theirs,
+    nodes: theirs.nodes.map((n) => (n.id === qId ? { ...n, status: 'done' } : n)),
+  });
+  const qDone = await sNode(qId);
+  check(
+    'three-way: an imported status change to done stamps done_at',
+    toDone.nodesUpdated === 1 && qDone?.status === 'done' && qDone.doneAt !== null,
+    qDone,
+  );
+  await arrive({
+    ...theirs,
+    nodes: theirs.nodes.map((n) => (n.id === qId ? { ...n, status: 'todo' } : n)),
+  });
+  const qReopened = await sNode(qId);
+  check(
+    'three-way: an imported status change away from done clears done_at',
+    qReopened?.status === 'todo' && qReopened.doneAt === null,
+    qReopened,
+  );
+
+  // A node only here, added after the base, is not a deletion the other side made.
+  const added = await applyPlanPatch(
+    db,
+    { ops: [{ op: 'upsert', nodeRef: 'tmp-n', parentRef: sBuilt.refs['sroot']!, title: 'N' }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+  const nId = added.created[0]!;
+  await arrive(retitled(theirs, qId, 'Q again'));
+  await arrive(retitled(theirs, qId, 'Q a third time'));
+  check(
+    'three-way: a node added here and never pushed survives two pulls that lack it',
+    (await sNode(nId)) !== undefined,
+  );
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: nId }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+
+  // The same field changed on both sides is asked, the database keeps its value and the file the other's.
+  await editS(pId, { title: 'P local 2' });
+  const asked = await arrive(retitled(theirs, pId, 'P by A'));
+  const rowsAsked = await pendingPlanRows(sId);
+  check(
+    'three-way: a title changed on both sides leaves one pending plan row with the three sides',
+    rowsAsked.length === 1 &&
+      rowsAsked[0]!.unit === `plan/${pId}#title` &&
+      JSON.stringify(rowsAsked[0]!.base) === '{"v":"P"}' &&
+      JSON.stringify(rowsAsked[0]!.local) === '{"v":"P local 2"}' &&
+      JSON.stringify(rowsAsked[0]!.incoming) === '{"v":"P by A"}' &&
+      (asked.conflicts ?? []).length === 1,
+    { rowsAsked, asked },
+  );
+  check('three-way: the database keeps its own title', (await sNode(pId))?.title === 'P local 2');
+  await writePlanMirror(db, sId, sDir);
+  check(
+    "three-way: the flush writes the other side's title into plan.json and the database's into plan.md",
+    (await titleIn(sPlanFile, pId)) === 'P by A' &&
+      (await readFile(path.join(sDir, HAIVE_DATA_FILES.planMarkdown), 'utf8')).includes(
+        'P local 2',
+      ) &&
+      (await sNode(pId))?.title === 'P local 2',
+  );
+  await arrive(theirs, false);
+  check(
+    'three-way: asking again about the same change keeps one row',
+    (await pendingPlanRows(sId)).length === 1,
+  );
+  await editS(pId, { title: 'P by A' });
+  await arrive(theirs);
+  const closed = await db
+    .select({ resolution: schema.projectStateConflicts.resolution })
+    .from(schema.projectStateConflicts)
+    .where(eq(schema.projectStateConflicts.unit, `plan/${pId}#title`));
+  check(
+    'three-way: a row closes as converged once the two sides agree',
+    (await pendingPlanRows(sId)).length === 0 &&
+      closed.length === 1 &&
+      closed[0]!.resolution === 'converged',
+    closed,
+  );
+
+  // A node the other side deleted and nobody here touched is deleted here, its subtree with it.
+  await db.insert(schema.planNodeEdges).values({
+    repositoryId: sId,
+    fromNodeId: pId,
+    toNodeId: r1Id,
+    kind: 'affects',
+  });
+  const dropR = await arrive({
+    ...theirs,
+    nodes: theirs.nodes.filter((n) => n.id !== rId && n.id !== r1Id),
+    edges: theirs.edges.filter((e) => e.toNodeId !== r1Id),
+  });
+  const afterDrop = await nodeRows();
+  check(
+    'three-way: an untouched node the other side deleted is deleted here, deepest first',
+    !afterDrop.some((n) => n.id === rId || n.id === r1Id) &&
+      JSON.stringify(dropR.nodesDeleted) === JSON.stringify([r1Id, rId]),
+    { dropR, afterDrop },
+  );
+  check(
+    'three-way: the links of a deleted node go with it',
+    (
+      await db
+        .select({ id: schema.planNodeEdges.id })
+        .from(schema.planNodeEdges)
+        .where(eq(schema.planNodeEdges.repositoryId, sId))
+    ).length === 0,
+  );
+
+  // No base: the incoming side wins and nothing is deleted, as a reconcile always did.
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedSnapshot: null })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await editS(pId, { title: 'P edited with no base' });
+  await arrive(retitled(theirs, pId, 'P by A, no base'));
+  check(
+    'three-way: with no base the incoming title wins',
+    (await sNode(pId))?.title === 'P by A, no base' && (await pendingPlanRows(sId)).length === 0,
+  );
+
+  // A flush with no base and unwritten edits of its own holds rather than guess which side is newer.
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedSnapshot: null })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await editS(pId, { title: 'P unwritten' });
+  const external = retitled(theirs, qId, 'Q external');
+  await writeFile(sPlanFile, JSON.stringify(external), 'utf8');
+  const heldNoBase = await writePlanMirror(db, sId, sDir).then(
+    () => 'wrote',
+    (err: Error) => err.name,
+  );
+  check(
+    'three-way: a flush with no base and unwritten local edits holds and keeps both sides',
+    heldNoBase === 'PlanMirrorHeldError' &&
+      (await readFile(sPlanFile, 'utf8')) === JSON.stringify(external) &&
+      (await sNode(pId))?.title === 'P unwritten',
+    heldNoBase,
+  );
+  await arrive(external);
+
+  // Deleting the plan closes its questions and drops the base.
+  await editS(pId, { title: 'P local 3' });
+  await arrive(retitled(theirs, pId, 'P by A 3'));
+  await arrive(retitled(theirs, pId, 'P by A 4'));
+  const askedAgain = (await pendingPlanRows(sId)).length;
+  await applyPlanPatch(
+    db,
+    { ops: [{ op: 'delete', nodeRef: sBuilt.refs['sroot']! }] },
+    { repositoryId: sId, origin: 'user' },
+  );
+  await writePlanMirror(db, sId, sDir);
+  const afterWipe = await db.query.planMirrorState.findFirst({
+    where: eq(schema.planMirrorState.repositoryId, sId),
+  });
+  check(
+    'three-way: deleting the plan closes its plan rows and clears the base',
+    askedAgain === 1 &&
+      (await pendingPlanRows(sId)).length === 0 &&
+      afterWipe?.syncedSnapshot === null,
+    { askedAgain, afterWipe },
+  );
+  await db.delete(schema.repositories).where(eq(schema.repositories.id, sId));
 
   await db.delete(schema.repositories).where(eq(schema.repositories.id, holdId));
   await rm(holdRoot, { recursive: true, force: true }).catch(() => {});

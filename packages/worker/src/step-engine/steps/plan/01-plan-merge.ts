@@ -48,7 +48,7 @@ import {
 } from '../../../plan/merge-prior.js';
 import {
   flushPlanMirrorForRepository,
-  reconcilePlanMirror,
+  reconcilePlanFromCheckout,
   writePlanMirror,
 } from '../../../plan/mirror.js';
 import {
@@ -616,7 +616,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     // The merge brought in the other side's plan.json; fold it into the database and
     // rewrite both files from there, so what is pushed is the union rather than
     // whichever side the text merge happened to keep.
-    await reconcilePlanMirror(ctx.db, d.repositoryId, ctx.repoPath);
+    await reconcilePlanFromCheckout(ctx.db, d.repositoryId, ctx.repoPath);
     await flushPlanMirrorForRepository(ctx.db, d.repositoryId);
     await commitPlanSnapshotFiles({
       repoPath: ctx.repoPath,

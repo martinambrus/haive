@@ -318,6 +318,7 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
   const db = getDb();
   const state = await db.query.planMirrorState.findFirst({
     where: eq(schema.planMirrorState.repositoryId, repositoryId),
+    columns: { revision: true, writtenRevision: true, lastError: true },
   });
   const repoRoot = await resolveRepoRoot(db, userId, repositoryId).catch(() => null);
   const paths = [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown];

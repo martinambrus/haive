@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { importPlanMirror, recordPlanMirrorError } from '../src/plan/mirror.js';
+import {
+  importPlanMirror,
+  reconcilePlanFromCheckout,
+  recordPlanMirrorError,
+} from '../src/plan/mirror.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import { persistDetection } from '../src/repo/clone.js';
 
@@ -15,6 +19,7 @@ vi.mock('../src/plan/mirror.js', () => ({
     code: 'no_mirror',
     reason: 'no plan mirror',
   })),
+  reconcilePlanFromCheckout: vi.fn(),
   recordPlanMirrorError: vi.fn(),
 }));
 
@@ -102,6 +107,12 @@ describe('persistDetection and a plan snapshot it leaves alone', () => {
 
     await persistDetection(db, REPO, root);
 
+    expect(reconcilePlanFromCheckout).toHaveBeenCalledTimes(code === 'has_plan' ? 1 : 0);
+    if (code === 'has_plan') {
+      expect(reconcilePlanFromCheckout).toHaveBeenCalledWith(db, REPO, root, {
+        requireStamp: true,
+      });
+    }
     if (recorded) {
       expect(recordPlanMirrorError).toHaveBeenCalledExactlyOnceWith(
         db,

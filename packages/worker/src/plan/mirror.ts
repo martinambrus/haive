@@ -6,13 +6,14 @@ import {
   rewriteFileIfNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { and, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, like, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   HAIVE_DATA_FILES,
   PLAN_MIRROR_SCHEMA_VERSION,
   logger,
   type PlanMirror,
+  type PlanMirrorPayload,
   type PlanPullOutcome,
 } from '@haive/shared';
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
@@ -23,6 +24,19 @@ import {
   renderPlanMarkdownFrom,
   planNodePath,
 } from '@haive/shared/plan';
+import {
+  PLAN_MIRROR_ASKED_FIELDS,
+  mergePlanMirror,
+  type PlanMirrorConflict,
+} from '@haive/shared/plan-mirror-merge';
+import {
+  PLAN_UNIT_PREFIX,
+  conflictSide,
+  conflictSideValue,
+  parsePlanConflictUnit,
+  planConflictUnit,
+  sameValue,
+} from '@haive/shared/project-state';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 
 /**
@@ -68,102 +82,16 @@ const hashBytes = (bytes: string | Buffer): string =>
 // Stamped when the files were removed, so a plan.json that arrives later reads as unimported.
 const ABSENT_HASH = 'absent';
 
-const HELD_UNIMPORTED =
-  "the checkout's plan.json holds changes Haive has not read in; Pull the plan to bring them in. Nothing was written.";
 const HELD_GIT_OPERATION =
   'a merge or rebase is open in the checkout; nothing was written. The plan is written again once it finishes.';
+const HELD_NO_BASE =
+  "the checkout's plan.json holds changes Haive has not read in, and this plan has unwritten changes of its own with no earlier copy to tell them apart; Pull the plan to bring them in. Nothing was written.";
+const HELD_MOVED =
+  "the checkout's plan.json changed while the plan was being written; nothing was written. It is written again on the next pass.";
+const heldUnreadable = (reason: string): string =>
+  `the checkout's plan.json could not be read in (${reason}); fix or discard it, then Pull the plan. Nothing was written.`;
 
-async function assertFlushMayWrite(
-  repoPath: string,
-  syncedHash: string | null,
-  nextJson: string | null,
-): Promise<void> {
-  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
-  const onDisk = await readPlanJson(repoPath);
-  if (onDisk === null) return;
-  if (onDisk === 'too-large' || !flushMayReplace(repoPath, onDisk, syncedHash, nextJson)) {
-    throw new PlanMirrorHeldError(HELD_UNIMPORTED);
-  }
-}
-
-function flushMayReplace(
-  repoPath: string,
-  onDisk: Buffer,
-  syncedHash: string | null,
-  nextJson: string | null,
-): boolean {
-  // Haive never writes an empty plan.json; older rows stamped absence as the hash of zero bytes.
-  if (onDisk.length === 0) return syncedHash === null;
-  const diskHash = hashBytes(onDisk);
-  if (diskHash === syncedHash || (nextJson !== null && diskHash === hashBytes(nextJson)))
-    return true;
-  if (syncedHash !== null) return false;
-  logger.warn({ repoPath }, 'plan.json differs from the database and was never stamped; adopting');
-  return true;
-}
-
-/** Removes plan.json only while it still holds bytes the flush may replace, judged on the file removed. */
-export async function removePlanJsonIfUnchanged(
-  repoPath: string,
-  syncedHash: string | null,
-): Promise<void> {
-  let operation = false;
-  const outcome = await removeFileIfNoFollow(
-    repoPath,
-    HAIVE_DATA_FILES.plan,
-    async (data) => {
-      operation = await gitOperationInProgress(repoPath);
-      return !operation && flushMayReplace(repoPath, data, syncedHash, null);
-    },
-    { maxBytes: PLAN_JSON_MAX_BYTES },
-  );
-  if (outcome === 'kept') {
-    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
-  }
-  if (outcome === 'absent' && (await gitOperationInProgress(repoPath))) {
-    throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
-  }
-}
-
-/** Replaces plan.json only while it still holds bytes the flush may replace, judged on the file it
- *  holds, so bytes a pull lands after the early check are never written over. */
-export async function writePlanJsonIfUnchanged(
-  repoPath: string,
-  json: string,
-  syncedHash: string | null,
-): Promise<void> {
-  const bytes = Buffer.from(json, 'utf8');
-  // Every read of plan.json stops at the cap, so a larger file Haive wrote could never be judged again.
-  if (bytes.length > PLAN_JSON_MAX_BYTES) throw new PlanMirrorHeldError(PLAN_WRITE_TOO_LARGE);
-  let operation = false;
-  // The merge check is repeated here, after the file is parked, so it sits next to the replace.
-  const outcome = await rewriteFileIfNoFollow(
-    repoPath,
-    HAIVE_DATA_FILES.plan,
-    async (data) => {
-      operation = await gitOperationInProgress(repoPath);
-      if (operation) return null;
-      return flushMayReplace(repoPath, data, syncedHash, json) ? bytes : null;
-    },
-    { maxBytes: PLAN_JSON_MAX_BYTES },
-  );
-  if (outcome === 'kept') {
-    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
-  }
-  if (outcome === 'rewritten') return;
-  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
-  try {
-    await writeFileNoFollow(repoPath, HAIVE_DATA_FILES.plan, bytes, {
-      mode: 'create-exclusive',
-      createParents: true,
-    });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new PlanMirrorHeldError(HELD_UNIMPORTED);
-    }
-    throw err;
-  }
-}
+type PlanMirrorTx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 async function stampSyncedHash(
   db: Pick<Database, 'update'>,
@@ -176,11 +104,46 @@ async function stampSyncedHash(
     .where(eq(schema.planMirrorState.repositoryId, repositoryId));
 }
 
-/** The two files as the database would write them now, or null when there is no plan. */
-async function renderPlanMirrorFiles(
+const lockPlanMirror = (db: Pick<Database, 'execute'>, repositoryId: string) =>
+  db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
+
+type PlanQuestion = {
+  nodeId: string;
+  field: string;
+  row: typeof schema.projectStateConflicts.$inferSelect;
+};
+
+async function loadPendingPlanQuestions(
+  db: Pick<Database, 'select'>,
+  repositoryId: string,
+): Promise<PlanQuestion[]> {
+  const rows = await db
+    .select()
+    .from(schema.projectStateConflicts)
+    .where(
+      and(
+        eq(schema.projectStateConflicts.repositoryId, repositoryId),
+        like(schema.projectStateConflicts.unit, `${PLAN_UNIT_PREFIX}%`),
+        isNull(schema.projectStateConflicts.resolvedAt),
+      ),
+    );
+  const out: PlanQuestion[] = [];
+  for (const row of rows) {
+    const parsed = parsePlanConflictUnit(row.unit);
+    if (parsed) out.push({ ...parsed, row });
+  }
+  return out;
+}
+
+/** The plan in the database as the mirror holds it, with no question applied. */
+async function renderPlanMirror(
   db: PlanMirrorTx,
   repositoryId: string,
-): Promise<{ json: string; markdown: string } | null> {
+): Promise<{
+  mirror: PlanMirror;
+  nodes: Awaited<ReturnType<typeof loadPlanNodes>>;
+  edges: Awaited<ReturnType<typeof loadPlanEdges>>;
+} | null> {
   const [nodes, edges, codeLinks] = await Promise.all([
     loadPlanNodes(db, repositoryId),
     loadPlanEdges(db, repositoryId),
@@ -231,9 +194,40 @@ async function renderPlanMirrorFiles(
     })),
     codeLinks,
   });
+  return { mirror, nodes, edges };
+}
+
+/** The two files as the flush writes them now, or null when there is no plan. A field with a
+ *  pending question carries the checkout's value in plan.json; the database keeps its own. */
+async function renderPlanMirrorFiles(
+  db: PlanMirrorTx,
+  repositoryId: string,
+): Promise<{ json: string; markdown: string } | null> {
+  const rendered = await renderPlanMirror(db, repositoryId);
+  if (!rendered) return null;
+  const questions = await loadPendingPlanQuestions(db, repositoryId);
+  const incoming = new Map<string, unknown>();
+  for (const q of questions) {
+    const side = conflictSideValue(q.row.incoming);
+    if (side !== undefined) incoming.set(`${q.nodeId}\0${q.field}`, side);
+  }
+  const mirror: PlanMirror =
+    incoming.size === 0
+      ? rendered.mirror
+      : {
+          ...rendered.mirror,
+          nodes: rendered.mirror.nodes.map((n) => {
+            const patched: Record<string, unknown> = { ...n };
+            for (const field of PLAN_MIRROR_ASKED_FIELDS) {
+              const key = `${n.id}\0${field}`;
+              if (incoming.has(key)) patched[field] = incoming.get(key);
+            }
+            return patched as PlanMirror['nodes'][number];
+          }),
+        };
   return {
     json: `${JSON.stringify(mirror, null, 2)}\n`,
-    markdown: renderPlanMarkdownFrom(nodes, edges),
+    markdown: renderPlanMarkdownFrom(rendered.nodes, rendered.edges),
   };
 }
 
@@ -250,7 +244,7 @@ export async function writePlanMirror(
       // Every writer (queue, plan steps, onboarding) enters here. Serialize per
       // repository across worker processes so an older render can never rename
       // over a newer one after the newer writer already marked itself current.
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
+      await lockPlanMirror(tx, repositoryId);
       return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
     });
     // Thrown only once the stamp of the plan.json that landed is committed.
@@ -262,7 +256,81 @@ export async function writePlanMirror(
   }
 }
 
-type PlanMirrorTx = Parameters<Parameters<Database['transaction']>[0]>[0];
+const loadMirrorState = async (db: PlanMirrorTx, repositoryId: string) => {
+  const columns = {
+    revision: schema.planMirrorState.revision,
+    writtenRevision: schema.planMirrorState.writtenRevision,
+    syncedHash: schema.planMirrorState.syncedHash,
+    hasBase: sql<boolean>`${schema.planMirrorState.syncedSnapshot} is not null`,
+  };
+  const [state] = await db
+    .select(columns)
+    .from(schema.planMirrorState)
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+    .limit(1);
+  return state ?? null;
+};
+
+/** Removes plan.json only while it still holds the bytes this flush judged, decided on the file removed. */
+export async function removePlanJsonIfUnchanged(
+  repoPath: string,
+  judged: Buffer | null,
+): Promise<void> {
+  let operation = false;
+  const outcome = await removeFileIfNoFollow(
+    repoPath,
+    HAIVE_DATA_FILES.plan,
+    async (data) => {
+      operation = await gitOperationInProgress(repoPath);
+      return !operation && judged !== null && data.equals(judged);
+    },
+    { maxBytes: PLAN_JSON_MAX_BYTES },
+  );
+  if (outcome === 'kept') {
+    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_MOVED);
+  }
+  if (outcome === 'absent' && (await gitOperationInProgress(repoPath))) {
+    throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  }
+}
+
+/** Replaces plan.json only while it still holds the bytes this flush judged (or already holds the
+ *  render), deciding on the file it holds, so bytes a pull lands meanwhile are never written over. */
+export async function writePlanJsonIfUnchanged(
+  repoPath: string,
+  json: string,
+  judged: Buffer | null,
+): Promise<void> {
+  const bytes = Buffer.from(json, 'utf8');
+  // Every read of plan.json stops at the cap, so a larger file Haive wrote could never be judged again.
+  if (bytes.length > PLAN_JSON_MAX_BYTES) throw new PlanMirrorHeldError(PLAN_WRITE_TOO_LARGE);
+  let operation = false;
+  // The merge check is repeated here, after the file is parked, so it sits next to the replace.
+  const outcome = await rewriteFileIfNoFollow(
+    repoPath,
+    HAIVE_DATA_FILES.plan,
+    async (data) => {
+      operation = await gitOperationInProgress(repoPath);
+      if (operation) return null;
+      return (judged !== null && data.equals(judged)) || data.equals(bytes) ? bytes : null;
+    },
+    { maxBytes: PLAN_JSON_MAX_BYTES },
+  );
+  if (outcome === 'kept') {
+    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_MOVED);
+  }
+  if (outcome === 'rewritten') return;
+  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  try {
+    await writeFileNoFollow(repoPath, HAIVE_DATA_FILES.plan, bytes, {
+      mode: 'create-exclusive',
+      createParents: true,
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new PlanMirrorHeldError(HELD_MOVED);
+    throw err;
+  }
+}
 
 async function writePlanMirrorLocked(
   db: PlanMirrorTx,
@@ -270,35 +338,56 @@ async function writePlanMirrorLocked(
   repoPath: string,
   changes?: PlanMirrorChanges,
 ): Promise<{ written: string[]; failed?: unknown }> {
-  let [state] = await db
-    .select()
-    .from(schema.planMirrorState)
-    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
-    .limit(1);
+  let state = await loadMirrorState(db, repositoryId);
   if (!state) {
-    const [created] = await db
+    await db
       .insert(schema.planMirrorState)
       .values({ repositoryId, revision: 1, writtenRevision: 0 })
-      .onConflictDoNothing()
-      .returning();
-    if (created) state = created;
-    else {
-      [state] = await db
-        .select()
-        .from(schema.planMirrorState)
-        .where(eq(schema.planMirrorState.repositoryId, repositoryId))
-        .limit(1);
+      .onConflictDoNothing();
+    state = await loadMirrorState(db, repositoryId);
+  }
+
+  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  let rendered = await renderPlanMirrorFiles(db, repositoryId);
+  const onDiskRead = await readPlanJson(repoPath);
+  if (onDiskRead === 'too-large') throw new PlanMirrorHeldError(heldUnreadable(PLAN_TOO_LARGE));
+  const onDiskBytes = onDiskRead;
+  if (onDiskBytes !== null) {
+    const diskHash = hashBytes(onDiskBytes);
+    // Haive never writes an empty plan.json; older rows stamped absence as the hash of zero bytes.
+    const synced = onDiskBytes.length > 0 && diskHash === (state?.syncedHash ?? null);
+    if (!synced && !(rendered !== null && diskHash === hashBytes(rendered.json))) {
+      if (state?.syncedHash == null) {
+        logger.warn(
+          { repoPath },
+          'plan.json differs from the database and was never stamped; adopting',
+        );
+      } else if (!state.hasBase && state.revision > state.writtenRevision) {
+        throw new PlanMirrorHeldError(HELD_NO_BASE);
+      } else {
+        const outcome = await reconcilePlanLocked(db, repositoryId, onDiskBytes, {}).catch(
+          (err) => {
+            if (err instanceof PlanSnapshotError)
+              throw new PlanMirrorHeldError(heldUnreadable(err.message));
+            throw err;
+          },
+        );
+        if (outcome.skipped) throw new PlanMirrorHeldError(heldUnreadable(outcome.skipped));
+        state = await loadMirrorState(db, repositoryId);
+        rendered = await renderPlanMirrorFiles(db, repositoryId);
+      }
     }
   }
   const targetRevision = Math.max(1, state?.revision ?? 1);
 
-  const rendered = await renderPlanMirrorFiles(db, repositoryId);
-  await assertFlushMayWrite(repoPath, state?.syncedHash ?? null, rendered?.json ?? null);
-
   if (!rendered) {
-    await removePlanJsonIfUnchanged(repoPath, state?.syncedHash ?? null);
+    await removePlanJsonIfUnchanged(repoPath, onDiskBytes);
     changes?.removed.push(HAIVE_DATA_FILES.plan);
-    await stampSyncedHash(db, repositoryId, ABSENT_HASH);
+    await db
+      .update(schema.planMirrorState)
+      .set({ syncedHash: ABSENT_HASH, syncedSnapshot: null })
+      .where(eq(schema.planMirrorState.repositoryId, repositoryId));
+    await closePlanQuestions(db, repositoryId, new Set());
     try {
       await removeNoFollow(repoPath, HAIVE_DATA_FILES.planMarkdown);
     } catch (err) {
@@ -332,7 +421,7 @@ async function writePlanMirrorLocked(
     changes?.written.push(rel);
   };
 
-  await writePlanJsonIfUnchanged(repoPath, rendered.json, state?.syncedHash ?? null);
+  await writePlanJsonIfUnchanged(repoPath, rendered.json, onDiskBytes);
   written.push(HAIVE_DATA_FILES.plan);
   changes?.written.push(HAIVE_DATA_FILES.plan);
   await stampSyncedHash(db, repositoryId, hashBytes(rendered.json));
@@ -574,6 +663,7 @@ export async function importPlanMirror(
         writtenRevision: revision,
         writtenAt: new Date(),
         syncedHash: hashBytes(rawBytes),
+        syncedSnapshot: mirror,
       })
       .onConflictDoUpdate({
         target: schema.planMirrorState.repositoryId,
@@ -584,6 +674,7 @@ export async function importPlanMirror(
           writtenAt: new Date(),
           updatedAt: new Date(),
           syncedHash: hashBytes(rawBytes),
+          syncedSnapshot: mirror,
         },
       });
   });
@@ -601,284 +692,476 @@ export async function importPlanMirror(
   return { imported: true };
 }
 
-/**
- * Reconcile a PULLED plan snapshot onto a plan that already exists.
- *
- * `importPlanMirror` cannot serve this: it refuses whenever the repository has
- * any plan rows, which is the entire case here. This is the second deliberate
- * bypass of `applyPlanPatch`, for the reason the first one documents — node ids
- * are restored VERBATIM, and the patch contract cannot express "create this node
- * with exactly this id". Verbatim ids are also what makes reconciling tractable
- * at all: two Haive instances that both restored from the same committed
- * snapshot are talking about the same nodes.
- *
- * ADDITIVE ONLY, and that is the whole design:
- *   - a node only in the snapshot is CREATED here
- *   - a node in both is UPDATED here
- *   - a node only HERE is KEPT, and reported
- *
- * The third case is where a merge would have to guess. A local-only node is
- * either work someone added and has not pushed, or work the other side deleted,
- * and the snapshot cannot tell those apart. Deleting is the one outcome with no
- * undo, so it is not taken: the caller is handed the ids instead, and a person
- * decides. Same for edges and code links, which are inserted and never removed.
- *
- * One transaction, so a failure leaves the plan exactly as it was.
- */
-export async function reconcilePlanMirror(
+/** A plan.json that cannot be read in as a plan. The flush holds on it; a Pull reports it. */
+class PlanSnapshotError extends Error {
+  override readonly name = 'PlanSnapshotError';
+}
+
+const NODE_FIELDS = ['parentId', 'ordinal', 'title', 'kind', 'body', 'status', 'taskable'] as const;
+
+const EMPTY_PLAN: PlanMirror = { schemaVersion: 2, nodes: [], edges: [], codeLinks: [] };
+
+const noOutcome = (skipped: string | null): PlanPullOutcome => ({
+  previousCommit: null,
+  fastForwarded: false,
+  nodesCreated: 0,
+  nodesUpdated: 0,
+  keptLocal: [],
+  edgesAdded: 0,
+  codeLinksAdded: 0,
+  skipped,
+});
+
+const NO_SNAPSHOT = 'this repository has no committed plan snapshot';
+
+/** Three-way reconcile of the checkout's plan.json onto the database (docs/architecture/plan-canvas.md);
+ *  a deliberate bypass of `applyPlanPatch`, which cannot create a node with a chosen id. */
+export async function reconcilePlanFromCheckout(
   db: Database,
   repositoryId: string,
-  storagePath: string,
+  repoPath: string,
+  opts: { requireStamp?: boolean } = {},
 ): Promise<PlanPullOutcome> {
-  const empty = (skipped: string): PlanPullOutcome => ({
-    previousCommit: null,
-    fastForwarded: false,
-    nodesCreated: 0,
-    nodesUpdated: 0,
-    keptLocal: [],
-    edgesAdded: 0,
-    codeLinksAdded: 0,
-    skipped,
+  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  return db.transaction(async (tx) => {
+    await lockPlanMirror(tx, repositoryId);
+    let bytes: Buffer | null;
+    try {
+      const read = await readPlanJson(repoPath);
+      if (read === 'too-large') return noOutcome(PLAN_TOO_LARGE);
+      bytes = read;
+    } catch {
+      bytes = null;
+    }
+    if (bytes === null) return noOutcome(NO_SNAPSHOT);
+    return reconcilePlanLocked(tx, repositoryId, bytes, opts);
   });
+}
+
+/** `bytes` is the plan.json read under the plan-mirror lock the caller holds; the stamp is its hash. */
+async function reconcilePlanLocked(
+  tx: PlanMirrorTx,
+  repositoryId: string,
+  bytes: Buffer,
+  opts: { requireStamp?: boolean },
+): Promise<PlanPullOutcome> {
+  const [state] = await tx
+    .select({
+      syncedHash: schema.planMirrorState.syncedHash,
+      syncedSnapshot: schema.planMirrorState.syncedSnapshot,
+    })
+    .from(schema.planMirrorState)
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+    .limit(1);
+  const hash = hashBytes(bytes);
+  if (state?.syncedHash === hash) return noOutcome(null);
+  const raw = bytes.toString('utf8');
+  if (opts.requireStamp && !state?.syncedHash) return noOutcome(null);
 
   let rawPayload: unknown;
-  let rawBytes: Buffer;
   try {
-    const raw = await readPlanJson(storagePath);
-    if (raw === null) return empty('this repository has no committed plan snapshot');
-    if (raw === 'too-large') return empty(PLAN_TOO_LARGE);
-    rawBytes = raw;
-    rawPayload = JSON.parse(raw.toString('utf8')) as unknown;
+    rawPayload = JSON.parse(raw) as unknown;
   } catch {
-    return empty('this repository has no committed plan snapshot');
+    return noOutcome(NO_SNAPSHOT);
   }
-
   const parsed = planMirrorPayloadSchema.safeParse(rawPayload);
   if (!parsed.success) {
-    throw new Error(
+    throw new PlanSnapshotError(
       `the committed plan snapshot could not be read: ${parsed.error.issues[0]?.message ?? 'validation failed'}`,
     );
   }
-  const mirror = parsed.data;
-  const incoming =
-    mirror.schemaVersion === 1
-      ? mirror.nodes.map((n) => ({ ...n, createdBy: n.createdBy }))
-      : mirror.nodes.map((n) => ({ ...n, createdBy: 'import' as const }));
-  if (incoming.length === 0) return empty('the committed plan snapshot has no nodes');
+  const incoming: PlanMirrorPayload = parsed.data;
+  if (incoming.nodes.length === 0) return noOutcome('the committed plan snapshot has no nodes');
 
-  const byId = new Map(incoming.map((n) => [n.id, n]));
-  for (const n of incoming) {
-    if (n.parentId !== null && !byId.has(n.parentId)) {
-      throw new Error(`the committed plan snapshot references a missing parent (${n.parentId})`);
+  const incomingIds = new Set(incoming.nodes.map((n) => n.id));
+  if (incomingIds.size !== incoming.nodes.length) {
+    throw new PlanSnapshotError('the committed plan snapshot contains duplicate node refs');
+  }
+  for (const n of incoming.nodes) {
+    if (n.parentId !== null && !incomingIds.has(n.parentId)) {
+      throw new PlanSnapshotError(
+        `the committed plan snapshot references a missing parent (${n.parentId})`,
+      );
     }
   }
-  const codeLinks = mirror.schemaVersion === 2 ? mirror.codeLinks : [];
 
-  return db.transaction(async (tx) => {
-    // Serialized against every mirror WRITE on the same repository: a reconcile
-    // that raced a flush could otherwise import a file the flush is mid-rename.
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
-    // A flush that held the lock first may have replaced the file this read; stamping the older
-    // bytes would make the next flush hold on a file Haive wrote.
-    const now = await readPlanJson(storagePath);
-    if (!Buffer.isBuffer(now) || !now.equals(rawBytes)) {
-      throw new Error('the plan snapshot changed while it was being read; try again');
-    }
+  const localRender = await renderPlanMirror(tx, repositoryId);
+  const local = localRender?.mirror ?? EMPTY_PLAN;
+  const baseParsed = planMirrorPayloadSchema.safeParse(state?.syncedSnapshot);
+  const merge = mergePlanMirror({
+    base: baseParsed.success ? baseParsed.data : null,
+    local,
+    incoming,
+  });
+  const merged = merge.merged;
+  if (merged.nodes.length > 0 && merged.nodes.filter((n) => n.parentId === null).length !== 1) {
+    throw new PlanSnapshotError(
+      'the committed plan has a different root from this plan, so the two share no history and were not merged',
+    );
+  }
 
-    const localRows = await tx
+  const localById = new Map(local.nodes.map((n) => [n.id, n]));
+  const kept = new Map<string, PlanMirrorConflict[]>();
+  for (const c of merge.conflicts) kept.set(c.nodeId, [...(kept.get(c.nodeId) ?? []), c]);
+  const targets = merged.nodes.map((n) => {
+    const target: Record<string, unknown> = { ...n };
+    for (const c of kept.get(n.id) ?? []) target[c.field] = localById.get(n.id)?.[c.field];
+    return target as PlanMirror['nodes'][number];
+  });
+  const targetById = new Map(targets.map((n) => [n.id, n]));
+
+  const created = targets.filter((n) => !localById.has(n.id));
+  if (created.length > 0) {
+    const clash = await tx
       .select({ id: schema.planNodes.id })
       .from(schema.planNodes)
-      .where(eq(schema.planNodes.repositoryId, repositoryId));
-    const localIds = new Set(localRows.map((r) => r.id));
+      .where(
+        inArray(
+          schema.planNodes.id,
+          created.map((n) => n.id),
+        ),
+      )
+      .limit(1);
+    if (clash.length > 0) {
+      throw new PlanSnapshotError(
+        'the incoming plan contains nodes that belong to another repository',
+      );
+    }
+  }
 
-    // A node id is globally unique, so an incoming id that exists under ANOTHER
-    // repository is not this plan's node. Refuse whole rather than import half.
-    const foreignIds = incoming.map((n) => n.id).filter((id) => !localIds.has(id));
-    if (foreignIds.length > 0) {
-      const clash = await tx
-        .select({ id: schema.planNodes.id })
-        .from(schema.planNodes)
-        .where(inArray(schema.planNodes.id, foreignIds))
-        .limit(1);
-      if (clash.length > 0) {
-        throw new Error('the incoming plan contains nodes that belong to another repository');
+  // Parents before children so `path` can be built; the guard stops a looping parentage.
+  const pathById = new Map<string, string>();
+  const ordered: typeof targets = [];
+  const resolving = new Set<string>();
+  const place = (id: string): boolean => {
+    if (pathById.has(id)) return true;
+    if (resolving.has(id)) return false;
+    const node = targetById.get(id);
+    if (!node) return false;
+    resolving.add(id);
+    let parentPath: string | null = null;
+    if (node.parentId !== null) {
+      if (!place(node.parentId)) {
+        resolving.delete(id);
+        return false;
       }
+      parentPath = pathById.get(node.parentId)!;
     }
-
-    // Parents before children, so a created node's `path` can be built from one
-    // that is already placed. `place()`'s cycle guard is what stops a snapshot
-    // whose parentage loops from hanging this.
-    const pathById = new Map<string, string>();
-    const ordered: typeof incoming = [];
-    const resolving = new Set<string>();
-    const place = (id: string): boolean => {
-      if (pathById.has(id)) return true;
-      if (resolving.has(id)) return false;
-      const node = byId.get(id);
-      if (!node) return false;
-      resolving.add(id);
-      let parentPath: string | null = null;
-      if (node.parentId !== null) {
-        if (!place(node.parentId)) {
-          resolving.delete(id);
-          return false;
-        }
-        parentPath = pathById.get(node.parentId)!;
-      }
-      resolving.delete(id);
-      pathById.set(id, planNodePath(parentPath, id));
-      ordered.push(node);
-      return true;
-    };
-    for (const n of incoming) {
-      if (!place(n.id)) {
-        throw new Error(`the incoming plan's parentage does not resolve for node ${n.id}`);
-      }
+    resolving.delete(id);
+    pathById.set(id, planNodePath(parentPath, id));
+    ordered.push(node);
+    return true;
+  };
+  for (const n of targets) {
+    if (!place(n.id)) {
+      throw new PlanSnapshotError(
+        `the incoming plan's parentage does not resolve for node ${n.id}`,
+      );
     }
+  }
 
-    let nodesCreated = 0;
-    let nodesUpdated = 0;
-    for (const node of ordered) {
-      const fields = {
-        parentId: node.parentId,
-        path: pathById.get(node.id)!,
-        ordinal: node.ordinal,
-        title: node.title,
-        kind: node.kind as 'component',
-        body: node.body,
-        status: node.status as 'todo',
-        taskable: node.taskable,
-        updatedAt: new Date(),
-      };
-      if (localIds.has(node.id)) {
-        await tx
-          .update(schema.planNodes)
-          .set({ ...fields, version: sql`${schema.planNodes.version} + 1` })
-          .where(eq(schema.planNodes.id, node.id));
-        nodesUpdated++;
-      } else {
-        await tx
-          .insert(schema.planNodes)
-          .values({ id: node.id, repositoryId, createdBy: node.createdBy, ...fields });
-        nodesCreated++;
-      }
-    }
+  const createdIds = new Set(created.map((n) => n.id));
+  const insertRows = ordered
+    .filter((n) => createdIds.has(n.id))
+    .map((n) => ({
+      id: n.id,
+      repositoryId,
+      parentId: n.parentId,
+      path: pathById.get(n.id)!,
+      ordinal: n.ordinal,
+      title: n.title,
+      kind: n.kind as 'component',
+      body: n.body,
+      status: n.status as 'todo',
+      taskable: n.taskable,
+      createdBy: 'import' as const,
+    }));
+  if (insertRows.length > 0) await tx.insert(schema.planNodes).values(insertRows);
 
-    // A node kept locally may still sit under a parent the snapshot MOVED, so its
-    // stored ancestry is now wrong. Rebuild every path from parentage rather than
-    // patching the ones that look affected — the whole plan is a few thousand
-    // short strings and a wrong `path` is invisible to every read that depends on
-    // it.
-    const keptLocal = [...localIds].filter((id) => !byId.has(id));
-    if (keptLocal.length > 0) {
-      const all = await tx
-        .select({ id: schema.planNodes.id, parentId: schema.planNodes.parentId })
-        .from(schema.planNodes)
-        .where(eq(schema.planNodes.repositoryId, repositoryId));
-      const parentOf = new Map(all.map((r) => [r.id, r.parentId]));
-      const resolved = new Map<string, string>();
-      const walk = (id: string, seen: Set<string>): string | null => {
-        const cached = resolved.get(id);
-        if (cached) return cached;
-        if (seen.has(id)) return null;
-        seen.add(id);
-        const parentId = parentOf.get(id) ?? null;
-        let parentPath: string | null = null;
-        if (parentId !== null) {
-          parentPath = walk(parentId, seen);
-          if (parentPath === null) return null;
-        }
-        const own = planNodePath(parentPath, id);
-        resolved.set(id, own);
-        return own;
-      };
-      for (const row of all) {
-        const own = walk(row.id, new Set());
-        if (own)
-          await tx
-            .update(schema.planNodes)
-            .set({ path: own })
-            .where(eq(schema.planNodes.id, row.id));
-      }
-    }
-
-    // Edges and code links are INSERTED, never removed, for the same reason a
-    // local-only node is kept: a link that is here and not in the snapshot may be
-    // one someone added, and dropping it is not reversible.
-    const liveIds = new Set([...localIds, ...byId.keys()]);
-    const edges = (mirror.edges ?? []).filter(
-      (e) => liveIds.has(e.fromNodeId) && liveIds.has(e.toNodeId) && e.fromNodeId !== e.toNodeId,
-    );
-    let edgesAdded = 0;
-    if (edges.length > 0) {
-      const inserted = await tx
-        .insert(schema.planNodeEdges)
-        .values(
-          edges.map((e) => ({
-            repositoryId,
-            fromNodeId: e.fromNodeId,
-            toNodeId: e.toNodeId,
-            kind: e.kind as 'affects',
-            note: e.note,
-          })),
-        )
-        .onConflictDoNothing()
-        .returning({ id: schema.planNodeEdges.id });
-      edgesAdded = inserted.length;
-    }
-
-    const links = codeLinks.filter((l) => liveIds.has(l.nodeId));
-    let codeLinksAdded = 0;
-    if (links.length > 0) {
-      const inserted = await tx
-        .insert(schema.planNodeCodeLinks)
-        .values(
-          links.map((l) => ({
-            repositoryId,
-            nodeId: l.nodeId,
-            repoPath: l.repoPath,
-            symbol: l.symbol,
-            evidence: l.evidence,
-            derivedAtCommit: l.derivedAtCommit,
-            stale: l.stale,
-            role: l.role,
-            confidence: null,
-          })),
-        )
-        .onConflictDoNothing()
-        .returning({ id: schema.planNodeCodeLinks.id });
-      codeLinksAdded = inserted.length;
-    }
-
-    // Dirty, not clean: the local-only nodes this kept mean the database now says
-    // something the pulled file does not, so the file has to be rewritten from
-    // the database rather than trusted as current.
-    if (nodesCreated > 0 || nodesUpdated > 0 || keptLocal.length > 0) {
-      await markPlanMirrorDirty(tx, repositoryId);
+  let nodesUpdated = 0;
+  for (const node of ordered) {
+    const before = localById.get(node.id);
+    if (!before) continue;
+    const set: Record<string, unknown> = {};
+    for (const field of NODE_FIELDS) if (node[field] !== before[field]) set[field] = node[field];
+    if (Object.keys(set).length === 0) continue;
+    if (set.status !== undefined) {
+      if (node.status === 'done') set.doneAt = new Date();
+      else if (before.status === 'done') set.doneAt = null;
     }
     await tx
-      .insert(schema.planMirrorState)
-      .values({ repositoryId, revision: 0, writtenRevision: 0, syncedHash: hashBytes(rawBytes) })
-      .onConflictDoUpdate({
-        target: schema.planMirrorState.repositoryId,
-        set: { syncedHash: hashBytes(rawBytes) },
-      });
+      .update(schema.planNodes)
+      .set({ ...set, version: sql`${schema.planNodes.version} + 1`, updatedAt: new Date() })
+      .where(eq(schema.planNodes.id, node.id));
+    nodesUpdated++;
+  }
 
-    logger.info(
-      { repositoryId, nodesCreated, nodesUpdated, keptLocal: keptLocal.length, edgesAdded },
-      'reconciled plan from pulled .haive-data mirror',
+  if (merge.deleted.length > 0) {
+    await tx.delete(schema.planNodes).where(inArray(schema.planNodes.id, merge.deleted));
+  }
+
+  // A moved subtree changes its descendants' ancestry, so every stored path is checked.
+  const stored = await tx
+    .select({ id: schema.planNodes.id, path: schema.planNodes.path })
+    .from(schema.planNodes)
+    .where(eq(schema.planNodes.repositoryId, repositoryId));
+  for (const row of stored) {
+    const expected = pathById.get(row.id);
+    if (expected !== undefined && expected !== row.path) {
+      await tx
+        .update(schema.planNodes)
+        .set({ path: expected })
+        .where(eq(schema.planNodes.id, row.id));
+    }
+  }
+
+  const edgeKey = (from: string, to: string, kind: string): string =>
+    JSON.stringify([from, to, kind]);
+  const edgeRows = await tx
+    .select({
+      id: schema.planNodeEdges.id,
+      fromNodeId: schema.planNodeEdges.fromNodeId,
+      toNodeId: schema.planNodeEdges.toNodeId,
+      kind: schema.planNodeEdges.kind,
+      note: schema.planNodeEdges.note,
+    })
+    .from(schema.planNodeEdges)
+    .where(eq(schema.planNodeEdges.repositoryId, repositoryId));
+  const wantedEdges = new Map(
+    merged.edges
+      .filter((e) => e.fromNodeId !== e.toNodeId)
+      .map((e) => [edgeKey(e.fromNodeId, e.toNodeId, e.kind), e]),
+  );
+  const haveEdges = new Map(edgeRows.map((e) => [edgeKey(e.fromNodeId, e.toNodeId, e.kind), e]));
+  const staleEdges = edgeRows.filter(
+    (e) => !wantedEdges.has(edgeKey(e.fromNodeId, e.toNodeId, e.kind)),
+  );
+  if (staleEdges.length > 0) {
+    await tx.delete(schema.planNodeEdges).where(
+      inArray(
+        schema.planNodeEdges.id,
+        staleEdges.map((e) => e.id),
+      ),
     );
-    return {
-      previousCommit: null,
-      fastForwarded: false,
-      nodesCreated,
+  }
+  for (const [key, edge] of wantedEdges) {
+    const have = haveEdges.get(key);
+    if (have && have.note !== edge.note) {
+      await tx
+        .update(schema.planNodeEdges)
+        .set({ note: edge.note })
+        .where(eq(schema.planNodeEdges.id, have.id));
+    }
+  }
+  const newEdges = [...wantedEdges].filter(([key]) => !haveEdges.has(key)).map(([, e]) => e);
+  let edgesAdded = 0;
+  if (newEdges.length > 0) {
+    const inserted = await tx
+      .insert(schema.planNodeEdges)
+      .values(
+        newEdges.map((e) => ({
+          repositoryId,
+          fromNodeId: e.fromNodeId,
+          toNodeId: e.toNodeId,
+          kind: e.kind as 'affects',
+          note: e.note,
+        })),
+      )
+      .onConflictDoNothing()
+      .returning({ id: schema.planNodeEdges.id });
+    edgesAdded = inserted.length;
+  }
+
+  const linkKey = (nodeId: string, repoPath: string, symbol: string | null): string =>
+    JSON.stringify([nodeId, repoPath, symbol ?? '']);
+  const linkRows = await tx
+    .select({
+      id: schema.planNodeCodeLinks.id,
+      nodeId: schema.planNodeCodeLinks.nodeId,
+      repoPath: schema.planNodeCodeLinks.repoPath,
+      symbol: schema.planNodeCodeLinks.symbol,
+      evidence: schema.planNodeCodeLinks.evidence,
+      derivedAtCommit: schema.planNodeCodeLinks.derivedAtCommit,
+      stale: schema.planNodeCodeLinks.stale,
+      role: schema.planNodeCodeLinks.role,
+    })
+    .from(schema.planNodeCodeLinks)
+    .where(eq(schema.planNodeCodeLinks.repositoryId, repositoryId));
+  const wantedLinks = new Map(
+    merged.codeLinks.map((l) => [linkKey(l.nodeId, l.repoPath, l.symbol), l]),
+  );
+  const haveLinks = new Map(linkRows.map((l) => [linkKey(l.nodeId, l.repoPath, l.symbol), l]));
+  const staleLinks = linkRows.filter(
+    (l) => !wantedLinks.has(linkKey(l.nodeId, l.repoPath, l.symbol)),
+  );
+  if (staleLinks.length > 0) {
+    await tx.delete(schema.planNodeCodeLinks).where(
+      inArray(
+        schema.planNodeCodeLinks.id,
+        staleLinks.map((l) => l.id),
+      ),
+    );
+  }
+  for (const [key, link] of wantedLinks) {
+    const have = haveLinks.get(key);
+    if (
+      have &&
+      (have.evidence !== link.evidence ||
+        have.derivedAtCommit !== link.derivedAtCommit ||
+        have.stale !== link.stale ||
+        have.role !== link.role)
+    ) {
+      await tx
+        .update(schema.planNodeCodeLinks)
+        .set({
+          evidence: link.evidence,
+          derivedAtCommit: link.derivedAtCommit,
+          stale: link.stale,
+          role: link.role as 'implements',
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.planNodeCodeLinks.id, have.id));
+    }
+  }
+  const newLinks = [...wantedLinks].filter(([key]) => !haveLinks.has(key)).map(([, l]) => l);
+  let codeLinksAdded = 0;
+  if (newLinks.length > 0) {
+    const inserted = await tx
+      .insert(schema.planNodeCodeLinks)
+      .values(
+        newLinks.map((l) => ({
+          repositoryId,
+          nodeId: l.nodeId,
+          repoPath: l.repoPath,
+          symbol: l.symbol,
+          evidence: l.evidence,
+          derivedAtCommit: l.derivedAtCommit,
+          stale: l.stale,
+          role: l.role as 'implements',
+          confidence: null,
+        })),
+      )
+      .onConflictDoNothing()
+      .returning({ id: schema.planNodeCodeLinks.id });
+    codeLinksAdded = inserted.length;
+  }
+
+  await recordPlanQuestions(tx, repositoryId, merge.conflicts);
+
+  // The next base: the checkout as read, each contested field still at its old base so it is asked again.
+  const atBase = new Map(
+    merge.conflicts
+      .filter((c) => c.base !== undefined)
+      .map((c) => [`${c.nodeId}\0${c.field}`, c.base]),
+  );
+  const snapshot: PlanMirrorPayload =
+    atBase.size === 0
+      ? incoming
+      : ({
+          ...incoming,
+          nodes: incoming.nodes.map((n) => {
+            const patched: Record<string, unknown> = { ...n };
+            for (const field of PLAN_MIRROR_ASKED_FIELDS) {
+              const key = `${n.id}\0${field}`;
+              if (atBase.has(key)) patched[field] = atBase.get(key);
+            }
+            return patched;
+          }),
+        } as PlanMirrorPayload);
+
+  // Dirty when the file no longer says what the database does.
+  const after = await renderPlanMirrorFiles(tx, repositoryId);
+  if (after === null || hashBytes(after.json) !== hash) await markPlanMirrorDirty(tx, repositoryId);
+  await tx
+    .insert(schema.planMirrorState)
+    .values({
+      repositoryId,
+      revision: 0,
+      writtenRevision: 0,
+      syncedHash: hash,
+      syncedSnapshot: snapshot,
+    })
+    .onConflictDoUpdate({
+      target: schema.planMirrorState.repositoryId,
+      set: { syncedHash: hash, syncedSnapshot: snapshot },
+    });
+
+  const keptLocal = targets
+    .filter((n) => localById.has(n.id) && !incomingIds.has(n.id))
+    .map((n) => n.id);
+  logger.info(
+    {
+      repositoryId,
+      nodesCreated: created.length,
       nodesUpdated,
-      keptLocal,
+      nodesDeleted: merge.deleted.length,
+      keptLocal: keptLocal.length,
+      conflicts: merge.conflicts.length,
       edgesAdded,
-      codeLinksAdded,
-      skipped: null,
-    } satisfies PlanPullOutcome;
-  });
+    },
+    'reconciled plan from pulled .haive-data mirror',
+  );
+  return {
+    previousCommit: null,
+    fastForwarded: false,
+    nodesCreated: created.length,
+    nodesUpdated,
+    keptLocal,
+    edgesAdded,
+    codeLinksAdded,
+    skipped: null,
+    nodesDeleted: merge.deleted,
+    conflicts: merge.conflicts.map((c) => ({ nodeId: c.nodeId, field: c.field })),
+  } satisfies PlanPullOutcome;
+}
+
+/** One pending row per contested field; a pending plan row that no longer conflicts converged. */
+async function recordPlanQuestions(
+  tx: PlanMirrorTx,
+  repositoryId: string,
+  conflicts: readonly PlanMirrorConflict[],
+): Promise<void> {
+  const pending = new Map(
+    (await loadPendingPlanQuestions(tx, repositoryId)).map((q) => [q.row.unit, q.row]),
+  );
+  const open = new Set<string>();
+  for (const c of conflicts) {
+    const unit = planConflictUnit(c.nodeId, c.field);
+    open.add(unit);
+    const sides = {
+      base: conflictSide(c.base),
+      local: conflictSide(c.local),
+      incoming: conflictSide(c.incoming),
+    };
+    const row = pending.get(unit);
+    if (!row) {
+      await tx.insert(schema.projectStateConflicts).values({ repositoryId, unit, ...sides });
+    } else if (
+      !sameValue(row.base, sides.base) ||
+      !sameValue(row.local, sides.local) ||
+      !sameValue(row.incoming, sides.incoming)
+    ) {
+      await tx
+        .update(schema.projectStateConflicts)
+        .set(sides)
+        .where(eq(schema.projectStateConflicts.id, row.id));
+    }
+  }
+  await closePlanQuestions(tx, repositoryId, open);
+}
+
+async function closePlanQuestions(
+  tx: PlanMirrorTx,
+  repositoryId: string,
+  keep: ReadonlySet<string>,
+): Promise<void> {
+  for (const { row } of await loadPendingPlanQuestions(tx, repositoryId)) {
+    if (keep.has(row.unit)) continue;
+    await tx
+      .update(schema.projectStateConflicts)
+      .set({ resolution: 'converged', resolvedAt: new Date() })
+      .where(eq(schema.projectStateConflicts.id, row.id));
+  }
 }
 
 /** Resolve the repository's writable/readable checkout and flush its current

@@ -1,5 +1,4 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,7 +10,7 @@ import {
   writePlanJsonIfUnchanged,
 } from '../src/plan/mirror.js';
 
-const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+const b = (text: string) => Buffer.from(text, 'utf8');
 const dirs: string[] = [];
 afterEach(async () => {
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
@@ -30,37 +29,37 @@ async function repoWith(planJson: string | null): Promise<string> {
 const onDisk = (repo: string) => readFile(path.join(repo, HAIVE_DATA_FILES.plan), 'utf8');
 
 describe('writePlanJsonIfUnchanged', () => {
-  it('replaces the bytes it last synced', async () => {
+  it('replaces the bytes it judged', async () => {
     const repo = await repoWith('{"synced":1}\n');
-    await writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha('{"synced":1}\n'));
+    await writePlanJsonIfUnchanged(repo, '{"next":1}\n', b('{"synced":1}\n'));
     expect(await onDisk(repo)).toBe('{"next":1}\n');
   });
 
-  it('holds and keeps bytes that arrived after the last sync, judged on the file it replaces', async () => {
+  it('holds and keeps bytes that landed after the flush judged the file', async () => {
     const repo = await repoWith('{"teammate":1}\n');
     await expect(
-      writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha('{"synced":1}\n')),
+      writePlanJsonIfUnchanged(repo, '{"next":1}\n', b('{"synced":1}\n')),
     ).rejects.toBeInstanceOf(PlanMirrorHeldError);
     expect(await onDisk(repo)).toBe('{"teammate":1}\n');
   });
 
   it('creates the file when none exists', async () => {
     const repo = await repoWith(null);
-    await writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(''));
+    await writePlanJsonIfUnchanged(repo, '{"next":1}\n', null);
     expect(await onDisk(repo)).toBe('{"next":1}\n');
   });
 });
 
 describe('removePlanJsonIfUnchanged', () => {
-  it('removes the bytes it last synced', async () => {
+  it('removes the bytes it judged', async () => {
     const repo = await repoWith('{"synced":1}\n');
-    await removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'));
+    await removePlanJsonIfUnchanged(repo, b('{"synced":1}\n'));
     await expect(access(path.join(repo, HAIVE_DATA_FILES.plan))).rejects.toThrow();
   });
 
-  it('holds and keeps bytes that arrived after the last sync', async () => {
+  it('holds and keeps bytes that landed after the flush judged the file', async () => {
     const repo = await repoWith('{"teammate":1}\n');
-    await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).rejects.toBeInstanceOf(
+    await expect(removePlanJsonIfUnchanged(repo, b('{"synced":1}\n'))).rejects.toBeInstanceOf(
       PlanMirrorHeldError,
     );
     expect(await onDisk(repo)).toBe('{"teammate":1}\n');
@@ -68,7 +67,7 @@ describe('removePlanJsonIfUnchanged', () => {
 
   it('is a no-op when the file is already gone', async () => {
     const repo = await repoWith(null);
-    await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).resolves.toBeUndefined();
+    await expect(removePlanJsonIfUnchanged(repo, b('{"synced":1}\n'))).resolves.toBeUndefined();
   });
 });
 
@@ -78,9 +77,9 @@ describe('a merge open when the file is judged', () => {
     execFileSync('git', ['init', '-q'], { cwd: repo });
     await writeFile(path.join(repo, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n');
     await expect(
-      writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha('{"synced":1}\n')),
+      writePlanJsonIfUnchanged(repo, '{"next":1}\n', b('{"synced":1}\n')),
     ).rejects.toThrow(/merge or rebase/);
-    await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).rejects.toThrow(
+    await expect(removePlanJsonIfUnchanged(repo, b('{"synced":1}\n'))).rejects.toThrow(
       /merge or rebase/,
     );
     expect(await onDisk(repo)).toBe('{"synced":1}\n');
@@ -90,10 +89,10 @@ describe('a merge open when the file is judged', () => {
     const repo = await repoWith(null);
     execFileSync('git', ['init', '-q'], { cwd: repo });
     await writeFile(path.join(repo, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n');
-    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(''))).rejects.toThrow(
+    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', null)).rejects.toThrow(
       /merge or rebase/,
     );
-    await expect(removePlanJsonIfUnchanged(repo, sha(''))).rejects.toThrow(/merge or rebase/);
+    await expect(removePlanJsonIfUnchanged(repo, null)).rejects.toThrow(/merge or rebase/);
     await expect(access(path.join(repo, HAIVE_DATA_FILES.plan))).rejects.toThrow();
   });
 });
@@ -110,9 +109,9 @@ describe('bytes that decode alike', () => {
     ]);
     await writeFile(path.join(repo, HAIVE_DATA_FILES.plan), malformed);
     expect(malformed.toString('utf8')).toBe(synced);
-    await expect(
-      writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(synced)),
-    ).rejects.toBeInstanceOf(PlanMirrorHeldError);
+    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', b(synced))).rejects.toBeInstanceOf(
+      PlanMirrorHeldError,
+    );
     expect(await readFile(path.join(repo, HAIVE_DATA_FILES.plan))).toEqual(malformed);
   });
 });
@@ -122,9 +121,9 @@ describe('a plan.json past the cap', () => {
     const repo = await repoWith('{"synced":1}\n');
     await truncate(path.join(repo, HAIVE_DATA_FILES.plan), 17 * 1024 * 1024);
     await expect(
-      writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha('{"synced":1}\n')),
+      writePlanJsonIfUnchanged(repo, '{"next":1}\n', b('{"synced":1}\n')),
     ).rejects.toBeInstanceOf(PlanMirrorHeldError);
-    await expect(removePlanJsonIfUnchanged(repo, sha('{"synced":1}\n'))).rejects.toBeInstanceOf(
+    await expect(removePlanJsonIfUnchanged(repo, b('{"synced":1}\n'))).rejects.toBeInstanceOf(
       PlanMirrorHeldError,
     );
   });
@@ -133,12 +132,10 @@ describe('a plan.json past the cap', () => {
 describe('an empty plan.json', () => {
   it('is never taken for the absence an older row stamped as the hash of zero bytes', async () => {
     const repo = await repoWith('');
-    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(''))).rejects.toBeInstanceOf(
+    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', null)).rejects.toBeInstanceOf(
       PlanMirrorHeldError,
     );
-    await expect(removePlanJsonIfUnchanged(repo, sha(''))).rejects.toBeInstanceOf(
-      PlanMirrorHeldError,
-    );
+    await expect(removePlanJsonIfUnchanged(repo, null)).rejects.toBeInstanceOf(PlanMirrorHeldError);
     expect(await onDisk(repo)).toBe('');
   });
 });
@@ -147,7 +144,7 @@ describe('a render past the cap', () => {
   it('is never written, since no later read could judge it', async () => {
     const repo = await repoWith(null);
     const huge = `{"t":"${'x'.repeat(16 * 1024 * 1024)}"}\n`;
-    await expect(writePlanJsonIfUnchanged(repo, huge, sha(''))).rejects.toBeInstanceOf(
+    await expect(writePlanJsonIfUnchanged(repo, huge, null)).rejects.toBeInstanceOf(
       PlanMirrorHeldError,
     );
     await expect(access(path.join(repo, HAIVE_DATA_FILES.plan))).rejects.toThrow();

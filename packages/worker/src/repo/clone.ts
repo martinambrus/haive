@@ -47,7 +47,11 @@ import {
 } from '@haive/shared/project-state';
 import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
-import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
+import {
+  importPlanMirror,
+  reconcilePlanFromCheckout,
+  recordPlanMirrorError,
+} from '../plan/mirror.js';
 import { syncProjectStateFromCheckout } from '../project-state/sync.js';
 import { raiseRtkQuestion } from '../project-state/rtk-conflict.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
@@ -321,6 +325,9 @@ export async function persistDetection(
   // no repository COLUMNS to fill, and the plan lives in its own tables.
   try {
     const res = await importPlanMirror(db, repositoryId, storagePath);
+    if (!res.imported && res.code === 'has_plan') {
+      await reconcilePlanFromCheckout(db, repositoryId, storagePath, { requireStamp: true });
+    }
     if (!res.imported && res.code === 'refused') {
       await recordPlanMirrorError(db, repositoryId, `Plan snapshot not imported: ${res.reason}`);
       logger.info({ repositoryId, reason: res.reason }, 'plan mirror not imported');

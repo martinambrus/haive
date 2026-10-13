@@ -72,6 +72,7 @@ import {
   claimFileName,
   isClaimablePath,
   isRecordName,
+  parsePlanConflictUnit,
   portableBundleSource,
   settingFileName,
 } from '@haive/shared/project-state';
@@ -2934,9 +2935,19 @@ async function runOnboardingArtifactReset(
       })
       .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
     await tx.delete(schema.projectStateSync).where(eq(schema.projectStateSync.repositoryId, id));
-    await tx
-      .delete(schema.projectStateConflicts)
+    // A plan question is about the plan, which the reset leaves alone.
+    const conflicts = await tx
+      .select({ id: schema.projectStateConflicts.id, unit: schema.projectStateConflicts.unit })
+      .from(schema.projectStateConflicts)
       .where(eq(schema.projectStateConflicts.repositoryId, id));
+    const takenBack = conflicts
+      .filter((row) => parsePlanConflictUnit(row.unit) === null)
+      .map((row) => row.id);
+    if (takenBack.length > 0) {
+      await tx
+        .delete(schema.projectStateConflicts)
+        .where(inArray(schema.projectStateConflicts.id, takenBack));
+    }
     await tx
       .delete(schema.projectStateOutbox)
       .where(eq(schema.projectStateOutbox.repositoryId, id));
