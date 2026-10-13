@@ -10,7 +10,16 @@ import { resolveMergePhase } from '../../merge-resolver.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { claimFake } from '../../../../test/merge-dir-claim-fake.js';
 
-const projections = vi.hoisted(() => ({ setAside: vi.fn(), resync: vi.fn(), restore: vi.fn() }));
+const projections = vi.hoisted(() => ({
+  setAside: vi.fn(),
+  resync: vi.fn(),
+  restore: vi.fn(),
+  seed: vi.fn(),
+}));
+vi.mock('../../../plan/mirror.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../plan/mirror.js')>()),
+  seedPlanBaseFromCheckout: projections.seed,
+}));
 vi.mock('../../../project-state/set-aside.js', () => ({
   setAsideHaiveProjections: projections.setAside,
   resyncHaiveProjections: projections.resync,
@@ -26,6 +35,8 @@ beforeEach(() => {
   projections.setAside.mockReset();
   projections.resync.mockReset();
   projections.restore.mockReset();
+  projections.seed.mockReset();
+  projections.seed.mockResolvedValue(undefined);
   projections.restore.mockResolvedValue({ outcome: 'clean' });
 });
 
@@ -152,6 +163,55 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(projections.resync).toHaveBeenCalledWith(ctx.db, 'repo-1', local);
       expect(atResync).not.toBe(before);
       expect(atResync).toBe(await head());
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('seeds the plan base from the checkout before the set-aside and the fast-forward', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      let atSeed: string | null = null;
+      projections.seed.mockImplementation(async () => {
+        atSeed = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      });
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: true, strategy: 'ff' });
+      expect(projections.seed).toHaveBeenCalledWith(ctx.db, 'repo-1', local);
+      expect(atSeed).toBe(before);
+      expect(projections.seed.mock.invocationCallOrder[0]).toBeLessThan(
+        projections.setAside.mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a plan base that cannot be seeded leaves the base where it is', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.seed.mockRejectedValue(new Error('plan.json unreadable'));
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
+      expect(out.reason).toContain('plan.json unreadable');
+      expect(projections.setAside).not.toHaveBeenCalled();
+      expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
       await rm(bare, { recursive: true, force: true });
       await rm(seed, { recursive: true, force: true });

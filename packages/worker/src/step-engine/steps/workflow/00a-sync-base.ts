@@ -11,6 +11,7 @@ import {
 } from '../../../repo/git-push.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
+import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
 import {
   MOVE_ATTEMPTS,
   restoreProjectionsInTx,
@@ -392,6 +393,19 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       if (aside.outcome === 'set-aside') asided = true;
       return aside;
     };
+    if (repositoryId) {
+      try {
+        await seedPlanBaseFromCheckout(ctx.db, repositoryId, ctx.repoPath);
+      } catch (err) {
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `the plan's base could not be read from the checkout (${(err as Error).message}); the base was not moved. Retry this step.`,
+        };
+      }
+    }
     const first = await setAside();
     if (first.outcome === 'refused') {
       return {
