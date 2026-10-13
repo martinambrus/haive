@@ -65,7 +65,7 @@ const hashBytes = (bytes: string | Buffer): string =>
   createHash('sha256').update(bytes).digest('hex');
 
 // Stamped when the files were removed, so a plan.json that arrives later reads as unimported.
-const ABSENT_HASH = hashBytes('');
+const ABSENT_HASH = 'absent';
 
 const HELD_UNIMPORTED =
   "the checkout's plan.json holds changes Haive has not read in; Pull the plan to bring them in. Nothing was written.";
@@ -91,6 +91,8 @@ function flushMayReplace(
   syncedHash: string | null,
   nextJson: string | null,
 ): boolean {
+  // Haive never writes an empty plan.json; older rows stamped absence as the hash of zero bytes.
+  if (onDisk.length === 0) return syncedHash === null;
   const diskHash = hashBytes(onDisk);
   if (diskHash === syncedHash || (nextJson !== null && diskHash === hashBytes(nextJson)))
     return true;

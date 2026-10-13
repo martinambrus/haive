@@ -129,3 +129,16 @@ describe('a plan.json past the cap', () => {
     );
   });
 });
+
+describe('an empty plan.json', () => {
+  it('is never taken for the absence an older row stamped as the hash of zero bytes', async () => {
+    const repo = await repoWith('');
+    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', sha(''))).rejects.toBeInstanceOf(
+      PlanMirrorHeldError,
+    );
+    await expect(removePlanJsonIfUnchanged(repo, sha(''))).rejects.toBeInstanceOf(
+      PlanMirrorHeldError,
+    );
+    expect(await onDisk(repo)).toBe('');
+  });
+});
