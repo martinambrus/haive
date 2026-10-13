@@ -2822,6 +2822,31 @@ async function main(): Promise<void> {
   await writePlanMirror(db, sId, sDir);
   theirs = await readMirror();
 
+  // A question is not recorded on a local value a canvas edit replaced during the reconcile.
+  await editS(pId, { title: 'P race local' });
+  const pRace = await sNode(pId);
+  let asking: Promise<string> | undefined;
+  await db.transaction(async (edit) => {
+    await edit
+      .update(schema.planNodes)
+      .set({ title: 'P on the canvas', version: pRace!.version + 1 })
+      .where(eq(schema.planNodes.id, pId));
+    asking = arrive(retitled(theirs, pId, 'P race remote')).then(
+      () => 'merged',
+      (err: Error) => err.name,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  });
+  const raceRows = await pendingPlanRows(sId);
+  check(
+    'three-way: a question is not recorded on a value a concurrent edit replaced',
+    (await asking) === 'PlanMirrorHeldError' &&
+      !raceRows.some(
+        (r) => r.unit === `plan/${pId}#title` && JSON.stringify(r.local) === '{"v":"P race local"}',
+      ),
+    { asking: await asking, raceRows },
+  );
+
   // Deleting the plan closes its questions and drops the base.
   await editS(pId, { title: 'P local 3' });
   await arrive(retitled(theirs, pId, 'P by A 3'));

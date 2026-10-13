@@ -746,7 +746,11 @@ export async function reconcilePlanFromCheckout(
       bytes = null;
     }
     if (bytes === null) return noOutcome(NO_SNAPSHOT);
-    return reconcilePlanLocked(tx, repositoryId, bytes, opts);
+    const outcome = await reconcilePlanLocked(tx, repositoryId, bytes, opts);
+    // The lock does not hold git off the checkout; what was read must still be there to commit.
+    const now = await readPlanJson(repoPath);
+    if (!Buffer.isBuffer(now) || !now.equals(bytes)) throw new PlanMirrorHeldError(HELD_MOVED);
+    return outcome;
   });
 }
 
@@ -1364,6 +1368,19 @@ async function reconcilePlanLocked(
     codeLinksAdded = inserted.length;
   }
 
+  // A question records this side's value, so it must still be the value read.
+  const askedIds = [...new Set(merge.conflicts.map((c) => c.nodeId))];
+  if (askedIds.length > 0) {
+    const current = await tx
+      .select({ id: schema.planNodes.id, version: schema.planNodes.version })
+      .from(schema.planNodes)
+      .where(inArray(schema.planNodes.id, askedIds))
+      .for('update');
+    const moved = askedIds.some(
+      (id) => current.find((r) => r.id === id)?.version !== versionOf.get(id),
+    );
+    if (moved) throw new PlanMirrorHeldError(HELD_RACED);
+  }
   await recordPlanQuestions(tx, repositoryId, merge.conflicts);
 
   // The next base: the checkout as read, each contested field still at its old base so it is asked again.
