@@ -363,6 +363,7 @@ export const restoreFaults: {
   afterRestore?: () => void | Promise<void>;
   beforeResync?: (domain: 'state' | 'plan') => void;
   beforeRestore?: () => void | Promise<void>;
+  beforeCapture?: () => void | Promise<void>;
 } = {};
 
 interface RestoreGuard {
@@ -425,6 +426,7 @@ async function restoreJudged(
   }
   const holding = guard.fence ? await guard.fence(tx) : 0;
   if (holding > 0) return { outcome: 'held', holding };
+  await restoreFaults.beforeCapture?.();
   for (const path of mine) {
     const bytes = await keptBytes(repoPath, path);
     const index = await indexEntry(repoPath, path);
@@ -498,8 +500,8 @@ const planGuard = (
 });
 
 /** Puts each path back to HEAD, in the file and the index, only while it still holds what the set-aside
- *  captured; returns the first path written by someone else meanwhile, which sends the set-aside round
- *  again. A path whose bytes were not captured is restored as git restores it. */
+ *  captured; returns the first path written by someone else meanwhile, or not captured at all, which
+ *  sends the set-aside round again. */
 async function restoreFromHead(
   repoPath: string,
   paths: readonly string[],
@@ -508,55 +510,47 @@ async function restoreFromHead(
   for (const path of paths) {
     const captured = kept.get(path);
     const head = await readBlob(repoPath, `HEAD:${path}`);
-    if (captured === undefined || captured.bytes === undefined) {
-      const res =
-        head !== null
-          ? await gitRun(repoPath, ['checkout', '-q', 'HEAD', '--', path])
-          : await gitRun(repoPath, ['rm', '--cached', '-f', '-q', '--ignore-unmatch', '--', path]);
-      if (res.code !== 0) throw new Error(`git restore failed: ${res.stderr.trim().slice(0, 300)}`);
-      if (head === null) await removeNoFollow(repoPath, path);
-    } else {
-      const was = captured.bytes;
-      const maxBytes = Math.max(head?.length ?? 0, was?.length ?? 0) + 1;
-      if (head !== null && was === null) {
-        try {
-          await writeFileNoFollow(repoPath, path, head, {
-            mode: 'create-exclusive',
-            createParents: true,
-          });
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'EEXIST') return path;
-          throw err;
-        }
-      } else if (head !== null && was !== null) {
-        const res = await rewriteFileIfNoFollow(
-          repoPath,
-          path,
-          (now) => (now.equals(was) ? head : null),
-          { maxBytes },
-        );
-        if (res !== 'rewritten') return path;
-      } else if (was !== null) {
-        const res = await removeFileIfNoFollow(repoPath, path, (now) => now.equals(was), {
-          maxBytes,
+    if (captured === undefined || captured.bytes === undefined) return path;
+    const was = captured.bytes;
+    const maxBytes = Math.max(head?.length ?? 0, was?.length ?? 0) + 1;
+    if (head !== null && was === null) {
+      try {
+        await writeFileNoFollow(repoPath, path, head, {
+          mode: 'create-exclusive',
+          createParents: true,
         });
-        if (res !== 'removed') return path;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') return path;
+        throw err;
       }
-      if ((await indexEntry(repoPath, path)) !== captured.index) return path;
-      const headIdx = await headEntry(repoPath, path);
-      if (headIdx !== captured.index) {
-        const res =
-          headIdx === null
-            ? await gitRun(repoPath, ['update-index', '--force-remove', '--', path])
-            : await gitRun(repoPath, [
-                'update-index',
-                '--add',
-                '--cacheinfo',
-                `${headIdx.replace(' ', ',')},${path}`,
-              ]);
-        if (res.code !== 0) {
-          throw new Error(`git update-index failed: ${res.stderr.trim().slice(0, 300)}`);
-        }
+    } else if (head !== null && was !== null) {
+      const res = await rewriteFileIfNoFollow(
+        repoPath,
+        path,
+        (now) => (now.equals(was) ? head : null),
+        { maxBytes },
+      );
+      if (res !== 'rewritten') return path;
+    } else if (was !== null) {
+      const res = await removeFileIfNoFollow(repoPath, path, (now) => now.equals(was), {
+        maxBytes,
+      });
+      if (res !== 'removed') return path;
+    }
+    if ((await indexEntry(repoPath, path)) !== captured.index) return path;
+    const headIdx = await headEntry(repoPath, path);
+    if (headIdx !== captured.index) {
+      const res =
+        headIdx === null
+          ? await gitRun(repoPath, ['update-index', '--force-remove', '--', path])
+          : await gitRun(repoPath, [
+              'update-index',
+              '--add',
+              '--cacheinfo',
+              `${headIdx.replace(' ', ',')},${path}`,
+            ]);
+      if (res.code !== 0) {
+        throw new Error(`git update-index failed: ${res.stderr.trim().slice(0, 300)}`);
       }
     }
     if (head === null) await pruneEmptyStateDirs(repoPath, path);
@@ -756,7 +750,8 @@ export async function resyncHaiveProjections(
 }
 
 /** After a set-aside that ends with no move: writes each kept file back as the set-aside found it, unless
- *  someone has written it since. The marks stay raised, so the sweep reconciles the rest later. */
+ *  someone has written it since. The marks stay raised, so the sweep reconciles the rest later. A failure
+ *  is thrown: a staged entry it could not put back is the person's, and no sweep can rebuild it. */
 export async function putBackProjections(
   db: Database,
   repositoryId: string,
@@ -764,38 +759,34 @@ export async function putBackProjections(
   kept: KeptFiles,
 ): Promise<void> {
   if (kept.size === 0) return;
-  try {
-    await db.transaction(async (tx) => {
-      await lockProjectState(tx, repositoryId);
-      await lockPlanMirror(tx, repositoryId);
-      // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
-      for (const [path, { bytes, index }] of kept) {
-        await putBackIndex(repoPath, path, index);
-        if (bytes === undefined) continue;
-        const head = await readBlob(repoPath, `HEAD:${path}`);
-        const maxBytes = Math.max(head?.length ?? 0, bytes?.length ?? 0) + 1;
-        if (head === null) {
-          if (bytes === null) continue;
-          try {
-            await writeFileNoFollow(repoPath, path, bytes, {
-              mode: 'create-exclusive',
-              createParents: true,
-            });
-          } catch (err) {
-            if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-          }
-        } else if (bytes === null) {
-          await removeFileIfNoFollow(repoPath, path, (now) => now.equals(head), { maxBytes });
-        } else {
-          await rewriteFileIfNoFollow(repoPath, path, (now) => (now.equals(head) ? bytes : null), {
-            maxBytes,
+  await db.transaction(async (tx) => {
+    await lockProjectState(tx, repositoryId);
+    await lockPlanMirror(tx, repositoryId);
+    // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
+    for (const [path, { bytes, index }] of kept) {
+      await putBackIndex(repoPath, path, index);
+      if (bytes === undefined) continue;
+      const head = await readBlob(repoPath, `HEAD:${path}`);
+      const maxBytes = Math.max(head?.length ?? 0, bytes?.length ?? 0) + 1;
+      if (head === null) {
+        if (bytes === null) continue;
+        try {
+          await writeFileNoFollow(repoPath, path, bytes, {
+            mode: 'create-exclusive',
+            createParents: true,
           });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
         }
+      } else if (bytes === null) {
+        await removeFileIfNoFollow(repoPath, path, (now) => now.equals(head), { maxBytes });
+      } else {
+        await rewriteFileIfNoFollow(repoPath, path, (now) => (now.equals(head) ? bytes : null), {
+          maxBytes,
+        });
       }
-    });
-  } catch (err) {
-    logger.warn({ err, repositoryId }, 'project files not put back after a set-aside');
-  }
+    }
+  });
 }
 
 /** A path's index entry as `mode sha`, or null when nothing is staged there. */

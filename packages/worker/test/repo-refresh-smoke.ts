@@ -5,7 +5,18 @@
 import { execFileSync } from 'node:child_process';
 import { isDeepStrictEqual as isDeepEqual } from 'node:util';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq, sql } from 'drizzle-orm';
@@ -1183,6 +1194,82 @@ async function main(): Promise<void> {
         'a retried, then held refresh stages render.json again as the first set-aside found it',
         restores >= 3 && stagedAfter === stagedBefore,
         { restores, stagedBefore, stagedAfter },
+      );
+    }
+
+    // 11e10. A projection that cannot be captured for its restore (here a link put in its place after the
+    // re-judge) is not restored over: the set-aside goes round, the offenders refuse it, and the link stays.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const target = path.join(c.dest, RENDER_REL);
+      let fired = false;
+      restoreFaults.beforeCapture = async () => {
+        if (fired) return;
+        fired = true;
+        await rm(target);
+        await symlink('elsewhere.json', target);
+      };
+      let aside;
+      try {
+        aside = await setAsideHaiveProjections(db, id, c.dest);
+      } finally {
+        delete restoreFaults.beforeCapture;
+      }
+      const stillLink = (await lstat(target).catch(() => null))?.isSymbolicLink() ?? false;
+      check(
+        'a projection swapped for a link before its capture is refused, not restored over',
+        fired && aside.outcome === 'refused' && stillLink,
+        { aside, stillLink },
+      );
+    }
+
+    // 11e11. A put-back that cannot finish (git's index is locked) fails the refresh instead of reporting
+    // an unmoved checkout over files and staged entries still at HEAD.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const mdRel = HAIVE_DATA_FILES.planMarkdown;
+      await writeFile(path.join(c.dest, mdRel), '# staged by a person\n');
+      git(c.dest, 'add', '--', mdRel);
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b', 'c', 'd', 'e'] });
+      upstreamCommit('a teammate adds a fifth agent', '.haive-data/state');
+      const lock = path.join(c.dest, '.git', 'index.lock');
+      let restores = 0;
+      restoreFaults.afterRestore = async () => {
+        restores += 1;
+        if (restores !== 2) return;
+        await db.insert(schema.tasks).values({
+          userId,
+          repositoryId: id,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        });
+        await writeFile(lock, '');
+      };
+      let failed = '';
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } catch (err) {
+        failed = (err as Error).message;
+      } finally {
+        delete restoreFaults.afterRestore;
+        await rm(lock, { force: true });
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      }
+      const status = (await statusOf(id)).statusMessage ?? '';
+      check(
+        'a put-back that cannot finish fails the refresh visibly',
+        restores >= 2 &&
+          (/update-index|index\.lock/.test(failed) || /index\.lock|update-index/.test(status)),
+        { restores, failed, status },
       );
     }
 
