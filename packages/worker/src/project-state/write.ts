@@ -25,6 +25,8 @@ import {
   portableRender,
   portableSettingsOf,
   settingFileName,
+  toolingUnitOf,
+  TOOLING_UNIT_NAME,
   withoutUnchosenRtk,
   portableTemplateId,
   recordReadable,
@@ -486,14 +488,18 @@ export async function writeProjectStateColumn(
           chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
           reviewDimensions: schema.repositories.reviewDimensions,
           onboardingEnvironment: schema.repositories.onboardingEnvironment,
+          onboardingTooling: schema.repositories.onboardingTooling,
         })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
+      const settings = repo
+        ? withoutUnchosenRtk(portableSettingsOf(repo), column.rtkChoiceRecorded)
+        : emptyProjectState().settings;
+      const tooling = repo ? toolingUnitOf(repo.onboardingTooling) : null;
+      if (tooling !== null) settings[TOOLING_UNIT_NAME] = tooling;
       return {
-        settings: repo
-          ? withoutUnchosenRtk(portableSettingsOf(repo), column.rtkChoiceRecorded)
-          : emptyProjectState().settings,
+        settings,
         environment: repo ? environmentUnitOf(repo.onboardingEnvironment) : null,
         pending: await loadPendingRenderConflicts(reader, repositoryId),
         pendingClaims,

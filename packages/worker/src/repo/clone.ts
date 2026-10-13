@@ -39,7 +39,12 @@ import {
 } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
-import { ENVIRONMENT_UNIT, PROJECT_STATE_DIR, settingFileName } from '@haive/shared/project-state';
+import {
+  ENVIRONMENT_UNIT,
+  PROJECT_STATE_DIR,
+  TOOLING_UNIT_NAME,
+  settingFileName,
+} from '@haive/shared/project-state';
 import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
 import { importPlanMirror, recordPlanMirrorError } from '../plan/mirror.js';
@@ -129,7 +134,7 @@ const MIRROR_READ_CAP = 1024 * 1024;
  *  mirror (written at 12-post-onboarding), so a repo onboarded on one machine
  *  and cloned to another recovers its scope denylist + stack/tooling without
  *  re-running onboarding. A unit the project state record carries (the environment, the scope
- *  denylist) is left to the sync that imports the record, whatever a stale legacy file holds; the
+ *  denylist, the tooling) is left to the sync that imports the record, whatever a stale legacy file holds; the
  *  call returns true when it left one, and `afterSync` repeats it as the fallback for a column the
  *  sync did not fill. Non-clobbering: only fills columns that are currently
  *  NULL, so a live local onboarding (or an earlier import) is never overwritten
@@ -193,7 +198,7 @@ async function importHaiveDataMirror(
     }
   }
   let heldMcpServers: unknown = null;
-  if (repo.onboardingTooling == null && !afterSync) {
+  if (repo.onboardingTooling == null && !(await recordHolds(settingFileName(TOOLING_UNIT_NAME)))) {
     const tooling = await readJson<OnboardingToolingMirror>(HAIVE_DATA_FILES.tooling);
     if (tooling?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION) {
       const incoming = tooling.tooling;
@@ -231,7 +236,8 @@ async function importHaiveDataMirror(
     if (
       updates.scopeExcludeGlobs !== undefined ||
       updates.rtkEnabled !== undefined ||
-      updates.onboardingEnvironment !== undefined
+      updates.onboardingEnvironment !== undefined ||
+      updates.onboardingTooling !== undefined
     ) {
       await markProjectStateDirty(tx, repositoryId);
     }

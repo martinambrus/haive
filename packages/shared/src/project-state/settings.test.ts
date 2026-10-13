@@ -8,6 +8,11 @@ import {
   normalizeSetting,
   portableSettingsOf,
   settingColumnUpdate,
+  isPortableSettingName,
+  toolingUnitFrom,
+  toolingUnitOf,
+  TOOLING_UNIT_NAME,
+  withoutMachineLocalTooling,
   withoutUnchosenRtk,
   type PortableSettingColumns,
 } from './settings.js';
@@ -219,5 +224,64 @@ describe('withoutUnchosenRtk', () => {
     expect({ ...withoutUnchosenRtk(settings, true) }).toEqual(settings);
     withoutUnchosenRtk(settings, false);
     expect(settings['rtk-enabled']).toBe(true);
+  });
+});
+
+describe('the onboarding tooling unit', () => {
+  const local = {
+    ragMode: 'internal',
+    ollamaUrl: 'http://10.0.0.5:11434',
+    ragConnectionString: 'postgres://u:p@h/d',
+    acceptedMcpSettingsMark: 'mark',
+    importedMcpServerNames: ['x'],
+  };
+
+  it('is no portable setting, so no merge or conflict row can name it', () => {
+    expect(TOOLING_UNIT_NAME).toBe('onboarding-tooling');
+    expect(isPortableSettingName(TOOLING_UNIT_NAME)).toBe(false);
+    expect(PORTABLE_SETTING_NAMES).not.toContain(TOOLING_UNIT_NAME);
+  });
+
+  it('drops the infrastructure addresses and this install’s MCP consent, and nothing else', () => {
+    expect(
+      withoutMachineLocalTooling({ ...local, importedMcpSettingsJson: '{}', embeddingModel: 'm' }),
+    ).toEqual({ ragMode: 'internal', embeddingModel: 'm' });
+  });
+
+  it('is the column’s tooling without them, never mutating the column', () => {
+    const column = { schemaVersion: 1, tooling: { ...local } };
+
+    expect(toolingUnitOf(column)).toEqual({ ragMode: 'internal' });
+    expect(column.tooling).toEqual(local);
+  });
+
+  it('carries a server list held for consent as mcpSettingsJson, unless the column has its own', () => {
+    const held = {
+      importedMcpSettingsJson: '{"mcpServers":{"x":{}}}',
+      importedMcpServerNames: ['x'],
+    };
+
+    expect(toolingUnitOf({ schemaVersion: 1, tooling: { ragMode: 'none', ...held } })).toEqual({
+      ragMode: 'none',
+      mcpSettingsJson: '{"mcpServers":{"x":{}}}',
+    });
+    expect(
+      toolingUnitOf({ schemaVersion: 1, tooling: { ...held, mcpSettingsJson: '{"own":1}' } }),
+    ).toEqual({ mcpSettingsJson: '{"own":1}' });
+  });
+
+  it.each([
+    ['nothing', null],
+    ['another schema version', { schemaVersion: 2, tooling: { ragMode: 'none' } }],
+    ['no tooling object', { schemaVersion: 1, tooling: [] }],
+    ['a list', []],
+    ['a unit past the file limit', { schemaVersion: 1, tooling: { pad: 'x'.repeat(1024 * 1024) } }],
+  ])('has no unit for a column holding %s', (_what, column) => {
+    expect(toolingUnitOf(column)).toBeNull();
+  });
+
+  it('reads a checkout’s value only when it is an object', () => {
+    expect(toolingUnitFrom({ ragMode: 'none' })).toEqual({ ragMode: 'none' });
+    for (const value of [null, [], 'x', 1, undefined]) expect(toolingUnitFrom(value)).toBeNull();
   });
 });

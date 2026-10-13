@@ -276,3 +276,64 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
     }
   });
 });
+
+describe('02 and the legacy tooling mirror', () => {
+  const TOOLING_LEGACY = '.haive-data/tooling.json';
+  const TOOLING_UNIT = '.haive-data/state/settings/onboarding-tooling.json';
+  const HAIVE_TOOLING = JSON.stringify({ schemaVersion: 1, tooling: { ragMode: 'internal' } });
+
+  async function withTooling(content: string, column: boolean) {
+    const s = await setup();
+    if (column) {
+      s.fake.patch(schema.repositories, REPO, {
+        onboardingTooling: { schemaVersion: 1, tooling: { ragMode: 'internal' } },
+      });
+    }
+    await mkdir(join(s.root, '.haive-data'), { recursive: true });
+    await writeFile(join(s.root, TOOLING_LEGACY), content);
+    return s;
+  }
+
+  it('retires a Haive-shaped one, lists it for the commit to drop and writes the unit', async () => {
+    const s = await withTooling(HAIVE_TOOLING, true);
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(false);
+    expect(out.deletedPaths).toContain(TOOLING_LEGACY);
+    expect(out.writtenPaths).toContain(TOOLING_UNIT);
+    expect(out.warnings).toEqual([]);
+  });
+
+  it('keeps a file that is not Haive’s, lists nothing, and says so', async () => {
+    const s = await withTooling('{"keep":true}', true);
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(true);
+    expect(out.deletedPaths ?? []).not.toContain(TOOLING_LEGACY);
+    expect(out.warnings).toContain(
+      `${TOOLING_LEGACY} was left in place: it is not a Haive tooling mirror`,
+    );
+  });
+
+  it('keeps it when the record does not carry the tooling, or the record write failed', async () => {
+    const none = await withTooling(HAIVE_TOOLING, false);
+    const outNone = await none.apply();
+    expect(existsSync(join(none.root, TOOLING_LEGACY))).toBe(true);
+    expect(outNone.deletedPaths ?? []).not.toContain(TOOLING_LEGACY);
+
+    const failed = await withTooling(HAIVE_TOOLING, true);
+    let refused = false;
+    failed.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+    const outFailed = await failed.apply();
+    expect(outFailed.warnings).toContain('project state record write failed: database refused');
+    expect(existsSync(join(failed.root, TOOLING_LEGACY))).toBe(true);
+    expect(outFailed.deletedPaths ?? []).not.toContain(TOOLING_LEGACY);
+  });
+});

@@ -3,10 +3,14 @@ import { normalizeReviewDimensionIds } from '../review/dimensions.js';
 import { LSP_KEY_SET } from '../tooling/lsp-servers.js';
 import {
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_CONSENT_KEYS,
+  ONBOARDING_TOOLING_INFRA_KEYS,
+  ONBOARDING_TOOLING_SCHEMA_VERSION,
   mirroredEnvDetectData,
   type OnboardingEnvironmentMirror,
 } from '../types/index.js';
-import { sameValue } from './canonical.js';
+import { canonicalJson, sameValue } from './canonical.js';
+import { PROJECT_STATE_LIMITS } from './limits.js';
 import type { ProjectEnvironment } from './record.js';
 
 /** The record's portable settings, by file name. App login and verify commands are left out on
@@ -84,6 +88,45 @@ export function environmentUnitOf(column: unknown): ProjectEnvironment | null {
 
 /** The `settings/<name>.json` files of the record's settings, relative to the state directory. */
 export const settingFileName = (name: string): string => `settings/${name}.json`;
+
+/** The onboarding tooling's name in the record's settings. It is no portable setting: a whole-value
+ *  unit that is never merged, so it has no conflict row and no column mapping of its own. */
+export const TOOLING_UNIT_NAME = 'onboarding-tooling';
+
+/** The tooling without the keys that stay on this machine: infrastructure addresses and this
+ *  install's MCP consent. */
+export function withoutMachineLocalTooling(
+  tooling: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...tooling };
+  for (const key of [...ONBOARDING_TOOLING_INFRA_KEYS, ...ONBOARDING_TOOLING_CONSENT_KEYS]) {
+    delete out[key];
+  }
+  return out;
+}
+
+/** The tooling unit from `repositories.onboarding_tooling`, or null when the column holds none a
+ *  reader of this release takes or the file would not be read back. A server list held for consent is
+ *  committed under `mcpSettingsJson`, the key the other installs read, so this install's hold does not
+ *  take the team's list out of the record. */
+export function toolingUnitOf(column: unknown): Record<string, unknown> | null {
+  if (!plainObject(column) || column.schemaVersion !== ONBOARDING_TOOLING_SCHEMA_VERSION) {
+    return null;
+  }
+  if (!plainObject(column.tooling)) return null;
+  const held = column.tooling.importedMcpSettingsJson;
+  const unit = withoutMachineLocalTooling(column.tooling);
+  if (typeof held === 'string' && typeof unit.mcpSettingsJson !== 'string') {
+    unit.mcpSettingsJson = held;
+  }
+  return Buffer.byteLength(canonicalJson(unit), 'utf8') > PROJECT_STATE_LIMITS.maxFileBytes
+    ? null
+    : unit;
+}
+
+/** The tooling unit a checkout holds, or null when its value is no object. */
+export const toolingUnitFrom = (value: unknown): Record<string, unknown> | null =>
+  plainObject(value) ? value : null;
 
 const COLUMN_OF = {
   'scope-exclude-globs': 'scopeExcludeGlobs',

@@ -6,6 +6,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -252,7 +253,10 @@ async function main(): Promise<void> {
         customAgentSpecs: [],
         lspLanguages: [],
       } as never,
-      settings: { 'scope-exclude-globs': ['record/**'] },
+      settings: {
+        'scope-exclude-globs': ['record/**'],
+        'onboarding-tooling': { ragMode: 'record', ollamaUrl: 'http://attacker.example' },
+      },
       environment: { envDetectData: { project: { name: 'record' } }, confirmedValues: {} },
     });
     for (const [rel, text] of files) {
@@ -261,6 +265,7 @@ async function main(): Promise<void> {
     }
     await writeFile(path.join(withRecord, '.haive-data', 'environment.json'), environment);
     await writeFile(path.join(withRecord, '.haive-data', 'exclusions.json'), exclusions);
+    await writeFile(path.join(withRecord, '.haive-data', 'tooling.json'), tooling());
     const e = await scanned(withRecord);
     check(
       'a record unit outranks a stale legacy file',
@@ -268,6 +273,14 @@ async function main(): Promise<void> {
         JSON.stringify(
           (e.onboardingEnvironment as { envDetectData?: unknown } | null)?.envDetectData,
         ) === '{"project":{"name":"record"}}',
+      e,
+    );
+    check(
+      'and so does the tooling unit, without a machine-local key and without the stale RTK-off',
+      isDeepStrictEqual(e.onboardingTooling, {
+        schemaVersion: 1,
+        tooling: { ragMode: 'record' },
+      }) && e.rtkEnabled === true,
       e,
     );
 
@@ -283,12 +296,20 @@ async function main(): Promise<void> {
       path.join(refused, '.haive-data', 'state', 'project', 'environment.json'),
       '{}\n',
     );
+    await writeFile(
+      path.join(refused, '.haive-data', 'state', 'settings', 'onboarding-tooling.json'),
+      '{"ragMode":"record"}\n',
+    );
     await writeFile(path.join(refused, '.haive-data', 'environment.json'), environment);
     await writeFile(path.join(refused, '.haive-data', 'exclusions.json'), exclusions);
+    await writeFile(path.join(refused, '.haive-data', 'tooling.json'), tooling());
     const f = await scanned(refused);
     check(
       'a record the sync refuses leaves the columns to the legacy files',
-      JSON.stringify(f.scopeExcludeGlobs) === '["vendor/**"]' && f.onboardingEnvironment !== null,
+      JSON.stringify(f.scopeExcludeGlobs) === '["vendor/**"]' &&
+        f.onboardingEnvironment !== null &&
+        (f.onboardingTooling as { tooling?: { ragMode?: unknown } } | null)?.tooling?.ragMode ===
+          'none',
       f,
     );
 

@@ -18,9 +18,8 @@ import {
   getHaiveVersion,
   HAIVE_DATA_FILES,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
-  ONBOARDING_TOOLING_CONSENT_KEYS,
-  ONBOARDING_TOOLING_INFRA_KEYS,
 } from '@haive/shared';
+import { withoutMachineLocalTooling } from '@haive/shared/project-state';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
@@ -356,9 +355,9 @@ async function recordOnboardingArtifacts(
  *  always (independent of the commit checkbox); the files it lists in `filesWritten`,
  *  which survives a throw, are staged when the user opts into a commit. The
  *  tooling file drops the machine-specific infra keys (ollamaUrl,
- *  ragConnectionString) — those do not move between machines. The environment and scope
- *  exclusion files are written only when `legacyMirrors` is set: a successful project state
- *  record write carries them and retires those files. */
+ *  ragConnectionString) — those do not move between machines. The environment, scope
+ *  exclusion and tooling files are written only when `legacyMirrors` is set: a successful project
+ *  state record write carries them and retires those files. */
 async function writeHaiveDataMirror(
   ctx: StepContext,
   repositoryId: string,
@@ -393,14 +392,10 @@ async function writeHaiveDataMirror(
   if (env && legacyMirrors) await writeJson(HAIVE_DATA_FILES.environment, env);
 
   const tooling = repo.onboardingTooling as OnboardingToolingMirror | null;
-  if (tooling?.tooling) {
-    const stripped: Record<string, unknown> = { ...tooling.tooling };
-    for (const k of [...ONBOARDING_TOOLING_INFRA_KEYS, ...ONBOARDING_TOOLING_CONSENT_KEYS]) {
-      delete stripped[k];
-    }
+  if (tooling?.tooling && legacyMirrors) {
     const mirror: OnboardingToolingMirror = {
       schemaVersion: tooling.schemaVersion,
-      tooling: stripped,
+      tooling: withoutMachineLocalTooling(tooling.tooling),
     };
     await writeJson(HAIVE_DATA_FILES.tooling, mirror);
   }

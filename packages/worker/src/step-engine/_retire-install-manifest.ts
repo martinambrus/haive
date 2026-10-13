@@ -3,8 +3,14 @@ import {
   HAIVE_DATA_FILES,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_SCHEMA_VERSION,
 } from '@haive/shared';
-import { ENVIRONMENT_UNIT, PROJECT_STATE_DIR, settingFileName } from '@haive/shared/project-state';
+import {
+  ENVIRONMENT_UNIT,
+  PROJECT_STATE_DIR,
+  TOOLING_UNIT_NAME,
+  settingFileName,
+} from '@haive/shared/project-state';
 import type { StepContext } from './step-definition.js';
 
 export const INSTALL_MANIFEST_PATH = '.haive/install.json';
@@ -58,6 +64,15 @@ function isHaiveExclusionsMirror(data: Buffer): boolean {
   );
 }
 
+function isHaiveToolingMirror(data: Buffer): boolean {
+  const doc = jsonObject(data);
+  return (
+    doc !== null &&
+    doc.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION &&
+    isPlainObject(doc.tooling)
+  );
+}
+
 /** Delete `path` while `accept` takes its bytes for Haive's own; the person's file at that name stays.
  *  `requires` is the record file that now carries the value: missing, nothing is deleted or reported.
  *  Never throws; a file it could not judge is reported as kept. */
@@ -104,8 +119,8 @@ export function retireInstallManifest(ctx: RetireContext, warnings: string[]): P
 
 const unitPath = (rel: string): string => `${PROJECT_STATE_DIR}/${rel}`;
 
-/** Delete the legacy `.haive-data/environment.json` and `exclusions.json` mirrors, each once the record
- *  file carrying its value exists. Never throws. */
+/** Delete the legacy `.haive-data/environment.json`, `exclusions.json` and `tooling.json` mirrors, each
+ *  once the record file carrying its value exists. Never throws. */
 export async function retireLegacyMirrors(
   ctx: RetireContext,
   warnings: string[],
@@ -122,6 +137,12 @@ export async function retireLegacyMirrors(
       label: 'exclusions mirror',
       accept: isHaiveExclusionsMirror,
       requires: unitPath(settingFileName('scope-exclude-globs')),
+    },
+    {
+      path: HAIVE_DATA_FILES.tooling,
+      label: 'tooling mirror',
+      accept: isHaiveToolingMirror,
+      requires: unitPath(settingFileName(TOOLING_UNIT_NAME)),
     },
   ];
   const results: Array<{ path: string; outcome: Outcome }> = [];

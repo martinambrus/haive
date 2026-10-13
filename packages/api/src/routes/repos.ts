@@ -66,6 +66,7 @@ import {
 } from '@haive/shared';
 import {
   PORTABLE_SETTING_NAMES,
+  TOOLING_UNIT_NAME,
   PROJECT_STATE_DIR,
   bundleFileName,
   claimFileName,
@@ -2401,7 +2402,11 @@ export async function resetOnboardingArtifacts(
   for (const source of provenance.bundleSources ?? []) {
     await remove(`${PROJECT_STATE_DIR}/${bundleFileName(source)}`, false);
   }
-  for (const name of new Set([...PORTABLE_SETTING_NAMES, ...(provenance.settingNames ?? [])])) {
+  for (const name of new Set([
+    ...PORTABLE_SETTING_NAMES,
+    TOOLING_UNIT_NAME,
+    ...(provenance.settingNames ?? []),
+  ])) {
     await remove(`${PROJECT_STATE_DIR}/${settingFileName(name)}`, false);
   }
   for (const rel of ONBOARDING_RESET_EMPTY_DIRS) await removeIfEmpty(rel);

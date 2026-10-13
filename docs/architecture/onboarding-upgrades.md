@@ -98,7 +98,7 @@ live artifact rows and `quarantinedAgentFiles`; 08's `written`, `removedPaths` a
 `mirroredDirs` entry (SKILL.md, the `subSkillSlugs`, the dir's README) and 09_5b's repairs, whose
 removals come from git (every file HEAD tracks under a repaired skill's directory that is gone from
 disk, since the repair clears the whole directory); and the
-files 12 writes itself (the `.haive-data` tooling and plan mirrors, the project state, and the `.haive/install.json` and legacy mirrors it retires), kept
+files 12 writes itself (the `.haive-data` plan mirror, the project state, the legacy mirrors it writes when no record was written, and the `.haive/install.json` and legacy mirrors it retires), kept
 even when a write threw after some of the files landed. The plan mirror reports what it wrote and
 removed through an accumulator (`writePlanMirror`'s `changes`), also on a throw, so a plan file the
 refresh never reached (a symlink it refused) is not staged, and a mirror that failed before it knew
@@ -615,24 +615,45 @@ made; 02 lists it in `deletedPaths` only when it removed it, and 03 stages it li
 04 writes no commit, so a tracked copy is left as an unstaged deletion. A reset still removes the
 file, for installs that hold one.
 
-**The legacy `.haive-data/environment.json` and `exclusions.json` are retired per unit.** The record
-carries their values (`project/environment.json`, `settings/scope-exclude-globs.json`) and the sync
-imports them, so a 12 whose record write succeeded no longer writes either file. A 12 with no render
-context, or whose record write failed, writes both exactly as before and stages them: the mirror
+**The legacy `.haive-data/environment.json`, `exclusions.json` and `tooling.json` are retired per
+unit.** The record carries their values (`project/environment.json`,
+`settings/scope-exclude-globs.json`, `settings/onboarding-tooling.json`) and the sync imports them,
+so a 12 whose record write succeeded no longer writes any of the three files. A 12 with no render
+context, or whose record write failed, writes them exactly as before and stages them: a mirror
 is retired only by a successful record write. After a successful `writeProjectStateRecord`, 12 and
 02 delete each one through `retireLegacyMirrors` (the same `retireHaiveFile` as `retireInstallManifest`,
 `_retire-install-manifest.ts`), and only while the record file that carries its value exists: a
 repository whose column holds nothing keeps its legacy file, which stays the only copy. The shape
 check is the mirror's own (`schemaVersion` 1, the environment's two objects, a list of strings for
-the globs); anything else at the name is the person's, kept and reported in the warnings. 12 lists the
+the globs, a `tooling` object); anything else at the name is the person's, kept and reported in the warnings. 12 lists the
 path in `ownRemoved` unless it was kept, 02 lists it in `deletedPaths` only when it removed it, 04
 does not touch them. The clone import (`importHaiveDataMirror`) decides per unit too: a column is
 left to the sync when the record's unit file exists in the checkout (`lstatNoFollow`, a stale legacy
 file never outranks it); a column the sync then left empty (it threw, or refused, deferred,
 superseded or found no record) is filled from the legacy file afterwards, still fill-if-absent. A
 repository with no record unit is filled from the legacy file as
-before, with B0.1's MCP consent hold and the tooling import untouched. `tooling.json` is not retired
-here; it is the last legacy mirror.
+before, with B0.1's MCP consent hold on the tooling import.
+
+**The tooling is one whole-value unit, never merged.** `settings/onboarding-tooling.json` holds the
+`tooling` object of `repositories.onboarding_tooling` (`toolingUnitOf`, shared) without
+`ragConnectionString` and `ollamaUrl` and without `ONBOARDING_TOOLING_CONSENT_KEYS`
+(`withoutMachineLocalTooling`, which 12's legacy `tooling.json` write uses too): it is the name of
+no portable setting, so `isSettingUnit` is false for it, no conflict row can name it and the
+three-way merge never sees it, as for a bundle descriptor. A server list this install holds for
+consent (`importedMcpSettingsJson`) is written as `mcpSettingsJson`, the key the other installs read,
+so that holding a teammate's list here does not take it out of the record the next sweep writes. A
+column of another `schemaVersion` or a unit past the 1 MiB file limit writes no file. The sync
+imports it with the legacy importer's semantics and nothing wider: only a NULL column is filled
+(`toolingColumnFromUnit`, `project-state/tooling-import.ts`), a column holding tooling is never
+overwritten, and the machine-local and consent keys are dropped from an incoming unit, so a record
+cannot claim an acceptance. Every imported server list goes through `holdImportedMcpServers`, the
+function the legacy import and the boot hold use, and is inert until a person accepts it on the
+tooling page; `rtk_enabled` is not read from the tooling, since `settings/rtk-enabled.json` carries
+it. The sync base keeps the checkout's unit, and the sync marks the repository dirty when the unit
+the column would write differs from the checkout's, so the next sweep brings the file to this
+install's tooling. Writers that change the column mark the outbox in their transaction: 04, the
+clone import, `initializeRagSyncPrefs`, the MCP consent PATCH (`repoMcpServersAction`) and the boot
+hold (`holdImportedMcpServerLists`). The reset removes the file with the other settings files.
 
 **A row this install cannot manage is `foreign`.** `foreignReason` (shared) names a `custom:` id (a
 bundle item this install holds no bundle for, stored verbatim, never as `foreign`), a marker from a

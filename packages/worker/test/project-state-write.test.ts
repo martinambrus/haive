@@ -1392,6 +1392,95 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
     expect(Object.keys(baseOf(s).settings)).toEqual(['rtk-version']);
   });
 
+  describe('the onboarding tooling unit', () => {
+    const TOOLING = `${SETTINGS}/onboarding-tooling.json`;
+    const COLUMN = {
+      schemaVersion: 1,
+      tooling: {
+        ragMode: 'internal',
+        embeddingModel: 'nomic-embed-text',
+        ollamaUrl: 'http://10.0.0.5:11434',
+        ragConnectionString: 'postgres://u:p@h/d',
+        acceptedMcpSettingsMark: 'mark',
+        mcpSettingsJson: '{"mcpServers":{}}',
+      },
+    };
+
+    it('writes the tooling without its machine-local keys, and carries it in the base', async () => {
+      const s = await setup();
+      await setColumns(s, { onboardingTooling: COLUMN });
+
+      const { written } = await s.writeFull(context(), true);
+
+      expect(written).toContain(TOOLING);
+      expect(read(s.root, TOOLING)).toEqual({
+        ragMode: 'internal',
+        embeddingModel: 'nomic-embed-text',
+        mcpSettingsJson: '{"mcpServers":{}}',
+      });
+      expect(baseOf(s).settings['onboarding-tooling']).toEqual(read(s.root, TOOLING));
+      const all = await listFiles(s.root);
+      const text = all.map((f) => readFileSync(join(s.root, f), 'utf8')).join('\n');
+      expect(text).not.toMatch(/10\.0\.0\.5|postgres:\/\/|mark/);
+    });
+
+    it('writes a server list held for consent under mcpSettingsJson, so the team keeps its list', async () => {
+      const s = await setup();
+      const { mcpSettingsJson: _own, acceptedMcpSettingsMark: _mark, ...rest } = COLUMN.tooling;
+      await setColumns(s, {
+        onboardingTooling: {
+          schemaVersion: 1,
+          tooling: {
+            ...rest,
+            importedMcpSettingsJson: '{"mcpServers":{"x":{"command":"c"}}}',
+            importedMcpServerNames: ['x'],
+          },
+        },
+      });
+
+      await s.writeFull(context(), true);
+
+      expect(read(s.root, TOOLING)).toEqual({
+        ragMode: 'internal',
+        embeddingModel: 'nomic-embed-text',
+        mcpSettingsJson: '{"mcpServers":{"x":{"command":"c"}}}',
+      });
+    });
+
+    it('writes no file for a column that holds nothing or another schema version', async () => {
+      const s = await setup();
+      await s.writeFull(context(), true);
+      expect(existsSync(join(s.root, TOOLING))).toBe(false);
+
+      await setColumns(s, { onboardingTooling: { ...COLUMN, schemaVersion: 2 } });
+      await s.writeFull(context(), true);
+      expect(existsSync(join(s.root, TOOLING))).toBe(false);
+    });
+
+    it('removes the file once the column is gone, and reports it', async () => {
+      const s = await setup();
+      await setColumns(s, { onboardingTooling: COLUMN });
+      await s.writeFull(context(), true);
+      await setColumns(s, { onboardingTooling: null });
+
+      const { removed } = await s.writeFull(context(), true);
+
+      expect(removed).toEqual([TOOLING]);
+      expect(baseOf(s).settings).toEqual({});
+    });
+
+    it('leaves a unit file the previous base never named', async () => {
+      const s = await setup();
+      await mkdir(join(s.root, SETTINGS), { recursive: true });
+      await writeFile(join(s.root, TOOLING), '{"ragMode":"theirs"}\n');
+
+      const { removed } = await s.writeFull(context(), true);
+
+      expect(removed).toEqual([]);
+      expect(read(s.root, TOOLING)).toEqual({ ragMode: 'theirs' });
+    });
+  });
+
   it('leaves a settings file the previous base never named', async () => {
     const s = await setup();
     await mkdir(join(s.root, SETTINGS), { recursive: true });

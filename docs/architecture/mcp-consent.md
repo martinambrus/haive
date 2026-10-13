@@ -17,3 +17,11 @@ stored the committed tooling verbatim, so a file could carry a matching hash of 
 `holdImportedMcpServerLists` holds such rows at boot. A record this install's own 04 wrote equals
 that run's `output.tooling`, so only one matching no local 04 run is held, and the mark keeps an
 accepted list from being held again.
+The project state record carries the same list: `settings/onboarding-tooling.json` is the tooling
+without its machine-local and consent keys, and the sync's import of it (`toolingColumnFromUnit`)
+runs the list through `holdImportedMcpServers` before it reaches the column, so a server that
+arrived in the record is inert until accepted exactly as one from `tooling.json`, whatever
+acceptance the committed unit claims (the consent keys are dropped from it). A column holding tooling
+is never overwritten by a record. A list held here is written back to the record as `mcpSettingsJson`,
+the team's list, and accepting or discarding it, like the boot hold, marks the record stale
+(`markProjectStateDirty`) in the transaction that changes the column.

@@ -24,6 +24,7 @@ import {
   environmentUnitOf,
   normalizeProjectState,
   portableSettingsOf,
+  toolingUnitOf,
   PROJECT_STATE_IMPORT_STEP_ID,
   renderProjectState,
 } from '@haive/shared/project-state';
@@ -274,6 +275,9 @@ const recordOf = (context: Record<string, unknown>) => ({
 });
 
 const BUNDLE_DESCRIPTOR = { source: 'zip:smoke-kit', name: 'smoke-kit' };
+const A_MCP_SETTINGS = JSON.stringify({
+  mcpServers: { 'smoke-only-on-a': { command: 'sh', args: ['-c', 'echo reached'] } },
+});
 
 const asJson = (value: unknown): unknown => JSON.parse(JSON.stringify(value)) as unknown;
 
@@ -556,6 +560,9 @@ async function main(): Promise<void> {
       ollamaUrl: 'http://only-on-a:11434',
       rtkEnabled: false,
     });
+    await a.db.execute(
+      sql`update repositories set onboarding_tooling = jsonb_set(onboarding_tooling, '{tooling,mcpSettingsJson}', to_jsonb(${A_MCP_SETTINGS}::text)) where id = ${a.repositoryId}`,
+    );
     await runStep(a, agentDiscoveryStep, taskA, rowOf(agentDiscoveryStep), {}, LLM_AGENTS);
     const generated = await runStep(a, generateFilesStep, taskA, rowOf(generateFilesStep));
     const rendered = generated.detected;
@@ -580,7 +587,11 @@ async function main(): Promise<void> {
       sourceType: 'zip',
       storageRoot: path.join(tmp, 'bundles', 'smoke-kit'),
     });
-    const LEGACY_FILES = ['.haive-data/environment.json', '.haive-data/exclusions.json'];
+    const LEGACY_FILES = [
+      '.haive-data/environment.json',
+      '.haive-data/exclusions.json',
+      '.haive-data/tooling.json',
+    ];
     await mkdir(path.join(a.repoPath, '.haive-data'), { recursive: true });
     await writeFile(
       path.join(a.repoPath, LEGACY_FILES[0]!),
@@ -589,6 +600,10 @@ async function main(): Promise<void> {
     await writeFile(
       path.join(a.repoPath, LEGACY_FILES[1]!),
       '{"schemaVersion":1,"scopeExcludeGlobs":[]}\n',
+    );
+    await writeFile(
+      path.join(a.repoPath, LEGACY_FILES[2]!),
+      '{"schemaVersion":1,"tooling":{"ragMode":"none"}}\n',
     );
     git(a.repoPath, 'add', '-f', ...LEGACY_FILES);
     git(a.repoPath, 'commit', '-qm', 'legacy mirrors from an older release');
@@ -601,7 +616,7 @@ async function main(): Promise<void> {
       posted.output,
     );
     check(
-      "12's commit takes the legacy environment and exclusions mirrors out of HEAD and the disk",
+      "12's commit takes the legacy environment, exclusions and tooling mirrors out of HEAD and the disk",
       LEGACY_FILES.every(
         (rel) =>
           git(a.repoPath, 'ls-tree', '-r', '--name-only', 'HEAD', '--', rel) === '' &&
@@ -641,10 +656,12 @@ async function main(): Promise<void> {
         lspServerVersions: schema.repositories.lspServerVersions,
         chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
         reviewDimensions: schema.repositories.reviewDimensions,
+        onboardingTooling: schema.repositories.onboardingTooling,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, a.repositoryId))
       .limit(1);
+    const toolingUnitA = toolingUnitOf(columnsA?.onboardingTooling);
     const environmentA = environmentUnitOf(columnsA?.onboardingEnvironment);
     const wantRecord =
       contextA === null
@@ -653,7 +670,10 @@ async function main(): Promise<void> {
             ...recordOf(contextA),
             bundles: [BUNDLE_DESCRIPTOR],
             environment: environmentA,
-            settings: portableSettingsOf(columnsA!),
+            settings: {
+              ...portableSettingsOf(columnsA!),
+              ...(toolingUnitA ? { 'onboarding-tooling': toolingUnitA } : {}),
+            },
           };
     const wantFiles = wantRecord === null ? null : renderProjectState(wantRecord);
     const recordOnDisk = (rel: string) =>
@@ -694,6 +714,7 @@ async function main(): Promise<void> {
         columnsA.scopeExcludeGlobs !== null &&
         columnsA.rtkVersion === null &&
         isDeepStrictEqual(inCommit.filter((rel) => rel.startsWith(`${SETTINGS_REL}/`)).sort(), [
+          `${SETTINGS_REL}/onboarding-tooling.json`,
           `${SETTINGS_REL}/rtk-enabled.json`,
           `${SETTINGS_REL}/scope-exclude-globs.json`,
         ]) &&
@@ -1067,12 +1088,17 @@ async function main(): Promise<void> {
       isDeepStrictEqual(repoB?.onboardingEnvironment, repoA?.onboardingEnvironment),
       repoB?.onboardingEnvironment,
     );
+    const { mcpSettingsJson: _aServers, ...portableToolingRest } = portableTooling;
     check(
-      "B restores A's tooling without its machine-local keys",
+      "B restores A's tooling through the record, without its machine-local keys, and holds A's MCP server until it is accepted",
       isDeepStrictEqual(repoB?.onboardingTooling, {
         schemaVersion: toolingA.schemaVersion,
-        tooling: portableTooling,
-      }),
+        tooling: {
+          ...portableToolingRest,
+          importedMcpSettingsJson: A_MCP_SETTINGS,
+          importedMcpServerNames: ['smoke-only-on-a'],
+        },
+      }) && portableTooling.mcpSettingsJson === A_MCP_SETTINGS,
       repoB?.onboardingTooling,
     );
     check(
@@ -1153,6 +1179,14 @@ async function main(): Promise<void> {
     await b.db.execute(
       sql`update repositories set render_context = jsonb_set(render_context, '{rtkChoiceRecorded}', 'true')
         where id = ${b.repositoryId}`,
+    );
+    const toolingRel = '.haive-data/state/settings/onboarding-tooling.json';
+    check(
+      "B's sweeps write A's tooling unit back as A committed it, the held MCP server list included",
+      git(b.repoPath, 'status', '--porcelain', '--', toolingRel) === '' &&
+        (await readFile(path.join(b.repoPath, toolingRel), 'utf8')) ===
+          git(b.repoPath, 'show', `HEAD:${toolingRel}`) + '\n',
+      git(b.repoPath, 'status', '--porcelain', '--', toolingRel),
     );
     const planA = await planOf(a);
     const planB = await planOf(b);

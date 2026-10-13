@@ -92,9 +92,9 @@ moving a project between installs "must work and be synced correctly and fully".
   `agent_rules_override ?? DEFAULT_AGENT_RULES`.
 - **Legacy:** `.haive/install.json` retired (12, 02 and 04 stop writing it and delete a file of
   Haive's own shape once the record is written; 12 and 03 stage the deletion, never
-  `git rm --cached`); `environment.json` and `exclusions.json` retired the same way once the record
-  carries their units (B1.8d), `tooling.json` still written and read as the fallback when no record
-  unit covers a column. **Version skew:** a newer `format.json`
+  `git rm --cached`); `environment.json`, `exclusions.json` and `tooling.json` retired the same way
+  once the record carries their units (B1.8d, B1.8e), each still written and read as the fallback
+  when no record unit covers a column. **Version skew:** a newer `format.json`
   refuses import and write; claims from a newer Haive release block upgrades on the older install
   with a banner. **Kill switch:** `CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED` (default on).
 - **Migrations are reversible by design:** imported claims are `source='backfill'` with
@@ -491,8 +491,18 @@ Phase 1 (the record):
   shared helper) while the record file carrying its value exists; 02 does the same into
   `deletedPaths`; the clone import skips a column whose record unit file exists, so a stale legacy
   file never outranks the record, fills it from the legacy file afterwards if the sync did not,
-  and a legacy-only repository imports as before. B1.8e:
-  the tooling mirror becomes one whole-value unit with today's importer semantics. Deviation from
+  and a legacy-only repository imports as before. B1.8e: the tooling becomes one whole-value unit,
+  `settings/onboarding-tooling.json`, which is the mirror's `tooling` object without the
+  machine-local keys (`ragConnectionString`, `ollamaUrl`) and without this install's MCP consent
+  keys; a server list held here for consent is written back under `mcpSettingsJson`, so a teammate's
+  list does not leave the record. It is never merged, like a bundle descriptor, so it has no
+  conflict row: the import keeps the legacy importer's fill-if-absent (a NULL column takes the
+  record's tooling, a column holding tooling is never overwritten) and every imported MCP server goes
+  through B0.1's hold (`holdImportedMcpServers`), inert until accepted; the sync base keeps the
+  checkout's unit, and the sync marks the repository dirty when the column's unit differs from the
+  checkout's. The MCP consent PATCH and the boot hold mark the outbox in their transactions, and
+  `tooling.json` retires like the other two (12 stops writing it once its record write succeeded,
+  02 and 12 delete a file of the mirror's shape while the unit file exists). Deviation from
   the B1.7 text above: a legacy file is retired only in the release whose sync imports its unit, and
   only from 12 and 02, not wherever the record first carries it. Controls: PATCH exclusions then a
   sweep tick updates `settings/scope-exclude-globs.json`; A's edit reaches B's column through the
