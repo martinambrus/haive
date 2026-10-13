@@ -839,7 +839,7 @@ async function reconcilePlanLocked(
     .where(eq(schema.planMirrorState.repositoryId, repositoryId))
     .limit(1);
   const hash = hashBytes(bytes);
-  if (state?.syncedHash === hash) {
+  if (bytes.length > 0 && state?.syncedHash === hash) {
     await convergePlanQuestions(tx, repositoryId);
     return noOutcome(null);
   }

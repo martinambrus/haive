@@ -2266,6 +2266,33 @@ async function main(): Promise<void> {
     { same, sameBefore, sameAfter },
   );
 
+  // An empty plan.json is never taken for the absence an older row stamped as the hash of zero bytes.
+  const stampBefore = (
+    await db.query.planMirrorState.findFirst({
+      where: eq(schema.planMirrorState.repositoryId, sId),
+    })
+  )?.syncedHash;
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedHash: createHash('sha256').update('').digest('hex') })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await writeFile(sPlanFile, '');
+  await markPlanMirrorDirty(db, sId);
+  const emptyHeld = await writePlanMirror(db, sId, sDir).then(
+    () => 'wrote',
+    (err: Error) => err.name,
+  );
+  check(
+    'three-way: an empty plan.json is held, not taken for an absent one',
+    emptyHeld === 'PlanMirrorHeldError' && (await readFile(sPlanFile, 'utf8')) === '',
+    emptyHeld,
+  );
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedHash: stampBefore ?? null })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await arrive(theirs);
+
   // A canvas edit that commits while a reconcile waits on its row wins; the reconcile holds.
   const qBefore = await sNode(qId);
   let racing: Promise<string> | undefined;
