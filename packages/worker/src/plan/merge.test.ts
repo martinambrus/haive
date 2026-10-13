@@ -9,6 +9,17 @@ import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared
 import { mergePlanMirror } from '@haive/shared/plan-mirror-merge';
 import type { PlanMirror } from '@haive/shared';
 import {
+  PROJECT_STATE_DIR,
+  claimFileName,
+  emptyProjectState,
+  mergeProjectState,
+  parseProjectState,
+  renderProjectState,
+  type ProjectRender,
+  type ProjectStateClaim,
+  type ProjectStateRecord,
+} from '@haive/shared/project-state';
+import {
   abortMerge,
   commitMerge,
   conflictedPaths,
@@ -80,10 +91,10 @@ afterEach(async () => {
   }
 });
 
-async function write(dir: string, file: string, body: string): Promise<void> {
+async function write(dir: string, file: string, body: string | Buffer): Promise<void> {
   const full = path.join(dir, file);
   await mkdir(path.dirname(full), { recursive: true });
-  await writeFile(full, body, 'utf8');
+  await writeFile(full, body);
 }
 
 /**
@@ -549,6 +560,275 @@ describe('mergeOriginInto: plan.json merges three-way', () => {
 
     expect(attempt.warnings.join('\n')).toContain('different roots');
     expect(await committed(PLAN_JSON)).toBe(serializePlanMirror(other));
+  });
+});
+
+const STATE_PREFIX = `${PROJECT_STATE_DIR}/`;
+const RENDER_FILE = `${STATE_PREFIX}project/render.json`;
+
+const baseRender = (over: Partial<ProjectRender> = {}): ProjectRender => ({
+  projectInfo: {},
+  framework: null,
+  acceptedAgentIds: [],
+  customAgentSpecs: [],
+  lspLanguages: [],
+  ...over,
+});
+
+const claimAt = (diskPath: string, writtenHash: string): ProjectStateClaim => ({
+  path: diskPath,
+  templateId: 'tpl',
+  kind: 'agent',
+  schemaVersion: 1,
+  templateHash: 'h',
+  writtenHash,
+  haiveVersion: '1.0.0',
+});
+
+const recordOf = (over: Partial<ProjectStateRecord> = {}): ProjectStateRecord => ({
+  ...emptyProjectState(),
+  render: baseRender(),
+  ...over,
+});
+
+type Files = Record<string, string | Buffer | null>;
+
+const stateFiles = (record: ProjectStateRecord): Files =>
+  Object.fromEntries(
+    [...renderProjectState(record)].map(([rel, text]) => [`${STATE_PREFIX}${rel}`, text]),
+  );
+
+/** Two checkouts of one history, each side's files given as path -> text (null = removed). */
+async function relatedFilesPair(
+  base: Files,
+  ours: Files,
+  theirs: Files,
+): Promise<{ local: string; wt: string }> {
+  const remote = await mkdtemp(path.join(tmpdir(), 'planmerge-remote-'));
+  const local = await mkdtemp(path.join(tmpdir(), 'planmerge-local-'));
+  dirs.push(remote, local);
+  await git(remote, ['init', '-b', 'main']);
+  await quietGit(remote);
+  await write(remote, 'README.md', '# repo\n');
+  const apply = async (dir: string, files: Files): Promise<void> => {
+    for (const [file, body] of Object.entries(files)) {
+      if (body === null) await git(dir, ['rm', '-q', '-f', file]);
+      else await write(dir, file, body);
+    }
+    await commitAll(dir, 'state');
+  };
+  await apply(remote, base);
+  await rm(local, { recursive: true, force: true });
+  await git(path.dirname(local), ['clone', remote, local]);
+  await quietGit(local);
+  await apply(local, ours);
+  await apply(remote, theirs);
+  await git(local, ['fetch', 'origin', 'main']);
+  return { local, wt: await ensurePlanMergeWorktree(local) };
+}
+
+async function committedRecord(wt: string): Promise<ProjectStateRecord> {
+  const listed = await git(wt, ['ls-tree', '-r', '--name-only', 'HEAD', '--', PROJECT_STATE_DIR]);
+  const files = new Map<string, string>();
+  for (const file of listed.split('\n').filter(Boolean)) {
+    files.set(file.slice(STATE_PREFIX.length), await git(wt, ['show', `HEAD:${file}`]));
+  }
+  const parsed = parseProjectState(files);
+  if (!parsed.ok) throw new Error(parsed.problems.join('; '));
+  return parsed.record;
+}
+
+const unmergedUnderState = async (wt: string): Promise<string> =>
+  (await git(wt, ['ls-files', '-u', '--', PROJECT_STATE_DIR])).trim();
+
+describe('mergeOriginInto: the project state record merges three-way', () => {
+  const base = recordOf();
+  const theirsSpec = [{ id: 'agent-a', description: 'A' }];
+
+  it('carries both sides changes to different keys of one file', async () => {
+    // customAgentSpecs and framework are adjacent lines of render.json, so git reports a conflict.
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }) })),
+      stateFiles(recordOf({ render: baseRender({ customAgentSpecs: theirsSpec }) })),
+    );
+    const { attempt } = await mergeAndCommit(local, wt);
+
+    expect(attempt.autoResolved).toContain(RENDER_FILE);
+    expect(attempt.clean).toBe(true);
+    expect(attempt.conflicts).toEqual([]);
+    expect(await unmergedUnderState(wt)).toBe('');
+    const record = await committedRecord(wt);
+    expect(record.render?.framework).toBe('drupal');
+    expect(record.render?.customAgentSpecs).toEqual(theirsSpec);
+  });
+
+  it('keeps theirs for a key both sides changed', async () => {
+    const ours = recordOf({ render: baseRender({ framework: 'drupal' }) });
+    const theirs = recordOf({ render: baseRender({ framework: 'laravel' }) });
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      stateFiles(ours),
+      stateFiles(theirs),
+    );
+    const { attempt } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect((await committedRecord(wt)).render?.framework).toBe('laravel');
+    const merge = mergeProjectState({ base, local: ours, incoming: theirs });
+    expect(merge.conflicts.map((c) => c.unit)).toEqual(['project/render.json#framework']);
+  });
+
+  it('keeps an added setting file and the other side change in a conflicted file', async () => {
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      stateFiles(
+        recordOf({
+          render: baseRender({ framework: 'drupal' }),
+          settings: Object.assign(Object.create(null), { 'rtk-version': '1.0' }) as Record<
+            string,
+            unknown
+          >,
+        }),
+      ),
+      stateFiles(recordOf({ render: baseRender({ customAgentSpecs: theirsSpec }) })),
+    );
+    const { attempt } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    const record = await committedRecord(wt);
+    expect(record.settings['rtk-version']).toBe('1.0');
+    expect(record.render?.framework).toBe('drupal');
+    expect(record.render?.customAgentSpecs).toEqual(theirsSpec);
+  });
+
+  it('keeps theirs for a whole-file unit both sides changed', async () => {
+    const withUnits = (setting: string, hash: string): ProjectStateRecord =>
+      recordOf({
+        settings: Object.assign(Object.create(null), { 'rtk-version': setting }) as Record<
+          string,
+          unknown
+        >,
+        claims: [claimAt('.claude/agents/a.md', hash)],
+      });
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(withUnits('1', 'h0')),
+      stateFiles(withUnits('2', 'h-ours')),
+      stateFiles(withUnits('3', 'h-theirs')),
+    );
+    const { attempt } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(await unmergedUnderState(wt)).toBe('');
+    const record = await committedRecord(wt);
+    expect(record.settings['rtk-version']).toBe('3');
+    expect(record.claims.map((c) => c.writtenHash)).toEqual(['h-theirs']);
+  });
+
+  it('removes a file the record no longer holds when theirs deleted a unit ours changed', async () => {
+    const claim = claimAt('.claude/agents/a.md', 'h0');
+    const file = `${STATE_PREFIX}${claimFileName(claim.path)}`;
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(recordOf({ claims: [claim] })),
+      stateFiles(recordOf({ claims: [{ ...claim, writtenHash: 'h-ours' }] })),
+      { [file]: null },
+    );
+    const { attempt } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(await unmergedUnderState(wt)).toBe('');
+    expect((await committedRecord(wt)).claims).toEqual([]);
+    await expect(lstat(path.join(wt, file))).rejects.toThrow();
+    expect((await git(wt, ['status', '--porcelain'])).trim()).toBe('');
+  });
+
+  it('falls back to theirs with a warning when a state file does not parse', async () => {
+    const theirs = stateFiles(recordOf({ render: baseRender({ framework: 'laravel' }) }));
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      { ...stateFiles(base), [RENDER_FILE]: '{ not json\n' },
+      theirs,
+    );
+    const { attempt, committed } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(attempt.warnings.some((w) => w.includes(PROJECT_STATE_DIR))).toBe(true);
+    expect(await unmergedUnderState(wt)).toBe('');
+    expect(await committed(RENDER_FILE)).toBe(theirs[RENDER_FILE]);
+  });
+
+  it('falls back without reading a state tree past the record limits', async () => {
+    const theirs = stateFiles(recordOf({ render: baseRender({ framework: 'laravel' }) }));
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }) })),
+      { ...theirs, [`${STATE_PREFIX}huge.json`]: `"${'x'.repeat(1024 * 1024 + 16)}"\n` },
+    );
+    const { attempt, committed } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(attempt.warnings.some((w) => w.includes('larger than the record allows'))).toBe(true);
+    expect(await unmergedUnderState(wt)).toBe('');
+    expect(await committed(RENDER_FILE)).toBe(theirs[RENDER_FILE]);
+  });
+
+  it('falls back rather than decoding a state file that is not UTF-8', async () => {
+    const theirs = stateFiles(recordOf({ render: baseRender({ framework: 'laravel' }) }));
+    const ours = String(
+      stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }) }))[RENDER_FILE],
+    );
+    const at = ours.indexOf('drupal');
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      {
+        [RENDER_FILE]: Buffer.concat([
+          Buffer.from(ours.slice(0, at)),
+          Buffer.from([0xff]),
+          Buffer.from(ours.slice(at + 1)),
+        ]),
+      },
+      theirs,
+    );
+    const { attempt, committed } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(attempt.warnings.some((w) => w.includes('not valid UTF-8'))).toBe(true);
+    expect(await committed(RENDER_FILE)).toBe(theirs[RENDER_FILE]);
+  });
+
+  it('takes the incoming deletion of a state file when the record falls back', async () => {
+    const claim = claimAt('.claude/agents/a.md', 'h0');
+    const file = `${STATE_PREFIX}${claimFileName(claim.path)}`;
+    const theirs = stateFiles(recordOf({ render: baseRender({ framework: 'laravel' }) }));
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(recordOf({ claims: [claim] })),
+      {
+        ...stateFiles(recordOf({ claims: [{ ...claim, writtenHash: 'h-ours' }] })),
+        [RENDER_FILE]: '{ not json\n',
+      },
+      { [RENDER_FILE]: theirs[RENDER_FILE]!, [file]: null },
+    );
+    const { attempt } = await mergeAndCommit(local, wt);
+
+    expect(attempt.clean).toBe(true);
+    expect(await unmergedUnderState(wt)).toBe('');
+    await expect(lstat(path.join(wt, file))).rejects.toThrow();
+    expect((await git(wt, ['ls-files', '--', file])).trim()).toBe('');
+  });
+
+  it('commits a merge whose only conflicts are in the state directory', async () => {
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }) })),
+      stateFiles(recordOf({ render: baseRender({ customAgentSpecs: theirsSpec }) })),
+    );
+    const { attempt } = await mergeAndCommit(local, wt);
+
+    expect(attempt.conflicts).toEqual([]);
+    expect(attempt.clean).toBe(true);
+    expect(
+      (await git(wt, ['rev-list', '--parents', '-n', '1', 'HEAD'])).trim().split(' '),
+    ).toHaveLength(3);
   });
 });
 
