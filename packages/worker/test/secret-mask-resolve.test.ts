@@ -122,6 +122,19 @@ describe('resolveSecretMasks', () => {
     expect(masks).toEqual([]);
   });
 
+  it('masks a repo-less task scratch workspace with the default policy', async () => {
+    const scratch = `${USER_ID}/_scratch/${TASK_ID}`;
+    await mkdir(path.join(storageRoot, scratch), { recursive: true });
+    await writeFile(path.join(storageRoot, scratch, '.env'), 'SECRET=1\n');
+
+    const masks = await resolveSecretMasks(
+      fakeDb({ userId: USER_ID, repositoryId: null }, undefined),
+      TASK_ID,
+      { source: 'haive_repos', target: '/workspace', subpath: scratch },
+    );
+    expect(masks).toEqual([{ containerPath: '/workspace/.env', content: '' }]);
+  });
+
   it('returns no masks when masking is off for the repo', async () => {
     await writeFile(path.join(storageRoot, USER_ID, REPO_ID, '.env'), 'SECRET=1\n');
     const masks = await resolveSecretMasks(

@@ -12,6 +12,7 @@ import {
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { splitWorktreePath, WORKTREE_SUBDIR } from '../../repo/worktree-paths.js';
+import { WORKER_REPO_STORAGE_ROOT } from '../../repo/worktree-git-boundary.js';
 import { resolveInvocationWorkerRoot } from './resolvers.js';
 import {
   secretMaskDeniesPath,
@@ -62,7 +63,15 @@ export async function resolveSecretMasks(
   if (!globallyEnabled) return [];
 
   const target = await maskedRepository(db, taskId);
-  if (!target) return [];
+  if (!target) {
+    // A repo-less task still mounts its scratch workspace; with no repository policy, the defaults apply.
+    if (!repoMount?.subpath) return [];
+    return computeSecretMasks(
+      posix.join(WORKER_REPO_STORAGE_ROOT, repoMount.subpath),
+      { allow: [], denyExtend: [] },
+      repoMount.target,
+    );
+  }
   const { task, repo } = target;
   if (!repo.secretMaskEnabled) return [];
 
@@ -92,9 +101,7 @@ async function maskedRepository(db: Database, taskId: string) {
     columns: { userId: true, repositoryId: true },
   });
   // No task row: we cannot resolve what would be mounted, so we cannot claim there is
-  // nothing to hide. A repo-less task is different — resolveTaskRepoMount returns null
-  // on the same condition, so no repo tree reaches the sandbox and there is genuinely
-  // nothing to mask.
+  // nothing to hide. A repo-less task has no repository policy; the caller masks its scratch mount.
   if (!task) throw new SecretMaskError(`secret-mask: task ${taskId} not found`);
   if (!task.repositoryId) return null;
 
