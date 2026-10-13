@@ -14,6 +14,7 @@ import { formatTokens } from '@/lib/format-tokens';
 import { mergeSpan } from '@/lib/merge-task-span';
 import { usePageTitle } from '@/lib/use-page-title';
 import { rememberTaskOrigin } from '@/lib/task-origin';
+import { taskTypeLabel } from '@/lib/task-type-label';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -31,18 +32,6 @@ function statusVariant(status: TaskStatus): BadgeVariant {
       return 'default';
   }
 }
-
-const TYPE_LABELS: Record<string, string> = {
-  onboarding: 'Onboarding',
-  workflow: 'Workflow',
-  onboarding_upgrade: 'Onboarding upgrade',
-  run_app: 'Run app',
-  kb_author: 'KB enrichment',
-  plan_build: 'Plan build',
-  plan_chat: 'Plan chat',
-  advisory: 'Advisory research',
-  env_replicate: 'Env replicate', // legacy tasks only
-};
 
 // Memoized list row. The 3s poll replaces the tasks array each tick (new refs →
 // rows re-render, acceptable), but typing in the search box re-renders TasksPage
@@ -113,7 +102,7 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
               ) : (
                 <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
               )}
-              <Badge>{TYPE_LABELS[task.type]}</Badge>
+              <Badge>{taskTypeLabel(task)}</Badge>
               {task.repository && (
                 <Badge
                   variant="info"

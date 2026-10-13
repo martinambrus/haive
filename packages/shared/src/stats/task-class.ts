@@ -1,10 +1,11 @@
 /**
  * Task class — the axis statistics group by.
  *
- * `tasks.type` alone is a poor axis. It has twelve members that mean four different KINDS of
- * thing, and a `workflow` task splits further by `execution_path` into paths whose cost
- * differs by an order of magnitude. Grouping a chart by the raw enum produces twelve thin
+ * `tasks.type` alone is a poor axis. It has eleven built-in types that mean four different KINDS
+ * of thing, and a `workflow` task splits further by `execution_path` into paths whose cost
+ * differs by an order of magnitude. Grouping a chart by the raw type produces eleven thin
  * series nobody can read, and hides that "setup" work is overhead rather than delivery.
+ * Admin-authored types (the column is text) are not built-ins and count as `other`.
  *
  * Derived, deliberately not a stored column: it is a presentation grouping over facts the
  * rows already carry, so it can change without a migration and cannot drift from `type`.

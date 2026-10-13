@@ -91,6 +91,7 @@ import {
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
   findQueuedInvocationStepIds,
+  loadTaskTypeLabels,
   resolveCurrentStepCliProviderIds,
   sumTaskTokens,
   sumTaskProviderBreakdown,
@@ -357,6 +358,10 @@ taskRoutes.get('/', async (c) => {
   // step's explicit CLI preference wins over the task column, which is only the fallback (see
   // resolveCurrentStepCliProviderIds). Batched across the page — three queries, not per row.
   const stepCliProviderIds = await resolveCurrentStepCliProviderIds(db, userId, rows);
+  const typeLabels = await loadTaskTypeLabels(
+    db,
+    rows.map((r) => r.type),
+  );
   const tasks = rows.map((t) => {
     const steps = stepsByTask.get(t.id) ?? [];
     const startMs = t.startedAt ? t.startedAt.getTime() : null;
@@ -379,6 +384,7 @@ taskRoutes.get('/', async (c) => {
       null;
     return {
       ...t,
+      typeLabel: typeLabels.get(t.type) ?? null,
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
@@ -1021,8 +1027,10 @@ taskRoutes.get('/:id', async (c) => {
     orderBy: [desc(schema.tasks.createdAt)],
   });
   const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
+  const typeLabels = await loadTaskTypeLabels(db, [task.type]);
   const taskWithActive = {
     ...task,
+    typeLabel: typeLabels.get(task.type) ?? null,
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,
     // Same derivation as the listing, over the rows already fetched above, so the header badge

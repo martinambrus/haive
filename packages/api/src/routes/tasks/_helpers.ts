@@ -666,6 +666,22 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
   });
 }
 
+export async function loadTaskTypeLabels(
+  db: ReturnType<typeof getDb>,
+  slugs: string[],
+): Promise<Map<string, string>> {
+  const distinct = [...new Set(slugs)];
+  if (distinct.length === 0) return new Map();
+  const rows = await db
+    .select({
+      slug: schema.taskTypeDefinitions.slug,
+      displayName: schema.taskTypeDefinitions.displayName,
+    })
+    .from(schema.taskTypeDefinitions)
+    .where(inArray(schema.taskTypeDefinitions.slug, distinct));
+  return new Map(rows.map((r) => [r.slug, r.displayName]));
+}
+
 /** Sum each task's CLI token usage for the listing (GET /tasks). One GROUP BY
  *  over the whole page keeps it a single round-trip regardless of task count.
  *  Uses the same `supersededAt IS NULL` filter as the per-step stats, plus the same
