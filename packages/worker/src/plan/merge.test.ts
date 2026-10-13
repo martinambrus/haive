@@ -551,6 +551,29 @@ describe('mergeOriginInto: plan.json merges three-way', () => {
     expect(await committed(PLAN_JSON)).toBe(serializePlanMirror(theirs));
   });
 
+  it('takes an incoming deletion of plan.md when the plan.json to render it from does not parse', async () => {
+    const { local, wt } = await relatedPair(
+      base,
+      planOf([[NODE_X, 'X ours']]),
+      planOf([[NODE_X, 'X ours']]),
+    );
+    await removePlanMergeWorktree(local);
+    await write(local, PLAN_JSON, '{"nodes":["local"]}\n');
+    await write(local, PLAN_MD, '# local edit\n');
+    await commitAll(local, 'garbled');
+    const remoteDir = (await git(local, ['remote', 'get-url', 'origin'])).trim();
+    await git(remoteDir, ['rm', '-q', '-f', PLAN_MD]);
+    await commitAll(remoteDir, 'drop md');
+    await git(local, ['fetch', 'origin', 'main']);
+    const fresh = await ensurePlanMergeWorktree(local);
+    expect(fresh).toBe(wt);
+    const { attempt } = await mergeAndCommit(local, fresh);
+
+    expect(attempt.clean).toBe(true);
+    expect((await git(fresh, ['ls-files', '-u'])).trim()).toBe('');
+    expect((await git(fresh, ['ls-files', '--', PLAN_MD])).trim()).toBe('');
+  });
+
   it('falls back to theirs with a warning when the roots differ', async () => {
     const other = planOf([[NODE_Y, 'Y other']]);
     other.nodes[0] = { ...other.nodes[0]!, id: NODE_W };
