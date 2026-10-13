@@ -99,6 +99,7 @@ export const planMirrorState = pgTable(
     lastError: text('last_error'),
     writtenAt: timestamp('written_at'),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    syncedHash: text('synced_hash'),
   },
   (table) => [
     check('plan_mirror_state_revision_nonnegative', sql`${table.revision} >= 0`),

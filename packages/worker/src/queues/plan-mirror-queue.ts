@@ -1,5 +1,5 @@
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq, inArray, lt } from 'drizzle-orm';
+import { and, asc, eq, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
@@ -22,9 +22,11 @@ import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
 import {
+  PlanMirrorHeldError,
   flushPlanMirrorForRepository,
   recordPlanMirrorError,
   reconcilePlanMirror,
+  stampPlanMirrorHashesAtBoot,
 } from '../plan/mirror.js';
 import { commitPlanSnapshotFiles } from '../plan/snapshot-git.js';
 import {
@@ -408,6 +410,7 @@ export async function sweepDirtyPlanMirrors(): Promise<number> {
     .select({ repositoryId: schema.planMirrorState.repositoryId })
     .from(schema.planMirrorState)
     .where(lt(schema.planMirrorState.writtenRevision, schema.planMirrorState.revision))
+    .orderBy(asc(schema.planMirrorState.updatedAt))
     .limit(25);
   let flushed = 0;
   for (const row of dirty) {
@@ -415,7 +418,17 @@ export async function sweepDirtyPlanMirrors(): Promise<number> {
       await refresh(row.repositoryId);
       flushed++;
     } catch (err) {
-      logger.warn({ err, repositoryId: row.repositoryId }, 'dirty plan mirror refresh failed');
+      if (err instanceof PlanMirrorHeldError) {
+        logger.debug({ repositoryId: row.repositoryId }, 'dirty plan mirror held');
+      } else {
+        logger.warn({ err, repositoryId: row.repositoryId }, 'dirty plan mirror refresh failed');
+      }
+      // A row that cannot be written goes to the back, so stuck rows cannot starve the batch.
+      await getDb()
+        .update(schema.planMirrorState)
+        .set({ updatedAt: new Date() })
+        .where(eq(schema.planMirrorState.repositoryId, row.repositoryId))
+        .catch(() => undefined);
     }
   }
   return flushed;
@@ -437,6 +450,9 @@ async function sweepAll(): Promise<number> {
 }
 
 export async function schedulePlanMirrorSweep(): Promise<void> {
+  await stampPlanMirrorHashesAtBoot(getDb()).catch((err) => {
+    logger.warn({ err }, 'plan mirror hashes not stamped at boot');
+  });
   await markProjectStatesDirtyAtBoot(getDb()).catch((err) => {
     logger.warn({ err }, 'project states not marked dirty at boot');
   });

@@ -2,7 +2,7 @@ import { and, asc, eq, isNotNull, lt, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { readRenderContextColumn } from '@haive/shared/project-state';
-import { gitRun } from '../repo/git-push.js';
+import { gitOperationInProgress } from '../repo/git-operation.js';
 import { syncProjectStateFromCheckout } from './sync.js';
 import { ProjectStateMovedError, writeProjectStateColumn } from './write.js';
 
@@ -32,13 +32,6 @@ async function touchOutbox(db: Database, repositoryId: string): Promise<void> {
     .update(schema.projectStateOutbox)
     .set({ updatedAt: new Date() })
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
-}
-
-async function gitOperationInProgress(repoPath: string): Promise<boolean> {
-  for (const ref of ['MERGE_HEAD', 'REBASE_HEAD']) {
-    if ((await gitRun(repoPath, ['rev-parse', '-q', '--verify', ref])).code === 0) return true;
-  }
-  return false;
 }
 
 /** Marks every repository holding a render context dirty, so the first sweep after a boot brings the

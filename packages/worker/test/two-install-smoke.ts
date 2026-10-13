@@ -32,6 +32,7 @@ import { applyPlanPatch } from '@haive/shared/plan';
 import { upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { handleClone, handleScan } from '../src/repo/clone.js';
+import { writePlanMirror } from '../src/plan/mirror.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   markProjectStatesDirtyAtBoot,
@@ -1197,6 +1198,30 @@ async function main(): Promise<void> {
         a: planA.length,
         b: planB.length,
       },
+    );
+
+    const restoredHash = (
+      await b.db.query.planMirrorState.findFirst({
+        where: eq(schema.planMirrorState.repositoryId, b.repositoryId),
+      })
+    )?.syncedHash;
+    await applyPlanPatch(
+      b.db,
+      { ops: [{ op: 'upsert', nodeRef: planB[1]!.id, title: 'Edited on B' }] },
+      { repositoryId: b.repositoryId, origin: 'user' },
+    );
+    const bFlush = await writePlanMirror(b.db, b.repositoryId, b.repoPath).then(
+      (files) => files,
+      (err: Error) => err.message,
+    );
+    check(
+      "B restores A's plan, edits it, and the write goes through",
+      typeof restoredHash === 'string' &&
+        Array.isArray(bFlush) &&
+        (await readFile(path.join(b.repoPath, '.haive-data/plan.json'), 'utf8')).includes(
+          'Edited on B',
+        ),
+      { restoredHash, bFlush },
     );
 
     // ---- B holds A's claims as import markers (B1.6) ----------------------------------------

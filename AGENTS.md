@@ -57,7 +57,10 @@ repo, bundle, runtime/ide ensure, ddev control, usage and PR polling, and plan m
 - `env-replicate-queue` runs Dockerfile builds for environment replication.
 - `plan-mirror-queue` reconciles the repository-backed plan snapshot: a `refresh` rewrites
   `.haive-data/plan.{json,md}`, a `save` also commits and optionally pushes, and a 10s
-  scheduled sweep drains `plan_mirror_state` rows whose `written_revision < revision`. The same
+  scheduled sweep drains `plan_mirror_state` rows whose `written_revision < revision`. A flush holds
+  (writes nothing, row stays dirty, `last_error` says why) while a merge or rebase is open or
+  `plan.json` holds bytes Haive has not read in (`synced_hash`; see
+  [Plan canvas](docs/architecture/plan-canvas.md)). The same
   sweep rewrites `.haive-data/state/` for `project_state_outbox` rows the same way (write only, never
   a commit; see [Onboarding template versioning](docs/architecture/onboarding-upgrades.md)).
 

@@ -1,5 +1,12 @@
-import { readTextNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { createHash } from 'node:crypto';
+import {
+  readFileNoFollow,
+  removeNoFollow,
+  removeFileIfNoFollow,
+  rewriteFileIfNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
+import { and, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   HAIVE_DATA_FILES,
@@ -16,6 +23,7 @@ import {
   renderPlanMarkdownFrom,
   planNodePath,
 } from '@haive/shared/plan';
+import { gitOperationInProgress } from '../repo/git-operation.js';
 
 /**
  * The committed `.haive-data/` projection of a repository's plan.
@@ -35,58 +43,144 @@ export interface PlanMirrorChanges {
   removed: string[];
 }
 
-/** Write both mirror files. Returns the repo-relative paths written; `changes`, when given,
- *  also collects what was written or removed up to a throw. */
-export async function writePlanMirror(
-  db: Database,
-  repositoryId: string,
+/** A flush that wrote nothing on purpose; the row stays dirty and `last_error` says why. */
+export class PlanMirrorHeldError extends Error {
+  override readonly name = 'PlanMirrorHeldError';
+}
+
+// A plan this size is far past any real plan; a larger file is held rather than buffered.
+const PLAN_JSON_MAX_BYTES = 16 * 1024 * 1024;
+const PLAN_WRITE_TOO_LARGE = `the plan renders to more than ${PLAN_JSON_MAX_BYTES / 1024 / 1024} MiB, so its plan.json is not written; nothing was written.`;
+const PLAN_TOO_LARGE = `the committed plan snapshot is larger than ${PLAN_JSON_MAX_BYTES / 1024 / 1024} MiB`;
+
+/** plan.json's bytes, `'too-large'` past the cap (nothing beyond it is read), or null when absent. */
+async function readPlanJson(anchor: string): Promise<Buffer | 'too-large' | null> {
+  const read = await readFileNoFollow(anchor, HAIVE_DATA_FILES.plan, {
+    maxBytes: PLAN_JSON_MAX_BYTES,
+  });
+  if (read === null) return null;
+  return read.truncated ? 'too-large' : read.data;
+}
+
+const hashBytes = (bytes: string | Buffer): string =>
+  createHash('sha256').update(bytes).digest('hex');
+
+// Stamped when the files were removed, so a plan.json that arrives later reads as unimported.
+const ABSENT_HASH = 'absent';
+
+const HELD_UNIMPORTED =
+  "the checkout's plan.json holds changes Haive has not read in; Pull the plan to bring them in. Nothing was written.";
+const HELD_GIT_OPERATION =
+  'a merge or rebase is open in the checkout; nothing was written. The plan is written again once it finishes.';
+
+async function assertFlushMayWrite(
   repoPath: string,
-  changes?: PlanMirrorChanges,
-): Promise<string[]> {
+  syncedHash: string | null,
+  nextJson: string | null,
+): Promise<void> {
+  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  const onDisk = await readPlanJson(repoPath);
+  if (onDisk === null) return;
+  if (onDisk === 'too-large' || !flushMayReplace(repoPath, onDisk, syncedHash, nextJson)) {
+    throw new PlanMirrorHeldError(HELD_UNIMPORTED);
+  }
+}
+
+function flushMayReplace(
+  repoPath: string,
+  onDisk: Buffer,
+  syncedHash: string | null,
+  nextJson: string | null,
+): boolean {
+  // Haive never writes an empty plan.json; older rows stamped absence as the hash of zero bytes.
+  if (onDisk.length === 0) return syncedHash === null;
+  const diskHash = hashBytes(onDisk);
+  if (diskHash === syncedHash || (nextJson !== null && diskHash === hashBytes(nextJson)))
+    return true;
+  if (syncedHash !== null) return false;
+  logger.warn({ repoPath }, 'plan.json differs from the database and was never stamped; adopting');
+  return true;
+}
+
+/** Removes plan.json only while it still holds bytes the flush may replace, judged on the file removed. */
+export async function removePlanJsonIfUnchanged(
+  repoPath: string,
+  syncedHash: string | null,
+): Promise<void> {
+  let operation = false;
+  const outcome = await removeFileIfNoFollow(
+    repoPath,
+    HAIVE_DATA_FILES.plan,
+    async (data) => {
+      operation = await gitOperationInProgress(repoPath);
+      return !operation && flushMayReplace(repoPath, data, syncedHash, null);
+    },
+    { maxBytes: PLAN_JSON_MAX_BYTES },
+  );
+  if (outcome === 'kept') {
+    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
+  }
+  if (outcome === 'absent' && (await gitOperationInProgress(repoPath))) {
+    throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  }
+}
+
+/** Replaces plan.json only while it still holds bytes the flush may replace, judged on the file it
+ *  holds, so bytes a pull lands after the early check are never written over. */
+export async function writePlanJsonIfUnchanged(
+  repoPath: string,
+  json: string,
+  syncedHash: string | null,
+): Promise<void> {
+  const bytes = Buffer.from(json, 'utf8');
+  // Every read of plan.json stops at the cap, so a larger file Haive wrote could never be judged again.
+  if (bytes.length > PLAN_JSON_MAX_BYTES) throw new PlanMirrorHeldError(PLAN_WRITE_TOO_LARGE);
+  let operation = false;
+  // The merge check is repeated here, after the file is parked, so it sits next to the replace.
+  const outcome = await rewriteFileIfNoFollow(
+    repoPath,
+    HAIVE_DATA_FILES.plan,
+    async (data) => {
+      operation = await gitOperationInProgress(repoPath);
+      if (operation) return null;
+      return flushMayReplace(repoPath, data, syncedHash, json) ? bytes : null;
+    },
+    { maxBytes: PLAN_JSON_MAX_BYTES },
+  );
+  if (outcome === 'kept') {
+    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_UNIMPORTED);
+  }
+  if (outcome === 'rewritten') return;
+  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
   try {
-    return await db.transaction(async (tx) => {
-      // Every writer (queue, plan steps, onboarding) enters here. Serialize per
-      // repository across worker processes so an older render can never rename
-      // over a newer one after the newer writer already marked itself current.
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
-      return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
+    await writeFileNoFollow(repoPath, HAIVE_DATA_FILES.plan, bytes, {
+      mode: 'create-exclusive',
+      createParents: true,
     });
   } catch (err) {
-    await recordPlanMirrorError(db, repositoryId, err).catch(() => undefined);
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new PlanMirrorHeldError(HELD_UNIMPORTED);
+    }
     throw err;
   }
 }
 
-type PlanMirrorTx = Parameters<Parameters<Database['transaction']>[0]>[0];
+async function stampSyncedHash(
+  db: Pick<Database, 'update'>,
+  repositoryId: string,
+  hash: string,
+): Promise<void> {
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedHash: hash })
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId));
+}
 
-async function writePlanMirrorLocked(
+/** The two files as the database would write them now, or null when there is no plan. */
+async function renderPlanMirrorFiles(
   db: PlanMirrorTx,
   repositoryId: string,
-  repoPath: string,
-  changes?: PlanMirrorChanges,
-): Promise<string[]> {
-  let [state] = await db
-    .select()
-    .from(schema.planMirrorState)
-    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
-    .limit(1);
-  if (!state) {
-    const [created] = await db
-      .insert(schema.planMirrorState)
-      .values({ repositoryId, revision: 1, writtenRevision: 0 })
-      .onConflictDoNothing()
-      .returning();
-    if (created) state = created;
-    else {
-      [state] = await db
-        .select()
-        .from(schema.planMirrorState)
-        .where(eq(schema.planMirrorState.repositoryId, repositoryId))
-        .limit(1);
-    }
-  }
-  const targetRevision = Math.max(1, state?.revision ?? 1);
-
+): Promise<{ json: string; markdown: string } | null> {
   const [nodes, edges, codeLinks] = await Promise.all([
     loadPlanNodes(db, repositoryId),
     loadPlanEdges(db, repositoryId),
@@ -103,33 +197,7 @@ async function writePlanMirrorLocked(
       .from(schema.planNodeCodeLinks)
       .where(eq(schema.planNodeCodeLinks.repositoryId, repositoryId)),
   ]);
-
-  if (nodes.length === 0) {
-    // Both settle before a failure propagates, so a removal that landed is always reported.
-    const removals = await Promise.allSettled(
-      [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown].map(async (rel) => {
-        await removeNoFollow(repoPath, rel);
-        changes?.removed.push(rel);
-      }),
-    );
-    const refused = removals.find((r) => r.status === 'rejected');
-    if (refused) throw refused.reason;
-    await db
-      .update(schema.planMirrorState)
-      .set({
-        writtenRevision: targetRevision,
-        lastError: null,
-        writtenAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.planMirrorState.repositoryId, repositoryId),
-          eq(schema.planMirrorState.revision, targetRevision),
-        ),
-      );
-    return [];
-  }
+  if (nodes.length === 0) return null;
 
   // `createdAt` is intentionally not portable, but legacy/manual rows can have
   // duplicate or gapped ordinals whose tie-breaker used that timestamp. Compact
@@ -163,6 +231,96 @@ async function writePlanMirrorLocked(
     })),
     codeLinks,
   });
+  return {
+    json: `${JSON.stringify(mirror, null, 2)}\n`,
+    markdown: renderPlanMarkdownFrom(nodes, edges),
+  };
+}
+
+/** Write both mirror files. Returns the repo-relative paths written; `changes`, when given,
+ *  also collects what was written or removed up to a throw. */
+export async function writePlanMirror(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+  changes?: PlanMirrorChanges,
+): Promise<string[]> {
+  try {
+    const result = await db.transaction(async (tx) => {
+      // Every writer (queue, plan steps, onboarding) enters here. Serialize per
+      // repository across worker processes so an older render can never rename
+      // over a newer one after the newer writer already marked itself current.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
+      return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
+    });
+    // Thrown only once the stamp of the plan.json that landed is committed.
+    if (result.failed !== undefined) throw result.failed;
+    return result.written;
+  } catch (err) {
+    await recordPlanMirrorError(db, repositoryId, err).catch(() => undefined);
+    throw err;
+  }
+}
+
+type PlanMirrorTx = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+async function writePlanMirrorLocked(
+  db: PlanMirrorTx,
+  repositoryId: string,
+  repoPath: string,
+  changes?: PlanMirrorChanges,
+): Promise<{ written: string[]; failed?: unknown }> {
+  let [state] = await db
+    .select()
+    .from(schema.planMirrorState)
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+    .limit(1);
+  if (!state) {
+    const [created] = await db
+      .insert(schema.planMirrorState)
+      .values({ repositoryId, revision: 1, writtenRevision: 0 })
+      .onConflictDoNothing()
+      .returning();
+    if (created) state = created;
+    else {
+      [state] = await db
+        .select()
+        .from(schema.planMirrorState)
+        .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+        .limit(1);
+    }
+  }
+  const targetRevision = Math.max(1, state?.revision ?? 1);
+
+  const rendered = await renderPlanMirrorFiles(db, repositoryId);
+  await assertFlushMayWrite(repoPath, state?.syncedHash ?? null, rendered?.json ?? null);
+
+  if (!rendered) {
+    await removePlanJsonIfUnchanged(repoPath, state?.syncedHash ?? null);
+    changes?.removed.push(HAIVE_DATA_FILES.plan);
+    await stampSyncedHash(db, repositoryId, ABSENT_HASH);
+    try {
+      await removeNoFollow(repoPath, HAIVE_DATA_FILES.planMarkdown);
+    } catch (err) {
+      return { written: [], failed: err };
+    }
+    changes?.removed.push(HAIVE_DATA_FILES.planMarkdown);
+    await db
+      .update(schema.planMirrorState)
+      .set({
+        writtenRevision: targetRevision,
+        lastError: null,
+        writtenAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.planMirrorState.repositoryId, repositoryId),
+          eq(schema.planMirrorState.revision, targetRevision),
+        ),
+      );
+    return { written: [] };
+  }
 
   const written: string[] = [];
   const write = async (rel: string, content: string): Promise<void> => {
@@ -174,8 +332,16 @@ async function writePlanMirrorLocked(
     changes?.written.push(rel);
   };
 
-  await write(HAIVE_DATA_FILES.plan, `${JSON.stringify(mirror, null, 2)}\n`);
-  await write(HAIVE_DATA_FILES.planMarkdown, renderPlanMarkdownFrom(nodes, edges));
+  await writePlanJsonIfUnchanged(repoPath, rendered.json, state?.syncedHash ?? null);
+  written.push(HAIVE_DATA_FILES.plan);
+  changes?.written.push(HAIVE_DATA_FILES.plan);
+  await stampSyncedHash(db, repositoryId, hashBytes(rendered.json));
+  // A failed plan.md leaves the row dirty but keeps the stamp of the plan.json that landed.
+  try {
+    await write(HAIVE_DATA_FILES.planMarkdown, rendered.markdown);
+  } catch (err) {
+    return { written, failed: err };
+  }
   // Conditional on the revision we rendered. A mutation that raced the file
   // write leaves the row dirty and the scheduled sweep immediately retries.
   await db
@@ -192,7 +358,7 @@ async function writePlanMirrorLocked(
         eq(schema.planMirrorState.revision, targetRevision),
       ),
     );
-  return written;
+  return { written };
 }
 
 /** Only `refused` is worth telling a person: every rescan meets no snapshot or an existing plan. */
@@ -225,12 +391,15 @@ export async function importPlanMirror(
   storagePath: string,
 ): Promise<PlanMirrorImport> {
   let rawPayload: unknown;
+  let rawBytes: Buffer;
   try {
     // null is absence OR a refusal — a link, a non-regular file — and both mean there is no mirror
     // to import, which is exactly what the `catch` concluded for an unreadable path.
-    const raw = await readTextNoFollow(storagePath, HAIVE_DATA_FILES.plan);
+    const raw = await readPlanJson(storagePath);
     if (raw === null) return { imported: false, code: 'no_mirror', reason: 'no plan mirror' };
-    rawPayload = JSON.parse(raw) as unknown;
+    if (raw === 'too-large') return refused(PLAN_TOO_LARGE);
+    rawBytes = raw;
+    rawPayload = JSON.parse(raw.toString('utf8')) as unknown;
   } catch {
     return { imported: false, code: 'no_mirror', reason: 'no plan mirror' };
   }
@@ -404,6 +573,7 @@ export async function importPlanMirror(
         revision,
         writtenRevision: revision,
         writtenAt: new Date(),
+        syncedHash: hashBytes(rawBytes),
       })
       .onConflictDoUpdate({
         target: schema.planMirrorState.repositoryId,
@@ -413,6 +583,7 @@ export async function importPlanMirror(
           lastError: null,
           writtenAt: new Date(),
           updatedAt: new Date(),
+          syncedHash: hashBytes(rawBytes),
         },
       });
   });
@@ -471,10 +642,13 @@ export async function reconcilePlanMirror(
   });
 
   let rawPayload: unknown;
+  let rawBytes: Buffer;
   try {
-    const raw = await readTextNoFollow(storagePath, HAIVE_DATA_FILES.plan);
+    const raw = await readPlanJson(storagePath);
     if (raw === null) return empty('this repository has no committed plan snapshot');
-    rawPayload = JSON.parse(raw) as unknown;
+    if (raw === 'too-large') return empty(PLAN_TOO_LARGE);
+    rawBytes = raw;
+    rawPayload = JSON.parse(raw.toString('utf8')) as unknown;
   } catch {
     return empty('this repository has no committed plan snapshot');
   }
@@ -504,6 +678,12 @@ export async function reconcilePlanMirror(
     // Serialized against every mirror WRITE on the same repository: a reconcile
     // that raced a flush could otherwise import a file the flush is mid-rename.
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
+    // A flush that held the lock first may have replaced the file this read; stamping the older
+    // bytes would make the next flush hold on a file Haive wrote.
+    const now = await readPlanJson(storagePath);
+    if (!Buffer.isBuffer(now) || !now.equals(rawBytes)) {
+      throw new Error('the plan snapshot changed while it was being read; try again');
+    }
 
     const localRows = await tx
       .select({ id: schema.planNodes.id })
@@ -676,6 +856,13 @@ export async function reconcilePlanMirror(
     if (nodesCreated > 0 || nodesUpdated > 0 || keptLocal.length > 0) {
       await markPlanMirrorDirty(tx, repositoryId);
     }
+    await tx
+      .insert(schema.planMirrorState)
+      .values({ repositoryId, revision: 0, writtenRevision: 0, syncedHash: hashBytes(rawBytes) })
+      .onConflictDoUpdate({
+        target: schema.planMirrorState.repositoryId,
+        set: { syncedHash: hashBytes(rawBytes) },
+      });
 
     logger.info(
       { repositoryId, nodesCreated, nodesUpdated, keptLocal: keptLocal.length, edgesAdded },
@@ -708,6 +895,62 @@ export async function flushPlanMirrorForRepository(
   if (!repoPath) throw new Error('repository has no resolvable filesystem path');
   const files = await writePlanMirror(db, repositoryId, repoPath);
   return { files, repoPath };
+}
+
+/** Stamps every clean row that has no `synced_hash` yet and whose plan.json already is what the
+ *  database renders. A row whose file differs stays unstamped, and its next flush adopts the file
+ *  as it did before the guard existed. */
+export async function stampPlanMirrorHashesAtBoot(db: Database): Promise<number> {
+  const rows = await db
+    .select({ repositoryId: schema.planMirrorState.repositoryId })
+    .from(schema.planMirrorState)
+    .where(
+      and(
+        isNull(schema.planMirrorState.syncedHash),
+        gte(schema.planMirrorState.writtenRevision, schema.planMirrorState.revision),
+      ),
+    );
+  let stamped = 0;
+  for (const { repositoryId } of rows) {
+    try {
+      const done = await db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
+        const [state] = await tx
+          .select({ syncedHash: schema.planMirrorState.syncedHash })
+          .from(schema.planMirrorState)
+          .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+          .limit(1);
+        if (!state || state.syncedHash !== null) return false;
+        const [repo] = await tx
+          .select({
+            storagePath: schema.repositories.storagePath,
+            localPath: schema.repositories.localPath,
+          })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, repositoryId))
+          .limit(1);
+        const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
+        if (!repoPath) return false;
+        const rendered = await renderPlanMirrorFiles(tx, repositoryId);
+        const onDisk = await readPlanJson(repoPath);
+        const matches =
+          rendered === null
+            ? onDisk === null
+            : Buffer.isBuffer(onDisk) && onDisk.equals(Buffer.from(rendered.json, 'utf8'));
+        if (!matches) return false;
+        await stampSyncedHash(
+          tx,
+          repositoryId,
+          Buffer.isBuffer(onDisk) ? hashBytes(onDisk) : ABSENT_HASH,
+        );
+        return true;
+      });
+      if (done) stamped++;
+    } catch (err) {
+      logger.warn({ err, repositoryId }, 'plan mirror hash not stamped at boot');
+    }
+  }
+  return stamped;
 }
 
 export async function recordPlanMirrorError(
