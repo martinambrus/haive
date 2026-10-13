@@ -136,7 +136,10 @@ describe('GET /modules/loaded', () => {
 });
 
 describe('GET /modules pages', () => {
-  const pages = { home: { title: 'Home', widgets: [{ type: 'markdown', body: 'hi' }] } };
+  const pages = {
+    home: { title: 'Home', widgets: [{ type: 'markdown', body: 'hi' }] },
+    load: { title: 'Load', widgets: [{ type: 'kpi', label: 'Load', endpoint: '/m/dash/load' }] },
+  };
 
   async function appWith(apiRequiresAdmin: boolean) {
     const app = new Hono<AppEnv>();
@@ -170,17 +173,14 @@ describe('GET /modules pages', () => {
     ((await (await app.request('/modules')).json()) as { modules: { nav: unknown[] }[] })
       .modules[0]!.nav;
 
-  it('hides the nav of an admin-only module from a user, not from an admin', async () => {
+  it("leaves nav to each item's adminOnly, whatever the api requires", async () => {
     h.role = 'user';
-    expect(await navFor(await appWith(true))).toEqual([]);
-    expect(await navFor(await appWith(false))).toHaveLength(1);
-    h.role = 'admin';
     expect(await navFor(await appWith(true))).toHaveLength(1);
   });
 
-  it('hides the pages of an admin-only module from a user', async () => {
+  it('hides from a user only the pages of an admin-only module that call its api', async () => {
     h.role = 'user';
-    expect(await pagesFor(await appWith(true))).toEqual({});
+    expect(await pagesFor(await appWith(true))).toEqual({ home: pages.home });
   });
 
   it('gives an admin the pages of an admin-only module', async () => {
