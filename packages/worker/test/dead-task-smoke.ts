@@ -355,7 +355,7 @@ async function main(): Promise<void> {
 
     // --- ADVANCE --------------------------------------------------------------------
     {
-      const id = await makeTask('advance-unknown-current');
+      const id = await makeTask('advance-unknown-current', { currentStepId: GONE });
       const threw = await run(TASK_JOB_NAMES.ADVANCE_STEP, {
         taskId: id,
         userId,
@@ -373,6 +373,26 @@ async function main(): Promise<void> {
           (await eventTypes(id)).includes('task.dead') &&
           threw === null,
         { v, threw: String(threw) },
+      );
+    }
+    {
+      const id = await makeTask('advance-unknown-moved-past');
+      const before = await view(id);
+      await run(TASK_JOB_NAMES.ADVANCE_STEP, {
+        taskId: id,
+        userId,
+        stepId: GONE,
+        round: 0,
+        epoch: 3,
+      });
+      const v = await view(id);
+      check(
+        'ADVANCE for an unknown step the task has moved past is dropped, not dead',
+        v.deadAt === null &&
+          v.status === 'running' &&
+          v.currentStepId === before.currentStepId &&
+          !(await eventTypes(id)).includes('task.dead'),
+        v,
       );
     }
     {

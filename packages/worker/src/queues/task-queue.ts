@@ -2296,17 +2296,6 @@ async function handleAdvanceStep(
     return;
   }
 
-  const stepDef = stepRegistry.get(payload.stepId);
-  if (!stepDef) {
-    await markTaskDead(db, ctx.taskId, deadReasonFor([payload.stepId]), {
-      epoch: ctx.orchestrationEpoch,
-      unresolved: [payload.stepId],
-      stepId: payload.stepId,
-      round,
-    });
-    return;
-  }
-
   // Every advance with no answer is queued for the step the task points at, so one for a step and
   // round it has moved past is left over, such as one queued before a restart for a row boot
   // requeued as abandoned, and must not claim that row and point the task back at it.
@@ -2322,6 +2311,17 @@ async function handleAdvanceStep(
       },
       'advance-step skipped: the task has moved past this step',
     );
+    return;
+  }
+
+  const stepDef = stepRegistry.get(payload.stepId);
+  if (!stepDef) {
+    await markTaskDead(db, ctx.taskId, deadReasonFor([payload.stepId]), {
+      epoch: ctx.orchestrationEpoch,
+      unresolved: [payload.stepId],
+      stepId: payload.stepId,
+      round,
+    });
     return;
   }
 
