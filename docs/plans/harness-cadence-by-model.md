@@ -96,18 +96,24 @@ per arm: `fix_loop.requested` rounds, which step sent each one back, gate-2 outc
 time and spend for 07 alone and for the whole task. Repeat once with a frontier model on 07 to see
 whether B only adds cost there, as the article found.
 
-Decision rule, written before the run: B is worth building if it cuts fix rounds for the cheaper
-model by enough that whole-task spend falls or stays flat. A cheaper 07 alone does not count, since
+Decision rule, written before the run: acceptance first, cost second. B qualifies only if its
+gate-2 outcomes are at least as good as A's (no more rejected or unfinished runs, and no
+unrecovered failure that ends a run early, which would cut rounds and spend for the wrong reason).
+Only then is B worth building if it cuts fix rounds for the cheaper model by enough that
+whole-task spend falls or stays flat. A cheaper 07 alone does not count, since
 the article's harness costs 3-4× more inside the implementation step. Local only: the patch and any
 CLI preference change are snapshotted and reverted after. Rollback: revert the local patch.
 
 ### P1. Checks inside implementation, as an explicit per-step setting (conditional on P0)
 
 A per-repository setting on the Tooling page, beside the declared commands: "Run checks during
-implementation", default off. When on, 07 (initial and fix passes) and the DAG coder can ask Haive
-to run a check by slot (lint, typecheck, tests, and on a fix round the last selective test run)
-and get its classified result back. The agent never receives a raw command to run itself, for two
-structural reasons:
+implementation", default off. When on, 07 (initial and fix passes) can ask Haive to run a check by
+slot (lint, typecheck, tests, and on a fix round the last selective test run) and get its classified
+result back. 07 works in `01-worktree-setup`'s integration worktree, the tree 08 checks, so both
+read the same files. A DAG coder does not: it edits its own per-issue worktree until the level
+merges (`docs/architecture/review-scope.md`), and a check run on 08's path would not see its edits.
+DAG coders are therefore out of P1 (D4). The agent never receives a raw command to run itself, for
+two structural reasons:
 
 - **DDEV.** 08's DDEV slots run host-side through `ddevExec`; the sandbox has no `ddev exec`
   (F1), so a handed-over command cannot run there.
@@ -116,8 +122,12 @@ structural reasons:
   non-zero exit (`execSlot`, `08-phase-5-verify.ts`). A prompt built before the run cannot know
   either, and both can change while the agent works.
 
-So the check runs host-side through 08's own `execSlot` and the same classifiers, never a second
-resolver or runner, and returns one of: passed, failed with its scoped output, or NOT RUN with the
+So each check runs through the runner its owning step uses, never a second resolver or runner:
+lint, typecheck and the full test command through 08's `execSlot` and its classifiers, and the
+selective test run through 08b's `runTestCommand`, which runs a structured `TestCommand` (kind,
+args, and a `cwd` for a framework below the root). 08b persists only the flattened display string
+(`testRun.command`) today, which cannot rebuild that `cwd`, so P1 has 08b also persist the
+structured command it ran. A check returns one of: passed, failed with its scoped output, or NOT RUN with the
 reason. A NOT RUN result tells the agent the check is unavailable and not its to fix, which keeps
 the fix-loop rule that no agent effort goes to a failure no agent can repair. How the agent asks
 (an MCP tool on the task's existing surface, or a file-based request the step polls) is D3. Rules
@@ -131,7 +141,8 @@ the result keeps:
 Why a setting and not a tier lookup: F3. Whether the default should flip, or the setting should
 follow the step's chosen CLI and model, is D1.
 
-Verification: prompt tests for both setting values; a check request on a fixture repository runs
+Verification: prompt tests for both setting values; a selective test request for a framework below
+the root runs from that framework's directory, as 08b ran it; a check request on a fixture repository runs
 exactly the command 08 runs for that slot; a missing program and a test-environment failure each
 come back NOT RUN, not failed; a DDEV repository's check runs host-side and returns; one live task
 with the setting on, where 07's transcript shows the requests and their results, and 08 still runs
@@ -152,8 +163,11 @@ for it must not rely on the framework's error wording.
 - **D2.** Whether P1's check requests are also open to 08b's tester passes, or stay with the
   implementer only.
 - **D3.** How the agent asks Haive to run a check in P1: an MCP tool on the task's existing MCP
-  surface (`mcp-surface.ts`), or a request file the step watches. Either way the run is host-side
-  through `execSlot`, and every CLI 07 can run on must be able to make the request.
+  surface (`mcp-surface.ts`), or a request file the step watches. Either way the run goes through
+  the owning step's runner, and every CLI 07 can run on must be able to make the request.
+- **D4.** DAG coders: leave them to the final gate, or run their checks against the requesting
+  issue's own worktree, which needs that worktree's path (and, for DDEV, a runtime bound to it)
+  carried into the request.
 
 ## Decided
 
