@@ -560,8 +560,14 @@ refuses the move and is named in the caller's own outcome (00a `skipped`, refres
 message). Otherwise the revision is bumped first, under the domain's lock (`markProjectStateDirty`,
 `markPlanMirrorDirty`), so a crash leaves the files stale and the sweep re-renders them; tracked
 paths return to HEAD with `git checkout HEAD --`, the rest are removed (`git rm --cached`, then
-`removeNoFollow`); and the sync base is pointed at the record now in the checkout
-(`rebaseProjectStateOnCheckout`), because the writer's base already holds the pending change and
+`removeNoFollow`, then any directory that leaves empty under `.haive-data/state`, since an empty one
+reads as a record with no format file); each restore runs under the domain's lock, after the caller's
+fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there, and a
+task that started meanwhile answers `held` with the files untouched; and the sync base is pointed at
+the record now in the checkout (`rebaseProjectStateOnCheckout`; a checkout with no record gets an
+EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
+a clash is asked about, never imported over it, and one whose record cannot be read keeps the old
+base and answers in `last_error`), because the writer's base already holds the pending change and
 a sync against it would read the incoming head as the other side's revert. The plan needs no such
 step: its base (`synced_snapshot`) is only ever the plan.json last read in. A valid hand edit is
 not refused: the sync that runs first imports it, so the database holds it and the set-aside loses

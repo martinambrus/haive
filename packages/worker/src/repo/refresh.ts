@@ -33,6 +33,9 @@ export async function checkoutHoldingTasks(
   return rows.length;
 }
 
+const holdingRefusal = (holding: number): string =>
+  `Not refreshed: ${plural(holding, 'task')} ${holding === 1 ? 'is' : 'are'} using this repository. Refresh once ${holding === 1 ? 'it finishes' : 'they finish'}.`;
+
 /** A git work tree whose top level is `dest` itself and that has a commit to stand on. */
 async function usableCheckout(dest: string): Promise<boolean> {
   const cdup = await gitRun(dest, ['rev-parse', '--show-cdup']);
@@ -134,10 +137,13 @@ async function fastForward(
   }
   if (behind === 0) return null;
 
-  const aside = await setAsideHaiveProjections(db, payload.repositoryId, dest);
+  const aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, (conn) =>
+    checkoutHoldingTasks(conn, payload.repositoryId),
+  );
   if (aside.outcome === 'refused') {
     return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
   }
+  if (aside.outcome === 'held') return holdingRefusal(aside.holding);
 
   // Under the project-state lock, and only while no task holds the checkout: an upgrade that is
   // still writing its record takes that lock, and refuses once its task is no longer holding.
@@ -220,7 +226,7 @@ export async function handleRefresh(
       const usable = await usableCheckout(dest);
       const holding = await checkoutHoldingTasks(db, payload.repositoryId);
       if (holding > 0) {
-        const refusal = `Not refreshed: ${plural(holding, 'task')} ${holding === 1 ? 'is' : 'are'} using this repository. Refresh once ${holding === 1 ? 'it finishes' : 'they finish'}.`;
+        const refusal = holdingRefusal(holding);
         if (!usable) throw new Error(refusal);
         await persistDetection(db, payload.repositoryId, dest, refusal);
         return;

@@ -771,8 +771,9 @@ export async function syncProjectStateFromCheckout(
 }
 
 /** Points the sync base at the record the checkout holds now, so a sync after the checkout moves merges
- *  this install's pending changes against the record they were made on. A checkout holding no readable
- *  record leaves no base, which the next sync reads as a first one. */
+ *  this install's pending changes against the record they were made on. A checkout holding no record
+ *  gets an empty base, so what an incoming commit adds is merged in rather than imported over the
+ *  pending state; one whose record cannot be read keeps its base and answers in `last_error`. */
 export async function rebaseProjectStateOnCheckout(
   db: Database,
   { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
@@ -780,10 +781,26 @@ export async function rebaseProjectStateOnCheckout(
   const checkout = await readCheckout(repoPath);
   await db.transaction(async (tx) => {
     await lockProjectState(tx, repositoryId);
-    if (checkout.kind !== 'record') {
+    if (checkout.kind === 'refused') {
+      const row = await readSyncRow(tx, repositoryId);
+      if (row !== null && row.lastError !== checkout.reason) {
+        await tx
+          .update(schema.projectStateSync)
+          .set({ lastError: checkout.reason, updatedAt: new Date() })
+          .where(eq(schema.projectStateSync.repositoryId, repositoryId));
+      }
+      return;
+    }
+    if (checkout.kind === 'absent') {
+      const synced = {
+        baseSnapshot: normalizeProjectState(emptyProjectState()),
+        lastError: null,
+        updatedAt: new Date(),
+      };
       await tx
-        .delete(schema.projectStateSync)
-        .where(eq(schema.projectStateSync.repositoryId, repositoryId));
+        .insert(schema.projectStateSync)
+        .values({ repositoryId, ...synced })
+        .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
       return;
     }
     const [repo] = await tx

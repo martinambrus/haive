@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { HAIVE_DATA_FILES, logger } from '@haive/shared';
-import { readFileNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import { readFileNoFollow, readdirNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { markPlanMirrorDirty } from '@haive/shared/plan';
 import {
   PROJECT_STATE_DIR,
@@ -26,11 +27,16 @@ import { rebaseProjectStateOnCheckout, syncProjectStateFromCheckout } from './sy
 import { lockProjectState } from './write.js';
 
 type DbOrTx = Parameters<typeof markPlanMirrorDirty>[0];
+type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 export type SetAsideResult =
   | { outcome: 'clean' }
   | { outcome: 'set-aside'; paths: string[] }
-  | { outcome: 'refused'; file: string; reason: string };
+  | { outcome: 'refused'; file: string; reason: string }
+  | { outcome: 'held'; holding: number };
+
+/** How many tasks hold the checkout now; read inside each lock, before the first file is touched. */
+export type CheckoutFence = (db: DbOrTx) => Promise<number>;
 
 const STATE_PREFIX = `${PROJECT_STATE_DIR}/`;
 const ABSENT_PLAN_HASH = 'absent';
@@ -161,6 +167,36 @@ async function planOffender(
   return held ? null : HAIVE_DATA_FILES.plan;
 }
 
+/** The restore under the domain's lock, with the fence read there and the stale mark raised first.
+ *  A restore that throws raises the mark again, since the transaction took the first one back. */
+async function restoreUnderLock(
+  db: Database,
+  repoPath: string,
+  paths: readonly string[],
+  guard: {
+    lock: (tx: Tx) => Promise<unknown>;
+    offender: (tx: Tx) => Promise<string | null>;
+    mark: (tx: DbOrTx) => Promise<unknown>;
+    fence: CheckoutFence | undefined;
+  },
+): Promise<SetAsideResult | null> {
+  try {
+    return await db.transaction(async (tx) => {
+      await guard.lock(tx);
+      const offender = await guard.offender(tx);
+      if (offender) return refuse(offender, NOT_HAIVE);
+      const holding = guard.fence ? await guard.fence(tx) : 0;
+      if (holding > 0) return { outcome: 'held' as const, holding };
+      await guard.mark(tx);
+      await restoreFromHead(repoPath, paths);
+      return null;
+    });
+  } catch (err) {
+    await guard.mark(db).catch(() => undefined);
+    throw err;
+  }
+}
+
 async function restoreFromHead(repoPath: string, paths: readonly string[]): Promise<void> {
   const tracked: string[] = [];
   const own: string[] = [];
@@ -175,6 +211,17 @@ async function restoreFromHead(repoPath: string, paths: readonly string[]): Prom
   for (const path of own) {
     await gitRun(repoPath, ['rm', '--cached', '-q', '--ignore-unmatch', '--', path]);
     await removeNoFollow(repoPath, path);
+    await pruneEmptyStateDirs(repoPath, path);
+  }
+}
+
+/** A directory left empty under the state directory reads as a record with no format file, not as no record. */
+async function pruneEmptyStateDirs(repoPath: string, removed: string): Promise<void> {
+  if (!removed.startsWith(STATE_PREFIX)) return;
+  for (let dir = posix.dirname(removed); dir.length >= PROJECT_STATE_DIR.length;) {
+    if (((await readdirNoFollow(repoPath, dir)) ?? ['.']).length > 0) return;
+    await removeNoFollow(repoPath, dir);
+    dir = posix.dirname(dir);
   }
 }
 
@@ -187,9 +234,12 @@ export async function setAsideHaiveProjections(
   db: Database,
   repositoryId: string,
   repoPath: string,
+  fence?: CheckoutFence,
 ): Promise<SetAsideResult> {
   const dirty = await dirtyProjections(repoPath);
   if (dirty.paths.length === 0) return { outcome: 'clean' };
+  const holdingEarly = fence ? await fence(db) : 0;
+  if (holdingEarly > 0) return { outcome: 'held', holding: holdingEarly };
   if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
     return refuse(dirty.paths[0]!, 'is part of a merge or rebase that is still open');
   }
@@ -207,26 +257,24 @@ export async function setAsideHaiveProjections(
   if (early) return refuse(early, NOT_HAIVE);
 
   if (state.length > 0) {
-    const offender = await db.transaction(async (tx) => {
-      await lockProjectState(tx, repositoryId);
-      const found = await stateOffender(tx, repositoryId, repoPath, state);
-      if (!found) await markProjectStateDirty(tx, repositoryId);
-      return found;
+    const stopped = await restoreUnderLock(db, repoPath, state, {
+      lock: (tx) => lockProjectState(tx, repositoryId),
+      offender: (tx) => stateOffender(tx, repositoryId, repoPath, state),
+      mark: (tx) => markProjectStateDirty(tx, repositoryId),
+      fence,
     });
-    if (offender) return refuse(offender, NOT_HAIVE);
-    await restoreFromHead(repoPath, state);
+    if (stopped) return stopped;
     await rebaseProjectStateOnCheckout(db, { repositoryId, repoPath });
     await markProjectStateDirty(db, repositoryId);
   }
   if (plan.length > 0) {
-    const offender = await db.transaction(async (tx) => {
-      await lockPlanMirror(tx, repositoryId);
-      const found = await planOffender(tx, repositoryId, repoPath, plan);
-      if (!found) await markPlanMirrorDirty(tx, repositoryId);
-      return found;
+    const stopped = await restoreUnderLock(db, repoPath, plan, {
+      lock: (tx) => lockPlanMirror(tx, repositoryId),
+      offender: (tx) => planOffender(tx, repositoryId, repoPath, plan),
+      mark: (tx) => markPlanMirrorDirty(tx, repositoryId),
+      fence,
     });
-    if (offender) return refuse(offender, NOT_HAIVE);
-    await restoreFromHead(repoPath, plan);
+    if (stopped) return stopped;
     await markPlanMirrorDirty(db, repositoryId);
   }
   return { outcome: 'set-aside', paths: dirty.paths };

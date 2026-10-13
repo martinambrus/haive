@@ -16,7 +16,8 @@ import { emptyProjectState, renderProjectState } from '@haive/shared/project-sta
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase, getDb } from '../src/db.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
-import { handleRefresh } from '../src/repo/refresh.js';
+import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
+import { setAsideHaiveProjections } from '../src/project-state/set-aside.js';
 import { lockProjectState, writeProjectStateColumn } from '../src/project-state/write.js';
 import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';
 import { writePlanMirror } from '../src/plan/mirror.js';
@@ -103,8 +104,8 @@ async function main(): Promise<void> {
       return sha;
     };
 
-    const cloned = async () => {
-      const remoteUrl = `file://${origin}`;
+    const cloned = async (from = origin) => {
+      const remoteUrl = `file://${from}`;
       const [row] = await db
         .insert(schema.repositories)
         .values({
@@ -440,7 +441,7 @@ async function main(): Promise<void> {
         column: column(),
       });
       git(c.dest, 'add', '.haive-data/state');
-      git(c.dest, 'commit', '-q', '-m', 'record');
+      git(c.dest, 'commit', '-q', '--allow-empty', '-m', 'record');
       git(c.dest, 'push', '-q', 'origin', 'HEAD:main');
       git(seed, 'pull', '-q', '--ff-only', 'origin', 'main');
       await db
@@ -613,6 +614,129 @@ async function main(): Promise<void> {
           isDeepEqual(col?.lspLanguages, ['go']) &&
           isDeepEqual(now.lspLanguages, ['go']),
         { col, now },
+      );
+    }
+
+    // 11d. HEAD holds no record, Haive has a pending one that is not committed, and the incoming commit
+    // adds a record with another value for a key the database holds: the database is the base-less
+    // side's only copy, so the incoming value must not be imported over it (an empty base, not a first
+    // import).
+    for (const via of ['refresh', '00a'] as const) {
+      // Its own remote: the shared one already carries a committed record by now.
+      const origin2 = path.join(tmp, `origin-no-record-${via}.git`);
+      git(tmp, 'init', '-q', '--bare', '-b', 'main', origin2);
+      const seed2 = path.join(tmp, `seed-no-record-${via}`);
+      git(tmp, 'clone', '-q', `file://${origin2}`, seed2);
+      await commitFile(seed2, 'README.md', 'seed\n', 'seed');
+      git(seed2, 'push', '-q', 'origin', 'HEAD:main');
+      const c = await cloned(origin2);
+      const id = c.payload.repositoryId;
+      const pendingName = 'pending-name';
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column({ projectInfo: { name: pendingName } }) })
+        .where(eq(schema.repositories.id, id));
+      await markProjectStateDirty(db, id);
+      await sweepDirtyProjectStates(db);
+      const untracked = git(c.dest, 'status', '--porcelain', '--', RENDER_REL);
+      await writeRecord(seed2, { projectInfo: { name: 'incoming-name' }, acceptedAgentIds: ['a'] });
+      git(seed2, 'add', '.haive-data/state');
+      git(seed2, 'commit', '-q', '-m', 'a teammate commits a record');
+      git(seed2, 'push', '-q', 'origin', 'HEAD:main');
+      const upstream = git(seed2, 'rev-parse', 'HEAD');
+      const moved = await moveVia(via, c);
+      const col = (await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, id),
+        columns: { renderContext: true },
+      }))!.renderContext as { projectInfo?: { name?: string } } | null;
+      const now = JSON.parse(await readFile(path.join(c.dest, RENDER_REL), 'utf8')) as {
+        projectInfo?: { name?: string };
+      };
+      const open = await db.query.projectStateConflicts.findMany({
+        where: eq(schema.projectStateConflicts.repositoryId, id),
+      });
+      check(
+        `${via}: a pending record with no committed one moves past an incoming record`,
+        untracked.startsWith('??') && git(c.dest, 'rev-parse', 'HEAD') === upstream,
+        { untracked, moved },
+      );
+      check(
+        `${via}: the database's pending value survives the incoming one, and the clash is asked about rather than silently replaced`,
+        col?.projectInfo?.name === pendingName &&
+          (now.projectInfo?.name === pendingName ||
+            open.some((r) => r.unit === 'project/render.json#projectInfo')),
+        { col, now, open: open.map((r) => r.unit) },
+      );
+    }
+
+    // 11e. A task that becomes checkout-holding after the first check and before the set-aside leaves
+    // Haive's projection files exactly as they were, and the refresh answers with the task count.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const before = await readFile(path.join(c.dest, RENDER_REL));
+      const headBefore = git(c.dest, 'rev-parse', 'HEAD');
+      const startTask = async () => {
+        await db.insert(schema.tasks).values({
+          userId,
+          repositoryId: id,
+          type: 'onboarding',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        });
+      };
+      const stopTasks = () => db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      const aside = await setAsideHaiveProjections(db, id, c.dest, async (conn) => {
+        await startTask();
+        return checkoutHoldingTasks(conn, id);
+      });
+      const after = await readFile(path.join(c.dest, RENDER_REL));
+      check(
+        'a task that starts before the set-aside holds it back, and the state file keeps its bytes',
+        aside.outcome === 'held' && before.equals(after),
+        { aside, changed: !before.equals(after) },
+      );
+      await stopTasks();
+
+      // The same through a refresh: the task appears while the plan base is seeded, after the first check.
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      await db
+        .update(schema.planMirrorState)
+        .set({ syncedSnapshot: null })
+        .where(eq(schema.planMirrorState.repositoryId, id));
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      const planBefore = await readFile(path.join(c.dest, PLAN_REL));
+      const renderBefore = await readFile(path.join(c.dest, RENDER_REL));
+      const fn = `refresh_smoke_task_${randomBytes(4).toString('hex')}`;
+      await db.execute(
+        sql.raw(
+          `CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ` +
+            `IF NEW.repository_id = '${id}' THEN INSERT INTO tasks (user_id, repository_id, type, title, status) ` +
+            `VALUES ('${userId}', '${id}', 'onboarding', 'repo-refresh-smoke', 'running'); END IF; ` +
+            `RETURN NEW; END $$; CREATE TRIGGER ${fn} AFTER UPDATE ON plan_mirror_state ` +
+            `FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+        ),
+      );
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${fn} ON plan_mirror_state; DROP FUNCTION ${fn}()`));
+        await stopTasks();
+      }
+      const message = (await statusOf(id)).statusMessage ?? '';
+      check(
+        'a refresh whose task starts after its first check refuses with the task count and moves nothing',
+        /1 task is using this repository/.test(message) &&
+          git(c.dest, 'rev-parse', 'HEAD') === headBefore &&
+          (await readFile(path.join(c.dest, RENDER_REL))).equals(renderBefore) &&
+          (await readFile(path.join(c.dest, PLAN_REL))).equals(planBefore),
+        { message },
       );
     }
 
