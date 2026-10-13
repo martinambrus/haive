@@ -51,8 +51,13 @@ import {
 type DbOrTx = Parameters<typeof markPlanMirrorDirty>[0];
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
-/** What each set-aside path held before its restore, by path: null where the file was absent. */
-export type KeptFiles = Map<string, Buffer | null>;
+/** What each set-aside path held before its restore: its bytes (null where absent, missing where unread)
+ *  and its index entry as `mode sha` (null where unstaged). */
+export interface KeptFile {
+  bytes?: Buffer | null;
+  index: string | null;
+}
+export type KeptFiles = Map<string, KeptFile>;
 
 export type SetAsideResult =
   | { outcome: 'clean' }
@@ -411,7 +416,8 @@ async function restoreJudged(
   if (holding > 0) return { outcome: 'held', holding };
   for (const path of mine) {
     const bytes = await keptBytes(repoPath, path);
-    if (bytes !== undefined) kept.set(path, bytes);
+    const index = await indexEntry(repoPath, path);
+    kept.set(path, bytes === undefined ? { index } : { bytes, index });
   }
   await restoreFromHead(repoPath, mine);
   await restoreFaults.afterRestore?.();
@@ -712,7 +718,9 @@ export async function putBackProjections(
       await lockProjectState(tx, repositoryId);
       await lockPlanMirror(tx, repositoryId);
       // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
-      for (const [path, bytes] of kept) {
+      for (const [path, { bytes, index }] of kept) {
+        await putBackIndex(repoPath, path, index);
+        if (bytes === undefined) continue;
         const head = await readBlob(repoPath, `HEAD:${path}`);
         const maxBytes = Math.max(head?.length ?? 0, bytes?.length ?? 0) + 1;
         if (head === null) {
@@ -737,6 +745,42 @@ export async function putBackProjections(
   } catch (err) {
     logger.warn({ err, repositoryId }, 'project files not put back after a set-aside');
   }
+}
+
+/** A path's index entry as `mode sha`, or null when nothing is staged there. */
+async function indexEntry(repoPath: string, path: string): Promise<string | null> {
+  const res = await gitRun(repoPath, ['ls-files', '-s', '-z', '--', literal(path)]);
+  if (res.code !== 0) throw new Error(`git ls-files failed: ${res.stderr.trim().slice(0, 300)}`);
+  const m = /^(\d+) ([0-9a-f]+) 0\t/.exec(res.stdout);
+  return m ? `${m[1]} ${m[2]}` : null;
+}
+
+async function headEntry(repoPath: string, path: string): Promise<string | null> {
+  const res = await gitRun(repoPath, ['ls-tree', '-z', 'HEAD', '--', literal(path)]);
+  if (res.code !== 0) return null;
+  const m = /^(\d+) blob ([0-9a-f]+)\t/.exec(res.stdout);
+  return m ? `${m[1]} ${m[2]}` : null;
+}
+
+/** Stages the entry the set-aside found again, only while the index still holds what the restore left. */
+async function putBackIndex(
+  repoPath: string,
+  path: string,
+  original: string | null,
+): Promise<void> {
+  const left = await headEntry(repoPath, path);
+  if (original === left || (await indexEntry(repoPath, path)) !== left) return;
+  const res =
+    original === null
+      ? await gitRun(repoPath, ['update-index', '--force-remove', '--', path])
+      : await gitRun(repoPath, [
+          'update-index',
+          '--add',
+          '--cacheinfo',
+          `${original.replace(' ', ',')},${path}`,
+        ]);
+  if (res.code !== 0)
+    throw new Error(`git update-index failed: ${res.stderr.trim().slice(0, 300)}`);
 }
 
 /** A failed re-sync leaves the domain's mark raised so the sweep retries it; a repository with no row

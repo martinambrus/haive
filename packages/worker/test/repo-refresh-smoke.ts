@@ -1066,6 +1066,54 @@ async function main(): Promise<void> {
       );
     }
 
+    // 11e7. A refresh that set projections aside and then could not move puts a staged plan.md back in
+    // the index as it was, not only its working copy.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const mdRel = HAIVE_DATA_FILES.planMarkdown;
+      await writeFile(path.join(c.dest, mdRel), '# staged by a person\n');
+      git(c.dest, 'add', '--', mdRel);
+      await writeFile(path.join(c.dest, mdRel), '# working copy, not staged\n');
+      const stagedBefore = git(c.dest, 'ls-files', '-s', '--', mdRel);
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b', 'c'] });
+      upstreamCommit('a teammate adds another agent', '.haive-data/state');
+      let restores = 0;
+      restoreFaults.afterRestore = async () => {
+        restores += 1;
+        if (restores !== 2) return;
+        await db.insert(schema.tasks).values({
+          userId,
+          repositoryId: id,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        });
+      };
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      }
+      const stagedAfter = git(c.dest, 'ls-files', '-s', '--', mdRel);
+      const workingAfter = await readFile(path.join(c.dest, mdRel), 'utf8');
+      check(
+        'a refresh that could not move puts a staged plan.md back in the index and its working copy back',
+        restores >= 2 &&
+          stagedBefore !== '' &&
+          stagedAfter === stagedBefore &&
+          workingAfter === '# working copy, not staged\n',
+        { restores, stagedBefore, stagedAfter, workingAfter },
+      );
+    }
+
     // 11e4. A re-sync that fails after a clean move raises the domain's mark, so the sweep retries it.
     {
       const c = await withPendingRender();
