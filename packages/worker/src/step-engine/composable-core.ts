@@ -8,7 +8,15 @@ const IMPLEMENT = '07-phase-2-implement';
 export const MERGE_CAPABLE_STEP_IDS: readonly string[] = ['00a-sync-base', '12-worktree-cleanup'];
 
 const needWorktree = { needs: 'worktree', reason: 'Works inside the task worktree.' };
-const EDITS_PRECEDE = ['validation', 'tests', 'verification', 'review', 'commit', 'reindexed'];
+const EDITS_PRECEDE = [
+  'validation',
+  'tests',
+  'verification',
+  'review',
+  'commit',
+  'reindexed',
+  'db-saved',
+];
 
 export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   {
@@ -111,7 +119,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'ddev', reason: 'Imports the dump into the DDEV project.' }],
     provides: [],
-    precedes: ['db-migrated'],
+    precedes: ['db-migrated', 'implementation', 'tests', 'verification'],
   },
   {
     stepId: '06a-db-migrate',
@@ -120,7 +128,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'ddev', reason: 'Runs migrations inside the DDEV project.' }],
     provides: ['db-migrated'],
-    precedes: ['implementation', 'tests', 'verification'],
+    precedes: ['implementation', 'tests', 'verification', 'db-saved'],
   },
   {
     stepId: '03-phase-0a-discovery',
@@ -189,6 +197,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['validation'],
+    precedes: ['tests', 'verification', 'review', 'commit', 'reindexed', 'db-saved'],
     loopTargetStepId: IMPLEMENT,
     loopBudgetEditable: true,
   },
@@ -202,7 +211,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'implementation', reason: 'Checks the implemented changes.' },
     ],
     provides: [],
-    precedes: ['tests', 'verification'],
+    precedes: ['tests', 'verification', 'db-saved'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -213,7 +222,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     requires: [needWorktree],
     provides: ['tests'],
     removes: ['clean-tree'],
-    precedes: ['verification', 'review', 'commit', 'reindexed'],
+    precedes: ['verification', 'review', 'commit', 'reindexed', 'db-saved'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -223,6 +232,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [needWorktree],
     provides: ['verification'],
+    precedes: ['db-saved'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -232,6 +242,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['review'],
+    precedes: ['db-saved'],
     loopTargetStepId: IMPLEMENT,
   },
   {

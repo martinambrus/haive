@@ -207,6 +207,11 @@ describe('core composable catalog', () => {
     ['07a-code-simplify', '07b-phase-4-validate', 'validation'],
     ['07-phase-2-implement', '11c-rag-reindex', 'reindexed'],
     ['01c1-restore-database', '06a-db-migrate', 'db-migrated'],
+    ['01c1-restore-database', '07-phase-2-implement', 'implementation'],
+    ['07b-phase-4-validate', '08-phase-5-verify', 'verification'],
+    ['07b-phase-4-validate', '10-gate-3-commit', 'commit'],
+    ['07-phase-2-implement', '11g-save-database', 'db-saved'],
+    ['08-phase-5-verify', '11g-save-database', 'db-saved'],
   ])('rejects %s placed after %s', (early, late, token) => {
     const setup = [
       '04-phase-0b-pre-planning',
