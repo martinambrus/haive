@@ -216,14 +216,17 @@ export async function handleRefresh(
         await persistDetection(db, payload.repositoryId, dest, refusal);
         return;
       }
-      // A row stamped before 0196 takes its base from the checkout before a fast-forward or a
-      // rebuild moves it; the seed only reads plan.json, so a tree that is not usable is fine.
-      await seedPlanBaseFromCheckout(db, payload.repositoryId, dest).catch((err: unknown) =>
-        logger.warn(
-          { err, repositoryId: payload.repositoryId },
-          'plan base not seeded before refresh',
-        ),
-      );
+      // A row stamped before 0196 takes its base from the checkout before a fast-forward moves it,
+      // so a failed seed leaves the checkout where it is. A rebuild keeps the old tree aside.
+      const seeded = seedPlanBaseFromCheckout(db, payload.repositoryId, dest);
+      if (usable) await seeded;
+      else
+        await seeded.catch((err: unknown) =>
+          logger.warn(
+            { err, repositoryId: payload.repositoryId },
+            'plan base not seeded before rebuild',
+          ),
+        );
       if (!usable) {
         await rebuild(db, payload, repoStorageRoot, rel, dest);
         return;

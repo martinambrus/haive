@@ -3,13 +3,13 @@
  * real git repositories. One throwaway user and temp directory, deleted after.
  */
 import { execFileSync } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { logger, type RepoJobPayload } from '@haive/shared';
+import { HAIVE_DATA_FILES, logger, type RepoJobPayload } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
@@ -329,6 +329,63 @@ async function main(): Promise<void> {
         'a detached checkout is left as it is',
         /not on a branch/.test(row.statusMessage ?? ''),
         row,
+      );
+    }
+
+    // 9. A plan base that cannot be taken from the checkout leaves the checkout where it is.
+    {
+      const { payload, dest } = await cloned();
+      const before = git(dest, 'rev-parse', 'HEAD');
+      const planBytes = `${JSON.stringify({
+        schemaVersion: 2,
+        nodes: [
+          {
+            id: randomUUID(),
+            parentId: null,
+            ordinal: 0,
+            title: 'Root',
+            kind: 'component',
+            body: null,
+            status: 'todo',
+            taskable: true,
+          },
+        ],
+        edges: [],
+        codeLinks: [],
+      })}\n`;
+      await mkdir(path.dirname(path.join(dest, HAIVE_DATA_FILES.plan)), { recursive: true });
+      await writeFile(path.join(dest, HAIVE_DATA_FILES.plan), planBytes);
+      await db.insert(schema.planMirrorState).values({
+        repositoryId: payload.repositoryId,
+        syncedHash: createHash('sha256').update(planBytes).digest('hex'),
+      });
+      await push('after-plan.txt', 'x\n');
+      const fn = `refresh_smoke_refuse_${randomBytes(4).toString('hex')}`;
+      await db.execute(
+        sql.raw(
+          `CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ` +
+            `IF NEW.repository_id = '${payload.repositoryId}' THEN RAISE EXCEPTION 'seed refused'; END IF; ` +
+            `RETURN NEW; END $$; CREATE TRIGGER ${fn} BEFORE UPDATE ON plan_mirror_state ` +
+            `FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+        ),
+      );
+      try {
+        await handleRefresh(payload, db, storage).catch(() => undefined);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${fn} ON plan_mirror_state; DROP FUNCTION ${fn}()`));
+      }
+      check(
+        'a failed plan base seed leaves the checkout unmoved',
+        git(dest, 'rev-parse', 'HEAD') === before,
+      );
+      await handleRefresh(payload, db, storage);
+      const seeded = await db.query.planMirrorState.findFirst({
+        where: eq(schema.planMirrorState.repositoryId, payload.repositoryId),
+      });
+      check(
+        'and the next refresh seeds the base, then moves it',
+        seeded?.syncedSnapshot != null && git(dest, 'rev-parse', 'HEAD') !== before,
+        seeded,
       );
     }
 
