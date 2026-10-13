@@ -6,7 +6,9 @@ import {
   conflictClaimPath,
   conflictKeyLabel,
   conflictSideMarkdown,
+  isPlanConflict,
   isRtkConflict,
+  planConflictHeading,
   isSettingConflict,
   landedAnswer,
   resolutionNotice,
@@ -385,5 +387,45 @@ describe('a setting or environment question', () => {
     expect(resolutionNotice([], [], [], ['take_theirs'])).toBe(
       "This install now uses your teammate's value.",
     );
+  });
+});
+
+describe('a plan question', () => {
+  const NODE = '11111111-1111-4111-8111-111111111111';
+  const unit = (field: string) => `plan/${NODE}#${field}`;
+
+  it('is told apart from a project record question', () => {
+    expect(isPlanConflict({ unit: unit('title') })).toBe(true);
+    expect(isPlanConflict({ unit: unit('ordinal') })).toBe(false);
+    expect(isPlanConflict({ unit: 'project/render.json#framework' })).toBe(false);
+  });
+
+  it('is headed by the node and the field', () => {
+    expect(planConflictHeading({ unit: unit('title'), nodeTitle: 'Billing' })).toBe(
+      '`Billing`: Title',
+    );
+    expect(planConflictHeading({ unit: unit('title'), nodeTitle: '**x**' })).toBe('`**x**`: Title');
+    expect(planConflictHeading({ unit: unit('taskable'), nodeTitle: null })).toBe(
+      'A node that was deleted here: Can start tasks',
+    );
+  });
+
+  it('shows prose as it is and the short fields as code or words', () => {
+    expect(conflictSideMarkdown({ present: true, value: 'Some **text**' }, unit('body'))).toBe(
+      'Some **text**',
+    );
+    expect(conflictSideMarkdown({ present: true, value: null }, unit('body'))).toBe('No text.');
+    expect(conflictSideMarkdown({ present: true, value: 'done' }, unit('status'))).toBe('`done`');
+    expect(conflictSideMarkdown({ present: true, value: true }, unit('taskable'))).toBe('Yes');
+  });
+
+  it('is confirmed in terms of the plan file, and noticed after the answer', () => {
+    const keep = answerConfirmation('keep_mine', 'title', unit('title'));
+    expect(keep.body).toContain('.haive-data/plan.json');
+    expect(answerConfirmation('take_theirs', 'title', unit('title')).confirmLabel).toBe(
+      'Take theirs',
+    );
+    expect(resolutionNotice([], [], [], [], ['keep_mine'])).toContain('.haive-data/plan.json');
+    expect(resolutionNotice([], [], [], [], ['take_theirs'])).toContain('teammate');
   });
 });

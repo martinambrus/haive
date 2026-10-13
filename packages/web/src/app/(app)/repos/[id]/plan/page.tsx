@@ -61,6 +61,9 @@ import { PlanDeleteDialog } from '@/components/plan/plan-delete-dialog';
 import { PlanStarter } from '@/components/plan/plan-starter';
 import { PlanMergePanel } from '@/components/plan/plan-merge-panel';
 import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
+import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
+import { pullReportLines } from '@/lib/plan-pull-report';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 /**
  * The plan canvas.
@@ -110,6 +113,7 @@ export default function PlanPage() {
   const [defectsOpen, setDefectsOpen] = useState(false);
   const [sequencing, setSequencing] = useState(false);
   const [pullReport, setPullReport] = useState<PlanPullOutcome | null>(null);
+  const [questionsKey, setQuestionsKey] = useState(0);
   const [removingEdge, setRemovingEdge] = useState(false);
   const [saveReport, setSaveReport] = useState<string | null>(null);
   const [linkingOrigin, setLinkingOrigin] = useState(false);
@@ -453,6 +457,7 @@ export default function PlanPage() {
       setError(e instanceof Error ? e.message : 'Failed to save the plan snapshot');
     } finally {
       setSnapshotBusy(false);
+      setQuestionsKey((k) => k + 1);
     }
   }
 
@@ -502,6 +507,7 @@ export default function PlanPage() {
       setError(e instanceof Error ? e.message : 'Failed to pull the plan snapshot');
     } finally {
       setSnapshotBusy(false);
+      setQuestionsKey((k) => k + 1);
     }
   }
 
@@ -984,6 +990,7 @@ export default function PlanPage() {
         onChanged={() => void refreshMerge()}
         onSettled={() => {
           setConflict(null);
+          setQuestionsKey((k) => k + 1);
           void refreshMerge();
           void refresh();
           void getPlanSnapshot(repositoryId)
@@ -1061,6 +1068,14 @@ export default function PlanPage() {
         </p>
       )}
 
+      <ProjectStateConflictsBanner
+        key={questionsKey}
+        repositoryId={repositoryId}
+        scope="plan"
+        pollMs={SNAPSHOT_POLL_MS}
+        onAnswered={() => void refresh()}
+      />
+
       {pullReport && (
         <div className="flex flex-col gap-1 rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">
           {pullReport.skipped ? (
@@ -1081,6 +1096,12 @@ export default function PlanPage() {
                   the removal was intended.
                 </p>
               )}
+              {pullReportLines(
+                pullReport,
+                (id) => tree.find((node) => node.id === id)?.title ?? null,
+              ).map((line) => (
+                <InlineMarkdown key={line} body={line} />
+              ))}
               {pullReport.previousCommit && (
                 <p className="text-neutral-500">
                   Checkout was at {pullReport.previousCommit.slice(0, 12)} before this.

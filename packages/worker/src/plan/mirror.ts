@@ -107,7 +107,7 @@ async function stampSyncedHash(
     .where(eq(schema.planMirrorState.repositoryId, repositoryId));
 }
 
-const lockPlanMirror = (db: Pick<Database, 'execute'>, repositoryId: string) =>
+export const lockPlanMirror = (db: Pick<Database, 'execute'>, repositoryId: string) =>
   db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
 
 type PlanQuestion = {
@@ -1164,7 +1164,12 @@ async function reconcilePlanLocked(
     }
     const updated = await tx
       .update(schema.planNodes)
-      .set({ ...set, version: sql`${schema.planNodes.version} + 1`, updatedAt: new Date() })
+      .set({
+        ...set,
+        sourceTaskId: null,
+        version: sql`${schema.planNodes.version} + 1`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(schema.planNodes.id, node.id),

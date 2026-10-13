@@ -1823,6 +1823,17 @@ export interface PlanPullOutcome {
   keptLocal: string[];
   edgesAdded: number;
   codeLinksAdded: number;
+  /** Local nodes the other side deleted and nobody here changed, by id. */
+  nodesDeleted?: string[];
+  /** Fields both sides changed differently: this install's value stays and the question is asked. */
+  conflicts?: { nodeId: string; field: string }[];
+  /** Decisions the merge made without asking. */
+  reported?: {
+    kind: string;
+    subject: string;
+    field?: string;
+    deletedBy?: 'local' | 'incoming';
+  }[];
   skipped: string | null;
 }
 

@@ -53,6 +53,7 @@ function seed() {
   const fake = createFakeDb({
     repositories: schema.repositories,
     projectStateConflicts: schema.projectStateConflicts,
+    planNodes: schema.planNodes,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'mine' });
   fake.insert(schema.repositories, { id: FOREIGN_REPO, userId: STRANGER, name: 'theirs' });
@@ -107,6 +108,7 @@ function seed() {
   });
   row(OTHER_REPO_ROW, FOREIGN_REPO, 'project/render.json#acceptedAgentIds', {});
   h.db = fake.db;
+  return fake;
 }
 
 const get = (repo = REPO) => app.request(`/repos/${repo}/project-state/conflicts`);
@@ -209,6 +211,79 @@ describe('GET /repos/:id/project-state/conflicts', () => {
     expect((await get(FOREIGN_REPO)).status).toBe(404);
     expect((await get('00000000-0000-4000-8000-0000000000ff')).status).toBe(404);
     expect((await get('not-a-uuid')).status).toBe(404);
+  });
+});
+
+describe('plan questions', () => {
+  const NODE = '00000000-0000-4000-8000-0000000000e1';
+  const GONE = '00000000-0000-4000-8000-0000000000e2';
+  const PLAN_ROW = '00000000-0000-4000-8000-0000000000d0';
+  const GONE_ROW = '00000000-0000-4000-8000-0000000000da';
+
+  function seedPlan() {
+    const fake = seed();
+    fake.insert(schema.planNodes, {
+      id: NODE,
+      repositoryId: REPO,
+      parentId: null,
+      path: `/${NODE}/`,
+      ordinal: 0,
+      title: 'Billing',
+      kind: 'component',
+      status: 'todo',
+      taskable: true,
+      version: 1,
+    });
+    const row = (id: string, nodeId: string) =>
+      fake.insert(schema.projectStateConflicts, {
+        id,
+        repositoryId: REPO,
+        unit: `plan/${nodeId}#title`,
+        base: conflictSide('Billing'),
+        local: conflictSide('Billing v2'),
+        incoming: conflictSide('Invoices'),
+        detectedAt: new Date('2026-10-03T10:00:00Z'),
+        resolution: null,
+        resolvedAt: null,
+        resolvedBy: null,
+      });
+    row(PLAN_ROW, NODE);
+    row(GONE_ROW, GONE);
+  }
+
+  it('lists a pending plan row with its node title, and null once the node is gone', async () => {
+    seedPlan();
+    const { conflicts } = (await (await get()).json()) as { conflicts: Record<string, unknown>[] };
+    expect(conflicts.find((c) => c.id === PLAN_ROW)).toMatchObject({
+      unit: `plan/${NODE}#title`,
+      key: 'title',
+      nodeTitle: 'Billing',
+      incoming: { present: true, value: 'Invoices' },
+    });
+    expect(conflicts.find((c) => c.id === GONE_ROW)).toMatchObject({ nodeTitle: null });
+    expect(conflicts.find((c) => c.id === PENDING)).not.toHaveProperty('nodeTitle');
+  });
+
+  it('returns one plan row with its node title and hands its answer to the worker', async () => {
+    seedPlan();
+    const one = await app.request(`/repos/${REPO}/project-state/conflicts/${PLAN_ROW}`);
+    expect(one.status).toBe(200);
+    expect(((await one.json()) as { conflict: unknown }).conflict).toMatchObject({
+      id: PLAN_ROW,
+      nodeTitle: 'Billing',
+    });
+    h.resolve.mockResolvedValue({
+      kind: 'resolved',
+      conflict: { id: PLAN_ROW },
+      written: [],
+    });
+    expect((await post(PLAN_ROW, { answer: 'take_theirs' })).status).toBe(200);
+    expect(h.resolve).toHaveBeenCalledWith({
+      repositoryId: REPO,
+      userId: USER,
+      conflictId: PLAN_ROW,
+      answer: 'take_theirs',
+    });
   });
 });
 

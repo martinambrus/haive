@@ -595,7 +595,7 @@ the row's `incoming` and the base at its `base` (`overlaySettings`, `overlayEnvi
 the RTK question. The writer also settles the rows it passes (`recordLocalSide`): a column that comes
 to hold the other side's value converges the row. Only an RTK row holds upgrades (`blocksUpgrade`,
 D6); the api and the banner list every unit `isConflictUnit` names, which is every unit admission can
-see. The worker answers one under the same locks as a render key (`answerSettingsQuestion`,
+see; a plan question (`plan/<nodeId>#<field>`, [plan canvas](plan-canvas.md)) is one too and never holds an upgrade. The worker answers one under the same locks as a render key (`answerSettingsQuestion`,
 `resolve.ts`): keep mine writes the column's value into the unit's own file and the base, take
 theirs applies the row's value to the column through `settingColumnUpdate` and the base and rewrites
 no file, and an answer reads as moved when the file no longer holds the row's `incoming`. A setting

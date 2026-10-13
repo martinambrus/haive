@@ -18,7 +18,9 @@ import {
   conflictKeyLabel,
   conflictSideMarkdown,
   isClaimConflict,
+  isPlanConflict,
   isRtkConflict,
+  planConflictHeading,
   isSettingConflict,
   stillListed,
   answerAndConfirm,
@@ -38,7 +40,11 @@ export interface ProjectStateConflictsViewProps {
   busyId: string | null;
   pendingIds: readonly string[];
   onAnswer: (conflict: ProjectStateConflictBody, answer: ProjectStateAnswer) => void;
+  /** `plan` shows the questions about plan nodes; `project` (the default) every other one. */
+  scope?: ConflictScope;
 }
+
+export type ConflictScope = 'project' | 'plan';
 
 function Side({ title, markdown }: { title: string; markdown: string }) {
   return (
@@ -56,22 +62,26 @@ export function ProjectStateConflictsView({
   busyId,
   pendingIds,
   onAnswer,
+  scope = 'project',
 }: ProjectStateConflictsViewProps) {
   if (conflicts.length === 0 && !notice) return null;
+  const plan = scope === 'plan';
   return (
     <div className="flex flex-col gap-2 rounded border border-amber-900 bg-amber-950/30 px-3 py-2 text-sm">
       {conflicts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="warning">
-            {conflicts.length === 1 ? 'Question' : `${conflicts.length} questions`} about the
-            project record
+            {conflicts.length === 1 ? 'Question' : `${conflicts.length} questions`} about the{' '}
+            {plan ? 'plan' : 'project record'}
           </Badge>
           <InlineMarkdown
             className="text-neutral-300"
             body={
-              conflicts.some((c) => blocksUpgrade(c.unit))
-                ? 'This install and another one changed the same setting differently. Upgrades and rollbacks are held until every question is answered.'
-                : "This install and another one changed the same setting differently. This install's value stays in effect and upgrades are not held."
+              plan
+                ? "This install and another one changed the same part of the plan differently. This install's value stays in effect until you answer, and upgrades are not held."
+                : conflicts.some((c) => blocksUpgrade(c.unit))
+                  ? 'This install and another one changed the same setting differently. Upgrades and rollbacks are held until every question is answered.'
+                  : "This install and another one changed the same setting differently. This install's value stays in effect and upgrades are not held."
             }
           />
         </div>
@@ -85,9 +95,16 @@ export function ProjectStateConflictsView({
             key={c.id}
             className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2"
           >
-            <p className="text-sm font-semibold text-neutral-100">
-              {conflictKeyLabel(c.key, c.unit, conflictClaimPath(c))}
-            </p>
+            {isPlanConflict(c) ? (
+              <InlineMarkdown
+                className="text-sm font-semibold text-neutral-100"
+                body={planConflictHeading(c)}
+              />
+            ) : (
+              <p className="text-sm font-semibold text-neutral-100">
+                {conflictKeyLabel(c.key, c.unit, conflictClaimPath(c))}
+              </p>
+            )}
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               <Side title="This install" markdown={conflictSideMarkdown(c.local, c.unit)} />
               <Side title="The other install" markdown={conflictSideMarkdown(c.incoming, c.unit)} />
@@ -130,15 +147,26 @@ export function ProjectStateConflictsView({
 
 export interface ProjectStateConflictsBannerProps {
   repositoryId: string;
+  scope?: ConflictScope;
+  /** Called once an answer has landed, for a page that shows what the answer changed. */
+  onAnswered?: () => void;
+  /** Re-reads the questions this often, for a page where background work can ask new ones. */
+  pollMs?: number;
 }
 
-export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConflictsBannerProps) {
+export function ProjectStateConflictsBanner({
+  repositoryId,
+  scope = 'project',
+  onAnswered,
+  pollMs,
+}: ProjectStateConflictsBannerProps) {
   const [conflicts, setConflicts] = useState<ProjectStateConflictBody[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [answered, setAnswered] = useState<ProjectStateAnswer[]>([]);
   const [rtkAnswered, setRtkAnswered] = useState<ProjectStateAnswer[]>([]);
   const [claimAnswered, setClaimAnswered] = useState<ProjectStateAnswer[]>([]);
   const [settingAnswered, setSettingAnswered] = useState<ProjectStateAnswer[]>([]);
+  const [planAnswered, setPlanAnswered] = useState<ProjectStateAnswer[]>([]);
   const [messages, setMessages] = useState<Record<string, ConflictMessage>>({});
   const [confirming, setConfirming] = useState<{
     conflict: ProjectStateConflictBody;
@@ -147,14 +175,21 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
   const [busyId, setBusyId] = useState<string | null>(null);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
   const pendingRef = useRef<string[]>([]);
+  const onAnsweredRef = useRef(onAnswered);
+  onAnsweredRef.current = onAnswered;
   const pendingAnswers = useRef<Record<string, ProjectStateAnswer>>({});
   const recordAnswers = useCallback((items: { answer: ProjectStateAnswer; unit: string }[]) => {
+    const plan = items.filter(isPlanConflict).map((i) => i.answer);
     const rtk = items.filter(isRtkConflict).map((i) => i.answer);
     const claims = items.filter(isClaimConflict).map((i) => i.answer);
     const settings = items.filter(isSettingConflict).map((i) => i.answer);
     const rest = items
-      .filter((i) => !isRtkConflict(i) && !isClaimConflict(i) && !isSettingConflict(i))
+      .filter(
+        (i) =>
+          !isPlanConflict(i) && !isRtkConflict(i) && !isClaimConflict(i) && !isSettingConflict(i),
+      )
       .map((i) => i.answer);
+    if (plan.length > 0) setPlanAnswered((prev) => [...prev, ...plan]);
     if (rest.length > 0) setAnswered((prev) => [...prev, ...rest]);
     if (settings.length > 0) setSettingAnswered((prev) => [...prev, ...settings]);
     if (rtk.length > 0) setRtkAnswered((prev) => [...prev, ...rtk]);
@@ -172,15 +207,16 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
           `/repos/${repositoryId}/project-state/conflicts`,
         );
         if (!alive.current) return null;
-        setConflicts(res.conflicts);
+        const mine = res.conflicts.filter((c) => isPlanConflict(c) === (scope === 'plan'));
+        setConflicts(mine);
         setLoadError(null);
-        return res.conflicts;
+        return mine;
       } catch (err) {
         if (alive.current && !quiet) setLoadError((err as Error).message ?? 'Failed to check');
         return null;
       }
     },
-    [repositoryId],
+    [repositoryId, scope],
   );
 
   const setPending = useCallback((ids: string[]) => {
@@ -223,6 +259,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
         if (l.answer) answers.push({ answer: l.answer, unit: l.unit });
       }
       recordAnswers(answers);
+      if (answers.length > 0) onAnsweredRef.current?.();
     }
     remaining.push(...unconfirmed);
     remaining.push(...pendingRef.current.filter((id) => !before.includes(id)));
@@ -255,6 +292,14 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     };
   }, [load]);
 
+  useEffect(() => {
+    if (!pollMs) return;
+    const timer = setInterval(() => {
+      if (!pollLoop.current) void load(true);
+    }, pollMs);
+    return () => clearInterval(timer);
+  }, [load, pollMs]);
+
   async function confirm() {
     if (!confirming || busyId) return;
     const { conflict, answer } = confirming;
@@ -285,6 +330,7 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
     } else {
       await load();
     }
+    if (out.kind === 'resolved' || (out.kind === 'error' && out.landed)) onAnsweredRef.current?.();
   }
 
   const confirmation = confirming
@@ -306,7 +352,14 @@ export function ProjectStateConflictsBanner({ repositoryId }: ProjectStateConfli
       )}
       <ProjectStateConflictsView
         conflicts={conflicts}
-        notice={resolutionNotice(answered, rtkAnswered, claimAnswered, settingAnswered)}
+        notice={resolutionNotice(
+          answered,
+          rtkAnswered,
+          claimAnswered,
+          settingAnswered,
+          planAnswered,
+        )}
+        scope={scope}
         messages={messages}
         busyId={busyId}
         pendingIds={pendingIds}

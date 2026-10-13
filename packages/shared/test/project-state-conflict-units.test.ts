@@ -182,10 +182,22 @@ describe('plan units', () => {
     });
   });
 
-  it('are no unit of the project state record, so the api serves none and no upgrade waits on one', () => {
-    const unit = planConflictUnit(nodeId, 'title');
-    expect(isConflictUnit(unit)).toBe(false);
-    expect(blocksUpgrade(unit)).toBe(false);
+  it('are conflict units the api serves, and no upgrade waits on one', () => {
+    for (const field of ['title', 'body', 'kind', 'status', 'taskable']) {
+      const unit = planConflictUnit(nodeId, field);
+      expect(isConflictUnit(unit)).toBe(true);
+      expect(blocksUpgrade(unit)).toBe(false);
+    }
+  });
+
+  it('are no conflict unit when the field is not one a person is asked about', () => {
+    for (const field of ['ordinal', 'parentId', 'nope']) {
+      expect(isConflictUnit(planConflictUnit(nodeId, field))).toBe(false);
+    }
+  });
+
+  it('are labelled by their field', () => {
+    expect(conflictUnitLabel(planConflictUnit(nodeId, 'status'))).toBe('Plan: status of a node');
   });
 
   it('refuse a unit that names no node or no field', () => {
