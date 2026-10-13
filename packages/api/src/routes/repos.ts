@@ -1070,7 +1070,9 @@ const WORKTREE_PAIR_STEP_IDS = [WORKFLOW_SKILL_STEP_ID, WORKTREE_CLEANUP_STEP_ID
  *  11d's skills in the root — a merge that completes mid-sweep leaves that workflow without the
  *  artifacts it just merged. `loadOnboardingTaskFacts` sees neither: it is filtered to
  *  `onboarding` because it also answers the ONBOARDED verdict. */
-const OTHER_ROOT_WRITER_TASK_TYPES = ['onboarding_upgrade', 'workflow'] as const;
+const OTHER_ROOT_WRITER_TASK_TYPES: readonly string[] = ['onboarding_upgrade', 'workflow'];
+/** A custom type whose run list sets up a worktree merges it into the root like a workflow does. */
+const ROOT_WRITER_SNAPSHOT_STEP = '01-worktree-setup';
 const PROVENANCE_STEP_IDS = [
   AGENT_TARGETS_STEP_ID,
   SKILL_MIRROR_STEP_ID,
@@ -1158,18 +1160,28 @@ export async function loadLiveRootWriters(
   userId: string,
   repositoryId: string,
 ): Promise<Array<{ id: string }>> {
-  return db
-    .select({ id: schema.tasks.id })
+  const live = await db
+    .select({
+      id: schema.tasks.id,
+      type: schema.tasks.type,
+      runListSnapshot: schema.tasks.runListSnapshot,
+    })
     .from(schema.tasks)
     .where(
       and(
         eq(schema.tasks.userId, userId),
         eq(schema.tasks.repositoryId, repositoryId),
-        inArray(schema.tasks.type, OTHER_ROOT_WRITER_TASK_TYPES),
         inArray(schema.tasks.status, LIVE_TASK_STATUSES),
       ),
+    );
+  return live
+    .filter(
+      (t) =>
+        OTHER_ROOT_WRITER_TASK_TYPES.includes(t.type) ||
+        t.runListSnapshot?.includes(ROOT_WRITER_SNAPSHOT_STEP) === true,
     )
-    .limit(1);
+    .slice(0, 1)
+    .map((t) => ({ id: t.id }));
 }
 
 /**

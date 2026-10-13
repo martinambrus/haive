@@ -31,7 +31,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { adminRoutes } from '../src/routes/admin.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { HttpError } from '../src/context.js';
@@ -45,11 +45,19 @@ const defRow = (slug: string, source: string) => ({
   source,
   runListStrategy: 'static',
   stepIds: ['00-a'],
+  requiresRepository: true,
+  preAnswerDefaults: {},
+  stepLoopLimitDefaults: {},
 });
 
 const handle = (rows: unknown[]) =>
   ({
-    select: () => ({ from: () => ({ where: () => ({ limit: async () => rows }) }) }),
+    select: () => ({
+      from: (table: unknown) =>
+        table === schema.stepCatalog
+          ? Promise.resolve([])
+          : { where: () => ({ limit: async () => rows }) },
+    }),
   }) as unknown as Pick<Database, 'select'>;
 
 async function refusal(promise: Promise<unknown>): Promise<HttpError> {
@@ -80,7 +88,7 @@ describe('definitionForCreate and the task type switches', () => {
     ]);
 
     h.flags.set(CUSTOM_KEY, true);
-    await expect(create('admin')).resolves.toEqual({ runListSnapshot: ['00-a'] });
+    await expect(create('admin')).resolves.toMatchObject({ runListSnapshot: ['00-a'] });
   });
 
   it('refuses a module type while its switch is off, and allows it when on', async () => {
@@ -91,7 +99,7 @@ describe('definitionForCreate and the task type switches', () => {
     ]);
 
     h.flags.set(MODULE_KEY, true);
-    await expect(create('module:acme')).resolves.toEqual({ runListSnapshot: ['00-a'] });
+    await expect(create('module:acme')).resolves.toMatchObject({ runListSnapshot: ['00-a'] });
   });
 
   it('keeps the two switches apart', async () => {
@@ -103,10 +111,10 @@ describe('definitionForCreate and the task type switches', () => {
   });
 
   it('never touches a built-in, with a row or without', async () => {
-    await expect(create('builtin')).resolves.toEqual({ runListSnapshot: ['00-a'] });
+    await expect(create('builtin')).resolves.toMatchObject({ runListSnapshot: ['00-a'] });
     await expect(
       definitionForCreate(handle([]), 'plan_merge', { generic: false }),
-    ).resolves.toEqual({ runListSnapshot: null });
+    ).resolves.toMatchObject({ runListSnapshot: null });
   });
 });
 

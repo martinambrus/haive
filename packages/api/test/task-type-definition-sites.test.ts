@@ -110,6 +110,7 @@ describe('POST /tasks pins the run list', () => {
   it('stores a null snapshot when the helper returns none', async () => {
     const { created } = world();
     h.definition.mockResolvedValueOnce({ runListSnapshot: null });
+    h.definition.mockResolvedValueOnce({ runListSnapshot: null });
     expect(
       (await post('/tasks', { type: 'workflow', title: 't', description: 'd', repositoryId: REPO }))
         .status,
