@@ -48,6 +48,7 @@ describe('slugProblem', () => {
     expect(slugProblem('Bad Slug')).not.toBeNull();
     expect(slugProblem('-lead')).not.toBeNull();
     expect(slugProblem('new')).toContain('reserved');
+    expect(slugProblem('catalog')).toContain('reserved');
   });
 });
 

@@ -7,9 +7,6 @@ import {
 } from '@haive/shared/modularity';
 import type { FormValues } from '@/components/form-validation';
 
-/** The page /admin/task-types/new takes this path, so a type with this slug could never be opened. */
-export const RESERVED_SLUG = RESERVED_TASK_TYPE_SLUGS[0]!;
-
 const FLAT_FIELDS = [
   'displayName',
   'description',
@@ -99,7 +96,9 @@ export function slugProblem(slug: string): string | null {
   if (!CUSTOM_TASK_TYPE_SLUG_PATTERN.test(slug)) {
     return 'The slug may use lowercase letters, digits and hyphens, starting with a letter or digit.';
   }
-  if (slug === RESERVED_SLUG) return `"${RESERVED_SLUG}" is reserved for the new-type page.`;
+  if (RESERVED_TASK_TYPE_SLUGS.includes(slug)) {
+    return `"${slug}" is reserved: a task type with it could not be opened.`;
+  }
   return null;
 }
 

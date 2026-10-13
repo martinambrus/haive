@@ -360,6 +360,7 @@ describe('task type schemas', () => {
 
   it('refuses a reserved slug', () => {
     expect(customTaskTypeCreateSchema.safeParse({ ...valid, slug: 'new' }).success).toBe(false);
+    expect(customTaskTypeCreateSchema.safeParse({ ...valid, slug: 'catalog' }).success).toBe(false);
     expect(customTaskTypeCreateSchema.safeParse({ ...valid, slug: 'new-thing' }).success).toBe(
       true,
     );
