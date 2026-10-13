@@ -5,9 +5,12 @@ import type {
 } from '@haive/shared/project-state';
 import {
   CONFLICT_KEY_LABELS,
+  ENVIRONMENT_UNIT,
   RTK_ENABLED_UNIT,
   conflictUnitLabel,
   isClaimUnit,
+  isEnvironmentUnit,
+  isSettingUnit,
 } from '@haive/shared/project-state-conflicts';
 import { fencedCode } from '../components/markdown/fenced-code';
 
@@ -22,8 +25,14 @@ function inlineCode(raw: string): string {
   return longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
 }
 
-const recordFileOf = (unit?: string): string =>
-  unit !== undefined && isClaimUnit(unit) ? `.haive-data/state/${unit}` : RECORD_FILE;
+const STATE_DIR = '.haive-data/state';
+
+/** The record file a question's answer writes: the unit's own, or the render file. */
+export const recordFileOf = (unit?: string): string => {
+  if (unit === undefined) return RECORD_FILE;
+  if (isClaimUnit(unit) || isSettingUnit(unit)) return `${STATE_DIR}/${unit}`;
+  return isEnvironmentUnit(unit) ? `${STATE_DIR}/${ENVIRONMENT_UNIT}` : RECORD_FILE;
+};
 
 export const PENDING_REFETCH_MS = 3000;
 
@@ -44,6 +53,10 @@ export const isRtkConflict = (conflict: { unit: string }): boolean =>
   conflict.unit === RTK_ENABLED_UNIT;
 
 export const isClaimConflict = (conflict: { unit: string }): boolean => isClaimUnit(conflict.unit);
+
+/** A setting or the environment, RTK's question aside: answered like a render key, into its own file. */
+export const isSettingConflict = (conflict: { unit: string }): boolean =>
+  !isRtkConflict(conflict) && (isSettingUnit(conflict.unit) || isEnvironmentUnit(conflict.unit));
 
 /** The file a claim question is about: a claim unit names its file only through the claim its sides hold. */
 export function conflictClaimPath(
@@ -67,10 +80,31 @@ export function conflictKeyLabel(
   return CONFLICT_KEY_LABELS[key] ?? key;
 }
 
+const bulletList = (items: readonly string[]): string =>
+  items.length === 0 ? 'Empty.' : items.map((item) => `- ${item}`).join('\n');
+
+/** A setting's value as a person reads it, rather than as the JSON the record file holds. */
+function settingMarkdown(value: unknown): string | null {
+  if (typeof value === 'boolean') return value ? 'On' : 'Off';
+  if (typeof value === 'string') return inlineCode(value);
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    return bulletList(value.map(inlineCode));
+  }
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.every(([, v]) => typeof v === 'string')) {
+      return bulletList(entries.map(([k, v]) => `${inlineCode(k)}: ${inlineCode(String(v))}`));
+    }
+  }
+  return null;
+}
+
 export function conflictSideMarkdown(side: ConflictSideBody, unit?: string): string {
   if (!side.present) return 'Not set.';
-  if (unit === RTK_ENABLED_UNIT && typeof side.value === 'boolean')
-    return side.value ? 'On' : 'Off';
+  if (unit !== undefined && isSettingUnit(unit)) {
+    const text = settingMarkdown(side.value);
+    if (text !== null) return text;
+  }
   if (unit !== undefined && isClaimUnit(unit)) {
     const claim = side.value as Record<string, unknown> | null;
     if (claim !== null && typeof claim === 'object' && typeof claim.templateId === 'string') {
@@ -128,8 +162,16 @@ export function resolutionNotice(
   answered: readonly ProjectStateAnswer[],
   rtkAnswered: readonly ProjectStateAnswer[] = [],
   claimAnswered: readonly ProjectStateAnswer[] = [],
+  settingAnswered: readonly ProjectStateAnswer[] = [],
 ): string | null {
   const notices: string[] = [];
+  if (settingAnswered.includes('keep_mine')) {
+    notices.push(
+      "This install's value is written into the project's record. Commit and push the changed file so your teammate gets it.",
+    );
+  } else if (settingAnswered.includes('take_theirs')) {
+    notices.push("This install now uses your teammate's value.");
+  }
   if (answered.includes('keep_mine')) {
     notices.push(
       `This install's value is written into \`${RECORD_FILE}\`. Commit and push that file so your teammate gets it.`,

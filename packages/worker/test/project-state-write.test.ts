@@ -1436,6 +1436,116 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
     expect(existsSync(join(s.root, ENVIRONMENT))).toBe(false);
   });
 
+  it('writes the other install’s value for a contested setting, and the base’s into the base', async () => {
+    const s = await setup();
+    await setColumns(s, { lspServers: ['pyright'], rtkVersion: '0.42.4' });
+    s.pend('settings/lsp-servers.json', {
+      base: ['vtsls'],
+      local: ['pyright'],
+      incoming: ['gopls'],
+    });
+
+    await s.writeFull(context(), true);
+
+    expect(read(s.root, `${SETTINGS}/lsp-servers.json`)).toEqual(['gopls']);
+    expect(read(s.root, `${SETTINGS}/rtk-version.json`)).toBe('0.42.4');
+    expect(baseOf(s).settings['lsp-servers']).toEqual(['vtsls']);
+    expect(baseOf(s).settings['rtk-version']).toBe('0.42.4');
+    const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(row).toMatchObject({ resolvedAt: null, local: { v: ['pyright'] } });
+  });
+
+  it('leaves a contested setting out of the base where the base held none, and out of the file where the other install has none', async () => {
+    const s = await setup();
+    await setColumns(s, { lspServers: ['pyright'] });
+    s.pend('settings/lsp-servers.json', { local: ['pyright'] });
+
+    await s.writeFull(context(), true);
+
+    expect(existsSync(join(s.root, `${SETTINGS}/lsp-servers.json`))).toBe(false);
+    expect(baseOf(s).settings).toEqual({});
+  });
+
+  it('follows the column in the row’s local side, and closes the row once the column holds the other value', async () => {
+    const s = await setup();
+    await setColumns(s, { lspServers: ['pyright'] });
+    s.pend('settings/lsp-servers.json', {
+      base: ['vtsls'],
+      local: ['jdtls'],
+      incoming: ['gopls'],
+    });
+
+    await s.writeFull(context(), true);
+    let [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(row).toMatchObject({ resolvedAt: null, local: { v: ['pyright'] } });
+
+    await setColumns(s, { lspServers: ['gopls'] });
+    await s.writeFull(context(), true);
+    [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    expect(row).toMatchObject({ resolution: 'converged' });
+    expect(read(s.root, `${SETTINGS}/lsp-servers.json`)).toEqual(['gopls']);
+  });
+
+  it('writes the other install’s value for a contested environment key, beside ours for the rest', async () => {
+    const s = await setup();
+    await setColumns(s, { onboardingEnvironment: ENV_MIRROR });
+    s.pend('project/environment.json#confirmedValues', {
+      base: { webserver: 'apache' },
+      local: { webserver: 'nginx-fpm' },
+      incoming: { webserver: 'caddy' },
+    });
+
+    await s.writeFull(context(), true);
+
+    expect(read(s.root, ENVIRONMENT)).toEqual({
+      envDetectData: ENV_MIRROR.envDetectData,
+      confirmedValues: { webserver: 'caddy' },
+    });
+    expect(baseOf(s).environment).toEqual({
+      envDetectData: ENV_MIRROR.envDetectData,
+      confirmedValues: { webserver: 'apache' },
+    });
+  });
+
+  describe('an RTK choice nobody recorded', () => {
+    const RTK = `${SETTINGS}/rtk-enabled.json`;
+
+    it('writes no rtk-enabled file for the column’s default, and names none in the base', async () => {
+      const s = await setup();
+      await setColumns(s, { rtkEnabled: true, rtkVersion: '0.42.4' });
+
+      await s.writeFull(context(), false);
+
+      expect(existsSync(join(s.root, RTK))).toBe(false);
+      expect(read(s.root, `${SETTINGS}/rtk-version.json`)).toBe('0.42.4');
+      expect(Object.keys(baseOf(s).settings)).toEqual(['rtk-version']);
+    });
+
+    it('leaves a teammate’s rtk-enabled file alone, though the previous base names it', async () => {
+      const s = await setup();
+      await setColumns(s, { rtkEnabled: false });
+      await mkdir(join(s.root, SETTINGS), { recursive: true });
+      await writeFile(join(s.root, RTK), 'false\n');
+      s.syncSeed({ [s.col.baseSnapshot]: { settings: { 'rtk-enabled': false } } });
+
+      const { removed } = await s.writeFull(context(), false);
+
+      expect(removed).toEqual([]);
+      expect(read(s.root, RTK)).toBe(false);
+      expect(baseOf(s).settings).toEqual({});
+    });
+
+    it('writes the file once the choice is recorded, whatever the value', async () => {
+      const s = await setup();
+      await setColumns(s, { rtkEnabled: true });
+
+      await s.writeFull(context(), true);
+
+      expect(read(s.root, RTK)).toBe(true);
+      expect(baseOf(s).settings['rtk-enabled']).toBe(true);
+    });
+  });
+
   it('writes the column’s RTK value while the RTK question is pending, and leaves the question pending', async () => {
     const s = await setup();
     await setColumns(s, { rtkEnabled: true });

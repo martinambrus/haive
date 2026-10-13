@@ -4,6 +4,7 @@ import { readFileNoFollow, removeFileIfNoFollow, writeFileNoFollow } from '@haiv
 import {
   PROJECT_STATE_DIR,
   RENDER_UNIT,
+  ENVIRONMENT_UNIT,
   bundleDescriptors,
   bundleFileName,
   claimFileName,
@@ -13,7 +14,10 @@ import {
   environmentUnitOf,
   isClaimablePath,
   isClaimUnit,
+  isEnvironmentUnit,
   isRenderUnit,
+  isRtkQuestion,
+  isSettingUnit,
   sameValue,
   normalizeProjectState,
   isRecordName,
@@ -21,6 +25,7 @@ import {
   portableRender,
   portableSettingsOf,
   settingFileName,
+  withoutUnchosenRtk,
   portableTemplateId,
   recordReadable,
   renderContextColumnSchema,
@@ -65,6 +70,7 @@ export interface ProjectStateRecordInput extends ProjectStateColumnInput {
 interface Look {
   pending: PendingRenderConflict[];
   pendingClaims: PendingClaimConflict[];
+  pendingSettings: PendingRenderConflict[];
   claims: ProjectStateClaim[];
   bundles: ProjectStateBundle[];
   settings: Record<string, unknown>;
@@ -72,6 +78,7 @@ interface Look {
   baseFiles: string[];
 }
 
+const RTK_SETTING_FILE = `${PROJECT_STATE_DIR}/${settingFileName('rtk-enabled')}`;
 const ENVIRONMENT_FILE = `${PROJECT_STATE_DIR}/project/environment.json`;
 const OWNED_FILE_PREFIXES = [
   `${PROJECT_STATE_DIR}/artifacts/`,
@@ -191,6 +198,53 @@ export async function loadPendingClaimConflicts(
   return (await loadPendingRows(db, repositoryId))
     .filter((row) => isClaimUnit(row.unit))
     .map(sidesOf);
+}
+
+/** Pending conflicts of a portable setting or of the environment, not the RTK question, which names a
+ *  setting no merge contested and so has no value of the other install's to write. */
+export async function loadPendingSettingConflicts(
+  db: Database | Tx,
+  repositoryId: string,
+): Promise<PendingRenderConflict[]> {
+  return (await loadPendingRows(db, repositoryId))
+    .filter(
+      (row) => (isSettingUnit(row.unit) || isEnvironmentUnit(row.unit)) && !isRtkQuestion(row),
+    )
+    .map(sidesOf);
+}
+
+/** The settings with every contested one at `side`'s value; a side that holds none leaves it out. */
+export function overlaySettings(
+  settings: Record<string, unknown>,
+  pending: readonly PendingRenderConflict[],
+  side: 'base' | 'local' | 'incoming',
+): Record<string, unknown> {
+  const out = { ...settings };
+  for (const row of pending.filter((r) => isSettingUnit(r.unit))) {
+    const name = row.unit.slice('settings/'.length, -'.json'.length);
+    if (row[side] === undefined) delete out[name];
+    else out[name] = row[side];
+  }
+  return out;
+}
+
+/** The environment with every contested key (or the whole of it) at `side`'s value. A result missing
+ *  a key is no environment. */
+export function overlayEnvironment(
+  environment: ProjectEnvironment | null,
+  pending: readonly PendingRenderConflict[],
+  side: 'base' | 'local' | 'incoming',
+): ProjectEnvironment | null {
+  let out: Record<string, unknown> | null = environment;
+  for (const row of pending.filter((r) => isEnvironmentUnit(r.unit))) {
+    if (row.unit === ENVIRONMENT_UNIT) {
+      out = (row[side] ?? null) as Record<string, unknown> | null;
+      continue;
+    }
+    out = { ...out, [row.unit.slice(ENVIRONMENT_UNIT.length + 1)]: row[side] };
+  }
+  const whole = out as Partial<ProjectEnvironment> | null;
+  return whole?.envDetectData && whole.confirmedValues ? (whole as ProjectEnvironment) : null;
 }
 
 /** The render unit with every contested key at `side`'s value, the whole unit first. A writer renders
@@ -406,16 +460,16 @@ export async function writeProjectStateColumn(
         render: overlayRender(portable, look.pending, 'incoming'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'incoming'),
         bundles: look.bundles,
-        settings: look.settings,
-        environment: look.environment,
+        settings: overlaySettings(look.settings, look.pendingSettings, 'incoming'),
+        environment: overlayEnvironment(look.environment, look.pendingSettings, 'incoming'),
       },
       baseSnapshot: normalizeProjectState({
         ...emptyProjectState(),
         render: overlayRender(portable, look.pending, 'base'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'base'),
         bundles: look.bundles,
-        settings: look.settings,
-        environment: look.environment,
+        settings: overlaySettings(look.settings, look.pendingSettings, 'base'),
+        environment: overlayEnvironment(look.environment, look.pendingSettings, 'base'),
       }),
     });
     const lookAt = async (reader: Database | Tx): Promise<Look> => {
@@ -437,17 +491,22 @@ export async function writeProjectStateColumn(
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
       return {
-        settings: repo ? portableSettingsOf(repo) : emptyProjectState().settings,
+        settings: repo
+          ? withoutUnchosenRtk(portableSettingsOf(repo), column.rtkChoiceRecorded)
+          : emptyProjectState().settings,
         environment: repo ? environmentUnitOf(repo.onboardingEnvironment) : null,
         pending: await loadPendingRenderConflicts(reader, repositoryId),
         pendingClaims,
+        pendingSettings: await loadPendingSettingConflicts(reader, repositoryId),
         claims,
         bundles: bundleDescriptors(
           await loadLocalBundles(reader, repositoryId),
           base.bundles,
           overlayClaims(claims, pendingClaims, 'incoming'),
         ),
-        baseFiles: base.files,
+        baseFiles: column.rtkChoiceRecorded
+          ? base.files
+          : base.files.filter((f) => f !== RTK_SETTING_FILE),
       };
     };
     // A first look only, so its failure must not clear the column: the files then wait for the locked read.
@@ -456,6 +515,7 @@ export async function writeProjectStateColumn(
       seen ?? {
         pending: [],
         pendingClaims: [],
+        pendingSettings: [],
         claims: [],
         bundles: [],
         settings: emptyProjectState().settings,
@@ -509,7 +569,10 @@ export async function writeProjectStateColumn(
         .update(schema.repositories)
         .set({ renderContext: column })
         .where(eq(schema.repositories.id, repositoryId));
-      await recordLocalSide(tx, repositoryId, portable, now.claims);
+      await recordLocalSide(tx, repositoryId, portable, now.claims, {
+        settings: now.settings,
+        environment: now.environment,
+      });
       await tx
         .insert(schema.projectStateSync)
         .values({ repositoryId, ...synced })
@@ -595,6 +658,7 @@ async function recordLocalSide(
   repositoryId: string,
   rendered: ProjectRender | null,
   claims?: readonly ProjectStateClaim[],
+  portable?: { settings: Record<string, unknown>; environment: ProjectEnvironment | null },
 ): Promise<void> {
   const settle = async (row: PendingRenderConflict, local: unknown): Promise<void> => {
     if (sameValue(local, row.local)) return;
@@ -621,6 +685,21 @@ async function recordLocalSide(
         ? rendered
         : (rendered as Record<string, unknown> | null)?.[row.unit.slice(RENDER_UNIT.length + 1)],
     );
+  }
+  if (portable !== undefined) {
+    for (const row of await loadPendingSettingConflicts(tx, repositoryId)) {
+      const { settings, environment } = portable;
+      await settle(
+        row,
+        isSettingUnit(row.unit)
+          ? settings[row.unit.slice('settings/'.length, -'.json'.length)]
+          : row.unit === ENVIRONMENT_UNIT
+            ? environment
+            : (environment as Record<string, unknown> | null)?.[
+                row.unit.slice(ENVIRONMENT_UNIT.length + 1)
+              ],
+      );
+    }
   }
   if (claims === undefined) return;
   for (const row of await loadPendingClaimConflicts(tx, repositoryId)) {

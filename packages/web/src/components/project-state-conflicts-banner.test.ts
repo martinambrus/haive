@@ -40,6 +40,25 @@ describe('ProjectStateConflictsView', () => {
     expect(html).toContain('Upgrades and rollbacks are held until every question is answered');
   });
 
+  it('says upgrades are not held where only settings are asked', () => {
+    const html = view({
+      conflicts: [
+        conflict({
+          unit: 'settings/lsp-servers.json',
+          key: null,
+          base: { present: true, value: ['vtsls'] },
+          local: { present: true, value: ['pyright'] },
+          incoming: { present: true, value: ['gopls'] },
+        }),
+      ],
+    });
+    expect(html).toContain('upgrades are not held');
+    expect(html).not.toContain('Upgrades and rollbacks are held');
+    expect(html).toContain('Language servers');
+    expect(html).toContain('<li>');
+    expect(html).toContain('gopls');
+  });
+
   it('shows the three values through the markdown renderer, not a bare pre', () => {
     const html = view({ conflicts: [conflict()] });
     expect(html).toContain('my-agent');

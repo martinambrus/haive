@@ -1,0 +1,355 @@
+import { randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import {
+  conflictSide,
+  emptyProjectState,
+  normalizeProjectState,
+  type ProjectStateAnswer,
+  type ProjectStateRecord,
+} from '@haive/shared/project-state';
+import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
+import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
+
+const OWNER = '00000000-0000-4000-8000-0000000000a1';
+const REPO = '00000000-0000-4000-8000-0000000000b1';
+const STATE_DIR = '.haive-data/state';
+
+const dirs: string[] = [];
+afterEach(async () => {
+  await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+});
+
+const json = (value: unknown): unknown => JSON.parse(JSON.stringify(value)) as unknown;
+const record = (
+  settings: Record<string, unknown>,
+  environment: ProjectStateRecord['environment'] = null,
+): ProjectStateRecord =>
+  normalizeProjectState({
+    ...emptyProjectState(),
+    settings: Object.assign(Object.create(null) as Record<string, unknown>, settings),
+    environment,
+  });
+const env = (name: string, confirmed: Record<string, unknown> = {}) => ({
+  envDetectData: { project: { name } },
+  confirmedValues: confirmed,
+});
+
+const RENDER = {
+  projectInfo: { name: 'acme' },
+  framework: 'drupal',
+  acceptedAgentIds: [],
+  customAgentSpecs: [],
+  lspLanguages: [],
+};
+
+interface Seed {
+  unit: string;
+  base?: unknown;
+  local?: unknown;
+  incoming?: unknown;
+  file?: string | null;
+  columns?: Record<string, unknown>;
+  baseRecord?: ProjectStateRecord;
+}
+
+async function setup(seed: Seed) {
+  const root = await mkdtemp(join(tmpdir(), 'project-state-resolve-settings-'));
+  dirs.push(root);
+  const { repositories, projectStateSync: sync, tasks } = schema;
+  const conflicts = schema.projectStateConflicts;
+  const fake = createFakeDb({
+    repositories,
+    projectStateSync: sync,
+    projectStateOutbox: schema.projectStateOutbox,
+    projectStateConflicts: conflicts,
+    tasks,
+    taskSteps: schema.taskSteps,
+    onboardingArtifacts: schema.onboardingArtifacts,
+    cliProviders: schema.cliProviders,
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+  });
+  fake.insert(repositories, {
+    id: REPO,
+    userId: OWNER,
+    name: 'acme',
+    source: 'git_https',
+    status: 'ready',
+    storagePath: root,
+    rtkEnabled: null,
+    renderContext: {
+      ...RENDER,
+      agentTargets: [],
+      enabledCliProviders: [],
+      rtkChoiceRecorded: true,
+    },
+    updatedAt: new Date(1000),
+    ...seed.columns,
+  });
+  fake.insert(sync, {
+    repositoryId: REPO,
+    baseSnapshot: json({ ...(seed.baseRecord ?? record({})), render: RENDER }),
+    lastError: null,
+    updatedAt: new Date(0),
+  });
+  const id = randomUUID();
+  fake.insert(conflicts, {
+    id,
+    repositoryId: REPO,
+    unit: seed.unit,
+    base: conflictSide(seed.base),
+    local: conflictSide(seed.local),
+    incoming: conflictSide(seed.incoming),
+    detectedAt: new Date(2000),
+    resolution: null,
+    resolvedAt: null,
+    resolvedBy: null,
+  });
+  const rel = `${STATE_DIR}/${seed.unit.split('#')[0]}`;
+  await mkdir(join(root, STATE_DIR, 'project'), { recursive: true });
+  await writeFile(join(root, STATE_DIR, 'format.json'), '{"schemaVersion":1}\n');
+  await writeFile(join(root, STATE_DIR, 'project/render.json'), JSON.stringify(RENDER));
+  if (seed.file !== null && seed.file !== undefined) {
+    await mkdir(dirname(join(root, rel)), { recursive: true });
+    await writeFile(join(root, rel), seed.file);
+  }
+  const db = fake.db as unknown as Database;
+  const answer = (a: ProjectStateAnswer) =>
+    resolveProjectStateConflict(db, {
+      repositoryId: REPO,
+      userId: OWNER,
+      conflictId: id,
+      answer: a,
+    });
+  return {
+    root,
+    fake,
+    db,
+    id,
+    answer,
+    row: () => fake.rows(conflicts).find((r) => r.id === id)!,
+    repo: () => fake.rows(repositories).find((r) => r.id === REPO)!,
+    base: () =>
+      fake.rows(sync).find((r) => r.repositoryId === REPO)!.baseSnapshot as ProjectStateRecord,
+    file: () => readFile(join(root, rel), 'utf8').catch(() => null),
+    rel,
+    addTask: (type: string, status: string) =>
+      fake.insert(tasks, {
+        id: randomUUID(),
+        userId: OWNER,
+        repositoryId: REPO,
+        type,
+        status,
+        title: 't',
+      }),
+  };
+}
+
+const LSP = 'settings/lsp-servers.json';
+const lspSeed = (over: Partial<Seed> = {}): Seed => ({
+  unit: LSP,
+  base: ['vtsls'],
+  local: ['pyright'],
+  incoming: ['gopls'],
+  file: '["gopls"]\n',
+  columns: { lspServers: ['pyright'] },
+  baseRecord: record({ 'lsp-servers': ['vtsls'] }),
+  ...over,
+});
+
+describe('answering a settings question: keep mine', () => {
+  it('writes the column’s value into the unit’s file and the base, leaves the column, closes the row', async () => {
+    const s = await setup(lspSeed());
+
+    const result = await s.answer('keep_mine');
+
+    expect(result).toMatchObject({ kind: 'resolved', written: [s.rel] });
+    expect(JSON.parse((await s.file())!)).toEqual(['pyright']);
+    expect(s.repo().lspServers).toEqual(['pyright']);
+    expect(s.base().settings['lsp-servers']).toEqual(['pyright']);
+    expect(s.row()).toMatchObject({ resolution: 'keep_mine', resolvedBy: OWNER });
+  });
+
+  it('is met by no conflict and no write on the next sync', async () => {
+    const s = await setup(lspSeed());
+    await s.answer('keep_mine');
+    const before = json({
+      r: s.fake.rows(schema.repositories),
+      s: s.fake.rows(schema.projectStateSync),
+    });
+
+    const next = await syncProjectStateFromCheckout(s.db, { repositoryId: REPO, repoPath: s.root });
+
+    expect(next.outcome).not.toBe('conflict');
+    expect(s.fake.rows(schema.projectStateConflicts).filter((r) => r.resolvedAt == null)).toEqual(
+      [],
+    );
+    expect(
+      json({ r: s.fake.rows(schema.repositories), s: s.fake.rows(schema.projectStateSync) }),
+    ).toEqual(before);
+  });
+
+  it('has no value to keep where the column holds none', async () => {
+    const s = await setup(lspSeed({ columns: { lspServers: null } }));
+
+    expect(await s.answer('keep_mine')).toEqual({ kind: 'no_local' });
+    expect(s.row().resolvedAt).toBeNull();
+  });
+});
+
+describe('answering a settings question: take theirs', () => {
+  it('applies the other install’s value to the column, rewrites no file and takes it into the base', async () => {
+    const s = await setup(lspSeed());
+    const fileBefore = await s.file();
+
+    const result = await s.answer('take_theirs');
+
+    expect(result).toMatchObject({ kind: 'resolved', written: [] });
+    expect(s.repo().lspServers).toEqual(['gopls']);
+    expect(await s.file()).toBe(fileBefore);
+    expect(s.base().settings['lsp-servers']).toEqual(['gopls']);
+    expect(s.row()).toMatchObject({ resolution: 'take_theirs' });
+  });
+
+  it('applies it with the routes’ normalisers', async () => {
+    const s = await setup(lspSeed({ file: '["gopls","made-up"]\n' }));
+
+    expect((await s.answer('take_theirs')).kind).toBe('resolved');
+    expect(s.repo().lspServers).toEqual(['gopls']);
+  });
+
+  it('reads a value the column cannot hold as moved: the re-sync drops the question and the column stays', async () => {
+    const s = await setup(
+      lspSeed({
+        unit: 'settings/review-dimensions.json',
+        base: ['security'],
+        local: ['performance'],
+        incoming: ['nope'],
+        file: '["nope"]\n',
+        columns: { reviewDimensions: ['performance'] },
+        baseRecord: record({ 'review-dimensions': ['security'] }),
+      }),
+    );
+
+    expect((await s.answer('take_theirs')).kind).toBe('moved');
+    expect(s.row().resolution).toBe('converged');
+    expect(s.repo().reviewDimensions).toEqual(['performance']);
+  });
+
+  it('unsets a setting the other install unset', async () => {
+    const s = await setup(
+      lspSeed({
+        unit: 'settings/rtk-version.json',
+        base: '0.1.0',
+        local: '0.2.0',
+        incoming: undefined,
+        file: null,
+        columns: { rtkVersion: '0.2.0' },
+        baseRecord: record({ 'rtk-version': '0.1.0' }),
+      }),
+    );
+
+    expect((await s.answer('take_theirs')).kind).toBe('resolved');
+    expect(s.repo().rtkVersion ?? null).toBeNull();
+    expect(s.base().settings).toEqual({});
+  });
+
+  it('cannot unset a setting that is never unset', async () => {
+    const s = await setup(
+      lspSeed({
+        unit: 'settings/scope-exclude-globs.json',
+        base: 'x',
+        local: ['a'],
+        incoming: undefined,
+        file: null,
+        columns: { scopeExcludeGlobs: ['a'] },
+      }),
+    );
+
+    expect((await s.answer('take_theirs')).kind).toBe('invalid');
+    expect(s.repo().scopeExcludeGlobs).toEqual(['a']);
+  });
+});
+
+describe('answering a settings question: the file moved or the repository is busy', () => {
+  it('reads as moved, and re-asks against the file, when it no longer holds their value', async () => {
+    const s = await setup(lspSeed({ file: '["jdtls"]\n' }));
+
+    expect(await s.answer('keep_mine')).toEqual({ kind: 'moved' });
+    expect(s.row().resolvedAt).toBeNull();
+    expect(s.repo().lspServers).toEqual(['pyright']);
+    expect(await s.file()).toBe('["jdtls"]\n');
+  });
+
+  it('reads as moved when the file is gone though their value was a value', async () => {
+    const s = await setup(lspSeed({ file: null }));
+
+    expect(await s.answer('take_theirs')).toEqual({ kind: 'moved' });
+  });
+
+  it('is busy while an onboarding holds the checkout', async () => {
+    const s = await setup(lspSeed());
+    s.addTask('onboarding', 'running');
+
+    expect(await s.answer('keep_mine')).toEqual({ kind: 'busy' });
+    expect(existsSync(join(s.root, s.rel))).toBe(true);
+  });
+
+  it('closed by the other answer reads as settled', async () => {
+    const s = await setup(lspSeed());
+    await s.answer('take_theirs');
+
+    expect(await s.answer('keep_mine')).toEqual({ kind: 'settled', resolution: 'take_theirs' });
+  });
+});
+
+describe('answering an environment question', () => {
+  const KEY = 'project/environment.json#confirmedValues';
+  const envSeed = (over: Partial<Seed> = {}): Seed => ({
+    unit: KEY,
+    base: { web: 'apache' },
+    local: { web: 'nginx' },
+    incoming: { web: 'caddy' },
+    file: JSON.stringify(env('acme', { web: 'caddy' })),
+    columns: { onboardingEnvironment: { schemaVersion: 1, ...env('acme', { web: 'nginx' }) } },
+    baseRecord: record({}, env('acme', { web: 'apache' })),
+    ...over,
+  });
+
+  it('keep mine writes the environment with my key into the file and the base', async () => {
+    const s = await setup(envSeed());
+
+    expect((await s.answer('keep_mine')).kind).toBe('resolved');
+    expect(JSON.parse((await s.file())!)).toEqual(env('acme', { web: 'nginx' }));
+    expect(s.base().environment).toEqual(env('acme', { web: 'nginx' }));
+    expect(s.repo().onboardingEnvironment).toEqual({
+      schemaVersion: 1,
+      ...env('acme', { web: 'nginx' }),
+    });
+  });
+
+  it('take theirs moves the key in the column, with its schema version, and leaves the file', async () => {
+    const s = await setup(envSeed());
+    const before = await s.file();
+
+    expect((await s.answer('take_theirs')).kind).toBe('resolved');
+    expect(s.repo().onboardingEnvironment).toEqual({
+      schemaVersion: 1,
+      ...env('acme', { web: 'caddy' }),
+    });
+    expect(await s.file()).toBe(before);
+    expect(s.base().environment).toEqual(env('acme', { web: 'caddy' }));
+  });
+
+  it('cannot take a key into a column that holds no environment', async () => {
+    const s = await setup(envSeed({ columns: { onboardingEnvironment: null } }));
+
+    expect((await s.answer('take_theirs')).kind).toBe('invalid');
+  });
+});

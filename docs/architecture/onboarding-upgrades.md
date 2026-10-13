@@ -419,9 +419,10 @@ stamped `resolution = 'converged'`. A writer (12, 02, 04: `writeProjectStateReco
 `base` for it in `base_snapshot`, reading the rows under the lock, while the column stays the
 writer's own. Without that the writer settled the conflict silently: the file and the base both
 became the local value, so the next sync saw no difference and a teammate's value was gone.
-`upgradeAdmission` refuses (`contested`, with the units) while any row is pending, so POST /tasks,
-the rollback, the banner, and every revival in the api and the worker hold, and upgrade-status
-returns `contestedUnits` and offers nothing. Workflow tasks keep running on the local value. The
+`upgradeAdmission` refuses (`contested`, with the units) while a row that holds upgrades is pending
+(`blocksUpgrade`: render, claim and RTK units; a contested setting or environment unit does not), so
+POST /tasks, the rollback, the banner, and every revival in the api and the worker hold, and
+upgrade-status returns `contestedUnits` and offers nothing. Workflow tasks keep running on the local value. The
 reset deletes the repository's rows with its sync row.
 
 **A conflict is answered by the worker, one key at a time.** `GET /repos/:id/project-state/conflicts`
@@ -467,7 +468,7 @@ pending row of unit `settings/rtk-enabled.json` (`RTK_ENABLED_UNIT`; base and lo
 incoming `{"v": false}`) under `lockProjectState`, `ON CONFLICT DO NOTHING` on the pending index, and
 there is no migration. The unit is no render unit: the writer overlay, the sync's converge pass and
 `loadPendingRenderConflicts` skip it, while the api list and one-row reads, the `RESOLVE_PROJECT_STATE`
-job and `upgradeAdmission` (any pending row holds) take it (`isConflictUnit`). The worker answers it
+job and `upgradeAdmission` take it (`isConflictUnit`, `blocksUpgrade`). The worker answers it
 under the same locks and the same busy, closed-row and different-answer rules, and writes no file:
 keep mine stamps the row and leaves the column; take theirs sets `rtk_enabled = false` through
 `rtkEnabledUpdate` (the columns the tooling page's PATCH writes, `rtk_enabled` and `updated_at`,
@@ -550,16 +551,56 @@ commit step stages from that list and the file may never have been staged.
 `scope-exclude-globs`, `rtk-enabled`, `rtk-version`, `lsp-servers`, `lsp-server-versions`,
 `chrome-devtools-mcp-version` and `review-dimensions`, and nothing else. `app_auth` and
 `verify_commands` stay on the machine, since a committed login URL or command would be typed or run
-on a teammate's. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
+on a teammate's. `settings/rtk-enabled.json` is written, named in the base and counted as this install's value only
+while the render column's `rtkChoiceRecorded` is true (`withoutUnchosenRtk`): `rtk_enabled` is NOT
+NULL default true, so a default nobody chose must not travel or outvote a teammate's choice. Until
+then the sync takes the checkout's value with no conflict and keeps it out of the base, and the writer
+neither writes the file nor removes one the base names. Importing a record into a NULL column records
+the choice, as before. A tooling-page switch on a repository whose choice was never recorded
+therefore does not travel until step 12 or 02 records it. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
 not an empty list), and `environmentUnitOf` gives `project/environment.json` from
 `onboarding_environment` without its schema version. The writer plans them into the record and the
-base, and removes a file the base named that the record no longer holds. The sync reads them but
-imports nothing yet: its base keeps the previous base's settings and environment, a first sync taking
-the checkout's. `settings/rtk-enabled.json` is also the name of the RTK question's conflict unit;
-the writer takes the value from the column and never overlays a pending row there, so the question
-stays open until it is answered. The marks are in `PATCH /repos/:id/exclusions`, `PATCH
+base, and removes a file the base named that the record no longer holds. `settings/rtk-enabled.json`
+is also the name of the RTK question's conflict unit; the writer takes the value from the column
+and never overlays a pending row there, so the question stays open until it is answered. The marks are in `PATCH /repos/:id/exclusions`, `PATCH
 /repos/:id/tooling` (a portable key only) and `POST .../tooling-upgrade`, 02 and 04, 09_7 (and 01g,
 which runs its apply), `initializeRagSyncPrefs`, the clone import and the RTK answer.
+
+**The sync imports the settings and the environment, and asks when both installs changed one.**
+`mergePortable` (`project-state/sync.ts`) merges the columns (local), the checkout's files (incoming)
+and the base's settings and environment three ways, in the sync's own transaction, and writes the
+columns it moved. A set (`scope-exclude-globs`) moves member by member; every other setting is one
+value; the environment merges per key (`project/environment.json#envDetectData`, `#confirmedValues`).
+A value is normalised before it merges, by the rules of the routes that store it
+(`normalizeSetting`, shared: `stripManagedKnowledgeGlobs` and sorting for the scope list, the LSP key
+set, `normalizeReviewDimensionIds`, trimmed non-empty versions; the environment loses the `__`
+prompt-only fields and gets `ONBOARDING_ENVIRONMENT_SCHEMA_VERSION` back in the column). A value the
+column could not hold is refused for that setting alone: this install's value stands, the base keeps
+the old one, the sync logs it and the next write replaces the file. A column the merge left as it was
+is not rewritten, so a legacy list in another order stays as it is. The checkout is read as _absent_
+for a setting that is never unset (`rtk-enabled`, a NOT NULL column, and `scope-exclude-globs`, NULL
+meaning "never chosen") and for the environment, so a missing file leaves the column alone and marks
+the record dirty for the writer; any other missing file unsets its column where nobody changed it
+here. **A base that holds no setting and no environment (no sync row, or one written before the record
+carried them) merges them as no base at all**: the checkout's value wins over a column nobody chose
+(`rtk_enabled` is NOT NULL default true, and would otherwise push B's default back over A's choice on
+B's first sync), and a set joins both lists. An RTK-off import closes the RTK question as converged
+(`convergeRtkQuestion`); the sync's own converge pass skips that question, whose base equals its local
+side (`isRtkQuestion`), since no merge contests that unit (a boolean cannot differ from base and both
+sides). When the merge leaves a value the checkout's file does not hold, the repository is marked dirty
+(`markProjectStateDirty`), except for a contested unit, whose file is meant to differ. A contested
+setting or environment key is one pending row (`settings/<name>.json`, `project/environment.json#key`):
+the column keeps this install's value, the base keeps the old one, and the writer renders the file at
+the row's `incoming` and the base at its `base` (`overlaySettings`, `overlayEnvironment`), except for
+the RTK question. The writer also settles the rows it passes (`recordLocalSide`): a column that comes
+to hold the other side's value converges the row. Only an RTK row holds upgrades (`blocksUpgrade`,
+D6); the api and the banner list every unit `isConflictUnit` names, which is every unit admission can
+see. The worker answers one under the same locks as a render key (`answerSettingsQuestion`,
+`resolve.ts`): keep mine writes the column's value into the unit's own file and the base, take
+theirs applies the row's value to the column through `settingColumnUpdate` and the base and rewrites
+no file, and an answer reads as moved when the file no longer holds the row's `incoming`. A setting
+this install has no value for cannot be kept (`no_local`), and one that is never unset cannot be taken
+as absent (`invalid`). The CLI set and the bundle descriptors are still not imported.
 
 **`.haive/install.json` is retired, not written.** Nothing read it, and a second 12 run changed it
 (`appliedAt`, `lastTaskId`) so an identical re-run dirtied a clean checkout. 12, 02 and 04 now delete

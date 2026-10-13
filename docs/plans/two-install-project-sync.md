@@ -474,10 +474,21 @@ Phase 1 (the record):
   deletion. `_install-manifest.ts` and the shared `InstallManifest` type are gone, and the reset
   still removes the file for installs that hold one. Controls: `smoke:two-install` ends with 0
   known gaps, and two identical 12 runs leave `git status --porcelain` empty on a real repository.
-- **B1.8 feat(api,worker): keep the record current on every settings edit** [B1.7]
-  (`markProjectStateDirty` in PATCH exclusions/tooling, the reset, bundle changes, 02-detection,
-  04-tooling, 06_7, bundle resync). Control: PATCH exclusions then a sweep tick updates
-  `settings/scope-exclude-globs.json` (today the mirror never changes after 12).
+- **B1.8 feat(api,worker): keep the record current, and import what it carries** [B1.7]. As built
+  in five PRs. B1.8a: a `project_state_outbox` marks a repository dirty (`markProjectStateDirty`, in
+  the mutating transaction) and a sweep in the plan-mirror tick writes the record, never commits.
+  B1.8b: the record carries the seven portable settings (scope exclusions, RTK switch and version,
+  LSP servers and versions, chrome-devtools-mcp version, review dimensions) and the environment, with
+  a mark at every writer; `app_auth` and `verify_commands` stay on the machine, since a committed
+  value would be typed or run on a teammate's. B1.8c: the sync merges them three ways into the
+  columns with the routes' normalisers, asks about a contested unit as a pending row, and only an
+  RTK row holds upgrades; a base that holds none merges them as no base, so the checkout wins over a
+  default nobody chose. B1.8d: the legacy `environment.json` and `exclusions.json` retire. B1.8e:
+  the tooling mirror becomes one whole-value unit with today's importer semantics. Deviation from
+  the B1.7 text above: a legacy file is retired only in the release whose sync imports its unit, and
+  only from 12 and 02, not wherever the record first carries it. Controls: PATCH exclusions then a
+  sweep tick updates `settings/scope-exclude-globs.json`; A's edit reaches B's column through the
+  record (`smoke:two-install`); a first sync takes A's RTK-off over B's default.
 
 Phase 2 (the plan):
 - **B2.1 fix(worker): a plan flush never overwrites a snapshot it has not imported, never writes

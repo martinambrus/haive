@@ -170,7 +170,8 @@ async function setup(seed: Seed = {}) {
     source: 'git_https',
     status: 'ready',
     storagePath: root,
-    rtkEnabled: false,
+    // Holds no value, so the render-only checkouts below are coherent with it.
+    rtkEnabled: null,
     renderContext: seed.column === undefined ? column(MINE) : seed.column,
     applicableTemplateIds: seed.claims ? WITH_DOCS : null,
     updatedAt: new Date(1000),
