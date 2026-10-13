@@ -642,7 +642,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       userId: ctx.userId,
     });
     result.pushed = true;
-    await advancePlanBaseFromCommit(ctx.db, d.repositoryId, ctx.repoPath, pushedHead);
+    await advancePlanBaseFromCommit(ctx.db, d.repositoryId, ctx.repoPath, pushedHead, d.branch);
 
     // Only now is the scratch worktree disposable. Removed on the success path only —
     // an abandoned conversation keeps it, which is what makes it resumable.

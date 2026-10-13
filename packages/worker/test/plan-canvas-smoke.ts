@@ -2639,6 +2639,30 @@ async function main(): Promise<void> {
   );
   await arrive(theirs);
 
+  // A row stamped before 0196 takes the bytes it already read as its base.
+  await db
+    .update(schema.planMirrorState)
+    .set({ syncedSnapshot: null })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await reconcilePlanFromCheckout(db, sId, sDir);
+  check(
+    'three-way: a stamped row with no base takes the unchanged file as its base',
+    (await baseOf()) != null,
+  );
+
+  // A plan.json that is not JSON is refused with a reason, not skipped as absent.
+  await writeFile(sPlanFile, '{ not json');
+  const notJson = await reconcilePlanFromCheckout(db, sId, sDir).then(
+    () => 'merged',
+    (err: Error) => `${err.name}: ${err.message}`,
+  );
+  check(
+    'three-way: a plan.json that is not JSON is refused',
+    notJson.startsWith('PlanSnapshotError') && notJson.includes('not valid JSON'),
+    notJson,
+  );
+  await arrive(theirs);
+
   // No base: the incoming side wins and nothing is deleted, as a reconcile always did.
   await db
     .update(schema.planMirrorState)

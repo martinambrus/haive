@@ -756,6 +756,7 @@ export async function advancePlanBaseToPushed(
   db: Database,
   repositoryId: string,
   pushedJson: string,
+  stillShared: () => Promise<boolean> = async () => true,
 ): Promise<void> {
   let raw: unknown;
   try {
@@ -767,8 +768,21 @@ export async function advancePlanBaseToPushed(
   if (!parsed.success) return;
   await db.transaction(async (tx) => {
     await lockPlanMirror(tx, repositoryId);
+    // Two Saves can finish out of order; only the push that is still the remote tip moves the base.
+    if (!(await stillShared())) return;
     await storeAgreedBase(tx, repositoryId, parsed.data);
   });
+}
+
+async function seedBaseFrom(tx: PlanMirrorTx, repositoryId: string, bytes: Buffer): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(bytes.toString('utf8')) as unknown;
+  } catch {
+    return;
+  }
+  const parsed = planMirrorPayloadSchema.safeParse(raw);
+  if (parsed.success) await storeAgreedBase(tx, repositoryId, parsed.data);
 }
 
 /** Both sides hold `agreed`, so it becomes the base; a field still asked about keeps its old base. */
@@ -813,11 +827,20 @@ export async function advancePlanBaseFromCommit(
   repositoryId: string,
   repoPath: string,
   commit: string | null,
+  branch: string,
 ): Promise<void> {
   if (!commit) return;
   try {
     const pushed = await gitRun(repoPath, ['show', `${commit}:${HAIVE_DATA_FILES.plan}`]);
-    if (pushed.code === 0) await advancePlanBaseToPushed(db, repositoryId, pushed.stdout);
+    if (pushed.code !== 0) return;
+    await advancePlanBaseToPushed(db, repositoryId, pushed.stdout, async () => {
+      const tip = await gitRun(repoPath, [
+        'rev-parse',
+        '--verify',
+        `refs/remotes/origin/${branch}`,
+      ]);
+      return tip.code === 0 && tip.stdout.trim() === commit;
+    });
   } catch (err) {
     logger.warn({ err, repositoryId }, 'plan base not advanced after push');
   }
@@ -882,6 +905,8 @@ async function reconcilePlanLocked(
     .limit(1);
   const hash = hashBytes(bytes);
   if (bytes.length > 0 && state?.syncedHash === hash) {
+    // A row stamped before 0196 has the bytes it last read but no base; they are the base.
+    if (state.syncedSnapshot == null) await seedBaseFrom(tx, repositoryId, bytes);
     await convergePlanQuestions(tx, repositoryId);
     return noOutcome(null);
   }
@@ -892,7 +917,7 @@ async function reconcilePlanLocked(
   try {
     rawPayload = JSON.parse(raw) as unknown;
   } catch {
-    return noOutcome(NO_SNAPSHOT);
+    throw new PlanSnapshotError('the committed plan snapshot is not valid JSON');
   }
   const parsed = planMirrorPayloadSchema.safeParse(rawPayload);
   if (!parsed.success) {

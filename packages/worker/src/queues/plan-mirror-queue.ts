@@ -290,7 +290,7 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         userId: payload.userId,
       });
       pushed = true;
-      await advancePlanBaseFromCommit(getDb(), repo.id, repoPath, pushedHead);
+      await advancePlanBaseFromCommit(getDb(), repo.id, repoPath, pushedHead, branch);
     }
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });
