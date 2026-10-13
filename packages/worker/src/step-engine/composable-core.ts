@@ -152,6 +152,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['implementation'],
+    precedes: ['commit'],
   },
   {
     stepId: '07a-code-simplify',
@@ -163,6 +164,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'implementation', reason: 'Simplifies the implemented changes.' },
     ],
     provides: [],
+    precedes: ['commit'],
     loopBudgetEditable: true,
   },
   {
@@ -254,7 +256,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Gate 4: Push',
     group: 'finish',
     dispatchesCli: false,
-    requires: [{ needs: 'commit', reason: 'Pushes the committed work.' }],
+    requires: [needWorktree, { needs: 'commit', reason: 'Pushes the committed work.' }],
     provides: [],
   },
   {

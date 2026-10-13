@@ -151,6 +151,31 @@ describe('core composable catalog', () => {
     ]);
   });
 
+  it.each(['07-phase-2-implement', '07a-code-simplify'])(
+    'rejects %s after the commit, whose edits it would leave out',
+    (stepId) => {
+      const order = ['01-worktree-setup', '07-phase-2-implement', '10-gate-3-commit', stepId];
+      expect(validateComposition(order, catalog)).toContainEqual({
+        kind: 'too-late',
+        index: 3,
+        stepId,
+        token: 'commit',
+      });
+    },
+  );
+
+  it('rejects the push gate after cleanup removed the worktree', () => {
+    const base = ['01-worktree-setup', '07-phase-2-implement', '10-gate-3-commit'];
+    expect(
+      validateComposition([...base, '11a-gate-4-push', '12-worktree-cleanup'], catalog),
+    ).toEqual([]);
+    expect(
+      validateComposition([...base, '12-worktree-cleanup', '11a-gate-4-push'], catalog),
+    ).toEqual([
+      expect.objectContaining({ kind: 'unmet-need', stepId: '11a-gate-4-push', needs: 'worktree' }),
+    ]);
+  });
+
   it('rejects syncing the base after the worktree is cut', () => {
     expect(validateComposition(['00a-sync-base', '01-worktree-setup'], catalog)).toEqual([]);
     expect(validateComposition(['01-worktree-setup', '00a-sync-base'], catalog)).toEqual([
