@@ -362,6 +362,10 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     }
 
     if (base === d.baseBranch && d.behindBy === 0) {
+      if (base === d.currentBranch) {
+        const repositoryId = await taskRepositoryId(ctx);
+        if (repositoryId) await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+      }
       return { synced: true, base, strategy: 'noop', behindBy: 0, reason: null };
     }
 
@@ -398,7 +402,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     const ffLocked = async (): Promise<{ code: number; stderr: string; stdout: string }> => {
       if (!repositoryId) return ff();
       const moved = await ctx.db.transaction(async (tx) => {
-        const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
+        const again = await restoreProjectionsInTx(ctx.db, tx, repositoryId, ctx.repoPath);
         return again.outcome === 'refused' ? { again, res: null } : { again, res: await ff() };
       });
       if (moved.again.outcome === 'set-aside') aside = moved.again;

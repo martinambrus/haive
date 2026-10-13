@@ -152,7 +152,7 @@ async function fastForward(
   // still writing its record takes the project-state lock, and refuses once its task is no longer
   // holding. The restore runs again here so no sweep can rewrite a file between it and the move.
   const moved = await db.transaction(async (tx) => {
-    const again = await restoreProjectionsInTx(tx, payload.repositoryId, dest, fence);
+    const again = await restoreProjectionsInTx(db, tx, payload.repositoryId, dest, fence);
     if (again.outcome === 'refused' || again.outcome === 'held') return { again, merge: null };
     if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) return { again, merge: null };
     return { again, merge: await gitRun(dest, ['merge', '--ff-only', target]) };

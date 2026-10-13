@@ -249,6 +249,23 @@ describe('00a-sync-base detect + apply (real git)', () => {
     }
   });
 
+  it('up to date on the current branch → re-syncs Haive projections, since a fast-forward may have landed unrecorded', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    try {
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: true, strategy: 'noop' });
+      expect(projections.setAside).not.toHaveBeenCalled();
+      expect(projections.resync).toHaveBeenCalledWith(ctx.db, 'repo-1', local);
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
   it('no origin remote → skipped, base still recorded for 01', async () => {
     const local = await mkdtemp(path.join(tmpdir(), 'sync-noremote-'));
     await git(local, ['init', '-b', 'main']);

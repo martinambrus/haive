@@ -23,11 +23,7 @@ import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { gitRun } from '../repo/git-exec.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { refreshProjectState } from './refresh.js';
-import {
-  rebaseProjectStateOnCheckout,
-  rebaseProjectStateOnCheckoutLocked,
-  syncProjectStateFromCheckout,
-} from './sync.js';
+import { rebaseProjectStateOnCheckoutLocked, syncProjectStateFromCheckout } from './sync.js';
 import {
   loadPendingClaimConflicts,
   loadPendingRenderConflicts,
@@ -195,8 +191,10 @@ interface RestoreGuard {
   fence: CheckoutFence | undefined;
 }
 
-/** The restore with the domain's lock held: the fence read there and the stale mark raised first. */
+/** The restore with the domain's lock held: the fence read there and the stale mark raised first, on
+ *  the pool, so a crash after the files moved and before `tx` commits still finds the mark. */
 async function restoreLocked(
+  db: Database,
   tx: Tx,
   repoPath: string,
   paths: readonly string[],
@@ -206,28 +204,25 @@ async function restoreLocked(
   if (offender) return refuse(offender, NOT_HAIVE);
   const holding = guard.fence ? await guard.fence(tx) : 0;
   if (holding > 0) return { outcome: 'held' as const, holding };
-  await guard.mark(tx);
+  await guard.mark(db);
   await restoreFromHead(repoPath, paths);
   return null;
 }
 
-/** The restore under the domain's lock. A restore that throws raises the mark again, since the
- *  transaction took the first one back. */
+/** The restore under the domain's lock; `after` runs in the same transaction once the files are restored. */
 async function restoreUnderLock(
   db: Database,
   repoPath: string,
   paths: readonly string[],
   guard: RestoreGuard,
+  after?: (tx: Tx) => Promise<void>,
 ): Promise<SetAsideResult | null> {
-  try {
-    return await db.transaction(async (tx) => {
-      await guard.lock(tx);
-      return restoreLocked(tx, repoPath, paths, guard);
-    });
-  } catch (err) {
-    await guard.mark(db).catch(() => undefined);
-    throw err;
-  }
+  return db.transaction(async (tx) => {
+    await guard.lock(tx);
+    const stopped = await restoreLocked(db, tx, repoPath, paths, guard);
+    if (!stopped) await after?.(tx);
+    return stopped;
+  });
 }
 
 const stateGuard = (
@@ -319,9 +314,9 @@ export async function setAsideHaiveProjections(
       repoPath,
       state,
       stateGuard(repositoryId, repoPath, state, fence),
+      (tx) => rebaseProjectStateOnCheckoutLocked(tx, { repositoryId, repoPath }),
     );
     if (stopped) return stopped;
-    await rebaseProjectStateOnCheckout(db, { repositoryId, repoPath });
     await markProjectStateDirty(db, repositoryId);
   }
   if (plan.length > 0) {
@@ -342,6 +337,7 @@ export async function setAsideHaiveProjections(
  *  until the transaction ends. Takes the locks in the documented order, project state then plan mirror.
  *  Returns `set-aside` when it restored anything, and never reads the network. */
 export async function restoreProjectionsInTx(
+  db: Database,
   tx: Tx,
   repositoryId: string,
   repoPath: string,
@@ -358,6 +354,7 @@ export async function restoreProjectionsInTx(
   const plan = dirty.paths.filter((p) => !p.startsWith(STATE_PREFIX));
   if (state.length > 0) {
     const stopped = await restoreLocked(
+      db,
       tx,
       repoPath,
       state,
@@ -368,6 +365,7 @@ export async function restoreProjectionsInTx(
   }
   if (plan.length > 0) {
     const stopped = await restoreLocked(
+      db,
       tx,
       repoPath,
       plan,

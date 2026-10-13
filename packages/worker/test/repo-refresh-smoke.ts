@@ -788,9 +788,10 @@ async function main(): Promise<void> {
     }
 
     // 11g. A writer that rewrites a file after the set-aside has restored it and before the move cannot get
-    // the move refused: the restore runs again under the locks, right before the move. The race is made
-    // wide: each mark raised by the set-aside sleeps, and a poller puts the written bytes back, once, as
-    // soon as the file reads as HEAD's.
+    // the move refused. The writer takes the project-state lock as the real one does, and holds it a
+    // second while it writes the file and the sync base it was written from: a rebase that read the
+    // working tree outside the set-aside's lock would record HEAD as the base after the writer's. Each
+    // commit that writes the mark or the base sleeps, so the writer queues for the lock before it is released.
     for (const via of ['refresh', '00a'] as const) {
       const c = await withPendingRender();
       const id = c.payload.repositoryId;
@@ -800,35 +801,54 @@ async function main(): Promise<void> {
         cwd: c.dest,
         env: gitEnv,
       });
+      const [synced] = await db
+        .select({ baseSnapshot: schema.projectStateSync.baseSnapshot })
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, id));
       await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
       const upstream = upstreamCommit('a teammate adds an agent', '.haive-data/state');
       const fn = `refresh_smoke_race_${randomBytes(4).toString('hex')}`;
       await db.execute(
         sql.raw(
           `CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ` +
-            `IF NEW.repository_id = '${id}' AND NEW.revision > OLD.revision THEN PERFORM pg_sleep(1); END IF; ` +
-            `RETURN NEW; END $$; CREATE TRIGGER ${fn} BEFORE UPDATE ON project_state_outbox ` +
-            `FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+            `IF NEW.repository_id = '${id}' THEN PERFORM pg_sleep(0.5); END IF; RETURN NULL; END $$; ` +
+            `CREATE CONSTRAINT TRIGGER ${fn}_o AFTER INSERT OR UPDATE ON project_state_outbox ` +
+            `DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${fn}(); ` +
+            `CREATE CONSTRAINT TRIGGER ${fn}_s AFTER INSERT OR UPDATE ON project_state_sync ` +
+            `DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
         ),
       );
       let rewrote = false;
+      let started = false;
       const poll = setInterval(() => {
-        if (rewrote) return;
+        if (started) return;
         void readFile(target)
           .then(async (now) => {
-            if (rewrote || !now.equals(headBytes)) return;
+            if (started || !now.equals(headBytes)) return;
+            started = true;
+            await db.transaction(async (tx) => {
+              await lockProjectState(tx, id);
+              await new Promise((r) => setTimeout(r, 1000));
+              await writeFile(target, rendered);
+              await tx
+                .update(schema.projectStateSync)
+                .set({ baseSnapshot: synced!.baseSnapshot })
+                .where(eq(schema.projectStateSync.repositoryId, id));
+            });
             rewrote = true;
-            await writeFile(target, rendered);
           })
           .catch(() => undefined);
       }, 20);
       let moved;
       try {
         moved = await moveVia(via, c);
+        while (started && !rewrote) await new Promise((r) => setTimeout(r, 50));
       } finally {
         clearInterval(poll);
         await db.execute(
-          sql.raw(`DROP TRIGGER ${fn} ON project_state_outbox; DROP FUNCTION ${fn}()`),
+          sql.raw(
+            `DROP TRIGGER ${fn}_o ON project_state_outbox; DROP TRIGGER ${fn}_s ON project_state_sync; DROP FUNCTION ${fn}()`,
+          ),
         );
       }
       check(
@@ -852,7 +872,7 @@ async function main(): Promise<void> {
       let sweep: Promise<number> | null = null;
       let during = '';
       await db.transaction(async (tx) => {
-        const restored = await restoreProjectionsInTx(tx, id, c.dest);
+        const restored = await restoreProjectionsInTx(db, tx, id, c.dest);
         sweep = sweepDirtyProjectStates(db);
         await new Promise((r) => setTimeout(r, 1500));
         during = await readFile(path.join(c.dest, RENDER_REL), 'utf8');
@@ -869,6 +889,63 @@ async function main(): Promise<void> {
         'a sweep started while the restore is open waits for it, then writes',
         during.trim() === headRender.trim() && after.includes('ruby'),
         { during, after },
+      );
+    }
+
+    // 11i. A fast-forward that landed while the process died leaves a checkout at origin's head with the
+    // record not read in: the next run finds nothing to move, and still brings the record in.
+    for (const via of ['refresh', '00a'] as const) {
+      const c = await committedRecord();
+      const id = c.payload.repositoryId;
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      const upstream = upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      git(c.dest, 'fetch', '-q', 'origin', 'main');
+      git(c.dest, 'merge', '-q', '--ff-only', 'origin/main');
+      const before = await columnOf(id);
+      const moved = await moveVia(via, c);
+      const col = await columnOf(id);
+      check(
+        `${via}: a checkout already at origin's head still imports the record it holds`,
+        git(c.dest, 'rev-parse', 'HEAD') === upstream &&
+          isDeepEqual(before?.acceptedAgentIds, ['a']) &&
+          isDeepEqual(col?.acceptedAgentIds, ['a', 'b']),
+        { before, col, moved },
+      );
+    }
+
+    // 11j. The mark that says the files are stale is committed before the files move: a restore inside a
+    // transaction that then fails leaves the files at HEAD and the row dirty, so the sweep is not skipped.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const rowOf = () =>
+        db
+          .select({
+            revision: schema.projectStateOutbox.revision,
+            written: schema.projectStateOutbox.writtenRevision,
+          })
+          .from(schema.projectStateOutbox)
+          .where(eq(schema.projectStateOutbox.repositoryId, id))
+          .then((rows) => rows[0]!);
+      const clean = await rowOf();
+      const failure = new Error('crash after the restore');
+      let restored = null;
+      await db
+        .transaction(async (tx) => {
+          restored = await restoreProjectionsInTx(db, tx, id, c.dest);
+          throw failure;
+        })
+        .catch((err: unknown) => {
+          if (err !== failure) throw err;
+        });
+      const dirty = await rowOf();
+      const headRender = git(c.dest, 'show', `HEAD:${RENDER_REL}`);
+      check(
+        'the stale mark survives a transaction that fails after the restore',
+        clean.written === clean.revision &&
+          dirty.written < dirty.revision &&
+          (await readFile(path.join(c.dest, RENDER_REL), 'utf8')).trim() === headRender.trim(),
+        { restored, clean, dirty },
       );
     }
 
