@@ -269,25 +269,25 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
 adminTaskTypeRoutes.delete('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const db = getDb();
-  const row = await findDefinition(db, slug);
-  if (!row) throw new HttpError(404, 'Task type not found');
-  if (row.source !== 'admin') {
-    throw new HttpError(400, 'Only custom task types can be deleted; disable this one instead');
-  }
-  const [used] = await db
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.type, slug))
-    .limit(1);
-  if (used) throw new HttpError(409, 'Tasks of this type exist; disable it instead');
-  await db
-    .delete(schema.taskTypeDefinitions)
-    .where(
-      and(
-        eq(schema.taskTypeDefinitions.slug, slug),
-        eq(schema.taskTypeDefinitions.source, 'admin'),
-      ),
-    );
+  // The row lock pairs with the create path's FOR SHARE read, so a task cannot be inserted between the check and the delete.
+  await db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.taskTypeDefinitions)
+      .where(eq(schema.taskTypeDefinitions.slug, slug))
+      .for('update');
+    if (!row) throw new HttpError(404, 'Task type not found');
+    if (row.source !== 'admin') {
+      throw new HttpError(400, 'Only custom task types can be deleted; disable this one instead');
+    }
+    const [used] = await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.type, slug))
+      .limit(1);
+    if (used) throw new HttpError(409, 'Tasks of this type exist; disable it instead');
+    await tx.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, slug));
+  });
   await recordAuditEvent(db, {
     actorUserId: c.get('userId'),
     action: 'task_type.delete',

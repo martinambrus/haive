@@ -401,6 +401,35 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
   });
 
   describe('DELETE /admin/task-types/:slug', () => {
+    it('waits for a task insert in flight, then refuses the delete', async () => {
+      await send('POST', '/admin/task-types', valid('tt-race'));
+      const [user] = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.emailBlindIndex, USER_EMAIL_INDEX));
+      let locked!: () => void;
+      const holding = new Promise<void>((r) => (locked = r));
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const creating = db.transaction(async (tx) => {
+        await tx
+          .select()
+          .from(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, 'tt-race'))
+          .for('share');
+        await tx.insert(schema.tasks).values({ userId: user!.id, type: 'tt-race', title: 'race' });
+        locked();
+        await gate;
+      });
+      await holding;
+      const deleting = send('DELETE', '/admin/task-types/tt-race');
+      await new Promise((r) => setTimeout(r, 300));
+      release();
+      await creating;
+      expect((await deleting).status).toBe(409);
+      expect(await row('tt-race')).toBeDefined();
+    });
+
     it('refuses with 409 while a task has the type, then deletes once none does', async () => {
       await send('POST', '/admin/task-types', valid('tt-del'));
       await taskFor('tt-del');
