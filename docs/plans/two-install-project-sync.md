@@ -501,7 +501,7 @@ Phase 1 (the record):
   through B0.1's hold (`holdImportedMcpServers`), inert until accepted; the sync base keeps the
   checkout's unit, and the sync marks the repository dirty when the column's unit differs from the
   checkout's. The MCP consent PATCH and the boot hold mark the outbox in their transactions, and
-  `tooling.json` retires like the other two (12 stops writing it once its record write succeeded,
+  The legacy import strips the same machine-local keys. `tooling.json` retires like the other two (12 stops writing it once its record write succeeded, unless the record cannot carry the tooling (then 12 still writes it and nothing retires it),
   02 and 12 delete a file of the mirror's shape while the unit file exists). Deviation from
   the B1.7 text above: a legacy file is retired only in the release whose sync imports its unit, and
   only from 12 and 02, not wherever the record first carries it. Controls: PATCH exclusions then a

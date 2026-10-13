@@ -575,4 +575,36 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
       tooling: { ragMode: 'internal' },
     });
   });
+
+  it.each([
+    ['another schema version', { ...TOOLING_COLUMN, schemaVersion: 2 }],
+    [
+      'a unit past the file limit',
+      {
+        schemaVersion: 1,
+        tooling: { ragMode: 'internal', pad: 'x'.repeat(1024 * 1024) },
+      },
+    ],
+  ])(
+    'with %s the record carries no tooling unit: tooling.json is written, committed, and not retired',
+    async (_why, column) => {
+      const stale = JSON.stringify({ schemaVersion: 1, tooling: { ragMode: 'stale' } });
+      const s = await seeded({ [TOOLING_LEGACY]: stale }, { onboardingTooling: column });
+
+      const out = await s.applyCommit();
+
+      expect(out.commitPerformed).toBe(true);
+      expect(existsSync(join(s.root, TOOLING_UNIT))).toBe(false);
+      expect(existsSync(join(s.root, RECORD_FORMAT))).toBe(true);
+      expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
+      const written = JSON.parse(await readFile(join(s.root, TOOLING_LEGACY), 'utf8')) as {
+        schemaVersion: number;
+        tooling: Record<string, unknown>;
+      };
+      expect(written.schemaVersion).toBe(column.schemaVersion);
+      expect(written.tooling.ragMode).toBe('internal');
+      expect(written.tooling.ollamaUrl).toBeUndefined();
+      expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+    },
+  );
 });

@@ -1,3 +1,5 @@
+import { eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import { lstatNoFollow, removeFileIfNoFollow } from '@haive/shared/fs-safe';
 import {
   HAIVE_DATA_FILES,
@@ -10,6 +12,7 @@ import {
   PROJECT_STATE_DIR,
   TOOLING_UNIT_NAME,
   settingFileName,
+  toolingUnitOf,
 } from '@haive/shared/project-state';
 import type { StepContext } from './step-definition.js';
 
@@ -119,11 +122,23 @@ export function retireInstallManifest(ctx: RetireContext, warnings: string[]): P
 
 const unitPath = (rel: string): string => `${PROJECT_STATE_DIR}/${rel}`;
 
+/** Whether the repository holds tooling the record cannot carry (another schema version, a unit past
+ *  the file limit), so `tooling.json` stays the only copy. */
+export async function toolingOutsideRecord(db: Database, repositoryId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ onboardingTooling: schema.repositories.onboardingTooling })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  return row?.onboardingTooling != null && toolingUnitOf(row.onboardingTooling) === null;
+}
+
 /** Delete the legacy `.haive-data/environment.json`, `exclusions.json` and `tooling.json` mirrors, each
- *  once the record file carrying its value exists. Never throws. */
+ *  once the record file carrying its value exists, except the paths in `keep`. Never throws. */
 export async function retireLegacyMirrors(
   ctx: RetireContext,
   warnings: string[],
+  keep: readonly string[] = [],
 ): Promise<Array<{ path: string; outcome: Outcome }>> {
   const targets = [
     {
@@ -147,7 +162,10 @@ export async function retireLegacyMirrors(
   ];
   const results: Array<{ path: string; outcome: Outcome }> = [];
   for (const target of targets) {
-    results.push({ path: target.path, outcome: await retireHaiveFile(ctx, target, warnings) });
+    results.push({
+      path: target.path,
+      outcome: keep.includes(target.path) ? 'kept' : await retireHaiveFile(ctx, target, warnings),
+    });
   }
   return results;
 }

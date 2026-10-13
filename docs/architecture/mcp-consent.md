@@ -25,3 +25,5 @@ acceptance the committed unit claims (the consent keys are dropped from it). A c
 is never overwritten by a record. A list held here is written back to the record as `mcpSettingsJson`,
 the team's list, and accepting or discarding it, like the boot hold, marks the record stale
 (`markProjectStateDirty`) in the transaction that changes the column.
+The same helper strips `ragConnectionString`, `ollamaUrl` and the consent keys from a legacy
+`tooling.json` on import, so no committed file chooses this install's RAG connection or Ollama endpoint.

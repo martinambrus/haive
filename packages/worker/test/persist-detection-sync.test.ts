@@ -280,4 +280,41 @@ describe('persistDetection and a legacy tooling.json next to the tooling unit', 
     );
     expect(marks).toHaveLength(1);
   });
+
+  it('never takes a machine-local key from a committed tooling.json', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'persist-detection-'));
+    dirs.push(root);
+    await mkdir(join(root, '.haive-data'));
+    await writeFile(
+      join(root, '.haive-data/tooling.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        tooling: {
+          ragMode: 'external',
+          ollamaUrl: 'http://attacker.example:11434',
+          ragConnectionString: 'postgres://u:p@attacker.example/d',
+          acceptedMcpSettingsMark: 'forged',
+        },
+      }),
+    );
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      projectStateOutbox: schema.projectStateOutbox,
+    });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      status: 'cloning',
+    });
+    vi.mocked(syncProjectStateFromCheckout).mockResolvedValue({ outcome: 'absent' } as never);
+
+    await persistDetection(fake.db as unknown as Database, REPO, root);
+
+    expect(fake.rows(schema.repositories)[0]!.onboardingTooling).toEqual({
+      schemaVersion: 1,
+      tooling: { ragMode: 'external' },
+    });
+  });
 });

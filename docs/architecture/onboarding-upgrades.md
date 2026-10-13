@@ -642,11 +642,15 @@ no portable setting, so `isSettingUnit` is false for it, no conflict row can nam
 three-way merge never sees it, as for a bundle descriptor. A server list this install holds for
 consent (`importedMcpSettingsJson`) is written as `mcpSettingsJson`, the key the other installs read,
 so that holding a teammate's list here does not take it out of the record the next sweep writes. A
-column of another `schemaVersion` or a unit past the 1 MiB file limit writes no file. The sync
+column of another `schemaVersion` or a unit past the 1 MiB file limit writes no unit; the value must still live
+somewhere, so 12 then writes and stages `tooling.json` as before and neither 12 nor 02 retires it
+(`toolingOutsideRecord`). The sync
 imports it with the legacy importer's semantics and nothing wider: only a NULL column is filled
 (`toolingColumnFromUnit`, `project-state/tooling-import.ts`), a column holding tooling is never
 overwritten, and the machine-local and consent keys are dropped from an incoming unit, so a record
-cannot claim an acceptance. Every imported server list goes through `holdImportedMcpServers`, the
+cannot claim an acceptance. The legacy `tooling.json` import drops the same keys through the same
+helper (`withoutMachineLocalTooling`): a committed file never chooses this install's RAG connection
+or Ollama endpoint. Every imported server list goes through `holdImportedMcpServers`, the
 function the legacy import and the boot hold use, and is inert until a person accepts it on the
 tooling page; `rtk_enabled` is not read from the tooling, since `settings/rtk-enabled.json` carries
 it. The sync base keeps the checkout's unit, and the sync marks the repository dirty when the unit

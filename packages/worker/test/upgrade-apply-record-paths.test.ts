@@ -336,4 +336,19 @@ describe('02 and the legacy tooling mirror', () => {
     expect(existsSync(join(failed.root, TOOLING_LEGACY))).toBe(true);
     expect(outFailed.deletedPaths ?? []).not.toContain(TOOLING_LEGACY);
   });
+
+  it('keeps it when the record cannot carry the tooling', async () => {
+    const s = await withTooling(HAIVE_TOOLING, false);
+    s.fake.patch(schema.repositories, REPO, {
+      onboardingTooling: { schemaVersion: 2, tooling: { ragMode: 'internal' } },
+    });
+    await mkdir(join(s.root, '.haive-data/state/settings'), { recursive: true });
+    await writeFile(join(s.root, TOOLING_UNIT), '{}\n');
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(true);
+    expect(out.deletedPaths ?? []).not.toContain(TOOLING_LEGACY);
+    expect(out.warnings).toEqual([]);
+  });
 });

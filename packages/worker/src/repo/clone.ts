@@ -28,7 +28,6 @@ import {
   HAIVE_DATA_FILES,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
-  ONBOARDING_TOOLING_CONSENT_KEYS,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   mirroredEnvDetectData,
   type ArchiveFormat,
@@ -44,6 +43,7 @@ import {
   PROJECT_STATE_DIR,
   TOOLING_UNIT_NAME,
   settingFileName,
+  withoutMachineLocalTooling,
 } from '@haive/shared/project-state';
 import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
@@ -139,9 +139,9 @@ const MIRROR_READ_CAP = 1024 * 1024;
  *  sync did not fill. Non-clobbering: only fills columns that are currently
  *  NULL, so a live local onboarding (or an earlier import) is never overwritten
  *  and a re-scan/refresh is a no-op once populated. schemaVersion-gated so a
- *  future mirror-format bump is ignored rather than mis-parsed. The tooling
- *  mirror already has the machine-specific infra keys stripped, so consumers on
- *  the new machine fall back to its local defaults. */
+ *  future mirror-format bump is ignored rather than mis-parsed. A committed
+ *  tooling file never chooses this install's machine-specific keys (RAG connection, Ollama
+ *  endpoint, MCP consent): they are dropped on import whatever the file holds. */
 async function importHaiveDataMirror(
   db: Database,
   repositoryId: string,
@@ -203,8 +203,7 @@ async function importHaiveDataMirror(
     if (tooling?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION) {
       const incoming = tooling.tooling;
       if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
-        const local: Record<string, unknown> = { ...incoming };
-        for (const key of ONBOARDING_TOOLING_CONSENT_KEYS) delete local[key];
+        const local = withoutMachineLocalTooling(incoming);
         const held = holdImportedMcpServers(local);
         heldMcpServers = held?.importedMcpServerNames ?? null;
         tooling.tooling = held ?? local;

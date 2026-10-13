@@ -19,7 +19,7 @@ import {
   HAIVE_DATA_FILES,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
 } from '@haive/shared';
-import { withoutMachineLocalTooling } from '@haive/shared/project-state';
+import { toolingUnitOf, withoutMachineLocalTooling } from '@haive/shared/project-state';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
@@ -57,6 +57,7 @@ import {
   INSTALL_MANIFEST_PATH,
   retireInstallManifest,
   retireLegacyMirrors,
+  toolingOutsideRecord,
 } from '../../_retire-install-manifest.js';
 import type { GenerateFilesApply, GenerateFilesDetect } from './07-generate-files.js';
 import { gitExec } from '../../../repo/git-exec.js';
@@ -357,7 +358,8 @@ async function recordOnboardingArtifacts(
  *  tooling file drops the machine-specific infra keys (ollamaUrl,
  *  ragConnectionString) — those do not move between machines. The environment, scope
  *  exclusion and tooling files are written only when `legacyMirrors` is set: a successful project
- *  state record write carries them and retires those files. */
+ *  state record write carries them and retires those files. Tooling the record cannot carry (no
+ *  unit is written for it) is still written here, so the value always lives in a committed file. */
 async function writeHaiveDataMirror(
   ctx: StepContext,
   repositoryId: string,
@@ -392,7 +394,7 @@ async function writeHaiveDataMirror(
   if (env && legacyMirrors) await writeJson(HAIVE_DATA_FILES.environment, env);
 
   const tooling = repo.onboardingTooling as OnboardingToolingMirror | null;
-  if (tooling?.tooling && legacyMirrors) {
+  if (tooling?.tooling && (legacyMirrors || toolingUnitOf(tooling) === null)) {
     const mirror: OnboardingToolingMirror = {
       schemaVersion: tooling.schemaVersion,
       tooling: withoutMachineLocalTooling(tooling.tooling),
@@ -667,7 +669,10 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           if ((await retireInstallManifest(ctx, warnings)) !== 'kept') {
             ownRemoved.push(INSTALL_MANIFEST_PATH);
           }
-          for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings)) {
+          const keep = (await toolingOutsideRecord(ctx.db, mirrorRepositoryId))
+            ? [HAIVE_DATA_FILES.tooling]
+            : [];
+          for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings, keep)) {
             if (outcome !== 'kept') ownRemoved.push(path);
           }
         } catch (err) {
