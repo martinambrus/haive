@@ -11,6 +11,7 @@ const ADMIN_TABS = [
   { label: 'Users', href: '/admin/users' },
   { label: 'Pricing', href: '/admin/pricing' },
   { label: 'Task types', href: '/admin/task-types' },
+  { label: 'Modules', href: '/admin/modules' },
   { label: 'Maintenance', href: '/admin/maintenance' },
   { label: 'Audit log', href: '/admin/audit' },
 ];

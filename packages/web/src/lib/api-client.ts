@@ -6,6 +6,8 @@ import type {
   CompositionIssue,
   CustomTaskTypeCreate,
   DashboardSpec,
+  ModuleDiff,
+  ModuleIntentRow,
   PublicTaskType,
   TaskTypeAvailability,
   TaskTypeUpdate,
@@ -2484,5 +2486,12 @@ export const updateTaskType = (slug: string, body: TaskTypeUpdate) =>
 
 export const deleteTaskType = (slug: string) =>
   api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);
+
+export interface ModulesLoadedResponse {
+  intent: ModuleIntentRow[];
+  modules: ModuleDiff;
+}
+
+export const getModulesLoaded = () => api.get<ModulesLoadedResponse>('/modules/loaded');
 
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');
