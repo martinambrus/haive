@@ -776,55 +776,39 @@ export async function syncProjectStateFromCheckout(
  *  pending state; one whose record cannot be read keeps its base and answers in `last_error`. */
 export async function rebaseProjectStateOnCheckout(
   db: Database,
+  args: { repositoryId: string; repoPath: string },
+): Promise<void> {
+  const checkout = await readCheckout(args.repoPath);
+  await db.transaction((tx) => rebaseLocked(tx, args.repositoryId, checkout));
+}
+
+/** The same rebase inside a transaction the caller already holds. */
+export async function rebaseProjectStateOnCheckoutLocked(
+  tx: Tx,
   { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
 ): Promise<void> {
-  const checkout = await readCheckout(repoPath);
-  await db.transaction(async (tx) => {
-    await lockProjectState(tx, repositoryId);
-    if (checkout.kind === 'refused') {
-      const row = await readSyncRow(tx, repositoryId);
-      if (row !== null && row.lastError !== checkout.reason) {
-        await tx
-          .update(schema.projectStateSync)
-          .set({ lastError: checkout.reason, updatedAt: new Date() })
-          .where(eq(schema.projectStateSync.repositoryId, repositoryId));
-      }
-      return;
-    }
-    if (checkout.kind === 'absent') {
-      const synced = {
-        baseSnapshot: normalizeProjectState(emptyProjectState()),
-        lastError: null,
-        updatedAt: new Date(),
-      };
+  await rebaseLocked(tx, repositoryId, await readCheckout(repoPath));
+}
+
+async function rebaseLocked(
+  tx: Tx,
+  repositoryId: string,
+  checkout: Awaited<ReturnType<typeof readCheckout>>,
+): Promise<void> {
+  await lockProjectState(tx, repositoryId);
+  if (checkout.kind === 'refused') {
+    const row = await readSyncRow(tx, repositoryId);
+    if (row !== null && row.lastError !== checkout.reason) {
       await tx
-        .insert(schema.projectStateSync)
-        .values({ repositoryId, ...synced })
-        .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
-      return;
+        .update(schema.projectStateSync)
+        .set({ lastError: checkout.reason, updatedAt: new Date() })
+        .where(eq(schema.projectStateSync.repositoryId, repositoryId));
     }
-    const [repo] = await tx
-      .select({ renderContext: schema.repositories.renderContext })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .limit(1);
-    const rtkKept =
-      (repo?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true ||
-      (repo?.renderContext ?? null) === null;
-    const settings = Object.create(null) as Record<string, unknown>;
-    for (const [name, value] of Object.entries(intakeSettings(checkout.settings, {}).accepted)) {
-      if (rtkKept || name !== 'rtk-enabled') settings[name] = value;
-    }
-    const tooling = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
-    if (tooling) settings[TOOLING_UNIT_NAME] = tooling;
+    return;
+  }
+  if (checkout.kind === 'absent') {
     const synced = {
-      baseSnapshot: normalizeProjectState({
-        ...recordOf(checkout.render),
-        claims: checkout.claims,
-        bundles: checkout.bundles,
-        settings,
-        environment: checkout.environment && normalizeEnvironment(checkout.environment),
-      }),
+      baseSnapshot: normalizeProjectState(emptyProjectState()),
       lastError: null,
       updatedAt: new Date(),
     };
@@ -832,5 +816,35 @@ export async function rebaseProjectStateOnCheckout(
       .insert(schema.projectStateSync)
       .values({ repositoryId, ...synced })
       .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
-  });
+    return;
+  }
+  const [repo] = await tx
+    .select({ renderContext: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  const rtkKept =
+    (repo?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true ||
+    (repo?.renderContext ?? null) === null;
+  const settings = Object.create(null) as Record<string, unknown>;
+  for (const [name, value] of Object.entries(intakeSettings(checkout.settings, {}).accepted)) {
+    if (rtkKept || name !== 'rtk-enabled') settings[name] = value;
+  }
+  const tooling = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
+  if (tooling) settings[TOOLING_UNIT_NAME] = tooling;
+  const synced = {
+    baseSnapshot: normalizeProjectState({
+      ...recordOf(checkout.render),
+      claims: checkout.claims,
+      bundles: checkout.bundles,
+      settings,
+      environment: checkout.environment && normalizeEnvironment(checkout.environment),
+    }),
+    lastError: null,
+    updatedAt: new Date(),
+  };
+  await tx
+    .insert(schema.projectStateSync)
+    .values({ repositoryId, ...synced })
+    .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
 }

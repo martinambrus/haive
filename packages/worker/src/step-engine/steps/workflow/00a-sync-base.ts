@@ -12,6 +12,7 @@ import {
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import {
+  restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
   type SetAsideResult,
@@ -393,7 +394,23 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       }
     }
 
-    let res = await ff();
+    // Under both projection locks, so no sweep can rewrite a file between the restore and the move.
+    const ffLocked = async (): Promise<{ code: number; stderr: string; stdout: string }> => {
+      if (!repositoryId) return ff();
+      const moved = await ctx.db.transaction(async (tx) => {
+        const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
+        return again.outcome === 'refused' ? { again, res: null } : { again, res: await ff() };
+      });
+      if (moved.again.outcome === 'set-aside') aside = moved.again;
+      if (moved.res) return moved.res;
+      return {
+        code: 1,
+        stderr: moved.again.outcome === 'refused' ? moved.again.reason : '',
+        stdout: '',
+      };
+    };
+
+    let res = await ffLocked();
     if (res.code !== 0) {
       await gitRun(ctx.repoPath, [
         'fetch',
@@ -402,7 +419,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         'origin',
         `refs/heads/${base}`,
       ]);
-      res = await ff();
+      res = await ffLocked();
     }
     if (repositoryId && (res.code === 0 || aside.outcome === 'set-aside')) {
       await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);

@@ -10,10 +10,11 @@ import { resolveMergePhase } from '../../merge-resolver.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { claimFake } from '../../../../test/merge-dir-claim-fake.js';
 
-const projections = vi.hoisted(() => ({ setAside: vi.fn(), resync: vi.fn() }));
+const projections = vi.hoisted(() => ({ setAside: vi.fn(), resync: vi.fn(), restore: vi.fn() }));
 vi.mock('../../../project-state/set-aside.js', () => ({
   setAsideHaiveProjections: projections.setAside,
   resyncHaiveProjections: projections.resync,
+  restoreProjectionsInTx: projections.restore,
 }));
 vi.mock('../../merge-dir-claim.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../merge-dir-claim.js')>()),
@@ -23,6 +24,8 @@ beforeEach(() => {
   claimFake.reset();
   projections.setAside.mockReset();
   projections.resync.mockReset();
+  projections.restore.mockReset();
+  projections.restore.mockResolvedValue({ outcome: 'clean' });
 });
 
 const exec = promisify(execFile);
@@ -58,6 +61,7 @@ function mkCtx(repoPath: string, repositoryId: string | null = null): StepContex
     taskId: 't1',
     taskStepId: 'step1',
     db: {
+      transaction: async (run: (tx: unknown) => Promise<unknown>) => run({}),
       query: {
         tasks: { findFirst: async () => ({ repositoryId }) },
         repositories: { findFirst: async () => null },
@@ -172,6 +176,31 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out.reason).toContain('.haive-data/state/project/render.json');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
       expect(projections.resync).not.toHaveBeenCalled();
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a file the restore under the locks refuses stops the fast-forward, naming the file', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      projections.restore.mockResolvedValue({
+        outcome: 'refused',
+        file: '.haive-data/state/project/render.json',
+        reason: '.haive-data/state/project/render.json holds changes Haive did not write',
+      });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
+      expect(out.reason).toContain('.haive-data/state/project/render.json');
+      expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
       await rm(bare, { recursive: true, force: true });
       await rm(seed, { recursive: true, force: true });

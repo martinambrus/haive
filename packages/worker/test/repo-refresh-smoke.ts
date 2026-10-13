@@ -17,7 +17,10 @@ import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase, getDb } from '../src/db.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
-import { setAsideHaiveProjections } from '../src/project-state/set-aside.js';
+import {
+  restoreProjectionsInTx,
+  setAsideHaiveProjections,
+} from '../src/project-state/set-aside.js';
 import { lockProjectState, writeProjectStateColumn } from '../src/project-state/write.js';
 import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';
 import { writePlanMirror } from '../src/plan/mirror.js';
@@ -426,10 +429,14 @@ async function main(): Promise<void> {
           where: eq(schema.repositories.id, id),
           columns: { renderContext: true },
         })
-      )?.renderContext as { acceptedAgentIds?: string[]; lspLanguages?: string[] } | null;
+      )?.renderContext as {
+        acceptedAgentIds?: string[];
+        lspLanguages?: string[];
+        framework?: string | null;
+      } | null;
     /** A cloned repository whose record is committed, then one pending change of Haive's own,
      *  written to render.json by the sweep. */
-    const withPendingRender = async () => {
+    const committedRecord = async () => {
       const c = await cloned();
       await db
         .update(schema.repositories)
@@ -444,6 +451,10 @@ async function main(): Promise<void> {
       git(c.dest, 'commit', '-q', '--allow-empty', '-m', 'record');
       git(c.dest, 'push', '-q', 'origin', 'HEAD:main');
       git(seed, 'pull', '-q', '--ff-only', 'origin', 'main');
+      return c;
+    };
+    const withPendingRender = async () => {
+      const c = await committedRecord();
       await db
         .update(schema.repositories)
         .set({ renderContext: column({ lspLanguages: ['php'] }) })
@@ -737,6 +748,127 @@ async function main(): Promise<void> {
           (await readFile(path.join(c.dest, RENDER_REL))).equals(renderBefore) &&
           (await readFile(path.join(c.dest, PLAN_REL))).equals(planBefore),
         { message },
+      );
+    }
+
+    // 11f. A conflict is pending on a render key: the writer renders the incoming side into the file and
+    // the base side into the sync base, and the file it wrote is still Haive's, so the move is not refused.
+    for (const via of ['refresh', '00a'] as const) {
+      const c = await committedRecord();
+      const id = c.payload.repositoryId;
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column({ framework: 'laravel' }) })
+        .where(eq(schema.repositories.id, id));
+      await writeRecord(c.dest, { framework: 'symfony' });
+      await markProjectStateDirty(db, id);
+      await sweepDirtyProjectStates(db);
+      const written = JSON.parse(await readFile(path.join(c.dest, RENDER_REL), 'utf8')) as {
+        framework: string;
+      };
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'], framework: 'symfony' });
+      const upstream = upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      const moved = await moveVia(via, c);
+      const row = await db.query.projectStateConflicts.findFirst({
+        where: eq(schema.projectStateConflicts.repositoryId, id),
+      });
+      const col = await columnOf(id);
+      check(
+        `${via}: a pending conflict leaves the file the writer rendered Haive's own, and the checkout moves`,
+        written.framework === 'symfony' && git(c.dest, 'rev-parse', 'HEAD') === upstream,
+        { written, moved },
+      );
+      check(
+        `${via}: and the conflict is still pending, with this install's value kept`,
+        row?.unit === 'project/render.json#framework' &&
+          row.resolvedAt === null &&
+          col?.framework === 'laravel',
+        { row, col },
+      );
+    }
+
+    // 11g. A writer that rewrites a file after the set-aside has restored it and before the move cannot get
+    // the move refused: the restore runs again under the locks, right before the move. The race is made
+    // wide: each mark raised by the set-aside sleeps, and a poller puts the written bytes back, once, as
+    // soon as the file reads as HEAD's.
+    for (const via of ['refresh', '00a'] as const) {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const target = path.join(c.dest, RENDER_REL);
+      const rendered = await readFile(target);
+      const headBytes = execFileSync('git', ['show', `HEAD:${RENDER_REL}`], {
+        cwd: c.dest,
+        env: gitEnv,
+      });
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      const upstream = upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      const fn = `refresh_smoke_race_${randomBytes(4).toString('hex')}`;
+      await db.execute(
+        sql.raw(
+          `CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ` +
+            `IF NEW.repository_id = '${id}' AND NEW.revision > OLD.revision THEN PERFORM pg_sleep(1); END IF; ` +
+            `RETURN NEW; END $$; CREATE TRIGGER ${fn} BEFORE UPDATE ON project_state_outbox ` +
+            `FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+        ),
+      );
+      let rewrote = false;
+      const poll = setInterval(() => {
+        if (rewrote) return;
+        void readFile(target)
+          .then(async (now) => {
+            if (rewrote || !now.equals(headBytes)) return;
+            rewrote = true;
+            await writeFile(target, rendered);
+          })
+          .catch(() => undefined);
+      }, 20);
+      let moved;
+      try {
+        moved = await moveVia(via, c);
+      } finally {
+        clearInterval(poll);
+        await db.execute(
+          sql.raw(`DROP TRIGGER ${fn} ON project_state_outbox; DROP FUNCTION ${fn}()`),
+        );
+      }
+      check(
+        `${via}: a file rewritten between the set-aside and the move does not stop the move`,
+        rewrote && git(c.dest, 'rev-parse', 'HEAD') === upstream,
+        { rewrote, moved },
+      );
+    }
+
+    // 11h. The restore before the move holds the locks the sweeps take: a sweep started while it is open
+    // writes nothing until it ends.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const headRender = git(c.dest, 'show', `HEAD:${RENDER_REL}`);
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column({ lspLanguages: ['ruby'] }) })
+        .where(eq(schema.repositories.id, id));
+      await markProjectStateDirty(db, id);
+      let sweep: Promise<number> | null = null;
+      let during = '';
+      await db.transaction(async (tx) => {
+        const restored = await restoreProjectionsInTx(tx, id, c.dest);
+        sweep = sweepDirtyProjectStates(db);
+        await new Promise((r) => setTimeout(r, 1500));
+        during = await readFile(path.join(c.dest, RENDER_REL), 'utf8');
+        check(
+          'the restore takes the file back to HEAD',
+          restored.outcome === 'set-aside',
+          restored,
+        );
+      });
+      await sweep;
+      await sweepDirtyProjectStates(db);
+      const after = await readFile(path.join(c.dest, RENDER_REL), 'utf8');
+      check(
+        'a sweep started while the restore is open waits for it, then writes',
+        during.trim() === headRender.trim() && after.includes('ruby'),
+        { during, after },
       );
     }
 
