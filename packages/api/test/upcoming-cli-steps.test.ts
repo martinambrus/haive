@@ -93,6 +93,13 @@ describe('buildUpcomingCliSteps for a task with a run list snapshot', () => {
     expect(out).not.toContain('08a-browser-verify');
   });
 
+  it('lists the steps in the order the snapshot runs them', async () => {
+    expect(await bySnapshot('review_only', ['08c-code-review', '07-phase-2-implement'])).toEqual([
+      '08c-code-review',
+      '07-phase-2-implement',
+    ]);
+  });
+
   it('drops a snapshot step that already has a row, and the model-health canary', async () => {
     const out = await bySnapshot(
       'review_only',

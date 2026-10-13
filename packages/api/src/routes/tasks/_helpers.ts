@@ -920,12 +920,12 @@ export async function buildUpcomingCliSteps(
   runListSnapshot: readonly string[] | null = null,
 ) {
   const started = new Set<string>(existingStepIds);
-  const upcoming = CLI_DISPATCH_STEPS.filter(
-    (s) =>
-      (runListSnapshot ? runListSnapshot.includes(s.id) : s.workflowType === taskType) &&
-      !MODEL_HEALTH_STEP_ID_SET.has(s.id) &&
-      !started.has(s.id),
-  ).map((s) => ({ stepId: s.id, title: s.title }));
+  const candidates = runListSnapshot
+    ? runListSnapshot.flatMap((id) => CLI_DISPATCH_STEPS.filter((s) => s.id === id))
+    : CLI_DISPATCH_STEPS.filter((s) => s.workflowType === taskType);
+  const upcoming = candidates
+    .filter((s) => !MODEL_HEALTH_STEP_ID_SET.has(s.id) && !started.has(s.id))
+    .map((s) => ({ stepId: s.id, title: s.title }));
   if (upcoming.length === 0) return [];
   return enrichStepsWithCliPreferences(db, userId, upcoming, taskId, ignoreSaved);
 }

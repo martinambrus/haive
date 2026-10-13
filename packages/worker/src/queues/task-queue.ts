@@ -882,8 +882,6 @@ async function cleanupTaskContainers(
   // run — a throw there turns it `failed`, whose recovery surfaces need the workspace. The call
   // lives at the end of markTaskCompleted and on the cancel path instead.
 
-  await releaseTaskWorktree(db, taskId, reason);
-
   // Reap the env template + image ONLY on cancel. cleanupTaskEnvImage deletes the
   // env_templates ROW (not just the docker image), and that row is a reusable
   // deliverable: env-replicate builds it (status ready + built image) for later tasks
@@ -916,6 +914,9 @@ async function cleanupTaskContainers(
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-terminal-sessions failed');
   }
+
+  // After the reap, so no live shell can write into the tree between the clean check and removal.
+  await releaseTaskWorktree(db, taskId, reason);
 }
 
 async function cleanupTaskEnvImage(
