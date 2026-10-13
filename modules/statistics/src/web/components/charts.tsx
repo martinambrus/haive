@@ -14,11 +14,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { CHART_CHROME, CHART_COLORS, THROUGHPUT_COLORS } from './palette';
-import { formatBucketLabel } from '@/lib/stats/format-stats';
-import { formatCost, type CostDisplay } from '@/lib/format-cost';
-import { formatTps } from '@/lib/format-throughput';
-import type { StatsTimelineDay } from '@/lib/api-client';
+import { CHART_CHROME, CHART_COLORS, THROUGHPUT_COLORS } from './palette.js';
+import { formatBucketLabel } from '../lib/format-stats.js';
+import { formatCost, type CostDisplay } from '@haive/web-kit/format-cost';
+import { formatTps } from '@haive/web-kit/format-throughput';
+import type { StatsTimelineDay } from '../api.js';
 
 /**
  * Dashboard charts.

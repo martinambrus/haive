@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { StatsTimelineDay } from '@/lib/api-client';
+import type { StatsTimelineDay } from '../../src/web/api.js';
 import {
   calendarMonths,
   heatStep,
@@ -8,7 +8,7 @@ import {
   isHeatMetric,
   localDayRange,
   WEEKDAY_LABELS,
-} from './heat-scale';
+} from '../../src/web/lib/heat-scale.js';
 
 /** The real agent-hours series from the dev install, 2026-09-01..07, most recent first. */
 const REAL_AGENT_HOURS = [44.76, 13.19, 15.87, 20.78, 16.36, 12.61, 8.35];

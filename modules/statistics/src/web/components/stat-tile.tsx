@@ -1,6 +1,6 @@
-import { cn } from '@/lib/cn';
-import { deltaToneClass, formatDeltaPercent } from '@/lib/stats/format-stats';
-import type { StatsDelta } from '@/lib/api-client';
+import { cn } from '@haive/web-kit/cn';
+import { deltaToneClass, formatDeltaPercent } from '../lib/format-stats.js';
+import type { StatsDelta } from '../api.js';
 
 export interface StatTileProps {
   label: string;

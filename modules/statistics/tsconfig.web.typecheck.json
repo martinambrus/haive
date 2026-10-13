@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.web.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": false,
+    "rootDir": "."
+  },
+  "include": ["src/web", "src/dashboard", "test/web"],
+  "exclude": ["node_modules", "dist"]
+}

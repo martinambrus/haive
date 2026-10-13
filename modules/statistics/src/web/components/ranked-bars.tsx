@@ -1,4 +1,4 @@
-import { cn } from '@/lib/cn';
+import { cn } from '@haive/web-kit/cn';
 
 /**
  * A ranked list with a bar per row: rank, label, value, and a track sized against the LARGEST

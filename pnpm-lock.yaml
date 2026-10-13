@@ -71,16 +71,31 @@ importers:
       '@haive/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@haive/web-kit':
+        specifier: workspace:*
+        version: link:../../packages/web-kit
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9(patch_hash=ba95541661260fe9eb74b4a42591259909862f0d0f185e65d5f4703259501945))
       hono:
         specifier: ^4.13.12
         version: 4.13.13
+      recharts:
+        specifier: ^3.10.1
+        version: 3.10.1(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react-is@19.2.8)(react@19.3.0)(redux@5.0.1)
       zod:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
+      '@types/react':
+        specifier: ^19.3.0
+        version: 19.3.0
+      next:
+        specifier: ^16.3.8
+        version: 16.3.8(@opentelemetry/api@1.9.1)(@playwright/test@1.63.0)(@types/node@26.6.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      react:
+        specifier: ^19.3.0
+        version: 19.3.0
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -232,6 +247,9 @@ importers:
 
   packages/web:
     dependencies:
+      '@haive/module-statistics':
+        specifier: workspace:*
+        version: link:../../modules/statistics
       '@haive/shared':
         specifier: workspace:*
         version: link:../shared
@@ -298,9 +316,6 @@ importers:
       react-markdown:
         specifier: ^10.1.0
         version: 10.1.0(@types/react@19.3.0)(react@19.3.0)
-      recharts:
-        specifier: ^3.10.1
-        version: 3.10.1(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react-is@19.2.8)(react@19.3.0)(redux@5.0.1)
       rehype-highlight:
         specifier: ^7.0.2
         version: 7.0.2

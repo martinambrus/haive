@@ -76,7 +76,7 @@ test.describe('app layout and navigation', () => {
   // The dashboard's own actions are "All tasks" and "Advanced statistics" — there is no
   // repositories card on it at all. This asserted "Manage repositories" and "Manage tasks",
   // neither of which the page has rendered for some time.
-  test('dashboard actions link to /tasks and /stats, even while statistics do not load', async ({
+  test('dashboard actions link to /tasks and /m/statistics, even while statistics do not load', async ({
     page,
   }) => {
     const sql = getSql();
@@ -93,7 +93,7 @@ test.describe('app layout and navigation', () => {
 
       await page.goto('/dashboard');
       await page.getByRole('button', { name: 'Advanced statistics' }).click();
-      await expect(page).toHaveURL(/\/stats$/);
+      await expect(page).toHaveURL(/\/m\/statistics$/);
     } finally {
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });

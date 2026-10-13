@@ -1,6 +1,7 @@
 # Statistics
 
-`/stats` (`packages/web/src/app/(app)/stats/page.tsx`) and the smaller `/dashboard` both read the
+The statistics module's page at `/m/statistics` (`modules/statistics/src/web/stats-page.tsx`; `/stats`
+redirects there) and its dashboard widget (`src/dashboard/stats-widget.tsx`) both read the
 statistics module's api (`modules/statistics/src/routes.ts`, mounted by the module loader at
 `/m/statistics/*` behind the same auth), nine endpoints sharing one query parser
 (`query.ts`: 30-day default, `MAX_RANGE_DAYS` 731, IANA zone validated against `Intl`, repo /
@@ -33,7 +34,7 @@ percent nor 100%.
 
 ## The heatmap and the token bar
 
-`ActivityHeatmap` and `StackedShareBar` (`components/stats/`) are plain DOM and STATICALLY
+`ActivityHeatmap` and `StackedShareBar` (`modules/statistics/src/web/components/`) are plain DOM and STATICALLY
 imported; only the three recharts charts are behind `next/dynamic`, and only because recharts is
 a ~7 MB package with a d3/redux tree. Both render fields `/m/statistics/timeline` and `/m/statistics/summary`
 had always computed and nothing had ever displayed — the per-day token series, `invocations`,
@@ -85,7 +86,7 @@ the "cached" tile is `cacheHitRatio`, of the prompt side alone, so the card says
 
 ## Ranked bar lists
 
-`RankedBars` (`components/stats/ranked-bars.tsx`) replaces the two-column count tables on the
+`RankedBars` (`modules/statistics/src/web/components/ranked-bars.tsx`) replaces the two-column count tables on the
 quality and reliability tabs, and `InlineBar` adds a scan aid to the per-task agent-hours column.
 Tracks are sized against the LARGEST row, not the total: these lists answer "which of these is
 biggest", which is a different question from `StackedShareBar`'s, and a share denominator
@@ -196,7 +197,7 @@ existed on the dev install to test a parser against, so only runs after 0181 car
 **Each side's numerator and denominator cover the same runs.** A run with no recorded usage enters
 neither side; a run without model time enters only the wall side. Σtokens / Σtime is the headline
 and the per-run median rides beside it on the model side, because one long run dominates the
-aggregate: MEASURED, gemma4:31b-cloud reads 53 aggregate against a 15 median. On `/stats`, rates
+aggregate: MEASURED, gemma4:31b-cloud reads 53 aggregate against a 15 median. On `/m/statistics`, rates
 below `MIN_SAMPLES_FOR_TREND` render as `n=…` and the trend chart leaves such a day as a gap
 rather than a point, because there a rate stands for a model's or a day's speed in general. The
 task page does NOT apply the floor, on purpose: a step badge is the exact rate of that step's own
