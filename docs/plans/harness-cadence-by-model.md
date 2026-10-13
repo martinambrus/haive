@@ -101,8 +101,12 @@ whether B only adds cost there, as the article found.
 Decision rule, written before the run: acceptance first, cost second. B qualifies only if its
 gate-2 outcomes are at least as good as A's (no more rejected or unfinished runs, and no
 unrecovered failure that ends a run early, which would cut rounds and spend for the wrong reason).
-Only then is B worth building if it cuts fix rounds for the cheaper model by enough that
-whole-task spend falls or stays flat. A cheaper 07 alone does not count, since
+Only then is cost compared, as whole-task spend per ACCEPTED outcome (total spend over the arm's
+runs divided by its accepted runs), not spend per attempt. When acceptance is equal the two agree;
+when B accepts more, per-attempt spend would reject the article's own result for the cheap model
+(~$0.09 to ~$0.27 per attempt, but ~$0.29 to ~$0.27 per accepted run, at 3/10 against 10/10). B
+is worth building if its spend per accepted outcome falls or stays flat. A cheaper 07 alone does
+not count, since
 the article's harness costs 3-4× more inside the implementation step. Local only: the patch and any
 CLI preference change are snapshotted and reverted after. Rollback: revert the local patch.
 
@@ -110,7 +114,9 @@ CLI preference change are snapshotted and reverted after. Rollback: revert the l
 
 A per-repository setting on the Tooling page, beside the declared commands: "Run checks during
 implementation", default off. When on, 07 (initial and fix passes) can ask Haive to run a check by
-slot (lint, typecheck, tests, and on a fix round the last selective test run) and get its classified
+slot (lint, typecheck, tests, and on a fix round the last selective test run; a lint request runs
+every lint 08 would, including the separate `phpLint` 08 resolves beside a package.json lint
+script, each with its own verdict, per `docs/architecture/fix-loop.md`) and get its classified
 result back. 07 works in `01-worktree-setup`'s integration worktree, the tree 08 checks, so both
 read the same files. A DAG coder does not: it edits its own per-issue worktree until the level
 merges (`docs/architecture/review-scope.md`), and a check run on 08's path would not see its edits.
