@@ -8,6 +8,7 @@ const IMPLEMENT = '07-phase-2-implement';
 export const MERGE_CAPABLE_STEP_IDS: readonly string[] = ['00a-sync-base', '12-worktree-cleanup'];
 
 const needWorktree = { needs: 'worktree', reason: 'Works inside the task worktree.' };
+const EDITS_PRECEDE = ['validation', 'tests', 'verification', 'review', 'commit', 'reindexed'];
 
 export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   {
@@ -104,12 +105,22 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     provides: ['app-runtime'],
   },
   {
+    stepId: '01c1-restore-database',
+    label: 'Restore database',
+    group: 'runtime',
+    dispatchesCli: false,
+    requires: [{ needs: 'ddev', reason: 'Imports the dump into the DDEV project.' }],
+    provides: [],
+    precedes: ['db-migrated'],
+  },
+  {
     stepId: '06a-db-migrate',
     label: 'Database migrations',
     group: 'runtime',
     dispatchesCli: false,
     requires: [{ needs: 'ddev', reason: 'Runs migrations inside the DDEV project.' }],
-    provides: [],
+    provides: ['db-migrated'],
+    precedes: ['implementation', 'tests', 'verification'],
   },
   {
     stepId: '03-phase-0a-discovery',
@@ -134,6 +145,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [{ needs: 'spec', reason: 'Reviews the pre-planning spec.' }],
     provides: ['spec'],
+    precedes: ['spec-approved'],
     loopBudgetEditable: true,
   },
   {
@@ -153,7 +165,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['implementation'],
-    precedes: ['commit', 'verification', 'review'],
+    precedes: EDITS_PRECEDE,
   },
   {
     stepId: '07a-code-simplify',
@@ -165,7 +177,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'implementation', reason: 'Simplifies the implemented changes.' },
     ],
     provides: [],
-    precedes: ['commit', 'verification', 'review'],
+    precedes: EDITS_PRECEDE,
     loopBudgetEditable: true,
   },
   {
@@ -174,7 +186,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'check',
     dispatchesCli: true,
     requires: [needWorktree],
-    provides: [],
+    provides: ['validation'],
     loopTargetStepId: IMPLEMENT,
     loopBudgetEditable: true,
   },
@@ -198,7 +210,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['tests'],
-    precedes: ['verification', 'review'],
+    precedes: ['verification', 'review', 'commit', 'reindexed'],
     loopTargetStepId: IMPLEMENT,
   },
   {
@@ -235,7 +247,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: true,
     requires: [needWorktree],
     provides: ['learnings'],
-    precedes: ['pushed'],
+    precedes: ['pushed', 'reindexed'],
     loopTargetStepId: '11-phase-8-learning',
   },
   {
@@ -253,7 +265,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'knowledge',
     dispatchesCli: false,
     requires: [needWorktree],
-    provides: [],
+    provides: ['reindexed'],
   },
   {
     stepId: '11a-gate-4-push',

@@ -15,8 +15,8 @@ const replace = (stepId: string, patch: Partial<ComposableStepEntry>): Composabl
 describe('core composable catalog', () => {
   beforeAll(() => registerStepsOnce());
 
-  it('holds the 30 curated steps and passes the assert on the real registry', () => {
-    expect(CORE_COMPOSABLE_STEPS).toHaveLength(30);
+  it('holds the 31 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(31);
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
   });
 
@@ -202,6 +202,11 @@ describe('core composable catalog', () => {
     ['06-gate-1-spec-approval', '07-phase-2-implement', 'implementation'],
     ['11-phase-8-learning', '11a-gate-4-push', 'pushed'],
     ['11b-kb-commit', '11a-gate-4-push', 'pushed'],
+    ['06a-db-migrate', '07-phase-2-implement', 'implementation'],
+    ['05-phase-0b5-spec-quality', '06-gate-1-spec-approval', 'spec-approved'],
+    ['07a-code-simplify', '07b-phase-4-validate', 'validation'],
+    ['07-phase-2-implement', '11c-rag-reindex', 'reindexed'],
+    ['01c1-restore-database', '06a-db-migrate', 'db-migrated'],
   ])('rejects %s placed after %s', (early, late, token) => {
     const setup = [
       '04-phase-0b-pre-planning',
