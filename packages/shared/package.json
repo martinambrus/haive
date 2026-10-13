@@ -167,6 +167,10 @@
       "types": "./dist/module-db/index.d.ts",
       "import": "./dist/module-db/index.js"
     },
+    "./module-host": {
+      "types": "./dist/module-host/index.d.ts",
+      "import": "./dist/module-host/index.js"
+    },
     "./system": {
       "types": "./dist/system/index.d.ts",
       "import": "./dist/system/index.js"

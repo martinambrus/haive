@@ -7,14 +7,16 @@ import {
   moduleManifestSchema,
   type ModuleManifest,
 } from '@haive/shared/modularity';
+import type { ModuleRouteContext } from '@haive/shared/module-host';
 import { HttpError, type AppEnv } from '../context.js';
+import { getDb } from '../db.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { getRedis } from '../redis.js';
 
 export type ApiModuleEntry = {
   packageName: string;
   manifest: unknown;
-  routes?: () => Hono<AppEnv>;
+  routes?: (ctx: ModuleRouteContext) => Hono<AppEnv>;
 };
 
 export type LoadedApiModule = {
@@ -42,6 +44,7 @@ function parseKind(raw: string): SettingsKind {
 export async function mountModules(
   app: Hono<AppEnv>,
   entries: readonly ApiModuleEntry[],
+  ctx: ModuleRouteContext,
 ): Promise<LoadedApiModule[]> {
   const loaded: LoadedApiModule[] = [];
   const seen = new Set<string>();
@@ -77,7 +80,7 @@ export async function mountModules(
       const sub = new Hono<AppEnv>();
       sub.use('*', requireAuth);
       if (manifest.apiRequiresAdmin === true) sub.use('*', requireAdmin);
-      sub.route('/', entry.routes());
+      sub.route('/', entry.routes(ctx));
       app.route(`/m/${manifest.id}`, sub);
     }
     for (const kind of ['global', 'admin'] as const) {
@@ -187,6 +190,6 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
 export async function installModules(app: Hono<AppEnv>): Promise<void> {
   // Loaded at boot only: the generated file exists after codegen, not on every path that imports this.
   const { moduleRegistry } = await import('../modules.generated.js');
-  const loaded = await mountModules(app, moduleRegistry);
+  const loaded = await mountModules(app, moduleRegistry, { db: getDb() });
   app.route('/modules', moduleRoutes(loaded));
 }
