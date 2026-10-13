@@ -540,6 +540,129 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     });
   });
 
+  describe('editableFields', () => {
+    const CUSTOM_FIELDS = [
+      'description',
+      'displayName',
+      'enabled',
+      'preAnswerDefaults',
+      'requiresRepository',
+      'selectable',
+      'sortOrder',
+      'stepIds',
+      'stepLoopLimitDefaults',
+    ];
+
+    it('lists the fields a PATCH accepts for a built-in, a custom and a module row', async () => {
+      await db.insert(schema.taskTypeDefinitions).values([
+        builtin('run_app', { runListStrategy: 'run_app_modes', stepIds: null, sortOrder: 3 }),
+        {
+          slug: 'tt-custom',
+          displayName: 'Custom',
+          runListStrategy: 'static',
+          stepIds: ['ta-a'],
+          source: 'admin',
+        },
+        {
+          slug: 'tt-mod-fields',
+          displayName: 'Mod',
+          runListStrategy: 'static',
+          stepIds: ['ta-a'],
+          source: 'module:acme',
+        },
+      ]);
+      const list = (await (await send('GET', '/admin/task-types')).json()) as {
+        taskTypes: { slug: string; editableFields: string[] }[];
+      };
+      const fields = (slug: string) =>
+        [...(list.taskTypes.find((t) => t.slug === slug)?.editableFields ?? [])].sort();
+      expect(fields('workflow')).toEqual(['description', 'displayName', 'sortOrder']);
+      expect(fields('plan_merge')).toEqual(['description', 'displayName', 'sortOrder']);
+      expect(fields('run_app')).toEqual(['description', 'displayName', 'enabled', 'sortOrder']);
+      expect(fields('tt-custom')).toEqual(CUSTOM_FIELDS);
+      expect(fields('tt-mod-fields')).toEqual(['displayName', 'enabled', 'sortOrder']);
+
+      for (const slug of ['workflow', 'tt-custom', 'tt-mod-fields']) {
+        const one = (await (await send('GET', `/admin/task-types/${slug}`)).json()) as {
+          taskType: { editableFields: string[] };
+        };
+        expect([...one.taskType.editableFields].sort()).toEqual(fields(slug));
+      }
+    });
+
+    it('returns them from a create and an update too', async () => {
+      const created = await send('POST', '/admin/task-types', valid('tt-write'));
+      expect(created.status).toBe(201);
+      const c = (await created.json()) as { taskType: { editableFields: string[] } };
+      expect([...c.taskType.editableFields].sort()).toEqual(CUSTOM_FIELDS);
+      const updated = await send('PATCH', '/admin/task-types/tt-write', { displayName: 'W' });
+      expect(updated.status).toBe(200);
+      const u = (await updated.json()) as { taskType: { editableFields: string[] } };
+      expect([...u.taskType.editableFields].sort()).toEqual(CUSTOM_FIELDS);
+    });
+  });
+
+  describe('public traits', () => {
+    it('reports restoresDatabase and dispatchesCli per row', async () => {
+      await db.insert(schema.stepCatalog).values([
+        catalogRow('01c1-restore-database', true, entry('01c1-restore-database')),
+        {
+          ...catalogRow('ta-agent', true, entry('ta-agent', { dispatchesCli: true })),
+          dispatchesCli: true,
+        },
+      ]);
+      const custom = (slug: string, stepIds: string[], source = 'admin') => ({
+        slug,
+        displayName: slug,
+        runListStrategy: 'static' as const,
+        stepIds,
+        source,
+      });
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values([
+          custom('tt-plain-t', ['ta-a', 'ta-b']),
+          custom('tt-restore-t', ['01c1-restore-database', 'ta-a']),
+          custom('tt-agent-t', ['ta-a', 'ta-agent']),
+          custom('tt-both-t', ['01c1-restore-database', 'ta-agent']),
+          custom('tt-mod-restore', ['01c1-restore-database'], 'module:acme'),
+        ]);
+      h.flags.set(CUSTOM_KEY, true);
+      h.flags.set(MODULE_KEY, true);
+      h.role = 'user';
+      const { taskTypes } = (await (await send('GET', '/task-types')).json()) as {
+        taskTypes: { slug: string; restoresDatabase: boolean; dispatchesCli: boolean }[];
+      };
+      const traits = (slug: string) => {
+        const t = taskTypes.find((x) => x.slug === slug);
+        return { restoresDatabase: t?.restoresDatabase, dispatchesCli: t?.dispatchesCli };
+      };
+      expect(traits('tt-plain-t')).toEqual({ restoresDatabase: false, dispatchesCli: false });
+      expect(traits('tt-restore-t')).toEqual({ restoresDatabase: true, dispatchesCli: false });
+      expect(traits('tt-agent-t')).toEqual({ restoresDatabase: false, dispatchesCli: true });
+      expect(traits('tt-both-t')).toEqual({ restoresDatabase: true, dispatchesCli: true });
+      expect(traits('tt-mod-restore')).toEqual({ restoresDatabase: false, dispatchesCli: false });
+      expect(traits('workflow')).toEqual({ restoresDatabase: true, dispatchesCli: true });
+    });
+
+    it('reports dispatchesCli while the step catalog is unsynced', async () => {
+      await db.delete(schema.stepCatalog);
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: 'tt-unsynced',
+        displayName: 'tt-unsynced',
+        runListStrategy: 'static',
+        stepIds: ['ta-a'],
+        source: 'admin',
+      });
+      h.flags.set(CUSTOM_KEY, true);
+      h.role = 'user';
+      const { taskTypes } = (await (await send('GET', '/task-types')).json()) as {
+        taskTypes: { slug: string; dispatchesCli: boolean }[];
+      };
+      expect(taskTypes.find((t) => t.slug === 'tt-unsynced')?.dispatchesCli).toBe(true);
+    });
+  });
+
   describe('GET /admin/task-types/catalog', () => {
     it('lists the composable steps, omits a corrupt entry, and reports the sync state', async () => {
       const res = await send('GET', '/admin/task-types/catalog');

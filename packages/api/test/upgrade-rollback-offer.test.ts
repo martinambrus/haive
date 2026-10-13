@@ -16,7 +16,8 @@ vi.mock('../src/middleware/auth.js', () => ({
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
 }));
 
-vi.mock('../src/lib/task-type-definition.js', () => ({
+vi.mock('../src/lib/task-type-definition.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/lib/task-type-definition.js')>()),
   definitionForCreate: async () => ({ runListSnapshot: null }),
 }));
 

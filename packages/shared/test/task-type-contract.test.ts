@@ -399,10 +399,15 @@ describe('task type schemas', () => {
       description: null,
       requiresRepository: true,
       sortOrder: 0,
+      restoresDatabase: false,
+      dispatchesCli: true,
       available: false,
       reason: 'missing-step',
     };
     expect(publicTaskTypeSchema.safeParse(dto).success).toBe(true);
+    expect(publicTaskTypeSchema.safeParse({ ...dto, dispatchesCli: undefined }).success).toBe(
+      false,
+    );
     expect(publicTaskTypeSchema.safeParse({ ...dto, reason: undefined }).success).toBe(true);
     expect(publicTaskTypeSchema.safeParse({ ...dto, reason: 'nope' }).success).toBe(false);
   });

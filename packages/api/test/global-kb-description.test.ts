@@ -33,7 +33,8 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
     fn({ db: h.gdb, settings: { namespace: 'default' } }),
 }));
 
-vi.mock('../src/lib/task-type-definition.js', () => ({
+vi.mock('../src/lib/task-type-definition.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/lib/task-type-definition.js')>()),
   definitionForCreate: async () => ({ runListSnapshot: null }),
 }));
 

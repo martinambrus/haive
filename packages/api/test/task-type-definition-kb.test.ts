@@ -8,7 +8,10 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../src/lib/task-type-definition.js', () => ({ definitionForCreate: h.definition }));
+vi.mock('../src/lib/task-type-definition.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/lib/task-type-definition.js')>()),
+  definitionForCreate: h.definition,
+}));
 vi.mock('../src/queues.js', () => ({
   getGlobalKbSyncQueue: () => ({ add: vi.fn() }),
   getTaskQueue: vi.fn(),

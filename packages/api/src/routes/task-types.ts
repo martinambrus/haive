@@ -15,6 +15,7 @@ import {
 } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import { acceptsSavedDatabase, restoresDatabase } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -28,6 +29,7 @@ type DefinitionRow = typeof schema.taskTypeDefinitions.$inferSelect;
 interface Catalog {
   synced: boolean;
   stepIds: Set<string>;
+  dispatchesCli: Set<string>;
   composable: Map<string, ComposableStepEntry>;
   steps: { stepId: string; source: string; title: string; entry: ComposableStepEntry }[];
 }
@@ -37,6 +39,7 @@ async function loadCatalog(db: Db): Promise<Catalog> {
   const catalog: Catalog = {
     synced: rows.length > 0,
     stepIds: new Set(rows.map((r) => r.stepId)),
+    dispatchesCli: new Set(rows.filter((r) => r.dispatchesCli).map((r) => r.stepId)),
     composable: new Map(),
     steps: [],
   };
@@ -105,6 +108,18 @@ function allowedFields(row: DefinitionRow): string[] | null {
   return MODULE_FIELDS;
 }
 
+const UPDATABLE_FIELDS = Object.keys(taskTypeUpdateSchema.shape);
+
+function editableFieldsOf(row: DefinitionRow): string[] {
+  return allowedFields(row) ?? UPDATABLE_FIELDS;
+}
+
+function dispatchesCliOf(row: DefinitionRow, catalog: Catalog): boolean {
+  // Unsynced, the catalog cannot rule an agent out, so the form keeps its CLI pickers.
+  if (!catalog.synced || row.runListStrategy !== 'static' || row.stepIds === null) return true;
+  return row.stepIds.some((id) => catalog.dispatchesCli.has(id));
+}
+
 export const adminTaskTypeRoutes = new Hono<AppEnv>();
 adminTaskTypeRoutes.use('*', requireAuth);
 adminTaskTypeRoutes.use('*', requireAdmin);
@@ -128,6 +143,7 @@ adminTaskTypeRoutes.get('/', async (c) => {
     taskTypes: rows.map((row) => ({
       ...row,
       builtin: row.source === 'builtin',
+      editableFields: editableFieldsOf(row),
       availability: availabilityOf(row, switches, catalog),
       taskCount: taskCounts.get(row.slug) ?? 0,
     })),
@@ -160,7 +176,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
         })
       : [];
   return c.json({
-    taskType: row,
+    taskType: { ...row, editableFields: editableFieldsOf(row) },
     availability: availabilityOf(row, switches, catalog),
     compositionIssues,
   });
@@ -212,7 +228,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
     targetType: 'task_type',
     metadata: { slug: body.slug, stepCount: body.stepIds.length },
   });
-  return c.json({ taskType: created }, 201);
+  return c.json({ taskType: { ...created, editableFields: editableFieldsOf(created) } }, 201);
 });
 
 adminTaskTypeRoutes.patch('/:slug', async (c) => {
@@ -271,13 +287,14 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
   });
   if ('invalid' in outcome) return c.json(outcome.invalid, 400);
   const updated = outcome.updated;
+  if (!updated) throw new HttpError(404, 'Task type not found');
   await recordAuditEvent(db, {
     actorUserId: c.get('userId'),
     action: 'task_type.update',
     targetType: 'task_type',
     metadata: { slug, fields },
   });
-  return c.json({ taskType: updated });
+  return c.json({ taskType: { ...updated, editableFields: editableFieldsOf(updated) } });
 });
 
 adminTaskTypeRoutes.delete('/:slug', async (c) => {
@@ -344,6 +361,8 @@ taskTypeRoutes.get('/', async (c) => {
         description: row.description,
         requiresRepository: row.requiresRepository,
         sortOrder: row.sortOrder,
+        restoresDatabase: acceptsSavedDatabase(row.slug, restoresDatabase(row)),
+        dispatchesCli: dispatchesCliOf(row, catalog),
         available: availability.available,
         ...(availability.available ? {} : { reason: availability.reason }),
       });
