@@ -2,6 +2,19 @@ import { HAIVE_DATA_FILES, type PlanMirror, type PlanMirrorPayload } from '@haiv
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
 import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared/plan';
 import { mergePlanMirror } from '@haive/shared/plan-mirror-merge';
+import {
+  PROJECT_STATE_DIR,
+  claimFileName,
+  bundleFileName,
+  emptyProjectState,
+  isClaimUnit,
+  isEnvironmentUnit,
+  isRenderUnit,
+  mergeProjectState,
+  parseProjectState,
+  renderProjectState,
+  type ProjectStateRecord,
+} from '@haive/shared/project-state';
 import { gitRun } from '../repo/git-exec.js';
 import { unmergedPaths } from '../step-engine/git-merge.js';
 
@@ -99,6 +112,170 @@ async function writeResolved(worktreePath: string, path: string, bytes: Buffer):
   return (await gitRun(worktreePath, ['checkout-index', '-f', '--', path])).code === 0;
 }
 
+const STATE_PREFIX = `${PROJECT_STATE_DIR}/`;
+const literal = (p: string): string => `:(literal)${p}`;
+const utf8Path = (raw: string): string => Buffer.from(raw, 'latin1').toString('utf8');
+
+/** The record's files in `rev`'s tree, relative to the state directory; empty where it has none. */
+async function readStateTree(worktreePath: string, rev: string): Promise<Map<string, string>> {
+  const listing = await gitRun(
+    worktreePath,
+    ['ls-tree', '-r', '-z', rev, '--', PROJECT_STATE_DIR],
+    undefined,
+    BYTES,
+  );
+  if (listing.code !== 0) throw new Error(`the state directory of ${rev} could not be listed`);
+  const files = new Map<string, string>();
+  for (const entry of listing.stdout.split('\0')) {
+    if (entry === '') continue;
+    const m = /^100(?:644|755) blob ([0-9a-f]+)\t([\s\S]*)$/.exec(entry);
+    const file = m ? utf8Path(m[2]!) : '';
+    if (!m || !file.startsWith(STATE_PREFIX))
+      throw new Error(`${rev} holds a state entry git reads as no file`);
+    const bytes = await readBlob(worktreePath, m[1]!);
+    if (!bytes) throw new Error(`${file} of ${rev} could not be read`);
+    files.set(file.slice(STATE_PREFIX.length), bytes.toString('utf8'));
+  }
+  return files;
+}
+
+function readRecord(
+  files: Map<string, string>,
+  side: string,
+): { record: ProjectStateRecord | null; ignored: string[] } {
+  if (files.size === 0) return { record: null, ignored: [] };
+  const parsed = parseProjectState(files);
+  if (!parsed.ok) throw new Error(`the ${side} state record is not valid: ${parsed.problems[0]}`);
+  return { record: parsed.record, ignored: parsed.ignored };
+}
+
+/** `merged` with each unit both sides changed set to the incoming side's value, absent included. */
+function takeIncomingUnits(
+  merged: ProjectStateRecord,
+  incoming: ProjectStateRecord,
+  units: string[],
+): ProjectStateRecord {
+  const out: ProjectStateRecord = {
+    ...merged,
+    settings: Object.assign(Object.create(null) as Record<string, unknown>, merged.settings),
+  };
+  for (const unit of units) {
+    const hash = unit.indexOf('#');
+    const file = hash === -1 ? unit : unit.slice(0, hash);
+    const setting = /^settings\/([^/]+)\.json$/.exec(unit);
+    if (isEnvironmentUnit(unit) || isRenderUnit(unit)) {
+      const field = file === 'project/environment.json' ? 'environment' : 'render';
+      if (hash === -1) {
+        (out as unknown as Record<string, unknown>)[field] = incoming[field];
+      } else {
+        const key = unit.slice(hash + 1);
+        const value = (incoming[field] as Record<string, unknown> | null)?.[key];
+        const copy = { ...(out[field] as Record<string, unknown>) };
+        if (value === undefined) delete copy[key];
+        else copy[key] = value;
+        (out as unknown as Record<string, unknown>)[field] = copy;
+      }
+    } else if (setting) {
+      const value = incoming.settings[setting[1]!];
+      if (value === undefined) delete out.settings[setting[1]!];
+      else out.settings[setting[1]!] = value;
+    } else if (isClaimUnit(unit)) {
+      out.claims = [
+        ...out.claims.filter((c) => claimFileName(c.path) !== unit),
+        ...incoming.claims.filter((c) => claimFileName(c.path) === unit),
+      ];
+    } else if (/^bundles\/[^/]+\.json$/.test(unit)) {
+      out.bundles = [
+        ...out.bundles.filter((b) => bundleFileName(b.source) !== unit),
+        ...incoming.bundles.filter((b) => bundleFileName(b.source) === unit),
+      ];
+    } else {
+      throw new Error(`${unit} is a unit this merge does not know`);
+    }
+  }
+  return out;
+}
+
+/** Take the incoming side of a path; where the incoming side deleted it, the existing side stays. */
+async function takeIncoming(worktreePath: string, path: string): Promise<boolean> {
+  const stages = await readStageNumbers(worktreePath, path);
+  const side = stages.has(3) ? '--theirs' : stages.has(2) ? '--ours' : null;
+  if (!side) return false;
+  const take = await gitRun(worktreePath, ['checkout', side, '--', literal(path)]);
+  return take.code === 0 && (await gitRun(worktreePath, ['add', '--', literal(path)])).code === 0;
+}
+
+async function readStageNumbers(worktreePath: string, path: string): Promise<Set<number>> {
+  const listing = await gitRun(
+    worktreePath,
+    ['ls-files', '-u', '-z', '--', literal(path)],
+    undefined,
+    BYTES,
+  );
+  const stages = new Set<number>();
+  for (const entry of listing.code === 0 ? listing.stdout.split('\0') : []) {
+    const m = /^\d+ [0-9a-f]+ ([123])\t/.exec(entry);
+    if (m) stages.add(Number(m[1]));
+  }
+  return stages;
+}
+
+async function unmergedInState(worktreePath: string): Promise<string[]> {
+  return ((await unmergedPaths(worktreePath)) ?? []).filter((p) => p.startsWith(STATE_PREFIX));
+}
+
+async function indexedInState(worktreePath: string): Promise<string[]> {
+  const listing = await gitRun(
+    worktreePath,
+    ['ls-files', '-z', '--', PROJECT_STATE_DIR],
+    undefined,
+    BYTES,
+  );
+  if (listing.code !== 0) throw new Error('the index could not be listed');
+  return [
+    ...new Set(
+      listing.stdout
+        .split('\0')
+        .filter((p) => p !== '')
+        .map(utf8Path),
+    ),
+  ];
+}
+
+/** Merge the whole record three-way and stage the result; a unit both sides changed takes theirs. */
+async function mergeStateRecord(worktreePath: string): Promise<void> {
+  const baseSha = await gitRun(worktreePath, ['merge-base', 'HEAD', 'MERGE_HEAD']);
+  const base =
+    baseSha.code === 0
+      ? readRecord(await readStateTree(worktreePath, baseSha.stdout.trim()), 'base')
+      : null;
+  const ours = readRecord(await readStateTree(worktreePath, 'HEAD'), 'local');
+  const theirs = readRecord(await readStateTree(worktreePath, 'MERGE_HEAD'), 'incoming');
+  const local = ours.record ?? emptyProjectState();
+  const incoming = theirs.record ?? emptyProjectState();
+  const merge = mergeProjectState({ base: base?.record ?? null, local, incoming });
+  const files = renderProjectState(
+    takeIncomingUnits(
+      merge.merged,
+      incoming,
+      merge.conflicts.map((c) => c.unit),
+    ),
+  );
+  for (const [rel, text] of files) {
+    if (!(await writeResolved(worktreePath, `${STATE_PREFIX}${rel}`, Buffer.from(text)))) {
+      throw new Error(`${rel} could not be staged`);
+    }
+  }
+  const kept = new Set(
+    [...files.keys(), ...ours.ignored, ...theirs.ignored].map((r) => `${STATE_PREFIX}${r}`),
+  );
+  for (const indexed of await indexedInState(worktreePath)) {
+    if (kept.has(indexed)) continue;
+    const removed = await gitRun(worktreePath, ['rm', '-f', '-q', '--', literal(indexed)]);
+    if (removed.code !== 0) throw new Error(`${indexed} could not be removed`);
+  }
+}
+
 async function takeTheirs(worktreePath: string, path: string): Promise<boolean> {
   const take = await gitRun(worktreePath, ['checkout', '--theirs', '--', path]);
   return take.code === 0 && (await gitRun(worktreePath, ['add', '--', path])).code === 0;
@@ -112,6 +289,10 @@ async function takeTheirs(worktreePath: string, path: string): Promise<boolean> 
  * the flush does for a pending question. plan.md is re-rendered from the merged plan.json. A side
  * that does not parse, another root, or a failed merge falls back to theirs for that path. Where one
  * side deleted plan.json and the other kept it, the kept side stays: dropping a plan is not a merge.
+ *
+ * A conflict anywhere in the project state directory merges the whole record three-way instead
+ * (`mergeProjectState`), a unit both sides changed taking theirs in the file; a record that does not
+ * parse or merge falls back to theirs for every path still unmerged under it.
  */
 export async function resolveHaiveProjectionConflicts(
   worktreePath: string,
@@ -128,6 +309,26 @@ export async function resolveHaiveProjectionConflicts(
       out.warnings.push(`${path}: ${why}; took the incoming side`);
     }
   };
+
+  if ([...conflicted].some((p) => p.startsWith(STATE_PREFIX))) {
+    const inState = [...conflicted].filter((p) => p.startsWith(STATE_PREFIX));
+    let why: string | null = null;
+    try {
+      await mergeStateRecord(worktreePath);
+    } catch (err) {
+      why = err instanceof Error ? err.message : String(err);
+    }
+    for (const left of await unmergedInState(worktreePath)) {
+      why ??= 'the record was left unmerged';
+      if (!(await takeIncoming(worktreePath, left))) {
+        out.warnings.push(`${left}: could not be resolved`);
+      }
+    }
+    if (why !== null) {
+      out.warnings.push(`${PROJECT_STATE_DIR}: ${why}; took the incoming side`);
+    }
+    if ((await unmergedInState(worktreePath)).length === 0) out.resolved.push(...inState);
+  }
 
   if (conflicted.has(jsonPath)) {
     const stages = await readStages(worktreePath, jsonPath);
