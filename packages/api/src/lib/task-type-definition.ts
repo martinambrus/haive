@@ -8,9 +8,16 @@ import {
 } from '@haive/shared';
 import {
   composableStepEntrySchema,
+  derivePromptStepComposable,
+  isCustomStepId,
+  promptStepEntrySchema,
+  promptStepId,
   resolveTaskTypeAvailability,
+  validatePromptStep,
   type ComposableStepEntry,
   type CompositionIssue,
+  type PromptStepEntry,
+  type PromptStepProblemKind,
 } from '@haive/shared/modularity';
 import { HttpError } from '../context.js';
 
@@ -47,8 +54,104 @@ export function acceptsSavedDatabase(slug: string, restores: boolean): boolean {
   return SAVED_DATABASE_BUILTINS.includes(slug) || restores;
 }
 
+/** Stored prompt steps by slug; an entry that no longer parses is left out, so its id reads as a missing step. */
+export function parsePromptSteps(raw: unknown): Record<string, PromptStepEntry> {
+  const out: Record<string, PromptStepEntry> = {};
+  if (typeof raw !== 'object' || raw === null) return out;
+  for (const [slug, value] of Object.entries(raw)) {
+    const parsed = promptStepEntrySchema.safeParse(value);
+    if (parsed.success) out[slug] = parsed.data;
+  }
+  return out;
+}
+
+interface CatalogSets {
+  stepIds: Set<string>;
+  dispatchesCli: Set<string>;
+  composable: Map<string, ComposableStepEntry>;
+}
+
+/** The catalog as one type sees it: the worker's steps plus that type's own prompt steps. */
+export function mergePromptStepCatalog<C extends CatalogSets>(
+  catalog: C,
+  def: { slug: string; source: string; requiresRepository: boolean; promptSteps: unknown },
+): C {
+  if (def.source !== 'admin') return catalog;
+  const entries = Object.values(parsePromptSteps(def.promptSteps));
+  if (entries.length === 0) return catalog;
+  const merged = {
+    ...catalog,
+    stepIds: new Set(catalog.stepIds),
+    dispatchesCli: new Set(catalog.dispatchesCli),
+    composable: new Map(catalog.composable),
+  };
+  for (const entry of entries) {
+    const composable = derivePromptStepComposable(entry, def.slug, def.requiresRepository);
+    merged.stepIds.add(composable.stepId);
+    merged.dispatchesCli.add(composable.stepId);
+    merged.composable.set(composable.stepId, composable);
+  }
+  return merged;
+}
+
+export type PromptStepIssueKind =
+  PromptStepProblemKind | 'prompt-step-missing' | 'prompt-step-orphan';
+
+export interface PromptStepIssue {
+  kind: PromptStepIssueKind;
+  stepId: string;
+  index?: number;
+  message: string;
+  raw?: string;
+  start?: number;
+}
+
+/** Every custom id in the step list has an entry of this type, every entry is used, and each validates where it stands. */
+export function checkPromptSteps(
+  def: { slug: string; stepIds: readonly string[]; requiresRepository: boolean },
+  promptSteps: Record<string, PromptStepEntry>,
+): PromptStepIssue[] {
+  const issues: PromptStepIssue[] = [];
+  const byId = new Map(
+    Object.values(promptSteps).map((entry) => [promptStepId(def.slug, entry.slug), entry]),
+  );
+  def.stepIds.forEach((stepId, index) => {
+    if (!isCustomStepId(stepId)) return;
+    const entry = byId.get(stepId);
+    if (!entry) {
+      issues.push({
+        kind: 'prompt-step-missing',
+        stepId,
+        index,
+        message: `${stepId} has no prompt step on this task type.`,
+      });
+      return;
+    }
+    const problems = validatePromptStep(entry, {
+      typeSlug: def.slug,
+      requiresRepository: def.requiresRepository,
+      stepIdsBefore: def.stepIds.slice(0, index),
+    });
+    for (const { kind, message, raw, start } of problems) {
+      issues.push({ kind, stepId, index, message, raw, start });
+    }
+  });
+  for (const stepId of byId.keys()) {
+    if (!def.stepIds.includes(stepId)) {
+      issues.push({
+        kind: 'prompt-step-orphan',
+        stepId,
+        message: `${stepId} is not in the step list.`,
+      });
+    }
+  }
+  return issues;
+}
+
 export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
+  /** The type's prompt steps by step id, only those in the snapshot; the task keeps this copy. */
+  customSteps: Record<string, PromptStepEntry> | null;
   requiresRepository: boolean;
   /** True when a SEEDED definition needs no repository, so the task records whether it was anchored. */
   repoOptional: boolean;
@@ -65,6 +168,7 @@ export interface TaskTypeDefinitionForCreate {
 
 const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
   runListSnapshot: null,
+  customSteps: null,
   requiresRepository: !REPO_OPTIONAL_BUILTIN_TASK_TYPES.has(slug),
   repoOptional: false,
   preAnswers: null,
@@ -121,8 +225,9 @@ export async function definitionForCreate(
     }
     return unseededBuiltin(slug);
   }
-  const catalog =
+  const storedCatalog =
     def.runListStrategy === 'static' && def.stepIds !== null ? await readCatalog(handle) : null;
+  const catalog = storedCatalog && mergePromptStepCatalog(storedCatalog, def);
   const availability = resolveTaskTypeAvailability({
     definition: def,
     switches: {
@@ -171,8 +276,16 @@ export async function definitionForCreate(
     snapshot = [MODEL_HEALTH_STEP_ID, ...snapshot];
   }
   const has = (id: string) => snapshot?.includes(id) === true;
+  const customSteps: Record<string, PromptStepEntry> = {};
+  if (custom) {
+    for (const entry of Object.values(parsePromptSteps(def.promptSteps))) {
+      const id = promptStepId(def.slug, entry.slug);
+      if (has(id)) customSteps[id] = entry;
+    }
+  }
   return {
     runListSnapshot: snapshot,
+    customSteps: Object.keys(customSteps).length > 0 ? customSteps : null,
     requiresRepository: def.requiresRepository,
     repoOptional: !def.requiresRepository,
     preAnswers:

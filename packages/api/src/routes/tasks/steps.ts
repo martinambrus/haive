@@ -51,7 +51,7 @@ import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
-import { loadStepFlags } from '../../lib/step-flags.js';
+import { loadStepFlags, withTaskCustomSteps } from '../../lib/step-flags.js';
 import {
   appendTaskEvent,
   enrichStepsWithActiveRole,
@@ -1622,6 +1622,8 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     columns: {
       id: true,
       status: true,
+      runListSnapshot: true,
+      customSteps: true,
       // stamped on the re-advance below so a later task retry can invalidate it
       orchestrationEpoch: true,
     },
@@ -1680,7 +1682,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   // there is nothing here to reset and no job to re-drive. Gated on the dispatch catalog
   // so an unknown step id still 404s rather than accumulating choices nothing reads.
   if (!step) {
-    if ((await loadStepFlags(db)).get(stepId)?.dispatchesStepCli !== true) {
+    if (
+      withTaskCustomSteps(await loadStepFlags(db), task).get(stepId)?.dispatchesStepCli !== true
+    ) {
       throw new HttpError(404, 'Step not found');
     }
     await writeStepCliChoice(db, choice);

@@ -54,7 +54,7 @@ import {
   loadPlanSkeletons,
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
-import { loadStepFlags } from '../../lib/step-flags.js';
+import { loadStepFlags, withTaskCustomSteps } from '../../lib/step-flags.js';
 import {
   liveOnboardingMessage,
   liveOnboardingTaskId,
@@ -657,7 +657,7 @@ taskRoutes.post('/', async (c) => {
         'The task type changed while this task was being created; try again',
       );
     }
-    const { runListSnapshot, preAnswers, stepLoopLimits, simplifyCode } = locked;
+    const { runListSnapshot, customSteps, preAnswers, stepLoopLimits, simplifyCode } = locked;
     return await handle
       .insert(schema.tasks)
       .values({
@@ -696,6 +696,7 @@ taskRoutes.post('/', async (c) => {
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
         estimatedTimeHours: body.estimatedTimeHours ?? null,
         runListSnapshot,
+        customSteps,
         status: 'created',
       })
       .returning();
@@ -993,7 +994,7 @@ taskRoutes.get('/:id', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
-  const flags = await loadStepFlags(db);
+  const flags = withTaskCustomSteps(await loadStepFlags(db), task);
   const enriched = await enrichStepsWithCliPreferences(
     db,
     flags,

@@ -1033,7 +1033,7 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
         );
       }
       const priorUpgrade = found.id;
-      const { runListSnapshot } = await definitionForCreate(tx, 'onboarding_upgrade', {
+      const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'onboarding_upgrade', {
         generic: false,
       });
       const [row] = await tx
@@ -1046,6 +1046,7 @@ upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
           repositoryId,
           metadata: { mode: 'rollback', rolledBackFromTaskId: priorUpgrade },
           runListSnapshot,
+          customSteps,
           status: 'created',
         })
         .returning();
