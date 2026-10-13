@@ -1,8 +1,10 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { schema } from '@haive/database';
 import { configService, validateFormValues } from '@haive/shared';
 import {
   collectFieldIds,
+  diffModuleIntent,
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   type ModuleManifest,
@@ -139,16 +141,18 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         worker = null;
       }
     }
+    const apiModules = loaded.map(({ packageName, manifest, hasRoutes }) => ({
+      id: manifest.id,
+      packageName,
+      version: manifest.version,
+      hasRoutes,
+    }));
+    const intent = await getDb().select().from(schema.modules);
     return c.json({
-      api: {
-        modules: loaded.map(({ packageName, manifest, hasRoutes }) => ({
-          id: manifest.id,
-          packageName,
-          version: manifest.version,
-          hasRoutes,
-        })),
-      },
+      api: { modules: apiModules },
       worker,
+      intent,
+      modules: diffModuleIntent(intent, apiModules, worker),
     });
   });
 

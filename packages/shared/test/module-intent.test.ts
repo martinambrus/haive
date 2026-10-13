@@ -1,0 +1,127 @@
+import { describe, expect, it } from 'vitest';
+import { diffModuleIntent, type ModuleIntentRow } from '../src/modularity/index.js';
+
+const LOADED = new Date('2026-10-01T00:00:00.000Z');
+const GONE = new Date('2026-10-05T00:00:00.000Z');
+
+const intent = (id: string, over: Partial<ModuleIntentRow> = {}): ModuleIntentRow => ({
+  moduleId: id,
+  name: `Name ${id}`,
+  source: 'local',
+  installedVersion: '1.0.0',
+  entitlementId: null,
+  lastLoadedAt: LOADED,
+  missingAt: null,
+  ...over,
+});
+const api = (id: string, version = '1.0.0') => ({ id, version });
+const report = (...mods: { id: string; version: string }[]) => ({
+  at: '2026-10-13T10:00:00.000Z',
+  modules: mods,
+});
+
+const stateOf = (result: ReturnType<typeof diffModuleIntent>, id: string) =>
+  result.rows.find((r) => r.id === id)?.state;
+
+describe('diffModuleIntent', () => {
+  it.each([
+    ['loaded', [intent('m')], [api('m')], report(api('m'))],
+    ['missing', [intent('m', { missingAt: GONE })], [], report()],
+    ['missing', [intent('m', { missingAt: GONE })], [api('m')], report()],
+    ['missing', [intent('m')], [], null],
+    ['api-only', [intent('m')], [api('m')], report()],
+    ['api-only', [intent('m')], [api('m')], null],
+    ['worker-only', [intent('m')], [], report(api('m'))],
+    ['worker-only', [], [], report(api('m'))],
+    ['unrecorded', [], [api('m')], report()],
+    ['unrecorded', [], [api('m')], report(api('m'))],
+    ['unrecorded', [], [api('m')], null],
+  ] as const)('is %s', (state, rows, loaded, worker) => {
+    const result = diffModuleIntent([...rows], [...loaded], worker);
+    expect(result.rows).toHaveLength(1);
+    expect(stateOf(result, 'm')).toBe(state);
+  });
+
+  it('gives one row per id, sorted, with the row facts and ISO dates', () => {
+    const result = diffModuleIntent(
+      [
+        intent('zeta', { entitlementId: 'ent-1', source: 'git' }),
+        intent('alpha', { missingAt: GONE }),
+      ],
+      [api('zeta')],
+      report(api('zeta')),
+    );
+    expect(result.rows.map((r) => r.id)).toEqual(['alpha', 'zeta']);
+    expect(result.rows[1]).toEqual({
+      id: 'zeta',
+      name: 'Name zeta',
+      source: 'git',
+      entitlementId: 'ent-1',
+      state: 'loaded',
+      rowVersion: '1.0.0',
+      apiVersion: '1.0.0',
+      workerVersion: '1.0.0',
+      versionDrift: false,
+      lastLoadedAt: LOADED.toISOString(),
+      missingAt: null,
+    });
+    expect(result.rows[0]!.missingAt).toBe(GONE.toISOString());
+  });
+
+  it('accepts dates already serialised to strings', () => {
+    const result = diffModuleIntent(
+      [
+        intent('m', {
+          lastLoadedAt: '2026-10-01T00:00:00.000Z',
+          missingAt: '2026-10-05T00:00:00.000Z',
+        }),
+      ],
+      [],
+      null,
+    );
+    expect(result.rows[0]).toMatchObject({
+      lastLoadedAt: '2026-10-01T00:00:00.000Z',
+      missingAt: '2026-10-05T00:00:00.000Z',
+    });
+  });
+
+  it.each([
+    ['row differs from api', '1.0.0', '2.0.0', '2.0.0'],
+    ['api differs from worker', '2.0.0', '2.0.0', '1.0.0'],
+    ['row differs from worker', '1.0.0', '1.0.0', '2.0.0'],
+    ['all three differ', '1.0.0', '2.0.0', '3.0.0'],
+  ])('flags version drift when %s', (_label, row, apiV, workerV) => {
+    const result = diffModuleIntent(
+      [intent('m', { installedVersion: row })],
+      [api('m', apiV)],
+      report(api('m', workerV)),
+    );
+    expect(result.rows[0]).toMatchObject({
+      versionDrift: true,
+      rowVersion: row,
+      apiVersion: apiV,
+      workerVersion: workerV,
+    });
+  });
+
+  it('does not flag drift when a half is simply absent', () => {
+    const result = diffModuleIntent([intent('m')], [api('m')], null);
+    expect(result.rows[0]).toMatchObject({ versionDrift: false, workerVersion: null });
+  });
+
+  it('carries the worker report time, or null with no report', () => {
+    expect(diffModuleIntent([], [], report()).workerAt).toBe('2026-10-13T10:00:00.000Z');
+    const none = diffModuleIntent([intent('m')], [api('m')], null);
+    expect(none.workerAt).toBeNull();
+    expect(none.rows[0]!.workerVersion).toBeNull();
+  });
+
+  it.each([undefined, 'junk', 7, {}, { at: 3, modules: 'x' }, { modules: [null, { id: 4 }] }])(
+    'treats a malformed worker report %j as no report',
+    (worker) => {
+      const result = diffModuleIntent([], [api('m')], worker);
+      expect(result.workerAt).toBeNull();
+      expect(stateOf(result, 'm')).toBe('unrecorded');
+    },
+  );
+});

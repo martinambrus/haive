@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   role: 'admin' as string,
   workerValue: null as string | null,
+  intentRows: [] as unknown[],
 }));
 
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
@@ -20,6 +21,9 @@ vi.mock('@haive/shared', async (importOriginal) => ({
     set: async () => undefined,
     setIfAbsent: async () => undefined,
   },
+}));
+vi.mock('../src/db.js', () => ({
+  getDb: () => ({ select: () => ({ from: async () => h.intentRows }) }),
 }));
 vi.mock('../src/redis.js', () => ({
   getRedis: () => ({ get: async () => h.workerValue }),
@@ -91,6 +95,7 @@ describe('GET /modules/loaded', () => {
 
   it('gives an admin both halves', async () => {
     h.role = 'admin';
+    h.intentRows = [];
     const worker = {
       at: '2026-10-12T00:00:00.000Z',
       modules: [{ id: 'with-routes', packageName: '@haive/module-with-routes', version: '1.2.3' }],
@@ -98,7 +103,8 @@ describe('GET /modules/loaded', () => {
     h.workerValue = JSON.stringify(worker);
     const res = await (await buildApp()).request('/modules/loaded');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
+    const body = (await res.json()) as Record<string, unknown>;
+    expect({ api: body.api, worker: body.worker }).toEqual({
       api: {
         modules: [
           {
@@ -119,11 +125,45 @@ describe('GET /modules/loaded', () => {
     });
   });
 
+  it('gives an admin the recorded intent and its diff against both halves', async () => {
+    h.role = 'admin';
+    const row = {
+      moduleId: 'gone',
+      packageName: '@haive/module-gone',
+      name: 'Gone',
+      source: 'local',
+      installedVersion: '0.9.0',
+      entitlementId: null,
+      firstLoadedAt: '2026-10-01T00:00:00.000Z',
+      lastLoadedAt: '2026-10-02T00:00:00.000Z',
+      missingAt: '2026-10-03T00:00:00.000Z',
+      updatedAt: '2026-10-03T00:00:00.000Z',
+    };
+    h.intentRows = [row];
+    h.workerValue = JSON.stringify({
+      at: '2026-10-12T00:00:00.000Z',
+      modules: [{ id: 'with-routes', packageName: '@haive/module-with-routes', version: '1.2.3' }],
+    });
+    const res = await (await buildApp()).request('/modules/loaded');
+    const body = (await res.json()) as {
+      intent: unknown;
+      modules: { workerAt: string | null; rows: { id: string; state: string }[] };
+    };
+    expect(body.intent).toEqual([row]);
+    expect(body.modules.workerAt).toBe('2026-10-12T00:00:00.000Z');
+    expect(body.modules.rows.map((r) => [r.id, r.state])).toEqual([
+      ['gone', 'missing'],
+      ['no-routes', 'unrecorded'],
+      ['with-routes', 'unrecorded'],
+    ]);
+  });
+
   it('refuses a user', async () => {
     h.role = 'user';
     h.workerValue = JSON.stringify({ at: 'x', modules: [] });
     const res = await (await buildApp()).request('/modules/loaded');
     expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('intent');
   });
 
   it.each([null, 'not json'])('reports no worker half when the key holds %j', async (value) => {
