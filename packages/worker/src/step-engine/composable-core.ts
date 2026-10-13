@@ -173,7 +173,16 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'ddev', reason: 'Imports the dump into the DDEV project.' }],
     provides: ['db-restored'],
-    precedes: ['db-migrated', 'implementation', 'tests', 'verification', 'db-saved', 'cleaned'],
+    precedes: [
+      'db-migrated',
+      'implementation',
+      'tests',
+      'verification',
+      'db-saved',
+      'cleaned',
+      'discovery',
+      'spec',
+    ],
   },
   {
     stepId: '06a-db-migrate',
