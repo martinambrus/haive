@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
+  HAIVE_DATA_FILES,
   PLAN_MIRROR_JOB_NAMES,
   QUEUE_NAMES,
   logger,
@@ -23,6 +24,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
 import {
   PlanMirrorHeldError,
+  advancePlanBaseToPushed,
   flushPlanMirrorForRepository,
   recordPlanMirrorError,
   reconcilePlanFromCheckout,
@@ -286,6 +288,13 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         userId: payload.userId,
       });
       pushed = true;
+      const atHead = await gitRun(repoPath, ['show', `HEAD:${HAIVE_DATA_FILES.plan}`]);
+      if (atHead.code === 0) {
+        // The push landed; a base left behind only asks one question again later.
+        await advancePlanBaseToPushed(getDb(), repo.id, atHead.stdout).catch((err: unknown) =>
+          logger.warn({ err, repositoryId: repo.id }, 'plan base not advanced after push'),
+        );
+      }
     }
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });

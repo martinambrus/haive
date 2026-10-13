@@ -738,6 +738,56 @@ export async function reconcilePlanFromCheckout(
   });
 }
 
+const UNRELATED_ROOT =
+  'the committed plan has a different root from this plan, so the two share no history and were not merged';
+
+/** After a push, what was pushed is what the other side will read next, so it becomes the base;
+ *  a field still asked about keeps its old base so the question stands. */
+export async function advancePlanBaseToPushed(
+  db: Database,
+  repositoryId: string,
+  pushedJson: string,
+): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(pushedJson) as unknown;
+  } catch {
+    return;
+  }
+  const parsed = planMirrorPayloadSchema.safeParse(raw);
+  if (!parsed.success) return;
+  await db.transaction(async (tx) => {
+    await lockPlanMirror(tx, repositoryId);
+    const [state] = await tx
+      .select({ syncedSnapshot: schema.planMirrorState.syncedSnapshot })
+      .from(schema.planMirrorState)
+      .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+      .limit(1);
+    if (!state) return;
+    const old = planMirrorPayloadSchema.safeParse(state.syncedSnapshot);
+    const oldById = new Map(old.success ? old.data.nodes.map((n) => [n.id, n]) : []);
+    const asked = await loadPendingPlanQuestions(tx, repositoryId);
+    const snapshot =
+      asked.length === 0
+        ? parsed.data
+        : ({
+            ...parsed.data,
+            nodes: parsed.data.nodes.map((n) => {
+              const patched: Record<string, unknown> = { ...n };
+              const before = oldById.get(n.id) as Record<string, unknown> | undefined;
+              for (const q of asked) {
+                if (q.nodeId === n.id && before) patched[q.field] = before[q.field];
+              }
+              return patched;
+            }),
+          } as PlanMirrorPayload);
+    await tx
+      .update(schema.planMirrorState)
+      .set({ syncedSnapshot: snapshot })
+      .where(eq(schema.planMirrorState.repositoryId, repositoryId));
+  });
+}
+
 /** `bytes` is the plan.json read under the plan-mirror lock the caller holds; the stamp is its hash. */
 async function reconcilePlanLocked(
   tx: PlanMirrorTx,
@@ -787,6 +837,9 @@ async function reconcilePlanLocked(
 
   const localRender = await renderPlanMirror(tx, repositoryId);
   const local = localRender?.mirror ?? EMPTY_PLAN;
+  const localRoot = local.nodes.find((n) => n.parentId === null);
+  const incomingRoot = incoming.nodes.find((n) => n.parentId === null);
+  if (localRoot && incomingRoot?.id !== localRoot.id) throw new PlanSnapshotError(UNRELATED_ROOT);
   const baseParsed = planMirrorPayloadSchema.safeParse(state?.syncedSnapshot);
   const merge = mergePlanMirror({
     base: baseParsed.success ? baseParsed.data : null,
@@ -795,9 +848,7 @@ async function reconcilePlanLocked(
   });
   const merged = merge.merged;
   if (merged.nodes.length > 0 && merged.nodes.filter((n) => n.parentId === null).length !== 1) {
-    throw new PlanSnapshotError(
-      'the committed plan has a different root from this plan, so the two share no history and were not merged',
-    );
+    throw new PlanSnapshotError(UNRELATED_ROOT);
   }
 
   const localById = new Map(local.nodes.map((n) => [n.id, n]));

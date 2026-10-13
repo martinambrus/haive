@@ -36,6 +36,7 @@ import { initDatabase, getDb } from '../src/db.js';
 import { gitRun } from '../src/repo/git-exec.js';
 import { sweepDirtyPlanMirrors } from '../src/queues/plan-mirror-queue.js';
 import {
+  advancePlanBaseToPushed,
   importPlanMirror,
   reconcilePlanFromCheckout,
   stampPlanMirrorHashesAtBoot,
@@ -2335,6 +2336,24 @@ async function main(): Promise<void> {
     'three-way: asking again about the same change keeps one row',
     (await pendingPlanRows(sId)).length === 1,
   );
+  const baseOf = async () =>
+    (
+      await db.query.planMirrorState.findFirst({
+        where: eq(schema.planMirrorState.repositoryId, sId),
+      })
+    )?.syncedSnapshot as PlanMirror | null;
+  await advancePlanBaseToPushed(
+    db,
+    sId,
+    JSON.stringify(retitled(retitled(theirs, pId, 'P pushed'), qId, 'Q pushed')),
+  );
+  const pushedBase = await baseOf();
+  check(
+    'three-way: a push makes what it pushed the base, except a field still asked about',
+    pushedBase?.nodes.find((n) => n.id === qId)?.title === 'Q pushed' &&
+      pushedBase.nodes.find((n) => n.id === pId)?.title === 'P',
+    pushedBase,
+  );
   await editS(pId, { title: 'P by A' });
   await arrive(theirs);
   const closed = await db
@@ -2377,6 +2396,28 @@ async function main(): Promise<void> {
         .where(eq(schema.planNodeEdges.repositoryId, sId))
     ).length === 0,
   );
+
+  // A file whose plan has another root shares no history with this one, and deletes nothing here.
+  const beforeReplace = await nodeRows();
+  await writeFile(
+    sPlanFile,
+    JSON.stringify({
+      ...theirs,
+      nodes: [{ ...theirs.nodes.find((n) => n.parentId === null)!, id: randomUUID() }],
+      edges: [],
+      codeLinks: [],
+    }),
+  );
+  const replaced = await reconcilePlanFromCheckout(db, sId, sDir).then(
+    () => 'merged',
+    (err: Error) => err.name,
+  );
+  check(
+    'three-way: a plan with a different root is refused and nothing here is deleted',
+    replaced === 'PlanSnapshotError' && (await nodeRows()).length === beforeReplace.length,
+    { replaced },
+  );
+  await arrive(theirs);
 
   // No base: the incoming side wins and nothing is deleted, as a reconcile always did.
   await db
