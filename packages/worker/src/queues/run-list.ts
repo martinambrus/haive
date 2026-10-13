@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
-import { stepRegistry, type StepRegistry } from '../step-engine/registry.js';
+import { stepRegistry, UnresolvedStepError, type StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
@@ -39,6 +39,27 @@ export interface ResolvedTaskContext {
   runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
   runListSnapshot: string[] | null;
   fixLoop?: FixLoopDef | null;
+  /** When the task was marked dead (see markTaskDead); null on a live task. */
+  deadAt?: Date | null;
+}
+
+/** A static task's run list, split into the steps that resolve and the ids that do not. A task
+ *  created before run-list snapshots existed has none and keeps the live list. */
+export function resolveRunList(
+  ctx: Pick<ResolvedTaskContext, 'workflowType' | 'runListSnapshot'>,
+  registry: Pick<StepRegistry, 'get' | 'listByWorkflow'> = stepRegistry,
+): { steps: StepDefinition[]; unresolved: string[] } {
+  if (!ctx.runListSnapshot) {
+    return { steps: registry.listByWorkflow(ctx.workflowType), unresolved: [] };
+  }
+  const steps: StepDefinition[] = [];
+  const unresolved: string[] = [];
+  for (const id of ctx.runListSnapshot) {
+    const def = registry.get(id);
+    if (def) steps.push(def);
+    else unresolved.push(id);
+  }
+  return { steps, unresolved };
 }
 
 export async function buildRunList(
@@ -61,10 +82,9 @@ export async function buildRunList(
     // filtered list.
     return orderWorkflowRunList(main, prelude, ctx.executionPath);
   }
-  // A task created before run-list snapshots existed has none and keeps the live list.
-  return ctx.runListSnapshot
-    ? ctx.runListSnapshot.map((id) => stepRegistry.require(id))
-    : stepRegistry.listByWorkflow(ctx.workflowType);
+  const { steps, unresolved } = resolveRunList(ctx);
+  if (unresolved.length > 0) throw new UnresolvedStepError(unresolved);
+  return steps;
 }
 
 export async function taskTypeRuntimeFor(

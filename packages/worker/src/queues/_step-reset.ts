@@ -170,7 +170,11 @@ export async function resetStepAndDownstream(
         .where(
           expectedEpoch === undefined
             ? eq(schema.tasks.id, taskId)
-            : and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, expectedEpoch)),
+            : and(
+                eq(schema.tasks.id, taskId),
+                eq(schema.tasks.orchestrationEpoch, expectedEpoch),
+                isNull(schema.tasks.deadAt),
+              ),
         )
         .returning({ epoch: schema.tasks.orchestrationEpoch });
       if (!bumped[0] && expectedEpoch !== undefined) throw new EpochMovedOn();
@@ -351,7 +355,13 @@ export async function autoResumeFailedStep(
           allowanceAutoResumedAt: now,
           updatedAt: now,
         })
-        .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')))
+        .where(
+          and(
+            eq(schema.tasks.id, taskId),
+            eq(schema.tasks.status, 'failed'),
+            isNull(schema.tasks.deadAt),
+          ),
+        )
         .returning({ count: schema.tasks.allowanceAutoResumeCount });
       if (bumped.length === 0) throw new ResumeClaimLost();
       await tx.insert(schema.taskEvents).values({

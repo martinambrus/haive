@@ -1,5 +1,15 @@
 import type { StepDefinition } from './step-definition.js';
 
+/** A step id a task's data names that this install does not register: the task is dead, not failed. */
+export class UnresolvedStepError extends Error {
+  readonly ids: string[];
+  constructor(ids: string[]) {
+    super(ids.map((id) => `Step ${id} not registered`).join('; '));
+    this.name = 'UnresolvedStepError';
+    this.ids = ids;
+  }
+}
+
 export class StepRegistry {
   private byId = new Map<string, StepDefinition>();
   private byWorkflow = new Map<string, StepDefinition[]>();
@@ -36,7 +46,7 @@ export class StepRegistry {
 
   require(id: string): StepDefinition {
     const def = this.byId.get(id);
-    if (!def) throw new Error(`Step ${id} not registered`);
+    if (!def) throw new UnresolvedStepError([id]);
     return def;
   }
 

@@ -112,6 +112,7 @@ import {
   taskTypeRuntimeFor,
   type ResolvedTaskContext,
 } from './run-list.js';
+import { UnresolvedStepError } from '../step-engine/registry.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
@@ -253,6 +254,7 @@ async function resolveTaskContext(
     completedAt: task.completedAt ?? null,
     ...(await taskTypeRuntimeFor(db, task.type)),
     runListSnapshot: task.runListSnapshot ?? null,
+    deadAt: task.deadAt ?? null,
   };
 }
 
@@ -606,6 +608,113 @@ async function writeTaskFailed(
     )
     .returning({ id: schema.tasks.id });
   return failed !== undefined;
+}
+
+function deadReasonFor(ids: readonly string[]): string {
+  return `the run list names ${ids.length === 1 ? 'a step' : 'steps'} this install does not register: ${ids.join(', ')}`;
+}
+
+/** Mark the task dead: it is neither failed nor completed, keeps its status and epoch, and tears
+ *  nothing down, so a revive finds it as it was. Only while the task is not cancelled or completed,
+ *  still at the epoch, and not already dead; false when nothing was written. */
+export async function markTaskDead(
+  db: Database | DbHandle,
+  taskId: string,
+  reason: string,
+  fence: {
+    epoch: number;
+    unresolved?: string[];
+    stepId?: string;
+    round?: number;
+    statuses?: readonly TaskStatus[];
+  },
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const [dead] = await tx
+      .update(schema.tasks)
+      .set({ deadAt: new Date(), deadReason: reason, updatedAt: new Date() })
+      .where(
+        and(
+          taskWriteTarget(taskId, { epoch: fence.epoch, reviveFailed: true }),
+          isNull(schema.tasks.deadAt),
+          ...(fence.statuses ? [inArray(schema.tasks.status, [...fence.statuses])] : []),
+        ),
+      )
+      .returning({ id: schema.tasks.id });
+    if (!dead) return false;
+    await appendEvent(tx, taskId, null, 'task.dead', {
+      reason,
+      unresolved: fence.unresolved ?? [],
+      stepId: fence.stepId ?? null,
+      round: fence.round ?? null,
+      epoch: fence.epoch,
+    });
+    logger.warn({ taskId, epoch: fence.epoch, reason }, 'task is dead');
+    return true;
+  });
+}
+
+/** Mark the task dead from a hand-off, while the finished step's row is still the pass's own: a
+ *  Retry writes the steps before the epoch, as routableFixLoopTarget's failure does. */
+async function markTaskDeadOnStep(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  rowId: string,
+  round: number,
+  stepId: string,
+  unresolved: string[],
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    if (!(await lockOwnedStep(tx, rowId))) return;
+    await markTaskDead(tx, ctx.taskId, deadReasonFor(unresolved), {
+      epoch: ctx.orchestrationEpoch,
+      unresolved,
+      stepId,
+      round,
+    });
+  });
+}
+
+/** A job that met an unresolved step marks the task dead under its step row's lock: a Retry resets
+ *  the row and moves the epoch in one transaction, so after the lock the epoch fence catches it,
+ *  while Skip and Stop leave the row skipped or failed without moving the epoch. */
+export async function markTaskDeadFromJob(
+  db: Database,
+  taskId: string,
+  reason: string,
+  opts: { epoch: number; unresolved: string[]; stepId?: string; round?: number },
+): Promise<void> {
+  const [row] = opts.stepId
+    ? await db
+        .select({ id: schema.taskSteps.id })
+        .from(schema.taskSteps)
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, taskId),
+            eq(schema.taskSteps.stepId, opts.stepId),
+            eq(schema.taskSteps.round, opts.round ?? 0),
+          ),
+        )
+        .limit(1)
+    : [];
+  if (!row) {
+    await markTaskDead(db, taskId, reason, opts);
+    return;
+  }
+  await db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select({ id: schema.taskSteps.id })
+      .from(schema.taskSteps)
+      .where(
+        and(
+          eq(schema.taskSteps.id, row.id),
+          notInArray(schema.taskSteps.status, ['skipped', 'failed']),
+        ),
+      )
+      .for('update');
+    if (!locked) return;
+    await markTaskDead(tx, taskId, reason, opts);
+  });
 }
 
 /** The step a fix round re-enters, or null after failing the task because it cannot be reached. */
@@ -1559,7 +1668,11 @@ export async function handleResult(
         .where(and(eq(schema.tasks.id, ctx.taskId), ne(schema.tasks.allowanceAutoResumeCount, 0)));
       const steps = await buildRunList(ctx, db);
       const idx = steps.findIndex((s) => s.metadata.id === stepId);
-      const next = idx >= 0 ? steps[idx + 1] : undefined;
+      if (idx < 0) {
+        await markTaskDeadOnStep(db, ctx, result.row.id, result.row.round, stepId, [stepId]);
+        return;
+      }
+      const next = steps[idx + 1];
       if (next) {
         // Forward walk stays in the same round as the step that just finished.
         const nextRound = result.row.round;
@@ -1845,7 +1958,13 @@ export async function handleResult(
       // (e.g. gate-1 reject → re-plan 04, 03c reject → re-mine 03b). No cap, because the
       // loop is human-gated (the review form re-parks every cycle). The target reads its
       // revise feedback from task_events, which survives across rounds.
-      const target = stepRegistry.require(result.targetStepId);
+      const target = stepRegistry.get(result.targetStepId);
+      if (!target) {
+        await markTaskDeadOnStep(db, ctx, result.row.id, result.row.round, stepId, [
+          result.targetStepId,
+        ]);
+        return;
+      }
       // The learning loop (11-phase-8-learning) revises ITSELF — keep it in place in the
       // SAME round (iterative draft polish, one card). The spec gates revise an EARLIER
       // step, so FORK a new round: each attempt becomes its own forward card (history
@@ -1957,7 +2076,11 @@ export async function resolveFixLoopGate(
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
     const steps = await buildRunList(ctx, db);
     const idx = steps.findIndex((s) => s.metadata.id === gateRow.stepId);
-    const next = idx >= 0 ? steps[idx + 1] : undefined;
+    if (idx < 0) {
+      await markTaskDeadOnStep(db, ctx, gateRow.id, round, gateRow.stepId, [gateRow.stepId]);
+      return;
+    }
+    const next = steps[idx + 1];
     if (next) {
       const pointed = await markTaskRunningWithStep(
         db,
@@ -2041,7 +2164,23 @@ async function handleStartTask(
     logger.warn({ taskId: payload.taskId }, 'start-task: task not found');
     return;
   }
-  const steps = await buildRunList(ctx, db);
+  if (ctx.deadAt) {
+    logger.info({ taskId: ctx.taskId }, 'start-task skipped: the task is dead');
+    return;
+  }
+  let steps: StepDefinition[];
+  try {
+    steps = await buildRunList(ctx, db);
+  } catch (err) {
+    if (!(err instanceof UnresolvedStepError)) throw err;
+    // Before the claim, so a redelivered START on a task already running must not touch it.
+    await markTaskDead(db, ctx.taskId, deadReasonFor(err.ids), {
+      epoch: ctx.orchestrationEpoch,
+      unresolved: err.ids,
+      statuses: STARTABLE_TASK_STATUSES,
+    });
+    return;
+  }
   const first = steps[0];
   if (!first) {
     await markTaskFailed(
@@ -2176,18 +2315,15 @@ async function handleAdvanceStep(
     );
     return;
   }
-  if (!payload.stepId) {
-    throw new Error('advance-step requires stepId');
-  }
-  const stepDef = stepRegistry.get(payload.stepId);
-  if (!stepDef) {
-    await markTaskFailed(
-      db,
-      ctx.taskId,
-      `unknown step id ${payload.stepId}`,
-      ctx.orchestrationEpoch,
+  if (ctx.deadAt) {
+    logger.info(
+      { taskId: ctx.taskId, stepId: payload.stepId },
+      'advance-step skipped: the task is dead',
     );
     return;
+  }
+  if (!payload.stepId) {
+    throw new Error('advance-step requires stepId');
   }
 
   const round = payload.round ?? 0;
@@ -2226,6 +2362,25 @@ async function handleAdvanceStep(
       },
       'advance-step skipped: the task has moved past this step',
     );
+    return;
+  }
+
+  const stepDef = stepRegistry.get(payload.stepId);
+  if (!stepDef) {
+    // Only the step the task stands on can kill it; any other job, answered ones included, is stale.
+    if (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) {
+      logger.warn(
+        { taskId: ctx.taskId, stepId: payload.stepId, round, currentStepId: ctx.currentStepId },
+        'advance-step skipped: an unregistered step the task is not on',
+      );
+      return;
+    }
+    await markTaskDeadFromJob(db, ctx.taskId, deadReasonFor([payload.stepId]), {
+      epoch: ctx.orchestrationEpoch,
+      unresolved: [payload.stepId],
+      stepId: payload.stepId,
+      round,
+    });
     return;
   }
 
@@ -3099,6 +3254,7 @@ export async function recoverParkedStep(
       and(
         eq(schema.tasks.id, s.taskId),
         eq(schema.tasks.status, 'running'),
+        isNull(schema.tasks.deadAt),
         eq(schema.tasks.orchestrationEpoch, s.epoch),
         sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${s.currentStepId}`,
         eq(schema.tasks.currentRound, s.currentRound),
@@ -3166,7 +3322,13 @@ export async function reconcileOrphanedSteps(
     })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
-    .where(and(eq(schema.taskSteps.status, 'waiting_cli'), eq(schema.tasks.status, 'running')));
+    .where(
+      and(
+        eq(schema.taskSteps.status, 'waiting_cli'),
+        eq(schema.tasks.status, 'running'),
+        isNull(schema.tasks.deadAt),
+      ),
+    );
   if (stuckCli.length > 0)
     logger.warn(
       { count: stuckCli.length },
@@ -3199,7 +3361,13 @@ export async function reconcileOrphanedSteps(
     })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
-    .where(and(eq(schema.taskSteps.status, 'running'), eq(schema.tasks.status, 'running')));
+    .where(
+      and(
+        eq(schema.taskSteps.status, 'running'),
+        eq(schema.tasks.status, 'running'),
+        isNull(schema.tasks.deadAt),
+      ),
+    );
   if (stuckRunning.length > 0)
     logger.warn(
       { count: stuckRunning.length },
@@ -3276,6 +3444,7 @@ export async function backfillMissingRunSeq(db: Database): Promise<void> {
     .where(
       and(
         isNull(schema.taskSteps.runSeq),
+        isNull(schema.tasks.deadAt),
         inArray(schema.tasks.status, ['created', 'running', 'waiting_user', 'failed']),
       ),
     );
@@ -3640,6 +3809,22 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       // when it read no epoch, since it cannot tell a Retry's newer generation from its own.
       const unclaimed = job.name === TASK_JOB_NAMES.START && !held.claimed;
       if (!unclaimed || epoch !== undefined) {
+        if (err instanceof UnresolvedStepError && epoch !== undefined) {
+          const { stepId, round } = job.data as TaskJobPayload;
+          const dead = await markTaskDeadFromJob(db, taskId, deadReasonFor(err.ids), {
+            epoch,
+            unresolved: err.ids,
+            stepId,
+            round,
+          }).then(
+            () => true,
+            (deadErr) => {
+              logger.warn({ err: deadErr, taskId }, 'markTaskDead during catch failed');
+              return false;
+            },
+          );
+          if (dead) return;
+        }
         const statuses = unclaimed ? STARTABLE_TASK_STATUSES : undefined;
         await markTaskFailed(db, taskId, message, epoch, statuses).catch((cleanupErr) => {
           logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
