@@ -140,4 +140,19 @@ describe('validateComposition', () => {
     ]);
     expect(validateComposition(['impl', 'verify', 'commit'], catalog)).toEqual([]);
   });
+
+  it('treats a step that both closes and loops as its own barrier', () => {
+    const catalog = catalogOf(
+      entry('impl', { provides: ['implementation'] }),
+      entry('push-and-check', { closes: true, loop: 'impl' }),
+    );
+    expect(validateComposition(['impl', 'push-and-check'], catalog)).toEqual([
+      {
+        kind: 'loop-after-closing',
+        index: 1,
+        stepId: 'push-and-check',
+        closingStepId: 'push-and-check',
+      },
+    ]);
+  });
 });

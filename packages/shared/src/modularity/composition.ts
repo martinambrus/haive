@@ -36,10 +36,10 @@ export function validateComposition(
         target: entry.loopTargetStepId,
       });
     }
+    if (entry.closes) closingStepId ??= stepId;
     if (entry.loopTargetStepId !== undefined && closingStepId !== undefined) {
       issues.push({ kind: 'loop-after-closing', index, stepId, closingStepId });
     }
-    if (entry.closes) closingStepId ??= stepId;
     for (const token of entry.provides) provided.add(token);
   });
   return issues;
