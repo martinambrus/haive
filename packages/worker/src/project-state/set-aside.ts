@@ -3,7 +3,12 @@ import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { HAIVE_DATA_FILES, logger } from '@haive/shared';
-import { readFileNoFollow, readdirNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  readFileNoFollow,
+  readdirNoFollow,
+  removeNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { markPlanMirrorDirty } from '@haive/shared/plan';
 import {
   PROJECT_STATE_DIR,
@@ -44,9 +49,12 @@ import {
 type DbOrTx = Parameters<typeof markPlanMirrorDirty>[0];
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
+/** What each set-aside path held before its restore, by path: null where the file was absent. */
+export type KeptFiles = Map<string, Buffer | null>;
+
 export type SetAsideResult =
   | { outcome: 'clean' }
-  | { outcome: 'set-aside'; paths: string[] }
+  | { outcome: 'set-aside'; paths: string[]; kept: KeptFiles }
   | { outcome: 'refused'; file: string; reason: string }
   | { outcome: 'held'; holding: number };
 
@@ -380,6 +388,7 @@ async function restoreJudged(
   repoPath: string,
   judged: { prints: Map<string, string>; generation: string },
   guard: RestoreGuard,
+  kept: KeptFiles,
   after?: (tx: Tx) => Promise<void>,
 ): Promise<SetAsideResult | Changed | null> {
   await guard.lock(tx);
@@ -398,10 +407,28 @@ async function restoreJudged(
   }
   const holding = guard.fence ? await guard.fence(tx) : 0;
   if (holding > 0) return { outcome: 'held', holding };
+  for (const path of mine) {
+    const bytes = await keptBytes(repoPath, path);
+    if (bytes !== undefined) kept.set(path, bytes);
+  }
   await restoreFromHead(repoPath, mine);
   await restoreFaults.afterRestore?.();
   await after?.(tx);
   return null;
+}
+
+/** The judged bytes of a path about to be restored: null when absent, undefined when they cannot be held. */
+async function keptBytes(repoPath: string, rel: string): Promise<Buffer | null | undefined> {
+  const maxBytes = rel.startsWith(STATE_PREFIX)
+    ? PROJECT_STATE_LIMITS.maxFileBytes
+    : PLAN_JSON_MAX_BYTES;
+  try {
+    const read = await readFileNoFollow(repoPath, rel, { maxBytes, strict: true });
+    if (read === null) return null;
+    return read.truncated ? undefined : read.data;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The restore of one domain, in two transactions; `after` runs in the second once the files are restored. */
@@ -410,12 +437,13 @@ async function setAsideDomain(
   repoPath: string,
   paths: readonly string[],
   guard: RestoreGuard,
+  kept: KeptFiles,
   after?: (tx: Tx) => Promise<void>,
 ): Promise<SetAsideResult | Changed | null> {
   const judged = await db.transaction((tx) => judgeAndMark(tx, repoPath, paths, guard));
   if ('stopped' in judged) return judged.stopped;
   await restoreFaults.afterBase?.();
-  return db.transaction((tx) => restoreJudged(tx, repoPath, judged, guard, after));
+  return db.transaction((tx) => restoreJudged(tx, repoPath, judged, guard, kept, after));
 }
 
 const stateGuard = (
@@ -499,17 +527,18 @@ export async function setAsideHaiveProjections(
   fence?: CheckoutFence,
 ): Promise<SetAsideResult> {
   const restored = new Set<string>();
-  // A stop after one domain was restored writes that domain back, since no move follows.
+  const kept: KeptFiles = new Map();
+  // A stop after one domain was restored puts that domain's files back, since no move follows.
   const stop = async (result: SetAsideResult): Promise<SetAsideResult> => {
-    if (restored.size > 0) await resyncHaiveProjections(db, repositoryId, repoPath);
+    if (restored.size > 0) await putBackProjections(db, repositoryId, repoPath, kept);
     return result;
   };
   let busy = '';
   for (let attempt = 1; attempt <= MOVE_ATTEMPTS; attempt++) {
-    const result = await setAsideOnce(db, repositoryId, repoPath, restored, fence);
+    const result = await setAsideOnce(db, repositoryId, repoPath, restored, kept, fence);
     if (!('changed' in result)) {
       if (result.outcome === 'clean' && restored.size > 0) {
-        return { outcome: 'set-aside', paths: [...restored].sort() };
+        return { outcome: 'set-aside', paths: [...restored].sort(), kept };
       }
       return result.outcome === 'held' || result.outcome === 'refused' ? stop(result) : result;
     }
@@ -525,6 +554,7 @@ async function setAsideOnce(
   repositoryId: string,
   repoPath: string,
   restored: Set<string>,
+  kept: KeptFiles,
   fence?: CheckoutFence,
 ): Promise<SetAsideResult | Changed> {
   const dirty = await dirtyProjections(repoPath);
@@ -566,6 +596,7 @@ async function setAsideOnce(
       repoPath,
       state,
       stateGuard(repositoryId, repoPath, state, fence),
+      kept,
       (tx) => rebaseProjectStateOnCheckoutLocked(tx, { repositoryId, repoPath }),
     );
     if (stopped) return stopped;
@@ -578,12 +609,13 @@ async function setAsideOnce(
       repoPath,
       plan,
       planGuard(repositoryId, repoPath, plan, fence),
+      kept,
     );
     if (stopped) return stopped;
     for (const path of plan) restored.add(path);
     await markPlanMirrorDirty(db, repositoryId);
   }
-  return { outcome: 'set-aside', paths: dirty.paths };
+  return { outcome: 'set-aside', paths: dirty.paths, kept };
 }
 
 /** The check again, inside the caller's transaction and under both writers' locks, immediately before
@@ -661,6 +693,31 @@ export async function resyncHaiveProjections(
   } catch (err) {
     logger.warn({ err, repositoryId }, 'plan not re-synced after a checkout move');
     await raiseMarkAfterFailure(db, schema.planMirrorState, repositoryId, markPlanMirrorDirty);
+  }
+}
+
+/** After a set-aside that ends with no move: writes each kept file back as the set-aside found it, unless
+ *  someone has written it since. The marks stay raised, so the sweep reconciles the rest later. */
+export async function putBackProjections(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+  kept: KeptFiles,
+): Promise<void> {
+  if (kept.size === 0) return;
+  try {
+    await db.transaction(async (tx) => {
+      await lockProjectState(tx, repositoryId);
+      await lockPlanMirror(tx, repositoryId);
+      const dirty = new Set((await dirtyProjections(repoPath)).paths);
+      for (const [path, bytes] of kept) {
+        if (dirty.has(path)) continue;
+        if (bytes === null) await removeNoFollow(repoPath, path);
+        else await writeFileNoFollow(repoPath, path, bytes, { createParents: true });
+      }
+    });
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'project files not put back after a set-aside');
   }
 }
 

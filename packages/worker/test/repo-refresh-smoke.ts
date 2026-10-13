@@ -890,6 +890,140 @@ async function main(): Promise<void> {
       );
     }
 
+    // 11e5. The no-move exits with an onboarding holder, which defers a re-sync: the kept bytes go back.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const target = path.join(c.dest, RENDER_REL);
+      const before = await readFile(target);
+      const headRender = execFileSync('git', ['show', `HEAD:${RENDER_REL}`], {
+        cwd: c.dest,
+        env: gitEnv,
+      });
+      let started = false;
+      const aside = await setAsideHaiveProjections(db, id, c.dest, async (conn) => {
+        if (!started && (await readFile(target)).equals(headRender)) {
+          started = true;
+          await db.insert(schema.tasks).values({
+            userId,
+            repositoryId: id,
+            type: 'onboarding',
+            title: 'repo-refresh-smoke',
+            status: 'running',
+          });
+        }
+        return checkoutHoldingTasks(conn, id);
+      });
+      const after = await readFile(target);
+      await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      check(
+        'O1: an onboarding task that starts between the state and the plan set-aside gets the state files put back',
+        aside.outcome === 'held' && started && after.equals(before),
+        { aside, started, atHead: after.equals(headRender) },
+      );
+    }
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      const renderBefore = await readFile(path.join(c.dest, RENDER_REL));
+      const planBytes = await readFile(path.join(c.dest, PLAN_REL));
+      let restores = 0;
+      restoreFaults.afterRestore = async () => {
+        restores += 1;
+        if (restores !== 2) return;
+        await writeFile(path.join(c.dest, PLAN_REL), planBytes);
+        await db.insert(schema.tasks).values({
+          userId,
+          repositoryId: id,
+          type: 'onboarding',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        });
+      };
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      }
+      const message = (await statusOf(id)).statusMessage ?? '';
+      const renderAfter = await readFile(path.join(c.dest, RENDER_REL));
+      check(
+        'O2: a refresh held by an onboarding task after a retried move puts back the state files',
+        restores >= 2 &&
+          /1 task is using this repository/.test(message) &&
+          renderAfter.equals(renderBefore),
+        { restores, message, back: renderAfter.equals(renderBefore) },
+      );
+    }
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      const renderBefore = await readFile(path.join(c.dest, RENDER_REL));
+      const headBefore = git(c.dest, 'rev-parse', 'HEAD');
+      const [own] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: id,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id });
+      let sibling = false;
+      restoreFaults.afterRestore = async () => {
+        if (sibling) return;
+        sibling = true;
+        await db.insert(schema.tasks).values({
+          userId,
+          repositoryId: id,
+          type: 'onboarding',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        });
+      };
+      let out;
+      try {
+        const ctx = taskCtx(c.dest, own!.id);
+        const detected = await syncBaseStep.detect!(ctx);
+        out = await syncBaseStep.apply(ctx, {
+          detected,
+          formValues: { base: 'main' },
+          iteration: 0,
+          previousIterations: [],
+        });
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+      }
+      const renderAfter = await readFile(path.join(c.dest, RENDER_REL));
+      check(
+        'O3: 00a skips the base when an onboarding task appears after the set-aside, and the state files are put back',
+        sibling &&
+          out?.strategy === 'skipped' &&
+          git(c.dest, 'rev-parse', 'HEAD') === headBefore &&
+          renderAfter.equals(renderBefore),
+        { sibling, out, back: renderAfter.equals(renderBefore) },
+      );
+    }
+
     // 11e4. A re-sync that fails after a clean move raises the domain's mark, so the sweep retries it.
     {
       const c = await withPendingRender();

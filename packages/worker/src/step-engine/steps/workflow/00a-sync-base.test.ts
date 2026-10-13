@@ -13,6 +13,7 @@ import { claimFake } from '../../../../test/merge-dir-claim-fake.js';
 const projections = vi.hoisted(() => ({
   setAside: vi.fn(),
   resync: vi.fn(),
+  putBack: vi.fn(),
   restore: vi.fn(),
   seed: vi.fn(),
 }));
@@ -23,6 +24,7 @@ vi.mock('../../../plan/mirror.js', async (importOriginal) => ({
 vi.mock('../../../project-state/set-aside.js', () => ({
   setAsideHaiveProjections: projections.setAside,
   resyncHaiveProjections: projections.resync,
+  putBackProjections: projections.putBack,
   restoreProjectionsInTx: projections.restore,
   MOVE_ATTEMPTS: 3,
 }));
@@ -34,6 +36,7 @@ beforeEach(() => {
   claimFake.reset();
   projections.setAside.mockReset();
   projections.resync.mockReset();
+  projections.putBack.mockReset();
   projections.restore.mockReset();
   projections.seed.mockReset();
   projections.seed.mockResolvedValue(undefined);
@@ -157,7 +160,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       let atResync: string | null = null;
       projections.setAside.mockImplementation(async () => {
         atAside = await head();
-        return { outcome: 'set-aside', paths: [] };
+        return { outcome: 'set-aside', paths: [], kept: new Map() };
       });
       projections.resync.mockImplementation(async () => {
         atResync = await head();
@@ -328,7 +331,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
     const local = await cloneLocal(bare);
     await advanceOrigin(seed, 'b.txt');
     try {
-      projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [] });
+      projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [], kept: new Map() });
       projections.restore.mockResolvedValueOnce({ outcome: 'retry' });
       const ctx = mkCtx(local, 'repo-1');
       const d = await syncBaseStep.detect!(ctx);
@@ -350,7 +353,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
     await advanceOrigin(seed, 'b.txt');
     try {
       const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
-      projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [] });
+      projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [], kept: new Map() });
       projections.restore.mockResolvedValue({ outcome: 'retry' });
       const ctx = mkCtx(local, 'repo-1');
       const d = await syncBaseStep.detect!(ctx);
@@ -359,6 +362,8 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out.reason).toContain('kept changing');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
       expect(projections.setAside).toHaveBeenCalledTimes(3);
+      expect(projections.putBack).toHaveBeenCalledTimes(1);
+      expect(projections.resync).not.toHaveBeenCalled();
     } finally {
       await rm(bare, { recursive: true, force: true });
       await rm(seed, { recursive: true, force: true });

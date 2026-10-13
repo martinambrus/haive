@@ -15,9 +15,11 @@ import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
 import {
   MOVE_ATTEMPTS,
+  putBackProjections,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
+  type KeptFiles,
   type SetAsideResult,
 } from '../../../project-state/set-aside.js';
 
@@ -391,10 +393,14 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     const fence = (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
       checkoutHoldingTasks(conn, repositoryId!, { excludeTaskId: ctx.taskId, rootOnly: true });
     let asided = false;
+    const kept: KeptFiles = new Map();
     const setAside = async (): Promise<SetAsideResult> => {
       if (!repositoryId) return { outcome: 'clean' };
       const aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
-      if (aside.outcome === 'set-aside') asided = true;
+      if (aside.outcome === 'set-aside') {
+        asided = true;
+        for (const [file, bytes] of aside.kept) kept.set(file, bytes);
+      }
       return aside;
     };
     if (repositoryId) {
@@ -492,8 +498,10 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       ]);
       res = await ffLocked();
     }
-    if (repositoryId && (res.code === 0 || asided)) {
+    if (repositoryId && res.code === 0) {
       await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+    } else if (repositoryId && asided) {
+      await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
     }
     if (res.code !== 0) {
       ctx.logger.warn(

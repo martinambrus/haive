@@ -12,9 +12,11 @@ import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@ha
 import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
 import {
   MOVE_ATTEMPTS,
+  putBackProjections,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
+  type KeptFiles,
 } from '../project-state/set-aside.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-push.js';
@@ -152,16 +154,20 @@ async function fastForward(
   // holding. The check runs again here so no sweep can rewrite a file between it and the move; a
   // file it finds rewritten ends the transaction unmoved and goes back to the set-aside.
   let asided = false;
+  const kept: KeptFiles = new Map();
   for (let attempt = 1; ; attempt++) {
     const aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
     if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
-      await resyncHaiveProjections(db, payload.repositoryId, dest);
+      await putBackProjections(db, payload.repositoryId, dest, kept);
     }
     if (aside.outcome === 'refused') {
       return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
     }
     if (aside.outcome === 'held') return holdingRefusal(aside.holding);
-    if (aside.outcome === 'set-aside') asided = true;
+    if (aside.outcome === 'set-aside') {
+      asided = true;
+      for (const [file, bytes] of aside.kept) kept.set(file, bytes);
+    }
 
     const { again, merge: merged } = await db.transaction(async (tx) => {
       const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
@@ -172,9 +178,8 @@ async function fastForward(
       return { again: check, merge: await gitRun(dest, ['merge', '--ff-only', target]) };
     });
     if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
-    if (merged?.code === 0 || asided) {
-      await resyncHaiveProjections(db, payload.repositoryId, dest);
-    }
+    if (merged?.code === 0) await resyncHaiveProjections(db, payload.repositoryId, dest);
+    else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
     if (again.outcome === 'refused') {
       return `Not refreshed: ${again.reason}. The checkout was not moved.`;
     }
