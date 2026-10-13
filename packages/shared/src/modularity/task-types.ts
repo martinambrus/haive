@@ -4,6 +4,8 @@ import { validateComposition, type CompositionIssue } from './composition.js';
 import type { ComposableStepEntry } from './contracts.js';
 
 export const CUSTOM_TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** Slugs a custom type may not take: `new` is the admin create page's path. */
+export const RESERVED_TASK_TYPE_SLUGS: readonly string[] = ['new'];
 
 export const COMPOSABLE_STEP_GROUPS = [
   { id: 'env', label: 'Environment', order: 0 },
@@ -82,7 +84,10 @@ const preAnswerDefaultsSchema = z.record(z.string(), z.record(z.string(), z.unkn
 
 export const customTaskTypeCreateSchema = z
   .object({
-    slug: z.string().regex(CUSTOM_TASK_TYPE_SLUG_PATTERN),
+    slug: z
+      .string()
+      .regex(CUSTOM_TASK_TYPE_SLUG_PATTERN)
+      .refine((slug) => !RESERVED_TASK_TYPE_SLUGS.includes(slug), 'This slug is reserved'),
     displayName: z.string().min(1),
     description: z.string().optional(),
     stepIds: z.array(z.string().min(1)).min(1),

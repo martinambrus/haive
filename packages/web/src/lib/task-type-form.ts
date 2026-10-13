@@ -1,13 +1,14 @@
 import type { FormSchema } from '@haive/shared';
 import {
   CUSTOM_TASK_TYPE_SLUG_PATTERN,
+  RESERVED_TASK_TYPE_SLUGS,
   type CustomTaskTypeCreate,
   type TaskTypeUpdate,
 } from '@haive/shared/modularity';
 import type { FormValues } from '@/components/form-validation';
 
 /** The page /admin/task-types/new takes this path, so a type with this slug could never be opened. */
-export const RESERVED_SLUG = 'new';
+export const RESERVED_SLUG = RESERVED_TASK_TYPE_SLUGS[0]!;
 
 const FLAT_FIELDS = [
   'displayName',

@@ -151,6 +151,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setSaveError(null);
     setSaved(false);
     setRefreshError(null);
+    setServerIssues([]);
     try {
       if (creating) {
         const problem = slugProblem(String(submitted.slug ?? '').trim());
