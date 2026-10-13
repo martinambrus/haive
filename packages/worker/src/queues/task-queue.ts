@@ -668,6 +668,37 @@ async function markTaskDeadOnStep(
   });
 }
 
+/** A job that met an unresolved step marks the task dead only while it still owns the step row it
+ *  was running, as a Retry writes the steps before it moves the epoch. */
+export async function markTaskDeadFromJob(
+  db: Database,
+  taskId: string,
+  reason: string,
+  opts: { epoch: number; unresolved: string[]; stepId?: string; round?: number },
+): Promise<void> {
+  const [row] = opts.stepId
+    ? await db
+        .select({ id: schema.taskSteps.id })
+        .from(schema.taskSteps)
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, taskId),
+            eq(schema.taskSteps.stepId, opts.stepId),
+            eq(schema.taskSteps.round, opts.round ?? 0),
+          ),
+        )
+        .limit(1)
+    : [];
+  if (!row) {
+    await markTaskDead(db, taskId, reason, opts);
+    return;
+  }
+  await db.transaction(async (tx) => {
+    if (!(await lockOwnedStep(tx, row.id))) return;
+    await markTaskDead(tx, taskId, reason, opts);
+  });
+}
+
 /** The step a fix round re-enters, or null after failing the task because it cannot be reached. */
 async function routableFixLoopTarget(
   db: Database,
@@ -3751,7 +3782,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       if (!unclaimed || epoch !== undefined) {
         if (err instanceof UnresolvedStepError && epoch !== undefined) {
           const { stepId, round } = job.data as TaskJobPayload;
-          const dead = await markTaskDead(db, taskId, deadReasonFor(err.ids), {
+          const dead = await markTaskDeadFromJob(db, taskId, deadReasonFor(err.ids), {
             epoch,
             unresolved: err.ids,
             stepId,

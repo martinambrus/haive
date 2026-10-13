@@ -24,6 +24,7 @@ import {
   getTaskQueue,
   handleResult,
   markTaskDead,
+  markTaskDeadFromJob,
   processTaskJob,
   reconcileOrphanedSteps,
   resolveFixLoopGate,
@@ -524,6 +525,33 @@ async function main(): Promise<void> {
     }
 
     // --- the job's catch ------------------------------------------------------------
+    for (const [status, expectDead] of [
+      ['pending', false],
+      ['running', true],
+    ] as const) {
+      const id = await makeTask(`catch-owned-${status}`);
+      await makeRow(id, 'p4b-a', status === 'pending' ? 'running' : status);
+      if (status === 'pending') {
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'pending' })
+          .where(eq(schema.taskSteps.taskId, id));
+      }
+      await markTaskDeadFromJob(db, id, 'gone', {
+        epoch: 3,
+        unresolved: [GONE],
+        stepId: 'p4b-a',
+        round: 0,
+      });
+      const v = await view(id);
+      check(
+        expectDead
+          ? 'a job that still owns its step row marks the task dead from its catch'
+          : 'a job whose step row a Retry reset leaves the task alive from its catch',
+        (v.deadAt !== null) === expectDead && v.status === 'running',
+        v,
+      );
+    }
     {
       const id = await makeTask('catch-typed', { snapshot: ['p4b-a', GONE] });
       const threw = await run(TASK_JOB_NAMES.ADVANCE_STEP, {
