@@ -1822,6 +1822,20 @@ describe('a fix round whose target is not in the task run list', () => {
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
+  it('leaves the task alone when a Retry already took the source row', async () => {
+    h.state.readsAnswer = true;
+    h.state.sourceOwned = false;
+    await handleResult(
+      db as never,
+      ctx(withoutTarget) as never,
+      'epoch-job-step',
+      loopBack as never,
+    );
+    expect(failure()).toBeUndefined();
+    expect(h.state.events).not.toContain('fix_loop.unroutable');
+    expect(h.state.add).not.toHaveBeenCalled();
+  });
+
   it('still routes a step fix request when the target is in the run list', async () => {
     h.state.readsAnswer = true;
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);

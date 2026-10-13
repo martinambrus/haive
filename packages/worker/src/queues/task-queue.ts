@@ -576,6 +576,18 @@ export async function markTaskFailed(
   epoch?: number,
   statuses?: readonly TaskStatus[],
 ): Promise<boolean> {
+  if (!(await writeTaskFailed(db, taskId, message, epoch, statuses))) return false;
+  await settleFailedTask(db, taskId);
+  return true;
+}
+
+async function writeTaskFailed(
+  db: Database | DbHandle,
+  taskId: string,
+  message: string,
+  epoch?: number,
+  statuses?: readonly TaskStatus[],
+): Promise<boolean> {
   const [failed] = await db
     .update(schema.tasks)
     .set({
@@ -593,9 +605,7 @@ export async function markTaskFailed(
       ),
     )
     .returning({ id: schema.tasks.id });
-  if (!failed) return false;
-  await settleFailedTask(db, taskId);
-  return true;
+  return failed !== undefined;
 }
 
 /** The step a fix round re-enters, or null after failing the task because it cannot be reached. */
@@ -611,10 +621,18 @@ async function routableFixLoopTarget(
     registry: stepRegistry,
   });
   if (resolved.ok) return resolved.def;
-  await appendEvent(db, ctx.taskId, sourceRowId, 'fix_loop.unroutable', {
-    reason: resolved.reason,
+  // Taken under the source row like the hand-off it replaces, as a Retry takes the steps first.
+  const failed = await db.transaction(async (tx) => {
+    if (!(await lockOwnedStep(tx, sourceRowId))) return false;
+    if (!(await writeTaskFailed(tx, ctx.taskId, resolved.reason, ctx.orchestrationEpoch))) {
+      return false;
+    }
+    await appendEvent(tx, ctx.taskId, sourceRowId, 'fix_loop.unroutable', {
+      reason: resolved.reason,
+    });
+    return true;
   });
-  await markTaskFailed(db, ctx.taskId, resolved.reason, ctx.orchestrationEpoch);
+  if (failed) await settleFailedTask(db, ctx.taskId);
   return null;
 }
 
