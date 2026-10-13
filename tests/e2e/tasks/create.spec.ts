@@ -170,11 +170,18 @@ test.describe('tasks list and create', () => {
     sql,
     users,
   }) => {
-    await users.register(page.request, { prefix: 'tasks-type-variants' });
+    const { userId } = await users.register(page.request, { prefix: 'tasks-type-variants' });
+    const repoFixture = await seedRepoFixture(sql, userId, 'tasks-type-variants');
+
+    const noRepository = await page.request.post(`${API_BASE}/tasks`, {
+      data: { type: 'onboarding', title: `e2e onboarding norepo ${Date.now().toString(36)}` },
+    });
+    expect(noRepository.status(), 'an onboarding task with no repository is refused').toBe(400);
 
     const onboardingRes = await page.request.post(`${API_BASE}/tasks`, {
       data: {
         type: 'onboarding',
+        repositoryId: repoFixture.repoId,
         title: `e2e onboarding ${Date.now().toString(36)}`,
       },
     });
@@ -188,7 +195,11 @@ test.describe('tasks list and create', () => {
     // A workflow task REQUIRES a description — createTaskRequestSchema refines exactly that,
     // and this request omitted it and expected 201. Both halves of the rule are pinned now.
     const noDescription = await page.request.post(`${API_BASE}/tasks`, {
-      data: { type: 'workflow', title: `e2e workflow nodesc ${Date.now().toString(36)}` },
+      data: {
+        type: 'workflow',
+        title: `e2e workflow nodesc ${Date.now().toString(36)}`,
+        repositoryId: repoFixture.repoId,
+      },
     });
     expect(noDescription.status(), 'a workflow task with no description is refused').toBe(400);
 
@@ -196,6 +207,7 @@ test.describe('tasks list and create', () => {
       data: {
         type: 'workflow',
         title: `e2e workflow ${Date.now().toString(36)}`,
+        repositoryId: repoFixture.repoId,
         description: 'e2e workflow task description',
       },
     });

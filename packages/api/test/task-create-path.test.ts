@@ -27,6 +27,7 @@ import { createDatabase, schema, type Database } from '@haive/database';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { adminTaskTypeRoutes } from '../src/routes/task-types.js';
 import { loadLiveRootWriters } from '../src/routes/repos.js';
+import { definitionForCreate } from '../src/lib/task-type-definition.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -146,7 +147,13 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
     await db
       .delete(schema.taskTypeDefinitions)
       .where(
-        inArray(schema.taskTypeDefinitions.slug, [...SLUGS, 'onboarding', 'workflow', 'run_app']),
+        inArray(schema.taskTypeDefinitions.slug, [
+          ...SLUGS,
+          'onboarding',
+          'workflow',
+          'run_app',
+          'kb_author',
+        ]),
       );
     await db.delete(schema.stepCatalog).where(inArray(schema.stepCatalog.stepId, STEP_IDS));
   };
@@ -274,14 +281,56 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
     expect(row.metadata).toBeNull();
   });
 
-  it('records no anchor on an unseeded built-in, repository or not', async () => {
+  it('records no anchor on an unseeded built-in that is given a repository', async () => {
     const withRepo = await created(await post({ type: 'workflow', repositoryId: REPO }));
     expect(withRepo.row.metadata).toBeNull();
-    const without = await post({ type: 'workflow' });
-    expect(without.status).toBe(201);
-    const { task } = (await without.json()) as { task: { id: string } };
-    const [row] = await db.select().from(schema.tasks).where(eq(schema.tasks.id, task.id));
-    expect(row?.metadata).toBeNull();
+  });
+
+  const taskCount = async () =>
+    (await db.select().from(schema.tasks).where(eq(schema.tasks.userId, USER))).length;
+
+  it('refuses a seeded built-in that requires a repository when the request names none', async () => {
+    await db.insert(schema.taskTypeDefinitions).values([
+      typeRow('onboarding', ['cp-b-1'], { source: 'builtin' }),
+      typeRow('workflow', [], {
+        source: 'builtin',
+        runListStrategy: 'workflow_paths',
+        stepIds: null,
+      }),
+      typeRow('run_app', [], {
+        source: 'builtin',
+        runListStrategy: 'run_app_modes',
+        stepIds: null,
+      }),
+    ]);
+    for (const type of ['onboarding', 'workflow', 'run_app']) {
+      expect((await post({ type })).status).toBe(400);
+    }
+    expect(await taskCount()).toBe(0);
+  });
+
+  it('refuses an unseeded built-in that requires a repository when the request names none', async () => {
+    expect((await post({ type: 'workflow' })).status).toBe(400);
+    expect(await taskCount()).toBe(0);
+  });
+
+  it('does not refuse a repo-optional built-in for lacking a repository', async () => {
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values(
+        typeRow('onboarding', ['cp-plain'], { source: 'builtin', requiresRepository: false }),
+      );
+    expect((await post({ type: 'onboarding' })).status).toBe(201);
+    expect(await definitionForCreate(db, 'kb_author', { generic: false })).toMatchObject({
+      requiresRepository: false,
+    });
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values(typeRow('kb_author', ['cp-plain'], { source: 'builtin', requiresRepository: false }));
+    expect(await definitionForCreate(db, 'kb_author', { generic: false })).toMatchObject({
+      requiresRepository: false,
+      repoOptional: true,
+    });
   });
 
   it('accepts a saved database only for a custom type that restores one', async () => {
