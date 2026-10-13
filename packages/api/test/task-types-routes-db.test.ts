@@ -644,6 +644,23 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect(traits('tt-mod-restore')).toEqual({ restoresDatabase: false, dispatchesCli: false });
       expect(traits('workflow')).toEqual({ restoresDatabase: true, dispatchesCli: true });
     });
+
+    it('reports dispatchesCli while the step catalog is unsynced', async () => {
+      await db.delete(schema.stepCatalog);
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: 'tt-unsynced',
+        displayName: 'tt-unsynced',
+        runListStrategy: 'static',
+        stepIds: ['ta-a'],
+        source: 'admin',
+      });
+      h.flags.set(CUSTOM_KEY, true);
+      h.role = 'user';
+      const { taskTypes } = (await (await send('GET', '/task-types')).json()) as {
+        taskTypes: { slug: string; dispatchesCli: boolean }[];
+      };
+      expect(taskTypes.find((t) => t.slug === 'tt-unsynced')?.dispatchesCli).toBe(true);
+    });
   });
 
   describe('GET /admin/task-types/catalog', () => {

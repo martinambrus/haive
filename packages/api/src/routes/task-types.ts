@@ -115,7 +115,8 @@ function editableFieldsOf(row: DefinitionRow): string[] {
 }
 
 function dispatchesCliOf(row: DefinitionRow, catalog: Catalog): boolean {
-  if (row.runListStrategy !== 'static' || row.stepIds === null) return true;
+  // Unsynced, the catalog cannot rule an agent out, so the form keeps its CLI pickers.
+  if (!catalog.synced || row.runListStrategy !== 'static' || row.stepIds === null) return true;
   return row.stepIds.some((id) => catalog.dispatchesCli.has(id));
 }
 
