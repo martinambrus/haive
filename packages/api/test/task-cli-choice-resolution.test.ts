@@ -8,7 +8,9 @@ import {
   enrichStepsWithCliPreferences,
   resolveCurrentStepCliProviderIds,
 } from '../src/routes/tasks/_helpers.js';
+import { staticStepFlags } from './step-flags-fixture.js';
 
+const flags = staticStepFlags();
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const TASK = '00000000-0000-4000-8000-000000000001';
 const TASK_CLI = '00000000-0000-4000-8000-0000000000b1';
@@ -61,6 +63,7 @@ describe("a step card's CLI", () => {
     choose('08c-code-review', PICKED_CLI);
     const [step] = await enrichStepsWithCliPreferences(
       db,
+      flags,
       USER,
       [{ stepId: '08c-code-review' }],
       TASK,
@@ -78,6 +81,7 @@ describe("a step card's CLI", () => {
     choose('08c-code-review', null);
     const steps = await enrichStepsWithCliPreferences(
       db,
+      flags,
       USER,
       [{ stepId: '08c-code-review' }, { stepId: '08d-adversarial-qa' }],
       TASK,
@@ -92,6 +96,7 @@ describe("a step card's CLI", () => {
     choose('08c-code-review', PICKED_CLI);
     const steps = await enrichStepsWithCliPreferences(
       db,
+      flags,
       USER,
       [{ stepId: '08c-code-review' }, { stepId: '08d-adversarial-qa' }],
       TASK,
@@ -113,6 +118,7 @@ describe("a step card's CLI", () => {
     });
     const [step] = await enrichStepsWithCliPreferences(
       db,
+      flags,
       USER,
       [{ stepId: '08c-code-review' }],
       TASK,
@@ -126,6 +132,7 @@ describe("a step card's CLI", () => {
     choose('08a-browser-verify', PICKED_CLI, 'fixer');
     const [step] = await enrichStepsWithCliPreferences(
       db,
+      flags,
       USER,
       [{ stepId: '08a-browser-verify' }],
       TASK,
@@ -146,13 +153,17 @@ describe("the listing's usage strip", () => {
     const picked = setup();
     picked.save('08c-code-review', SAVED_CLI);
     picked.choose('08c-code-review', PICKED_CLI);
-    const a = await resolveCurrentStepCliProviderIds(picked.db, USER, [task('08c-code-review')]);
+    const a = await resolveCurrentStepCliProviderIds(picked.db, flags, USER, [
+      task('08c-code-review'),
+    ]);
     expect(a.get(TASK)?.[0]).toBe(PICKED_CLI);
 
     const cleared = setup();
     cleared.save('08c-code-review', SAVED_CLI);
     cleared.choose('08c-code-review', null);
-    const b = await resolveCurrentStepCliProviderIds(cleared.db, USER, [task('08c-code-review')]);
+    const b = await resolveCurrentStepCliProviderIds(cleared.db, flags, USER, [
+      task('08c-code-review'),
+    ]);
     expect(b.get(TASK)?.[0]).toBe(TASK_CLI);
   });
 
@@ -161,7 +172,7 @@ describe("the listing's usage strip", () => {
     save('08c-code-review', SAVED_CLI);
     choose('08c-code-review', PICKED_CLI);
     fake.patch(schema.cliProviders, PICKED_CLI, { enabled: false });
-    const out = await resolveCurrentStepCliProviderIds(db, USER, [task('08c-code-review')]);
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [task('08c-code-review')]);
     expect(out.get(TASK)?.[0]).toBe(TASK_CLI);
   });
 });

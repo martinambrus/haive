@@ -15,6 +15,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { stepRoutes } from '../src/routes/tasks/steps.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
+import { seedStepCatalog } from './step-flags-fixture.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const TASK = '00000000-0000-4000-8000-000000000001';
@@ -41,7 +42,9 @@ function setup(withRow?: string) {
     taskStepCliChoices: schema.taskStepCliChoices,
     userStepCliPreferences: schema.userStepCliPreferences,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
+    stepCatalog: schema.stepCatalog,
   });
+  seedStepCatalog(fake);
   fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'running', orchestrationEpoch: 1 });
   fake.insert(schema.cliProviders, { id: CLI, userId: USER, name: 'codex', enabled: true });
   if (withRow) {

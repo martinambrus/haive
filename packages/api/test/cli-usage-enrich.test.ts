@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { enrichStepsWithCliUsage } from '../src/routes/tasks/_helpers.js';
+import { staticStepFlags } from './step-flags-fixture.js';
+
+const flags = staticStepFlags();
 
 describe('enrichStepsWithCliUsage', () => {
   it('flags steps that dispatch a CLI and clears deterministic ones', () => {
@@ -10,12 +13,12 @@ describe('enrichStepsWithCliUsage', () => {
       { stepId: '01-worktree-setup' }, // deterministic
       { stepId: '09_6-skill-verification' }, // deterministic (provider-sensitive)
     ];
-    const out = enrichStepsWithCliUsage(steps);
+    const out = enrichStepsWithCliUsage(flags, steps);
     expect(out.map((s) => s.usesCli)).toEqual([true, true, true, false, false]);
   });
 
   it('preserves the original step fields', () => {
-    const [out] = enrichStepsWithCliUsage([{ stepId: '09-qa', extra: 42 }]);
+    const [out] = enrichStepsWithCliUsage(flags, [{ stepId: '09-qa', extra: 42 }]);
     expect(out).toEqual({ stepId: '09-qa', extra: 42, usesCli: true });
   });
 });

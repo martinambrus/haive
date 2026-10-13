@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { CLI_DISPATCH_STEPS } from '@haive/shared';
 import { buildUpcomingCliSteps } from '../src/routes/tasks/_helpers.js';
+import { staticStepFlags } from './step-flags-fixture.js';
+
+const flags = staticStepFlags();
 
 /** buildUpcomingCliSteps only reads preferences — every select below returns no rows, so
  *  these tests exercise the FILTERING (which steps the CLIs tab offers) and the role/seat
@@ -15,7 +18,7 @@ function makeFakeDb(): never {
 }
 
 const ids = async (taskType: string, started: string[] = []): Promise<string[]> =>
-  (await buildUpcomingCliSteps(makeFakeDb(), 'user-1', 'task-1', taskType, started)).map(
+  (await buildUpcomingCliSteps(makeFakeDb(), flags, 'user-1', 'task-1', taskType, started)).map(
     (s) => s.stepId,
   );
 
@@ -29,6 +32,24 @@ describe('buildUpcomingCliSteps', () => {
     expect(workflow).not.toContain('01-kb-enrich');
     expect(await ids('onboarding')).toContain('09_5-skill-generation');
     expect(await ids('kb_author')).toEqual(['01-kb-enrich']);
+  });
+
+  it('lists a type without a snapshot in run order, by the catalog step index', async () => {
+    const swapped = new Map(flags);
+    swapped.set('08c-code-review', { ...flags.get('08c-code-review')!, stepIndex: -1 });
+    const out = await buildUpcomingCliSteps(
+      makeFakeDb(),
+      swapped,
+      'user-1',
+      'task-1',
+      'workflow',
+      [],
+    );
+    expect(out[0]?.stepId).toBe('08c-code-review');
+    const expected = CLI_DISPATCH_STEPS.filter(
+      (s) => s.workflowType === 'workflow' && s.id !== '00-model-health-workflow',
+    ).map((s) => s.id);
+    expect(await ids('workflow')).toEqual(expected);
   });
 
   it('excludes steps that already have a row', async () => {
@@ -45,7 +66,14 @@ describe('buildUpcomingCliSteps', () => {
   });
 
   it("carries the catalog title and each step's loop roles / fan-out seats", async () => {
-    const out = await buildUpcomingCliSteps(makeFakeDb(), 'user-1', 'task-1', 'workflow', []);
+    const out = await buildUpcomingCliSteps(
+      makeFakeDb(),
+      flags,
+      'user-1',
+      'task-1',
+      'workflow',
+      [],
+    );
     const browser = out.find((s) => s.stepId === '08a-browser-verify');
     expect(browser?.title).toBe('Phase 5a: Browser validation');
     expect(browser?.cliRoles?.map((r) => r.id)).toEqual(['tester', 'fixer']);
@@ -76,6 +104,7 @@ describe('buildUpcomingCliSteps for a task with a run list snapshot', () => {
     (
       await buildUpcomingCliSteps(
         makeFakeDb(),
+        flags,
         'user-1',
         'task-1',
         taskType,

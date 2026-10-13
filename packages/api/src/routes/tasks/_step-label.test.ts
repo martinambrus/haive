@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { staticStepFlags } from '../../../test/step-flags-fixture.js';
 import { currentStepLabel, deriveRoundSuffixes, type StepLabelRow } from './_step-label.js';
+
+const flags = staticStepFlags();
 
 const step = (over: Partial<StepLabelRow> = {}): StepLabelRow => ({
   stepId: '07b-phase-4-validate',
@@ -11,7 +14,7 @@ const step = (over: Partial<StepLabelRow> = {}): StepLabelRow => ({
 
 describe('currentStepLabel', () => {
   it('returns the human title, never the step slug', () => {
-    expect(currentStepLabel([step()], '07b-phase-4-validate', 0)).toBe(
+    expect(currentStepLabel([step()], '07b-phase-4-validate', 0, flags)).toBe(
       'Phase 4: Implementation validation',
     );
   });
@@ -22,7 +25,7 @@ describe('currentStepLabel', () => {
       step({ stepId: '07-phase-2-implement', round: 1, title: 'Implement' }),
       step({ round: 1 }),
     ];
-    expect(currentStepLabel(steps, '07b-phase-4-validate', 1)).toBe(
+    expect(currentStepLabel(steps, '07b-phase-4-validate', 1, flags)).toBe(
       'Phase 4: Implementation validation (fix loop 1)',
     );
   });
@@ -44,27 +47,29 @@ describe('currentStepLabel', () => {
   it('falls back to the in-place pass count on round 0', () => {
     // A step with no CLI roles does one pass per iteration, so passes are reported as-is.
     const plain = step({ stepId: '03-phase-0a-discovery', title: 'Discovery', iterationCount: 3 });
-    expect(currentStepLabel([plain], '03-phase-0a-discovery', 0)).toBe('Discovery (iter ×3)');
+    expect(currentStepLabel([plain], '03-phase-0a-discovery', 0, flags)).toBe(
+      'Discovery (iter ×3)',
+    );
   });
 
   it('reports a role-split step in ROUNDS, since each round costs one pass per role', () => {
     // 07b runs validator + fixer, so 3 raw iterations is 2 rounds — matching the per-step
     // badge on the task page rather than inventing a second convention for the same number.
-    expect(currentStepLabel([step({ iterationCount: 3 })], '07b-phase-4-validate', 0)).toBe(
+    expect(currentStepLabel([step({ iterationCount: 3 })], '07b-phase-4-validate', 0, flags)).toBe(
       'Phase 4: Implementation validation (round ×2)',
     );
   });
 
   it('adds no suffix on an untouched first pass (never an empty bracket)', () => {
-    expect(currentStepLabel([step()], '07b-phase-4-validate', 0)).not.toContain('(');
+    expect(currentStepLabel([step()], '07b-phase-4-validate', 0, flags)).not.toContain('(');
   });
 
   it('matches on round, so a round-0 row does not label a round-2 pointer', () => {
-    expect(currentStepLabel([step({ round: 0 })], '07b-phase-4-validate', 2)).toBeNull();
+    expect(currentStepLabel([step({ round: 0 })], '07b-phase-4-validate', 2, flags)).toBeNull();
   });
 
   it('is null when the task has no current step or the row is missing', () => {
-    expect(currentStepLabel([step()], null, 0)).toBeNull();
-    expect(currentStepLabel([], '07b-phase-4-validate', 0)).toBeNull();
+    expect(currentStepLabel([step()], null, 0, flags)).toBeNull();
+    expect(currentStepLabel([], '07b-phase-4-validate', 0, flags)).toBeNull();
   });
 });

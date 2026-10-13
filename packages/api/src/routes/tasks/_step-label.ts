@@ -1,4 +1,4 @@
-import { STEP_CLI_ROLES } from '@haive/shared';
+import type { StepFlagMap } from '../../lib/step-flags.js';
 
 /** Human label for the step a task is parked on — "Phase 4: Implementation validation
  *  (fix loop 7)" rather than the raw `07b-phase-4-validate` slug.
@@ -51,8 +51,8 @@ export function deriveRoundSuffixes(orderedSteps: readonly StepLabelRow[]): Map<
 
 /** In-place loop counter for a round-0 step that has re-run passes. A step whose CLI work is
  *  split into roles does several passes per round, so its passes are reported as rounds. */
-export function iterationSuffix(step: StepLabelRow): string {
-  const loopPassesPerRound = STEP_CLI_ROLES[step.stepId]?.length ?? 1;
+export function iterationSuffix(step: StepLabelRow, flags: StepFlagMap): string {
+  const loopPassesPerRound = flags.get(step.stepId)?.cliRoles?.length ?? 1;
   return loopPassesPerRound > 1
     ? `round ×${Math.ceil(step.iterationCount / loopPassesPerRound)}`
     : `iter ×${step.iterationCount}`;
@@ -70,6 +70,7 @@ export function currentStepLabel(
   orderedSteps: readonly StepLabelRow[],
   currentStepId: string | null,
   currentRound: number,
+  flags: StepFlagMap,
 ): string | null {
   if (!currentStepId) return null;
   const current = orderedSteps.find((s) => s.stepId === currentStepId && s.round === currentRound);
@@ -78,7 +79,7 @@ export function currentStepLabel(
     current.round > 0
       ? (deriveRoundSuffixes(orderedSteps).get(current.round) ?? null)
       : current.iterationCount > 0
-        ? iterationSuffix(current)
+        ? iterationSuffix(current, flags)
         : null;
   return suffix ? `${current.title} (${suffix})` : current.title;
 }

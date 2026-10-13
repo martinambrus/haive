@@ -35,7 +35,6 @@ import {
   expandTaskStatusFilter,
   logger,
   PAUSED_FILTER_TOKEN,
-  PROVIDER_SENSITIVE_STEP_IDS,
   renameTaskRequestSchema,
   setCliProviderRequestSchema,
   setSummaryCliRequestSchema,
@@ -55,6 +54,7 @@ import {
   loadPlanSkeletons,
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
+import { loadStepFlags } from '../../lib/step-flags.js';
 import {
   liveOnboardingMessage,
   liveOnboardingTaskId,
@@ -357,7 +357,8 @@ taskRoutes.get('/', async (c) => {
   // Which subscription each row actually spends, for the listing's usage strip: the current
   // step's explicit CLI preference wins over the task column, which is only the fallback (see
   // resolveCurrentStepCliProviderIds). Batched across the page — three queries, not per row.
-  const stepCliProviderIds = await resolveCurrentStepCliProviderIds(db, userId, rows);
+  const flags = await loadStepFlags(db);
+  const stepCliProviderIds = await resolveCurrentStepCliProviderIds(db, flags, userId, rows);
   const typeLabels = await loadTaskTypeLabels(
     db,
     rows.map((r) => r.type),
@@ -391,7 +392,7 @@ taskRoutes.get('/', async (c) => {
       // Human name of the step the task sits on, so the list badge reads the same as the
       // task header instead of printing the raw step slug. Same helper, same rows, on both
       // endpoints — the two cannot drift.
-      currentStepLabel: currentStepLabel(steps, t.currentStepId, t.currentRound),
+      currentStepLabel: currentStepLabel(steps, t.currentStepId, t.currentRound, flags),
       // Every CLI the current step will spend (step/seat prefs resolved, task provider as the
       // fallback), so the usage strip meters what these rows actually run on rather than what
       // the task row happens to name.
@@ -992,18 +993,20 @@ taskRoutes.get('/:id', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
+  const flags = await loadStepFlags(db);
   const enriched = await enrichStepsWithCliPreferences(
     db,
+    flags,
     userId,
     stepRows,
     id,
     task.ignoreSavedStepClis,
   );
-  const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
+  const withSkip = await enrichStepsWithSkipFlag(db, flags, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
-  const withActiveRole = await enrichStepsWithActiveRole(db, id, withStats);
+  const withActiveRole = await enrichStepsWithActiveRole(db, flags, id, withStats);
   const withAgentCounts = await enrichStepsWithAgentCounts(db, id, withActiveRole);
-  const steps = enrichStepsWithCliUsage(withAgentCounts);
+  const steps = enrichStepsWithCliUsage(flags, withAgentCounts);
   const active = await findActiveCliInvocation(db, id);
   const providerBreakdown = await sumTaskProviderBreakdown(db, id);
   // Costs are stored in USD (what every vendor bills); this is the rate the UI formats
@@ -1047,7 +1050,7 @@ taskRoutes.get('/:id', async (c) => {
     }),
     // Same helper the listing uses, over the already-ordered rows above, so the header
     // badge and the list badge render one identical string.
-    currentStepLabel: currentStepLabel(stepRows, task.currentStepId, task.currentRound),
+    currentStepLabel: currentStepLabel(stepRows, task.currentStepId, task.currentRound, flags),
   };
   // CLI steps the run has not reached yet. They have no task_steps row, so no card and no
   // CLI picker — and a step that never pauses before dispatching had no window at all in
@@ -1055,6 +1058,7 @@ taskRoutes.get('/:id', async (c) => {
   // because the worker resolves it at dispatch.
   const upcomingCliSteps = await buildUpcomingCliSteps(
     db,
+    flags,
     userId,
     id,
     task.type,
@@ -1644,7 +1648,13 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
     .where(
       and(
         eq(schema.taskSteps.taskId, id),
-        inArray(schema.taskSteps.stepId, [...PROVIDER_SENSITIVE_STEP_IDS]),
+        inArray(
+          schema.taskSteps.stepId,
+          db
+            .select({ stepId: schema.stepCatalog.stepId })
+            .from(schema.stepCatalog)
+            .where(eq(schema.stepCatalog.providerSensitive, true)),
+        ),
         inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
       ),
     );

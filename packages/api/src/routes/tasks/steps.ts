@@ -32,7 +32,6 @@ import {
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   setCliProviderRequestSchema,
   stepActionRequestSchema,
-  STEP_CLI_ROLES,
   submitStepRequestSchema,
   TASK_JOB_NAMES,
   type TaskJobPayload,
@@ -52,9 +51,9 @@ import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
+import { loadStepFlags } from '../../lib/step-flags.js';
 import {
   appendTaskEvent,
-  CLI_DISPATCH_STEP_ID_SET,
   enrichStepsWithActiveRole,
   enrichStepsWithAgentCounts,
   enrichStepsWithCliStats,
@@ -442,16 +441,18 @@ stepRoutes.get('/:id/steps', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
+  const flags = await loadStepFlags(db);
   const enriched = await enrichStepsWithCliPreferences(
     db,
+    flags,
     userId,
     stepRows,
     id,
     task.ignoreSavedStepClis,
   );
-  const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
+  const withSkip = await enrichStepsWithSkipFlag(db, flags, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
-  const withActiveRole = await enrichStepsWithActiveRole(db, id, withStats);
+  const withActiveRole = await enrichStepsWithActiveRole(db, flags, id, withStats);
   const steps = await enrichStepsWithAgentCounts(db, id, withActiveRole);
   return c.json({ steps });
 });
@@ -1181,7 +1182,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       );
       return c.json({ ok: true, status: 'running', retriedAgents: failedAgents.length });
     }
-    const isLoopStep = (STEP_CLI_ROLES[stepId]?.length ?? 0) > 0;
+    const isLoopStep = ((await loadStepFlags(db)).get(stepId)?.cliRoles?.length ?? 0) > 0;
     if (step.iterationCount <= 0 && !isLoopStep) {
       throw new HttpError(
         409,
@@ -1366,9 +1367,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
 
   if (body.action === 'skip') {
     // Skip is disabled across the workflow except on the steps that opt in
-    // (metadata.allowSkip), plus 01-worktree-setup for run_app (skip = run from
+    // (metadata.allowSkip), plus 01-worktree-setup where the run list allows it (skip = run from
     // the project root instead of an isolated worktree/branch).
-    if (!isStepSkippable(stepId, task.type)) {
+    if (!isStepSkippable(await loadStepFlags(db), stepId, task)) {
       throw new HttpError(409, 'This step cannot be skipped');
     }
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
@@ -1679,7 +1680,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   // there is nothing here to reset and no job to re-drive. Gated on the dispatch catalog
   // so an unknown step id still 404s rather than accumulating choices nothing reads.
   if (!step) {
-    if (!CLI_DISPATCH_STEP_ID_SET.has(stepId)) throw new HttpError(404, 'Step not found');
+    if ((await loadStepFlags(db)).get(stepId)?.dispatchesStepCli !== true) {
+      throw new HttpError(404, 'Step not found');
+    }
     await writeStepCliChoice(db, choice);
     await appendTaskEvent(db, id, null, 'step.cli_provider_preference_changed', {
       stepId,

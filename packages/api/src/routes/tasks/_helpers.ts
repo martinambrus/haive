@@ -3,14 +3,10 @@ import { resolve } from 'node:path';
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
-  CLI_DISPATCH_STEP_IDS,
-  CLI_DISPATCH_STEPS,
   decideTaskWorktree,
   WORKTREE_SUBDIR,
   worktreeDirName,
   MODEL_HEALTH_STEP_IDS,
-  SKIPPABLE_STEP_IDS,
-  STEP_CLI_ROLES,
   STEP_MINING_SEATS,
   taskMayRunWithoutRepository,
   taskScratchSubpath,
@@ -26,6 +22,7 @@ import {
 } from '@haive/shared/stats-server';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
+import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
 
 export const MAX_FILE_CONTENT_BYTES = 512 * 1024;
@@ -116,6 +113,7 @@ function emptyStepCliPrefRows(): StepCliPrefRows {
 
 async function loadStepCliPrefRows(
   db: ReturnType<typeof getDb>,
+  flags: StepFlagMap,
   userId: string,
   stepIds: string[],
 ): Promise<StepCliPrefRows> {
@@ -140,7 +138,7 @@ async function loadStepCliPrefRows(
 
   // Per-role prefs, only for steps that declare CLI roles or fan-out seats. Both kinds
   // live in the same (user, step, role) table, so one query serves both.
-  const roleStepIds = stepIds.filter((sid) => STEP_CLI_ROLES[sid] ?? STEP_MINING_SEATS[sid]);
+  const roleStepIds = stepIds.filter((sid) => flags.get(sid)?.cliRoles ?? STEP_MINING_SEATS[sid]);
   if (roleStepIds.length > 0) {
     const rolePrefs = await db
       .select()
@@ -218,6 +216,7 @@ async function loadTaskCliChoices(
 
 export async function enrichStepsWithCliPreferences<T extends { stepId: string }>(
   db: ReturnType<typeof getDb>,
+  flags: StepFlagMap,
   userId: string,
   steps: T[],
   taskId: string,
@@ -228,7 +227,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
     /** Per-step effort override (null = use the provider's configured effort);
      *  drives the per-step effort dropdown's selected value. */
     preferredEffortLevel: string | null;
-    /** Present only for multi-CLI steps (STEP_CLI_ROLES); drives the per-role
+    /** Present only for multi-CLI steps (catalog cli_roles); drives the per-role
      *  dropdowns and their currently-selected providers in the UI. */
     cliRoles?: readonly CliRoleDescriptor[];
     cliRoleProviders?: Record<string, string | null>;
@@ -245,6 +244,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   const stepIds = [...new Set(steps.map((s) => s.stepId))];
   const { byStep, byStepEffort, roleByStep, roleEffortByStep } = await loadStepCliPrefRows(
     db,
+    flags,
     userId,
     stepIds,
   );
@@ -260,7 +260,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
         new Map<string, Map<string, TaskCliChoice>>())
       : new Map<string, Map<string, TaskCliChoice>>();
   return steps.map((s) => {
-    const roles = STEP_CLI_ROLES[s.stepId];
+    const roles = flags.get(s.stepId)?.cliRoles ?? undefined;
     const seats = STEP_MINING_SEATS[s.stepId];
     const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
     const roleEfforts = roleEffortByStep.get(s.stepId) ?? new Map<string, string | null>();
@@ -333,6 +333,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
  *  means the task names no usable provider at all. */
 export async function resolveCurrentStepCliProviderIds(
   db: ReturnType<typeof getDb>,
+  flags: StepFlagMap,
   userId: string,
   tasks: readonly {
     id: string;
@@ -351,7 +352,7 @@ export async function resolveCurrentStepCliProviderIds(
     .from(schema.cliProviders)
     .where(and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)));
   const enabled = new Set(enabledRows.map((p) => p.id));
-  const prefs = await loadStepCliPrefRows(db, userId, stepIds);
+  const prefs = await loadStepCliPrefRows(db, flags, userId, stepIds);
   const touched = await loadTouchedRoles(
     db,
     tasks.filter((t) => t.ignoreSavedStepClis).map((t) => t.id),
@@ -389,7 +390,7 @@ export async function resolveCurrentStepCliProviderIds(
     for (const seat of (stepId ? STEP_MINING_SEATS[stepId] : undefined) ?? []) {
       push(usable(slot(seat.id, roleProviders.get(seat.id) ?? null)) ?? stepDefault);
     }
-    for (const role of (stepId ? STEP_CLI_ROLES[stepId] : undefined) ?? []) {
+    for (const role of (stepId ? flags.get(stepId)?.cliRoles : undefined) ?? []) {
       push(usable(slot(role.id, roleProviders.get(role.id) ?? null)) ?? stepDefault);
     }
     out.set(task.id, ids);
@@ -761,17 +762,18 @@ export async function sumTaskProviderBreakdown(
 /** Reverse-lookup the role of each waiting_cli step's LIVE cli invocation (from its
  *  agentTitle, the role label) so the UI can react to the active pass — e.g. the
  *  browser panel hides during 08a's `fixer` pass. cli_invocations has no role
- *  column, so map the label back through STEP_CLI_ROLES. null when not waiting on a
+ *  column, so map the label back through the step's catalog cli_roles. null when not waiting on a
  *  role-bearing CLI. */
 export async function enrichStepsWithActiveRole<
   T extends { id: string; stepId: string; status: string },
 >(
   db: ReturnType<typeof getDb>,
+  flags: StepFlagMap,
   taskId: string,
   steps: T[],
 ): Promise<(T & { activeRole: string | null })[]> {
   const liveIds = steps
-    .filter((s) => s.status === 'waiting_cli' && STEP_CLI_ROLES[s.stepId])
+    .filter((s) => s.status === 'waiting_cli' && flags.get(s.stepId)?.cliRoles)
     .map((s) => s.id);
   if (liveIds.length === 0) return steps.map((s) => ({ ...s, activeRole: null }));
   const rows = await db
@@ -793,38 +795,47 @@ export async function enrichStepsWithActiveRole<
   return steps.map((s) => {
     const title = titleByStep.get(s.id) ?? null;
     const role =
-      title != null ? (STEP_CLI_ROLES[s.stepId]?.find((r) => r.label === title)?.id ?? null) : null;
+      title != null
+        ? (flags.get(s.stepId)?.cliRoles?.find((r) => r.label === title)?.id ?? null)
+        : null;
     return { ...s, activeRole: role };
   });
 }
 
-/** Whether the user Skip action is permitted on a step. Beyond the static
- *  SKIPPABLE_STEP_IDS (steps whose StepDefinition opts in via allowSkip), a
- *  run_app task may skip 01-worktree-setup to run from the project root instead
- *  of an isolated branch/worktree. The skip handler enforces the same rule. */
-export function isStepSkippable(stepId: string, workflowType?: string | null): boolean {
-  if (SKIPPABLE_STEP_IDS.includes(stepId)) return true;
-  return workflowType === 'run_app' && stepId === '01-worktree-setup';
+/** Whether the user Skip action is permitted on a step. Beyond the catalog's allow_skip (steps
+ *  whose StepDefinition opts in via allowSkip), 01-worktree-setup may be skipped on a run_app task,
+ *  which runs from the project root instead of an isolated branch/worktree, and on a task whose run
+ *  list snapshot stays as valid without it. The skip handler enforces the same rule. */
+export function isStepSkippable(
+  flags: StepFlagMap,
+  stepId: string,
+  task: { type?: string | null; runListSnapshot?: readonly string[] | null },
+): boolean {
+  if (flags.get(stepId)?.allowSkip === true) return true;
+  if (stepId !== '01-worktree-setup') return false;
+  if (task.type === 'run_app') return true;
+  const snapshot = task.runListSnapshot;
+  return snapshot?.includes(stepId) === true && compositionSurvivesWithout(flags, snapshot, stepId);
 }
 
 export async function enrichStepsWithSkipFlag<
   T extends { id: string; status: string; stepId: string },
 >(
   db: ReturnType<typeof getDb>,
+  flags: StepFlagMap,
   taskId: string,
   steps: T[],
 ): Promise<(T & { manuallySkipped: boolean; canSkip: boolean })[]> {
   // canSkip: the step opts into the user-facing Skip action (the skip handler
-  // enforces the same rule). Task-type-aware so run_app can skip the worktree.
+  // enforces the same rule). Task-aware so the worktree can be skipped where the run list allows.
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { type: true },
+    columns: { type: true, runListSnapshot: true },
   });
-  const workflowType = task?.type ?? null;
   const withFlags = (s: T, manuallySkipped: boolean) => ({
     ...s,
     manuallySkipped,
-    canSkip: isStepSkippable(s.stepId, workflowType),
+    canSkip: isStepSkippable(flags, s.stepId, task ?? {}),
   });
   const skippedIds = steps.filter((s) => s.status === 'skipped').map((s) => s.id);
   if (skippedIds.length === 0) return steps.map((s) => withFlags(s, false));
@@ -889,18 +900,17 @@ export async function enrichStepsWithAgentCounts<T extends { id: string }>(
   });
 }
 
-export const CLI_DISPATCH_STEP_ID_SET = new Set<string>(CLI_DISPATCH_STEP_IDS);
-
 /** Annotate each step with whether it ever dispatches a CLI (llm | agentMining |
- *  dagExecute), from the CLI_DISPATCH_STEP_IDS mirror. Drives whether the web
+ *  dagExecute), from the catalog's dispatches_step_cli. Drives whether the web
  *  renders the per-step CLI picker — deterministic steps never consume a per-step
  *  provider, so the picker is hidden (and a "runs without an AI CLI" note shown)
- *  for them. Pure/static: the source of truth is the worker step registry, kept
- *  in sync by a worker boot assertion. */
+ *  for them. The source of truth is the worker step registry, synced into step_catalog
+ *  at every worker boot. */
 export function enrichStepsWithCliUsage<T extends { stepId: string }>(
+  flags: StepFlagMap,
   steps: T[],
 ): (T & { usesCli: boolean })[] {
-  return steps.map((s) => ({ ...s, usesCli: CLI_DISPATCH_STEP_ID_SET.has(s.stepId) }));
+  return steps.map((s) => ({ ...s, usesCli: flags.get(s.stepId)?.dispatchesStepCli === true }));
 }
 
 const MODEL_HEALTH_STEP_ID_SET = new Set<string>(MODEL_HEALTH_STEP_IDS);
@@ -928,6 +938,7 @@ const MODEL_HEALTH_STEP_ID_SET = new Set<string>(MODEL_HEALTH_STEP_IDS);
  *  preference, and it runs first in every pipeline anyway. */
 export async function buildUpcomingCliSteps(
   db: ReturnType<typeof getDb>,
+  flags: StepFlagMap,
   userId: string,
   taskId: string,
   taskType: string,
@@ -937,13 +948,22 @@ export async function buildUpcomingCliSteps(
 ) {
   const started = new Set<string>(existingStepIds);
   const candidates = runListSnapshot
-    ? runListSnapshot.flatMap((id) => CLI_DISPATCH_STEPS.filter((s) => s.id === id))
-    : CLI_DISPATCH_STEPS.filter((s) => s.workflowType === taskType);
+    ? runListSnapshot.flatMap((id) => {
+        const f = flags.get(id);
+        return f?.dispatchesStepCli ? [f] : [];
+      })
+    : [...flags.values()]
+        .filter((f) => f.dispatchesStepCli && f.workflowType === taskType)
+        .sort(
+          (a, b) =>
+            (a.stepIndex ?? Infinity) - (b.stepIndex ?? Infinity) ||
+            (a.stepId < b.stepId ? -1 : a.stepId > b.stepId ? 1 : 0),
+        );
   const upcoming = candidates
-    .filter((s) => !MODEL_HEALTH_STEP_ID_SET.has(s.id) && !started.has(s.id))
-    .map((s) => ({ stepId: s.id, title: s.title }));
+    .filter((f) => !MODEL_HEALTH_STEP_ID_SET.has(f.stepId) && !started.has(f.stepId))
+    .map((f) => ({ stepId: f.stepId, title: f.title }));
   if (upcoming.length === 0) return [];
-  return enrichStepsWithCliPreferences(db, userId, upcoming, taskId, ignoreSaved);
+  return enrichStepsWithCliPreferences(db, flags, userId, upcoming, taskId, ignoreSaved);
 }
 
 async function directoryExists(p: string): Promise<boolean> {
