@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { resolveModulePage } from './module-pages';
+import type { DashboardSpec } from '@haive/shared/modularity';
+import { resolveModulePage, resolveModuleRoute } from './module-pages';
 
 const Index = () => null;
 const Detail = () => null;
@@ -25,5 +26,56 @@ describe('resolveModulePage', () => {
     expect(resolveModulePage(registry, 'constructor', [])).toBeNull();
     expect(resolveModulePage(registry, '__proto__', [])).toBeNull();
     expect(resolveModulePage(registry, 'stats', ['constructor'])).toBeNull();
+  });
+});
+
+describe('resolveModuleRoute', () => {
+  const spec: DashboardSpec = { title: 'Overview', widgets: [{ type: 'markdown', body: 'x' }] };
+  const modules: { id: string; pages: Record<string, DashboardSpec> }[] = [
+    { id: 'stats', pages: { overview: spec, '': spec } },
+    { id: 'acme', pages: { overview: spec } },
+    { id: 'bare', pages: {} },
+  ];
+
+  it('lets the compiled page win over a declared page of the same path', () => {
+    const route = resolveModuleRoute(registry, modules, 'stats', []);
+    expect(route).toEqual({ kind: 'component', Page: Index });
+    expect(resolveModuleRoute(registry, null, 'stats', [])).toEqual({
+      kind: 'component',
+      Page: Index,
+    });
+  });
+
+  it('finds a declared page of exactly one segment', () => {
+    expect(resolveModuleRoute(registry, modules, 'acme', ['overview'])).toEqual({
+      kind: 'dashboard',
+      spec,
+    });
+  });
+
+  it('waits for the module list before deciding', () => {
+    expect(resolveModuleRoute(registry, null, 'acme', ['overview'])).toEqual({ kind: 'loading' });
+  });
+
+  it('answers not-found for a nested path, an unknown module or page, and the module root', () => {
+    expect(resolveModuleRoute(registry, modules, 'acme', ['overview', 'more'])).toEqual({
+      kind: 'not-found',
+    });
+    expect(resolveModuleRoute(registry, modules, 'nope', ['overview'])).toEqual({
+      kind: 'not-found',
+    });
+    expect(resolveModuleRoute(registry, modules, 'acme', ['missing'])).toEqual({
+      kind: 'not-found',
+    });
+    expect(resolveModuleRoute(registry, modules, 'acme', [])).toEqual({ kind: 'not-found' });
+  });
+
+  it('does not reach Object.prototype through a page id', () => {
+    expect(resolveModuleRoute(registry, modules, 'bare', ['constructor'])).toEqual({
+      kind: 'not-found',
+    });
+    expect(resolveModuleRoute(registry, modules, 'bare', ['__proto__'])).toEqual({
+      kind: 'not-found',
+    });
   });
 });
