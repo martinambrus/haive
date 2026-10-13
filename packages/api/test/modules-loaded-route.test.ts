@@ -30,24 +30,59 @@ import { moduleManifestSchema, MODULES_LOADED_WORKER_KEY } from '@haive/shared/m
 import { mountModules, moduleRoutes } from '../src/modules/loader.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
+import type { Database } from '@haive/database';
+import { HttpError as ModuleHttpError } from '@haive/shared/module-host';
 
 const manifestOf = (id: string) =>
   moduleManifestSchema.parse({ id, name: id, version: '1.2.3', schemaVersion: 1 });
 
 async function buildApp() {
   const app = new Hono<AppEnv>();
-  const loaded = await mountModules(app, [
-    {
-      packageName: '@haive/module-with-routes',
-      manifest: manifestOf('with-routes'),
-      routes: () => new Hono<AppEnv>(),
-    },
-    { packageName: '@haive/module-no-routes', manifest: manifestOf('no-routes') },
-  ]);
+  const loaded = await mountModules(
+    app,
+    [
+      {
+        packageName: '@haive/module-with-routes',
+        manifest: manifestOf('with-routes'),
+        routes: () => new Hono<AppEnv>(),
+      },
+      { packageName: '@haive/module-no-routes', manifest: manifestOf('no-routes') },
+    ],
+    { db: {} as Database },
+  );
   app.route('/modules', moduleRoutes(loaded));
   app.onError(errorHandler);
   return app;
 }
+
+describe('module routes', () => {
+  it('answers a module HttpError with its own status and hands routes the database', async () => {
+    const db = { marker: 'host-db' } as unknown as Database;
+    let seen: unknown;
+    const app = new Hono<AppEnv>();
+    await mountModules(
+      app,
+      [
+        {
+          packageName: '@haive/module-teapot',
+          manifest: manifestOf('teapot'),
+          routes: (ctx) => {
+            seen = ctx.db;
+            return new Hono<AppEnv>().get('/brew', () => {
+              throw new ModuleHttpError(418, 'short and stout');
+            });
+          },
+        },
+      ],
+      { db },
+    );
+    app.onError(errorHandler);
+    const res = await app.request('/m/teapot/brew');
+    expect(res.status).toBe(418);
+    expect(await res.json()).toEqual({ error: 'short and stout', code: null });
+    expect(seen).toBe(db);
+  });
+});
 
 describe('GET /modules/loaded', () => {
   it('shares the worker key through the contracts', () => {
