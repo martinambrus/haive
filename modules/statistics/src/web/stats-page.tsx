@@ -404,7 +404,7 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
     return resolvePreset(preset, nowMs);
     // `filterKey` deliberately drives this rather than the individual params.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterKey, nowMs, windowReady]);
+  }, [filterKey, nowMs, windowReady, urlHasPreset]);
 
   const params: StatsQueryParams | null = useMemo(
     () =>
