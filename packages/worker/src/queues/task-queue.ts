@@ -2347,7 +2347,7 @@ async function handleAdvanceStep(
 
   const stepDef = stepRegistry.get(payload.stepId);
   if (!stepDef) {
-    await markTaskDead(db, ctx.taskId, deadReasonFor([payload.stepId]), {
+    await markTaskDeadFromJob(db, ctx.taskId, deadReasonFor([payload.stepId]), {
       epoch: ctx.orchestrationEpoch,
       unresolved: [payload.stepId],
       stepId: payload.stepId,
