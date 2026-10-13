@@ -177,7 +177,7 @@ describe('ProjectStateConflictsView on the plan page', () => {
 
   it('names the node and the field, and renders a body as markdown', () => {
     const html = view({ conflicts: [planConflict()], scope: 'plan' });
-    expect(html).toContain('Billing: Text');
+    expect(html).toContain('<code>Billing</code>: Text');
     expect(html).toContain('about the plan');
     expect(html).toContain('<strong>invoice</strong>');
     expect(html).toContain('Their text');

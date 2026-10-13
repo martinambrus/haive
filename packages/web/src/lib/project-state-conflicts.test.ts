@@ -402,8 +402,9 @@ describe('a plan question', () => {
 
   it('is headed by the node and the field', () => {
     expect(planConflictHeading({ unit: unit('title'), nodeTitle: 'Billing' })).toBe(
-      'Billing: Title',
+      '`Billing`: Title',
     );
+    expect(planConflictHeading({ unit: unit('title'), nodeTitle: '**x**' })).toBe('`**x**`: Title');
     expect(planConflictHeading({ unit: unit('taskable'), nodeTitle: null })).toBe(
       'A node that was deleted here: Can start tasks',
     );

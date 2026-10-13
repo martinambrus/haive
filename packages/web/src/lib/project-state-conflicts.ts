@@ -64,10 +64,11 @@ const PLAN_FIELD_LABELS: Readonly<Record<string, string>> = {
   taskable: 'Can start tasks',
 };
 
-/** What a plan question is about, as its heading reads: the node, then the field. */
+/** What a plan question is about, as markdown: the node's title as code, then the field. */
 export function planConflictHeading(conflict: { unit: string; nodeTitle?: string | null }): string {
   const field = parsePlanConflictUnit(conflict.unit)?.field ?? '';
-  const node = conflict.nodeTitle ?? 'A node that was deleted here';
+  const node =
+    conflict.nodeTitle == null ? 'A node that was deleted here' : inlineCode(conflict.nodeTitle);
   return `${node}: ${PLAN_FIELD_LABELS[field] ?? field}`;
 }
 

@@ -95,11 +95,16 @@ export function ProjectStateConflictsView({
             key={c.id}
             className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2"
           >
-            <p className="text-sm font-semibold text-neutral-100">
-              {isPlanConflict(c)
-                ? planConflictHeading(c)
-                : conflictKeyLabel(c.key, c.unit, conflictClaimPath(c))}
-            </p>
+            {isPlanConflict(c) ? (
+              <InlineMarkdown
+                className="text-sm font-semibold text-neutral-100"
+                body={planConflictHeading(c)}
+              />
+            ) : (
+              <p className="text-sm font-semibold text-neutral-100">
+                {conflictKeyLabel(c.key, c.unit, conflictClaimPath(c))}
+              </p>
+            )}
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               <Side title="This install" markdown={conflictSideMarkdown(c.local, c.unit)} />
               <Side title="The other install" markdown={conflictSideMarkdown(c.incoming, c.unit)} />
