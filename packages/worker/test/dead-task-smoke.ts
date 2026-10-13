@@ -10,6 +10,7 @@ import path from 'node:path';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CONFIG_KEYS,
   configService,
   logger,
   secretsService,
@@ -27,10 +28,14 @@ import {
   markTaskDeadFromJob,
   processTaskJob,
   reconcileOrphanedSteps,
+  recoverParkedStep,
   resolveFixLoopGate,
   setContainerCleanupRunner,
   backfillMissingRunSeq,
 } from '../src/queues/task-queue.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { checkProviderRecovery } from '../src/queues/usage-poll-queue.js';
+import { closePrPollQueue, runPrPollTick } from '../src/queues/pr-poll-queue.js';
 import { defaultDeps, redriveStalledTasks } from '../src/queues/stalled-redrive.js';
 import { buildRunList, resolveRunList, type ResolvedTaskContext } from '../src/queues/run-list.js';
 import { stepRegistry, UnresolvedStepError } from '../src/step-engine/registry.js';
@@ -169,7 +174,7 @@ async function main(): Promise<void> {
   const makeRow = async (
     taskId: string,
     stepId: string,
-    status: 'done' | 'waiting_form' | 'waiting_cli' | 'running',
+    status: 'done' | 'failed' | 'waiting_form' | 'waiting_cli' | 'running',
     over: Partial<typeof schema.taskSteps.$inferInsert> = {},
   ) => {
     const [row] = await db
@@ -681,6 +686,156 @@ async function main(): Promise<void> {
         (await runSeqs(deadBackfill)).every((s) => s === null),
       { live: await runSeqs(liveBackfill), dead: await runSeqs(deadBackfill) },
     );
+
+    // --- the allowance watcher and the PR poller skip a dead task ----------------------
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({ userId, name: 'claude-code', label: 'dead-task-smoke' })
+      .returning({ id: schema.cliProviders.id });
+    const armedWatch = {
+      status: 'failed' as const,
+      awaitingAllowanceProviderId: provider!.id,
+      awaitingProviderReason: 'rate_limit' as const,
+      awaitingProviderSince: longAgo,
+      allowanceResetAt: longAgo,
+    };
+    const liveArmed = await makeTask('watch-live', armedWatch);
+    const deadArmed = await makeTask('watch-dead', armedWatch);
+    const livePr = await makeTask('pr-live', {
+      status: 'waiting_pr',
+      prState: 'merged',
+      prFinalizeMode: 'auto',
+    });
+    const deadPr = await makeTask('pr-dead', {
+      status: 'waiting_pr',
+      prState: 'merged',
+      prFinalizeMode: 'auto',
+    });
+    for (const id of [liveArmed, deadArmed]) await makeRow(id, 'p4b-a', 'failed');
+    for (const id of [livePr, deadPr]) await makeRow(id, '13-pr-wait', 'waiting_form');
+    for (const id of [deadArmed, deadPr]) await markDeadRaw(id);
+    const watchState = async (taskId: string) =>
+      (
+        await db
+          .select({
+            status: schema.tasks.status,
+            watch: schema.tasks.awaitingAllowanceProviderId,
+            autoResumes: schema.tasks.allowanceAutoResumeCount,
+            replenishedAt: schema.tasks.allowanceReplenishedAt,
+          })
+          .from(schema.tasks)
+          .where(eq(schema.tasks.id, taskId))
+      )[0]!;
+    const stepStatuses = async (taskId: string) =>
+      (
+        await db
+          .select({ status: schema.taskSteps.status })
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.taskId, taskId))
+      ).map((r) => r.status);
+    await configService.set(CONFIG_KEYS.ALLOWANCE_WATCH_MODE, 'auto');
+    await configService.set(CONFIG_KEYS.PR_WORKFLOW_ENABLED, 'true');
+    try {
+      await checkProviderRecovery(db);
+      await runPrPollTick(db);
+    } finally {
+      await configService.set(CONFIG_KEYS.ALLOWANCE_WATCH_MODE, 'notify');
+      await configService.set(CONFIG_KEYS.PR_WORKFLOW_ENABLED, 'false');
+    }
+    check(
+      'control: the provider recovery check auto-resumes a live failed task and queues its ADVANCE',
+      (await watchState(liveArmed)).status === 'running' &&
+        (await jobsFor(liveArmed)).includes(TASK_JOB_NAMES.ADVANCE_STEP),
+      { state: await watchState(liveArmed), jobs: await jobsFor(liveArmed) },
+    );
+    check(
+      'the provider recovery check leaves a dead failed task alone: still failed, watch kept, step row failed, no job',
+      (await watchState(deadArmed)).status === 'failed' &&
+        (await watchState(deadArmed)).watch === provider!.id &&
+        (await watchState(deadArmed)).autoResumes === 0 &&
+        (await watchState(deadArmed)).replenishedAt === null &&
+        (await stepStatuses(deadArmed)).every((s) => s === 'failed') &&
+        (await jobsFor(deadArmed)).length === 0,
+      {
+        state: await watchState(deadArmed),
+        steps: await stepStatuses(deadArmed),
+        jobs: await jobsFor(deadArmed),
+      },
+    );
+    check(
+      'control: a PR poll tick queues the ADVANCE for a live merged waiting_pr task',
+      (await jobsFor(livePr)).includes(TASK_JOB_NAMES.ADVANCE_STEP),
+      await jobsFor(livePr),
+    );
+    check(
+      'a PR poll tick queues nothing for a dead merged waiting_pr task',
+      (await jobsFor(deadPr)).length === 0,
+      await jobsFor(deadPr),
+    );
+    // --- the fences refuse a task that went dead after the sweep read it ----------------
+    const fenceTargets: Record<string, { id: string; rowId: string }> = {};
+    for (const name of ['live', 'dead', 'dead-reset']) {
+      const id = await makeTask(`fence-${name}`);
+      const row = await makeRow(id, 'p4b-a', 'waiting_cli');
+      fenceTargets[name] = { id, rowId: row.id };
+      if (name !== 'live') await markDeadRaw(id);
+    }
+    const fenceAdvances: string[] = [];
+    const fenceDeps = {
+      enqueueAdvance: async (taskId: string) => {
+        fenceAdvances.push(taskId);
+      },
+      queuedInvocationIds: owedNothing,
+    };
+    const orphan = (t: { id: string; rowId: string }) => ({
+      taskStepId: t.rowId,
+      taskId: t.id,
+      stepId: 'p4b-a',
+      round: 0,
+      userId,
+      epoch: 3,
+      currentStepId: 'p4b-a',
+      currentRound: 0,
+    });
+    const liveRecovered = await recoverParkedStep(
+      db,
+      orphan(fenceTargets.live!),
+      new Set(),
+      fenceDeps,
+    );
+    const deadRecovered = await recoverParkedStep(
+      db,
+      orphan(fenceTargets.dead!),
+      new Set(),
+      fenceDeps,
+    );
+    check(
+      'the parked-step recovery fence re-drives a live task and refuses a dead one: epoch unchanged, no advance',
+      liveRecovered &&
+        !deadRecovered &&
+        (await view(fenceTargets.live!.id)).epoch === 4 &&
+        (await view(fenceTargets.dead!.id)).epoch === 3 &&
+        fenceAdvances.length === 1 &&
+        fenceAdvances[0] === fenceTargets.live!.id,
+      { liveRecovered, deadRecovered, fenceAdvances },
+    );
+    const liveReset = await resetStepAndDownstream(db, fenceTargets.live!.id, 'p4b-a', 0, 4);
+    const deadReset = await resetStepAndDownstream(
+      db,
+      fenceTargets['dead-reset']!.id,
+      'p4b-a',
+      0,
+      3,
+    );
+    check(
+      'the step reset fence resets a live task at its epoch and refuses a dead one: epoch unchanged, row unchanged',
+      typeof liveReset === 'object' &&
+        liveReset !== null &&
+        deadReset === 'superseded' &&
+        (await view(fenceTargets['dead-reset']!.id)).epoch === 3 &&
+        (await stepStatuses(fenceTargets['dead-reset']!.id)).every((st) => st === 'waiting_cli'),
+      { liveReset, deadReset, steps: await stepStatuses(fenceTargets['dead-reset']!.id) },
+    );
   } finally {
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     await db
@@ -690,6 +845,7 @@ async function main(): Promise<void> {
     await db.delete(schema.users).where(eq(schema.users.id, userId));
     await rm(dir, { recursive: true, force: true });
     await queue.obliterate({ force: true }).catch(() => undefined);
+    await closePrPollQueue();
     await closeTaskQueue();
     await closeRedis();
   }

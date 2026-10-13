@@ -445,7 +445,7 @@ async function runUsagePollTick(db: Database): Promise<void> {
  *  Reads only stored snapshots, so it ignores the per-provider 429 backoff. Skipped entirely in
  *  watch mode 'off': armed rows simply stop resolving, and resume resolving if the mode is
  *  turned back on. */
-async function checkProviderRecovery(db: Database): Promise<void> {
+export async function checkProviderRecovery(db: Database): Promise<void> {
   const watchMode = parseAllowanceWatchMode(
     await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE),
   );
@@ -474,6 +474,7 @@ async function checkProviderRecovery(db: Database): Promise<void> {
       and(
         isNotNull(schema.tasks.awaitingAllowanceProviderId),
         isNull(schema.tasks.allowanceReplenishedAt),
+        isNull(schema.tasks.deadAt),
         eq(schema.tasks.status, 'failed'),
       ),
     );

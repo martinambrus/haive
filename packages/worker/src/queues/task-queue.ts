@@ -3226,6 +3226,7 @@ export async function recoverParkedStep(
       and(
         eq(schema.tasks.id, s.taskId),
         eq(schema.tasks.status, 'running'),
+        isNull(schema.tasks.deadAt),
         eq(schema.tasks.orchestrationEpoch, s.epoch),
         sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${s.currentStepId}`,
         eq(schema.tasks.currentRound, s.currentRound),

@@ -1,5 +1,5 @@
 import { Queue, Worker } from 'bullmq';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import {
   CONFIG_KEYS,
   QUEUE_NAMES,
@@ -95,13 +95,13 @@ interface PrWaitTask {
   prCredentialId: string | null;
 }
 
-async function runPrPollTick(db: Database): Promise<void> {
+export async function runPrPollTick(db: Database): Promise<void> {
   if (!(await configService.getBoolean(CONFIG_KEYS.PR_WORKFLOW_ENABLED, false))) return;
   // Every parked PR-wait task, not just prState='open': a task already flipped to
   // 'merged' but still parked means a prior auto-advance was lost — re-drive it. A
   // completed task is no longer 'waiting_pr', so it drops out of this set.
   const tasks = (await db.query.tasks.findMany({
-    where: eq(schema.tasks.status, 'waiting_pr'),
+    where: and(eq(schema.tasks.status, 'waiting_pr'), isNull(schema.tasks.deadAt)),
     columns: {
       id: true,
       userId: true,
