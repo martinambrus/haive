@@ -3,7 +3,7 @@ import { validateComposition, type ComposableStepEntry } from '../src/modularity
 
 function entry(
   stepId: string,
-  opts: { needs?: string[]; provides?: string[]; loop?: string } = {},
+  opts: { needs?: string[]; provides?: string[]; loop?: string; closes?: boolean } = {},
 ): ComposableStepEntry {
   return {
     stepId,
@@ -13,6 +13,7 @@ function entry(
     requires: (opts.needs ?? []).map((needs) => ({ needs, reason: `${stepId} needs ${needs}` })),
     provides: opts.provides ?? [],
     ...(opts.loop ? { loopTargetStepId: opts.loop } : {}),
+    ...(opts.closes ? { closes: true } : {}),
   };
 }
 
@@ -126,5 +127,17 @@ describe('validateComposition', () => {
         reason: 'use-worktree needs worktree',
       },
     ]);
+  });
+
+  it('refuses a looping step after a closing step', () => {
+    const catalog = catalogOf(
+      entry('impl', { provides: ['implementation'] }),
+      entry('commit', { closes: true }),
+      entry('verify', { loop: 'impl' }),
+    );
+    expect(validateComposition(['impl', 'commit', 'verify'], catalog)).toEqual([
+      { kind: 'loop-after-closing', index: 2, stepId: 'verify', closingStepId: 'commit' },
+    ]);
+    expect(validateComposition(['impl', 'verify', 'commit'], catalog)).toEqual([]);
   });
 });
