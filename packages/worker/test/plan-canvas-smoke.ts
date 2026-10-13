@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray, isNull, like, notInArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, like, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 // Subpath, not the root barrel: the plan applier reaches the database, and the
@@ -35,6 +35,7 @@ import { HAIVE_DATA_FILES, PLAN_MIRROR_SCHEMA_VERSION, type PlanMirror } from '@
 import { initDatabase, getDb } from '../src/db.js';
 import { gitRun } from '../src/repo/git-exec.js';
 import { sweepDirtyPlanMirrors } from '../src/queues/plan-mirror-queue.js';
+import { persistDetection } from '../src/repo/clone.js';
 import {
   advancePlanBaseToPushed,
   importPlanMirror,
@@ -2620,6 +2621,21 @@ async function main(): Promise<void> {
     'three-way: a plan with a different root is refused and nothing here is deleted',
     replaced === 'PlanSnapshotError' && (await nodeRows()).length === beforeReplace.length,
     { replaced },
+  );
+  // A rescan that meets the same refused file keeps the reason and leaves the row for the sweep.
+  await db
+    .update(schema.planMirrorState)
+    .set({ lastError: null, writtenRevision: sql`${schema.planMirrorState.revision}` })
+    .where(eq(schema.planMirrorState.repositoryId, sId));
+  await persistDetection(db, sId, sDir);
+  const rescanned = await db.query.planMirrorState.findFirst({
+    where: eq(schema.planMirrorState.repositoryId, sId),
+  });
+  check(
+    'three-way: a rescan whose reconcile is refused records why and leaves the mirror dirty',
+    !!rescanned?.lastError?.includes('different root') &&
+      rescanned.revision > rescanned.writtenRevision,
+    rescanned,
   );
   await arrive(theirs);
 

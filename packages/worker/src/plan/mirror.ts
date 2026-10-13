@@ -1477,6 +1477,17 @@ export async function stampPlanMirrorHashesAtBoot(db: Database): Promise<number>
   return stamped;
 }
 
+/** For a reconcile no caller retries (a rescan): the reason is kept and the row left dirty, so the
+ *  sweep's flush meets the same file and holds with it until it can be read in. */
+export async function recordPlanReconcileFailure(
+  db: Database,
+  repositoryId: string,
+  err: unknown,
+): Promise<void> {
+  await markPlanMirrorDirty(db, repositoryId);
+  await recordPlanMirrorError(db, repositoryId, err);
+}
+
 export async function recordPlanMirrorError(
   db: Database,
   repositoryId: string,

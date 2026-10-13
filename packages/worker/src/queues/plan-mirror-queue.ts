@@ -278,8 +278,10 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         await commitPlanSnapshotFiles({ repoPath, message, identity });
       }
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
-      const pushedHead = await gitRun(repoPath, ['rev-parse', 'HEAD']);
+      const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
+      const pushedHead = head.code === 0 ? head.stdout.trim() : null;
       await pushBranch({
+        ...(pushedHead ? { sha: pushedHead } : {}),
         cwd: repoPath,
         branch,
         setUpstream: upstream.code !== 0,
@@ -288,12 +290,7 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
         userId: payload.userId,
       });
       pushed = true;
-      await advancePlanBaseFromCommit(
-        getDb(),
-        repo.id,
-        repoPath,
-        pushedHead.code === 0 ? pushedHead.stdout.trim() : null,
-      );
+      await advancePlanBaseFromCommit(getDb(), repo.id, repoPath, pushedHead);
     }
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });

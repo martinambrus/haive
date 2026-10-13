@@ -51,6 +51,7 @@ import {
   importPlanMirror,
   reconcilePlanFromCheckout,
   recordPlanMirrorError,
+  recordPlanReconcileFailure,
 } from '../plan/mirror.js';
 import { syncProjectStateFromCheckout } from '../project-state/sync.js';
 import { raiseRtkQuestion } from '../project-state/rtk-conflict.js';
@@ -326,7 +327,12 @@ export async function persistDetection(
   try {
     const res = await importPlanMirror(db, repositoryId, storagePath);
     if (!res.imported && res.code === 'has_plan') {
-      await reconcilePlanFromCheckout(db, repositoryId, storagePath, { requireStamp: true });
+      await reconcilePlanFromCheckout(db, repositoryId, storagePath, {
+        requireStamp: true,
+      }).catch(async (err: unknown) => {
+        await recordPlanReconcileFailure(db, repositoryId, err);
+        throw err;
+      });
     }
     if (!res.imported && res.code === 'refused') {
       await recordPlanMirrorError(db, repositoryId, `Plan snapshot not imported: ${res.reason}`);
