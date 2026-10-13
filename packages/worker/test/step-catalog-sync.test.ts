@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import {
   CLI_DISPATCH_STEP_IDS,
@@ -8,8 +8,11 @@ import {
   STEP_CLI_ROLES,
 } from '@haive/shared';
 import { bootStepEngine } from '../src/step-engine/boot.js';
+import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import { syncStepCatalog } from '../src/step-engine/step-catalog.js';
+
+vi.mock('../src/redis.js', () => ({ getRedis: () => ({ set: async () => 'OK' }) }));
 
 const url = process.env.STEP_CATALOG_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/step_catalog_test'))
@@ -38,11 +41,22 @@ describe.skipIf(!url)('step catalog sync on Postgres', () => {
       expect(r.source).toBe('core');
       expect(r.allowSkip).toBe(SKIPPABLE_STEP_IDS.includes(r.stepId));
       expect(r.providerSensitive).toBe(PROVIDER_SENSITIVE_STEP_IDS.includes(r.stepId));
-      expect(r.dispatchesCli).toBe(CLI_DISPATCH_STEP_IDS.includes(r.stepId));
+      const merges = stepRegistry.get(r.stepId as never)?.mergeResolve !== undefined;
+      expect(r.dispatchesCli).toBe(CLI_DISPATCH_STEP_IDS.includes(r.stepId) || merges);
       expect(r.cliRoles).toEqual(STEP_CLI_ROLES[r.stepId] ?? null);
-      expect(r.composable).toBe(false);
-      expect(r.entry).toBeNull();
     }
+  });
+
+  it('marks the curated core steps composable with their entry and no other core step', async () => {
+    const list = await rows();
+    const curated = new Map(CORE_COMPOSABLE_STEPS.map((e) => [e.stepId, e] as const));
+    expect(curated.size).toBeGreaterThan(0);
+    for (const r of list) {
+      const entry = curated.get(r.stepId);
+      expect(r.composable).toBe(entry !== undefined);
+      expect(r.entry).toEqual(entry ?? null);
+    }
+    expect(list.filter((r) => r.composable)).toHaveLength(curated.size);
   });
 
   it('a second sync changes nothing but updated_at', async () => {
@@ -70,17 +84,23 @@ describe.skipIf(!url)('step catalog sync on Postgres', () => {
     expect((await rows()).some((r) => r.stepId === 'zz-stale')).toBe(false);
   });
 
-  it('never writes composable or entry', async () => {
-    const id = stepRegistry.all()[0]!.metadata.id;
+  it('rewrites composable and entry on core rows from the code-owned list', async () => {
+    const curatedId = CORE_COMPOSABLE_STEPS[0]!.stepId;
+    const otherId = stepRegistry
+      .all()
+      .map((d) => d.metadata.id)
+      .find((id) => !CORE_COMPOSABLE_STEPS.some((e) => e.stepId === id))!;
     await db.execute(
-      sql`UPDATE step_catalog SET composable = true, entry = '{"k":1}'::jsonb WHERE step_id = ${id}`,
+      sql`UPDATE step_catalog SET composable = false, entry = NULL WHERE step_id = ${curatedId}`,
+    );
+    await db.execute(
+      sql`UPDATE step_catalog SET composable = true, entry = '{"k":1}'::jsonb WHERE step_id = ${otherId}`,
     );
     await syncStepCatalog(db, stepRegistry);
-    const row = byId(await rows()).get(id)!;
-    expect(row.composable).toBe(true);
-    expect(row.entry).toEqual({ k: 1 });
-    await db.execute(
-      sql`UPDATE step_catalog SET composable = false, entry = NULL WHERE step_id = ${id}`,
-    );
+    const after = byId(await rows());
+    expect(after.get(curatedId)!.composable).toBe(true);
+    expect(after.get(curatedId)!.entry).toEqual(CORE_COMPOSABLE_STEPS[0]);
+    expect(after.get(otherId)!.composable).toBe(false);
+    expect(after.get(otherId)!.entry).toBeNull();
   });
 });

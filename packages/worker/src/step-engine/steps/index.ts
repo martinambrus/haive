@@ -29,6 +29,11 @@ export function dispatchesCli(def: StepDefinition): boolean {
   return Boolean(def.llm || def.agentMining || def.dagExecute);
 }
 
+/** dispatchesCli plus a merge fixer, which enqueues a CLI only when a merge conflicts. */
+export function dispatchesAnyCli(def: StepDefinition): boolean {
+  return dispatchesCli(def) || def.mergeResolve !== undefined;
+}
+
 export function emitsLoop(def: StepDefinition): boolean {
   return Boolean(def.fixLoop || def.fixLoopOnError || def.reviseLoop || def.restartLoop);
 }

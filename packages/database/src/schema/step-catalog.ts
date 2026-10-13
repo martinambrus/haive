@@ -1,6 +1,6 @@
 import { pgTable, text, varchar, boolean, jsonb, timestamp } from 'drizzle-orm/pg-core';
 
-/** Refreshed by the worker at every boot; `composable` and `entry` belong to the composer, never the sync. */
+/** Refreshed by the worker at every boot; `composable` and `entry` come from the code-owned core catalog and module manifests. */
 export const stepCatalog = pgTable('step_catalog', {
   stepId: varchar('step_id', { length: 256 }).primaryKey(),
   source: varchar('source', { length: 128 }).notNull(),

@@ -7,6 +7,7 @@ import {
   type WorkerModuleEntry,
 } from '../modules/loader.js';
 import { getRedis } from '../redis.js';
+import { assertCoreComposableCatalog } from './composable-core.js';
 import { stepRegistry } from './registry.js';
 import { syncStepCatalog } from './step-catalog.js';
 import { syncTaskTypeDefinitions } from './task-type-seed.js';
@@ -35,6 +36,7 @@ export async function bootStepEngine(
   db: Database,
 ): Promise<{ loaded: LoadedWorkerModule[]; entries: readonly WorkerModuleEntry[] }> {
   registerStepsOnce();
+  assertCoreComposableCatalog(stepRegistry);
   const { loaded, entries } = await registerModulesOnce();
   const composables = new Map(
     loaded.flatMap((m) => m.composable.map((c) => [c.stepId, c] as const)),

@@ -141,6 +141,85 @@ describe('validateComposition', () => {
     expect(validateComposition(['impl', 'verify', 'commit'], catalog)).toEqual([]);
   });
 
+  it('accepts a loop after a closing step whose target also follows it', () => {
+    const catalog = catalogOf(
+      entry('commit', { closes: true }),
+      entry('learn', { loop: 'learn' }),
+      entry('review-learnings', { loop: 'learn' }),
+    );
+    expect(validateComposition(['commit', 'learn', 'review-learnings'], catalog)).toEqual([]);
+  });
+
+  it('reports a step placed after a provider of a token it must precede', () => {
+    const catalog = catalogOf(entry('cut', { provides: ['worktree'] }), {
+      ...entry('sync'),
+      precedes: ['worktree'],
+    });
+    expect(validateComposition(['sync', 'cut'], catalog)).toEqual([]);
+    expect(validateComposition(['sync'], catalog)).toEqual([]);
+    expect(validateComposition(['cut', 'sync'], catalog)).toEqual([
+      { kind: 'too-late', index: 1, stepId: 'sync', token: 'worktree' },
+    ]);
+  });
+
+  it('reports a step whose entailed token no later step provides', () => {
+    const catalog = catalogOf(
+      { ...entry('declare'), entails: ['image'] },
+      entry('build', { provides: ['image'] }),
+    );
+    expect(validateComposition(['declare'], catalog)).toEqual([
+      { kind: 'unfulfilled', index: 0, stepId: 'declare', token: 'image' },
+    ]);
+    expect(validateComposition(['build', 'declare'], catalog)).toEqual([
+      { kind: 'unfulfilled', index: 1, stepId: 'declare', token: 'image' },
+    ]);
+    expect(validateComposition(['declare', 'build'], catalog)).toEqual([]);
+  });
+
+  it('entails a token only when its condition token was provided earlier', () => {
+    const catalog = catalogOf(
+      entry('runtime', { provides: ['ddev'] }),
+      { ...entry('implement'), entailsWhen: [{ provided: 'ddev', entails: ['reconciled'] }] },
+      entry('reconcile', { provides: ['reconciled'] }),
+    );
+    expect(validateComposition(['implement'], catalog)).toEqual([]);
+    expect(validateComposition(['runtime', 'implement'], catalog)).toEqual([
+      { kind: 'unfulfilled', index: 1, stepId: 'implement', token: 'reconciled' },
+    ]);
+    expect(validateComposition(['runtime', 'implement', 'reconcile'], catalog)).toEqual([]);
+  });
+
+  it('withdraws a token a step removes', () => {
+    const catalog = catalogOf(
+      entry('cut', { provides: ['worktree'] }),
+      { ...entry('clean'), removes: ['worktree'] },
+      entry('use', { needs: ['worktree'] }),
+    );
+    expect(validateComposition(['cut', 'use', 'clean'], catalog)).toEqual([]);
+    expect(validateComposition(['cut', 'clean', 'use'], catalog)).toEqual([
+      {
+        kind: 'unmet-need',
+        index: 2,
+        stepId: 'use',
+        needs: 'worktree',
+        reason: 'use needs worktree',
+      },
+    ]);
+  });
+
+  it('checks a loop against the latest closing step, not only the first', () => {
+    const catalog = catalogOf(
+      entry('close-a', { closes: true }),
+      entry('target'),
+      entry('close-b', { closes: true }),
+      entry('emitter', { loop: 'target' }),
+    );
+    expect(validateComposition(['close-a', 'target', 'close-b', 'emitter'], catalog)).toEqual([
+      { kind: 'loop-after-closing', index: 3, stepId: 'emitter', closingStepId: 'close-b' },
+    ]);
+    expect(validateComposition(['close-a', 'target', 'emitter', 'close-b'], catalog)).toEqual([]);
+  });
+
   it('treats a step that both closes and loops as its own barrier', () => {
     const catalog = catalogOf(
       entry('impl', { provides: ['implementation'] }),
