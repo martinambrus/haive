@@ -234,6 +234,9 @@ export type ClarifyStepRequest = z.infer<typeof clarifyStepRequestSchema>;
 export const MERGE_CLARIFICATION_ASKED_EVENT = 'merge_resolution.clarification_asked';
 export const MERGE_CLARIFICATION_ANSWERED_EVENT = 'merge_resolution.clarification_answered';
 
+/** task_events type the worker's markTaskDead writes with the unresolved step ids; the api reads it. */
+export const TASK_DEAD_EVENT = 'task.dead';
+
 /** One turn of a plan-merge conversation. In `task_events` rather than a table of its
  *  own because the conversation belongs to ONE task and dies with it — unlike
  *  `plan_node_messages`, which exists because a node accumulates conversations across
