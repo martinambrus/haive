@@ -84,7 +84,7 @@ export function describeIssue(issue: CompositionIssue, ctx: IssueContext): Issue
     case 'unmet-need':
       if (issue.needs === REPOSITORY_TOKEN && !ctx.requiresRepository) {
         return {
-          message: "Requires a repository: turn on 'Requires repository' or remove this step.",
+          message: "Requires a repository: turn on 'Requires a repository' or remove this step.",
           providedBy: [],
         };
       }

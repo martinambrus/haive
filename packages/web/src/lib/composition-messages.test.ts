@@ -87,7 +87,7 @@ describe('describeIssue', () => {
       ctx(['01-worktree-setup'], false),
     );
     expect(view.message).toBe(
-      "Requires a repository: turn on 'Requires repository' or remove this step.",
+      "Requires a repository: turn on 'Requires a repository' or remove this step.",
     );
     expect(view.providedBy).toEqual([]);
   });
