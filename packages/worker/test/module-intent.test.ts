@@ -118,6 +118,35 @@ describe.skipIf(!url)('module intent sync on Postgres', () => {
     expect((await row('alpha'))!.source).toBe('git');
   });
 
+  describe('deactivated_at', () => {
+    const OFF = new Date('2026-10-14T08:00:00.000Z');
+    const deactivate = (id: string) =>
+      db.update(schema.modules).set({ deactivatedAt: OFF }).where(eq(schema.modules.moduleId, id));
+
+    it('is null for a module the first load records', async () => {
+      await syncModuleIntent(db, [mod('alpha')]);
+      expect((await row('alpha'))!.deactivatedAt).toBeNull();
+    });
+
+    it('is left alone by a later sync that loads the module again', async () => {
+      await syncModuleIntent(db, [mod('alpha')]);
+      await deactivate('alpha');
+      await syncModuleIntent(db, [mod('alpha', { version: '1.1.0' })]);
+      expect(await row('alpha')).toMatchObject({ installedVersion: '1.1.0', deactivatedAt: OFF });
+    });
+
+    it('survives a missing spell and the load that ends it', async () => {
+      await syncModuleIntent(db, [mod('alpha'), mod('beta')]);
+      await deactivate('alpha');
+      await syncModuleIntent(db, [mod('beta')]);
+      expect(await row('alpha')).toMatchObject({ deactivatedAt: OFF });
+      expect((await row('alpha'))!.missingAt).toBeInstanceOf(Date);
+      await syncModuleIntent(db, [mod('alpha'), mod('beta')]);
+      expect(await row('alpha')).toMatchObject({ deactivatedAt: OFF, missingAt: null });
+      expect((await row('beta'))!.deactivatedAt).toBeNull();
+    });
+  });
+
   it('marks every row missing when no module loaded', async () => {
     await syncModuleIntent(db, [mod('alpha'), mod('beta')]);
     await syncModuleIntent(db, []);

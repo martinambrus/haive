@@ -23,6 +23,8 @@ export interface StepContext {
    *  `round > 0` does NOT mean "fix re-run". To branch into fix mode, ask isFixRound /
    *  loadFixLoopDiagnosis, which key on the recorded request for this round. */
   round: number;
+  /** The task epoch this pass runs under; unset where no pass is fenced on one. */
+  epoch?: number | null;
   db: Database;
   logger: Logger;
   signal: AbortSignal;

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { databaseName, installId, InvalidInstallIdError } from '../src/naming/index.js';
 import {
   collectFieldIds,
   dashboardSpecSchema,
@@ -136,6 +137,38 @@ describe('moduleManifestSchema', () => {
     expect(ok({ ...manifest, globalSettings: { form, defaults: { missing: 1 } } })).toBe(false);
     expect(ok({ ...manifest, adminSettings: { form, defaults: { missing: 1 } } })).toBe(false);
     expect(ok({ ...manifest, globalSettings: { form, defaults: {} } })).toBe(true);
+  });
+});
+
+describe('module id length', () => {
+  const POSTGRES_IDENTIFIER_BYTES = 63;
+  const LONGEST_INSTALL_ID = 'a'.repeat(32);
+  const withId = (id: string) => ok({ id, name: 'A', version: '1', schemaVersion: 1 });
+  const original = process.env.HAIVE_INSTALL_ID;
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.HAIVE_INSTALL_ID;
+    else process.env.HAIVE_INSTALL_ID = original;
+  });
+
+  it('is bounded by the longest install id installId accepts', () => {
+    expect(installId({ HAIVE_INSTALL_ID: LONGEST_INSTALL_ID })).toBe(LONGEST_INSTALL_ID);
+    expect(() => installId({ HAIVE_INSTALL_ID: `${LONGEST_INSTALL_ID}a` })).toThrow(
+      InvalidInstallIdError,
+    );
+  });
+
+  it('accepts exactly the ids whose module database name fits a Postgres identifier', () => {
+    process.env.HAIVE_INSTALL_ID = LONGEST_INSTALL_ID;
+    const bytes = (id: string) => Buffer.byteLength(databaseName('module', id));
+    expect(bytes('a'.repeat(23))).toBe(POSTGRES_IDENTIFIER_BYTES);
+    expect(bytes('a'.repeat(24))).toBe(POSTGRES_IDENTIFIER_BYTES + 1);
+    expect(withId('a'.repeat(23))).toBe(true);
+    expect(withId('a'.repeat(24))).toBe(false);
+  });
+
+  it('still accepts a dashed id of the longest length', () => {
+    expect(withId('a-'.repeat(11) + 'a')).toBe(true);
   });
 });
 

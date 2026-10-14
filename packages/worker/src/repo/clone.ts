@@ -47,12 +47,7 @@ import {
 } from '@haive/shared/project-state';
 import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
-import {
-  importPlanMirror,
-  reconcilePlanFromCheckout,
-  recordPlanMirrorError,
-  recordPlanReconcileFailure,
-} from '../plan/mirror.js';
+import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { syncProjectStateFromCheckout } from '../project-state/sync.js';
 import { raiseRtkQuestion } from '../project-state/rtk-conflict.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
@@ -325,27 +320,7 @@ export async function persistDetection(
   // branch inside importHaiveDataMirror: that function early-returns once it has
   // no repository COLUMNS to fill, and the plan lives in its own tables.
   try {
-    // Whether a plan exists is read from the rows, not from the import: a malformed file fails the
-    // import before it checks, and would never reach the reconcile and its failure record.
-    const [ownPlan] = await db
-      .select({ id: schema.planNodes.id })
-      .from(schema.planNodes)
-      .where(eq(schema.planNodes.repositoryId, repositoryId))
-      .limit(1);
-    if (ownPlan) {
-      await reconcilePlanFromCheckout(db, repositoryId, storagePath, {
-        requireStamp: true,
-      }).catch(async (err: unknown) => {
-        await recordPlanReconcileFailure(db, repositoryId, err);
-        throw err;
-      });
-    } else {
-      const res = await importPlanMirror(db, repositoryId, storagePath);
-      if (!res.imported && res.code === 'refused') {
-        await recordPlanMirrorError(db, repositoryId, `Plan snapshot not imported: ${res.reason}`);
-        logger.info({ repositoryId, reason: res.reason }, 'plan mirror not imported');
-      }
-    }
+    await syncPlanFromCheckout(db, repositoryId, storagePath);
   } catch (err) {
     logger.warn({ err, repositoryId }, 'plan mirror import failed (non-fatal)');
   }

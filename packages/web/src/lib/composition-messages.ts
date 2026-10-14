@@ -1,8 +1,21 @@
 import {
+  CUSTOM_TOOL_DESCRIPTION_MAX_LENGTH,
+  CUSTOM_TOOL_NAME_MAX_LENGTH,
+  CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH,
+  CUSTOM_TOOL_PARAMS_MAX,
+  CUSTOM_TOOL_RESERVED_NAMES,
+  CUSTOM_TOOL_RESPONSE_MAX_BYTES,
+  CUSTOM_TOOL_RESPONSE_MIN_BYTES,
+  CUSTOM_TOOL_TIMEOUT_MAX_MS,
+  CUSTOM_TOOL_TIMEOUT_MIN_MS,
+  CUSTOM_TOOL_URL_MAX_LENGTH,
+  CUSTOM_TOOLS_MAX_PER_STEP,
   PROMPT_STEP_PROBLEM_KINDS,
   PROMPT_STEP_TEMPLATE_MAX_BYTES,
   PROMPT_STEP_TIMEOUT_MAX_MS,
   PROMPT_STEP_TIMEOUT_MIN_MS,
+  RAG_QUERY_TOP_K_MAX,
+  RAG_QUERY_TOP_K_MIN,
   REPOSITORY_TOKEN,
   STEP_ID_MAX_LENGTH,
   validateComposition,
@@ -217,6 +230,8 @@ export function describeAvailability(availability: TaskTypeAvailability): string
       return 'Unavailable: custom task types are switched off';
     case 'module-types-off':
       return 'Unavailable: module task types are switched off';
+    case 'module-deactivated':
+      return `Unavailable: deactivated modules ${(availability.moduleIds ?? []).join(', ')}`;
     case 'missing-step':
       return `Unavailable: missing steps ${(availability.stepIds ?? []).join(', ')}`;
     case 'invalid-composition': {
@@ -261,6 +276,7 @@ export function promptStepIssuesOf(issues: unknown): PromptStepIssue[] {
 
 export function describePromptStepIssue(issue: PromptStepIssue): string {
   const token = issue.raw ? inlineCode(issue.raw) : 'A token';
+  const tool = issue.raw ? `The tool ${inlineCode(issue.raw)}` : 'A tool';
   switch (issue.kind) {
     case 'title-empty':
       return 'Give the step a title.';
@@ -294,6 +310,52 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
       return `${token} names a step whose output can carry a person's words; only a step whose output an agent wrote can be quoted.`;
     case 'step-token-not-own-line':
       return `${token} must be alone on its line.`;
+    case 'tools-not-supported-yet':
+      return "Tools on a prompt step are not supported yet. Remove this step's tools to save it.";
+    case 'too-many-tools':
+      return `A step can have at most ${CUSTOM_TOOLS_MAX_PER_STEP} tools; remove some.`;
+    case 'tool-name-invalid':
+      return `${tool} needs a name that starts with a lowercase letter and uses only lowercase letters, digits and underscores, up to ${CUSTOM_TOOL_NAME_MAX_LENGTH} characters.`;
+    case 'tool-name-reserved':
+      return `${tool} has a name Haive keeps for its own tools (${CUSTOM_TOOL_RESERVED_NAMES.join(', ')}); pick another name.`;
+    case 'tool-name-duplicate':
+      return `${issue.raw ? `Two tools are named ${inlineCode(issue.raw)}` : 'Two tools have the same name'}; give each tool in a step its own name.`;
+    case 'tool-description-invalid':
+      return `${tool} needs a description of 1 to ${CUSTOM_TOOL_DESCRIPTION_MAX_LENGTH} characters with no control characters, so the agent knows when to call it.`;
+    case 'tool-url-invalid':
+      return `${tool} has a URL that is not valid: it must be one https:// address of at most ${CUSTOM_TOOL_URL_MAX_LENGTH} characters, with no spaces, control characters, backslashes or stray braces.`;
+    case 'tool-url-not-https':
+      return `${tool} must call an address that starts with https://.`;
+    case 'tool-url-userinfo':
+      return `${tool} has a user name or password in its URL; remove it, a tool never sends credentials.`;
+    case 'tool-url-fragment':
+      return `${tool} has a # fragment in its URL; remove it.`;
+    case 'tool-host-ip-literal':
+      return `${tool} calls an IP address; use the DNS name of the host instead.`;
+    case 'tool-host-not-public':
+      return `${tool} calls a host that is not a public DNS name: not localhost, not a name without a dot, and not one that ends in .local, .internal or .localhost.`;
+    case 'tool-placeholder-outside-path':
+      return `${tool} has a {placeholder} outside the path of its URL; a placeholder may only stand in the path, after the host.`;
+    case 'tool-param-undeclared':
+      return `${tool} uses a name in its URL or query list that it does not declare as a parameter.`;
+    case 'tool-param-unused':
+      return `${tool} declares a parameter that its URL path and query list never use.`;
+    case 'tool-param-reused':
+      return `${tool} uses a parameter more than once; each parameter goes once in the URL path or the query list.`;
+    case 'tool-param-duplicate':
+      return `${tool} declares two parameters with the same name.`;
+    case 'tool-param-invalid':
+      return `A parameter of ${issue.raw ? `the tool ${inlineCode(issue.raw)}` : 'a tool'} is not valid: its name follows the tool name rules, its description is 1 to ${CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH} characters, and its limits fit its type.`;
+    case 'tool-too-many-params':
+      return `${tool} has more than ${CUSTOM_TOOL_PARAMS_MAX} parameters; remove some.`;
+    case 'tool-timeout-out-of-range':
+      return `${tool} needs a timeout between ${CUSTOM_TOOL_TIMEOUT_MIN_MS / 1000} and ${CUSTOM_TOOL_TIMEOUT_MAX_MS / 1000} seconds.`;
+    case 'tool-response-cap-out-of-range':
+      return `${tool} needs a response size cap between ${CUSTOM_TOOL_RESPONSE_MIN_BYTES / 1024} and ${CUSTOM_TOOL_RESPONSE_MAX_BYTES / 1024} KiB.`;
+    case 'tool-top-k-out-of-range':
+      return `${tool} must return between ${RAG_QUERY_TOP_K_MIN} and ${RAG_QUERY_TOP_K_MAX} results.`;
+    case 'tool-scope-needs-repository':
+      return `${tool} searches the project, which needs a repository: turn on 'Requires a repository' or search the global knowledge base only.`;
     case 'prompt-step-orphan':
       return `${issue.stepId} is defined but is not in the step list.`;
     case 'prompt-step-missing':

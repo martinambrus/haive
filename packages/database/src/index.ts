@@ -56,6 +56,7 @@ export {
   checkRevive,
   liveTaskIdOfType,
   lockRepositoryRow,
+  lockRepositoryTasksKey,
   type LockedRepository,
   type ReviveCheck,
   type ReviveRefusal,

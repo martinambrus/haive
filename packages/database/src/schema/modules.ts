@@ -1,7 +1,7 @@
 import { pgTable, text, timestamp, check } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
-/** Written only by the worker boot: what it loaded last, and since when a module that loaded before is missing. */
+/** Two writers on different columns: the worker boot writes what it loaded last and since when a module that loaded before is missing; the admin toggle writes `deactivatedAt`, null while the module is active. */
 export const modules = pgTable(
   'modules',
   {
@@ -15,6 +15,7 @@ export const modules = pgTable(
     lastLoadedAt: timestamp('last_loaded_at').notNull().defaultNow(),
     missingAt: timestamp('missing_at'),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    deactivatedAt: timestamp('deactivated_at'),
   },
   (table) => [check('modules_source_check', sql`${table.source} IN ('local', 'git', 'registry')`)],
 );

@@ -28,6 +28,10 @@ vi.mock('../src/db.js', () => ({
 vi.mock('../src/redis.js', () => ({
   getRedis: () => ({ get: async () => h.workerValue }),
 }));
+vi.mock('../src/modules/activation.js', () => ({
+  deactivatedModuleIds: async () => new Set<string>(),
+  isModuleDeactivated: async () => false,
+}));
 
 import { Hono } from 'hono';
 import { moduleManifestSchema, MODULES_LOADED_WORKER_KEY } from '@haive/shared/modularity';
@@ -137,6 +141,7 @@ describe('GET /modules/loaded', () => {
       firstLoadedAt: '2026-10-01T00:00:00.000Z',
       lastLoadedAt: '2026-10-02T00:00:00.000Z',
       missingAt: '2026-10-03T00:00:00.000Z',
+      deactivatedAt: null,
       updatedAt: '2026-10-03T00:00:00.000Z',
     };
     h.intentRows = [row];

@@ -546,6 +546,54 @@ its signature and is the column check around `writeProjectStateColumn`. The writ
 through fs-safe and does not rewrite one holding the bytes, but still lists it in `written`, since a
 commit step stages from that list and the file may never have been staged.
 
+**A checkout move sets Haive's own pending files aside, then re-syncs.** The files the outbox and the
+plan flush write (`.haive-data/state/**`, `plan.json`, `plan.md`) are projections of rows, so a move
+of the checkout (`git merge --ff-only` in 00a and in refresh) must not be stopped by one, nor lose
+one. `setAsideHaiveProjections` (`project-state/set-aside.ts`) lists the projection paths that differ
+from HEAD or are untracked and, when a state file is among them, runs the sync first. Each state
+file must then equal what the sync base renders there (`renderProjectState` over `base_snapshot`,
+which the writer sets to what it wrote and the sync to what it read, so no hash column exists), and
+`plan.json` must hash to `plan_mirror_state.synced_hash` while the database holds a plan; `plan.md`
+is rendered from it on every flush and is never judged. A file that is not what Haive last wrote
+(one the sync could not take, such as an unreadable edit, or one held back by a pending conflict)
+refuses the move and is named in the caller's own outcome (00a `skipped`, refresh's status
+message). Otherwise the revision is bumped first, under the domain's lock (`markProjectStateDirty`,
+`markPlanMirrorDirty`), so a crash leaves the files stale and the sweep re-renders them. Each path
+then returns to HEAD as a compare-and-swap on what the capture recorded: the file is rewritten,
+re-created from HEAD or removed through a parked fs-safe judge only while it still holds the captured
+bytes, mode and owner (`rewriteFileIfNoFollow`, `removeFileIfNoFollow`), and its index entry moves to
+HEAD's through `git apply --cached` of a full-context patch whose preimage is the captured entry, which
+git checks and writes under its own index lock, so a `git add` landing meanwhile refuses the swap
+instead of being overwritten. Because git matches hunk context only, the entry the apply leaves is
+compared with HEAD's and undone unless it is exactly that; an intent-to-add entry, which a diff cannot
+show, refuses the move by name. Anything that moved sends the set-aside round again, and a path still
+moving after `MOVE_ATTEMPTS` refuses it. Any directory the removals leave empty under
+`.haive-data/state` goes too, since an empty one reads as a record with no format file. A removed
+file and each directory its removal empties keep the owner and mode captured with them, which
+whatever re-creates them, the put-back or the writer during the re-sync after a move, gets back while
+the writer still owns it (`restoreKeptMetadata`, best-effort, as fs-safe's inherited owner is); a group
+someone set meanwhile is kept, and so is a file mode other than the 0644 the writer gives a new file. The
+put-back is the same steps in reverse under the same rules (the stored patch applied with `-R`), and
+every put-back 00a triggers runs under its checkout's merge-dir lock (`inMergeDirUnlessClaimed`) and
+is refused while another task's claim holds it. Each restore runs under the domain's lock, after the
+caller's fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there,
+and a task that started meanwhile answers `held` with the files untouched; 00a runs that restore and its move in its claim's merge-dir section (`withMergeDirSection`, fenced on the pass's epoch), so a Stop or a cancel refuses both; and the sync base is pointed at
+the record now in the checkout (`rebaseProjectStateOnCheckout`; a checkout with no record gets an
+EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
+a clash is asked about, never imported over it, and one whose record cannot be read keeps the old
+base and answers in `last_error`), because the writer's base already holds the pending change and
+a sync against it would read the incoming head as the other side's revert. The plan needs no such
+step: its base (`synced_snapshot`) is only ever the plan.json last read in. A valid hand edit is
+not refused: the sync that runs first imports it, so the database holds it and the set-aside loses
+nothing. After the move, `resyncHaiveProjections` runs the sync, writes the record if the outbox is
+dirty, reconciles the plan and flushes it, each in its own try. The revision is bumped again after
+the restore, since a sweep that ran between the two would have stamped it written. 00a calls it
+only when the base is the checked-out branch (a ref-only update moves no file), and again after a
+merge it drove; `persistDetection` keeps its two importers, because the legacy mirror files
+(`environment.json`, `tooling.json`, `exclusions.json`) still restore repositories no record
+covers; only its plan block moved into `syncPlanFromCheckout`, which the re-sync shares. The merge resolver on
+the checkout, plan Pull and Save, step 13 and the task-end hooks do not call it yet.
+
 **The record carries the portable settings and the environment.** `portableSettingsOf`
 (`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:
 `scope-exclude-globs`, `rtk-enabled`, `rtk-version`, `lsp-servers`, `lsp-server-versions`,

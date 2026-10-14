@@ -43,9 +43,9 @@ export async function bootStepEngine(
     loaded.flatMap((m) => m.composable.map((c) => [c.stepId, c] as const)),
   );
   await syncStepCatalog(db, stepRegistry, composables);
-  await syncTaskTypeDefinitions(db, stepRegistry);
+  const taskTypes = await syncTaskTypeDefinitions(db, stepRegistry, loaded);
   const schemas = await ensureModuleSchemas(db, loaded, entries);
   await syncModuleIntent(db, loaded);
-  await publishWorkerBootReport(getRedis(), loaded, schemas);
+  await publishWorkerBootReport(getRedis(), loaded, schemas, taskTypes);
   return { loaded, entries };
 }

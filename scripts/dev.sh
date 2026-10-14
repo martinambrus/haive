@@ -115,39 +115,46 @@ build_libs() {
   dc run --rm dev-libs
 }
 
-rebuild_one() {
-  local svc="$1" vols=()
-  case "$svc" in
-    api)    vols=("${PROJECT}_haive_node_modules_api") ;;
-    worker) vols=("${PROJECT}_haive_node_modules_worker") ;;
-    web)    vols=("${PROJECT}_haive_node_modules_web" "${PROJECT}_haive_web_next") ;;
-    *) say "rebuild: unknown service '$svc' (expected api, worker, or web)"; exit 1 ;;
-  esac
-  say "Rebuilding $svc (package-local node_modules). For a root/shared/database dependency change use 'rebuild' with no args."
-  dc rm -fs "$svc" || true
+# Images are built before anything is removed, so a failed build leaves the running stack as it was.
+build_images() {
+  dc build "$@" || { local rc=$?; say "Build failed: the running stack was left as it was."; exit "$rc"; }
+}
+
+rebuild_services() {
+  local svc vols=()
+  for svc in "$@"; do
+    case "$svc" in
+      api)    vols+=("${PROJECT}_haive_node_modules_api") ;;
+      worker) vols+=("${PROJECT}_haive_node_modules_worker") ;;
+      web)    vols+=("${PROJECT}_haive_node_modules_web" "${PROJECT}_haive_web_next") ;;
+      *) say "rebuild: unknown service '$svc' (expected api, worker, or web)"; exit 1 ;;
+    esac
+  done
+  say "Rebuilding $* (package-local node_modules). For a root/shared/database dependency change use 'rebuild' with no args."
+  build_images "$@"
+  dc rm -fs "$@" || true
   docker volume rm "${vols[@]}" 2>/dev/null || true
-  dc build "$svc"
   gpu_note
-  dc up -d "$svc"
+  dc up -d "$@"
 }
 
 rebuild_all() {
   say "Full rebuild: recreating app images + node_modules volumes. Data volumes untouched."
-  dc rm -fs dev-libs "${APP_SERVICES[@]}" || true
-  docker volume rm "${NM_VOLUMES[@]}" 2>/dev/null || true
   # Build dev-libs too: it starts first (the depends_on gate) and mounts the shared
   # root node_modules volume, so a stale dev-libs image repopulates root with OLD
   # deps even though api/worker/web were rebuilt. Keep its image in lockstep.
-  dc build dev-libs "${APP_SERVICES[@]}"
+  build_images dev-libs "${APP_SERVICES[@]}"
+  dc rm -fs dev-libs "${APP_SERVICES[@]}" || true
+  docker volume rm "${NM_VOLUMES[@]}" 2>/dev/null || true
   gpu_note
   dc up -d
 }
 
 reset_stack() {
   say "Reset: full rebuild + wiping compiled dist/tsbuildinfo (stale/corrupt-build recovery). All data preserved."
+  build_images dev-libs "${APP_SERVICES[@]}"
   dc rm -fs dev-libs "${APP_SERVICES[@]}" || true
   docker volume rm "${NM_VOLUMES[@]}" 2>/dev/null || true
-  dc build dev-libs "${APP_SERVICES[@]}"
   # Wipe the bind-mount compiled artifacts inside a container (host rm hits
   # EACCES on root-owned files); recreates the fresh volumes in the same pass.
   dc run --rm --no-deps --entrypoint sh dev-libs -c \
@@ -199,7 +206,7 @@ case "$cmd" in
   status|ps)     dc ps ;;
   libs)          build_libs ;;
   restart)       gpu_guard "$cmd"; dc rm -fs dev-libs >/dev/null 2>&1 || true; gpu_note; dc up -d --force-recreate "$@" ;;
-  rebuild)       gpu_guard "$cmd"; if [ "$#" -eq 0 ]; then rebuild_all; else for s in "$@"; do rebuild_one "$s"; done; fi ;;
+  rebuild)       gpu_guard "$cmd"; if [ "$#" -eq 0 ]; then rebuild_all; else rebuild_services "$@"; fi ;;
   reset)         gpu_guard "$cmd"; reset_stack ;;
   sandbox-build) dc --profile sandbox build cli-sandbox ;;
   migrate)       dc run --rm db-migrate ;;

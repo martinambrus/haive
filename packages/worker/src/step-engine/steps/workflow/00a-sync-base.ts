@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { lockRepositoryTasksKey, schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
 import { isBranchName } from '@haive/shared/git-args';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -11,6 +11,29 @@ import {
 } from '../../../repo/git-push.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
+import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
+import { checkoutHoldingTasks } from '../../../repo/refresh.js';
+import {
+  claimMergeDir,
+  inMergeDirUnlessClaimed,
+  otherLiveClaim,
+  releaseMergeDir,
+  withMergeDirSection,
+  type DbHandle,
+} from '../../merge-dir-claim.js';
+import {
+  MOVE_ATTEMPTS,
+  putBackAfterFailure,
+  putBackProjections,
+  recoverAfterMoveFailure,
+  restoreKeptMetadata,
+  restoreProjectionsInTx,
+  resyncHaiveProjections,
+  setAsideHaiveProjections,
+  type KeptFiles,
+  type RestoreSection,
+  type SetAsideResult,
+} from '../../../project-state/set-aside.js';
 
 // Pre-branch base sync. Runs after the model-health canary and before triage (the
 // explicit pull in orderWorkflowRunList places it there). Brings the LOCAL base
@@ -88,6 +111,14 @@ async function countCommits(repoPath: string, range: string): Promise<number> {
   if (res.code !== 0) return 0;
   const n = Number.parseInt(res.stdout.trim() || '0', 10);
   return Number.isFinite(n) ? n : 0;
+}
+
+async function taskRepositoryId(ctx: StepContext): Promise<string | null> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { repositoryId: true },
+  });
+  return task?.repositoryId ?? null;
 }
 
 export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
@@ -316,6 +347,11 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       throw new Error(`${JSON.stringify(base)} is not a branch name git accepts`);
     }
 
+    // A claim this step left when its release failed would hold every other task out of the checkout.
+    if (await taskRepositoryId(ctx)) {
+      await releaseMergeDir(ctx.db, { mergeDir: ctx.repoPath, stepId: ctx.taskStepId });
+    }
+
     if (!d.hasOrigin) {
       return { synced: false, base, strategy: 'skipped', behindBy: 0, reason: 'no origin remote' };
     }
@@ -332,6 +368,10 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     // Divergence was analyzed for the default base (d.baseBranch). When the user kept
     // it, the merge phase already merged origin in (syncAction=merge) or they skipped.
     if (base === d.baseBranch && d.diverged) {
+      if (values.syncAction === 'merge') {
+        const repositoryId = await taskRepositoryId(ctx);
+        if (repositoryId) await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+      }
       return values.syncAction === 'merge'
         ? { synced: true, base, strategy: 'merge', behindBy: d.behindBy, reason: null }
         : {
@@ -344,6 +384,10 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     }
 
     if (base === d.baseBranch && d.behindBy === 0) {
+      if (base === d.currentBranch) {
+        const repositoryId = await taskRepositoryId(ctx);
+        if (repositoryId) await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+      }
       return { synced: true, base, strategy: 'noop', behindBy: 0, reason: null };
     }
 
@@ -361,30 +405,207 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
             `refs/heads/${base}:refs/heads/${base}`,
           ]);
 
-    let res = await ff();
-    if (res.code !== 0) {
-      await gitRun(ctx.repoPath, [
-        'fetch',
-        '--deepen=50',
-        '--end-of-options',
-        'origin',
-        `refs/heads/${base}`,
-      ]);
-      res = await ff();
+    const repositoryId = onCurrent ? await taskRepositoryId(ctx) : null;
+    // Another task working in the checkout itself (no worktree of its own) holds the base where it is.
+    const fence = async (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
+      (await checkoutHoldingTasks(conn, repositoryId!, {
+        excludeTaskId: ctx.taskId,
+        rootOnly: true,
+      })) + ((await otherLiveClaim(conn as DbHandle, ctx.repoPath, ctx.taskId)) ? 1 : 0);
+    let asided = false;
+    const kept: KeptFiles = new Map();
+    const owner = {
+      mergeDir: ctx.repoPath,
+      stepId: ctx.taskStepId,
+      taskId: ctx.taskId,
+      epoch: ctx.epoch,
+    };
+    const putBackSection: RestoreSection = (fn) => inMergeDirUnlessClaimed(ctx.db, owner, fn);
+    const setAside = async (): Promise<SetAsideResult> => {
+      if (!repositoryId) return { outcome: 'clean' };
+      let aside: SetAsideResult;
+      try {
+        aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence, {
+          restore: (fn) => withMergeDirSection(ctx.db, owner, fn),
+          putBack: putBackSection,
+        });
+      } catch (err) {
+        if (asided)
+          await putBackAfterFailure(ctx.db, repositoryId, ctx.repoPath, kept, err, putBackSection);
+        throw err;
+      }
+      if (aside.outcome === 'set-aside') {
+        asided = true;
+        for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
+      }
+      return aside;
+    };
+    if (repositoryId) {
+      try {
+        await seedPlanBaseFromCheckout(ctx.db, repositoryId, ctx.repoPath);
+      } catch (err) {
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `the plan's base could not be read from the checkout (${(err as Error).message}); the base was not moved. Retry this step.`,
+        };
+      }
     }
-    if (res.code !== 0) {
-      ctx.logger.warn(
-        { base, stderr: res.stderr },
-        'sync base: fast-forward failed; continuing with local base',
-      );
+    const moveBase = async (): Promise<SyncBaseApply> => {
+      const first = await setAside();
+      if (first.outcome === 'held') {
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `${first.holding} other task${first.holding === 1 ? ' is' : 's are'} working in this checkout; the base was not moved. Retry this step once ${first.holding === 1 ? 'it finishes' : 'they finish'}.`,
+        };
+      }
+      if (first.outcome === 'refused') {
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `${first.reason}; the base was not moved. Commit or discard that change, then Retry this step.`,
+        };
+      }
+
+      // Under both projection locks, so no sweep can rewrite a file between the check and the move. A
+      // file found rewritten ends the transaction unmoved and goes back to the set-aside.
+      const ffLocked = async (): Promise<{
+        code: number;
+        stderr: string;
+        stdout: string;
+        unmoved?: true;
+      }> => {
+        if (!repositoryId) return ff();
+        for (let attempt = 1; ; attempt++) {
+          // A claimed section: no merge in this checkout interleaves, and a cancelled pass is refused.
+          const moved = await withMergeDirSection(ctx.db, owner, async (tx) => {
+            // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
+            await lockRepositoryTasksKey(tx, repositoryId);
+            const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
+            if (again.outcome !== 'clean') return { again, res: null, holding: 0 };
+            const holding = await fence(tx);
+            return holding > 0
+              ? { again, res: null, holding }
+              : { again, res: await ff(), holding };
+          });
+          if (moved.res) return moved.res;
+          if (moved.holding > 0) {
+            return {
+              code: 1,
+              stderr: `${moved.holding} other task${moved.holding === 1 ? ' is' : 's are'} working in this checkout`,
+              stdout: '',
+              unmoved: true,
+            };
+          }
+          if (moved.again.outcome === 'refused') {
+            return { code: 1, stderr: moved.again.reason, stdout: '', unmoved: true };
+          }
+          if (attempt === MOVE_ATTEMPTS) {
+            return {
+              code: 1,
+              stderr: "Haive's project files kept changing under the move; Retry this step",
+              stdout: '',
+              unmoved: true,
+            };
+          }
+          const again = await setAside();
+          if (again.outcome === 'held') {
+            return {
+              code: 1,
+              stderr: `${again.holding} other task${again.holding === 1 ? ' is' : 's are'} working in this checkout`,
+              stdout: '',
+              unmoved: true,
+            };
+          }
+          if (again.outcome === 'refused') {
+            return { code: 1, stderr: again.reason, stdout: '', unmoved: true };
+          }
+        }
+      };
+
+      const before = (await gitRun(ctx.repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+      let res: Awaited<ReturnType<typeof ffLocked>>;
+      try {
+        res = await ffLocked();
+        if (res.code !== 0 && !res.unmoved) {
+          // The deepen is a network fetch: Haive's files go back first, and the retry sets them aside again.
+          if (repositoryId && asided) {
+            await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept, putBackSection);
+            kept.clear();
+            asided = false;
+          }
+          await gitRun(ctx.repoPath, [
+            'fetch',
+            '--deepen=50',
+            '--end-of-options',
+            'origin',
+            `refs/heads/${base}`,
+          ]);
+          res = await ffLocked();
+        }
+      } catch (err) {
+        if (repositoryId && asided) {
+          await recoverAfterMoveFailure(
+            ctx.db,
+            repositoryId,
+            ctx.repoPath,
+            kept,
+            before,
+            err,
+            putBackSection,
+          );
+        }
+        throw err;
+      }
+      if (repositoryId && res.code === 0) {
+        await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+        await restoreKeptMetadata(ctx.repoPath, kept);
+      } else if (repositoryId && asided) {
+        await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept, putBackSection);
+      }
+      if (res.code !== 0) {
+        ctx.logger.warn(
+          { base, stderr: res.stderr },
+          'sync base: fast-forward failed; continuing with local base',
+        );
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `fast-forward failed: ${res.stderr || res.stdout}`,
+        };
+      }
+      return { synced: true, base, strategy: 'ff', behindBy: d.behindBy, reason: null };
+    };
+    if (!repositoryId) return moveBase();
+    // The set-aside and the move write the checkout, so they hold its merge-dir claim as a merge does.
+    const claim = await claimMergeDir(ctx.db, owner);
+    if (claim.kind === 'held') {
       return {
         synced: false,
         base,
         strategy: 'skipped',
         behindBy: d.behindBy,
-        reason: `fast-forward failed: ${res.stderr || res.stdout}`,
+        reason: `Task "${claim.holder.title}" (${claim.holder.id}) is merging in this checkout; the base was not moved. Retry this step once it finishes.`,
       };
     }
-    return { synced: true, base, strategy: 'ff', behindBy: d.behindBy, reason: null };
+    let out: SyncBaseApply;
+    try {
+      out = await moveBase();
+    } catch (err) {
+      await releaseMergeDir(ctx.db, owner).catch(() => undefined);
+      throw err;
+    }
+    // A claim left behind would hold every other task out of this checkout, so its release must land.
+    await releaseMergeDir(ctx.db, owner);
+    return out;
   },
 };

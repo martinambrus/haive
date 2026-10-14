@@ -5,3 +5,4 @@ export * from './composition.js';
 export * from './task-types.js';
 export * from './module-intent.js';
 export * from './prompt-steps.js';
+export * from './custom-tools.js';

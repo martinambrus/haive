@@ -7,6 +7,8 @@ import {
   getTaskTypeCatalog,
   listAdminTaskTypes,
   listTaskTypes,
+  moduleOpenTasks,
+  patchModuleActive,
   updateTaskType,
   type ApiError,
 } from '../src/lib/api-client.js';
@@ -106,5 +108,71 @@ describe('task type helpers', () => {
     expect(gone.map((c) => [c.method, new URL(c.url).pathname])).toEqual([
       ['DELETE', '/admin/task-types/a-b'],
     ]);
+  });
+});
+
+describe('module activation helpers', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const blockedBy = [{ id: 'task-1', title: 'Fix it', status: 'running', ownerId: 'user-1' }];
+  const refusal = async (status: number, body: unknown): Promise<ApiError> => {
+    failWith(status, body);
+    try {
+      await patchModuleActive('statistics', false);
+    } catch (err) {
+      return err as ApiError;
+    }
+    throw new Error('request did not fail');
+  };
+
+  it('patches /modules/:id with the active flag and returns the stamp', async () => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    const answer = { moduleId: 'statistics', active: false, deactivatedAt: '2026-10-14T12:00:00Z' };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body as string | undefined });
+        return new Response(JSON.stringify(answer), { status: 200 });
+      }),
+    );
+    expect(await patchModuleActive('statistics', false)).toEqual(answer);
+    await patchModuleActive('statistics', true);
+    expect(calls.map((c) => [c.method, new URL(c.url).pathname, c.body])).toEqual([
+      ['PATCH', '/modules/statistics', JSON.stringify({ active: false })],
+      ['PATCH', '/modules/statistics', JSON.stringify({ active: true })],
+    ]);
+  });
+
+  it('reads the blocking tasks off the 409 that refuses a deactivation', async () => {
+    const err = await refusal(409, {
+      error: 'Live tasks still use this module. Finish or cancel them first.',
+      code: 'module_tasks_open',
+      tasks: blockedBy,
+    });
+    expect(err.status).toBe(409);
+    expect(err.code).toBe('module_tasks_open');
+    expect(moduleOpenTasks(err)).toEqual(blockedBy);
+  });
+
+  it('reads no tasks off any other failure', async () => {
+    expect(moduleOpenTasks(await refusal(404, { error: 'Module not found' }))).toEqual([]);
+    expect(moduleOpenTasks(await refusal(403, { error: 'Admin access required' }))).toEqual([]);
+    expect(
+      moduleOpenTasks(
+        await refusal(409, { error: 'x', code: 'plan_tasks_open', tasks: blockedBy }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('reads no tasks off a refusal that carries none, or not a list', async () => {
+    expect(moduleOpenTasks(await refusal(409, { error: 'x', code: 'module_tasks_open' }))).toEqual(
+      [],
+    );
+    expect(
+      moduleOpenTasks(await refusal(409, { error: 'x', code: 'module_tasks_open', tasks: 'no' })),
+    ).toEqual([]);
+    expect(
+      moduleOpenTasks(await refusal(409, { error: 'x', code: 'module_tasks_open', tasks: [] })),
+    ).toEqual([]);
   });
 });

@@ -3,6 +3,7 @@ import { diffModuleIntent, type ModuleIntentRow } from '../src/modularity/index.
 
 const LOADED = new Date('2026-10-01T00:00:00.000Z');
 const GONE = new Date('2026-10-05T00:00:00.000Z');
+const SWITCHED_OFF = new Date('2026-10-14T08:00:00.000Z');
 
 const intent = (id: string, over: Partial<ModuleIntentRow> = {}): ModuleIntentRow => ({
   moduleId: id,
@@ -12,6 +13,7 @@ const intent = (id: string, over: Partial<ModuleIntentRow> = {}): ModuleIntentRo
   entitlementId: null,
   lastLoadedAt: LOADED,
   missingAt: null,
+  deactivatedAt: null,
   ...over,
 });
 const api = (id: string, version = '1.0.0') => ({ id, version });
@@ -65,8 +67,37 @@ describe('diffModuleIntent', () => {
       versionDrift: false,
       lastLoadedAt: LOADED.toISOString(),
       missingAt: null,
+      deactivatedAt: null,
     });
     expect(result.rows[0]!.missingAt).toBe(GONE.toISOString());
+  });
+
+  it('carries deactivatedAt as an ISO date from a Date or a string, and null with no row', () => {
+    const result = diffModuleIntent(
+      [
+        intent('a', { deactivatedAt: SWITCHED_OFF }),
+        intent('b', { deactivatedAt: SWITCHED_OFF.toISOString() }),
+        intent('c'),
+      ],
+      [api('d')],
+      report(api('e')),
+    );
+    expect(result.rows.map((r) => [r.id, r.deactivatedAt])).toEqual([
+      ['a', SWITCHED_OFF.toISOString()],
+      ['b', SWITCHED_OFF.toISOString()],
+      ['c', null],
+      ['d', null],
+      ['e', null],
+    ]);
+  });
+
+  it('keeps the load state of a deactivated module', () => {
+    const result = diffModuleIntent(
+      [intent('m', { deactivatedAt: SWITCHED_OFF })],
+      [api('m')],
+      report(api('m')),
+    );
+    expect(result.rows[0]).toMatchObject({ state: 'loaded', deactivatedAt: expect.any(String) });
   });
 
   it('accepts dates already serialised to strings', () => {
