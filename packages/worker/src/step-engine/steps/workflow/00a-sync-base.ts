@@ -13,7 +13,13 @@ import { buildMergeFixPrompt } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
-import { inMergeDirLock, otherLiveClaim, type DbHandle } from '../../merge-dir-claim.js';
+import {
+  claimMergeDir,
+  inMergeDirLock,
+  otherLiveClaim,
+  releaseMergeDir,
+  type DbHandle,
+} from '../../merge-dir-claim.js';
 import {
   MOVE_ATTEMPTS,
   putBackProjections,
@@ -420,113 +426,135 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         };
       }
     }
-    const first = await setAside();
-    if (first.outcome === 'held') {
-      return {
-        synced: false,
-        base,
-        strategy: 'skipped',
-        behindBy: d.behindBy,
-        reason: `${first.holding} other task${first.holding === 1 ? ' is' : 's are'} working in this checkout; the base was not moved. Retry this step once ${first.holding === 1 ? 'it finishes' : 'they finish'}.`,
-      };
-    }
-    if (first.outcome === 'refused') {
-      return {
-        synced: false,
-        base,
-        strategy: 'skipped',
-        behindBy: d.behindBy,
-        reason: `${first.reason}; the base was not moved. Commit or discard that change, then Retry this step.`,
-      };
-    }
-
-    // Under both projection locks, so no sweep can rewrite a file between the check and the move. A
-    // file found rewritten ends the transaction unmoved and goes back to the set-aside.
-    const ffLocked = async (): Promise<{
-      code: number;
-      stderr: string;
-      stdout: string;
-      unmoved?: true;
-    }> => {
-      if (!repositoryId) return ff();
-      for (let attempt = 1; ; attempt++) {
-        // Under the dir's lock, so a merge section in this checkout (12, 13) never interleaves with the move.
-        const moved = await inMergeDirLock(ctx.db, ctx.repoPath, async (tx) => {
-          const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
-          if (again.outcome !== 'clean') return { again, res: null, holding: 0 };
-          const holding = await fence(tx);
-          return holding > 0 ? { again, res: null, holding } : { again, res: await ff(), holding };
-        });
-        if (moved.res) return moved.res;
-        if (moved.holding > 0) {
-          return {
-            code: 1,
-            stderr: `${moved.holding} other task${moved.holding === 1 ? ' is' : 's are'} working in this checkout`,
-            stdout: '',
-            unmoved: true,
-          };
-        }
-        if (moved.again.outcome === 'refused') {
-          return { code: 1, stderr: moved.again.reason, stdout: '', unmoved: true };
-        }
-        if (attempt === MOVE_ATTEMPTS) {
-          return {
-            code: 1,
-            stderr: "Haive's project files kept changing under the move; Retry this step",
-            stdout: '',
-            unmoved: true,
-          };
-        }
-        const again = await setAside();
-        if (again.outcome === 'held') {
-          return {
-            code: 1,
-            stderr: `${again.holding} other task${again.holding === 1 ? ' is' : 's are'} working in this checkout`,
-            stdout: '',
-            unmoved: true,
-          };
-        }
-        if (again.outcome === 'refused') {
-          return { code: 1, stderr: again.reason, stdout: '', unmoved: true };
-        }
+    const moveBase = async (): Promise<SyncBaseApply> => {
+      const first = await setAside();
+      if (first.outcome === 'held') {
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `${first.holding} other task${first.holding === 1 ? ' is' : 's are'} working in this checkout; the base was not moved. Retry this step once ${first.holding === 1 ? 'it finishes' : 'they finish'}.`,
+        };
       }
-    };
+      if (first.outcome === 'refused') {
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `${first.reason}; the base was not moved. Commit or discard that change, then Retry this step.`,
+        };
+      }
 
-    let res = await ffLocked();
-    if (res.code !== 0 && !res.unmoved) {
-      // The deepen is a network fetch: Haive's files go back first, and the retry sets them aside again.
-      if (repositoryId && asided) {
+      // Under both projection locks, so no sweep can rewrite a file between the check and the move. A
+      // file found rewritten ends the transaction unmoved and goes back to the set-aside.
+      const ffLocked = async (): Promise<{
+        code: number;
+        stderr: string;
+        stdout: string;
+        unmoved?: true;
+      }> => {
+        if (!repositoryId) return ff();
+        for (let attempt = 1; ; attempt++) {
+          // Under the dir's lock, so a merge section in this checkout (12, 13) never interleaves with the move.
+          const moved = await inMergeDirLock(ctx.db, ctx.repoPath, async (tx) => {
+            const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
+            if (again.outcome !== 'clean') return { again, res: null, holding: 0 };
+            const holding = await fence(tx);
+            return holding > 0
+              ? { again, res: null, holding }
+              : { again, res: await ff(), holding };
+          });
+          if (moved.res) return moved.res;
+          if (moved.holding > 0) {
+            return {
+              code: 1,
+              stderr: `${moved.holding} other task${moved.holding === 1 ? ' is' : 's are'} working in this checkout`,
+              stdout: '',
+              unmoved: true,
+            };
+          }
+          if (moved.again.outcome === 'refused') {
+            return { code: 1, stderr: moved.again.reason, stdout: '', unmoved: true };
+          }
+          if (attempt === MOVE_ATTEMPTS) {
+            return {
+              code: 1,
+              stderr: "Haive's project files kept changing under the move; Retry this step",
+              stdout: '',
+              unmoved: true,
+            };
+          }
+          const again = await setAside();
+          if (again.outcome === 'held') {
+            return {
+              code: 1,
+              stderr: `${again.holding} other task${again.holding === 1 ? ' is' : 's are'} working in this checkout`,
+              stdout: '',
+              unmoved: true,
+            };
+          }
+          if (again.outcome === 'refused') {
+            return { code: 1, stderr: again.reason, stdout: '', unmoved: true };
+          }
+        }
+      };
+
+      let res = await ffLocked();
+      if (res.code !== 0 && !res.unmoved) {
+        // The deepen is a network fetch: Haive's files go back first, and the retry sets them aside again.
+        if (repositoryId && asided) {
+          await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
+          kept.clear();
+          asided = false;
+        }
+        await gitRun(ctx.repoPath, [
+          'fetch',
+          '--deepen=50',
+          '--end-of-options',
+          'origin',
+          `refs/heads/${base}`,
+        ]);
+        res = await ffLocked();
+      }
+      if (repositoryId && res.code === 0) {
+        await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+      } else if (repositoryId && asided) {
         await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
-        kept.clear();
-        asided = false;
       }
-      await gitRun(ctx.repoPath, [
-        'fetch',
-        '--deepen=50',
-        '--end-of-options',
-        'origin',
-        `refs/heads/${base}`,
-      ]);
-      res = await ffLocked();
-    }
-    if (repositoryId && res.code === 0) {
-      await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
-    } else if (repositoryId && asided) {
-      await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
-    }
-    if (res.code !== 0) {
-      ctx.logger.warn(
-        { base, stderr: res.stderr },
-        'sync base: fast-forward failed; continuing with local base',
-      );
+      if (res.code !== 0) {
+        ctx.logger.warn(
+          { base, stderr: res.stderr },
+          'sync base: fast-forward failed; continuing with local base',
+        );
+        return {
+          synced: false,
+          base,
+          strategy: 'skipped',
+          behindBy: d.behindBy,
+          reason: `fast-forward failed: ${res.stderr || res.stdout}`,
+        };
+      }
+      return { synced: true, base, strategy: 'ff', behindBy: d.behindBy, reason: null };
+    };
+    if (!repositoryId) return moveBase();
+    // The set-aside and the move write the checkout, so they hold its merge-dir claim as a merge does.
+    const owner = { mergeDir: ctx.repoPath, stepId: ctx.taskStepId, taskId: ctx.taskId };
+    const claim = await claimMergeDir(ctx.db, owner);
+    if (claim.kind === 'held') {
       return {
         synced: false,
         base,
         strategy: 'skipped',
         behindBy: d.behindBy,
-        reason: `fast-forward failed: ${res.stderr || res.stdout}`,
+        reason: `Task "${claim.holder.title}" (${claim.holder.id}) is merging in this checkout; the base was not moved. Retry this step once it finishes.`,
       };
     }
-    return { synced: true, base, strategy: 'ff', behindBy: d.behindBy, reason: null };
+    try {
+      return await moveBase();
+    } finally {
+      await releaseMergeDir(ctx.db, owner).catch(() => undefined);
+    }
   },
 };

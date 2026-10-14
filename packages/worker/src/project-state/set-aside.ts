@@ -34,7 +34,6 @@ import { gitOperationInProgress } from '../repo/git-operation.js';
 import { refreshProjectState } from './refresh.js';
 import {
   readProjectStateBase,
-  rebaseProjectStateOnCheckoutLocked,
   rebaseProjectStateOnHeadLocked,
   syncProjectStateFromCheckout,
 } from './sync.js';
@@ -598,7 +597,14 @@ export async function setAsideHaiveProjections(
   };
   let busy = '';
   for (let attempt = 1; attempt <= MOVE_ATTEMPTS; attempt++) {
-    const result = await setAsideOnce(db, repositoryId, repoPath, restored, kept, fence);
+    let result: Awaited<ReturnType<typeof setAsideOnce>>;
+    try {
+      result = await setAsideOnce(db, repositoryId, repoPath, restored, kept, fence);
+    } catch (err) {
+      if (kept.size > 0)
+        await putBackProjections(db, repositoryId, repoPath, kept).catch(() => undefined);
+      throw err;
+    }
     if (!('changed' in result)) {
       if (result.outcome === 'clean' && restored.size > 0) {
         return { outcome: 'set-aside', paths: [...restored].sort(), kept };
@@ -660,7 +666,7 @@ async function setAsideOnce(
       state,
       stateGuard(repositoryId, repoPath, state, fence),
       kept,
-      (tx) => rebaseProjectStateOnCheckoutLocked(tx, { repositoryId, repoPath }),
+      (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
     );
     if (stopped) return stopped;
     for (const path of state) restored.add(path);

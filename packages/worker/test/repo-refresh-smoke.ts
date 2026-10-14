@@ -478,11 +478,22 @@ async function main(): Promise<void> {
       await sweepDirtyProjectStates(db);
       return c;
     };
-    const taskCtx = (dest: string, taskId: string): StepContext =>
-      ({
+    const taskCtx = async (dest: string, taskId: string): Promise<StepContext> => {
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId,
+          stepId: '00a-sync-base',
+          stepIndex: 0,
+          round: 0,
+          title: 'Sync base',
+          status: 'running',
+        })
+        .returning({ id: schema.taskSteps.id });
+      return {
         round: 0,
         taskId,
-        taskStepId: randomUUID(),
+        taskStepId: step!.id,
         userId,
         repoPath: dest,
         workspacePath: dest,
@@ -493,7 +504,8 @@ async function main(): Promise<void> {
         signal: new AbortController().signal,
         throwIfCancelled: () => undefined,
         async emitProgress() {},
-      }) as StepContext;
+      } as StepContext;
+    };
     const moveVia = async (via: 'refresh' | '00a', c: Awaited<ReturnType<typeof cloned>>) => {
       if (via === 'refresh') {
         await handleRefresh(c.payload, db, storage);
@@ -510,7 +522,7 @@ async function main(): Promise<void> {
         })
         .returning({ id: schema.tasks.id });
       try {
-        const ctx = taskCtx(c.dest, task!.id);
+        const ctx = await taskCtx(c.dest, task!.id);
         const detected = await syncBaseStep.detect!(ctx);
         const out = await syncBaseStep.apply(ctx, {
           detected,
@@ -1012,7 +1024,7 @@ async function main(): Promise<void> {
       };
       let out;
       try {
-        const ctx = taskCtx(c.dest, own!.id);
+        const ctx = await taskCtx(c.dest, own!.id);
         const detected = await syncBaseStep.detect!(ctx);
         out = await syncBaseStep.apply(ctx, {
           detected,
@@ -1488,6 +1500,7 @@ async function main(): Promise<void> {
           .where(eq(schema.projectStateOutbox.repositoryId, id))
           .then((rows) => rows[0]!);
       const clean = await rowOf();
+      const beforeAside = await readFile(path.join(c.dest, RENDER_REL), 'utf8');
       const failure = new Error('crash after the restore');
       let restored = null;
       restoreFaults.afterRestore = () => {
@@ -1501,12 +1514,11 @@ async function main(): Promise<void> {
         delete restoreFaults.afterRestore;
       }
       const dirty = await rowOf();
-      const headRender = git(c.dest, 'show', `HEAD:${RENDER_REL}`);
       check(
-        'the stale mark survives a set-aside that fails after the restore',
+        'the stale mark survives a set-aside that fails after the restore, and the files are put back',
         clean.written === clean.revision &&
           dirty.written < dirty.revision &&
-          (await readFile(path.join(c.dest, RENDER_REL), 'utf8')).trim() === headRender.trim(),
+          (await readFile(path.join(c.dest, RENDER_REL), 'utf8')) === beforeAside,
         { restored, clean, dirty },
       );
     }
@@ -1554,8 +1566,8 @@ async function main(): Promise<void> {
         setAsideHaiveProjections(db, c.payload.repositoryId, c.dest),
       );
       check(
-        'K1: a crash after the set-aside restored the files keeps the pending value, in the database and on disk',
-        survived(k1) && !k1.crashed.includes('php'),
+        'K1: a failure after the set-aside restored the files puts them back and keeps the pending value',
+        survived(k1) && k1.crashed.includes('php'),
         { thrown: String(k1.thrown), crashed: k1.crashed, col: k1.col, disk: k1.disk },
       );
 
@@ -1899,7 +1911,7 @@ async function main(): Promise<void> {
         g1Run.thrown === crashAfterRestore &&
           g1Run.sweeps === 2 &&
           g1Mark.written < g1Mark.revision &&
-          g1AtHead &&
+          !g1AtHead &&
           g1After.includes('Root, edited here'),
         { g1Run: { ...g1Run, thrown: String(g1Run.thrown) }, g1Mark, g1AtHead },
       );

@@ -289,7 +289,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       const d = await syncBaseStep.detect!(ctx);
       const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
       expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
-      expect(out.reason).toContain('working in this checkout');
+      expect(out.reason).toContain('is merging in this checkout');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
       claimFake.reset();

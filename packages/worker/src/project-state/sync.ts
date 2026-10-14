@@ -810,14 +810,6 @@ export async function readProjectStateBase(tx: Tx, repositoryId: string): Promis
   return JSON.stringify(await readSyncRow(tx, repositoryId));
 }
 
-/** The same rebase inside a transaction the caller already holds. */
-export async function rebaseProjectStateOnCheckoutLocked(
-  tx: Tx,
-  { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
-): Promise<void> {
-  await rebaseLocked(tx, repositoryId, await readCheckout(repoPath));
-}
-
 async function rebaseLocked(
   tx: Tx,
   repositoryId: string,
