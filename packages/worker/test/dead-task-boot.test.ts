@@ -1,4 +1,4 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import type { WorkflowType } from '@haive/shared';
@@ -22,6 +22,7 @@ if (url && !new URL(url).pathname.startsWith('/dead_task_boot_test'))
   throw new Error('Use a dedicated dead_task_boot_test database for dead task boot tests');
 
 const TYPE = 'j4a_dead_boot';
+const DYNAMIC = 'fnf136_dead_boot_dynamic';
 const A = 'j4a-a';
 const B = 'j4a-b';
 const GONE = 'module.j4a.gone';
@@ -202,6 +203,15 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       .insert(schema.taskTypeDefinitions)
       .values({ slug: TYPE, displayName: TYPE, runListStrategy: 'static', source: 'test' })
       .onConflictDoNothing();
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values({
+        slug: DYNAMIC,
+        displayName: DYNAMIC,
+        runListStrategy: 'workflow_paths',
+        source: 'test',
+      })
+      .onConflictDoNothing();
     stub(A, 1);
     stub(B, 2);
   });
@@ -212,7 +222,9 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
 
   afterAll(async () => {
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
-    await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(inArray(schema.taskTypeDefinitions.slug, [TYPE, DYNAMIC]));
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     await db.$client.end({ timeout: 5 });
   });
@@ -612,6 +624,128 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
 
       expect(await task(unjudged)).toEqual(before);
       expect((await task(judged)).deadAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('a dead task without a run list snapshot', () => {
+    const makeDynamicDead = (over: Partial<typeof schema.tasks.$inferInsert> = {}) =>
+      makeDead({ type: DYNAMIC, runListSnapshot: null, ...over });
+
+    it.each([
+      { status: 'queued', current: null, job: 'start' },
+      { status: 'running', current: A, job: 'advance' },
+    ] as const)(
+      'is revived from $status once its current step resolves, and gets the $job job',
+      async (c) => {
+        const id = await makeDynamicDead({
+          status: c.status,
+          currentStepId: c.current,
+          currentRound: 1,
+        });
+        const { sent, deps } = recorder();
+
+        await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({
+          marked: 0,
+          revived: 1,
+        });
+
+        expect(await task(id)).toMatchObject({
+          deadAt: null,
+          deadReason: null,
+          status: c.status,
+          orchestrationEpoch: 4,
+          currentStepId: c.current,
+          currentRound: 1,
+        });
+        expect(sent).toEqual(
+          c.job === 'start'
+            ? [{ kind: 'start', taskId: id }]
+            : [{ kind: 'advance', taskId: id, stepId: A, round: 1, epoch: 4 }],
+        );
+        const revived = await events(id, 'task.revived');
+        expect(revived).toHaveLength(1);
+        expect(revived[0]?.payload).toMatchObject({ epoch: 4, action: c.job });
+      },
+    );
+
+    it('is revived the same way on a static type, for a task made before snapshots existed', async () => {
+      const id = await makeDead({ runListSnapshot: null });
+      const { sent, deps } = recorder();
+
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ revived: 1 });
+
+      expect(await task(id)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+      expect(sent).toEqual([{ kind: 'advance', taskId: id, stepId: A, round: 0, epoch: 4 }]);
+    });
+
+    it('stays dead while a step its death named is missing, even with no current step', async () => {
+      const id = await makeDynamicDead({ status: 'queued', currentStepId: null });
+      await db.insert(schema.taskEvents).values({
+        taskId: id,
+        eventType: 'task.dead',
+        payload: { reason: DEAD_REASON, unresolved: [GONE], epoch: 3 },
+      });
+      const before = await task(id);
+      const { sent, deps } = recorder();
+
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ marked: 0, revived: 0 });
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ marked: 0, revived: 0 });
+
+      expect(await task(id)).toEqual(before);
+      expect(await events(id, 'task.revived')).toHaveLength(0);
+      expect(sent).toEqual([]);
+    });
+
+    it('is revived once every step its death named is registered again', async () => {
+      const id = await makeDynamicDead({ status: 'queued', currentStepId: null });
+      await db.insert(schema.taskEvents).values({
+        taskId: id,
+        eventType: 'task.dead',
+        payload: { reason: DEAD_REASON, unresolved: [B], epoch: 3 },
+      });
+      const { sent, deps } = recorder();
+
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ revived: 1 });
+
+      expect(await task(id)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+      expect(sent).toEqual([{ kind: 'start', taskId: id }]);
+    });
+
+    it('is left alone while its current step is not registered', async () => {
+      const id = await makeDynamicDead({ currentStepId: GONE });
+      const before = await task(id);
+      const { sent, deps } = recorder();
+
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ marked: 0, revived: 0 });
+
+      expect(await task(id)).toEqual(before);
+      expect(await events(id)).toHaveLength(0);
+      expect(sent).toEqual([]);
+    });
+
+    it.each(['cancelled', 'completed'] as const)('is left alone once %s', async (status) => {
+      const id = await makeDynamicDead({ status });
+      const before = await task(id);
+      const { sent, deps } = recorder();
+
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ marked: 0, revived: 0 });
+
+      expect(await task(id)).toEqual(before);
+      expect(sent).toEqual([]);
+    });
+  });
+
+  describe('a live task without a run list snapshot', () => {
+    it.each([A, GONE])('is not marked dead when its current step is %s', async (current) => {
+      const id = await make({ type: DYNAMIC, runListSnapshot: null, currentStepId: current });
+      const before = await task(id);
+      const { sent, deps } = recorder();
+
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ marked: 0, revived: 0 });
+
+      expect(await task(id)).toEqual(before);
+      expect(await events(id)).toHaveLength(0);
+      expect(sent).toEqual([]);
     });
   });
 

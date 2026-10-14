@@ -608,9 +608,10 @@ export const PUBSUB_CHANNELS = {
  *    terminal:out:{sid}  — shell stdout/stderr → browser (raw bytes)
  *    terminal:ctl:{sid}  — control frames (resize, signal) as JSON
  *
- *  Registry (Redis hash, one entry per session):
- *    terminal:session:{userId}:{taskId}:{providerId} — JSON
- *      { containerName, sessionId, refcount, lastSeenAt, startedAt }
+ *  Registry (Redis hash, one entry per session; key from terminalSessionKey):
+ *    terminal:session:{userId}:{taskId | repo:{repositoryId}}:{providerId}
+ *      { containerName, sessionId, shell, refcount, lastSeenAt, startedAt }, plus for a repo
+ *      shell given a git credential token { scope, scopeId, userId, gitCredMintedAt }
  *
  *  Idle policy: refcount==0 && now-lastSeenAt > TERMINAL_IDLE_GRACE_MS
  *  → reaper kills container and deletes registry entry. */

@@ -60,8 +60,9 @@ repository copy also loads.
   and a re-fed prompt gains no second copy. An MCP server name that is not one line, or that the
   fence would rewrite, is counted rather than listed: it could close its block early.
 - **Unfenced**, because providers are per-user and edited by their owner: this is operator text.
-- **Opt-outs** (`skipAgentRules`): the step recap, `01-env-detect` and the model-health canary,
-  whose prompts carry their whole task and whose replies are parsed as they are. The sub-agent
+- **Opt-outs** (`skipAgentRules`): the step recap, `01-env-detect`, the model-health canary and
+  the creator-mode drafter `01-type-draft`, whose prompts carry their whole task and whose replies
+  are parsed as they are. The sub-agent
   kinds, which no step builds, get no block.
 - **`CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED`** (default on, Admin > CLI execution). ABSENT in
   the pure resolver means off, which keeps every direct `resolveDispatch` caller's prompt

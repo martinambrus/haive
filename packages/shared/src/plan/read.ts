@@ -82,7 +82,11 @@ export async function loadPlanSkeletons(
     })
     .from(schema.planNodes)
     .where(eq(schema.planNodes.repositoryId, repositoryId))
-    .orderBy(asc(schema.planNodes.ordinal), asc(schema.planNodes.createdAt));
+    .orderBy(
+      asc(schema.planNodes.ordinal),
+      asc(schema.planNodes.createdAt),
+      asc(schema.planNodes.id),
+    );
 }
 
 /** As above, with bodies. Used by the markdown render (which is both the prompt
@@ -111,7 +115,11 @@ export async function loadPlanNodes(
     })
     .from(schema.planNodes)
     .where(eq(schema.planNodes.repositoryId, repositoryId))
-    .orderBy(asc(schema.planNodes.ordinal), asc(schema.planNodes.createdAt));
+    .orderBy(
+      asc(schema.planNodes.ordinal),
+      asc(schema.planNodes.createdAt),
+      asc(schema.planNodes.id),
+    );
 }
 
 /**

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   api,
+  changedTaskType,
   createTaskType,
   deleteTaskType,
   getAdminTaskType,
@@ -109,6 +110,58 @@ describe('task type helpers', () => {
     expect(gone.map((c) => [c.method, new URL(c.url).pathname])).toEqual([
       ['DELETE', '/admin/task-types/a-b'],
     ]);
+  });
+});
+
+describe('task type update precondition', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const row = { slug: 'a-b', displayName: 'Theirs', updatedAt: '2026-10-14T12:30:00.456Z' };
+  const refusal = async (status: number, body: unknown): Promise<ApiError> => {
+    failWith(status, body);
+    try {
+      await updateTaskType('a-b', { displayName: 'B' });
+    } catch (err) {
+      return err as ApiError;
+    }
+    throw new Error('request did not fail');
+  };
+
+  it('sends the updatedAt the editor read along with an update', async () => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body as string | undefined });
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+    const body = { displayName: 'B', expectedUpdatedAt: '2026-10-14T12:00:00.123Z' };
+    await updateTaskType('a-b', body);
+    expect(calls.map((c) => [c.method, new URL(c.url).pathname, c.body])).toEqual([
+      ['PATCH', '/admin/task-types/a-b', JSON.stringify(body)],
+    ]);
+  });
+
+  it('reads the current row off the 409 that refuses a stale edit', async () => {
+    const err = await refusal(409, {
+      error: 'The task type was changed since it was loaded',
+      code: 'task_type_changed',
+      taskType: row,
+    });
+    expect(err.status).toBe(409);
+    expect(err.code).toBe('task_type_changed');
+    expect(changedTaskType(err)).toEqual(row);
+  });
+
+  it('reads no row off any other failure', async () => {
+    expect(changedTaskType(await refusal(404, { error: 'Task type not found' }))).toBeNull();
+    expect(
+      changedTaskType(await refusal(409, { error: 'x', code: 'other', taskType: row })),
+    ).toBeNull();
+    expect(
+      changedTaskType(await refusal(409, { error: 'x', code: 'task_type_changed' })),
+    ).toBeNull();
   });
 });
 

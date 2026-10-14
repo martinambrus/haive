@@ -3,8 +3,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 /** Repo-scoped bearer token for the interactive terminal's git credential
  *  helper -> API path.
  *
- *  Minted server-side (worker, when spawning a repo-scope shell container) and
- *  handed to the container via env. The in-container git credential helper
+ *  Minted server-side by the worker and written to a 0600 file in the repo-scope
+ *  shell container, renewed before it expires. The in-container git credential helper
  *  presents it to `POST /internal/git-credential`; the API verifies it, trusts
  *  the embedded repositoryId/userId, looks up the repo's bound credential, and
  *  returns username/password for that one push. The decrypted secret never

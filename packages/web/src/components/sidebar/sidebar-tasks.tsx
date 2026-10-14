@@ -25,9 +25,9 @@ import {
   TASK_TONE_BUTTON_CLASS,
   TASK_TONE_CLASS,
   TASK_TONE_FILTERS,
-  TASK_TONE_LABEL,
   filterTasksByTone,
   taskTone,
+  taskToneLabel,
   type TaskToneFilter,
 } from '@/lib/task-tone';
 import {
@@ -259,7 +259,7 @@ export function SidebarTasks({
           {...rowDropProps(node.key, container, siblings, false)}
           style={pad}
           aria-current={isOpen ? 'page' : undefined}
-          title={`${task.title} — ${TASK_TONE_LABEL[tone]}${phase ? ` — ${phase}` : ''}${isOpen ? ' — currently open' : ''}`}
+          title={`${task.title} — ${taskToneLabel(task)}${phase ? ` — ${phase}` : ''}${isOpen ? ' — currently open' : ''}`}
           className={cn(
             'block cursor-grab rounded px-1.5 py-1 transition-colors active:cursor-grabbing',
             TASK_TONE_CLASS[tone],

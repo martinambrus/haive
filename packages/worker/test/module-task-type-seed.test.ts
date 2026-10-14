@@ -145,7 +145,7 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
     });
   });
 
-  it('a second sync changes nothing but updated_at', async () => {
+  it('a second sync changes nothing, updated_at included', async () => {
     const fx = moduleOf([seedOf(), seedOf({ slug: 'daily' })]);
     await sync(fx);
     const before = new Map((await all()).map((r) => [r.slug, r]));
@@ -154,7 +154,22 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
     const after = await all();
     expect(after.length).toBe(before.size);
     for (const row of after) {
-      expect(withoutTime(row), row.slug).toEqual(withoutTime(before.get(row.slug)));
+      expect(row, row.slug).toEqual(before.get(row.slug));
+    }
+  });
+
+  it('moves updated_at for a seed it rewrites and for no other row', async () => {
+    const daily = seedOf({ slug: 'daily' });
+    await sync(moduleOf([seedOf(), daily]));
+    const old = new Date('2020-01-01T00:00:00.000Z');
+    await db.update(schema.taskTypeDefinitions).set({ updatedAt: old });
+    await sync(moduleOf([seedOf({ description: 'Changed.' }), daily]));
+    for (const row of await all()) {
+      if (row.slug === 'fx__weekly') {
+        expect(row.updatedAt.getTime()).toBeGreaterThan(old.getTime());
+      } else {
+        expect(row.updatedAt, row.slug).toEqual(old);
+      }
     }
   });
 
@@ -490,7 +505,7 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
   describe('what a module seeding changes outside its own rows', () => {
     it('leaves every built-in row as a plain sync wrote it', async () => {
       const before = await bySource('builtin');
-      expect(before).toHaveLength(11);
+      expect(before).toHaveLength(12);
       await sync(moduleOf([seedOf()]));
       expect(await one('fx__weekly')).toBeDefined();
       expect((await bySource('builtin')).map((r) => withoutTime(r))).toEqual(

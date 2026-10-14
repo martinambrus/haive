@@ -19,6 +19,7 @@ describe('resolveTaskClass', () => {
       onboarding: 'setup',
       onboarding_upgrade: 'setup',
       kb_author: 'setup',
+      type_draft: 'setup',
       env_replicate: 'setup',
       run_app: 'run',
     };

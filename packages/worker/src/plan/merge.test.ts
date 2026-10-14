@@ -891,6 +891,20 @@ describe('landPlanMerge', () => {
 
     await expect(landPlanMerge(local, sha!)).rejects.toThrow(/checkout moved/i);
   });
+
+  it('names a change in the checkout that git refused to overwrite, rather than blaming a move', async () => {
+    const { local } = await unrelatedPair();
+    const wt = await ensurePlanMergeWorktree(local);
+    await mergeOriginInto(wt, 'main', (await divergence(local, 'main')).unrelated, COMMIT_ENV);
+    await write(wt, 'README.md', 'merged\n');
+    await git(wt, ['add', 'README.md']);
+    const sha = await commitMerge(wt, 'Merge origin/main', COMMIT_ENV);
+
+    await write(local, 'README.md', 'edited meanwhile\n');
+
+    await expect(landPlanMerge(local, sha!)).rejects.toThrow(/uncommitted changes \(README\.md\)/);
+    expect(await readFile(path.join(local, 'README.md'), 'utf8')).toBe('edited meanwhile\n');
+  });
 });
 
 describe('abortMerge', () => {

@@ -174,8 +174,8 @@ async function main(): Promise<void> {
     registerStepsOnce();
     const loaded = registerModuleSteps(stepRegistry, [entry]);
     await syncStepCatalog(db, stepRegistry, new Map());
-    await syncTaskTypeDefinitions(db, stepRegistry, loaded);
     await syncModuleIntent(db, loaded);
+    await syncTaskTypeDefinitions(db, stepRegistry, loaded);
 
     const [row] = await db
       .select()

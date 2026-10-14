@@ -628,11 +628,15 @@ async function stampOutbox(tx: Tx, repositoryId: string, revision: number): Prom
 
 async function refuseReleasedCheckout(tx: Tx, taskId: string): Promise<void> {
   const [task] = await tx
-    .select({ status: schema.tasks.status })
+    .select({ status: schema.tasks.status, deadAt: schema.tasks.deadAt })
     .from(schema.tasks)
     .where(eq(schema.tasks.id, taskId))
     .limit(1);
-  if (!task || !(CHECKOUT_HOLDING_TASK_STATUSES as readonly string[]).includes(task.status)) {
+  if (
+    !task ||
+    task.deadAt !== null ||
+    !(CHECKOUT_HOLDING_TASK_STATUSES as readonly string[]).includes(task.status)
+  ) {
     throw new ProjectStateMovedError();
   }
 }

@@ -42,11 +42,14 @@ describe('errorHandler', () => {
     expect(await res.text()).toBe('Too many requests');
   });
 
-  it('keeps answering an HttpError with its status and code', async () => {
-    const res = await appThrowing(new HttpError(409, 'Taken', 'taken')).request('/');
-    expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: 'Taken', code: 'taken' });
-  });
+  it.each([409, 413, 429, 501, 502, 503, 504])(
+    'keeps answering an HttpError with its status %i and code',
+    async (status) => {
+      const res = await appThrowing(new HttpError(status, 'Refused', 'refused')).request('/');
+      expect(res.status).toBe(status);
+      expect(await res.json()).toEqual({ error: 'Refused', code: 'refused' });
+    },
+  );
 
   it('keeps answering anything else as a 500', async () => {
     const res = await appThrowing(new Error('boom')).request('/');
