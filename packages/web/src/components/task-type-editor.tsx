@@ -37,6 +37,7 @@ import {
   taskTypeFormSchema,
 } from '@/lib/task-type-form';
 import { usePageTitle } from '@/lib/use-page-title';
+import { useUnsavedChangesGuard } from '@/lib/use-unsaved-changes-guard';
 import type { TaskTypeAvailability } from '@haive/shared/modularity';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { TaskTypeComposer } from '@/components/task-type-composer';
@@ -52,6 +53,8 @@ const NEW_TYPE_DEFAULTS: FormValues = {
   selectable: true,
   sortOrder: 0,
 };
+
+const NO_COMPOSITION = { stepIds: [], stepLoopLimitDefaults: {}, promptSteps: {} };
 
 const CREATE_FIELDS = [
   'displayName',
@@ -197,6 +200,11 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     () => (creating ? NEW_TYPE_DEFAULTS : row ? initialValuesOf(row) : undefined),
     [creating, row],
   );
+  const dirty =
+    initialValues !== undefined &&
+    (Object.keys(values).some((k) => values[k] !== initialValues[k]) ||
+      compositionChanged({ stepIds, loopLimits, promptSteps }, row ?? NO_COMPOSITION));
+  const leaveDialog = useUnsavedChangesGuard(dirty);
 
   function touch() {
     setSaved(false);
@@ -402,6 +410,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         onClose={() => setDeleteOpen(false)}
         onDeleted={() => router.push('/admin/task-types')}
       />
+      {leaveDialog}
     </div>
   );
 }

@@ -393,7 +393,7 @@ export function TaskTypeComposer({
                   rowShadow(index),
                 )}
               >
-                <div className="flex items-start gap-2">
+                <div className="flex flex-wrap items-start gap-2 sm:flex-nowrap">
                   {!readOnly && (
                     <span
                       aria-hidden
@@ -476,7 +476,7 @@ export function TaskTypeComposer({
                     )}
                   </div>
                   {!readOnly && (
-                    <div className="flex shrink-0 gap-1">
+                    <div className="flex w-full shrink-0 gap-1 pl-8 sm:w-auto sm:pl-0">
                       <Button
                         type="button"
                         variant="ghost"

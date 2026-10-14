@@ -138,6 +138,31 @@ describe('TaskTypeComposer', () => {
     expect(html).not.toContain('draggable="true"');
   });
 
+  it('puts the move and remove buttons on their own line under the label below the sm breakpoint', () => {
+    const html = renderToStaticMarkup(
+      <TaskTypeComposer
+        {...base}
+        stepIds={['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality']}
+      />,
+    );
+    const row = html.split('<li ')[1]!;
+    const classesOf = (tag: string) => tag.split(' ');
+    const line = classesOf(row.match(/<div class="([^"]*)">/)![1]!);
+    expect(line).toEqual(expect.arrayContaining(['flex', 'items-start', 'gap-2']));
+    expect(line).toEqual(expect.arrayContaining(['flex-wrap', 'sm:flex-nowrap']));
+    const buttons = classesOf(row.match(/<div class="([^"]*)"><button[^>]*data-act="up"/)![1]!);
+    expect(buttons).toEqual(expect.arrayContaining(['flex', 'shrink-0', 'gap-1']));
+    expect(buttons).toEqual(expect.arrayContaining(['w-full', 'pl-8', 'sm:w-auto', 'sm:pl-0']));
+    expect(row).toMatch(/<div class="[^"]*min-w-0 flex-1[^"]*"><p /);
+    const labels = { up: 'Move ', down: 'Move ', remove: 'Remove ' };
+    for (const [act, label] of Object.entries(labels)) {
+      const tag = row.match(new RegExp(`<button[^>]*data-act="${act}"[^>]*>`))![0];
+      expect(tag).toContain('h-11');
+      expect(tag).toContain('min-w-11');
+      expect(tag).toContain(`aria-label="${label}`);
+    }
+  });
+
   describe('prompt steps', () => {
     const step = {
       slug: 'ask',
