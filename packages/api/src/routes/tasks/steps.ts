@@ -421,7 +421,14 @@ stepRoutes.get('/:id/steps', async (c) => {
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, ignoreSavedStepClis: true },
+    columns: {
+      id: true,
+      ignoreSavedStepClis: true,
+      type: true,
+      repositoryId: true,
+      runListSnapshot: true,
+      customSteps: true,
+    },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   const stepRows = await db
@@ -441,7 +448,7 @@ stepRoutes.get('/:id/steps', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
-  const flags = await loadStepFlags(db);
+  const flags = withTaskCustomSteps(await loadStepFlags(db), task);
   const enriched = await enrichStepsWithCliPreferences(
     db,
     flags,

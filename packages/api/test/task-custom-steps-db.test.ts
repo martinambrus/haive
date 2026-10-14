@@ -291,6 +291,10 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
         steps: { stepId: string; canSkip: boolean }[];
       };
       expect(view.steps.find((s) => s.stepId === WORKTREE)).toMatchObject({ canSkip: false });
+      const stepsOnly = (await (await send('GET', `/tasks/${task.id}/steps`)).json()) as {
+        steps: { stepId: string; canSkip: boolean }[];
+      };
+      expect(stepsOnly.steps.find((s) => s.stepId === WORKTREE)).toMatchObject({ canSkip: false });
       const res = await skip(task.id);
       expect(res.status).toBe(409);
       expect(await res.text()).toContain('This step cannot be skipped');
