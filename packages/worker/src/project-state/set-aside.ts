@@ -255,7 +255,7 @@ function projectionCap(rel: string): number {
   return rel === HAIVE_DATA_FILES.planMarkdown ? PLAN_MD_MAX_BYTES : PLAN_JSON_MAX_BYTES;
 }
 
-/** The working-tree bytes, the index blob and any mode change of `rel` as one string, to tell later whether any moved. */
+/** The working-tree bytes, the index blob, any mode change and the owner of `rel` as one string, to tell later whether any moved. */
 async function fingerprint(repoPath: string, rel: string): Promise<string> {
   const maxBytes = projectionCap(rel);
   let work = 'unreadable';
@@ -265,7 +265,9 @@ async function fingerprint(repoPath: string, rel: string): Promise<string> {
   } catch {
     work = 'unreadable';
   }
-  return `${work}|${await stagedOid(repoPath, rel)}|${(await modeChanges(repoPath, [rel])).get(rel) ?? ''}`;
+  const entry = await lstatNoFollow(repoPath, rel).catch(() => null);
+  const owner = entry === null ? '' : `${entry.stats.uid}:${entry.stats.gid}`;
+  return `${work}|${await stagedOid(repoPath, rel)}|${(await modeChanges(repoPath, [rel])).get(rel) ?? ''}|${owner}`;
 }
 
 /** The first dirty state file that is not what the sync base renders there, or null. The base is the
@@ -571,7 +573,11 @@ async function restoreFromHead(
       const res = await removeFileIfNoFollow(
         repoPath,
         path,
-        (now, mode) => now.equals(was) && (mode & 0o7777) === captured.mode,
+        (now, mode, owner) =>
+          now.equals(was) &&
+          (mode & 0o7777) === captured.mode &&
+          owner.uid === captured.owner?.uid &&
+          owner.gid === captured.owner?.gid,
         {
           maxBytes,
         },
@@ -901,7 +907,8 @@ export async function putBackProjections(
         await removeFileIfNoFollow(
           repoPath,
           path,
-          (now, onDisk) => now.equals(head) && (onDisk & 0o7777) === headMode,
+          (now, onDisk, owner) =>
+            now.equals(head) && (onDisk & 0o7777) === headMode && owner.uid === process.getuid?.(),
           { maxBytes },
         );
       } else {

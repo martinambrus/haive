@@ -7,6 +7,7 @@ import { isDeepStrictEqual as isDeepEqual } from 'node:util';
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   chmod,
+  chown,
   lstat,
   mkdir,
   mkdtemp,
@@ -2089,6 +2090,44 @@ async function main(): Promise<void> {
         asideM5.outcome === 'set-aside' && m5Gone && m5Mode === 0o600,
         { outcome: asideM5.outcome, m5Gone, m5Mode: m5Mode.toString(8) },
       );
+
+      // O4. An owner change landing after the capture of an untracked plan.json keeps the file.
+      const o4 = await cloned();
+      const o4Id = o4.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: o4Id, origin: 'user' },
+      );
+      await writePlanMirror(db, o4Id, o4.dest);
+      const o4Plan = path.join(o4.dest, PLAN_REL);
+      const o4Was = await stat(o4Plan);
+      const o4Gid = process.getgroups?.().find((gid) => gid !== o4Was.gid);
+      if (o4Gid === undefined) {
+        check('O4: skipped, the process belongs to no second group to give the file to', true);
+      } else {
+        let o4Fired = false;
+        restoreFaults.beforeRestore = async () => {
+          delete restoreFaults.beforeRestore;
+          o4Fired = true;
+          await chown(o4Plan, o4Was.uid, o4Gid);
+        };
+        let asideO4;
+        try {
+          asideO4 = await setAsideHaiveProjections(db, o4Id, o4.dest);
+        } finally {
+          delete restoreFaults.beforeRestore;
+        }
+        if (asideO4.outcome === 'set-aside') {
+          await putBackProjections(db, o4Id, o4.dest, asideO4.kept);
+        }
+        const o4Now = await stat(o4Plan).catch(() => null);
+        check(
+          'O4: an owner change landing before the restore of an untracked plan.json is kept',
+          o4Fired && o4Now?.gid === o4Gid,
+          { o4Fired, outcome: asideO4.outcome, gid: o4Now?.gid, want: o4Gid, was: o4Was.gid },
+        );
+      }
 
       // M6. A tracked plan.md deleted in the checkout comes back from HEAD for the move; a mode a person
       // gives it meanwhile keeps it out of the put-back's removal.
