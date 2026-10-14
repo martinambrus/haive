@@ -124,7 +124,7 @@ describe('a module task type seed in a manifest', () => {
   });
 
   it('counts the module id towards the length', () => {
-    const id = 'm'.repeat(100);
+    const id = 'm'.repeat(23);
     const local = 'a'.repeat(128 - id.length - 2);
     const core = ['01-env-detect'];
     expect(problems(manifest([seed({ slug: local, stepIds: core })], id))).toEqual([]);

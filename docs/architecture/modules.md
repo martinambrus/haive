@@ -18,6 +18,9 @@ the module loads again.
 
 - **Installed, active.** `pnpm module add <id>` and a rebuild. Everything runs: the module's api
   routes at `/m/<id>`, nav and pages, settings, dashboard widget, worker steps, jobs and database.
+  A module whose manifest sets `apiRequiresAdmin` is listed for a non-admin with
+  `compiledWeb: false`: its compiled pages answer not-found and its compiled dashboard widgets do not
+  render for that user, while its declared pages without data endpoints still do.
 - **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
   `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
   `module_tasks_open`, which the page shows as a list of up to 200 tasks, while a live task's run list

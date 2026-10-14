@@ -70,9 +70,9 @@ jobs:
       # `# shellcheck disable=` directives written for a linter nothing ever ran.
       #
       # MEASURED before adding this: shellcheck reports ZERO findings on that file, so the gate has
-      # no backlog to work through. It is scoped to the installer rather than every `*.sh` because
-      # the other four scripts carry style notes (SC2034 on loop counters, one SC2086) that belong
-      # to their own change, not to this one.
+      # no backlog to work through. It is scoped to the installer and dev.sh rather than every
+      # `*.sh` because the other four scripts carry style notes (SC2034 on loop counters, one
+      # SC2086) that belong to their own change, not to this one.
       #
       # It is not hypothetical coverage: a `die "… `docker compose up -d` succeeded …"` written
       # while fixing the installer put a live COMMAND SUBSTITUTION inside an error message, which
@@ -84,13 +84,14 @@ jobs:
       # ubuntu's build reported SC2015 on a line that 0.11.0 passes, so the gate went red on code
       # that had been checked. An unpinned linter fails builds nobody caused, and the fix for the
       # finding it did raise is in `install.sh`, not in a suppression here.
-      - name: Shellcheck the installer
+      - name: Shellcheck the installer and dev.sh
         run: |
           set -euo pipefail
           image=koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
           scripts/ci-retry.sh docker pull "$image"
           docker run --rm -v "$PWD:/mnt:ro" "$image" \
             --shell=sh install/install.sh install/test/boot-failures.sh
+          docker run --rm -v "$PWD:/mnt:ro" "$image" --shell=bash scripts/dev.sh
 
       # The installer's BOOT block, which nothing else runs. `platform-checks.yml` installs with
       # `--no-start` and boots through the generated `./haive`, deliberately — a full `up` pulls
@@ -185,6 +186,7 @@ jobs:
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
+          INTEGRATIONS_BROKER_TEST_REDIS_URL: redis://localhost:6379/13
         run: |
           set -uo pipefail
           pnpm --filter @haive/web-kit build
@@ -226,15 +228,19 @@ jobs:
           worker test/module-deactivated-step.test.ts MODULE_DEACTIVATED_STEP_TEST_URL module_deactivated_step_test pg
           worker test/module-teardown.test.ts MODULE_TEARDOWN_TEST_URL module_teardown_test pg
           worker test/cancel-sandbox-fence.test.ts CANCEL_FENCE_TEST_URL cancel_fence_test pg
+          worker test/pending-fail-path.test.ts PENDING_FAIL_PATH_TEST_URL pending_fail_path_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
           api test/task-custom-steps-db.test.ts TASK_CUSTOM_STEPS_TEST_URL task_custom_steps_test pg
           api test/module-deactivation-db.test.ts MODULE_DEACTIVATION_API_TEST_URL module_deactivation_api_test pg
           api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test pg
+          api test/integrations-broker.test.ts INTEGRATIONS_BROKER_TEST_URL integrations_broker_test pg
+          api test/custom-mcp-db.test.ts CUSTOM_MCP_TEST_URL custom_mcp_test pg
           shared test/create-database-race.test.ts RACE_PG_URL create_database_race_test pg
           shared test/integrations-refresh-db.test.ts INTEGRATIONS_REFRESH_TEST_URL integrations_refresh_test pg
           shared test/integrations-clients-db.test.ts INTEGRATIONS_CLIENTS_TEST_URL integrations_clients_test pg
           database test/integration-connection-keys.test.ts INTEGRATION_KEYS_TEST_URL integration_keys_test pg
+          api test/admin-integrations-db.test.ts ADMIN_INTEGRATIONS_TEST_URL admin_integrations_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector

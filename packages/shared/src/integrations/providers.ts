@@ -12,14 +12,18 @@ export function getIntegrationProvider(providerId: string): IntegrationProviderS
   return listIntegrationProviders().find((provider) => provider.id === providerId);
 }
 
-/** The admin's switch when there is a row for the provider, else on for a registered core provider only. */
+/** What a provider with no row is: on for a registered core provider only. */
+export function defaultProviderEnabled(providerId: string): boolean {
+  return (
+    parseProviderId(providerId)?.kind === 'core' && getIntegrationProvider(providerId) !== undefined
+  );
+}
+
+/** The admin's switch when there is a row for the provider, else its default. */
 export async function isProviderEnabled(db: Database | DbTx, providerId: string): Promise<boolean> {
   const [row] = await db
     .select({ enabled: schema.integrationProviderConfigs.enabled })
     .from(schema.integrationProviderConfigs)
     .where(eq(schema.integrationProviderConfigs.providerId, providerId));
-  if (row) return row.enabled;
-  return (
-    parseProviderId(providerId)?.kind === 'core' && getIntegrationProvider(providerId) !== undefined
-  );
+  return row ? row.enabled : defaultProviderEnabled(providerId);
 }

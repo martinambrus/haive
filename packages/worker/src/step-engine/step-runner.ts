@@ -2593,6 +2593,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   }, CANCEL_POLL_INTERVAL_MS);
 
   const ctx = buildStepContext(params, row, controller.signal, throwIfCancelled);
+  let opened = row.status !== 'pending';
 
   try {
     if (stepDef.shouldRun && isFreshStepEntry(row.status)) {
@@ -2625,6 +2626,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
       if (!claimed) return supersededPass(current);
       current = claimed;
+      opened = true;
     } else if (current.status === 'waiting_cli') {
       // Same fold, for the CLI continuation. The invocation ended, markCliParkBegin stamped the
       // wait (cli-exec/handlers.ts), and THIS advance is where work actually resumes — so the
@@ -3472,6 +3474,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     } else {
       log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
     }
+    // A pass that threw before opening its row left it pending, which updateRow refuses.
+    const writeEnd = (patch: UpdatePatch): Promise<TaskStepRow | null> =>
+      (opened
+        ? updateRow(db, row.id, patch)
+        : openPendingStep(db, taskId, params.epoch, row.id, patch)
+      ).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces
     // the round cap; at the cap the task fails with this diagnosis. A predicate form
@@ -3479,12 +3487,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // and still hard-fail on the ones no amount of re-implementing would clear.
     const routeErrorToFixLoop = routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
-      const finished = await updateRow(db, row.id, {
+      const finished = await writeEnd({
         status: 'done',
         statusMessage: null,
         errorMessage,
         endedAt: new Date(),
-      }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
+      });
       // After the step's own write, so a Resume never finds the agents ended on a step still running;
       // not when that write errored (the catch hands back the stale row) and the step is not terminal.
       if (stepDef.agentMining && finished !== row)
@@ -3503,12 +3511,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         ...(advised?.advice ? { guidance: advised.advice } : {}),
       };
     }
-    const failed = await updateRow(db, row.id, {
+    const failed = await writeEnd({
       status: 'failed',
       statusMessage: null,
       errorMessage,
       endedAt: new Date(),
-    }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
+    });
     if (stepDef.agentMining && failed !== row) await releaseStepAgents(db, row.id, errorMessage);
     if (!failed) return supersededPass(row);
     return { status: 'failed', row: failed, error: errorMessage };
