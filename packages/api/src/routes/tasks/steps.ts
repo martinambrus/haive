@@ -1369,7 +1369,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // Skip is disabled across the workflow except on the steps that opt in
     // (metadata.allowSkip), plus 01-worktree-setup where the run list allows it (skip = run from
     // the project root instead of an isolated worktree/branch).
-    if (!isStepSkippable(await loadStepFlags(db), stepId, task)) {
+    if (!isStepSkippable(withTaskCustomSteps(await loadStepFlags(db), task), stepId, task)) {
       throw new HttpError(409, 'This step cannot be skipped');
     }
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
@@ -1622,6 +1622,8 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     columns: {
       id: true,
       status: true,
+      type: true,
+      repositoryId: true,
       runListSnapshot: true,
       customSteps: true,
       // stamped on the re-advance below so a later task retry can invalidate it

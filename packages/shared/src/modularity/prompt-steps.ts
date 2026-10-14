@@ -10,6 +10,7 @@ import {
 } from './contracts.js';
 
 export const PROMPT_STEP_TEMPLATE_MAX_BYTES = 16 * 1024;
+export const PROMPT_STEP_TITLE_MAX_LENGTH = 512;
 export const PROMPT_STEP_TIMEOUT_MIN_MS = 60_000;
 export const PROMPT_STEP_TIMEOUT_MAX_MS = 30 * 60_000;
 export const PROMPT_STEP_CAPABILITIES = ['tool_use', 'file_write', 'vision'] as const;
@@ -27,7 +28,7 @@ const utf8Bytes = (text: string): number => new TextEncoder().encode(text).lengt
 
 export const promptStepEntrySchema = z.object({
   slug: z.string().refine((slug) => isCustomStepId(`custom.t.${slug}`), 'invalid step slug'),
-  title: z.string().min(1),
+  title: z.string().min(1).max(PROMPT_STEP_TITLE_MAX_LENGTH),
   description: z.string().optional(),
   template: z
     .string()

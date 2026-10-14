@@ -8,6 +8,7 @@ import {
 } from '@haive/shared';
 import {
   composableStepEntrySchema,
+  derivePromptStepComposable,
   promptStepEntrySchema,
   validateComposition,
   type CompositionIssue,
@@ -107,6 +108,8 @@ export async function loadStepFlags(
 export function withTaskCustomSteps(
   flags: StepFlagMap,
   task: {
+    type: string;
+    repositoryId: string | null;
     runListSnapshot: readonly string[] | null;
     customSteps: Record<string, unknown> | null;
   },
@@ -127,7 +130,7 @@ export function withTaskCustomSteps(
       providerSensitive: false,
       cliRoles: null,
       stepIndex: index,
-      composable: null,
+      composable: derivePromptStepComposable(entry.data, task.type, task.repositoryId !== null),
     });
   }
   return merged;

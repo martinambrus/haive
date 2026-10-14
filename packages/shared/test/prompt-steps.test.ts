@@ -395,6 +395,8 @@ describe('promptStepEntrySchema', () => {
     expect(bad({ template: 'a'.repeat(PROMPT_STEP_TEMPLATE_MAX_BYTES + 1) })).toBe(false);
     expect(bad({ template: '' })).toBe(false);
     expect(bad({ title: '' })).toBe(false);
+    expect(bad({ title: 'a'.repeat(512) })).toBe(true);
+    expect(bad({ title: 'a'.repeat(513) })).toBe(false);
     expect(bad({ capabilities: ['tool_use', 'file_write', 'vision'] })).toBe(true);
     expect(bad({ capabilities: ['subagents'] })).toBe(false);
   });

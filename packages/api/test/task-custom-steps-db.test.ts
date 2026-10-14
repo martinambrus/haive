@@ -134,13 +134,13 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
     expect(created.status).toBe(201);
   });
 
-  const insertTask = async () => {
-    const def = await definitionForCreate(db, TYPE, { generic: true });
+  const insertTask = async (type: string = TYPE) => {
+    const def = await definitionForCreate(db, type, { generic: true });
     const [task] = await db
       .insert(schema.tasks)
       .values({
         userId: ACTOR_ID,
-        type: TYPE,
+        type,
         title: 'pinned',
         status: 'running',
         runListSnapshot: def.runListSnapshot,
@@ -226,5 +226,72 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
       send('PATCH', `/tasks/${task.id}/steps/${stepId}/cli-provider`, { cliProviderId: null });
     expect((await choose(CUSTOM_ID)).status).toBe(200);
     expect((await choose(`custom.${TYPE}.nope`)).status).toBe(404);
+  });
+
+  describe('a pinned step that writes files', () => {
+    const WRITER_TYPE = 'tcs-writer';
+    const WORKTREE = '01-worktree-setup';
+
+    const setUp = async (capabilities: string[]) => {
+      await db.delete(schema.stepCatalog);
+      await db.insert(schema.stepCatalog).values({
+        stepId: WORKTREE,
+        source: 'core',
+        title: 'Worktree setup',
+        workflowType: 'workflow',
+        dispatchesCli: false,
+        allowSkip: false,
+        providerSensitive: false,
+        composable: true,
+        stepIndex: 0,
+        entry: {
+          stepId: WORKTREE,
+          label: 'Worktree setup',
+          group: 'setup',
+          dispatchesCli: false,
+          requires: [{ needs: 'repository', reason: 'Cuts the worktree from the repository.' }],
+          provides: ['worktree', 'clean-tree'],
+        },
+      });
+      resetStepFlagsCache();
+      const created = await send('POST', '/admin/task-types', {
+        slug: WRITER_TYPE,
+        displayName: 'Writer',
+        stepIds: [WORKTREE, `custom.${WRITER_TYPE}.review`],
+        requiresRepository: true,
+        promptSteps: { review: { ...promptStep('Write {{task.title}}'), capabilities } },
+      });
+      expect(created.status).toBe(201);
+      const { task } = await insertTask(WRITER_TYPE);
+      await db.insert(schema.taskSteps).values({
+        taskId: task.id,
+        stepId: WORKTREE,
+        stepIndex: 0,
+        title: 'Worktree setup',
+        status: 'waiting_form',
+      });
+      return task;
+    };
+    const skip = (taskId: string) =>
+      send('POST', `/tasks/${taskId}/steps/${WORKTREE}/action`, { action: 'skip' });
+
+    it('keeps the worktree step unskippable in the task view and refuses its skip action', async () => {
+      const task = await setUp(['file_write']);
+      const view = (await (await send('GET', `/tasks/${task.id}`)).json()) as {
+        steps: { stepId: string; canSkip: boolean }[];
+      };
+      expect(view.steps.find((s) => s.stepId === WORKTREE)).toMatchObject({ canSkip: false });
+      const res = await skip(task.id);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('This step cannot be skipped');
+    });
+
+    it('lets the worktree step go when the pinned step only reads', async () => {
+      const task = await setUp(['tool_use']);
+      const view = (await (await send('GET', `/tasks/${task.id}`)).json()) as {
+        steps: { stepId: string; canSkip: boolean }[];
+      };
+      expect(view.steps.find((s) => s.stepId === WORKTREE)).toMatchObject({ canSkip: true });
+    });
   });
 });

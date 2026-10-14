@@ -142,10 +142,11 @@ describe('withTaskCustomSteps', () => {
     'custom.t.second': entry('second', 'Second step'),
   };
   const snapshot = ['a', 'custom.t.second', 'b', 'custom.t.first'];
+  const owner = { type: 't', repositoryId: null };
 
   it('answers custom ids from the task copy, at their snapshot position', async () => {
     const base = await loadStepFlags(fakeDb(() => [row('a'), row('b')]).db);
-    const flags = withTaskCustomSteps(base, { runListSnapshot: snapshot, customSteps });
+    const flags = withTaskCustomSteps(base, { ...owner, runListSnapshot: snapshot, customSteps });
     expect(flags.get('custom.t.second')).toMatchObject({
       stepId: 'custom.t.second',
       title: 'Second step',
@@ -154,7 +155,7 @@ describe('withTaskCustomSteps', () => {
       providerSensitive: false,
       cliRoles: null,
       stepIndex: 1,
-      composable: null,
+      composable: { stepId: 'custom.t.second', requires: [], provides: [] },
     });
     expect(flags.get('custom.t.first')).toMatchObject({ title: 'First step', stepIndex: 3 });
     expect(flags.get('a')).toBe(base.get('a'));
@@ -162,31 +163,77 @@ describe('withTaskCustomSteps', () => {
 
   it('never writes into the map it was given', async () => {
     const base = await loadStepFlags(fakeDb(() => [row('a')]).db);
-    withTaskCustomSteps(base, { runListSnapshot: snapshot, customSteps });
+    withTaskCustomSteps(base, { ...owner, runListSnapshot: snapshot, customSteps });
     expect(base.has('custom.t.first')).toBe(false);
     expect((await loadStepFlags(fakeDb(() => [row('a')]).db)).has('custom.t.first')).toBe(false);
   });
 
   it('returns the map itself for a task with no custom steps', async () => {
     const base = await loadStepFlags(fakeDb(() => [row('a')]).db);
-    expect(withTaskCustomSteps(base, { runListSnapshot: snapshot, customSteps: null })).toBe(base);
-    expect(withTaskCustomSteps(base, { runListSnapshot: snapshot, customSteps: {} })).toBe(base);
+    expect(
+      withTaskCustomSteps(base, { ...owner, runListSnapshot: snapshot, customSteps: null }),
+    ).toBe(base);
+    expect(
+      withTaskCustomSteps(base, { ...owner, runListSnapshot: snapshot, customSteps: {} }),
+    ).toBe(base);
   });
 
   it('ignores a copy whose id is not in the snapshot', async () => {
     const base = await loadStepFlags(fakeDb(() => [row('a')]).db);
-    const flags = withTaskCustomSteps(base, { runListSnapshot: ['a'], customSteps });
+    const flags = withTaskCustomSteps(base, { ...owner, runListSnapshot: ['a'], customSteps });
     expect(flags.has('custom.t.first')).toBe(false);
   });
 
   it('shows the custom step in the upcoming list in snapshot order and keeps it unskippable', async () => {
     const base = await loadStepFlags(fakeDb(() => [row('a'), row('b')]).db);
-    const task = { runListSnapshot: snapshot, customSteps };
+    const task = { ...owner, runListSnapshot: snapshot, customSteps };
     const flags = withTaskCustomSteps(base, task);
     const db = { select: () => ({ from: () => ({ where: async () => [] }) }) } as never;
     const upcoming = await buildUpcomingCliSteps(db, flags, 'u', 't', 'tt-x', [], false, snapshot);
     expect(upcoming.map((s) => s.stepId)).toEqual(['custom.t.second', 'custom.t.first']);
     expect(enrichStepsWithCliUsage(flags, [{ stepId: 'custom.t.first' }])[0]!.usesCli).toBe(true);
     expect(isStepSkippable(flags, 'custom.t.first', task)).toBe(false);
+  });
+});
+
+describe('withTaskCustomSteps and 01-worktree-setup', () => {
+  const worktree = row('01-worktree-setup', {
+    composable: true,
+    entry: {
+      stepId: '01-worktree-setup',
+      label: 'Worktree setup',
+      group: 'setup',
+      dispatchesCli: false,
+      requires: [{ needs: 'repository', reason: 'Cuts the worktree from the repository.' }],
+      provides: ['worktree', 'clean-tree'],
+    },
+  });
+  const pinned = (capabilities: string[]) => ({
+    'custom.t.step': {
+      slug: 'step',
+      title: 'Step',
+      template: 'Do it',
+      capabilities,
+      timeoutMs: 300_000,
+    },
+  });
+  const snapshot = ['01-worktree-setup', 'custom.t.step'];
+  const skippable = async (capabilities: string[]) => {
+    const base = await loadStepFlags(fakeDb(() => [worktree]).db);
+    const task = {
+      type: 't',
+      repositoryId: 'r1',
+      runListSnapshot: snapshot,
+      customSteps: pinned(capabilities),
+    };
+    return isStepSkippable(withTaskCustomSteps(base, task), '01-worktree-setup', task);
+  };
+
+  it('keeps the worktree step unskippable under a pinned step that writes files', async () => {
+    expect(await skippable(['file_write'])).toBe(false);
+  });
+
+  it('lets the worktree step go under a pinned step that only reads', async () => {
+    expect(await skippable(['tool_use'])).toBe(true);
   });
 });
