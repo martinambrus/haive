@@ -261,6 +261,8 @@ taskRoutes.get('/', async (c) => {
   const effectiveVoteScore = sql`case when ${schema.tasks.status} in ('completed', 'cancelled', 'failed') then 0 else ${schema.tasks.voteScore} end`;
   const rows = await db.query.tasks.findMany({
     where,
+    // A task's pinned prompt steps can run to many KiB; no list reader needs them.
+    columns: { customSteps: false },
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],

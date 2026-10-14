@@ -184,6 +184,16 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
     expect(later.customSteps?.[CUSTOM_ID]?.template).toBe('Second {{task.description}}');
   });
 
+  it('leaves the pinned prompt bodies out of the task list', async () => {
+    const { task } = await insertTask();
+    const res = await send('GET', '/tasks?pageSize=100');
+    expect(res.status).toBe(200);
+    const { tasks } = (await res.json()) as { tasks: Record<string, unknown>[] };
+    const listed = tasks.find((t) => t.id === task.id);
+    expect(listed).toBeDefined();
+    expect(listed).not.toHaveProperty('customSteps');
+  });
+
   it('gives the pinned custom step a CLI picker and a place in the upcoming list', async () => {
     const { task } = await insertTask();
     const res = await send('GET', `/tasks/${task.id}`);
