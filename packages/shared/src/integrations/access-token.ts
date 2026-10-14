@@ -1,0 +1,156 @@
+import { eq, sql } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
+import { secretsService } from '../config/secrets.service.js';
+import { envelopeDecrypt } from '../crypto/index.js';
+import { logger } from '../logger/index.js';
+import { decryptConnectionTokens, encryptConnectionTokens } from './connection-tokens.js';
+import {
+  ConnectionNotFoundError,
+  NeedsReauthError,
+  OauthUnavailableError,
+  OauthVendorError,
+} from './errors.js';
+import { refreshAccessToken, type TokenSet } from './oauth.js';
+import { resolveOauthClient } from './oauth-client.js';
+import { getIntegrationProvider } from './providers.js';
+
+const REFRESH_MARGIN_MS = 5 * 60_000;
+const REFRESH_LOCK_TIMEOUT_MS = 30_000;
+
+type ConnectionRow = typeof schema.integrationConnections.$inferSelect;
+type Outcome = { accessToken: string } | { needsReauth: true };
+
+export interface AccessTokenOptions {
+  fetchFn: typeof fetch;
+  now?: () => number;
+}
+
+// Per database client, so one process shares a refresh among its callers while two pools do not.
+const refreshing = new WeakMap<Database, Map<string, Promise<string>>>();
+
+function isExpiring(row: ConnectionRow, nowMs: number): boolean {
+  return row.expiresAt !== null && row.expiresAt.getTime() - REFRESH_MARGIN_MS <= nowMs;
+}
+
+/**
+ * A usable access token, refreshed first when about to expire; a Git-credential-backed connection
+ * returns that credential's secret. Throws NeedsReauthError when the owner must sign in again.
+ */
+export async function getConnectionAccessToken(
+  db: Database,
+  connectionId: string,
+  options: AccessTokenOptions,
+): Promise<string> {
+  const now = options.now ?? Date.now;
+  const [row] = await db
+    .select()
+    .from(schema.integrationConnections)
+    .where(eq(schema.integrationConnections.id, connectionId));
+  if (!row) throw new ConnectionNotFoundError(connectionId);
+  if (row.status !== 'connected') throw new NeedsReauthError(connectionId, row.status);
+
+  const kek = await secretsService.getMasterKek();
+  if (row.repoCredentialId !== null) {
+    const [credential] = await db
+      .select({
+        encryptedValue: schema.repoCredentials.secretEncrypted,
+        encryptedDek: schema.repoCredentials.encryptedDek,
+      })
+      .from(schema.repoCredentials)
+      .where(eq(schema.repoCredentials.id, row.repoCredentialId));
+    if (!credential) throw new ConnectionNotFoundError(connectionId);
+    return envelopeDecrypt(credential, kek);
+  }
+  if (!isExpiring(row, now())) return decryptConnectionTokens(row, kek).accessToken;
+
+  const inFlight = refreshing.get(db) ?? new Map<string, Promise<string>>();
+  refreshing.set(db, inFlight);
+  let flight = inFlight.get(connectionId);
+  if (!flight) {
+    flight = refreshLocked(db, connectionId, kek, options.fetchFn, now).finally(() =>
+      inFlight.delete(connectionId),
+    );
+    inFlight.set(connectionId, flight);
+  }
+  return flight;
+}
+
+async function refreshLocked(
+  db: Database,
+  connectionId: string,
+  kek: string,
+  fetchFn: typeof fetch,
+  now: () => number,
+): Promise<string> {
+  const outcome = await db.transaction(async (tx): Promise<Outcome> => {
+    await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${REFRESH_LOCK_TIMEOUT_MS}ms'`));
+    const [row] = await tx
+      .select()
+      .from(schema.integrationConnections)
+      .where(eq(schema.integrationConnections.id, connectionId))
+      .for('update');
+    if (!row) throw new ConnectionNotFoundError(connectionId);
+    if (row.status !== 'connected') throw new NeedsReauthError(connectionId, row.status);
+    const tokens = decryptConnectionTokens(row, kek);
+    if (!isExpiring(row, now())) return { accessToken: tokens.accessToken };
+
+    const needsReauth = async (reason: string): Promise<Outcome> => {
+      await tx
+        .update(schema.integrationConnections)
+        .set({ status: 'needs_reauth', lastError: reason, updatedAt: new Date(now()) })
+        .where(eq(schema.integrationConnections.id, connectionId));
+      logger.warn(
+        { connectionId, providerId: row.providerId },
+        'integration connection needs to be connected again',
+      );
+      return { needsReauth: true };
+    };
+    if (tokens.refreshToken === null) return needsReauth('The provider issued no refresh token.');
+
+    const method = getIntegrationProvider(row.providerId)?.auth.find(
+      (auth) => auth.kind === row.authMethod,
+    );
+    if (method?.kind !== 'oauth2' && method?.kind !== 'device') {
+      throw new OauthUnavailableError(
+        `provider ${row.providerId} has no ${row.authMethod} method to refresh with`,
+      );
+    }
+    const client = await resolveOauthClient(tx, row.providerId, row.ownerUserId, method.kind, kek);
+    if (!client) {
+      throw new OauthUnavailableError(`no OAuth client is configured for ${row.providerId}`);
+    }
+
+    let fresh: TokenSet;
+    try {
+      fresh = await refreshAccessToken(fetchFn, {
+        tokenUrl: method.tokenUrl,
+        client,
+        refreshToken: tokens.refreshToken,
+        now,
+      });
+    } catch (err) {
+      if (err instanceof OauthVendorError && err.code === 'invalid_grant') {
+        return needsReauth(err.description ?? err.code);
+      }
+      throw err;
+    }
+    await tx
+      .update(schema.integrationConnections)
+      .set({
+        ...encryptConnectionTokens(
+          {
+            accessToken: fresh.accessToken,
+            refreshToken: fresh.refreshToken ?? tokens.refreshToken,
+          },
+          kek,
+        ),
+        expiresAt: fresh.expiresAt,
+        grantedScopes: fresh.scopes ?? row.grantedScopes,
+        updatedAt: new Date(now()),
+      })
+      .where(eq(schema.integrationConnections.id, connectionId));
+    return { accessToken: fresh.accessToken };
+  });
+  if ('needsReauth' in outcome) throw new NeedsReauthError(connectionId, 'needs_reauth');
+  return outcome.accessToken;
+}

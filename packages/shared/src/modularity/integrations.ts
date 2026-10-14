@@ -20,6 +20,15 @@ const scopeSetSchema = z.object({
   write: z.array(z.string()),
 });
 
+const jsonPointerSchema = z.string().regex(/^(\/([^/~]|~[01])*)+$/, 'must be a JSON pointer');
+
+export const userInfoSpecSchema = z.object({
+  url: httpsUrlSchema,
+  idPointer: jsonPointerSchema,
+  labelPointer: jsonPointerSchema,
+});
+export type UserInfoSpec = z.infer<typeof userInfoSpecSchema>;
+
 export const authMethodSpecSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('oauth2'),
@@ -29,12 +38,14 @@ export const authMethodSpecSchema = z.discriminatedUnion('kind', [
     scopes: scopeSetSchema,
     pkce: z.literal(true),
     clientRegistration: z.array(z.enum(['preregistered', 'cimd', 'dcr'])).min(1),
+    userInfo: userInfoSpecSchema.optional(),
   }),
   z.object({
     kind: z.literal('device'),
     deviceCodeUrl: httpsUrlSchema,
     tokenUrl: httpsUrlSchema,
     scopes: scopeSetSchema,
+    userInfo: userInfoSpecSchema.optional(),
   }),
   z.object({
     kind: z.literal('token'),

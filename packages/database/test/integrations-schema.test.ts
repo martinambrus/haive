@@ -33,6 +33,26 @@ describe('integration tables', () => {
     expect(constraint?.columns.map((c) => c.name)).toEqual(['user_id', 'category_id']);
   });
 
+  it('keys a connection on its account and on its Git credential, only where those are set', () => {
+    const indexes = getTableConfig(schema.integrationConnections).indexes.map((i) => i.config);
+    const named = (name: string) => indexes.find((i) => i.name === name);
+    const account = named('integration_connections_account_key_idx');
+    expect(account?.unique).toBe(true);
+    expect(account?.columns.map((c) => (c as { name: string }).name)).toEqual([
+      'scope',
+      'owner_user_id',
+      'provider_id',
+      'external_account_id',
+    ]);
+    expect(account?.where).toBeDefined();
+    const credential = named('integration_connections_repo_credential_key_idx');
+    expect(credential?.unique).toBe(true);
+    expect(credential?.columns.map((c) => (c as { name: string }).name)).toEqual([
+      'repo_credential_id',
+    ]);
+    expect(credential?.where).toBeDefined();
+  });
+
   it('keys user settings on user and provider', () => {
     const [pk] = getTableConfig(schema.integrationUserSettings).primaryKeys;
     expect(pk?.columns.map((c) => c.name)).toEqual(['user_id', 'provider_id']);

@@ -224,6 +224,9 @@ jobs:
           api test/task-custom-steps-db.test.ts TASK_CUSTOM_STEPS_TEST_URL task_custom_steps_test pg
           api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test pg
           shared test/create-database-race.test.ts RACE_PG_URL create_database_race_test pg
+          shared test/integrations-refresh-db.test.ts INTEGRATIONS_REFRESH_TEST_URL integrations_refresh_test pg
+          shared test/integrations-clients-db.test.ts INTEGRATIONS_CLIENTS_TEST_URL integrations_clients_test pg
+          database test/integration-connection-keys.test.ts INTEGRATION_KEYS_TEST_URL integration_keys_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector

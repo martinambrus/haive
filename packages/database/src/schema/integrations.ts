@@ -8,6 +8,7 @@ import {
   timestamp,
   index,
   unique,
+  uniqueIndex,
   primaryKey,
   check,
   pgEnum,
@@ -79,6 +80,12 @@ export const integrationConnections = pgTable(
   (table) => [
     index('integration_connections_owner_user_id_idx').on(table.ownerUserId),
     index('integration_connections_provider_id_idx').on(table.providerId),
+    uniqueIndex('integration_connections_account_key_idx')
+      .on(table.scope, table.ownerUserId, table.providerId, table.externalAccountId)
+      .where(sql`${table.externalAccountId} IS NOT NULL`),
+    uniqueIndex('integration_connections_repo_credential_key_idx')
+      .on(table.repoCredentialId)
+      .where(sql`${table.repoCredentialId} IS NOT NULL`),
   ],
 );
 
