@@ -41,7 +41,7 @@ export function restoresDatabase(def: {
   stepIds: readonly string[] | null;
 }): boolean {
   return (
-    def.source === 'admin' &&
+    def.source !== 'builtin' &&
     def.runListStrategy === 'static' &&
     def.stepIds?.includes(RESTORE_DATABASE_STEP_ID) === true
   );
@@ -273,13 +273,15 @@ export async function definitionForCreate(
         );
     }
   }
-  const custom = def.source === 'admin';
-  const promptEntries = custom ? Object.values(parsePromptSteps(def.promptSteps)) : [];
+  const notBuiltin = def.source !== 'builtin';
+  // Prompt steps stay with admin rows; every other trait is shared by module and admin rows.
+  const promptEntries =
+    def.source === 'admin' ? Object.values(parsePromptSteps(def.promptSteps)) : [];
   // Every prompt step dispatches a CLI, which the stored entries prove without a synced catalog.
   const promptIds = new Set(promptEntries.map((entry) => promptStepId(def.slug, entry.slug)));
   let snapshot = def.runListStrategy === 'static' ? def.stepIds : null;
   if (
-    custom &&
+    notBuiltin &&
     snapshot !== null &&
     !snapshot.includes(MODEL_HEALTH_STEP_ID) &&
     snapshot.some((id) => promptIds.has(id) || catalog?.dispatchesCli.has(id))
@@ -298,11 +300,11 @@ export async function definitionForCreate(
     requiresRepository: def.requiresRepository,
     repoOptional: !def.requiresRepository,
     preAnswers:
-      custom && Object.keys(def.preAnswerDefaults).length > 0 ? def.preAnswerDefaults : null,
-    stepLoopLimits: custom ? def.stepLoopLimitDefaults : {},
-    simplifyCode: custom && has(SIMPLIFY_STEP_ID),
+      notBuiltin && Object.keys(def.preAnswerDefaults).length > 0 ? def.preAnswerDefaults : null,
+    stepLoopLimits: notBuiltin ? def.stepLoopLimitDefaults : {},
+    simplifyCode: notBuiltin && has(SIMPLIFY_STEP_ID),
     takesRootLock: slug === 'workflow' || ROOT_WRITING_STEP_IDS.some(has),
-    pinsDatabase: custom && DATABASE_PIN_STEP_IDS.some(has),
+    pinsDatabase: notBuiltin && DATABASE_PIN_STEP_IDS.some(has),
     restoresDatabase: restoresDatabase(def),
   };
 }
