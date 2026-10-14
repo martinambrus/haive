@@ -87,9 +87,14 @@ describe('POST /enrich pins the kb_author step list', () => {
     });
   });
 
-  it('removes the skeleton entry when the task insert fails', async () => {
+  const refused = () =>
+    Object.assign(new Error('Failed query'), {
+      cause: Object.assign(new Error('value too long'), { code: '22001' }),
+    });
+
+  it('removes the skeleton entry when Postgres refuses the task insert', async () => {
     fake.hooks.beforeInsert = (table) => {
-      if (table === schema.tasks) throw new Error('insert refused');
+      if (table === schema.tasks) throw refused();
     };
     expect((await enrich()).status).toBe(500);
     expect(fake.rows(schema.tasks)).toHaveLength(0);
@@ -122,34 +127,29 @@ describe('POST /enrich pins the kb_author step list', () => {
     expect(entry?.id).toBe((task!.metadata as { globalKbEntryId: string }).globalKbEntryId);
   });
 
-  it('keeps the skeleton entry when it cannot tell whether the task was written', async () => {
-    fake.hooks.beforeInsert = (table) => {
-      if (table === schema.tasks) throw new Error('connection dropped');
-    };
-    const real = fake.db;
-    h.db = new Proxy(real, {
-      get(target, prop, receiver) {
-        if (prop !== 'query') return Reflect.get(target, prop, receiver);
-        return {
-          ...real.query,
-          tasks: {
-            findFirst: async () => {
-              throw new Error('database unreachable');
-            },
-          },
-        };
-      },
-    });
-    expect((await enrich()).status).toBe(500);
-    expect(fake.rows(schema.tasks)).toHaveLength(0);
-    expect(fake.rows(globalKbEntries)).toHaveLength(1);
+  it('keeps the skeleton entry when the outcome of the insert is unknown', async () => {
+    for (const error of [
+      Object.assign(new Error('connection failure'), { code: '08006' }),
+      Object.assign(new Error('statement completion unknown'), { code: '40003' }),
+      new Error('socket closed'),
+    ]) {
+      fake = makeFake();
+      fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER });
+      h.db = fake.db;
+      h.gdb = fake.db;
+      fake.hooks.beforeInsert = (table) => {
+        if (table === schema.tasks) throw error;
+      };
+      expect((await enrich()).status).toBe(500);
+      expect(fake.rows(globalKbEntries)).toHaveLength(1);
+    }
   });
 
   it('keeps an entry that stopped being a skeleton before the cleanup', async () => {
     fake.hooks.beforeInsert = (table) => {
       if (table !== schema.tasks) return;
       fake.patch(globalKbEntries, fake.rows(globalKbEntries)[0]!.id as string, { status: 'draft' });
-      throw new Error('insert refused');
+      throw refused();
     };
     expect((await enrich()).status).toBe(500);
     expect(fake.rows(globalKbEntries)).toHaveLength(1);

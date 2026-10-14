@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
-import { isLockNotAvailable, schema } from '@haive/database';
+import { isLockNotAvailable, isRefusedStatement, schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
@@ -599,13 +598,11 @@ globalKbRoutes.post('/enrich', async (c) => {
     return presentEntry(row!, await houseRuleContext(settings.namespace));
   });
 
-  const taskId = randomUUID();
   let task: typeof schema.tasks.$inferSelect | undefined;
   try {
     [task] = await db
       .insert(schema.tasks)
       .values({
-        id: taskId,
         userId,
         type: 'kb_author',
         title: `Enrich: ${data.title}`.slice(0, 512),
@@ -638,15 +635,9 @@ globalKbRoutes.post('/enrich', async (c) => {
       .returning();
     if (!task) throw new HttpError(500, 'failed to create enrichment task');
   } catch (err) {
-    // The entry lives in the global KB database, so no transaction spans both writes. A rejected
-    // insert can still have committed, so the entry goes only once the task is known to be absent.
-    const taskExists = await db.query.tasks
-      .findFirst({ where: eq(schema.tasks.id, taskId), columns: { id: true } })
-      .then(
-        (row) => row !== undefined,
-        () => true,
-      );
-    if (!taskExists) {
+    // The entry lives in the global KB database, so no transaction spans both writes. Only an insert
+    // Postgres refused is known to have written nothing; any other failure may still commit.
+    if (isRefusedStatement(err)) {
       await withGlobalKb(db, ({ db: gdb }) =>
         gdb.transaction(async (tx) => {
           if ((await lockEntry(tx, entry.id))?.status !== 'skeleton') return;
