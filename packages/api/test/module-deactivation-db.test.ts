@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 
@@ -352,6 +352,29 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     });
   });
 
+  describe('GET /modules/loaded and the teardown record', () => {
+    it('carries when the teardown ran, on the record and on the row', async () => {
+      const down = new Date('2026-10-14T09:30:00.000Z');
+      await patchModule('alpha', false);
+      await db
+        .update(schema.modules)
+        .set({ tornDownAt: down })
+        .where(eq(schema.modules.moduleId, 'alpha'));
+      const body = JSON.parse((await read('/modules/loaded')).body) as {
+        intent: { moduleId: string; tornDownAt: string | null }[];
+        modules: { rows: { id: string; tornDownAt: string | null }[] };
+      };
+      expect(Object.fromEntries(body.intent.map((r) => [r.moduleId, r.tornDownAt]))).toMatchObject({
+        alpha: down.toISOString(),
+        beta: null,
+      });
+      expect(Object.fromEntries(body.modules.rows.map((r) => [r.id, r.tornDownAt]))).toMatchObject({
+        alpha: down.toISOString(),
+        beta: null,
+      });
+    });
+  });
+
   describe('GET /admin/task-types/catalog', () => {
     const catalog = async () => {
       const body = JSON.parse((await read('/admin/task-types/catalog')).body) as {
@@ -530,6 +553,33 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(await back.json()).toEqual({ moduleId: 'alpha', active: true, deactivatedAt: null });
       expect(await stampOf('alpha')).toBeNull();
       expect((await patchModule('alpha', true)).status).toBe(200);
+    });
+
+    it('clears the teardown record on activate and keeps it on a repeated deactivate', async () => {
+      const down = new Date('2026-10-14T09:30:00.000Z');
+      const record = async (moduleId: string) =>
+        (
+          await db
+            .select({ at: schema.modules.tornDownAt })
+            .from(schema.modules)
+            .where(eq(schema.modules.moduleId, moduleId))
+        )[0]?.at;
+      await patchModule('alpha', false);
+      await patchModule('alpha-two', false);
+      await db
+        .update(schema.modules)
+        .set({ tornDownAt: down })
+        .where(inArray(schema.modules.moduleId, ['alpha', 'alpha-two']));
+
+      expect((await patchModule('alpha', false)).status).toBe(200);
+      expect(await record('alpha')).toEqual(down);
+
+      expect((await patchModule('alpha', true)).status).toBe(200);
+      expect(await record('alpha')).toBeNull();
+      expect(await record('alpha-two')).toEqual(down);
+
+      await patchModule('alpha', false);
+      expect(await record('alpha')).toBeNull();
     });
 
     it('keeps a stamp even while live tasks use the module', async () => {

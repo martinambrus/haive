@@ -19,6 +19,8 @@ let ddevControlQueueEvents: QueueEvents | null = null;
 let usagePollQueue: Queue | null = null;
 let planMirrorQueue: Queue | null = null;
 let planMirrorQueueEvents: QueueEvents | null = null;
+let moduleControlQueue: Queue | null = null;
+let moduleControlQueueEvents: QueueEvents | null = null;
 
 export function getRepoQueue(): Queue {
   if (!repoQueue) {
@@ -144,6 +146,22 @@ export function getPlanMirrorQueueEvents(): QueueEvents {
   return planMirrorQueueEvents;
 }
 
+export function getModuleControlQueue(): Queue {
+  if (!moduleControlQueue) {
+    moduleControlQueue = new Queue(QUEUE_NAMES.MODULE_CONTROL, { connection: getBullRedis() });
+  }
+  return moduleControlQueue;
+}
+
+export function getModuleControlQueueEvents(): QueueEvents {
+  if (!moduleControlQueueEvents) {
+    moduleControlQueueEvents = new QueueEvents(QUEUE_NAMES.MODULE_CONTROL, {
+      connection: getBullRedis(),
+    });
+  }
+  return moduleControlQueueEvents;
+}
+
 export async function closeQueues(): Promise<void> {
   await Promise.allSettled([
     repoQueue?.close(),
@@ -161,6 +179,8 @@ export async function closeQueues(): Promise<void> {
     usagePollQueue?.close(),
     planMirrorQueue?.close(),
     planMirrorQueueEvents?.close(),
+    moduleControlQueue?.close(),
+    moduleControlQueueEvents?.close(),
   ]);
   repoQueue = null;
   taskQueue = null;
@@ -177,4 +197,6 @@ export async function closeQueues(): Promise<void> {
   usagePollQueue = null;
   planMirrorQueue = null;
   planMirrorQueueEvents = null;
+  moduleControlQueue = null;
+  moduleControlQueueEvents = null;
 }

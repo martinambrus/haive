@@ -2521,4 +2521,15 @@ export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
     : [];
 }
 
+export interface ModuleTeardownDone {
+  moduleId: string;
+  tornDownAt: string;
+}
+
+/** `{ status: 'running' }` is a 202: the worker was still at it when the api stopped waiting. */
+export type ModuleTeardownResponse = ModuleTeardownDone | { status: 'running' };
+
+export const postModuleTeardown = (moduleId: string) =>
+  api.post<ModuleTeardownResponse>(`/modules/${encodeURIComponent(moduleId)}/teardown`);
+
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');
