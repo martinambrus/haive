@@ -13,6 +13,7 @@ import { buildMergeFixPrompt } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
+import { inMergeDirLock, otherLiveClaim, type DbHandle } from '../../merge-dir-claim.js';
 import {
   MOVE_ATTEMPTS,
   putBackProjections,
@@ -390,8 +391,11 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
 
     const repositoryId = onCurrent ? await taskRepositoryId(ctx) : null;
     // Another task working in the checkout itself (no worktree of its own) holds the base where it is.
-    const fence = (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
-      checkoutHoldingTasks(conn, repositoryId!, { excludeTaskId: ctx.taskId, rootOnly: true });
+    const fence = async (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
+      (await checkoutHoldingTasks(conn, repositoryId!, {
+        excludeTaskId: ctx.taskId,
+        rootOnly: true,
+      })) + ((await otherLiveClaim(conn as DbHandle, ctx.repoPath, ctx.taskId)) ? 1 : 0);
     let asided = false;
     const kept: KeptFiles = new Map();
     const setAside = async (): Promise<SetAsideResult> => {
@@ -446,7 +450,8 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     }> => {
       if (!repositoryId) return ff();
       for (let attempt = 1; ; attempt++) {
-        const moved = await ctx.db.transaction(async (tx) => {
+        // Under the dir's lock, so a merge section in this checkout (12, 13) never interleaves with the move.
+        const moved = await inMergeDirLock(ctx.db, ctx.repoPath, async (tx) => {
           const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
           if (again.outcome !== 'clean') return { again, res: null, holding: 0 };
           const holding = await fence(tx);

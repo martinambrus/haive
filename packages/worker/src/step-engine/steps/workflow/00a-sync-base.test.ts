@@ -75,6 +75,7 @@ function mkCtx(
 ): StepContext {
   const db = {
     transaction: async (run: (tx: unknown) => Promise<unknown>) => run(db),
+    execute: async () => [{ ok: true }],
     query: {
       tasks: {
         findFirst: async () => ({ repositoryId }),
@@ -270,6 +271,28 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out.reason).toContain('working in this checkout');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('another task merging in this checkout holds the fast-forward, and the base is not moved', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      claimFake.claims.set(local, { taskId: 'cleanup-task', stepId: 'step-12', title: 'cleanup' });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
+      expect(out.reason).toContain('working in this checkout');
+      expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+    } finally {
+      claimFake.reset();
       await rm(bare, { recursive: true, force: true });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });

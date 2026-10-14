@@ -28,7 +28,7 @@ const LOCK_RETRY_MAX_MS = 1000;
 export async function inMergeDirLock<T>(
   db: Database,
   mergeDir: string,
-  fn: (tx: DbHandle) => Promise<T>,
+  fn: (tx: Parameters<Parameters<Database['transaction']>[0]>[0]) => Promise<T>,
 ): Promise<T> {
   let delay = LOCK_RETRY_FIRST_MS;
   for (;;) {
@@ -89,6 +89,21 @@ export async function liveClaimHolder(
     return { id: claim.taskId, title: holder.title };
   }
   return null;
+}
+
+/** Another task's live claim on `mergeDir`, or null. Read under the dir's lock, so it holds until the
+ *  section ends. */
+export async function otherLiveClaim(
+  tx: DbHandle,
+  mergeDir: string,
+  taskId: string,
+): Promise<MergeDirHolder | null> {
+  const [claim] = await tx
+    .select()
+    .from(schema.mergeDirClaims)
+    .where(eq(schema.mergeDirClaims.mergeDir, mergeDir));
+  if (!claim || claim.taskId === taskId) return null;
+  return liveClaimHolder(tx, claim);
 }
 
 /** Take `mergeDir` for the pass's step before its first git write, committed ahead of it. Another
