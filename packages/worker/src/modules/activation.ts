@@ -2,17 +2,19 @@ import { eq, isNotNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { parseStepId } from '@haive/shared/modularity';
 
+/** `lock` reads under KEY SHARE, which waits out a deactivation holding the row FOR UPDATE. */
 export async function moduleDeactivationMessage(
   db: Database,
   stepId: string,
+  opts: { lock?: boolean } = {},
 ): Promise<string | null> {
   const parsed = parseStepId(stepId);
   if (parsed?.kind !== 'module') return null;
-  const [row] = await db
+  const read = db
     .select({ deactivatedAt: schema.modules.deactivatedAt })
     .from(schema.modules)
-    .where(eq(schema.modules.moduleId, parsed.moduleId))
-    .limit(1);
+    .where(eq(schema.modules.moduleId, parsed.moduleId));
+  const [row] = opts.lock ? await read.for('key share') : await read.limit(1);
   if (!row?.deactivatedAt) return null;
   return (
     `Module ${parsed.moduleId} is deactivated, so step ${stepId} cannot run. ` +

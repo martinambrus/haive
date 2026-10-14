@@ -325,6 +325,30 @@ describe.skipIf(!url)('module activation guard on Postgres', () => {
     await expect(moduleDeactivationMessage(db, 'module.ghost.x')).resolves.toBeNull();
   });
 
+  it('waits, when locking, for a deactivation that holds the row, then names the module', async () => {
+    await setModule('alpha', null);
+    let raced: string | undefined;
+    let read!: Promise<string | null>;
+    await db.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(schema.modules)
+        .where(eq(schema.modules.moduleId, 'alpha'))
+        .for('update');
+      await tx
+        .update(schema.modules)
+        .set({ deactivatedAt: OFF })
+        .where(eq(schema.modules.moduleId, 'alpha'));
+      read = moduleDeactivationMessage(db, 'module.alpha.x', { lock: true });
+      raced = await Promise.race([
+        read.then(() => 'done'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 400)),
+      ]);
+    });
+    expect(raced).toBe('blocked');
+    expectNamedReason((await read) ?? '');
+  });
+
   it('names no module for a core or a custom step id', async () => {
     await setModule('alpha', OFF);
     await expect(moduleDeactivationMessage(db, '01-worktree-setup')).resolves.toBeNull();

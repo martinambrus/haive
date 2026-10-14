@@ -224,6 +224,12 @@ const db = {
               return [];
             },
             for: async () => {
+              if (name === 'modules') {
+                h.state.moduleReads += 1;
+                return h.state.moduleReads > 1 && h.state.laterModuleRows
+                  ? h.state.laterModuleRows
+                  : h.state.moduleRows;
+              }
               if (name === 'tasks') {
                 const held = taskMatches(cond);
                 h.state.taskHolds.push(held);
@@ -1630,15 +1636,24 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       expect(handedOn()).toEqual(expect.stringContaining('module.epoch-skip.runtime'));
     });
 
-    it('reads on once, and hands that on though a later read would say off', async () => {
+    it('reads on, then again once the task is live, and hands on a deactivation that landed between', async () => {
       h.state.readsAnswer = true;
       h.state.parkRow = unparked;
       h.state.moduleRows = on;
       h.state.laterModuleRows = off;
       await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
-      expect(h.state.moduleReads).toBe(1);
+      expect(h.state.moduleReads).toBe(2);
       expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toEqual(expect.stringContaining('module.epoch-skip.runtime'));
+    });
+
+    it('reads on twice and hands on when the module stays active', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = on;
+      await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+      expect(h.state.moduleReads).toBe(2);
       expect(handedOn()).toBeNull();
     });
 

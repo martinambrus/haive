@@ -2908,6 +2908,10 @@ async function handleAdvanceStep(
     );
     return;
   }
+  // Now that the task is live a deactivation must count it, and one already under way is waited
+  // out; on can still turn off here, never the reverse, which would run a step admission skipped.
+  const moduleDecision =
+    moduleDeactivation ?? (await moduleDeactivationMessage(db, payload.stepId, { lock: true }));
 
   const providers = await loadProviders(db, ctx.userId);
   try {
@@ -2926,7 +2930,7 @@ async function handleAdvanceStep(
       providers,
       deps: workerDeps,
       epoch: ctx.orchestrationEpoch,
-      moduleDeactivation,
+      moduleDeactivation: moduleDecision,
     });
     await handleResult(db, ctx, payload.stepId, result);
   } finally {
