@@ -2290,6 +2290,10 @@ async function handleStartTask(
   // too: a pass a Stop cut off can still be on the step when a Retry queues this START.
   const release = await takeStepHold(`${ctx.taskId}:${first.metadata.id}:0`);
   try {
+    // The task is live, so a deactivation must count it; one already under way is waited out.
+    const moduleDeactivation = await moduleDeactivationMessage(db, first.metadata.id, {
+      lock: true,
+    });
     const providers = await loadProviders(db, ctx.userId);
     const result = await advanceStep({
       db,
@@ -2305,6 +2309,7 @@ async function handleStartTask(
       providers,
       deps: workerDeps,
       epoch: ctx.orchestrationEpoch,
+      moduleDeactivation,
     });
     await handleResult(db, ctx, first.metadata.id, result);
   } finally {
