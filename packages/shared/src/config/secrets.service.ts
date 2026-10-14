@@ -12,8 +12,6 @@ export const SECRET_KEYS = {
   EMAIL_BLIND_INDEX_PEPPER: 'email_blind_index_pepper',
   MASTER_KEK: 'master_kek',
   SMTP_PASSWORD: 'smtp_password',
-  GITHUB_CLIENT_ID: 'github_client_id',
-  GITHUB_CLIENT_SECRET: 'github_client_secret',
   // External global-KB Postgres connection string (may carry credentials).
   GLOBAL_KB_CONNECTION_STRING: 'global_kb_connection_string',
 } as const;

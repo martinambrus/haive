@@ -8,6 +8,7 @@ import { HttpError, type AppEnv } from './context.js';
 import { isForeignOrigin, trustedOrigins } from './lib/request-origin.js';
 import { installUnhandledRejectionLogger } from './lib/unhandled-rejection.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { jsonBodyErrors } from './middleware/json-body.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { adminRoutes } from './routes/admin.js';
 import { cliPricingRoutes } from './routes/cli-pricing.js';
@@ -46,6 +47,7 @@ import { versionRoutes } from './routes/version.js';
 import { maintenanceGate } from './middleware/maintenance.js';
 import { maintenanceRoutes } from './routes/maintenance.js';
 import { adminTaskTypeRoutes, taskTypeRoutes } from './routes/task-types.js';
+import { adminIntegrationRoutes } from './routes/admin-integrations.js';
 import { installModules } from './modules/loader.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -79,6 +81,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   // gate that must be remembered at every mount point is one that will be missed at one. In the
   // normal state it costs a single cached config read and no database work.
   app.use('*', maintenanceGate);
+  app.use('*', jsonBodyErrors);
 
   app.onError(errorHandler);
 
@@ -113,6 +116,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/admin', adminRoutes);
   app.route('/admin/maintenance', maintenanceRoutes);
   app.route('/admin/task-types', adminTaskTypeRoutes);
+  app.route('/admin/integrations', adminIntegrationRoutes);
   app.route('/task-types', taskTypeRoutes);
   app.route('/tooling', toolingRoutes);
   app.route('/repositories', upgradeRoutes);
