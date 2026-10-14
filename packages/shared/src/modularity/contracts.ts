@@ -36,6 +36,27 @@ export const CORE_INTEGRATION_CATEGORIES = [
 ] as const;
 export type CoreIntegrationCategory = (typeof CORE_INTEGRATION_CATEGORIES)[number];
 
+const CORE_INTEGRATION_CATEGORY_LABELS: Readonly<Record<CoreIntegrationCategory, string>> = {
+  'rich-documents': 'Documents',
+  spreadsheets: 'Spreadsheets',
+  'file-storage': 'File storage',
+  mail: 'Email',
+  chat: 'Chat',
+  issues: 'Issue tracking',
+  wiki: 'Wiki',
+  forge: 'Git forge',
+};
+
+export const CORE_INTEGRATION_CATEGORY_SPECS: readonly {
+  readonly id: CoreIntegrationCategory;
+  readonly label: string;
+}[] = CORE_INTEGRATION_CATEGORIES.map((id) => ({
+  id,
+  label: CORE_INTEGRATION_CATEGORY_LABELS[id],
+}));
+
+const CORE_INTEGRATION_CATEGORY_IDS: ReadonlySet<string> = new Set(CORE_INTEGRATION_CATEGORIES);
+
 export type ParsedStepId =
   | { kind: 'core' }
   | { kind: 'module'; moduleId: string; localId: string }
@@ -84,7 +105,8 @@ export function isProviderId(id: string): boolean {
 }
 
 export function isCategoryId(id: string): boolean {
-  return parseCategoryId(id) !== null;
+  const parsed = parseCategoryId(id);
+  return parsed !== null && (parsed.kind === 'module' || CORE_INTEGRATION_CATEGORY_IDS.has(id));
 }
 
 export function isPersonaId(id: string): boolean {

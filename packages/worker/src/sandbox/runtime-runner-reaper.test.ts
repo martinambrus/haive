@@ -1,10 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import type { Database } from '@haive/database';
 import {
   reapDecision,
   pickPreemptibleRunner,
+  RuntimeRunnerReaper,
   type ReaperTask,
   type RunnerContainer,
 } from './runtime-runner-reaper.js';
+
+vi.mock('./runner-activity.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  runnerExecLive: async () => false,
+}));
 
 const GRACE = 180 * 60_000; // RUNTIME_IDLE_REAP_MINUTES default: 180 min
 const NOW = Date.parse('2026-07-22T18:30:00Z');
@@ -264,6 +271,108 @@ describe('pickPreemptibleRunner', () => {
       ]),
     );
     expect(pick?.id).toBe('old');
+  });
+
+  it('preempts a settled dead task’s runner on demand, with no grace', () => {
+    expect(
+      pickPreemptibleRunner([runner()], tasks([['t1', deadTask({ deadAt: ago(60_000) })]]))?.id,
+    ).toBe('c1');
+  });
+
+  it('never preempts a dead task that still has a CLI run finishing', () => {
+    expect(
+      pickPreemptibleRunner([runner()], tasks([['t1', deadTask({ settled: false })]])),
+    ).toBeNull();
+  });
+
+  it('never preempts a settled task that is not dead', () => {
+    expect(
+      pickPreemptibleRunner([runner()], tasks([['t1', deadTask({ deadAt: null })]])),
+    ).toBeNull();
+  });
+
+  it('prefers a failed runner over a dead one', () => {
+    const pick = pickPreemptibleRunner(
+      [runner({ id: 'dead', taskId: 'td' }), runner({ id: 'failed', taskId: 'tf' })],
+      tasks([
+        ['td', deadTask({ deadAt: ago(10 * 60 * 60_000) })],
+        ['tf', { status: 'failed', completedAt: ago(60_000) }],
+      ]),
+    );
+    expect(pick?.id).toBe('failed');
+  });
+
+  it('prefers the longest-held runner among paused and dead tasks', () => {
+    const tasksHeld = (deadFor: number, pausedFor: number) =>
+      tasks([
+        ['td', deadTask({ deadAt: ago(deadFor) })],
+        ['tp', pausedTask({ pausedAt: ago(pausedFor) })],
+      ]);
+    const both = [runner({ id: 'dead', taskId: 'td' }), runner({ id: 'paused', taskId: 'tp' })];
+
+    expect(pickPreemptibleRunner(both, tasksHeld(5 * 60 * 60_000, 10 * 60_000))?.id).toBe('dead');
+    expect(pickPreemptibleRunner(both, tasksHeld(10 * 60_000, 5 * 60 * 60_000))?.id).toBe('paused');
+  });
+});
+
+describe('RuntimeRunnerReaper.reclaimOnePreemptible: a dead task', () => {
+  const row = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    status: 'running',
+    completedAt: null,
+    pausedAt: null,
+    deadAt: ago(60_000),
+    voteScore: 0,
+    ...over,
+  });
+
+  /** Answers only the columns asked for, so a column the code forgets to select reads as absent. */
+  function reaperOf(task: Record<string, unknown>, liveRuns = 0) {
+    const db = {
+      query: {
+        tasks: {
+          findFirst: async ({ columns }: { columns: Record<string, boolean> }) =>
+            Object.fromEntries(
+              Object.entries(columns)
+                .filter(([, selected]) => selected)
+                .map(([name]) => [name, task[name]]),
+            ),
+        },
+      },
+      select: () => ({ from: () => ({ where: async () => [{ n: liveRuns }] }) }),
+    } as unknown as Database;
+    const reaper = new RuntimeRunnerReaper({ db });
+    const inner = reaper as unknown as {
+      listRunnerContainers: () => Promise<RunnerContainer[]>;
+      reap: (id: string) => Promise<void>;
+      inspect: (id: string) => Promise<RunnerContainer | null>;
+    };
+    vi.spyOn(inner, 'listRunnerContainers').mockResolvedValue([runner()]);
+    vi.spyOn(inner, 'inspect').mockResolvedValue(null);
+    return { reaper, reap: vi.spyOn(inner, 'reap').mockResolvedValue(undefined) };
+  }
+
+  it('reclaims the runner of a settled dead task for a waiting task', async () => {
+    const { reaper, reap } = reaperOf(row());
+
+    await expect(reaper.reclaimOnePreemptible()).resolves.toBe(true);
+
+    expect(reap).toHaveBeenCalledExactlyOnceWith('c1');
+  });
+
+  it('leaves the runner of a dead task that still has a CLI run live', async () => {
+    const { reaper, reap } = reaperOf(row(), 1);
+
+    await expect(reaper.reclaimOnePreemptible()).resolves.toBe(false);
+
+    expect(reap).not.toHaveBeenCalled();
+  });
+
+  it('leaves the runner of a task that is not dead', async () => {
+    const { reaper, reap } = reaperOf(row({ deadAt: null }));
+
+    await expect(reaper.reclaimOnePreemptible()).resolves.toBe(false);
+
+    expect(reap).not.toHaveBeenCalled();
   });
 });
 

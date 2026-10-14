@@ -71,17 +71,24 @@ interface Write {
 
 /** Records every write with the transaction it ran in (null outside one). */
 function fakeDb(opts: {
-  lockedRun?: { supersededAt: Date | null };
+  lockedRun?: { id?: string; supersededAt: Date | null };
   summaryLands?: { stepId: string; round: number };
   /** A Retry or a Stop superseded the run between the job's read and its start. */
   supersededBeforeStart?: boolean;
+  /** The task the job's one read of the run returns with it. */
+  task?: { status: string; deadAt: Date | null };
 }) {
   const writes: Write[] = [];
   let txSeq = 0;
   const handle = (tx: number | null): unknown => ({
     query: {
       cliInvocations: {
-        findFirst: async () => ({ id: RUN, endedAt: null, supersededAt: null }),
+        findFirst: async () => ({
+          id: RUN,
+          endedAt: null,
+          supersededAt: null,
+          task: opts.task ?? { status: 'running', deadAt: null },
+        }),
       },
       tasks: { findFirst: async () => ({ status: 'running' }) },
     },
@@ -297,6 +304,66 @@ describe('a cli run start', () => {
     expect(miningWrites(writes)).toEqual([]);
     expect(runWrites(writes)).toHaveLength(1);
     expect(conditionValues(runWrites(writes)[0]!.where)).toEqual([RUN]);
+  });
+});
+
+describe('a cli run of a dead task', () => {
+  const DEAD_AT = new Date('2026-10-14T08:00:00.000Z');
+
+  it('starts no sandbox, and ends the run cancelled the way the dead mark does', async () => {
+    stubs.executeByKind.mockResolvedValue(ok);
+    const { db, writes } = fakeDb({
+      task: { status: 'running', deadAt: DEAD_AT },
+      lockedRun: { id: RUN, supersededAt: null },
+    });
+    await handleCliExecJob(db, base);
+
+    expect(stubs.executeByKind).not.toHaveBeenCalled();
+    expect(miningWrites(writes)).toEqual([]);
+    expect(runWrites(writes)).toHaveLength(1);
+    const [ended] = runWrites(writes);
+    expect(ended!.set).toMatchObject({
+      exitCode: 137,
+      errorMessage: 'cancelled: the task is dead',
+      endedAt: expect.any(Date),
+      supersededAt: expect.any(Date),
+    });
+    expect('startedAt' in ended!.set).toBe(false);
+    expect(ended!.tx).not.toBeNull();
+    expect(conditionValues(ended!.where)).toEqual([RUN]);
+  });
+
+  it('ends the recap of a dead task too, since it is a CLI call all the same', async () => {
+    stubs.executeByKind.mockResolvedValue(ok);
+    const { db, writes } = fakeDb({
+      task: { status: 'waiting_user', deadAt: DEAD_AT },
+      lockedRun: { id: RUN, supersededAt: null },
+    });
+    await handleCliExecJob(db, recap);
+
+    expect(stubs.executeByKind).not.toHaveBeenCalled();
+    expect(runWrites(writes).map((w) => w.set.exitCode)).toEqual([137]);
+  });
+
+  it('still runs a task that is not dead', async () => {
+    stubs.executeByKind.mockResolvedValue(ok);
+    const { db, writes } = fakeDb({ task: { status: 'running', deadAt: null } });
+    await handleCliExecJob(db, base);
+
+    expect(stubs.executeByKind).toHaveBeenCalledOnce();
+    expect(runWrites(writes).some((w) => 'startedAt' in w.set)).toBe(true);
+    expect(runWrites(writes).some((w) => w.set.exitCode === 137)).toBe(false);
+  });
+
+  it.each(['cancelled', 'completed'])('does not call a %s task dead', async (status) => {
+    stubs.executeByKind.mockResolvedValue(ok);
+    const { db, writes } = fakeDb({
+      task: { status, deadAt: DEAD_AT },
+      lockedRun: { id: RUN, supersededAt: null },
+    });
+    await handleCliExecJob(db, base);
+
+    expect(runWrites(writes).some((w) => w.set.exitCode === 137)).toBe(false);
   });
 });
 

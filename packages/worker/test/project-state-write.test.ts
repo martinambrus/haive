@@ -340,9 +340,10 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
 
   it('refuses once its task no longer holds the checkout, so a refresh may have moved it', async () => {
     const TASK = '00000000-0000-4000-8000-0000000000c1';
-    for (const [status, refused] of [
-      ['running', false],
-      ['cancelled', true],
+    for (const [status, deadAt, refused] of [
+      ['running', null, false],
+      ['cancelled', null, true],
+      ['running', new Date(), true],
     ] as const) {
       const s = await setup();
       s.fake.insert(schema.tasks, {
@@ -350,6 +351,7 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
         userId: USER,
         repositoryId: REPO,
         status,
+        deadAt,
         type: 'onboarding_upgrade',
       });
       const write = s.write(context(), true, { expectedColumns: [null], holdingTaskId: TASK });

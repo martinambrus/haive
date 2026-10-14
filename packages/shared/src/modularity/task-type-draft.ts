@@ -242,3 +242,30 @@ export function validateTaskTypeDraft(
   if (issues.length > 0) return { issues, warnings };
   return { issues: validateTaskTypeDefaults(body, composable), warnings };
 }
+
+export const TYPE_DRAFT_MESSAGE_EVENT = 'type_draft.message';
+export const TYPE_DRAFT_MESSAGE_MAX_CHARS = 8_000;
+export const TYPE_DRAFT_STATE_MAX_BYTES = 64 * 1024;
+
+export interface TypeDraftUserTurn {
+  role: 'user';
+  body: string;
+  /** The editor's state when the message was sent, cut to the draftable keys. */
+  draft?: Record<string, unknown>;
+  draftIgnored?: 'not-json' | 'too-large';
+}
+
+export interface TypeDraftAssistantTurn {
+  role: 'assistant';
+  body: string;
+  draft: Record<string, unknown> | null;
+  issues: TaskTypeDraftIssue[];
+  warnings: TaskTypeDraftWarning[];
+  /** The keys of the agent's draft that were cut because the editor cannot show them. */
+  dropped: string[];
+  repaired?: true;
+  /** Set when the agent's reply could not be read, so the turn has no draft. */
+  error?: string;
+}
+
+export type TypeDraftTurn = TypeDraftUserTurn | TypeDraftAssistantTurn;
