@@ -161,13 +161,54 @@ jobs:
       - name: Apply database migrations
         run: pnpm --filter @haive/database migrate
 
-      - name: Database snapshot concurrency, restore and cleanup
-        run: |
-          docker exec ${{ job.services.postgres.id }} psql -U haive -d postgres -c 'CREATE DATABASE snapshot_test'
-          DATABASE_URL="$DATABASE_SNAPSHOT_TEST_URL" pnpm --filter @haive/database migrate
-          pnpm --filter @haive/worker exec vitest run test/database-snapshots.test.ts
+      # A gated file skips green when its URL is unset, so each must report tests run and none skipped.
+      # The database column is the name each file's own guard demands.
+      - name: Postgres-gated tests
         env:
-          DATABASE_SNAPSHOT_TEST_URL: postgres://haive:haive_dev_password@localhost:5432/snapshot_test
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -uo pipefail
+          pnpm --filter @haive/web-kit build
+          pnpm --filter './modules/*' build
+          node scripts/gen-modules.mjs
+          failed=0
+          while IFS=' ' read -r pkg file var db; do
+            [ -n "$pkg" ] || continue
+            echo "::group::$pkg $file ($var, database $db)"
+            url="postgres://haive:haive_dev_password@localhost:5432/$db"
+            report="$RUNNER_TEMP/$db.json"
+            rm -f "$report"
+            exists=$(docker exec "$PG_CONTAINER" psql -U haive -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'")
+            if [ "$exists" != 1 ]; then
+              docker exec "$PG_CONTAINER" psql -U haive -d postgres -c "CREATE DATABASE $db" \
+                || { echo "::error::could not create $db"; failed=1; echo "::endgroup::"; continue; }
+            fi
+            DATABASE_URL="$url" pnpm --filter @haive/database migrate \
+              || { echo "::error::migrate failed for $db"; failed=1; echo "::endgroup::"; continue; }
+            env "$var=$url" pnpm --filter "@haive/$pkg" exec vitest run "$file" --reporter=default --reporter=json --outputFile.json="$report" \
+              || { echo "::error::$file failed"; failed=1; }
+            REPORT="$report" FILE="$file" node -e '
+              const r = JSON.parse(require("fs").readFileSync(process.env.REPORT, "utf8"));
+              console.log(process.env.FILE + ": passed=" + r.numPassedTests + " failed=" + r.numFailedTests + " skipped=" + r.numPendingTests + " todo=" + r.numTodoTests);
+              if (!(r.numPassedTests > 0) || r.numPendingTests > 0 || r.numTodoTests > 0) {
+                console.log("::error::" + process.env.FILE + " did not run in full");
+                process.exit(1);
+              }
+            ' || failed=1
+            echo "::endgroup::"
+          done <<'GATED'
+          worker test/database-snapshots.test.ts DATABASE_SNAPSHOT_TEST_URL snapshot_test
+          worker test/task-type-seed.test.ts TASK_TYPE_SEED_TEST_URL task_type_seed_test
+          worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test
+          worker test/step-catalog-sync.test.ts STEP_CATALOG_TEST_URL step_catalog_test
+          worker test/module-intent.test.ts MODULE_INTENT_TEST_URL module_intent_test
+          worker test/cancel-sandbox-fence.test.ts CANCEL_FENCE_TEST_URL cancel_fence_test
+          api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test
+          api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test
+          api test/task-custom-steps-db.test.ts TASK_CUSTOM_STEPS_TEST_URL task_custom_steps_test
+          api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test
+          GATED
+          exit "$failed"
 
       # api smokes first: they are seconds each, so a broken route surfaces before the
       # worker suite spends most of the job's 30-minute budget. smoke:terminal is
@@ -261,6 +302,21 @@ jobs:
                      const f=readdirSync(d);
                      if(!f.includes('0000_baseline.sql')) throw new Error('baseline missing from image: '+f.join(','));
                      console.log('ok: '+f.length+' entries in '+d);"
+
+  production-images:
+    name: Production image build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Nothing else builds these production stages before a release tag; the api one is in schema-parity.
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [worker, web]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the production stage
+        run: scripts/ci-retry.sh docker build --target production -f packages/${{ matrix.service }}/Dockerfile -t haive-${{ matrix.service }}-prod-check .
 
   compose-boot:
     name: docker compose up (fresh-host boot)
