@@ -51,6 +51,15 @@ the persona says HOW to work and never what you may FIND, so narrowing, skipping
 omitting, downgrading and reaching a verdict are all refused. A carve-out with no limit is a
 licence, and the limit is the half that is easy to leave out.
 
+**A PROMPT STEP'S PERSONA IS THE TEMPLATE'S, NEVER A QUOTE'S.** An admin's prompt step names a persona with
+`{{agent:<id>}}`; the dispatcher pastes that persona's body only for the ids the step runner read off the RENDERED
+TEMPLATE before attachments, ledger entries and learned guidance were appended (`promptStepPersonaIds`). Any other
+`[[HAIVE_TEMPLATE_PERSONA:` marker in a dispatch — a task description, an attachment name, an agent's output, any
+non-prompt-step prompt, retry_ai — is neutralised and never read, and every block appended after the template is
+neutralised before it joins it, so even an allowed id is pasted once, at the template's own marker. A persona is read
+from the selected CLI's markdown agent dir, else any markdown agent dir, else `.codex/agents/<id>.toml`
+(`developer_instructions`).
+
 **FENCE AGENT PROSE CARRIED INTO ANOTHER PROMPT.** `fencedAgentBlock` wraps a block between
 `UNTRUSTED_OPEN`/`CLOSE` and runs `fenceSafe`, which collapses any run of four or more `=` —
 keyed on the run rather than either banner's wording, so a reworded banner cannot reopen the

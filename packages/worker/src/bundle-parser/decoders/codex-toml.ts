@@ -31,7 +31,7 @@ export function decodeCodexAgent(content: string, sourcePath: string): AgentSpec
   };
 }
 
-interface FlatTomlFields {
+export interface FlatTomlFields {
   name?: string;
   description?: string;
   developer_instructions?: string;
@@ -42,7 +42,7 @@ interface FlatTomlFields {
  *  `developer_instructions = """…"""`. Quoted strings unescape `\"`, `\\`,
  *  and triple-quoted blocks unescape `\"""`. Anything else is ignored — TOML
  *  files with extra keys still parse, but lossily. */
-function parseFlatToml(text: string): FlatTomlFields {
+export function parseFlatToml(text: string): FlatTomlFields {
   const out: FlatTomlFields = {};
   let pos = 0;
   while (pos < text.length) {

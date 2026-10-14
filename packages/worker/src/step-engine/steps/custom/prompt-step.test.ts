@@ -9,7 +9,6 @@ import {
 import type { StepContext } from '../../step-definition.js';
 import {
   PROMPT_STEP_OUTPUT_CAP_BYTES,
-  PROMPT_STEP_PERSONAS_UNSUPPORTED,
   buildPromptStep,
   promptStepNamedText,
 } from './prompt-step.js';
@@ -130,11 +129,9 @@ describe('prompt step prompt', () => {
     expect(text).toContain('{{agent:x}}');
   });
 
-  it('fails with a named reason when the template carries a persona marker', () => {
-    expect(() => prompt(make({ template: 'Act as {{agent:reviewer}}' }))).toThrow(
-      PROMPT_STEP_PERSONAS_UNSUPPORTED,
-    );
-    expect(PROMPT_STEP_PERSONAS_UNSUPPORTED).toBe('Prompt step personas are not supported yet');
+  it('keeps the persona marker in the prompt for the dispatcher to fill', () => {
+    const text = prompt(make({ template: 'Act as {{agent:reviewer}}' }));
+    expect(text).toContain('Act as [[HAIVE_TEMPLATE_PERSONA:reviewer]]');
   });
 });
 

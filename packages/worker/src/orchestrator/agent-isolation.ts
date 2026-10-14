@@ -15,10 +15,17 @@ import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { readFileNoFollow, type ReadResult } from '@haive/shared/fs-safe';
-import { CONFIG_KEYS, configService, logger, promptNamesAgentPath } from '@haive/shared';
+import {
+  CLI_PROVIDER_LIST,
+  CONFIG_KEYS,
+  configService,
+  logger,
+  promptNamesAgentPath,
+} from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { parseAgentFile } from '../step-engine/steps/workflow/_agent-loader.js';
+import { parseFlatToml } from '../bundle-parser/decoders/codex-toml.js';
 import {
   secretMaskDeniesPath,
   secretMaskPolicy,
@@ -147,6 +154,92 @@ export interface PersonaBodiesResult {
   /** Ids whose file exists but did not fit the remaining budget, with the size it claimed. The
    *  caller reports these; they fall back to their inline protocol. */
   oversized: { id: string; rel: string; size: number }[];
+  /** Bytes of the budget the pasted bodies spent. */
+  used: number;
+}
+
+type PersonaFileOutcome =
+  | { kind: 'ok'; body: string; size: number }
+  | { kind: 'absent' | 'refused' | 'masked' | 'unparseable' | 'empty' }
+  | { kind: 'oversized'; size: number };
+
+/** One persona file under the rules both readers share: the mask policy first (so the git call is
+ *  paid for only when it can change the answer), then a no-follow read capped at the remaining
+ *  budget, then the frontmatter split. `strict` tells a refused path (a link, outside the tree, not
+ *  a regular file) from an absent one; the lenient form folds both into `absent`. */
+async function existsNoFollow(
+  anchor: ReturnType<typeof workspaceAnchor>,
+  rel: string,
+): Promise<boolean> {
+  try {
+    return (
+      (await readFileNoFollow(anchor.anchor, `${anchor.prefix}${rel}`, {
+        maxBytes: 0,
+        strict: true,
+      })) !== null
+    );
+  } catch {
+    return true;
+  }
+}
+
+async function readPersonaFile(args: {
+  anchor: ReturnType<typeof workspaceAnchor>;
+  rel: string;
+  policy: SecretMaskPolicy;
+  tracked: () => Promise<Set<string> | null>;
+  remaining: number;
+  strict: boolean;
+  format?: 'markdown' | 'toml';
+}): Promise<PersonaFileOutcome> {
+  // With no tracked set the predicate treats everything as untracked and masks more, so a "not
+  // denied" verdict here is final and needs no git at all — the overwhelmingly common case, since no
+  // default deny glob matches a `.md` under an agents directory.
+  if (secretMaskDeniesPath(args.policy, args.rel)) {
+    // A strict reader tells "denied and present" from "denied and absent": only the first holds the
+    // id. A path it cannot probe cleanly (a link in a component) counts as present.
+    if (args.strict && !(await existsNoFollow(args.anchor, args.rel))) return { kind: 'absent' };
+    if (secretMaskDeniesPath({ ...args.policy, tracked: await args.tracked() }, args.rel)) {
+      return { kind: 'masked' };
+    }
+  }
+
+  let read: ReadResult | null;
+  try {
+    // One byte more than the budget, so a file that claims to fit and then reads longer is caught
+    // rather than silently truncated.
+    read = await readFileNoFollow(args.anchor.anchor, `${args.anchor.prefix}${args.rel}`, {
+      maxBytes: args.remaining + 1,
+      strict: args.strict,
+    });
+  } catch {
+    return { kind: 'refused' };
+  }
+  if (read === null) return { kind: 'absent' };
+  if (read.size > args.remaining || read.data.length > args.remaining) {
+    return { kind: 'oversized', size: read.size };
+  }
+
+  const text = read.data.toString('utf8');
+  let body: string;
+  if (args.format === 'toml') {
+    const instructions = parseFlatToml(text).developer_instructions;
+    if (instructions === undefined) return { kind: 'unparseable' };
+    body = instructions.trim();
+  } else {
+    const parsed = parseAgentFile(text);
+    if (!parsed) return { kind: 'unparseable' };
+    body = parsed.body.trim();
+  }
+  if (!body) return { kind: 'empty' };
+  return { kind: 'ok', body, size: read.size };
+}
+
+function memoTracked(
+  loadTracked: () => Promise<Set<string> | null>,
+): () => Promise<Set<string> | null> {
+  let loaded: Promise<Set<string> | null> | undefined;
+  return () => (loaded ??= loadTracked());
 }
 
 /**
@@ -161,7 +254,8 @@ export interface PersonaBodiesResult {
  * Treated as MISSING (the id keeps its inline protocol): an absent or refused file, one the
  * invocation's secret-mask policy would hide, one `parseAgentFile` cannot parse, and one whose body
  * is empty after the frontmatter — pasting an empty persona is the same silent failure as pasting
- * none. Ids are read in marker order and share one budget.
+ * none. Ids are read in marker order and share one budget, `budget` bytes when the caller has
+ * already spent part of `MAX_PERSONA_BODY_BYTES`.
  */
 export async function readPersonaBodies(args: {
   workerTree: string;
@@ -172,50 +266,155 @@ export async function readPersonaBodies(args: {
    *  actually match a path — a committed file is out of scope for masking, so the git call is only
    *  needed to rescue a path the globs already denied. */
   loadTracked: () => Promise<Set<string> | null>;
+  budget?: number;
 }): Promise<PersonaBodiesResult> {
-  const wa = workspaceAnchor(args.workerTree);
+  const anchor = workspaceAnchor(args.workerTree);
+  const tracked = memoTracked(args.loadTracked);
   const bodies: Record<string, string> = {};
   const oversized: PersonaBodiesResult['oversized'] = [];
-  let remaining = MAX_PERSONA_BODY_BYTES;
-  let tracked: Set<string> | null | undefined;
+  const start = args.budget ?? MAX_PERSONA_BODY_BYTES;
+  let remaining = start;
 
   for (const id of args.ids) {
     if (remaining <= 0) break;
     const rel = `${args.projectAgentsDir}/${id}.md`;
-
-    // Two steps so the git call is paid for only when it can change the answer. With no tracked set
-    // the predicate treats everything as untracked and masks more, so a "not denied" verdict here is
-    // final and needs no git at all — which is the overwhelmingly common case, since no default deny
-    // glob matches a `.md` under an agents directory.
-    if (secretMaskDeniesPath(args.policy, rel)) {
-      if (tracked === undefined) tracked = await args.loadTracked();
-      if (secretMaskDeniesPath({ ...args.policy, tracked }, rel)) continue;
-    }
-
-    let read: { data: Buffer; size: number; truncated: boolean } | null;
-    try {
-      // One byte more than the budget, so a file that claims to fit and then reads longer is
-      // caught rather than silently truncated.
-      read = await readFileNoFollow(wa.anchor, `${wa.prefix}${rel}`, { maxBytes: remaining + 1 });
-    } catch {
-      continue;
-    }
-    if (read === null) continue;
-    if (read.size > remaining || read.data.length > remaining) {
-      oversized.push({ id, rel, size: read.size });
-      continue;
-    }
-
-    const parsed = parseAgentFile(read.data.toString('utf8'));
-    if (!parsed) continue;
-    const body = parsed.body.trim();
-    if (!body) continue;
-
-    bodies[id] = body;
-    remaining -= read.size;
+    const outcome = await readPersonaFile({
+      anchor,
+      rel,
+      policy: args.policy,
+      tracked,
+      remaining,
+      strict: false,
+    });
+    if (outcome.kind === 'oversized') oversized.push({ id, rel, size: outcome.size });
+    if (outcome.kind !== 'ok') continue;
+    bodies[id] = outcome.body;
+    remaining -= outcome.size;
   }
 
-  return { bodies, oversized };
+  return { bodies, oversized, used: start - remaining };
+}
+
+/** Every markdown agent directory, in catalog order: where a template's persona is looked for when
+ *  the selected provider's own directory (if it has a markdown one) does not hold it. */
+const MARKDOWN_AGENT_DIRS: readonly string[] = [
+  ...new Set(
+    CLI_PROVIDER_LIST.flatMap((p) =>
+      p.agentFileFormat === 'markdown' && p.projectAgentsDir ? [p.projectAgentsDir] : [],
+    ),
+  ),
+];
+
+/** Every TOML agent directory (Codex), looked in only after no markdown directory holds the id. */
+const TOML_AGENT_DIRS: readonly string[] = [
+  ...new Set(
+    CLI_PROVIDER_LIST.flatMap((p) =>
+      p.agentFileFormat === 'toml' && p.projectAgentsDir ? [p.projectAgentsDir] : [],
+    ),
+  ),
+];
+
+export type TemplatePersonasResult =
+  | { ok: true; personas: Record<string, { body: string; rel: string }>; used: number }
+  | { ok: false; failure: string };
+
+/** The step's failure text for a template persona that cannot be pasted: names the id and why. */
+export function templatePersonaFailure(id: string, reason: string): string {
+  return `Prompt step persona "${id}" cannot be used: ${reason}.`;
+}
+
+/**
+ * Read the persona behind every `{{agent:<id>}}` marker of a prompt step's template.
+ *
+ * Unlike a built-in marker, which falls back to its inline protocol, a template persona has no
+ * fallback text: the admin chose it, so any file that cannot be pasted FAILS the step with the id
+ * and the reason. Each id is looked up in the selected provider's markdown directory first (when it
+ * has one), then in every markdown directory in catalog order, and the first that holds `<id>.md`
+ * decides — a refused, masked, empty or over-budget file there is a failure, never a reason to try
+ * the next directory. When no markdown directory holds the id, a Codex `<id>.toml` is the persona
+ * (its `developer_instructions` is the body). A path the mask policy denies counts as held only when a file exists there. Same reader, mask policy and budget as the built-in bodies.
+ */
+export async function readTemplatePersonas(args: {
+  workerTree: string;
+  /** The selected provider's agents directory when it holds markdown definitions, else null. */
+  providerAgentsDir: string | null;
+  ids: readonly string[];
+  policy: SecretMaskPolicy;
+  loadTracked: () => Promise<Set<string> | null>;
+  budget?: number;
+}): Promise<TemplatePersonasResult> {
+  const anchor = workspaceAnchor(args.workerTree);
+  const tracked = memoTracked(args.loadTracked);
+  const dirs = [
+    ...new Set([
+      ...(args.providerAgentsDir ? [args.providerAgentsDir] : []),
+      ...MARKDOWN_AGENT_DIRS,
+    ]),
+  ];
+  const candidates = (id: string): { rel: string; format: 'markdown' | 'toml' }[] => [
+    ...dirs.map((dir) => ({ rel: `${dir}/${id}.md`, format: 'markdown' as const })),
+    ...TOML_AGENT_DIRS.map((dir) => ({ rel: `${dir}/${id}.toml`, format: 'toml' as const })),
+  ];
+  const start = args.budget ?? MAX_PERSONA_BODY_BYTES;
+  let remaining = start;
+  const personas: Record<string, { body: string; rel: string }> = {};
+
+  for (const id of args.ids) {
+    let resolved = false;
+    for (const { rel, format } of candidates(id)) {
+      const outcome = await readPersonaFile({
+        anchor,
+        rel,
+        policy: args.policy,
+        tracked,
+        remaining,
+        strict: true,
+        format,
+      });
+      if (outcome.kind === 'absent') continue;
+      const fail = (reason: string): TemplatePersonasResult => ({
+        ok: false,
+        failure: templatePersonaFailure(id, reason),
+      });
+      switch (outcome.kind) {
+        case 'refused':
+          return fail(
+            `${rel} is a link, lies outside the repository tree, or is not a regular file`,
+          );
+        case 'masked':
+          return fail(`${rel} is hidden by the secret-mask policy`);
+        case 'oversized':
+          return fail(
+            `${rel} is ${outcome.size} bytes and does not fit the ${remaining} bytes left of the ` +
+              `${MAX_PERSONA_BODY_BYTES}-byte persona budget`,
+          );
+        case 'unparseable':
+          return fail(
+            format === 'toml'
+              ? `${rel} has no developer_instructions that can be read`
+              : `${rel} has no frontmatter that can be parsed`,
+          );
+        case 'empty':
+          return fail(`${rel} has an empty body`);
+        case 'ok':
+          personas[id] = { body: outcome.body, rel };
+          remaining -= outcome.size;
+          resolved = true;
+      }
+      break;
+    }
+    if (!resolved) {
+      return {
+        ok: false,
+        failure: templatePersonaFailure(
+          id,
+          `no ${id}.md found in ${dirs.join(', ')}, and no ${id}.toml in ${TOML_AGENT_DIRS.join(', ')}`,
+        ),
+      };
+    }
+  }
+
+  return { ok: true, personas, used: start - remaining };
 }
 
 /** The invocation's effective secret-mask policy, for the reader above. Mirrors

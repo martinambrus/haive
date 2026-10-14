@@ -25,11 +25,13 @@ import type {
   SubAgentInvocation,
   SubAgentSpec,
 } from '../cli-adapters/types.js';
+import { TEMPLATE_PERSONA_MARKER_PATTERN } from '@haive/shared/modularity';
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
 import {
   adaptPromptForCliCapabilities,
   agentGuidanceIds,
   stripAgentGuidanceBlocks,
+  templatePersonaIds,
 } from '../step-engine/steps/_retrieval-guidance.js';
 import { withGlobalKbDigest, type GlobalKbDigest } from '../step-engine/steps/_global-kb-digest.js';
 import type { HouseRulesStamp } from '@haive/shared/global-kb';
@@ -37,11 +39,14 @@ import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { resolveInvocationWorkerTree } from '../repo/worktree-git-boundary.js';
 import {
+  MAX_PERSONA_BODY_BYTES,
   instructionsNameAgentPath,
   readPersonaBodies,
+  readTemplatePersonas,
   recordOversizedPersonas,
   resolveAgentIsolationEnabled,
   resolvePersonaMaskPolicy,
+  templatePersonaFailure,
 } from './agent-isolation.js';
 import {
   agentRulesHash,
@@ -122,6 +127,9 @@ export interface DispatchPlan {
    *  model_identity: decide it where the evidence is, and let every insert site record the
    *  decision rather than re-derive it. Null on a 'skip' plan, which runs nothing. */
   effort?: EffortDecision | null;
+  /** Set on a 'skip' plan whose cause is a prompt step's persona that cannot be pasted. It is the
+   *  step's whole failure text, which must not read as "no cli provider available". */
+  personaFailure?: string;
   reason: string;
 }
 
@@ -201,6 +209,17 @@ export interface DispatchRequest {
    *  by `agentIsolationApplies`: a body that names an agent path ends isolation, because a replacer's
    *  return value is never rescanned and a marker block inside a body reaches the model as written. */
   agentBodies?: Record<string, string>;
+  /** Persona bodies read at dispatch for a prompt step's `{{agent:<id>}}` markers, keyed by id, with
+   *  the repository-relative path each came from. Resolved by `resolveTaskDispatch` after the
+   *  provider is known; exposed on the pure resolver only for tests. Pasted whatever the isolation
+   *  decision, and scanned like the built-in bodies when it is made. */
+  templatePersonas?: Record<string, { body: string; rel: string }>;
+  /** Set only by a prompt step's dispatch (a `custom.*` step id): the ids of the
+   *  `[[HAIVE_TEMPLATE_PERSONA:<id>]]` markers in its RENDERED TEMPLATE, taken before the attachment
+   *  notice, ledger and learned guidance are appended. Only these are resolved. Every other marker,
+   *  and every marker when this is absent, is text a prompt quoted from elsewhere: no persona is read
+   *  for it and it is neutralised in the prompt. */
+  promptStepPersonaIds?: readonly string[];
   /** The global switch for putting the provider's effective agent rules at the top of the prompt,
    *  resolved by `resolveTaskDispatch`; exposed on the pure resolver only for tests, like
    *  `agentIsolation`. Absent or false means no block. */
@@ -260,6 +279,9 @@ export function agentIsolationApplies(req: DispatchRequest, injectedRules?: stri
   )
     return false;
   for (const body of Object.values(req.agentBodies ?? {})) {
+    if (promptNamesAgentPath(body, SANDBOX_WORKDIR)) return false;
+  }
+  for (const { body } of Object.values(req.templatePersonas ?? {})) {
     if (promptNamesAgentPath(body, SANDBOX_WORKDIR)) return false;
   }
   // EXTERNAL text the dispatcher appends AFTER this decision, which the prompt argument cannot answer
@@ -338,6 +360,7 @@ export async function resolveTaskDispatch(
   }
   const resolved: DispatchRequest = {
     ...req,
+    input: neutraliseUnresolvedTemplateMarkers(req),
     lspConfigured,
     // Production callers cannot accidentally claim a boundary the mount will
     // not apply (or omit one it will): the DB-backed target wins any input.
@@ -375,14 +398,86 @@ export async function resolveTaskDispatch(
   // is `adapter.rulesFile` and the agents directory to read is that provider's own. Gathered here
   // and fed back into ONE second pass, together with any codex verdict — early-returning on each
   // would skip the others the moment a task needs both.
-  const isolation = await resolveAgentIsolation(db, taskId, resolved, provider, adapter);
+  // A prompt step's template personas come first: they are pasted whatever the isolation decision,
+  // that decision scans their bodies, and the built-in bodies share the budget they leave.
+  const templated = await resolveTemplatePersonas(db, taskId, resolved, provider);
+  if (templated !== null && 'failure' in templated) {
+    return { ...skipPlan(templated.failure), personaFailure: templated.failure };
+  }
+  const withTemplates: DispatchRequest =
+    templated === null ? resolved : { ...resolved, templatePersonas: templated.personas };
+  const isolation = await resolveAgentIsolation(
+    db,
+    taskId,
+    withTemplates,
+    provider,
+    adapter,
+    templated?.used ?? 0,
+  );
 
-  if (verdict === null && isolation === null) return plan;
+  if (verdict === null && isolation === null && templated === null) return plan;
   return resolveDispatch({
-    ...resolved,
+    ...withTemplates,
     ...(verdict ? { codexAppServer: { ...codexAppServer!, [provider.id]: verdict } } : {}),
     ...(isolation ?? {}),
   });
+}
+
+/** A marker is resolved only when its id is one the prompt step's own template named. Anywhere else
+ *  the text is quoted data, so one space after the brackets breaks it, as the shared template
+ *  renderer breaks a reserved marker in a value. */
+function neutraliseUnresolvedTemplateMarkers(req: DispatchRequest): DispatchInput {
+  if (req.input.kind !== 'prompt') return req.input;
+  const allowed = new Set(req.promptStepPersonaIds ?? []);
+  return {
+    ...req.input,
+    prompt: req.input.prompt.replaceAll(TEMPLATE_PERSONA_MARKER_PATTERN, (marker, id: string) =>
+      allowed.has(id) ? marker : marker.replace('[[', '[[ '),
+    ),
+  };
+}
+
+/** The bodies behind a prompt step's template markers, a failure naming the first persona that
+ *  cannot be pasted, or null when the prompt carries no template marker. Reads the tree this
+ *  invocation mounts, under the same mask policy as the built-in bodies, and fails CLOSED. */
+async function resolveTemplatePersonas(
+  db: Database,
+  taskId: string,
+  resolved: DispatchRequest,
+  provider: CliProviderRecord,
+): Promise<
+  | { personas: Record<string, { body: string; rel: string }>; used: number }
+  | { failure: string }
+  | null
+> {
+  if (resolved.input.kind !== 'prompt') return null;
+  const ids = templatePersonaIds(stripHaivePreamble(resolved.input.prompt));
+  if (ids.length === 0) return null;
+
+  const workerTree = await resolveInvocationWorkerTree(db, taskId, resolved.worktreeRel);
+  if (workerTree === null) {
+    return {
+      failure: templatePersonaFailure(
+        ids[0]!,
+        'the task has no repository checkout to read it from',
+      ),
+    };
+  }
+  const mask = await resolvePersonaMaskPolicy(db, taskId, workerTree);
+  if (mask === null) {
+    return {
+      failure: templatePersonaFailure(ids[0]!, 'the secret-mask policy could not be evaluated'),
+    };
+  }
+  const metadata = getCliProviderMetadata(provider.name);
+  const result = await readTemplatePersonas({
+    workerTree,
+    providerAgentsDir: metadata.agentFileFormat === 'markdown' ? metadata.projectAgentsDir : null,
+    ids,
+    policy: mask.policy,
+    loadTracked: mask.loadTracked,
+  });
+  return result.ok ? { personas: result.personas, used: result.used } : { failure: result.failure };
 }
 
 /** The instruction verdict and the persona bodies, or null when nothing new was learned.
@@ -397,6 +492,7 @@ async function resolveAgentIsolation(
   resolved: DispatchRequest,
   provider: CliProviderRecord,
   adapter: BaseCliAdapter,
+  templateBytes: number,
 ): Promise<Pick<DispatchRequest, 'instructionsNameAgentPath' | 'agentBodies'> | null> {
   if (!agentIsolationApplies(resolved)) return null;
 
@@ -440,6 +536,7 @@ async function resolveAgentIsolation(
     ids,
     policy: mask.policy,
     loadTracked: mask.loadTracked,
+    budget: MAX_PERSONA_BODY_BYTES - templateBytes,
   });
   await recordOversizedPersonas(db, taskId, oversized);
   return { instructionsNameAgentPath: false, agentBodies: bodies };
@@ -571,6 +668,7 @@ function buildCliSidePlan(
       agentFileFormat: providerMetadata.agentFileFormat,
       isolated,
       agentBodies: req.agentBodies,
+      templatePersonas: req.templatePersonas,
     });
     // Both boundaries ride the same predicate: an invocation isolated to a worktree is
     // exactly the one that gets the read-only `.git` and `#ddev-generated` masks, so a
@@ -687,18 +785,19 @@ function buildCliSidePlan(
     if (houseRules) spec.houseRules = houseRules;
     if (assignedAgentIds.length > 0) spec.assignedAgentIds = assignedAgentIds;
     if (isolated) spec.maskAgentDefinitions = true;
-    // Recorded from the bodies actually pasted, and NOT gated on isolation: exec rechecks whatever
-    // paths are recorded, and a future path pastes template personas outside isolation too. Only
-    // the ids the rewrite could paste are listed, so a marker that fell back to its inline protocol
-    // contributes nothing to recheck.
-    if (isolated && providerMetadata.projectAgentsDir && req.agentBodies) {
-      // Every key here came from this prompt's own marker ids — the reader was handed
-      // `agentGuidanceIds(prompt)` and returns only ids it could read — so the keys ARE the pasted
-      // set and need no re-filtering.
-      const dir = providerMetadata.projectAgentsDir;
-      const pasted = Object.keys(req.agentBodies).map((id) => `${dir}/${id}.md`);
-      if (pasted.length > 0) spec.pastedPersonaPaths = pasted;
-    }
+    // Recorded from the bodies actually pasted: exec rechecks whatever paths are recorded. A built-in
+    // body is pasted only when isolated, and only the ids the rewrite could paste are listed, so a
+    // marker that fell back to its inline protocol contributes nothing to recheck. A template body
+    // is pasted whatever the decision. Every key of `agentBodies` came from this prompt's own marker
+    // ids — the reader was handed `agentGuidanceIds(prompt)` and returns only ids it could read — so
+    // the keys ARE the pasted set and need no re-filtering.
+    const builtInPaths =
+      isolated && providerMetadata.projectAgentsDir && req.agentBodies
+        ? Object.keys(req.agentBodies).map((id) => `${providerMetadata.projectAgentsDir}/${id}.md`)
+        : [];
+    const templatePaths = Object.values(req.templatePersonas ?? {}).map((p) => p.rel);
+    const pasted = [...new Set([...builtInPaths, ...templatePaths])];
+    if (pasted.length > 0) spec.pastedPersonaPaths = pasted;
     return {
       mode: 'cli',
       providerId: provider.id,
@@ -780,7 +879,10 @@ function houseRulesInjection(req: DispatchRequest): {
  *  marker into the pointer sentence or its fallback line, and the stored prompt is the rewritten
  *  one, so this is the only moment the assignment can be read. */
 function assignedPersonaIds(req: DispatchRequest, prompts: string[]): string[] {
-  const ids = new Set(req.assignedAgentIds ?? []);
+  const ids = new Set([
+    ...(req.assignedAgentIds ?? []),
+    ...Object.keys(req.templatePersonas ?? {}),
+  ]);
   for (const prompt of prompts) {
     for (const id of agentGuidanceIds(prompt)) ids.add(id);
   }

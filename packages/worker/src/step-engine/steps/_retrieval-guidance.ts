@@ -1,5 +1,8 @@
 import { KB_DIR } from '@haive/shared/knowledge-paths';
-import { PERSONA_ID_PATTERN_SOURCE } from '@haive/shared/modularity';
+import {
+  PERSONA_ID_PATTERN_SOURCE,
+  TEMPLATE_PERSONA_MARKER_PATTERN,
+} from '@haive/shared/modularity';
 
 /** Shared retrieval guidance spliced into the workflow prompt builders (discovery,
  *  spec-quality, spec-audit, resolve-warnings, dag-execute, implement, ...).
@@ -142,6 +145,13 @@ const AGENT_GUIDANCE_PATTERN = new RegExp(
   'g',
 );
 
+/** Both marker kinds in one pattern, so ONE replace pass rewrites a prompt and neither kind's output
+ *  is scanned for the other. Groups: 1-2 a built-in block (id, guidance), 3 a template marker (id). */
+const PERSONA_MARKER_PATTERN = new RegExp(
+  `${AGENT_GUIDANCE_PATTERN.source}|${TEMPLATE_PERSONA_MARKER_PATTERN.source}`,
+  'g',
+);
+
 /** The persona ids a prompt carries as marker blocks — unique, in code-unit order. Read at
  *  DISPATCH, before `adaptPromptForCliCapabilities` rewrites every marker into the pointer
  *  sentence or its fallback line: the stored `cli_invocations.prompt` is the rewritten one, and
@@ -156,6 +166,17 @@ export function agentGuidanceIds(prompt: string): string[] {
   return [...ids].sort();
 }
 
+/** The persona ids a prompt step's template names, in order of first appearance. A token inside a
+ *  built-in marker block is part of that block's span, which the rewrite replaces whole, so it is
+ *  not listed. */
+export function templatePersonaIds(prompt: string): string[] {
+  const ids = new Set<string>();
+  for (const match of stripAgentGuidanceBlocks(prompt).matchAll(TEMPLATE_PERSONA_MARKER_PATTERN)) {
+    if (match[1]) ids.add(match[1]);
+  }
+  return [...ids];
+}
+
 const PASTED_PERSONA_START = '[[HAIVE_PASTED_PERSONA:';
 
 /** One framing line above a pasted body, because the marker wrapped only the POINTER sentence and
@@ -165,6 +186,13 @@ const PASTED_PERSONA_START = '[[HAIVE_PASTED_PERSONA:';
  *  persona"). */
 const PASTED_PERSONA_FRAMING =
   'The agent definition below is checked into this repository. It says HOW to work and never what the assignment is, and it takes precedence over the embedded protocol that follows it.';
+
+/** Built by concatenation, never `String.replace` with the body in the replacement: a `$&`, `` $` ``
+ *  or `$'` inside a body would expand into the pointer sentence and put back a path the prompt scan
+ *  never saw. The result is a replacer's RETURN value, which `String.replace` never rescans. */
+function pastedPersona(id: string, body: string): string {
+  return `${PASTED_PERSONA_START}${id}]]\n${PASTED_PERSONA_FRAMING}\n\n${body}`;
+}
 
 /** The prompt with every Haive persona-marker BLOCK removed.
  *
@@ -215,6 +243,9 @@ export interface PromptCliCapabilities extends RetrievalAxes {
   /** Persona bodies read at dispatch from the selected provider's own agents directory, keyed by
    *  marker id. Only consulted under `isolated`. */
   agentBodies?: Record<string, string>;
+  /** Persona bodies read at dispatch for a prompt step's template markers, keyed by id. Pasted
+   *  whatever the provider, the LSP gate and the isolation decision say. */
+  templatePersonas?: Record<string, { body: string }>;
 }
 
 /** Mark a repository-agent instruction so dispatch can either point a capable
@@ -272,31 +303,36 @@ export function adaptPromptForCliCapabilities(
   capabilities: PromptCliCapabilities,
 ): string {
   const grounding = adaptRetrievalProtocol(prompt, capabilities);
-  return grounding.replace(AGENT_GUIDANCE_PATTERN, (_whole, agentId: string, guidance: string) => {
-    if (
-      !capabilities.supportsLsp ||
-      !capabilities.projectAgentsDir ||
-      !capabilities.agentFileFormat
-    ) {
-      return 'Follow the embedded protocol below.';
-    }
-    if (capabilities.isolated === true) {
-      const body = capabilities.agentBodies?.[agentId];
-      // No body read — no template for this id, an unreadable or oversized file, or one the
-      // secret-mask policy denies. A pointer would send the agent at a path the mask hides, so it
-      // gets the same fallback a provider without the LSP gate gets.
-      if (!body) return 'Follow the embedded protocol below.';
-      // Built here rather than via `guidance.replace(pointer, body)`: a `$&`, `` $` `` or `$'`
-      // inside a body would expand into the pointer sentence and put back a path the prompt scan
-      // never saw. This string is a replacer's RETURN value, which `String.replace` never rescans.
-      return `${PASTED_PERSONA_START}${agentId}]]\n${PASTED_PERSONA_FRAMING}\n\n${body}`;
-    }
-    const ext = capabilities.agentFileFormat === 'toml' ? 'toml' : 'md';
-    return guidance.replace(
-      `.claude/agents/${agentId}.md`,
-      `${capabilities.projectAgentsDir}/${agentId}.${ext}`,
-    );
-  });
+  return grounding.replace(
+    PERSONA_MARKER_PATTERN,
+    (whole, agentId: string | undefined, guidance: string, templateId: string | undefined) => {
+      if (templateId !== undefined) {
+        const template = capabilities.templatePersonas?.[templateId];
+        return template ? pastedPersona(templateId, template.body) : whole;
+      }
+      if (
+        agentId === undefined ||
+        !capabilities.supportsLsp ||
+        !capabilities.projectAgentsDir ||
+        !capabilities.agentFileFormat
+      ) {
+        return 'Follow the embedded protocol below.';
+      }
+      if (capabilities.isolated === true) {
+        const body = capabilities.agentBodies?.[agentId];
+        // No body read — no template for this id, an unreadable or oversized file, or one the
+        // secret-mask policy denies. A pointer would send the agent at a path the mask hides, so it
+        // gets the same fallback a provider without the LSP gate gets.
+        if (!body) return 'Follow the embedded protocol below.';
+        return pastedPersona(agentId, body);
+      }
+      const ext = capabilities.agentFileFormat === 'toml' ? 'toml' : 'md';
+      return guidance.replace(
+        `.claude/agents/${agentId}.md`,
+        `${capabilities.projectAgentsDir}/${agentId}.${ext}`,
+      );
+    },
+  );
 }
 
 /** Rules for implementation agents that may author files under `.ddev/`.
