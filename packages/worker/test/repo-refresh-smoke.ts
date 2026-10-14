@@ -1751,6 +1751,21 @@ async function main(): Promise<void> {
         { m4Tracked, asideM4, m4Mode: m4Mode.toString(8) },
       );
 
+      // P2. A lone plan.md in a repository whose database holds no plan is not Haive's: refused and kept.
+      const p2 = await cloned();
+      const p2Md = path.join(p2.dest, HAIVE_DATA_FILES.planMarkdown);
+      await mkdir(path.dirname(p2Md), { recursive: true });
+      await writeFile(p2Md, '# notes a person keeps here\n');
+      const asideP2 = await setAsideHaiveProjections(db, p2.payload.repositoryId, p2.dest);
+      const keptP2 = await readFile(p2Md, 'utf8').catch(() => null);
+      check(
+        'P2: a lone plan.md with no plan in the database refuses the set-aside and is kept',
+        asideP2.outcome === 'refused' &&
+          asideP2.file === HAIVE_DATA_FILES.planMarkdown &&
+          keptP2 === '# notes a person keeps here\n',
+        { asideP2, keptP2 },
+      );
+
       // 11l-2. A mode change is not in the blob id: a staged chmod, or one only in the working tree, on a
       // file holding Haive's bytes is a person's change, and returning the path to HEAD would lose it.
       const indexMode = (dir: string, rel: string) =>

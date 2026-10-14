@@ -314,7 +314,15 @@ async function planOffender(
 ): Promise<string | null> {
   const [moded] = [...(await modeChanges(repoPath, paths)).keys()];
   if (moded !== undefined) return moded;
-  if (!paths.includes(HAIVE_DATA_FILES.plan)) return null;
+  if (!paths.includes(HAIVE_DATA_FILES.plan)) {
+    if (!paths.includes(HAIVE_DATA_FILES.planMarkdown)) return null;
+    const [held] = await db
+      .select({ id: schema.planNodes.id })
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.repositoryId, repositoryId))
+      .limit(1);
+    return held ? null : HAIVE_DATA_FILES.planMarkdown;
+  }
   const [row] = await db
     .select({ syncedHash: schema.planMirrorState.syncedHash })
     .from(schema.planMirrorState)
