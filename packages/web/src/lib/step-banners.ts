@@ -1,4 +1,5 @@
 import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
+import { parseStepId } from '@haive/shared/modularity';
 
 /** Banner visibility for step cards, invocation terminals and attachment rows.
  *
@@ -58,12 +59,13 @@ export interface StepBannerRow {
  *  Gated on the marker, never on the message: the park writes its queue line to status_message
  *  and a loop whose chain ended cannot clear its own line, so a step nothing was driving kept
  *  advertising a live wait next to the real one. `taskEnded` suppresses it outright — a cancelled
- *  or completed task can still hold a marker, and nothing is queued there. */
+ *  or completed task can still hold a marker, and nothing is queued there. `dead` does the same:
+ *  nothing drives a dead task's park loop either. */
 export function parkBanner(
   step: StepBannerRow,
-  opts: { taskEnded: boolean; paused?: boolean },
+  opts: { taskEnded: boolean; paused?: boolean; dead?: boolean },
 ): { text: string } | null {
-  if (opts.taskEnded) return null;
+  if (opts.taskEnded || opts.dead) return null;
   if (step.status !== 'pending') return null;
   if (step.waitingStartedAt == null) return null;
   // Paused overrides the stored queue line. The park marker is still the thing that proves the
@@ -231,4 +233,87 @@ export function leftMergeBanners(
       text: `${LEFT_MERGE_OUTCOME_LABEL[m.settled.outcome]} ${where}. ${m.settled.reason}`.trim(),
     };
   });
+}
+
+export interface DeadTaskRow {
+  status: string;
+  /** Absent on an api that predates the column, which reads as alive. */
+  deadAt?: Date | string | null;
+}
+
+export interface DeadStepRow {
+  stepId: string;
+  /** `missing`: the module is not installed; otherwise it is installed without this step. */
+  module: { id: string; name: string | null; missing: boolean } | null;
+}
+
+/** Structural: `dead_at` set on a task not cancelled or completed. Never `dead_reason`, which is copy. */
+export function isTaskDead(task: DeadTaskRow): boolean {
+  return task.deadAt != null && task.status !== 'cancelled' && task.status !== 'completed';
+}
+
+function codeList(values: readonly string[]): string {
+  const spans = values.map(codeSpan);
+  return spans.length > 1 ? `${spans.slice(0, -1).join(', ')} and ${spans.at(-1)}` : spans.join('');
+}
+
+const DEAD_LEAD = 'This task is dead:';
+const DEAD_TAIL = 'and the worker restarts; until then you can only cancel it.';
+
+/** Markdown for a dead task's banner, one sentence per kind of unresolved step; null while alive. */
+export function deadBanner(
+  task: DeadTaskRow,
+  steps: readonly DeadStepRow[],
+): { text: string } | null {
+  if (!isTaskDead(task)) return null;
+  const notInstalled = new Map<string, string>();
+  const noLongerProvided = new Map<string, { label: string; stepIds: string[] }>();
+  const custom: string[] = [];
+  const core: string[] = [];
+  for (const { stepId, module } of steps) {
+    if (module?.missing) {
+      notInstalled.set(module.id, module.name || module.id);
+    } else if (module) {
+      const entry = noLongerProvided.get(module.id) ?? {
+        label: module.name || module.id,
+        stepIds: [],
+      };
+      entry.stepIds.push(stepId);
+      noLongerProvided.set(module.id, entry);
+    } else if (parseStepId(stepId)?.kind === 'custom') {
+      custom.push(stepId);
+    } else {
+      core.push(stepId);
+    }
+  }
+  const sentences: string[] = [];
+  if (notInstalled.size > 0) {
+    const one = notInstalled.size === 1;
+    const names = codeList([...notInstalled.values()]);
+    sentences.push(
+      `This task needs the ${one ? 'module' : 'modules'} ${names}, which ${one ? 'is' : 'are'} not installed. ` +
+        `Nothing runs on it until ${one ? 'the module is' : 'they are'} installed again ${DEAD_TAIL}`,
+    );
+  }
+  for (const { label, stepIds } of noLongerProvided.values()) {
+    sentences.push(
+      `${DEAD_LEAD} the module ${codeSpan(label)} no longer provides ${codeList(stepIds)}. ` +
+        `Nothing runs on it until the module provides what it needs again ${DEAD_TAIL}`,
+    );
+  }
+  if (custom.length > 0) {
+    sentences.push(
+      `${DEAD_LEAD} its prompt ${custom.length === 1 ? 'step' : 'steps'} ${codeList(custom)} ` +
+        'cannot be read from what the task was created with; cancel it.',
+    );
+  }
+  if (core.length > 0) {
+    sentences.push(
+      `${DEAD_LEAD} its run list names steps this install does not have: ${codeList(core)}. You can only cancel it.`,
+    );
+  }
+  if (sentences.length === 0) {
+    sentences.push(`${DEAD_LEAD} a step it needs is no longer available. You can only cancel it.`);
+  }
+  return { text: sentences.join('\n\n') };
 }

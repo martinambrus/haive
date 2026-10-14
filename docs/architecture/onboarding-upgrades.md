@@ -591,8 +591,13 @@ the restore, since a sweep that ran between the two would have stamped it writte
 only when the base is the checked-out branch (a ref-only update moves no file), and again after a
 merge it drove; `persistDetection` keeps its two importers, because the legacy mirror files
 (`environment.json`, `tooling.json`, `exclusions.json`) still restore repositories no record
-covers; only its plan block moved into `syncPlanFromCheckout`, which the re-sync shares. The merge resolver on
-the checkout, plan Pull and Save, step 13 and the task-end hooks do not call it yet.
+covers; only its plan block moved into `syncPlanFromCheckout`, which the re-sync shares. A plan Pull,
+Save & push and the `01-plan-merge` confirm set aside the same way around their fast-forward
+(`integrateOrigin`): their fence is the checkout-holding task count (the confirm leaves out its own task
+and counts only tasks working in the checkout itself), a Save sets aside only once the remote is ahead,
+so a Save with nothing to land is never stopped by a waiting task, and a Pull refuses, by name, an
+untracked file under `.haive-data/state/` that Haive did not write. The merge resolver on the checkout,
+step 13 and the task-end hooks do not call it yet.
 
 **The record carries the portable settings and the environment.** `portableSettingsOf`
 (`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:
