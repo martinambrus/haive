@@ -188,6 +188,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
         'repo-1',
         local,
         expect.any(Function),
+        expect.any(Function),
       );
       expect(atAside).toBe(before);
       expect(projections.resync).toHaveBeenCalledWith(ctx.db, 'repo-1', local);

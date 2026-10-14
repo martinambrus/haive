@@ -563,7 +563,7 @@ paths return to HEAD with `git checkout HEAD --`, the rest are removed (`git rm 
 `removeNoFollow`, then any directory that leaves empty under `.haive-data/state`, since an empty one
 reads as a record with no format file); each restore runs under the domain's lock, after the caller's
 fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there, and a
-task that started meanwhile answers `held` with the files untouched; and the sync base is pointed at
+task that started meanwhile answers `held` with the files untouched; 00a runs that restore and its move in its claim's merge-dir section (`withMergeDirSection`, fenced on the pass's epoch), so a Stop or a cancel refuses both; and the sync base is pointed at
 the record now in the checkout (`rebaseProjectStateOnCheckout`; a checkout with no record gets an
 EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
 a clash is asked about, never imported over it, and one whose record cannot be read keeps the old

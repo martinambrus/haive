@@ -75,6 +75,8 @@ export const MOVE_ATTEMPTS = 3;
 
 /** How many tasks hold the checkout now; read inside each lock, before the first file is touched. */
 export type CheckoutFence = (db: DbOrTx) => Promise<number>;
+/** Runs the transaction that writes the files; a caller holding a merge-dir claim passes its section. */
+export type RestoreSection = <T>(fn: (tx: Tx) => Promise<T>) => Promise<T>;
 
 const STATE_PREFIX = `${PROJECT_STATE_DIR}/`;
 const ABSENT_PLAN_HASH = 'absent';
@@ -478,12 +480,14 @@ async function setAsideDomain(
   paths: readonly string[],
   guard: RestoreGuard,
   kept: KeptFiles,
+  section: RestoreSection | undefined,
   after?: (tx: Tx) => Promise<void>,
 ): Promise<SetAsideResult | Changed | null> {
   const judged = await db.transaction((tx) => judgeAndMark(tx, repoPath, paths, guard));
   if ('stopped' in judged) return judged.stopped;
   await restoreFaults.afterBase?.();
-  return db.transaction((tx) => restoreJudged(tx, repoPath, judged, guard, kept, after));
+  const restore = (tx: Tx) => restoreJudged(tx, repoPath, judged, guard, kept, after);
+  return section ? section(restore) : db.transaction(restore);
 }
 
 const stateGuard = (
@@ -602,6 +606,7 @@ export async function setAsideHaiveProjections(
   repositoryId: string,
   repoPath: string,
   fence?: CheckoutFence,
+  section?: RestoreSection,
 ): Promise<SetAsideResult> {
   const restored = new Set<string>();
   const kept: KeptFiles = new Map();
@@ -614,7 +619,7 @@ export async function setAsideHaiveProjections(
   for (let attempt = 1; attempt <= MOVE_ATTEMPTS; attempt++) {
     let result: Awaited<ReturnType<typeof setAsideOnce>>;
     try {
-      result = await setAsideOnce(db, repositoryId, repoPath, restored, kept, fence);
+      result = await setAsideOnce(db, repositoryId, repoPath, restored, kept, fence, section);
     } catch (err) {
       return putBackAfterFailure(db, repositoryId, repoPath, kept, err);
     }
@@ -638,6 +643,7 @@ async function setAsideOnce(
   restored: Set<string>,
   kept: KeptFiles,
   fence?: CheckoutFence,
+  section?: RestoreSection,
 ): Promise<SetAsideResult | Changed> {
   const dirty = await dirtyProjections(repoPath);
   if (dirty.paths.length === 0) return { outcome: 'clean' };
@@ -679,6 +685,7 @@ async function setAsideOnce(
       state,
       stateGuard(repositoryId, repoPath, state, fence),
       kept,
+      section,
       (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
     );
     if (stopped) return stopped;
@@ -692,6 +699,7 @@ async function setAsideOnce(
       plan,
       planGuard(repositoryId, repoPath, plan, fence),
       kept,
+      section,
     );
     if (stopped) return stopped;
     for (const path of plan) restored.add(path);

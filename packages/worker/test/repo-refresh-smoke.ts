@@ -28,6 +28,7 @@ import { applyPlanPatch } from '@haive/shared/plan';
 import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase, getDb } from '../src/db.js';
+import { StepSupersededError } from '../src/step-engine/step-ownership.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
 import {
@@ -1045,6 +1046,75 @@ async function main(): Promise<void> {
           git(c.dest, 'rev-parse', 'HEAD') === headBefore &&
           renderAfter.equals(renderBefore),
         { sibling, out, back: renderAfter.equals(renderBefore) },
+      );
+    }
+
+    // E1/E2. A Stop or a cancel that lands during 00a's set-aside fences what follows: E1 a Stop (the task
+    // failed at the pass's epoch) refuses the move and the files go back; E2 a cancel before the restore
+    // refuses the restore itself, which runs in the claim's section.
+    {
+      const stopped = async (
+        at: 'beforeCapture' | 'afterBase',
+        status: 'failed' | 'cancelled',
+      ): Promise<{ thrown: unknown; restored: boolean; moved: boolean; back: boolean }> => {
+        const c = await withPendingRender();
+        const id = c.payload.repositoryId;
+        await writeRecord(seed, { acceptedAgentIds: ['a', 'b', at] });
+        upstreamCommit(`a teammate adds agent ${at}`, '.haive-data/state');
+        const renderBefore = await readFile(path.join(c.dest, RENDER_REL));
+        const headBefore = git(c.dest, 'rev-parse', 'HEAD');
+        const [own] = await db
+          .insert(schema.tasks)
+          .values({
+            userId,
+            repositoryId: id,
+            type: 'workflow',
+            title: 'repo-refresh-smoke',
+            status: 'running',
+          })
+          .returning({ id: schema.tasks.id, epoch: schema.tasks.orchestrationEpoch });
+        let restored = false;
+        restoreFaults[at] = async () => {
+          await db.update(schema.tasks).set({ status }).where(eq(schema.tasks.id, own!.id));
+        };
+        restoreFaults.beforeRestore = () => {
+          restored = true;
+        };
+        let thrown: unknown = null;
+        try {
+          const ctx = { ...(await taskCtx(c.dest, own!.id)), epoch: own!.epoch };
+          const detected = await syncBaseStep.detect!(ctx);
+          await syncBaseStep.apply(ctx, {
+            detected,
+            formValues: { base: 'main' },
+            iteration: 0,
+            previousIterations: [],
+          });
+        } catch (err) {
+          thrown = err;
+        } finally {
+          delete restoreFaults[at];
+          delete restoreFaults.beforeRestore;
+          await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id));
+        }
+        return {
+          thrown,
+          restored,
+          moved: git(c.dest, 'rev-parse', 'HEAD') !== headBefore,
+          back: (await readFile(path.join(c.dest, RENDER_REL))).equals(renderBefore),
+        };
+      };
+      const e1 = await stopped('beforeCapture', 'failed');
+      check(
+        'E1: a Stop during the set-aside refuses the move at the pass epoch, and the files go back',
+        e1.thrown instanceof StepSupersededError && e1.restored && !e1.moved && e1.back,
+        { ...e1, thrown: String(e1.thrown) },
+      );
+      const e2 = await stopped('afterBase', 'cancelled');
+      check(
+        'E2: a cancel before the restore refuses the restore in the claim section, leaving the files as they were',
+        e2.thrown instanceof StepSupersededError && !e2.restored && !e2.moved && e2.back,
+        { ...e2, thrown: String(e2.thrown) },
       );
     }
 

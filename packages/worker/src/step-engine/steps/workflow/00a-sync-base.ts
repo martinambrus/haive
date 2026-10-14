@@ -406,11 +406,19 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       })) + ((await otherLiveClaim(conn as DbHandle, ctx.repoPath, ctx.taskId)) ? 1 : 0);
     let asided = false;
     const kept: KeptFiles = new Map();
+    const owner = {
+      mergeDir: ctx.repoPath,
+      stepId: ctx.taskStepId,
+      taskId: ctx.taskId,
+      epoch: ctx.epoch,
+    };
     const setAside = async (): Promise<SetAsideResult> => {
       if (!repositoryId) return { outcome: 'clean' };
       let aside: SetAsideResult;
       try {
-        aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
+        aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence, (fn) =>
+          withMergeDirSection(ctx.db, owner, fn),
+        );
       } catch (err) {
         if (asided) await putBackAfterFailure(ctx.db, repositoryId, ctx.repoPath, kept, err);
         throw err;
@@ -434,7 +442,6 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         };
       }
     }
-    const owner = { mergeDir: ctx.repoPath, stepId: ctx.taskStepId, taskId: ctx.taskId };
     const moveBase = async (): Promise<SyncBaseApply> => {
       const first = await setAside();
       if (first.outcome === 'held') {
