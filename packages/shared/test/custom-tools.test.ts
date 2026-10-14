@@ -4,9 +4,11 @@ import {
   customToolArgsSchema,
   customToolInputSchema,
   customToolSchema,
+  customToolUrl,
   validateCustomTool,
   validateCustomTools,
   type CustomTool,
+  type CustomToolArgs,
   type CustomToolParam,
   type CustomToolValidationContext,
   type HttpGetTool,
@@ -326,6 +328,7 @@ describe('validateCustomTool: what a clean tool looks like', () => {
     'https://app.localhost.example.com',
     'https://localtest.me',
     'https://API.Example.COM',
+    'https://api.example.com.',
   ])('accepts the public host %s', (host) => {
     expect(kindsOf(atHost(host))).toEqual([]);
   });
@@ -383,6 +386,40 @@ describe('validateCustomTool: the url', () => {
     ['localhost', 'tool-host-not-public', atHost('https://localhost')],
     ['LOCALHOST', 'tool-host-not-public', atHost('https://LOCALHOST')],
     ['localhost with a trailing dot', 'tool-host-not-public', atHost('https://localhost.')],
+    ['localhost with two trailing dots', 'tool-host-not-public', atHost('https://localhost..')],
+    ['localhost with three trailing dots', 'tool-host-not-public', atHost('https://localhost...')],
+    [
+      'a compose service name with two trailing dots',
+      'tool-host-not-public',
+      atHost('https://postgres..'),
+    ],
+    [
+      'host.docker.internal with two trailing dots',
+      'tool-host-not-public',
+      atHost('https://host.docker.internal..'),
+    ],
+    [
+      'a .localhost name with two trailing dots',
+      'tool-host-not-public',
+      atHost('https://app.localhost..'),
+    ],
+    [
+      'an IPv4 address with two trailing dots',
+      'tool-host-ip-literal',
+      atHost('https://127.0.0.1..'),
+    ],
+    [
+      'a public name with two trailing dots',
+      'tool-url-invalid',
+      atHost('https://api.example.com..'),
+    ],
+    ['an empty label inside the host', 'tool-url-invalid', atHost('https://api..example.com')],
+    ['an empty label at the start of the host', 'tool-url-invalid', atHost('https://.example.com')],
+    [
+      'an empty label inside a host that ends in a dot',
+      'tool-url-invalid',
+      atHost('https://api..example.com.'),
+    ],
     [
       'a percent-encoded localhost',
       'tool-host-not-public',
@@ -593,6 +630,9 @@ describe('validateCustomTool: the params', () => {
     ['an enum value of 65 characters', enumParam('a', ['v'.repeat(65)])],
     ['an empty enum value', enumParam('a', [''])],
     ['an enum value with a control character', enumParam('a', [`a${BEL}`])],
+    ['an enum value that is a lone surrogate', enumParam('a', [ch(0xd800)])],
+    ['an enum value holding a lone surrogate', enumParam('a', [`a${ch(0xdc00)}b`])],
+    ['a description holding a lone surrogate', boolParam('a', { description: `a${ch(0xd800)}` })],
     ['an enum that repeats a value', enumParam('a', ['x', 'x'])],
   ];
 
@@ -600,6 +640,25 @@ describe('validateCustomTool: the params', () => {
     'refuses $label as tool-param-invalid and as nothing else',
     ({ param }) => {
       expect(kindsOf(inQuery(param))).toEqual(['tool-param-invalid']);
+    },
+  );
+
+  it.each([
+    ['a slash', 'x/y'],
+    ['a backslash', 'x\\y'],
+    ['a dot segment', '.'],
+    ['a dot-dot segment', '..'],
+    ['two fullwidth full stops, which NFKC folds to ..', `${ch(0xff0e)}${ch(0xff0e)}`],
+  ])(
+    'refuses an enum choice with %s in the URL path, and allows it in the query',
+    (_label, choice) => {
+      const inPath = http({
+        url: 'https://api.example.com/v1/{a}',
+        query: [],
+        params: [enumParam('a', ['ok', choice])],
+      });
+      expect(kindsOf(inPath)).toEqual(['tool-param-invalid']);
+      expect(kindsOf(inQuery(enumParam('a', ['ok', choice])))).toEqual([]);
     },
   );
 
@@ -664,6 +723,7 @@ describe('validateCustomTool: the name, the description and the limits', () => {
     ['a C1 control', `a${NEL}b`],
     ['the last C1 control', `a${LAST_C1}b`],
     ['a leading control', `${BEL}ab`],
+    ['a lone surrogate', `a${ch(0xd800)}b`],
   ])('refuses a description with %s as tool-description-invalid', (_label, description) => {
     expect(kindsOf(http({ description }))).toEqual(['tool-description-invalid']);
     expect(kindsOf(rag({ description }))).toEqual(['tool-description-invalid']);
@@ -964,6 +1024,57 @@ describe('customToolArgsSchema', () => {
     expect(args.safeParse(['haive']).success).toBe(false);
   });
 
+  describe('text that is not well-formed', () => {
+    const tool = http({
+      url: 'https://api.example.com/v1/{p}',
+      query: ['q'],
+      params: [stringParam('p', { required: true }), stringParam('q')],
+    });
+    const schema = customToolArgsSchema(tool);
+
+    it.each([
+      ['a lone high surrogate', ch(0xd800)],
+      ['a lone low surrogate', ch(0xdc00)],
+      ['a high surrogate that ends the text', `ab${ch(0xd83d)}`],
+      ['a low surrogate before a high one', `${ch(0xde00)}${ch(0xd83d)}`],
+      ['a lone surrogate between letters', `a${ch(0xd800)}b`],
+    ])('refuses %s in a string value, in the path and in the query', (_name, value) => {
+      expect(schema.safeParse({ p: value }).success).toBe(false);
+      expect(schema.safeParse({ p: 'ok', q: value }).success).toBe(false);
+    });
+
+    it('names the parameter and gives a reason, without repeating the value', () => {
+      const result = schema.safeParse({ p: `MARKER-7c1${ch(0xd800)}` });
+
+      expect(result.success).toBe(false);
+      const issue = result.error!.issues[0]!;
+      expect(issue.path).toEqual(['p']);
+      expect(issue.message).toMatch(/unicode/i);
+      expect(JSON.stringify(result.error!.issues)).not.toContain('MARKER-7c1');
+    });
+
+    it('accepts a valid surrogate pair, and encodes it as the four bytes it stands for', () => {
+      const emoji = String.fromCodePoint(0x1f600);
+      const parsed = schema.safeParse({ p: emoji, q: emoji });
+
+      expect(parsed.success).toBe(true);
+      const url = customToolUrl(tool, parsed.data!);
+      expect(url.ok && url.url.href).toBe('https://api.example.com/v1/%F0%9F%98%80?q=%F0%9F%98%80');
+    });
+
+    it('leaves the other types alone', () => {
+      const typed = customToolArgsSchema(
+        http({
+          url: 'https://api.example.com/v1/x',
+          query: ['n', 'on', 'kind'],
+          params: [intParam('n'), boolParam('on'), enumParam('kind', ['a', 'b'])],
+        }),
+      );
+
+      expect(typed.safeParse({ n: 1, on: true, kind: 'a' }).success).toBe(true);
+    });
+  });
+
   it('requires a path param whatever its own flag says', () => {
     const optionalPath = customToolArgsSchema(
       http({ params: [stringParam('repo', { required: false }), boolParam('verbose')] }),
@@ -1039,5 +1150,236 @@ describe('customToolArgsSchema', () => {
         expect(accepted.safeParse(without).success, `${tool.name} without ${name}`).toBe(false);
       }
     }
+  });
+});
+
+describe('customToolUrl', () => {
+  const built = (tool: HttpGetTool, args: CustomToolArgs): URL => {
+    const result = customToolUrl(tool, args);
+    if (!result.ok) throw new Error(`expected a URL, got: ${result.message}`);
+    return result.url;
+  };
+  const refused = (tool: HttpGetTool, args: CustomToolArgs): string => {
+    const result = customToolUrl(tool, args);
+    if (result.ok) throw new Error(`expected a refusal, got: ${result.url.href}`);
+    return result.message;
+  };
+
+  it('puts the path value in its slot and appends the query value after it', () => {
+    expect(built(httpBase, { repo: 'haive', verbose: true }).href).toBe(
+      'https://api.example.com/v1/repos/haive/status?verbose=true',
+    );
+  });
+
+  it('leaves out a query value the agent did not give, and writes false when it gave false', () => {
+    expect(built(httpBase, { repo: 'haive' }).href).toBe(
+      'https://api.example.com/v1/repos/haive/status',
+    );
+    expect(built(httpBase, { repo: 'haive', verbose: false }).search).toBe('?verbose=false');
+  });
+
+  it('keeps a static query of the template and joins the appended values to it with &', () => {
+    const tool = http({ url: `${httpBase.url}?format=json`, query: ['verbose', 'page'] });
+    const withPage = {
+      ...tool,
+      params: [...tool.params, intParam('page')],
+    } as HttpGetTool;
+
+    expect(built(withPage, { repo: 'haive', verbose: true, page: 7 }).search).toBe(
+      '?format=json&verbose=true&page=7',
+    );
+    expect(built(withPage, { repo: 'haive' }).search).toBe('?format=json');
+  });
+
+  it('appends the query values in the order of the tool query list', () => {
+    const tool = http({
+      url: 'https://api.example.com/v1/x',
+      query: ['b', 'a'],
+      params: [stringParam('a'), stringParam('b')],
+    });
+
+    expect(built(tool, { a: '1', b: '2' }).search).toBe('?b=2&a=1');
+  });
+
+  it('works for a template with no placeholder and no query', () => {
+    expect(built(http({ url: 'https://api.example.com/ping', ...noParams }), {}).href).toBe(
+      'https://api.example.com/ping',
+    );
+  });
+
+  it('encodes a value so that it is one path segment: ? # % & = + space and non-ASCII', () => {
+    const value = 'a?b#c%d&e=f+g h é';
+
+    const url = built(httpBase, { repo: value });
+
+    expect(url.pathname).toBe(`/v1/repos/${encodeURIComponent(value)}/status`);
+    expect(url.pathname.split('/')).toHaveLength(5);
+    expect(url.search).toBe('');
+    expect(url.hash).toBe('');
+  });
+
+  it('keeps a percent-encoded slash, dots and a CRLF inside the one segment', () => {
+    for (const value of ['..%2f..', '%2F', '%5C', 'x\r\nHost: evil', 'a..b', 'a.']) {
+      const url = built(httpBase, { repo: value });
+      expect(url.pathname.split('/')).toHaveLength(5);
+      expect(url.pathname.startsWith('/v1/repos/')).toBe(true);
+      expect(url.pathname.endsWith('/status')).toBe(true);
+      expect(url.search).toBe('');
+    }
+    expect(built(httpBase, { repo: '..%2f..' }).pathname).toBe('/v1/repos/..%252f../status');
+  });
+
+  it.each([
+    ['a slash', 'a/b'],
+    ['a leading slash', '/etc/passwd'],
+    ['only a slash', '/'],
+    ['two slashes', '//evil.example.com'],
+    ['a scheme and slashes', 'https://evil.example.com'],
+    ['a traversal', '../../admin'],
+    ['a backslash', 'a\\b'],
+    ['a leading backslash', '\\evil.example.com'],
+    ['a backslash traversal', '..\\..\\admin'],
+  ])(
+    'refuses a path value with %s, which a server that decodes it would take out of the prefix',
+    (_name, value) => {
+      expect(refused(httpBase, { repo: value })).toMatch(/repo/);
+    },
+  );
+
+  it('keeps a slash and a backslash as query values, which are data and not path segments', () => {
+    const tool = http({
+      url: 'https://api.example.com/v1/x',
+      query: ['q'],
+      params: [stringParam('q')],
+    });
+
+    expect(built(tool, { q: 'a/b\\c' }).search).toBe('?q=a%2Fb%5Cc');
+  });
+
+  it('refuses the slash in a path value of any type, an enum choice included', () => {
+    const tool = http({
+      url: 'https://api.example.com/v1/{kind}',
+      query: [],
+      params: [enumParam('kind', ['plain', 'a/b'], { required: true })],
+    });
+
+    expect(built(tool, { kind: 'plain' }).pathname).toBe('/v1/plain');
+    expect(refused(tool, { kind: 'a/b' })).toMatch(/kind/);
+  });
+
+  it('encodes a query value so that it cannot end the query, add a pair or start a fragment', () => {
+    const url = built(httpBase, { repo: 'haive' });
+    const tool = http({
+      url: 'https://api.example.com/v1/x',
+      query: ['q'],
+      params: [stringParam('q')],
+    });
+
+    expect(built(tool, { q: 'a&b=c#d e' }).search).toBe('?q=a%26b%3Dc%23d%20e');
+    expect(built(tool, { q: 'a&b=c#d e' }).hash).toBe('');
+    expect(url.search).toBe('');
+  });
+
+  it.each(['.', '..'])('refuses %j as a path value, which would climb out of its segment', (v) => {
+    expect(refused(httpBase, { repo: v })).toMatch(/repo/);
+  });
+
+  it.each(['...', 'a..', '..a', '.a', 'a.', '%2e%2e', '.%2e'])(
+    'lets the value %j through, since it is not a dot segment once encoded',
+    (value) => {
+      const url = built(httpBase, { repo: value });
+
+      expect(url.pathname).toBe(`/v1/repos/${encodeURIComponent(value)}/status`);
+    },
+  );
+
+  it.each([
+    ['a fullwidth full stop', ch(0xff0e)],
+    ['two fullwidth full stops', ch(0xff0e).repeat(2)],
+    ['a fullwidth and an ascii full stop', `${ch(0xff0e)}.`],
+    ['a one dot leader', ch(0x2024)],
+    ['a two dot leader', ch(0x2025)],
+    ['two one dot leaders', ch(0x2024).repeat(2)],
+    ['a small full stop', ch(0xfe52)],
+  ])('refuses %s as a path value, since its NFKC form is a dot segment', (_name, value) => {
+    expect(refused(httpBase, { repo: value })).toMatch(/repo/);
+  });
+
+  it.each([
+    ['three fullwidth full stops', ch(0xff0e).repeat(3)],
+    ['an ideographic full stop, which NFKC leaves alone', ch(0x3002)],
+    ['a full stop and a zero width space', `.${ch(0x200b)}`],
+  ])('lets %s through as a path value: its NFKC form is not . or ..', (_name, value) => {
+    expect(built(httpBase, { repo: value }).pathname).toBe(
+      `/v1/repos/${encodeURIComponent(value)}/status`,
+    );
+  });
+
+  it('keeps . and .. as query values, which are data and not path segments', () => {
+    const tool = http({
+      url: 'https://api.example.com/v1/x',
+      query: ['q'],
+      params: [stringParam('q')],
+    });
+
+    expect(built(tool, { q: '..' }).search).toBe('?q=..');
+    expect(built(tool, { q: ch(0xff0e).repeat(2) }).search).toBe('?q=%EF%BC%8E%EF%BC%8E');
+  });
+
+  it('cannot move the origin: no value changes the scheme, host, port or credentials', () => {
+    for (const value of ['@evil.example.com', 'x:443', '?x=1', '#frag', 'evil.example.com:8443@']) {
+      const url = built(httpBase, { repo: value });
+      expect(url.origin).toBe('https://api.example.com');
+      expect(url.username).toBe('');
+      expect(url.password).toBe('');
+      expect(url.pathname.startsWith('/v1/repos/')).toBe(true);
+    }
+  });
+
+  it('keeps a port the template names', () => {
+    const tool = http({ url: 'https://api.example.com:8443/v1/repos/{repo}/status' });
+
+    expect(built(tool, { repo: 'haive' }).href).toBe(
+      'https://api.example.com:8443/v1/repos/haive/status',
+    );
+  });
+
+  it('renders integers and booleans in the path and the query', () => {
+    const tool = http({
+      url: 'https://api.example.com/v1/{n}/{on}',
+      query: [],
+      params: [intParam('n', { required: true }), boolParam('on', { required: true })],
+    });
+
+    expect(built(tool, { n: -5, on: false }).pathname).toBe('/v1/-5/false');
+  });
+
+  it('refuses arguments that make the URL longer than the 2048 characters a tool may carry', () => {
+    const tool = http({
+      url: 'https://api.example.com/v1/x',
+      query: ['a', 'b', 'c', 'd', 'e'],
+      params: ['a', 'b', 'c', 'd', 'e'].map((n) => stringParam(n, { maxLength: 512 })),
+    });
+    const long = '/'.repeat(512);
+
+    expect(refused(tool, { a: long, b: long, c: long, d: long, e: long })).toMatch(/2048/);
+    expect(built(tool, { a: long }).href.length).toBeLessThanOrEqual(2048);
+  });
+
+  it('serves the longest URL that fits and refuses one character more', () => {
+    const base = `https://api.example.com/${'s'.repeat(1530)}/`;
+    const tool = http({
+      url: `${base}{p}`,
+      query: [],
+      params: [stringParam('p', { required: true, maxLength: 512 })],
+    });
+    const room = 2048 - base.length;
+
+    expect(built(tool, { p: 'x'.repeat(room) }).href).toHaveLength(2048);
+    expect(refused(tool, { p: 'x'.repeat(room + 1) })).toMatch(/2048/);
+  });
+
+  it('refuses a template it cannot read, rather than guessing a URL', () => {
+    expect(refused(http({ url: 'not a url' }), { repo: 'haive' })).toMatch(/URL/i);
   });
 });

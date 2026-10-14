@@ -36,6 +36,7 @@ import {
   normalizeReviewDimensionIds,
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
+import { recordAuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -795,15 +796,30 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     // Credentials go to the encrypted per-user store, keyed per repository. An empty
     // string is a deliberate clear; `undefined` leaves the stored value alone, so saving
     // the form without retyping the password does not wipe it.
-    for (const [field, suffix] of [
-      ['appAuthUsername', 'username'],
-      ['appAuthPassword', 'password'],
-    ] as const) {
-      const value = body[field];
-      if (typeof value !== 'string') continue;
-      const key = `app_auth:${repositoryId}:${suffix}`;
-      if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`);
-      else await userSecretsService.delete(userId, key);
+    const appAuthChanges: Record<string, 'set' | 'cleared'> = {};
+    try {
+      for (const [field, suffix] of [
+        ['appAuthUsername', 'username'],
+        ['appAuthPassword', 'password'],
+      ] as const) {
+        const value = body[field];
+        if (typeof value !== 'string') continue;
+        const key = `app_auth:${repositoryId}:${suffix}`;
+        if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`);
+        else await userSecretsService.delete(userId, key);
+        appAuthChanges[suffix] = value ? 'set' : 'cleared';
+      }
+    } finally {
+      // A write that failed after another landed still leaves the one that landed on record.
+      if (Object.keys(appAuthChanges).length > 0) {
+        await recordAuditEvent(db, {
+          actorUserId: userId,
+          action: 'repository.app_auth.update',
+          targetType: 'repository',
+          targetId: repositoryId,
+          metadata: appAuthChanges,
+        });
+      }
     }
 
     // RAG embed-health actions. A re-embed is forced only where hash vectors can

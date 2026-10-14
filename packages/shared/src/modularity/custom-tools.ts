@@ -40,7 +40,11 @@ const hasControl = (text: string): boolean => {
 };
 
 const isPlainText = (value: unknown, max: number): boolean =>
-  typeof value === 'string' && value.length >= 1 && value.length <= max && !hasControl(value);
+  typeof value === 'string' &&
+  value.length >= 1 &&
+  value.length <= max &&
+  !hasControl(value) &&
+  value.isWellFormed();
 
 const plainText = (max: number) =>
   z
@@ -202,7 +206,7 @@ function checkHost(authority: string, add: Add): void {
     add('tool-url-invalid', 'The URL host is not valid.');
     return;
   }
-  const bare = host.endsWith('.') ? host.slice(0, -1) : host;
+  const bare = host.replace(/\.+$/, '');
   if (bare.startsWith('[') || IPV4.test(bare)) {
     add('tool-host-ip-literal', `The URL host ${host} is an IP address; use a DNS name.`);
   } else if (!bare.includes('.') || INTERNAL_SUFFIX.test(bare)) {
@@ -210,6 +214,8 @@ function checkHost(authority: string, add: Add): void {
       'tool-host-not-public',
       `The URL host ${host} is not a public DNS name: not localhost, not a single-label name, and not a .local, .internal or .localhost name.`,
     );
+  } else if (host.replace(/\.$/, '').split('.').includes('')) {
+    add('tool-url-invalid', 'The URL host is not valid.');
   }
 }
 
@@ -256,7 +262,7 @@ function checkUrl(url: string, add: Add): string[] | null {
   return [...placeholdersIn(parts.path), ...outside];
 }
 
-function paramProblem(param: CustomToolParam): string | null {
+function paramProblem(param: CustomToolParam, inPath: boolean): string | null {
   if (!CUSTOM_TOOL_NAME_PATTERN.test(param.name)) {
     return `its name must start with a lowercase letter and use only lowercase letters, digits and underscores, up to ${CUSTOM_TOOL_NAME_MAX_LENGTH} characters`;
   }
@@ -289,13 +295,20 @@ function paramProblem(param: CustomToolParam): string | null {
       if (!param.values.every((v) => isPlainText(v, CUSTOM_TOOL_ENUM_VALUE_MAX_LENGTH))) {
         return `each value must be 1 to ${CUSTOM_TOOL_ENUM_VALUE_MAX_LENGTH} characters with no control characters`;
       }
+      if (inPath && param.values.some(refusedInPath)) {
+        return 'a value used in the URL path must not be . or .., and must not contain / or \\';
+      }
       return new Set(param.values).size === param.values.length ? null : 'values must not repeat';
     default:
       return null;
   }
 }
 
-function checkParams(params: readonly CustomToolParam[], add: Add): void {
+function checkParams(
+  params: readonly CustomToolParam[],
+  inPath: ReadonlySet<string>,
+  add: Add,
+): void {
   if (params.length > CUSTOM_TOOL_PARAMS_MAX) {
     add('tool-too-many-params', `A tool can have at most ${CUSTOM_TOOL_PARAMS_MAX} parameters.`);
   }
@@ -304,7 +317,7 @@ function checkParams(params: readonly CustomToolParam[], add: Add): void {
   for (const param of params) {
     if (seen.has(param.name)) repeated.add(param.name);
     seen.add(param.name);
-    const problem = paramProblem(param);
+    const problem = paramProblem(param, inPath.has(param.name));
     if (problem !== null) {
       add(
         'tool-param-invalid',
@@ -368,7 +381,7 @@ export function validateCustomTool(
 
   if (tool.action === 'http-get') {
     const used = checkUrl(tool.url, add);
-    checkParams(tool.params, add);
+    checkParams(tool.params, new Set(pathPlaceholders(tool.url)), add);
     if (used !== null) {
       checkUsage(
         tool.params.map((p) => p.name),
@@ -497,7 +510,11 @@ export type CustomToolArgs = Record<string, string | number | boolean>;
 function argOf(param: CustomToolParam): z.ZodType {
   switch (param.type) {
     case 'string':
-      return z.string().min(1).max(param.maxLength);
+      return z
+        .string()
+        .min(1)
+        .max(param.maxLength)
+        .refine((text) => text.isWellFormed(), 'must be valid Unicode text');
     case 'integer': {
       let whole = z.number().int();
       if (param.min !== undefined) whole = whole.min(param.min);
@@ -523,4 +540,53 @@ export function customToolArgsSchema(tool: CustomTool): z.ZodType<CustomToolArgs
     tool.params.map((p) => [p.name, required.has(p.name) ? argOf(p) : argOf(p).optional()]),
   );
   return z.strictObject(shape) as z.ZodType<CustomToolArgs>;
+}
+
+export type CustomToolUrl = { ok: true; url: URL } | { ok: false; message: string };
+
+const DOT_SEGMENTS: ReadonlySet<string> = new Set(['.', '..']);
+const PATH_SEPARATOR = /[/\\]/;
+
+function refusedInPath(text: string): boolean {
+  return PATH_SEPARATOR.test(text) || DOT_SEGMENTS.has(text.normalize('NFKC'));
+}
+
+/** The URL a call fetches: the tool's template with each value percent-encoded into its slot.
+ *  Assumes `args` passed `customToolArgsSchema` and the tool passed `validateCustomTool`. */
+export function customToolUrl(tool: HttpGetTool, args: CustomToolArgs): CustomToolUrl {
+  const fail = (message: string): CustomToolUrl => ({ ok: false, message });
+  const parts = splitUrl(tool.url);
+  if (!parts) return fail('the tool URL cannot be read');
+
+  const encoded = new Map<string, string>();
+  for (const name of placeholdersIn(parts.path)) {
+    const value = args[name];
+    if (value === undefined) return fail(`${name} is missing`);
+    const text = String(value);
+    if (refusedInPath(text)) {
+      return fail(`${name} must not contain / or \\, and must not be . or ..`);
+    }
+    encoded.set(name, encodeURIComponent(text));
+  }
+  const path = parts.path.replace(PLACEHOLDER, (_match, name: string) => encoded.get(name) ?? '');
+  const appended = tool.query.flatMap((name) =>
+    args[name] === undefined ? [] : [`${name}=${encodeURIComponent(String(args[name]))}`],
+  );
+  const query = [parts.query ?? '', ...appended].filter((pair) => pair !== '').join('&');
+  const href = `${parts.scheme}://${parts.authority}${path}${query === '' ? '' : `?${query}`}`;
+  if (href.length > CUSTOM_TOOL_URL_MAX_LENGTH) {
+    return fail(`the URL would be longer than ${CUSTOM_TOOL_URL_MAX_LENGTH} characters`);
+  }
+
+  try {
+    const url = new URL(href);
+    const origin = new URL(`${parts.scheme}://${parts.authority}/`).origin;
+    const prefix = new URL(parts.path.split('{', 1)[0] || '/', origin).pathname;
+    if (url.origin !== origin || !url.pathname.startsWith(prefix)) {
+      return fail('the URL would leave the address the tool is pinned to');
+    }
+    return { ok: true, url };
+  } catch {
+    return fail('the URL cannot be built from these arguments');
+  }
 }

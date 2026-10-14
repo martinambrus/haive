@@ -3144,6 +3144,7 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
     where: and(
       eq(schema.tasks.repositoryId, id),
       inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+      isNull(schema.tasks.deadAt),
     ),
     columns: { id: true },
   });

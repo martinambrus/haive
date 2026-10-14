@@ -55,6 +55,7 @@ import { moduleDeactivationMessage } from '../modules/activation.js';
 import { completePlanNodesForTask } from '../plan/task-link.js';
 import { stampRepositoryOnboarded } from '../repo/onboarded.js';
 import { markPlanCodeLinksStale } from '../plan/code-link-staleness.js';
+import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
 import { getBullRedis, getRedis } from '../redis.js';
 import { reapAllSessionsForTask } from '../sandbox/terminal-session-reaper.js';
 import {
@@ -561,6 +562,7 @@ export async function markTaskCompleted(
   } catch (err) {
     logger.warn({ err, taskId }, 'task completion bookkeeping failed; task stays completed');
   }
+  await resyncAfterTaskEnd(db, taskId);
   // PUBLISHED here rather than by each caller. Both of them used to emit this immediately after
   // calling us, which put a fallible insert AFTER the point where completion looked final: a
   // throw there reached the queue's catch and called markTaskFailed, so the reap below had
@@ -714,15 +716,16 @@ async function markTaskDeadOnStep(
   ids: string[],
 ): Promise<void> {
   const unresolved = ids.filter((id) => !resolveTaskStep(ctx, id));
-  await db.transaction(async (tx) => {
-    if (!(await lockOwnedStep(tx, rowId))) return;
-    await markTaskDead(tx, ctx.taskId, deadReasonFor(unresolved, stepId), {
+  const marked = await db.transaction(async (tx) => {
+    if (!(await lockOwnedStep(tx, rowId))) return false;
+    return markTaskDead(tx, ctx.taskId, deadReasonFor(unresolved, stepId), {
       epoch: ctx.orchestrationEpoch,
       unresolved,
       stepId,
       round,
     });
   });
+  if (marked) await resyncAfterTaskEnd(db, ctx.taskId);
 }
 
 /** A job that met an unresolved step marks the task dead under its step row's lock: a Retry resets
@@ -748,10 +751,10 @@ export async function markTaskDeadFromJob(
         .limit(1)
     : [];
   if (!row) {
-    await markTaskDead(db, taskId, reason, opts);
+    if (await markTaskDead(db, taskId, reason, opts)) await resyncAfterTaskEnd(db, taskId);
     return;
   }
-  await db.transaction(async (tx) => {
+  const marked = await db.transaction(async (tx) => {
     const [locked] = await tx
       .select({ id: schema.taskSteps.id })
       .from(schema.taskSteps)
@@ -762,9 +765,10 @@ export async function markTaskDeadFromJob(
         ),
       )
       .for('update');
-    if (!locked) return;
-    await markTaskDead(tx, taskId, reason, opts);
+    if (!locked) return false;
+    return markTaskDead(tx, taskId, reason, opts);
   });
+  if (marked) await resyncAfterTaskEnd(db, taskId);
 }
 
 /** The step a fix round re-enters, or null after failing the task because it cannot be reached. */
@@ -798,6 +802,7 @@ async function routableFixLoopTarget(
 /** What a task that ended failed releases. */
 async function settleFailedTask(db: Database, taskId: string): Promise<void> {
   await cleanupTaskContainers(db, taskId, 'failed');
+  await resyncAfterTaskEnd(db, taskId);
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
   // A failed kb_author enrich leaves its global KB entry stuck in 'enriching'; mark
@@ -2224,11 +2229,12 @@ async function handleStartTask(
   } catch (err) {
     if (!(err instanceof UnresolvedStepError)) throw err;
     // Before the claim, so a redelivered START on a task already running must not touch it.
-    await markTaskDead(db, ctx.taskId, deadReasonFor(err.ids), {
+    const marked = await markTaskDead(db, ctx.taskId, deadReasonFor(err.ids), {
       epoch: ctx.orchestrationEpoch,
       unresolved: err.ids,
       statuses: STARTABLE_TASK_STATUSES,
     });
+    if (marked) await resyncAfterTaskEnd(db, ctx.taskId);
     return;
   }
   const first = steps[0];
@@ -3611,6 +3617,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     await recordLeftOpenMerges(db, payload.taskId);
     await releaseTaskMergeClaims(db, payload.taskId);
     await discardPlanMerge(db, payload.taskId);
+    await resyncAfterTaskEnd(db, payload.taskId);
     try {
       await cleanupTaskScratchWorkspace(db, payload.taskId);
     } catch (err) {

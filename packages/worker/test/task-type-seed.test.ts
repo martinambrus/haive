@@ -18,6 +18,7 @@ const SLUGS = [
   'advisory',
   'plan_sequence',
   'plan_merge',
+  'type_draft',
 ];
 const SELECTABLE = ['onboarding', 'workflow', 'onboarding_upgrade', 'run_app'];
 
@@ -27,7 +28,7 @@ describe('builtinTaskTypeRows', () => {
   const rows = builtinTaskTypeRows(stepRegistry);
   const bySlug = new Map(rows.map((r) => [r.slug, r]));
 
-  it('has the 11 built-in types in enum order', () => {
+  it('has the 12 built-in types in enum order', () => {
     expect(rows.map((r) => r.slug)).toEqual(SLUGS);
     expect(rows.map((r) => r.sortOrder)).toEqual(SLUGS.map((_, i) => i));
     for (const r of rows) {
@@ -46,7 +47,10 @@ describe('builtinTaskTypeRows', () => {
 
   it('marks selectable and repository-optional types', () => {
     expect(rows.filter((r) => r.selectable).map((r) => r.slug)).toEqual(SELECTABLE);
-    expect(rows.filter((r) => !r.requiresRepository).map((r) => r.slug)).toEqual(['kb_author']);
+    expect(rows.filter((r) => !r.requiresRepository).map((r) => r.slug)).toEqual([
+      'kb_author',
+      'type_draft',
+    ]);
   });
 
   it('copies the registry list into static rows and nothing into dynamic ones', () => {
@@ -100,18 +104,32 @@ describe.skipIf(!url)('task type definitions sync on Postgres', () => {
     return row;
   };
 
-  it('writes the 11 built-in rows', async () => {
+  it('writes the 12 built-in rows', async () => {
     const list = (await rows()).filter((r) => r.source === 'builtin');
     expect(list.map((r) => r.slug).sort()).toEqual([...SLUGS].sort());
   });
 
-  it('a second sync changes nothing but updated_at', async () => {
+  it('a second sync changes nothing, updated_at included', async () => {
     const before = new Map((await rows()).map((r) => [r.slug, r]));
     await syncTaskTypeDefinitions(db, stepRegistry, []);
     const after = await rows();
     expect(after.length).toBe(before.size);
     for (const row of after) {
-      expect({ ...row, updatedAt: null }).toEqual({ ...before.get(row.slug), updatedAt: null });
+      expect(row, row.slug).toEqual(before.get(row.slug));
+    }
+  });
+
+  it('moves updated_at for a row it rewrites and for no other', async () => {
+    const old = new Date('2020-01-01T00:00:00.000Z');
+    await db.update(schema.taskTypeDefinitions).set({ updatedAt: old });
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({ stepIds: ['tampered'], contentHash: 'bad' })
+      .where(eq(schema.taskTypeDefinitions.slug, 'plan_chat'));
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
+    for (const row of await rows()) {
+      if (row.slug === 'plan_chat') expect(row.updatedAt.getTime()).toBeGreaterThan(old.getTime());
+      else expect(row.updatedAt, row.slug).toEqual(old);
     }
   });
 

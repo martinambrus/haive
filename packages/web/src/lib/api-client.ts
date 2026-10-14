@@ -647,9 +647,9 @@ export interface Container {
 }
 
 /** Task types the browser can encounter. A superset of the ones the create-task
- *  form offers: kb_author and the three plan types are spawned by their own
- *  endpoints (they need context the generic form has no field for) but still
- *  appear in the task list and detail views. */
+ *  form offers: kb_author, advisory, type_draft and the plan types are spawned by
+ *  their own endpoints (they need context the generic form has no field for) but
+ *  still appear in the task list and detail views. */
 export type WorkflowType =
   | 'onboarding'
   | 'workflow'
@@ -661,6 +661,7 @@ export type WorkflowType =
   | 'advisory'
   | 'plan_sequence'
   | 'plan_merge'
+  | 'type_draft'
   | (string & {});
 
 /** Execution path chosen at the 00-triage step (workflow tasks). Mirrors
@@ -2489,8 +2490,17 @@ export const getTaskTypeCatalog = () => api.get<TaskTypeCatalog>('/admin/task-ty
 export const createTaskType = (body: CustomTaskTypeCreate) =>
   api.post<{ taskType: AdminTaskType }>('/admin/task-types', body);
 
-export const updateTaskType = (slug: string, body: TaskTypeUpdate) =>
-  api.patch<{ taskType: AdminTaskType }>(`/admin/task-types/${encodeURIComponent(slug)}`, body);
+/** `expectedUpdatedAt` is the row's `updatedAt` as the editor read it; the api refuses a stale edit. */
+export const updateTaskType = (
+  slug: string,
+  body: TaskTypeUpdate & { expectedUpdatedAt?: string },
+) => api.patch<{ taskType: AdminTaskType }>(`/admin/task-types/${encodeURIComponent(slug)}`, body);
+
+/** The current row carried by the 409 `task_type_changed` that refuses a stale `updateTaskType`. */
+export function changedTaskType(err: ApiError): AdminTaskType | null {
+  const taskType = (err.body as { taskType?: unknown } | undefined)?.taskType;
+  return err.code === 'task_type_changed' && taskType ? (taskType as AdminTaskType) : null;
+}
 
 export const deleteTaskType = (slug: string) =>
   api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);

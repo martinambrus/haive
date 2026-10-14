@@ -79,6 +79,15 @@ export const DEFAULT_CLI_NETWORK_POLICY: CliNetworkPolicy = {
   ips: [],
 };
 
+/** The policy a run gets: the task's own `metadata.egress` when it carries one, else its provider's. */
+export function effectiveNetworkPolicy(
+  taskMetadata: unknown,
+  providerPolicy: CliNetworkPolicy | null,
+): CliNetworkPolicy | null {
+  const override = (taskMetadata as { egress?: CliNetworkPolicy } | null | undefined)?.egress;
+  return override ?? providerPolicy;
+}
+
 export const createCliProviderRequestSchema = z.object({
   name: cliProviderNameSchema,
   label: z.string().min(1).max(255),

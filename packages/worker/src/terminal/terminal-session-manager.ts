@@ -522,6 +522,14 @@ export class TerminalSessionManager {
     await this.redis.hset(key, {
       containerName: ensured.containerName,
       shell: ensured.shell,
+      ...(ensured.gitCredMintedAt === undefined
+        ? {}
+        : {
+            scope,
+            scopeId,
+            userId: req.userId,
+            gitCredMintedAt: String(ensured.gitCredMintedAt),
+          }),
     });
     await this.redis.hsetnx(key, 'startedAt', String(now));
     await this.redis.hsetnx(key, 'lastSeenAt', String(now));
