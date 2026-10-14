@@ -76,6 +76,7 @@ export const integrationConnections = pgTable(
     lastError: text('last_error'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    oauthClientId: text('oauth_client_id'),
   },
   (table) => [
     index('integration_connections_owner_user_id_idx').on(table.ownerUserId),

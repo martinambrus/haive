@@ -4,7 +4,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createDatabase, schema, type Database } from '@haive/database';
 import { secretsService } from '../src/config/secrets.service.js';
 import { envelopeEncrypt } from '../src/crypto/index.js';
-import { isProviderEnabled, resolveOauthClient } from '../src/integrations/index.js';
+import {
+  isProviderEnabled,
+  resolveOauthClient,
+  resolveOauthClientById,
+} from '../src/integrations/index.js';
 
 const url = process.env.INTEGRATIONS_CLIENTS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/integrations_clients_test'))
@@ -220,6 +224,56 @@ describe.skipIf(!url)('OAuth clients and provider enablement on Postgres', () =>
       expect((await resolveOauthClient(db, 'gitlab', userId, 'oauth2'))?.clientSecret).toBe(
         ADMIN.secret,
       );
+    });
+  });
+
+  describe('resolveOauthClientById', () => {
+    const env = { clientId: ENV.id, clientSecret: ENV.secret, source: 'env' } as const;
+    const user = { clientId: USER_CLIENT_ID, clientSecret: null, source: 'user' } as const;
+    const admin = { clientId: ADMIN.id, clientSecret: ADMIN.secret, source: 'admin' } as const;
+
+    it('finds the source that holds the id whatever its priority, and only if it serves the method', async () => {
+      vi.stubEnv('GITHUB_OAUTH_CLIENT_ID', ENV.id);
+      vi.stubEnv('GITHUB_OAUTH_CLIENT_SECRET', ENV.secret);
+      const userId = await createUser();
+      await setUserClientId(userId, USER_CLIENT_ID);
+      await setAdminClient('github', ADMIN.id, ADMIN.secret);
+      const byId = (method: 'device' | 'oauth2', clientId: string) =>
+        resolveOauthClientById(db, 'github', userId, method, clientId);
+
+      expect(await byId('device', ENV.id)).toEqual(env);
+      expect(await byId('oauth2', ENV.id)).toEqual(env);
+      expect(await byId('device', USER_CLIENT_ID)).toEqual(user);
+      expect(await byId('oauth2', USER_CLIENT_ID)).toBeNull();
+      expect(await byId('device', ADMIN.id)).toEqual(admin);
+      expect(await byId('oauth2', ADMIN.id)).toEqual(admin);
+      expect(await byId('device', 'stub-unknown-client-id')).toBeNull();
+      expect(await byId('oauth2', 'stub-unknown-client-id')).toBeNull();
+    });
+
+    it('takes the first source, in priority order, that holds the id and serves the method', async () => {
+      vi.stubEnv('GITHUB_OAUTH_CLIENT_ID', ADMIN.id);
+      const userId = await createUser();
+      await setAdminClient('github', ADMIN.id, ADMIN.secret);
+      expect(await resolveOauthClientById(db, 'github', userId, 'device', ADMIN.id)).toEqual({
+        clientId: ADMIN.id,
+        clientSecret: null,
+        source: 'env',
+      });
+      expect(await resolveOauthClientById(db, 'github', userId, 'oauth2', ADMIN.id)).toEqual(admin);
+    });
+
+    it('reads only the admin row for every other provider', async () => {
+      vi.stubEnv('GITHUB_OAUTH_CLIENT_ID', ENV.id);
+      vi.stubEnv('GITHUB_OAUTH_CLIENT_SECRET', ENV.secret);
+      const userId = await createUser();
+      await setUserClientId(userId, USER_CLIENT_ID);
+      await setAdminClient('gitlab', ADMIN.id, ADMIN.secret);
+      expect(await resolveOauthClientById(db, 'gitlab', userId, 'oauth2', ENV.id)).toBeNull();
+      expect(
+        await resolveOauthClientById(db, 'gitlab', userId, 'device', USER_CLIENT_ID),
+      ).toBeNull();
+      expect(await resolveOauthClientById(db, 'gitlab', userId, 'oauth2', ADMIN.id)).toEqual(admin);
     });
   });
 

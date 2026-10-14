@@ -11,7 +11,7 @@ import {
   OauthVendorError,
 } from './errors.js';
 import { refreshAccessToken, type TokenSet } from './oauth.js';
-import { resolveOauthClient } from './oauth-client.js';
+import { resolveOauthClient, resolveOauthClientById } from './oauth-client.js';
 import { getIntegrationProvider } from './providers.js';
 
 const REFRESH_MARGIN_MS = 5 * 60_000;
@@ -117,8 +117,27 @@ async function refreshLocked(
         `provider ${row.providerId} has no ${row.authMethod} method to refresh with`,
       );
     }
-    const client = await resolveOauthClient(tx, row.providerId, row.ownerUserId, method.kind, kek);
+    const issuer = row.oauthClientId;
+    const client =
+      issuer === null
+        ? await resolveOauthClient(tx, row.providerId, row.ownerUserId, method.kind, kek)
+        : await resolveOauthClientById(
+            tx,
+            row.providerId,
+            row.ownerUserId,
+            method.kind,
+            issuer,
+            kek,
+          );
     if (!client) {
+      // A replaced client strands the connection; no client at all may be a config gap that heals.
+      const current =
+        issuer === null
+          ? null
+          : await resolveOauthClient(tx, row.providerId, row.ownerUserId, method.kind, kek);
+      if (current !== null) {
+        return needsReauth('The OAuth client that issued this connection was replaced.');
+      }
       throw new OauthUnavailableError(`no OAuth client is configured for ${row.providerId}`);
     }
 

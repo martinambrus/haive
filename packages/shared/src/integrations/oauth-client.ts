@@ -63,16 +63,13 @@ async function adminClient(
   return { clientId, clientSecret: secret || null, source: 'admin' };
 }
 
-/**
- * The environment's client, then the user's own, then the admin's row; each whole, and a source
- * that cannot serve the method is skipped (a code flow needs a secret). `kek` spares a pool lookup.
- */
-export async function resolveOauthClient(
+async function findOauthClient(
   db: Handle,
   providerId: string,
   userId: string,
   method: OauthClientMethod,
-  kek?: string,
+  wantedId: string | undefined,
+  kek: string | undefined,
 ): Promise<ResolvedOauthClient | null> {
   const key = kek ?? (await secretsService.getMasterKek());
   const own = OWN_CLIENT_SOURCES.get(providerId);
@@ -95,7 +92,42 @@ export async function resolveOauthClient(
   sources.push(() => adminClient(db, key, providerId));
   for (const source of sources) {
     const client = await source();
-    if (client && (method === 'device' || client.clientSecret !== null)) return client;
+    if (
+      client &&
+      (method === 'device' || client.clientSecret !== null) &&
+      (wantedId === undefined || client.clientId === wantedId)
+    ) {
+      return client;
+    }
   }
   return null;
+}
+
+/**
+ * The environment's client, then the user's own, then the admin's row; each whole, and a source
+ * that cannot serve the method is skipped (a code flow needs a secret). `kek` spares a pool lookup.
+ */
+export function resolveOauthClient(
+  db: Handle,
+  providerId: string,
+  userId: string,
+  method: OauthClientMethod,
+  kek?: string,
+): Promise<ResolvedOauthClient | null> {
+  return findOauthClient(db, providerId, userId, method, undefined, kek);
+}
+
+/**
+ * The first source, in `resolveOauthClient`'s order, whose client has this id and can serve the
+ * method: a connection refreshes with the client that issued it, whatever outranks that one now.
+ */
+export function resolveOauthClientById(
+  db: Handle,
+  providerId: string,
+  userId: string,
+  method: OauthClientMethod,
+  clientId: string,
+  kek?: string,
+): Promise<ResolvedOauthClient | null> {
+  return findOauthClient(db, providerId, userId, method, clientId, kek);
 }

@@ -514,6 +514,87 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
     });
   });
 
+  describe('the client that issued a connection', () => {
+    async function setUserClient(owner: string, clientId: string) {
+      const envelope = envelopeEncrypt(clientId, KEK);
+      await dbA.insert(schema.userSecrets).values({
+        userId: owner,
+        keyName: 'github_client_id',
+        encryptedValue: envelope.encryptedValue,
+        encryptedDek: envelope.encryptedDek,
+      });
+    }
+
+    async function setAdminClient(clientId: string, secret: string) {
+      const envelope = envelopeEncrypt(secret, KEK);
+      await dbA.insert(schema.integrationProviderConfigs).values({
+        providerId: 'github',
+        oauthClientId: clientId,
+        oauthClientSecretEncrypted: envelope.encryptedValue,
+        encryptedDek: envelope.encryptedDek,
+      });
+    }
+
+    it("keeps refreshing with the owner's own client after the environment gains one", async () => {
+      const owner = await createUser();
+      await setUserClient(owner, 'stub-user-id');
+      const id = await createConnection({
+        ownerUserId: owner,
+        authMethod: 'device',
+        oauthClientId: 'stub-user-id',
+      });
+      const vendor = createVendor();
+      await getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn });
+      expect(vendor.requests[0]?.form).toEqual({
+        grant_type: 'refresh_token',
+        refresh_token: 'stub-refresh-0',
+        client_id: 'stub-user-id',
+      });
+    });
+
+    it('needs a new connection, with no vendor call, once the admin row names another client', async () => {
+      await setAdminClient('stub-admin-id-2', 'stub-admin-secret');
+      const id = await createConnection({ oauthClientId: 'stub-admin-id' });
+      const before = await readRow(id);
+      const vendor = createVendor();
+
+      const err = await rejection(getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn }));
+      expect(vendor.calls()).toBe(0);
+      expect(err).toBeInstanceOf(NeedsReauthError);
+      const row = await readRow(id);
+      expect(row.status).toBe('needs_reauth');
+      expect(row.lastError).toBe('The OAuth client that issued this connection was replaced.');
+      expect(row.accessTokenEncrypted).toBe(before.accessTokenEncrypted);
+      expect(row.refreshTokenEncrypted).toBe(before.refreshTokenEncrypted);
+    });
+
+    it('keeps the connection, writing nothing, while no client is configured at all', async () => {
+      vi.stubEnv('GITHUB_OAUTH_CLIENT_ID', '');
+      const id = await createConnection({ oauthClientId: 'stub-admin-id' });
+      const before = await readRow(id);
+      const vendor = createVendor();
+      const err = await rejection(getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn }));
+      expect(err).toBeInstanceOf(OauthUnavailableError);
+      expect(vendor.calls()).toBe(0);
+      expect(await readRow(id)).toEqual(before);
+    });
+
+    it('refreshes a connection that recorded no client with the highest-priority one', async () => {
+      const owner = await createUser();
+      await setUserClient(owner, 'stub-user-id');
+      await setAdminClient('stub-admin-id', 'stub-admin-secret');
+      const id = await createConnection({ ownerUserId: owner, authMethod: 'device' });
+      const vendor = createVendor();
+      await getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn });
+      expect(vendor.requests[0]?.form).toEqual({
+        grant_type: 'refresh_token',
+        refresh_token: 'stub-refresh-0',
+        client_id: 'stub-client-id',
+        client_secret: 'stub-client-secret',
+      });
+    });
+  });
+
   describe('a connection that is not refreshed', () => {
     it.each(['needs_reauth', 'revoked', 'provider_unavailable'] as const)(
       'throws NeedsReauthError for status %s without any vendor call',
