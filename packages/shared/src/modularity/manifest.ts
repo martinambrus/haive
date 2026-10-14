@@ -3,11 +3,15 @@ import { formSchemaSchema, statusSummaryItemSchema, type FormSchema } from '../s
 import {
   composableStepEntrySchema,
   isCoreStepId,
+  moduleTaskTypeSlug,
+  parseStepId,
   taskTypeDefinitionSeedSchema,
 } from './contracts.js';
 
 const MODULE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 const PAGE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+/** The `task_type_definitions.slug` column. */
+const TASK_TYPE_SLUG_MAX_LENGTH = 128;
 
 const endpointSchema = z
   .string()
@@ -214,6 +218,37 @@ export const moduleManifestSchema = z
   .refine((m) => isUnique((m.taskTypes ?? []).map((t) => t.slug)), {
     message: 'task type slugs must be unique within a manifest',
     path: ['taskTypes'],
+  })
+  .superRefine((m, ctx) => {
+    (m.taskTypes ?? []).forEach((seed, index) => {
+      const fail = (message: string) =>
+        ctx.addIssue({
+          code: 'custom',
+          message: `task type "${seed.slug}": ${message}`,
+          path: ['taskTypes', index],
+        });
+      const stored = moduleTaskTypeSlug(m.id, seed.slug);
+      if (stored.length > TASK_TYPE_SLUG_MAX_LENGTH) {
+        fail(
+          `stored slug is ${stored.length} characters; the limit is ${TASK_TYPE_SLUG_MAX_LENGTH}`,
+        );
+      }
+      if (seed.runListStrategy !== 'static') {
+        fail('a module task type must use the static strategy');
+      }
+      for (const stepId of seed.stepIds ?? []) {
+        const parsed = parseStepId(stepId);
+        if (parsed?.kind === 'custom') {
+          fail(
+            `step "${stepId}" is a custom step; a module task type names core steps and its own`,
+          );
+        } else if (parsed?.kind === 'module' && parsed.moduleId !== m.id) {
+          fail(
+            `step "${stepId}" belongs to module "${parsed.moduleId}"; a module task type names core steps and its own`,
+          );
+        }
+      }
+    });
   })
   .refine((m) => defaultsMatchForm(m.globalSettings), {
     message: 'every default must name a field of the form',

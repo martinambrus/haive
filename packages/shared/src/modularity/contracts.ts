@@ -10,8 +10,18 @@ export const CORE_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 export const PERSONA_ID_PATTERN_SOURCE = '[a-z0-9-]+';
 const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_PATTERN_SOURCE}$`);
 const TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+const MODULE_TASK_TYPE_SLUG_PATTERN = /^([a-z0-9][a-z0-9-]*)__[a-z0-9][a-z0-9_-]*$/;
 /** Slugs no task type may take: `new` is the admin create page and `catalog` the step catalog route. */
 export const RESERVED_TASK_TYPE_SLUGS: readonly string[] = ['new', 'catalog'];
+
+/** No module id and no admin slug holds an underscore and no built-in holds `__`, so the first `__` splits it. */
+export function moduleTaskTypeSlug(moduleId: string, local: string): string {
+  return `${moduleId}__${local}`;
+}
+
+export function moduleIdOfTaskTypeSlug(slug: string): string | null {
+  return MODULE_TASK_TYPE_SLUG_PATTERN.exec(slug)?.[1] ?? null;
+}
 
 export const CORE_INTEGRATION_CATEGORIES = [
   'rich-documents',
@@ -154,7 +164,7 @@ export const taskTypeDefinitionSeedSchema = z
     requiresRepository: z.boolean(),
     preAnswerDefaults: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
     stepLoopLimitDefaults: z.record(z.string(), z.number()).optional(),
-    sortOrder: z.number().optional(),
+    sortOrder: z.number().int().optional(),
   })
   .refine(
     (s) =>

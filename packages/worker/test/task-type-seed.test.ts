@@ -79,7 +79,7 @@ describe.skipIf(!url)('task type definitions sync on Postgres', () => {
 
   beforeAll(async () => {
     db = createDatabase(url as string);
-    await syncTaskTypeDefinitions(db, stepRegistry);
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
   });
 
   afterAll(async () => {
@@ -102,7 +102,7 @@ describe.skipIf(!url)('task type definitions sync on Postgres', () => {
 
   it('a second sync changes nothing but updated_at', async () => {
     const before = new Map((await rows()).map((r) => [r.slug, r]));
-    await syncTaskTypeDefinitions(db, stepRegistry);
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
     const after = await rows();
     expect(after.length).toBe(before.size);
     for (const row of after) {
@@ -115,7 +115,7 @@ describe.skipIf(!url)('task type definitions sync on Postgres', () => {
       .update(schema.taskTypeDefinitions)
       .set({ enabled: false, displayName: 'X' })
       .where(eq(schema.taskTypeDefinitions.slug, 'advisory'));
-    await syncTaskTypeDefinitions(db, stepRegistry);
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
     const row = await one('advisory');
     expect(row?.enabled).toBe(false);
     expect(row?.displayName).toBe('X');
@@ -127,7 +127,7 @@ describe.skipIf(!url)('task type definitions sync on Postgres', () => {
       .update(schema.taskTypeDefinitions)
       .set({ stepIds: ['tampered'], contentHash: 'bad' })
       .where(eq(schema.taskTypeDefinitions.slug, 'plan_chat'));
-    await syncTaskTypeDefinitions(db, stepRegistry);
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
     const row = await one('plan_chat');
     expect(row?.stepIds).toEqual(want);
     expect(row?.contentHash).not.toBe('bad');
@@ -142,7 +142,7 @@ describe.skipIf(!url)('task type definitions sync on Postgres', () => {
       source: 'admin',
     });
     const before = await one('custom-x');
-    await syncTaskTypeDefinitions(db, stepRegistry);
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
     expect(await one('custom-x')).toEqual(before);
   });
 });

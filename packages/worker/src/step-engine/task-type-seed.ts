@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
-import { eq, inArray } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
-import { REPO_OPTIONAL_BUILTIN_TASK_TYPES } from '@haive/shared';
+import { and, eq, inArray, notInArray } from 'drizzle-orm';
+import { schema, type Database, type DbTx } from '@haive/database';
+import { REPO_OPTIONAL_BUILTIN_TASK_TYPES, logger } from '@haive/shared';
+import { moduleTaskTypeSlug, type ModuleManifest } from '@haive/shared/modularity';
+import type { LoadedWorkerModule, ModuleTaskTypeOutcome } from '../modules/loader.js';
 import type { StepRegistry } from './registry.js';
 
 type RunListStrategy = (typeof schema.runListStrategyEnum.enumValues)[number];
@@ -38,6 +40,11 @@ const DYNAMIC_STRATEGIES: Record<string, RunListStrategy> = {
 };
 const SELECTABLE_SLUGS = ['onboarding', 'workflow', 'onboarding_upgrade', 'run_app'];
 
+const contentHashOf = (runListStrategy: RunListStrategy, stepIds: string[] | null): string =>
+  createHash('sha256')
+    .update(JSON.stringify({ strategy: runListStrategy, stepIds }))
+    .digest('hex');
+
 export function builtinTaskTypeRows(registry: StepRegistry): BuiltinTaskTypeRow[] {
   return schema.workflowTypeEnum.enumValues.map((slug, index) => {
     const runListStrategy = DYNAMIC_STRATEGIES[slug] ?? 'static';
@@ -52,16 +59,97 @@ export function builtinTaskTypeRows(registry: StepRegistry): BuiltinTaskTypeRow[
       selectable: SELECTABLE_SLUGS.includes(slug),
       requiresRepository: !REPO_OPTIONAL_BUILTIN_TASK_TYPES.has(slug),
       sortOrder: index,
-      contentHash: createHash('sha256')
-        .update(JSON.stringify({ strategy: runListStrategy, stepIds }))
-        .digest('hex'),
+      contentHash: contentHashOf(runListStrategy, stepIds),
     };
   });
 }
 
-export async function syncTaskTypeDefinitions(db: Database, registry: StepRegistry): Promise<void> {
+async function seedModuleTaskTypes(
+  tx: DbTx,
+  manifest: ModuleManifest,
+  now: Date,
+): Promise<ModuleTaskTypeOutcome> {
+  const source = `module:${manifest.id}`;
+  const rows = (manifest.taskTypes ?? []).map((seed) => ({
+    slug: moduleTaskTypeSlug(manifest.id, seed.slug),
+    displayName: seed.displayName,
+    description: seed.description ?? null,
+    runListStrategy: seed.runListStrategy,
+    stepIds: seed.stepIds,
+    preAnswerDefaults: seed.preAnswerDefaults ?? {},
+    stepLoopLimitDefaults: seed.stepLoopLimitDefaults ?? {},
+    enabled: true,
+    selectable: seed.selectable,
+    source,
+    requiresRepository: seed.requiresRepository,
+    sortOrder: seed.sortOrder ?? 0,
+    contentHash: contentHashOf(seed.runListStrategy, seed.stepIds),
+  }));
+  const slugs = rows.map((r) => r.slug);
+
+  for (const row of rows) {
+    await tx
+      .insert(schema.taskTypeDefinitions)
+      .values({ ...row, updatedAt: now })
+      .onConflictDoUpdate({
+        target: schema.taskTypeDefinitions.slug,
+        // enabled, displayName and sortOrder stay what the insert or the admin made them.
+        set: {
+          runListStrategy: row.runListStrategy,
+          stepIds: row.stepIds,
+          description: row.description,
+          preAnswerDefaults: row.preAnswerDefaults,
+          stepLoopLimitDefaults: row.stepLoopLimitDefaults,
+          selectable: row.selectable,
+          requiresRepository: row.requiresRepository,
+          contentHash: row.contentHash,
+          updatedAt: now,
+        },
+        setWhere: eq(schema.taskTypeDefinitions.source, source),
+      });
+  }
+
+  const stored = await tx
+    .select({ slug: schema.taskTypeDefinitions.slug, source: schema.taskTypeDefinitions.source })
+    .from(schema.taskTypeDefinitions)
+    .where(inArray(schema.taskTypeDefinitions.slug, slugs));
+  const holders = new Map(stored.map((r) => [r.slug, r.source]));
+  const outcome: ModuleTaskTypeOutcome = { seeded: [], conflicts: [] };
+  for (const slug of slugs) {
+    const heldBy = holders.get(slug);
+    if (heldBy === source) {
+      outcome.seeded.push(slug);
+    } else if (heldBy !== undefined) {
+      // Failing the boot would leave the install unbootable, and the other row is not ours to change.
+      logger.warn(
+        { module: manifest.id, slug, heldBy },
+        'module task type seed skipped: the slug is held by another row',
+      );
+      outcome.conflicts.push({ slug, heldBy });
+    }
+  }
+
+  await tx
+    .update(schema.taskTypeDefinitions)
+    .set({ selectable: false, updatedAt: now })
+    .where(
+      and(
+        eq(schema.taskTypeDefinitions.source, source),
+        notInArray(schema.taskTypeDefinitions.slug, slugs),
+        eq(schema.taskTypeDefinitions.selectable, true),
+      ),
+    );
+  return outcome;
+}
+
+export async function syncTaskTypeDefinitions(
+  db: Database,
+  registry: StepRegistry,
+  loaded: readonly LoadedWorkerModule[],
+): Promise<Record<string, ModuleTaskTypeOutcome>> {
   const now = new Date();
   const wanted = builtinTaskTypeRows(registry);
+  const outcomes: Record<string, ModuleTaskTypeOutcome> = {};
 
   await db.transaction(async (tx) => {
     for (const row of wanted) {
@@ -107,5 +195,10 @@ export async function syncTaskTypeDefinitions(db: Database, registry: StepRegist
         );
       }
     }
+
+    for (const { manifest } of loaded) {
+      outcomes[manifest.id] = await seedModuleTaskTypes(tx, manifest, now);
+    }
   });
+  return outcomes;
 }
