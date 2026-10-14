@@ -2858,7 +2858,7 @@ async function handleAdvanceStep(
         // work+idle still reconciles with wall), then reset the live timing and OPEN the park
         // marker. iterations/output/detect are PRESERVED so it RESUMES when a slot frees — a
         // park is a transient resource wait, not a reset (the pending->running re-run folds the
-        // park into idle_ms and stamps a fresh started_at, step-runner.ts).
+        // park into carried_idle_ms and stamps a fresh started_at, step-runner.ts).
         const fold = computeFoldContribution(row, Date.now());
         // A parked step IS what the task is working on, so point current_step_id/current_round at
         // it. Only a step that RUNS stamped them before, which left the pointer addressing an
