@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { CompositionIssue } from '@haive/shared/modularity';
-import { validateComposition } from '@haive/shared/modularity';
+import { PROMPT_STEP_PROBLEM_KINDS, validateComposition } from '@haive/shared/modularity';
 import {
   catalogEntries,
   compositionProblems,
   describeAvailability,
   describeDefaultsIssue,
   describeIssue,
+  describePromptStepIssue,
   issuesByRow,
+  promptStepIssuesOf,
   providersOf,
   splitServerIssues,
 } from './composition-messages';
@@ -85,7 +87,7 @@ describe('describeIssue', () => {
       ctx(['01-worktree-setup'], false),
     );
     expect(view.message).toBe(
-      "Requires a repository: turn on 'Requires repository' or remove this step.",
+      "Requires a repository: turn on 'Requires a repository' or remove this step.",
     );
     expect(view.providedBy).toEqual([]);
   });
@@ -274,5 +276,84 @@ describe('describeAvailability', () => {
     expect(describeAvailability({ available: false, reason: 'disabled' })).toBe(
       'Unavailable: disabled',
     );
+  });
+});
+
+describe('describePromptStepIssue', () => {
+  it('has plain words for every problem kind the validator can raise', () => {
+    const texts = PROMPT_STEP_PROBLEM_KINDS.map((kind) =>
+      describePromptStepIssue({ kind, stepId: 'custom.t.a', raw: '{{x:y}}' }),
+    );
+    for (const text of texts) {
+      expect(text).toMatch(/\S/);
+      expect(text).not.toBe('undefined');
+    }
+    expect(new Set(texts).size).toBe(texts.length);
+  });
+
+  it('names the token it is about, in a code span', () => {
+    expect(
+      describePromptStepIssue({ kind: 'unknown-token', stepId: 's', raw: '{{bogus}}' }),
+    ).toContain('`{{bogus}}` is not a template token');
+    expect(
+      describePromptStepIssue({ kind: 'step-token-not-own-line', stepId: 's', raw: '{{step:a}}' }),
+    ).toBe('`{{step:a}}` must be alone on its line.');
+    expect(
+      describePromptStepIssue({ kind: 'unknown-token', stepId: 's', raw: '{{a``b}}' }),
+    ).toContain('``` {{a``b}} ``` is not a template token');
+  });
+
+  it('keeps a backtick in the token from closing the code span', () => {
+    expect(
+      describePromptStepIssue({ kind: 'integration-token', stepId: 's', raw: '{{a`b}}' }),
+    ).toBe('`` {{a`b}} `` is not supported yet.');
+  });
+
+  it('says what the client-only and set-level problems mean', () => {
+    expect(describePromptStepIssue({ kind: 'template-empty', stepId: 's' })).toContain('empty');
+    expect(describePromptStepIssue({ kind: 'title-empty', stepId: 's' })).toContain('title');
+    expect(describePromptStepIssue({ kind: 'prompt-step-orphan', stepId: 'custom.t.a' })).toContain(
+      'custom.t.a is defined but is not in the step list',
+    );
+    expect(
+      describePromptStepIssue({ kind: 'prompt-step-missing', stepId: 'custom.t.a' }),
+    ).toContain('custom.t.a is in the step list but has no prompt step');
+  });
+
+  it('puts the limits of the api in the words of its refusals', () => {
+    expect(describePromptStepIssue({ kind: 'timeout-out-of-range', stepId: 's' })).toContain(
+      '1 and 30 minutes',
+    );
+    expect(describePromptStepIssue({ kind: 'template-too-large', stepId: 's' })).toContain(
+      '16 KiB',
+    );
+  });
+});
+
+describe('promptStepIssuesOf', () => {
+  it('keeps the prompt-step kinds that name a step and drops the rest', () => {
+    const out = promptStepIssuesOf([
+      {
+        kind: 'unknown-token',
+        stepId: 'custom.t.a',
+        index: 2,
+        raw: '{{x}}',
+        start: 0,
+        message: 'm',
+      },
+      { kind: 'prompt-step-orphan', stepId: 'custom.t.b', message: 'm' },
+      { kind: 'unknown-step', index: 0, stepId: 'a' },
+      { kind: 'unknown-token' },
+      { path: 'slug', message: 'Invalid' },
+      null,
+    ]);
+    expect(out.map((i) => [i.kind, i.stepId, i.index])).toEqual([
+      ['unknown-token', 'custom.t.a', 2],
+      ['prompt-step-orphan', 'custom.t.b', undefined],
+    ]);
+  });
+
+  it('tolerates a body with no issues', () => {
+    expect(promptStepIssuesOf(undefined)).toEqual([]);
   });
 });

@@ -18,8 +18,17 @@ import {
   compositionProblems,
   describeAvailability,
   describeDefaultsIssue,
+  promptStepIssuesOf,
   splitServerIssues,
+  type PromptStepIssue,
 } from '@/lib/composition-messages';
+import {
+  promptStepIssues,
+  renamePromptStepIds,
+  renamePromptStepTokens,
+  withPromptStepEntries,
+  type PromptSteps,
+} from '@/lib/prompt-step-editing';
 import {
   buildCreateBody,
   buildUpdateBody,
@@ -50,6 +59,7 @@ const CREATE_FIELDS = [
   'stepIds',
   'preAnswerDefaults',
   'stepLoopLimitDefaults',
+  'promptSteps',
   'requiresRepository',
   'selectable',
   'enabled',
@@ -84,6 +94,8 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [stepIds, setStepIds] = useState<string[]>([]);
   const [loopLimits, setLoopLimits] = useState<Record<string, number>>({});
+  const [promptSteps, setPromptSteps] = useState<PromptSteps>({});
+  const [serverPromptIssues, setServerPromptIssues] = useState<PromptStepIssue[]>([]);
   const [values, setValues] = useState<FormValues>(creating ? NEW_TYPE_DEFAULTS : {});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -97,6 +109,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setRow(taskType);
     setStepIds(taskType.stepIds ?? []);
     setLoopLimits(taskType.stepLoopLimitDefaults);
+    setPromptSteps(taskType.promptSteps ?? {});
     setValues(initialValuesOf(taskType));
     setFormRevision((n) => n + 1);
   }, []);
@@ -125,14 +138,47 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const composable = editableFields.includes('stepIds');
   const entries = useMemo(() => (catalog ? catalogEntries(catalog) : null), [catalog]);
   const requiresRepository = values.requiresRepository === true;
+  const promptEditable = editableFields.includes('promptSteps');
+  const typeSlug = creating ? String(values.slug ?? '').trim() : (row?.slug ?? '');
+  const withPrompts = useMemo(
+    () =>
+      entries ? withPromptStepEntries(entries, typeSlug, requiresRepository, promptSteps) : null,
+    [entries, typeSlug, requiresRepository, promptSteps],
+  );
   const clientProblems = useMemo(
     () =>
-      composable && entries
-        ? compositionProblems({ stepIds, loopLimits, catalog: entries, requiresRepository })
-        : { composition: [], defaults: [] },
-    [composable, entries, stepIds, loopLimits, requiresRepository],
+      composable && withPrompts
+        ? {
+            ...compositionProblems({
+              stepIds,
+              loopLimits,
+              catalog: withPrompts,
+              requiresRepository,
+            }),
+            prompt: promptEditable
+              ? promptStepIssues({
+                  typeSlug,
+                  stepIds,
+                  requiresRepository,
+                  promptSteps,
+                  catalog: withPrompts,
+                })
+              : [],
+          }
+        : { composition: [], defaults: [], prompt: [] },
+    [
+      composable,
+      withPrompts,
+      promptEditable,
+      typeSlug,
+      stepIds,
+      loopLimits,
+      requiresRepository,
+      promptSteps,
+    ],
   );
-  const compositionEdited = row !== null && compositionChanged({ stepIds, loopLimits }, row);
+  const compositionEdited =
+    row !== null && compositionChanged({ stepIds, loopLimits, promptSteps }, row);
   // A flat-only edit is not re-checked by the api, so only an edit that touches the composition waits on it.
   const compositionTouched =
     creating || compositionEdited || requiresRepository !== row?.requiresRepository;
@@ -141,6 +187,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     compositionTouched &&
     (clientProblems.composition.length > 0 ||
       clientProblems.defaults.length > 0 ||
+      clientProblems.prompt.length > 0 ||
       catalog?.synced === false);
   const schema = useMemo(
     () => taskTypeFormSchema(editableFields, creating ? 'create' : 'edit'),
@@ -156,6 +203,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setRefreshError(null);
     setSaveError(null);
     setServerIssues([]);
+    setServerPromptIssues([]);
   }
 
   async function submit(submitted: FormValues) {
@@ -164,6 +212,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setSaved(false);
     setRefreshError(null);
     setServerIssues([]);
+    setServerPromptIssues([]);
     try {
       if (creating) {
         const problem = slugProblem(String(submitted.slug ?? '').trim());
@@ -171,7 +220,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           setSaveError(problem);
           return;
         }
-        const body = buildCreateBody(submitted, { stepIds, loopLimits });
+        const body = buildCreateBody(submitted, { stepIds, loopLimits, promptSteps });
         await createTaskType(body);
         router.push(`/admin/task-types/${encodeURIComponent(body.slug)}`);
         return;
@@ -179,7 +228,9 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       const body = buildUpdateBody(
         submitted,
         editableFields,
-        composable && compositionEdited ? { stepIds, loopLimits, saved: row! } : null,
+        composable && compositionEdited
+          ? { stepIds, loopLimits, promptSteps, typeSlug: row!.slug, saved: row! }
+          : null,
         initialValuesOf(row!),
       );
       const res = await updateTaskType(row!.slug, body);
@@ -194,10 +245,17 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     } catch (err) {
       const error = err as ApiError;
       const issues = splitServerIssues((error.body as { issues?: unknown } | undefined)?.issues);
+      const promptIssues = promptStepIssuesOf(
+        (error.body as { issues?: unknown } | undefined)?.issues,
+      );
       setServerIssues(issues.composition);
+      setServerPromptIssues(promptIssues);
       const lines = [
         ...(issues.composition.length > 0
           ? ['The server rejected this step list; the marked rows say why.']
+          : []),
+        ...(promptIssues.length > 0
+          ? ['The server rejected a prompt step; the marked rows say why.']
           : []),
         ...(entries ? issues.defaults.map((i) => describeDefaultsIssue(i, entries)) : []),
       ];
@@ -231,6 +289,17 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       readOnly={readOnly}
       disabled={saving}
       serverIssues={serverIssues}
+      {...(promptEditable && !readOnly
+        ? {
+            typeSlug,
+            promptSteps,
+            serverPromptIssues,
+            onPromptStepsChange: (next: PromptSteps) => {
+              touch();
+              setPromptSteps(next);
+            },
+          }
+        : {})}
       onStepIdsChange={(next) => {
         touch();
         setStepIds(next);
@@ -284,6 +353,11 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           errorMessage={saveError}
           onSubmit={submit}
           onValuesChange={(next) => {
+            if (creating && typeof next.slug === 'string' && next.slug.trim() !== typeSlug) {
+              const toSlug = next.slug.trim();
+              setStepIds((prev) => renamePromptStepIds(prev, typeSlug, toSlug));
+              setPromptSteps((prev) => renamePromptStepTokens(prev, typeSlug, toSlug));
+            }
             setValues((prev) => ({ ...prev, ...next }));
             const current = row ? initialValuesOf(row) : {};
             if (Object.keys(next).some((k) => next[k] !== current[k])) setSaved(false);

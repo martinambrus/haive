@@ -1,16 +1,22 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ComposableStepEntry, CompositionIssue } from '@haive/shared/modularity';
+import {
+  promptStepId,
+  type ComposableStepEntry,
+  type CompositionIssue,
+} from '@haive/shared/modularity';
 import type { TaskTypeCatalog } from '@/lib/api-client';
 import {
   catalogEntries,
   compositionProblems,
   describeDefaultsIssue,
   describeIssue,
+  describePromptStepIssue,
   issuesByRow,
   stepLabel,
   type CatalogEntries,
+  type PromptStepIssue,
   type StepRef,
 } from '@/lib/composition-messages';
 import {
@@ -20,10 +26,20 @@ import {
   pruneLoopLimits,
   removeStep,
 } from '@/lib/composition-order';
+import {
+  newPromptStep,
+  promptStepIssues,
+  promptStepSlugOf,
+  takenPromptSlugs,
+  withPromptStepEntries,
+  type PromptSteps,
+} from '@/lib/prompt-step-editing';
+import { slugProblem } from '@/lib/task-type-form';
 import { dropIntentFromY } from '@/lib/sidebar-tree';
 import { cn } from '@/lib/cn';
 import { Badge, Button, Input } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { PromptStepEditor } from '@/components/prompt-step-editor';
 
 interface TaskTypeComposerProps {
   catalog: TaskTypeCatalog;
@@ -33,6 +49,10 @@ interface TaskTypeComposerProps {
   readOnly?: boolean;
   disabled?: boolean;
   serverIssues?: CompositionIssue[];
+  typeSlug?: string;
+  promptSteps?: PromptSteps;
+  serverPromptIssues?: PromptStepIssue[];
+  onPromptStepsChange?: (promptSteps: PromptSteps) => void;
   onStepIdsChange: (stepIds: string[]) => void;
   onLoopLimitsChange: (limits: Record<string, number>) => void;
 }
@@ -40,6 +60,10 @@ interface TaskTypeComposerProps {
 type FocusKind = 'up' | 'down' | 'remove';
 
 const ICON_BUTTON = 'h-11 min-w-11 px-0';
+const NO_PROMPT_STEPS: PromptSteps = {};
+const NO_PROMPT_ISSUES: PromptStepIssue[] = [];
+
+const promptIssueKey = (i: PromptStepIssue) => `${i.kind}|${i.stepId}|${i.raw ?? ''}`;
 
 function Chips({ label, tokens }: { label: string; tokens: string[] }) {
   if (tokens.length === 0) return null;
@@ -106,10 +130,24 @@ export function TaskTypeComposer({
   readOnly = false,
   disabled = false,
   serverIssues = [],
+  typeSlug,
+  promptSteps = NO_PROMPT_STEPS,
+  serverPromptIssues = NO_PROMPT_ISSUES,
+  onPromptStepsChange,
   onStepIdsChange,
   onLoopLimitsChange,
 }: TaskTypeComposerProps) {
-  const entries: CatalogEntries = useMemo(() => catalogEntries(catalog), [catalog]);
+  const prompt =
+    !readOnly && onPromptStepsChange !== undefined && typeSlug !== undefined
+      ? { typeSlug, set: onPromptStepsChange }
+      : null;
+  const entries: CatalogEntries = useMemo(() => {
+    const base = catalogEntries(catalog);
+    return typeSlug === undefined
+      ? base
+      : withPromptStepEntries(base, typeSlug, requiresRepository, promptSteps);
+  }, [catalog, typeSlug, requiresRepository, promptSteps]);
+  const [openStepId, setOpenStepId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [announcement, setAnnouncement] = useState('');
@@ -149,7 +187,32 @@ export function TaskTypeComposer({
   const defaults = readOnly ? [] : problems.defaults;
   const byRow = issuesByRow(composition);
   const generalIssues = composition.filter((i) => !('index' in i));
-  const problemCount = composition.length + defaults.length;
+  const promptIssues: PromptStepIssue[] = readOnly
+    ? []
+    : [
+        ...new Map(
+          [
+            ...(typeSlug === undefined
+              ? []
+              : promptStepIssues({
+                  typeSlug,
+                  stepIds,
+                  requiresRepository,
+                  promptSteps,
+                  catalog: entries,
+                })),
+            ...serverPromptIssues,
+          ].map((i) => [promptIssueKey(i), i] as const),
+        ).values(),
+      ];
+  const promptByStep = new Map<string, PromptStepIssue[]>();
+  for (const issue of promptIssues) {
+    if (stepIds.includes(issue.stepId)) {
+      promptByStep.set(issue.stepId, [...(promptByStep.get(issue.stepId) ?? []), issue]);
+    }
+  }
+  const generalPromptIssues = promptIssues.filter((i) => !stepIds.includes(i.stepId));
+  const problemCount = composition.length + defaults.length + promptIssues.length;
   const summary =
     problemCount === 0 ? 'No problems' : `${problemCount} problem${problemCount === 1 ? '' : 's'}`;
 
@@ -164,7 +227,18 @@ export function TaskTypeComposer({
       catalog: entries,
       requiresRepository,
     });
-    const n = after.composition.length + after.defaults.length;
+    const n =
+      after.composition.length +
+      after.defaults.length +
+      (readOnly || typeSlug === undefined
+        ? 0
+        : promptStepIssues({
+            typeSlug,
+            stepIds: next,
+            requiresRepository,
+            promptSteps,
+            catalog: entries,
+          }).length);
     setAnnouncement(`${message}; ${n === 0 ? 'no problems' : `${n} problem${n === 1 ? '' : 's'}`}`);
     if (focusTo) setFocus(focusTo);
   }
@@ -184,6 +258,23 @@ export function TaskTypeComposer({
       index: Math.min(index, next.length - 1),
       kind: 'remove',
     });
+    const slug = prompt ? promptStepSlugOf(id, prompt.typeSlug) : null;
+    if (prompt && slug !== null && !next.includes(id)) {
+      const { [slug]: _gone, ...kept } = promptSteps;
+      prompt.set(kept);
+    }
+    if (openStepId === id) setOpenStepId(null);
+  }
+
+  function addPromptStep() {
+    if (!prompt) return;
+    const entry = newPromptStep(takenPromptSlugs(promptSteps, stepIds!, prompt.typeSlug));
+    const id = promptStepId(prompt.typeSlug, entry.slug);
+    const openIndex = openStepId === null ? -1 : stepIds!.indexOf(openStepId);
+    const at = openIndex < 0 ? stepIds!.length : openIndex + 1;
+    prompt.set({ ...promptSteps, [entry.slug]: entry });
+    commit(insertStep(stepIds!, at, id), `Added prompt step at position ${at + 1}`);
+    setOpenStepId(id);
   }
 
   function add(stepId: string, at: number = stepIds!.length) {
@@ -240,6 +331,13 @@ export function TaskTypeComposer({
                 }
               />
             ))}
+            {generalPromptIssues.map((issue) => (
+              <InlineMarkdown
+                key={promptIssueKey(issue)}
+                className="text-sm text-red-300"
+                body={describePromptStepIssue(issue)}
+              />
+            ))}
             {defaults.map((issue) => (
               <InlineMarkdown
                 key={`${issue.kind}-${issue.stepId}`}
@@ -255,6 +353,9 @@ export function TaskTypeComposer({
             const entry = entries.get(stepId);
             const label = stepLabel(stepId, entries);
             const rowIssues = byRow.get(index) ?? [];
+            const promptSlug = typeSlug === undefined ? null : promptStepSlugOf(stepId, typeSlug);
+            const promptEntry = promptSlug === null ? undefined : promptSteps[promptSlug];
+            const rowPromptIssues = promptByStep.get(stepId) ?? [];
             const limitEditable = !readOnly && entry?.loopBudgetEditable === true;
             return (
               <li
@@ -284,7 +385,7 @@ export function TaskTypeComposer({
                 }
                 className={cn(
                   'rounded-md border bg-neutral-950/60 px-3 py-2',
-                  rowIssues.length > 0 || (!entry && !readOnly)
+                  rowIssues.length > 0 || rowPromptIssues.length > 0 || (!entry && !readOnly)
                     ? 'border-red-800/70'
                     : 'border-neutral-800',
                   rowShadow(index),
@@ -316,8 +417,9 @@ export function TaskTypeComposer({
                     {index + 1}.
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-neutral-100 [overflow-wrap:anywhere]">
+                    <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-neutral-100 [overflow-wrap:anywhere]">
                       {label}
+                      {promptEntry && <Badge variant="warning">Prompt step</Badge>}
                     </p>
                     {entry ? (
                       <>
@@ -330,6 +432,19 @@ export function TaskTypeComposer({
                       <p className="text-[11px] text-neutral-500">
                         {readOnly ? 'Built-in step, not composable' : 'Not in the step catalog'}
                       </p>
+                    )}
+                    {promptEntry && prompt && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="mt-2 h-11"
+                        disabled={disabled}
+                        aria-expanded={openStepId === stepId}
+                        aria-label={`${openStepId === stepId ? 'Close' : 'Edit'} prompt step ${label}`}
+                        onClick={() => setOpenStepId(openStepId === stepId ? null : stepId)}
+                      >
+                        {openStepId === stepId ? 'Close editor' : 'Edit'}
+                      </Button>
                     )}
                     {entry?.loopTargetStepId !== undefined && (
                       <InlineMarkdown
@@ -396,6 +511,21 @@ export function TaskTypeComposer({
                     </div>
                   )}
                 </div>
+                {promptEntry && prompt && openStepId === stepId && (
+                  <PromptStepEditor
+                    entry={promptEntry}
+                    disabled={disabled}
+                    onChange={(next) => prompt.set({ ...promptSteps, [promptEntry.slug]: next })}
+                    onRemove={() => remove(index)}
+                  />
+                )}
+                {rowPromptIssues.map((issue) => (
+                  <InlineMarkdown
+                    key={promptIssueKey(issue)}
+                    className="mt-2 text-xs text-red-300 [overflow-wrap:anywhere]"
+                    body={describePromptStepIssue(issue)}
+                  />
+                ))}
                 {rowIssues.map((issue) => {
                   const view = describeIssue(issue, {
                     stepIds,
@@ -436,6 +566,24 @@ export function TaskTypeComposer({
             );
           })}
         </ol>
+        {prompt && (
+          <div className="mt-3">
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-11"
+              disabled={disabled || slugProblem(prompt.typeSlug) !== null}
+              onClick={addPromptStep}
+            >
+              Add prompt step
+            </Button>
+            {slugProblem(prompt.typeSlug) !== null && (
+              <p className="mt-1 text-xs text-neutral-500">
+                Enter a valid slug for the task type first; a prompt step&apos;s id contains it.
+              </p>
+            )}
+          </div>
+        )}
         <p role="status" aria-live="polite" className="sr-only">
           {announcement}
         </p>

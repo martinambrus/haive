@@ -6,6 +6,7 @@ import {
   type TaskTypeUpdate,
 } from '@haive/shared/modularity';
 import type { FormValues } from '@/components/form-validation';
+import { listedPromptSteps, samePromptSteps, type PromptSteps } from './prompt-step-editing';
 
 const FLAT_FIELDS = [
   'displayName',
@@ -104,18 +105,25 @@ export function slugProblem(slug: string): string | null {
 
 export function buildCreateBody(
   values: FormValues,
-  composition: { stepIds: string[]; loopLimits: Record<string, number> },
+  composition: {
+    stepIds: string[];
+    loopLimits: Record<string, number>;
+    promptSteps?: PromptSteps;
+  },
 ): CustomTaskTypeCreate {
   const flat = flatValues(values, FLAT_FIELDS);
   const description = text(values.description).trim();
+  const slug = text(values.slug).trim();
+  const promptSteps = listedPromptSteps(composition.promptSteps ?? {}, composition.stepIds, slug);
   return {
-    slug: text(values.slug).trim(),
+    slug,
     displayName: flat.displayName ?? '',
     ...(description === '' ? {} : { description }),
     stepIds: composition.stepIds,
     ...(Object.keys(composition.loopLimits).length > 0
       ? { stepLoopLimitDefaults: composition.loopLimits }
       : {}),
+    ...(Object.keys(promptSteps).length > 0 ? { promptSteps } : {}),
     requiresRepository: flat.requiresRepository ?? true,
     selectable: flat.selectable,
     enabled: flat.enabled,
@@ -132,12 +140,21 @@ function sameLimits(a: Record<string, number>, b: Record<string, number>): boole
 }
 
 export function compositionChanged(
-  current: { stepIds: readonly string[]; loopLimits: Record<string, number> },
-  saved: { stepIds: readonly string[] | null; stepLoopLimitDefaults: Record<string, number> },
+  current: {
+    stepIds: readonly string[];
+    loopLimits: Record<string, number>;
+    promptSteps?: PromptSteps;
+  },
+  saved: {
+    stepIds: readonly string[] | null;
+    stepLoopLimitDefaults: Record<string, number>;
+    promptSteps?: PromptSteps;
+  },
 ): boolean {
   return (
     !sameIds(current.stepIds, saved.stepIds ?? []) ||
-    !sameLimits(current.loopLimits, saved.stepLoopLimitDefaults)
+    !sameLimits(current.loopLimits, saved.stepLoopLimitDefaults) ||
+    !samePromptSteps(current.promptSteps ?? {}, saved.promptSteps ?? {})
   );
 }
 
@@ -148,10 +165,13 @@ export function buildUpdateBody(
   composition: {
     stepIds: string[];
     loopLimits: Record<string, number>;
+    promptSteps?: PromptSteps;
+    typeSlug?: string;
     saved: {
       stepIds: readonly string[] | null;
       stepLoopLimitDefaults: Record<string, number>;
       preAnswerDefaults: Record<string, Record<string, unknown>>;
+      promptSteps?: PromptSteps;
     };
   } | null,
   saved: Partial<Record<(typeof FLAT_FIELDS)[number], unknown>>,
@@ -174,6 +194,14 @@ export function buildUpdateBody(
     }
     if (!sameLimits(composition.loopLimits, was.stepLoopLimitDefaults)) {
       body.stepLoopLimitDefaults = composition.loopLimits;
+    }
+    if (editableFields.includes('promptSteps')) {
+      const listedNow = listedPromptSteps(
+        composition.promptSteps ?? {},
+        composition.stepIds,
+        composition.typeSlug ?? '',
+      );
+      if (!samePromptSteps(listedNow, was.promptSteps ?? {})) body.promptSteps = listedNow;
     }
   }
   return body;

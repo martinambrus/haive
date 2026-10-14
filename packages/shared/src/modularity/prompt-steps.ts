@@ -113,6 +113,20 @@ function scanTemplate(template: string): {
   return { tokens, unknown };
 }
 
+/** The template with each `{{step:<id>}}` token whose id `rename` maps to a new id rewritten. */
+export function rewriteStepTokens(template: string, rename: (id: string) => string | null): string {
+  let out = '';
+  let at = 0;
+  for (const token of scanTemplate(template).tokens) {
+    if (token.kind !== 'step') continue;
+    const next = rename(token.id);
+    if (next === null || next === token.id) continue;
+    out += `${template.slice(at, token.start)}{{step:${next}}}`;
+    at = token.end;
+  }
+  return at === 0 ? template : out + template.slice(at);
+}
+
 export function parsePromptTemplate(template: string): ParsedPromptTemplate {
   const { tokens, unknown } = scanTemplate(template);
   return unknown.length > 0 ? { ok: false, problems: unknown } : { ok: true, tokens };

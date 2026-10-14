@@ -207,3 +207,131 @@ describe('compositionChanged', () => {
     expect(compositionChanged({ stepIds: ['a', 'b'], loopLimits: {} }, saved)).toBe(true);
   });
 });
+
+describe('prompt steps in the bodies', () => {
+  const step = (slug: string, template = 'Do it') => ({
+    slug,
+    title: `T ${slug}`,
+    template,
+    capabilities: [] as ('tool_use' | 'file_write' | 'vision')[],
+    timeoutMs: 300_000,
+  });
+  const values = {
+    displayName: 'N',
+    description: '',
+    requiresRepository: true,
+    enabled: true,
+    selectable: true,
+    sortOrder: 0,
+  };
+  const savedRow = (promptSteps: Record<string, ReturnType<typeof step>>, stepIds: string[]) => ({
+    stepIds,
+    stepLoopLimitDefaults: {},
+    preAnswerDefaults: {},
+    promptSteps,
+  });
+  const fields = [...ADMIN_FIELDS, 'promptSteps'];
+
+  it('sends the listed prompt steps on create, and none when there are none', () => {
+    const withStep = buildCreateBody(
+      { slug: 't', displayName: 'T', requiresRepository: true },
+      { stepIds: ['custom.t.a'], loopLimits: {}, promptSteps: { a: step('a'), z: step('z') } },
+    );
+    expect(withStep.promptSteps).toEqual({ a: step('a') });
+    const without = buildCreateBody(
+      { slug: 't', displayName: 'T', requiresRepository: true },
+      { stepIds: ['x'], loopLimits: {} },
+    );
+    expect(without).not.toHaveProperty('promptSteps');
+  });
+
+  it('leaves promptSteps out when they did not change, however the list moved', () => {
+    const body = buildUpdateBody(
+      values,
+      fields,
+      {
+        stepIds: ['x', 'custom.t.a'],
+        loopLimits: {},
+        promptSteps: { a: step('a') },
+        typeSlug: 't',
+        saved: savedRow({ a: step('a') }, ['custom.t.a', 'x']),
+      },
+      { ...values },
+    );
+    expect(body.stepIds).toEqual(['x', 'custom.t.a']);
+    expect(body).not.toHaveProperty('promptSteps');
+  });
+
+  it('sends the whole set when a step was edited, added or removed', () => {
+    const run = (
+      now: Record<string, ReturnType<typeof step>>,
+      ids: string[],
+      was: Record<string, ReturnType<typeof step>>,
+      wasIds: string[],
+    ) =>
+      buildUpdateBody(
+        values,
+        fields,
+        {
+          stepIds: ids,
+          loopLimits: {},
+          promptSteps: now,
+          typeSlug: 't',
+          saved: savedRow(was, wasIds),
+        },
+        { ...values },
+      );
+    expect(
+      run({ a: step('a', 'Changed') }, ['custom.t.a'], { a: step('a') }, ['custom.t.a'])
+        .promptSteps,
+    ).toEqual({ a: step('a', 'Changed') });
+    expect(
+      run({ a: step('a'), b: step('b') }, ['custom.t.a', 'custom.t.b'], { a: step('a') }, [
+        'custom.t.a',
+      ]).promptSteps,
+    ).toEqual({ a: step('a'), b: step('b') });
+    const removed = run(
+      { a: step('a'), b: step('b') },
+      ['custom.t.a'],
+      { a: step('a'), b: step('b') },
+      ['custom.t.a', 'custom.t.b'],
+    );
+    expect(removed.promptSteps).toEqual({ a: step('a') });
+    expect(removed.stepIds).toEqual(['custom.t.a']);
+  });
+
+  it('never sends promptSteps for a row the api does not let change them', () => {
+    const body = buildUpdateBody(
+      values,
+      ADMIN_FIELDS,
+      {
+        stepIds: ['a'],
+        loopLimits: {},
+        promptSteps: { a: step('a') },
+        typeSlug: 't',
+        saved: savedRow({}, ['b']),
+      },
+      { ...values },
+    );
+    expect(body).not.toHaveProperty('promptSteps');
+  });
+});
+
+describe('compositionChanged with prompt steps', () => {
+  const step = {
+    slug: 'a',
+    title: 'A',
+    template: 'x',
+    capabilities: [] as [],
+    timeoutMs: 300_000,
+  };
+  const saved = { stepIds: ['custom.t.a'], stepLoopLimitDefaults: {}, promptSteps: { a: step } };
+
+  it('is false for an unchanged set and true for an edited one', () => {
+    const current = { stepIds: ['custom.t.a'], loopLimits: {} };
+    expect(compositionChanged({ ...current, promptSteps: { a: { ...step } } }, saved)).toBe(false);
+    expect(
+      compositionChanged({ ...current, promptSteps: { a: { ...step, template: 'y' } } }, saved),
+    ).toBe(true);
+  });
+});
