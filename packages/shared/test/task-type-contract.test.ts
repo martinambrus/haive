@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   COMPOSABLE_STEP_GROUPS,
   CUSTOM_TASK_TYPE_SLUG_PATTERN,
+  PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS,
+  TASK_TYPE_UNAVAILABLE_REASONS,
   customTaskTypeCreateSchema,
   isCustomStepId,
   moduleIdsOfTaskType,
@@ -11,6 +13,7 @@ import {
   taskTypeUpdateSchema,
   validateTaskTypeDefaults,
   type ComposableStepEntry,
+  type TaskTypeModuleState,
 } from '../src/modularity/index.js';
 
 function entry(
@@ -35,7 +38,13 @@ const composable = new Map<string, ComposableStepEntry>([
 ]);
 const catalog = { stepIds: new Set(['a', 'b', 'c', 'legacy-step']), composable };
 const on = { customEnabled: true, moduleEnabled: true };
-const none: ReadonlySet<string> = new Set();
+const noRows: ReadonlyMap<string, TaskTypeModuleState> = new Map();
+const moduleRow = (name: string, over: Partial<TaskTypeModuleState> = {}): TaskTypeModuleState => ({
+  name,
+  missing: false,
+  deactivated: false,
+  ...over,
+});
 
 function definition(over: Record<string, unknown> = {}) {
   return {
@@ -57,7 +66,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
@@ -69,7 +78,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: false, reason: 'disabled' });
   });
@@ -78,7 +87,7 @@ describe('resolveTaskTypeAvailability', () => {
     const input = {
       definition: definition({ selectable: false }),
       switches: on,
-      deactivatedModules: none,
+      modules: noRows,
       catalog,
     };
     expect(resolveTaskTypeAvailability({ ...input, generic: true })).toEqual({
@@ -96,7 +105,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: off,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: false, reason: 'custom-types-off' });
     expect(
@@ -105,7 +114,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: off,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
@@ -118,7 +127,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: off,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: false, reason: 'module-types-off' });
     expect(
@@ -127,7 +136,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: off,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
@@ -139,7 +148,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: false, reason: 'missing-step', stepIds: ['gone', 'gone2'] });
   });
@@ -151,14 +160,14 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: false, reason: 'disabled' });
   });
 
   it('precedence runs not-selectable, custom-types-off, module-types-off, missing-step', () => {
     const off = { customEnabled: false, moduleEnabled: false };
-    const base = { switches: off, deactivatedModules: none, catalog, generic: true };
+    const base = { switches: off, modules: noRows, catalog, generic: true };
     expect(
       resolveTaskTypeAvailability({
         ...base,
@@ -193,7 +202,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog: null,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
     expect(
@@ -202,7 +211,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog: null,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
@@ -214,7 +223,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
@@ -226,7 +235,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
@@ -238,7 +247,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({
       available: false,
@@ -247,16 +256,62 @@ describe('resolveTaskTypeAvailability', () => {
     });
   });
 
-  it('a module type skips invalid-composition', () => {
-    expect(
+  describe('a module type', () => {
+    const acme = new Map([['acme', moduleRow('Acme')]]);
+    const resolve = (stepIds: string[], over: Record<string, unknown> = {}) =>
       resolveTaskTypeAvailability({
-        definition: definition({ source: 'module:acme', stepIds: ['b', 'a'] }),
+        definition: definition({ source: 'module:acme', stepIds, ...over }),
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
-      }),
-    ).toEqual({ available: true });
+        modules: acme,
+      });
+
+    it('has its composition checked when every step has a composable entry', () => {
+      expect(resolve(['b', 'a'])).toEqual({
+        available: false,
+        reason: 'invalid-composition',
+        issues: [{ kind: 'unmet-need', index: 0, stepId: 'b', needs: 't', reason: 'b needs t' }],
+      });
+      expect(resolve(['a', 'b'])).toEqual({ available: true });
+    });
+
+    it('is not checked when a step is internal: in the catalog, with no composable entry', () => {
+      expect(resolve(['b', 'a', 'legacy-step'])).toEqual({ available: true });
+      expect(resolve(['legacy-step'])).toEqual({ available: true });
+    });
+
+    it('is checked against its own requiresRepository', () => {
+      const cut = entry('cut', { provides: ['wt'] });
+      const needy = {
+        stepIds: new Set(['cut']),
+        composable: new Map([
+          ['cut', { ...cut, requires: [{ needs: 'repository', reason: 'cut needs repository' }] }],
+        ]),
+      };
+      const check = (requiresRepository: boolean) =>
+        resolveTaskTypeAvailability({
+          definition: definition({
+            source: 'module:acme',
+            stepIds: ['cut'],
+            requiresRepository,
+          }),
+          switches: on,
+          catalog: needy,
+          generic: true,
+          modules: acme,
+        });
+      expect(check(true)).toEqual({ available: true });
+      expect(check(false)).toMatchObject({ reason: 'invalid-composition' });
+    });
+
+    it('still reports a step missing from the catalog before any composition problem', () => {
+      expect(resolve(['b', 'a', 'gone'])).toEqual({
+        available: false,
+        reason: 'missing-step',
+        stepIds: ['gone'],
+      });
+    });
   });
 
   it('a builtin skips invalid-composition', () => {
@@ -266,7 +321,7 @@ describe('resolveTaskTypeAvailability', () => {
         switches: on,
         catalog,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
@@ -292,7 +347,7 @@ describe('resolveTaskTypeAvailability repository token', () => {
         switches: on,
         catalog: withRepo,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
@@ -304,7 +359,7 @@ describe('resolveTaskTypeAvailability repository token', () => {
         switches: on,
         catalog: withRepo,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toMatchObject({
       available: false,
@@ -320,19 +375,28 @@ describe('resolveTaskTypeAvailability repository token', () => {
         switches: on,
         catalog: withRepo,
         generic: true,
-        deactivatedModules: none,
+        modules: noRows,
       }),
     ).toEqual({ available: true });
   });
 });
 
-describe('resolveTaskTypeAvailability and deactivated modules', () => {
+describe('resolveTaskTypeAvailability and module states', () => {
   const stepsOf = ['module.alpha.x', 'module.alpha.y', 'module.beta.z', 'module.gamma.q'];
   const withModules = {
     stepIds: new Set([...catalog.stepIds, ...stepsOf]),
     composable: new Map([...composable, ...stepsOf.map((id) => [id, entry(id)] as const)]),
   };
-  const alphaOff = new Set(['alpha']);
+  const NAMES: Record<string, string> = { alpha: 'Alpha', beta: 'Beta', gamma: 'Gamma' };
+  // A module given null has no row, as after a purge.
+  const rowsOf = (over: Record<string, Partial<TaskTypeModuleState> | null> = {}) =>
+    new Map(
+      Object.entries(NAMES).flatMap(([id, name]) =>
+        over[id] === null ? [] : [[id, moduleRow(name, over[id] ?? {})] as const],
+      ),
+    );
+  const alphaOff = rowsOf({ alpha: { deactivated: true } });
+  const alphaMissing = rowsOf({ alpha: { missing: true } });
   const resolve = (
     over: Record<string, unknown>,
     input: Partial<Parameters<typeof resolveTaskTypeAvailability>[0]> = {},
@@ -340,111 +404,307 @@ describe('resolveTaskTypeAvailability and deactivated modules', () => {
     resolveTaskTypeAvailability({
       definition: definition(over),
       switches: on,
-      deactivatedModules: alphaOff,
+      modules: alphaOff,
       catalog: withModules,
       generic: true,
       ...input,
     });
-  const unavailable = (...moduleIds: string[]) => ({
+  const refs = (...ids: string[]) => ids.map((id) => ({ id, name: NAMES[id] ?? null }));
+  const deactivated = (...ids: string[]) => ({
     available: false,
     reason: 'module-deactivated',
-    moduleIds,
+    modules: refs(...ids),
+  });
+  const missing = (...ids: string[]) => ({
+    available: false,
+    reason: 'module-missing',
+    modules: refs(...ids),
   });
 
-  it('a type seeded by a deactivated module is unavailable, naming the module', () => {
-    expect(resolve({ source: 'module:alpha', stepIds: ['a'] })).toEqual(unavailable('alpha'));
-  });
-
-  it('a type with a step of a deactivated module is unavailable, whoever wrote it', () => {
-    for (const source of ['admin', 'builtin', 'module:beta']) {
-      expect(resolve({ source, stepIds: ['a', 'module.alpha.x', 'b'] }), source).toEqual(
-        unavailable('alpha'),
-      );
-    }
-  });
-
-  it('lists each deactivated module once, sorted', () => {
-    expect(
-      resolve(
-        {
-          source: 'module:gamma',
-          stepIds: ['module.gamma.q', 'module.alpha.y', 'module.alpha.x', 'module.beta.z'],
-        },
-        { deactivatedModules: new Set(['gamma', 'alpha']) },
-      ),
-    ).toEqual(unavailable('alpha', 'gamma'));
-  });
-
-  it("leaves a type that uses only another module's steps available", () => {
-    expect(resolve({ source: 'module:beta', stepIds: ['a', 'module.beta.z'] })).toEqual({
-      available: true,
+  describe('module-deactivated', () => {
+    it('a type seeded by a deactivated module is unavailable, naming the module', () => {
+      expect(resolve({ source: 'module:alpha', stepIds: ['a'] })).toEqual(deactivated('alpha'));
     });
-    expect(resolve({ source: 'admin', stepIds: ['module.beta.z'] })).toEqual({ available: true });
+
+    it('a type with a step of a deactivated module is unavailable, whoever wrote it', () => {
+      for (const source of ['admin', 'builtin', 'module:beta']) {
+        expect(resolve({ source, stepIds: ['a', 'module.alpha.x', 'b'] }), source).toEqual(
+          deactivated('alpha'),
+        );
+      }
+    });
+
+    it('lists each deactivated module once, sorted', () => {
+      expect(
+        resolve(
+          {
+            source: 'module:gamma',
+            stepIds: ['module.gamma.q', 'module.alpha.y', 'module.alpha.x', 'module.beta.z'],
+          },
+          { modules: rowsOf({ alpha: { deactivated: true }, gamma: { deactivated: true } }) },
+        ),
+      ).toEqual(deactivated('alpha', 'gamma'));
+    });
+
+    it("leaves a type that uses only another module's steps available", () => {
+      expect(resolve({ source: 'module:beta', stepIds: ['a', 'module.beta.z'] })).toEqual({
+        available: true,
+      });
+      expect(resolve({ source: 'admin', stepIds: ['module.beta.z'] })).toEqual({
+        available: true,
+      });
+    });
+
+    it('leaves a core-only type available, with or without module rows', () => {
+      expect(resolve({ source: 'admin', stepIds: ['a', 'b'] })).toEqual({ available: true });
+      expect(resolve({ source: 'builtin', stepIds: ['a', 'b'] }, { modules: noRows })).toEqual({
+        available: true,
+      });
+      expect(resolve({ source: 'builtin', stepIds: ['a', 'b'] }, { modules: null })).toEqual({
+        available: true,
+      });
+    });
+
+    it('needs no catalog, and reads a step list only on the static strategy', () => {
+      expect(
+        resolve({ source: 'builtin', stepIds: ['module.alpha.x'] }, { catalog: null }),
+      ).toEqual(deactivated('alpha'));
+      expect(
+        resolve({ source: 'module:alpha', runListStrategy: 'workflow_paths', stepIds: null }),
+      ).toEqual(deactivated('alpha'));
+      expect(
+        resolve({
+          source: 'builtin',
+          runListStrategy: 'workflow_paths',
+          stepIds: ['module.alpha.x'],
+        }),
+      ).toEqual({ available: true });
+    });
   });
 
-  it('leaves a core-only type available, with or without modules deactivated', () => {
-    expect(resolve({ source: 'admin', stepIds: ['a', 'b'] })).toEqual({ available: true });
-    expect(
-      resolve({ source: 'builtin', stepIds: ['a', 'b'] }, { deactivatedModules: none }),
-    ).toEqual({ available: true });
-    expect(
-      resolve({ source: 'module:beta', stepIds: ['a'] }, { deactivatedModules: none }),
-    ).toEqual({ available: true });
+  describe('module-missing', () => {
+    it('a type seeded by a missing module is unavailable, though every one of its steps is core', () => {
+      expect(
+        resolve({ source: 'module:alpha', stepIds: ['a', 'b'] }, { modules: alphaMissing }),
+      ).toEqual(missing('alpha'));
+    });
+
+    it('reads a module with no row as missing, and has no name for it', () => {
+      const purged = rowsOf({ alpha: null });
+      expect(resolve({ source: 'module:alpha', stepIds: ['a'] }, { modules: purged })).toEqual({
+        available: false,
+        reason: 'module-missing',
+        modules: [{ id: 'alpha', name: null }],
+      });
+      expect(
+        resolve({ source: 'module:alpha', stepIds: ['a'] }, { modules: noRows }),
+      ).toMatchObject({ reason: 'module-missing', modules: [{ id: 'alpha', name: null }] });
+    });
+
+    it('a step of a missing module is module-missing, not missing-step, whoever wrote the type', () => {
+      const gone = { stepIds: catalog.stepIds, composable };
+      for (const source of ['admin', 'builtin', 'module:beta']) {
+        expect(
+          resolve(
+            { source, stepIds: ['a', 'module.alpha.x', 'b'] },
+            { modules: alphaMissing, catalog: gone },
+          ),
+          source,
+        ).toEqual(missing('alpha'));
+      }
+    });
+
+    it('names the module when the step is still in the catalog', () => {
+      expect(
+        resolve({ source: 'admin', stepIds: ['module.alpha.x'] }, { modules: alphaMissing }),
+      ).toEqual(missing('alpha'));
+    });
+
+    it('stays missing-step for a step the catalog lacks of a module that is present', () => {
+      expect(
+        resolve({ source: 'admin', stepIds: ['a', 'module.beta.gone'] }, { modules: rowsOf() }),
+      ).toEqual({ available: false, reason: 'missing-step', stepIds: ['module.beta.gone'] });
+      expect(
+        resolve({ source: 'module:beta', stepIds: ['a', 'gone'] }, { modules: rowsOf() }),
+      ).toEqual({ available: false, reason: 'missing-step', stepIds: ['gone'] });
+    });
+
+    it('lists each missing module once, sorted, naming the ones that have a row', () => {
+      expect(
+        resolve(
+          {
+            source: 'module:gamma',
+            stepIds: ['module.gamma.q', 'module.alpha.y', 'module.alpha.x', 'module.beta.z'],
+          },
+          { modules: rowsOf({ alpha: null, gamma: { missing: true } }) },
+        ),
+      ).toEqual({
+        available: false,
+        reason: 'module-missing',
+        modules: [
+          { id: 'alpha', name: null },
+          { id: 'gamma', name: 'Gamma' },
+        ],
+      });
+    });
+
+    it('reads a row that is both missing and deactivated as missing', () => {
+      expect(
+        resolve(
+          { source: 'module:alpha', stepIds: ['a'] },
+          { modules: rowsOf({ alpha: { missing: true, deactivated: true } }) },
+        ),
+      ).toEqual(missing('alpha'));
+    });
+
+    it('comes before module-deactivated, and the deactivated one shows once the missing one is back', () => {
+      const uses = { source: 'admin', stepIds: ['module.alpha.x', 'module.beta.z'] };
+      const both = rowsOf({ alpha: { missing: true }, beta: { deactivated: true } });
+      expect(resolve(uses, { modules: both })).toEqual(missing('alpha'));
+      expect(resolve(uses, { modules: rowsOf({ beta: { deactivated: true } }) })).toEqual(
+        deactivated('beta'),
+      );
+    });
+
+    it('needs no catalog, and reads a step list only on the static strategy', () => {
+      expect(
+        resolve(
+          { source: 'builtin', stepIds: ['module.alpha.x'] },
+          { modules: alphaMissing, catalog: null },
+        ),
+      ).toEqual(missing('alpha'));
+      expect(
+        resolve(
+          { source: 'module:alpha', runListStrategy: 'run_app_modes', stepIds: null },
+          { modules: alphaMissing },
+        ),
+      ).toEqual(missing('alpha'));
+      expect(
+        resolve(
+          { source: 'builtin', runListStrategy: 'workflow_paths', stepIds: ['module.alpha.x'] },
+          { modules: alphaMissing },
+        ),
+      ).toEqual({ available: true });
+    });
+
+    it('leaves a type whose modules are all present available', () => {
+      expect(
+        resolve(
+          { source: 'module:alpha', stepIds: ['a', 'module.alpha.x', 'module.beta.z'] },
+          { modules: rowsOf() },
+        ),
+      ).toEqual({ available: true });
+    });
+
+    it('is not decided without module rows: the step falls back to missing-step', () => {
+      const gone = { stepIds: catalog.stepIds, composable };
+      expect(
+        resolve(
+          { source: 'admin', stepIds: ['a', 'module.alpha.x'] },
+          { modules: null, catalog: gone },
+        ),
+      ).toEqual({ available: false, reason: 'missing-step', stepIds: ['module.alpha.x'] });
+      expect(resolve({ source: 'module:alpha', stepIds: ['a'] }, { modules: null })).toEqual({
+        available: true,
+      });
+    });
   });
 
-  it('needs no catalog, and reads a step list only on the static strategy', () => {
-    expect(resolve({ source: 'builtin', stepIds: ['module.alpha.x'] }, { catalog: null })).toEqual(
-      unavailable('alpha'),
-    );
-    expect(
-      resolve({ source: 'module:alpha', runListStrategy: 'workflow_paths', stepIds: null }),
-    ).toEqual(unavailable('alpha'));
-    expect(
-      resolve({
-        source: 'builtin',
-        runListStrategy: 'workflow_paths',
-        stepIds: ['module.alpha.x'],
-      }),
-    ).toEqual({ available: true });
-  });
-
-  it('comes after disabled, not-selectable and the two switches, and before missing-step', () => {
+  it('runs disabled, not-selectable, the two switches, module-missing, module-deactivated, missing-step, invalid-composition', () => {
     const uses = { source: 'module:alpha', stepIds: ['module.alpha.x', 'not-in-catalog'] };
-    expect(resolve({ ...uses, enabled: false })).toEqual({ available: false, reason: 'disabled' });
-    expect(resolve({ ...uses, selectable: false })).toEqual({
+    const gone = rowsOf({ alpha: { missing: true, deactivated: true } });
+    expect(resolve({ ...uses, enabled: false }, { modules: gone })).toEqual({
+      available: false,
+      reason: 'disabled',
+    });
+    expect(resolve({ ...uses, selectable: false }, { modules: gone })).toEqual({
       available: false,
       reason: 'not-selectable',
     });
     expect(
       resolve(
         { ...uses, source: 'admin' },
-        { switches: { customEnabled: false, moduleEnabled: true } },
+        { modules: gone, switches: { customEnabled: false, moduleEnabled: true } },
       ),
     ).toEqual({ available: false, reason: 'custom-types-off' });
-    expect(resolve(uses, { switches: { customEnabled: true, moduleEnabled: false } })).toEqual({
-      available: false,
-      reason: 'module-types-off',
-    });
-    expect(resolve(uses)).toEqual(unavailable('alpha'));
-    expect(resolve(uses, { deactivatedModules: none })).toMatchObject({
+    expect(
+      resolve(uses, { modules: gone, switches: { customEnabled: true, moduleEnabled: false } }),
+    ).toEqual({ available: false, reason: 'module-types-off' });
+    expect(resolve(uses, { modules: gone })).toEqual(missing('alpha'));
+    expect(resolve(uses, { modules: alphaOff })).toEqual(deactivated('alpha'));
+    expect(resolve(uses, { modules: rowsOf() })).toMatchObject({
       reason: 'missing-step',
       stepIds: ['not-in-catalog'],
     });
+    expect(resolve({ source: 'admin', stepIds: ['b', 'a'] }, { modules: rowsOf() })).toMatchObject({
+      reason: 'invalid-composition',
+    });
+  });
+});
+
+describe('publicTaskTypeSchema', () => {
+  const dto = {
+    slug: 'x',
+    displayName: 'X',
+    description: null,
+    requiresRepository: true,
+    sortOrder: 0,
+    restoresDatabase: false,
+    dispatchesCli: false,
+    available: false,
+  };
+
+  it('carries a module reason with the modules it names', () => {
+    for (const reason of ['module-missing', 'module-deactivated']) {
+      const parsed = publicTaskTypeSchema.safeParse({
+        ...dto,
+        reason,
+        modules: [
+          { id: 'alpha', name: 'Alpha' },
+          { id: 'beta', name: null },
+        ],
+      });
+      expect(parsed.success, reason).toBe(true);
+      expect(parsed.success && parsed.data.modules).toEqual([
+        { id: 'alpha', name: 'Alpha' },
+        { id: 'beta', name: null },
+      ]);
+    }
   });
 
-  it('is a reason the public dto carries', () => {
-    const dto = {
-      slug: 'x',
-      displayName: 'X',
-      description: null,
-      requiresRepository: true,
-      sortOrder: 0,
-      restoresDatabase: false,
-      dispatchesCli: false,
-      available: false,
-      reason: 'module-deactivated',
-    };
-    expect(publicTaskTypeSchema.safeParse(dto).success).toBe(true);
+  it('carries the steps a missing-step reason names', () => {
+    const parsed = publicTaskTypeSchema.safeParse({
+      ...dto,
+      reason: 'missing-step',
+      stepIds: ['gone', 'gone2'],
+    });
+    expect(parsed.success && parsed.data.stepIds).toEqual(['gone', 'gone2']);
+    expect(
+      publicTaskTypeSchema.safeParse({ ...dto, reason: 'missing-step', stepIds: [1] }).success,
+    ).toBe(false);
+  });
+
+  it('refuses the two reasons the public list filters out before it asks', () => {
+    for (const reason of ['disabled', 'not-selectable']) {
+      expect(publicTaskTypeSchema.safeParse({ ...dto, reason }).success, reason).toBe(false);
+    }
+  });
+
+  it('accepts every other reason the resolver can give', () => {
+    expect([...PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS]).toEqual(
+      TASK_TYPE_UNAVAILABLE_REASONS.filter((r) => r !== 'disabled' && r !== 'not-selectable'),
+    );
+    for (const reason of PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS) {
+      expect(publicTaskTypeSchema.safeParse({ ...dto, reason }).success, reason).toBe(true);
+    }
+  });
+
+  it('lists module-missing right before module-deactivated', () => {
+    const at = (reason: string) =>
+      (TASK_TYPE_UNAVAILABLE_REASONS as readonly string[]).indexOf(reason);
+    expect(at('module-missing')).toBeGreaterThan(at('module-types-off'));
+    expect(at('module-deactivated')).toBe(at('module-missing') + 1);
+    expect(at('missing-step')).toBe(at('module-deactivated') + 1);
   });
 });
 

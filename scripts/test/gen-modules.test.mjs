@@ -42,6 +42,42 @@ describe('gen-modules: installed = depended on by api', () => {
     assert.match(tree.read(REGISTRIES[3]), /moduleId: 'foo'/);
   });
 
+  it('maps a ./teardown export to the worker entry beside the other worker parts, and no part a module lacks', (t) => {
+    const tree = makeTree(t, {
+      modules: {
+        bar: { exports: ['./manifest'] },
+        foo: { exports: ['./manifest', './steps', './ensure-schema', './jobs', './teardown'] },
+      },
+      api: names('bar', 'foo'),
+      worker: names('bar', 'foo'),
+    });
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    const worker = tree.read(REGISTRIES[1]);
+    assert.match(worker, /^import t1 from '@haive\/module-foo\/teardown';$/m);
+    assert.match(
+      worker,
+      /packageName: '@haive\/module-foo', manifest: m1, steps: s1, ensureSchema: e1, jobs: j1, teardown: t1 \},/,
+    );
+    assert.match(worker, /packageName: '@haive\/module-bar', manifest: m0 \},/);
+    assert.doesNotMatch(tree.read(REGISTRIES[0]), /teardown/);
+    assert.doesNotMatch(tree.read(REGISTRIES[2]), /teardown/);
+    assert.doesNotMatch(tree.read(REGISTRIES[3]), /teardown/);
+  });
+
+  it('maps a ./teardown export on its own', (t) => {
+    const tree = makeTree(t, {
+      modules: { foo: { exports: ['./manifest', './teardown'] } },
+      api: names('foo'),
+      worker: names('foo'),
+    });
+    assert.equal(tree.run('gen-modules.mjs').status, 0);
+    assert.match(
+      tree.read(REGISTRIES[1]),
+      /\{ packageName: '@haive\/module-foo', manifest: m0, teardown: t0 \},/,
+    );
+  });
+
   it('writes empty registries for a tree with no module', (t) => {
     const tree = makeTree(t);
     const out = tree.run('gen-modules.mjs');

@@ -19,6 +19,8 @@ import {
   type CompositionIssue,
   type PromptStepEntry,
   type PromptStepProblemKind,
+  type TaskTypeModuleRef,
+  type TaskTypeModuleState,
 } from '@haive/shared/modularity';
 import { HttpError } from '../context.js';
 
@@ -214,20 +216,34 @@ async function readCatalog(handle: Pick<Database, 'select'>) {
   };
 }
 
-// KEY SHARE holds the rows until the caller's commit against deactivate's FOR UPDATE, which then
-// counts the new task, while the boot's own non-key updates of the same rows still pass.
-async function deactivatedAmong(
+// FOR KEY SHARE on named rows: a deactivate running meanwhile waits, then counts the new task.
+export async function readModuleStates(
   handle: Pick<Database, 'select'>,
-  moduleIds: string[],
-): Promise<Set<string>> {
-  if (moduleIds.length === 0) return new Set();
-  const rows = await handle
-    .select({ moduleId: schema.modules.moduleId, deactivatedAt: schema.modules.deactivatedAt })
-    .from(schema.modules)
-    .where(inArray(schema.modules.moduleId, moduleIds))
-    .for('key share');
-  return new Set(rows.filter((row) => row.deactivatedAt !== null).map((row) => row.moduleId));
+  only?: readonly string[],
+): Promise<Map<string, TaskTypeModuleState>> {
+  if (only?.length === 0) return new Map();
+  const read = handle
+    .select({
+      moduleId: schema.modules.moduleId,
+      name: schema.modules.name,
+      missingAt: schema.modules.missingAt,
+      deactivatedAt: schema.modules.deactivatedAt,
+    })
+    .from(schema.modules);
+  const rows =
+    only === undefined
+      ? await read
+      : await read.where(inArray(schema.modules.moduleId, [...only])).for('key share');
+  return new Map(
+    rows.map((row) => [
+      row.moduleId,
+      { name: row.name, missing: row.missingAt !== null, deactivated: row.deactivatedAt !== null },
+    ]),
+  );
 }
+
+const moduleNames = (modules: TaskTypeModuleRef[] = []): string =>
+  modules.map((m) => (m.name === null ? m.id : `${m.name} (${m.id})`)).join(', ');
 
 export async function definitionForCreate(
   handle: Pick<Database, 'select'>,
@@ -249,7 +265,7 @@ export async function definitionForCreate(
     }
     return unseededBuiltin(slug);
   }
-  const deactivatedModules = await deactivatedAmong(handle, moduleIdsOfTaskType(def));
+  const modules = await readModuleStates(handle, moduleIdsOfTaskType(def));
   const storedCatalog =
     def.runListStrategy === 'static' && def.stepIds !== null ? await readCatalog(handle) : null;
   const catalog = storedCatalog && mergePromptStepCatalog(storedCatalog, def);
@@ -263,7 +279,7 @@ export async function definitionForCreate(
         !def.source.startsWith('module:') ||
         (await configService.getBoolean(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, false)),
     },
-    deactivatedModules,
+    modules,
     catalog,
     generic: opts.generic,
   });
@@ -277,10 +293,16 @@ export async function definitionForCreate(
         throw new HttpError(403, 'Custom task types are disabled on this install');
       case 'module-types-off':
         throw new HttpError(403, 'Module task types are disabled on this install');
+      case 'module-missing':
+        throw new HttpError(
+          409,
+          `Task type ${slug} needs modules that are not installed: ${moduleNames(availability.modules)}`,
+          availability.reason,
+        );
       case 'module-deactivated':
         throw new HttpError(
           409,
-          `Task type ${slug} uses deactivated modules: ${availability.moduleIds?.join(', ')}`,
+          `Task type ${slug} needs modules an administrator turned off: ${moduleNames(availability.modules)}`,
           availability.reason,
         );
       case 'missing-step':

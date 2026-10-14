@@ -142,6 +142,7 @@ describe('GET /modules/loaded', () => {
       lastLoadedAt: '2026-10-02T00:00:00.000Z',
       missingAt: '2026-10-03T00:00:00.000Z',
       deactivatedAt: null,
+      tornDownAt: null,
       updatedAt: '2026-10-03T00:00:00.000Z',
     };
     h.intentRows = [row];

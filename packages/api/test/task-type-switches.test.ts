@@ -50,7 +50,9 @@ const defRow = (slug: string, source: string) => ({
   stepLoopLimitDefaults: {},
 });
 
-const handle = (rows: unknown[], modules: unknown[] = []) =>
+const acme = { moduleId: 'acme', name: 'Acme', missingAt: null, deactivatedAt: null };
+
+const handle = (rows: unknown[], modules: unknown[] = [acme]) =>
   ({
     select: () => ({
       from: (table: unknown) =>
@@ -112,18 +114,39 @@ describe('definitionForCreate and the task type switches', () => {
     expect((await refusal(create('module:acme'))).status).toBe(403);
   });
 
-  it('refuses a type that uses a deactivated module with a 409 naming it, and not an active one', async () => {
-    h.flags.set(MODULE_KEY, true);
+  describe('a module the type uses', () => {
     const create = (modules: unknown[]) =>
       definitionForCreate(handle([defRow('x-type', 'module:acme')], modules), 'x-type', {
         generic: false,
       });
-    const err = await refusal(create([{ moduleId: 'acme', deactivatedAt: new Date() }]));
-    expect([err.status, err.code]).toEqual([409, 'module-deactivated']);
-    expect(err.message).toContain('acme');
 
-    await expect(create([{ moduleId: 'acme', deactivatedAt: null }])).resolves.toMatchObject({
-      runListSnapshot: ['00-a'],
+    beforeEach(() => h.flags.set(MODULE_KEY, true));
+
+    it('refuses a deactivated one with a 409 naming it, and not an active one', async () => {
+      const err = await refusal(create([{ ...acme, deactivatedAt: new Date() }]));
+      expect([err.status, err.code]).toEqual([409, 'module-deactivated']);
+      expect(err.message).toContain('Acme');
+
+      await expect(create([acme])).resolves.toMatchObject({ runListSnapshot: ['00-a'] });
+    });
+
+    it('refuses a missing one with a 409 naming it', async () => {
+      const err = await refusal(create([{ ...acme, missingAt: new Date() }]));
+      expect([err.status, err.code]).toEqual([409, 'module-missing']);
+      expect(err.message).toContain('Acme');
+    });
+
+    it('refuses one with no row with a 409 naming its id', async () => {
+      const err = await refusal(create([]));
+      expect([err.status, err.code]).toEqual([409, 'module-missing']);
+      expect(err.message).toContain('acme');
+    });
+
+    it('reports a missing one before a deactivated one', async () => {
+      const err = await refusal(
+        create([{ ...acme, missingAt: new Date(), deactivatedAt: new Date() }]),
+      );
+      expect(err.code).toBe('module-missing');
     });
   });
 

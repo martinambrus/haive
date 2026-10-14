@@ -82,7 +82,7 @@ export function setModuleActive(
     if (active) {
       await tx
         .update(schema.modules)
-        .set({ deactivatedAt: null })
+        .set({ deactivatedAt: null, tornDownAt: null })
         .where(eq(schema.modules.moduleId, moduleId));
       return { kind: 'ok', deactivatedAt: null };
     }

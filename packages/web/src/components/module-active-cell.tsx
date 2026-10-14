@@ -7,10 +7,12 @@ export function ModuleActiveCell({
   row,
   busy,
   onToggle,
+  onTeardown,
 }: {
-  row: Pick<ModuleDiffRow, 'id' | 'rowVersion' | 'deactivatedAt'>;
+  row: Pick<ModuleDiffRow, 'id' | 'rowVersion' | 'deactivatedAt' | 'state' | 'tornDownAt'>;
   busy: boolean;
   onToggle: () => void;
+  onTeardown: () => void;
 }) {
   if (row.rowVersion === null) return <span className="text-neutral-500">—</span>;
   const since = row.deactivatedAt;
@@ -30,6 +32,23 @@ export function ModuleActiveCell({
       >
         {action}
       </Button>
+      {since !== null && row.tornDownAt !== null && (
+        <span className="text-neutral-400">
+          {`Torn down ${new Date(row.tornDownAt).toLocaleString()}`}
+        </span>
+      )}
+      {since !== null && row.tornDownAt === null && row.state === 'loaded' && (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={busy}
+          aria-label={`Tear down ${row.id}`}
+          onClick={onTeardown}
+        >
+          Tear down
+        </Button>
+      )}
     </div>
   );
 }

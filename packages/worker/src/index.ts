@@ -63,6 +63,7 @@ import {
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
 import { startModuleJobs } from './modules/loader.js';
+import { startModuleControlWorker } from './queues/module-control-queue.js';
 import { deactivatedModuleIds } from './modules/activation.js';
 
 async function main(): Promise<void> {
@@ -265,6 +266,11 @@ async function main(): Promise<void> {
     moduleEntries,
     await deactivatedModuleIds(getDb()),
   );
+  // After the module jobs: a teardown refuses a module whose jobs this worker started.
+  const moduleControlWorker = startModuleControlWorker({
+    loaded: loadedModules,
+    entries: moduleEntries,
+  });
 
   logger.info('haive-worker ready');
 
@@ -299,6 +305,7 @@ async function main(): Promise<void> {
       usagePollWorker.close(true),
       prPollWorker.close(true),
       planMirrorWorker.close(true),
+      moduleControlWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
       closePrPollQueue(),

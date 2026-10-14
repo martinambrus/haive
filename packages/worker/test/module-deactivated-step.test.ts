@@ -1,6 +1,7 @@
-import { eq, getTableName } from 'drizzle-orm';
+import { eq, getTableName, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { computeTaskTiming } from '@haive/shared/timing';
 import { moduleDeactivationMessage } from '../src/modules/activation.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { advanceStep, type AdvanceStepParams } from '../src/step-engine/step-runner.js';
@@ -138,6 +139,8 @@ describe('advanceStep on a module step', () => {
       }),
     };
   };
+  const failWrites = (status: string) =>
+    status === 'pending' ? ['update task_steps', 'update task_steps'] : ['update task_steps'];
 
   it.each(['pending', 'running', 'waiting_form', 'waiting_cli'])(
     'fails the %s row of a deactivated module and runs none of its code',
@@ -152,13 +155,14 @@ describe('advanceStep on a module step', () => {
       expectNamedReason(error);
       expect(row.errorMessage).toBe(error);
       expect(state.reads).toEqual(['task_steps', 'modules']);
-      expect(state.writes).toEqual(['update task_steps']);
-      expect(state.patches[0]).toMatchObject({
+      expect(state.writes).toEqual(failWrites(status));
+      expect(state.patches.some((p) => 'waitingStartedAt' in p)).toBe(status === 'pending');
+      expect(state.patches.at(-1)).toMatchObject({
         status: 'failed',
         statusMessage: null,
         errorMessage: error,
       });
-      expect(state.patches[0]?.endedAt).toBeInstanceOf(Date);
+      expect(state.patches.at(-1)?.endedAt).toBeInstanceOf(Date);
       expect(shouldRun).not.toHaveBeenCalled();
     },
   );
@@ -175,7 +179,7 @@ describe('advanceStep on a module step', () => {
         false,
       );
       await expect(result).resolves.toMatchObject({ status: 'superseded' });
-      expect(state.writes).toEqual(['update task_steps']);
+      expect(state.writes).toEqual(failWrites(status));
       expect(shouldRun).not.toHaveBeenCalled();
     },
   );
@@ -221,7 +225,7 @@ describe('advanceStep on a module step', () => {
         row: { status: 'failed', errorMessage: HANDED_OFF },
       });
       expect(state.reads).toEqual(['task_steps']);
-      expect(state.writes).toEqual(['update task_steps']);
+      expect(state.writes).toEqual(failWrites(status));
       expect(shouldRun).not.toHaveBeenCalled();
     },
   );
@@ -281,6 +285,24 @@ describe.skipIf(!url)('module activation guard on Postgres', () => {
       .from(schema.tasks)
       .where(eq(schema.tasks.id, taskId));
     return task!.epoch;
+  };
+  const parkRow = () =>
+    db.insert(schema.taskSteps).values({
+      taskId,
+      stepId: 'module.alpha.x',
+      stepIndex: 100,
+      runSeq: 0,
+      round: 0,
+      title: 'module.alpha.x',
+      status: 'pending',
+      waitingStartedAt: sql`now() - interval '90 seconds'`,
+    });
+  const expectParkFolded = async () => {
+    const [row] = await stepRows();
+    const idle = computeTaskTiming(row ? [row] : [], Date.now()).idleMs;
+    expect(idle).toBeGreaterThanOrEqual(89_000);
+    expect(idle).toBeLessThan(120_000);
+    expect(row?.waitingStartedAt).toBeNull();
   };
 
   beforeAll(async () => {
@@ -451,6 +473,31 @@ describe.skipIf(!url)('module activation guard on Postgres', () => {
     ).resolves.toMatchObject({ status: 'superseded' });
     expect(await stepRows()).toMatchObject([{ status: 'pending', errorMessage: null }]);
     expect(shouldRun).not.toHaveBeenCalled();
+  });
+
+  it('keeps the wait for a runtime slot as idle time when it fails a parked row', async () => {
+    await setModule('alpha', OFF);
+    await parkRow();
+    await expect(
+      advanceStep({
+        ...paramsFor(db, stepDef('module.alpha.x'), taskId),
+        epoch: await taskEpoch(),
+      }),
+    ).resolves.toMatchObject({ status: 'failed' });
+    await expectParkFolded();
+  });
+
+  it('folds the park, as a skip does, for a pass a Retry has already moved past', async () => {
+    await setModule('alpha', OFF);
+    await parkRow();
+    await db.update(schema.tasks).set({ orchestrationEpoch: 1 }).where(eq(schema.tasks.id, taskId));
+    await expect(
+      advanceStep({ ...paramsFor(db, stepDef('module.alpha.x'), taskId), epoch: 0 }),
+    ).resolves.toMatchObject({ status: 'superseded' });
+    expect(await stepRows()).toMatchObject([
+      { status: 'pending', errorMessage: null, endedAt: null },
+    ]);
+    await expectParkFolded();
   });
 
   it('writes a row for an active module, and none of a failure', async () => {

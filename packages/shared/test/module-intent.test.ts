@@ -4,6 +4,7 @@ import { diffModuleIntent, type ModuleIntentRow } from '../src/modularity/index.
 const LOADED = new Date('2026-10-01T00:00:00.000Z');
 const GONE = new Date('2026-10-05T00:00:00.000Z');
 const SWITCHED_OFF = new Date('2026-10-14T08:00:00.000Z');
+const TORN_DOWN = new Date('2026-10-14T09:30:00.000Z');
 
 const intent = (id: string, over: Partial<ModuleIntentRow> = {}): ModuleIntentRow => ({
   moduleId: id,
@@ -14,6 +15,7 @@ const intent = (id: string, over: Partial<ModuleIntentRow> = {}): ModuleIntentRo
   lastLoadedAt: LOADED,
   missingAt: null,
   deactivatedAt: null,
+  tornDownAt: null,
   ...over,
 });
 const api = (id: string, version = '1.0.0') => ({ id, version });
@@ -68,6 +70,7 @@ describe('diffModuleIntent', () => {
       lastLoadedAt: LOADED.toISOString(),
       missingAt: null,
       deactivatedAt: null,
+      tornDownAt: null,
     });
     expect(result.rows[0]!.missingAt).toBe(GONE.toISOString());
   });
@@ -85,6 +88,25 @@ describe('diffModuleIntent', () => {
     expect(result.rows.map((r) => [r.id, r.deactivatedAt])).toEqual([
       ['a', SWITCHED_OFF.toISOString()],
       ['b', SWITCHED_OFF.toISOString()],
+      ['c', null],
+      ['d', null],
+      ['e', null],
+    ]);
+  });
+
+  it('carries tornDownAt as an ISO date from a Date or a string, and null with no row', () => {
+    const result = diffModuleIntent(
+      [
+        intent('a', { deactivatedAt: SWITCHED_OFF, tornDownAt: TORN_DOWN }),
+        intent('b', { deactivatedAt: SWITCHED_OFF, tornDownAt: TORN_DOWN.toISOString() }),
+        intent('c', { deactivatedAt: SWITCHED_OFF }),
+      ],
+      [api('d')],
+      report(api('e')),
+    );
+    expect(result.rows.map((r) => [r.id, r.tornDownAt])).toEqual([
+      ['a', TORN_DOWN.toISOString()],
+      ['b', TORN_DOWN.toISOString()],
       ['c', null],
       ['d', null],
       ['e', null],
