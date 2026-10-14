@@ -12,12 +12,14 @@ export function getIntegrationProvider(providerId: string): IntegrationProviderS
   return listIntegrationProviders().find((provider) => provider.id === providerId);
 }
 
-/** The admin's switch when there is a row for the provider, else on for a core provider only. */
+/** The admin's switch when there is a row for the provider, else on for a registered core provider only. */
 export async function isProviderEnabled(db: Database | DbTx, providerId: string): Promise<boolean> {
   const [row] = await db
     .select({ enabled: schema.integrationProviderConfigs.enabled })
     .from(schema.integrationProviderConfigs)
     .where(eq(schema.integrationProviderConfigs.providerId, providerId));
   if (row) return row.enabled;
-  return parseProviderId(providerId)?.kind === 'core';
+  return (
+    parseProviderId(providerId)?.kind === 'core' && getIntegrationProvider(providerId) !== undefined
+  );
 }

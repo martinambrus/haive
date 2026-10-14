@@ -318,6 +318,16 @@ describe('vendor answers', () => {
     expect(err.message).not.toContain('stub-client-secret');
   });
 
+  it('blanks the secrets it sent out of the error code too, and keeps it to 100 characters', async () => {
+    const echoed = stub(() => json(400, { error: 'bad stub-refresh-0 for stub-client-secret' }));
+    const err = (await rejection(refresh(echoed.fetchFn))) as OauthVendorError;
+    expect(err.code).toBe('bad [redacted] for [redacted]');
+    expect(err.message).not.toContain('stub-refresh-0');
+    expect(err.message).not.toContain('stub-client-secret');
+    const long = stub(() => json(400, { error: 'x'.repeat(2000) }));
+    expect(((await rejection(refresh(long.fetchFn))) as OauthVendorError).code).toHaveLength(100);
+  });
+
   it('keeps a description to 500 characters', async () => {
     const { fetchFn } = stub(() =>
       json(400, { error: 'invalid_grant', error_description: 'x'.repeat(2000) }),

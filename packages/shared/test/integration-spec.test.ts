@@ -96,6 +96,10 @@ describe('integrationProviderSpecSchema', () => {
     ['a bad provider id', { ...forge, id: 'Bad Id' }],
     ['no auth method', { ...forge, auth: [] }],
     [
+      'a repeated auth kind',
+      { ...forge, auth: [oauth, { ...oauth, tokenUrl: 'https://other.example.com/token' }] },
+    ],
+    [
       'a token auth with a bad form',
       { ...forge, auth: [{ ...tokenAuth, form: { fields: 'nope' } }] },
     ],

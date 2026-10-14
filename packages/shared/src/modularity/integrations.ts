@@ -93,6 +93,10 @@ export const integrationProviderSpecSchema = z
     message: 'categories must be unique',
     path: ['categories'],
   })
+  .refine((p) => new Set(p.auth.map((a) => a.kind)).size === p.auth.length, {
+    message: 'each auth kind may appear once',
+    path: ['auth'],
+  })
   .refine(
     (p) => {
       const ids = (p.operations ?? []).map((o) => o.opId);

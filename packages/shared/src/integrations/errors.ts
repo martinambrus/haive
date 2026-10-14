@@ -19,7 +19,7 @@ export class ConnectionNotFoundError extends Error {
   }
 }
 
-/** The provider answered with an OAuth `error` code. `code` is that JSON field, verbatim. */
+/** The provider answered with an OAuth `error` code. `code` is that JSON field, redacted and bounded. */
 export class OauthVendorError extends Error {
   constructor(
     operation: string,

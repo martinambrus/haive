@@ -244,5 +244,9 @@ describe.skipIf(!url)('OAuth clients and provider enablement on Postgres', () =>
     it('is off for an id that is not a provider id at all', async () => {
       expect(await isProviderEnabled(db, 'Not A Provider')).toBe(false);
     });
+
+    it('is off for a core-shaped id that no provider registers', async () => {
+      expect(await isProviderEnabled(db, 'dropbox')).toBe(false);
+    });
   });
 });

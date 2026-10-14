@@ -8,6 +8,7 @@ const DEFAULT_DEVICE_INTERVAL_SECONDS = 5;
 const DEVICE_SLOW_DOWN_SECONDS = 5;
 const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 const DESCRIPTION_MAX_LENGTH = 500;
+const ERROR_CODE_MAX_LENGTH = 100;
 const MIN_REDACTED_LENGTH = 8;
 
 export interface OauthClientCredentials {
@@ -100,7 +101,8 @@ async function callVendor(fetchFn: FetchFn, request: VendorRequest): Promise<Jso
       typeof raw === 'string' && raw.length > 0
         ? redact(raw, request.secrets).slice(0, DESCRIPTION_MAX_LENGTH)
         : null;
-    throw new OauthVendorError(request.operation, body.error, description, res.status);
+    const code = redact(body.error, request.secrets).slice(0, ERROR_CODE_MAX_LENGTH);
+    throw new OauthVendorError(request.operation, code, description, res.status);
   }
   if (!res.ok) {
     throw new OauthUnavailableError(`${request.operation} failed (HTTP ${res.status})`);
