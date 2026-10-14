@@ -717,6 +717,36 @@ describe('selectForDispatch', () => {
       expect(lsFiles()).toEqual([['ls-files', '-z']]);
     });
 
+    it('selects a files rule through a path only the extra text names, and not without it', async () => {
+      await emptyTree('src/foo.ts');
+      task({ description: 'Make the badge look right.' });
+      const rules = [files(['src/foo.ts'])];
+      const withText = await selectNamed(
+        { mode: 'write', namedText: 'Edit `src/foo.ts` and stop.' },
+        kb({ rules }),
+      );
+      expect(withText.entries.map((e) => e.why)).toStrictEqual([
+        { scope: 'files', glob: 'src/foo.ts', via: 'named' },
+      ]);
+      expect(lsFiles()).toEqual([['ls-files', '-z']]);
+      const without = await selectNamed({ mode: 'write' }, kb({ rules }));
+      expect(without.entries).toEqual([]);
+      expect(without.filesRulesUnmatched).toBe(1);
+    });
+
+    it('adds the extra text to the task text and reads the tracked files once', async () => {
+      await emptyTree();
+      task({ description: 'Edit docs/old.md.' });
+      h.gitCalls = [];
+      const rules = [files(['**/*.md']), files(['**/*.php'])];
+      const out = await selectNamed(
+        { mode: 'write', namedText: 'Then src/keep.php.' },
+        kb({ rules }),
+      );
+      expect(out.entries).toHaveLength(2);
+      expect(lsFiles()).toHaveLength(1);
+    });
+
     it('reads the title and the spec as well as the description', async () => {
       await emptyTree();
       task({

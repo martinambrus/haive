@@ -151,14 +151,20 @@ export async function readTrackedFiles(
   return listed.stdout.split('\0').filter((file) => file !== '');
 }
 
-/** The paths a task names, resolved against the tracked files; none when they cannot be read. */
+/** The paths a task (and any extra text) names, resolved against the tracked files; none when they cannot be read. */
 async function readNamedFiles(
   db: Database,
   taskId: string,
   worktreeRel: string | undefined,
+  extraText?: string,
 ): Promise<string[]> {
   try {
-    const names = namedFiles(await readTaskText(db, taskId));
+    const names = [
+      ...new Set([
+        ...namedFiles(await readTaskText(db, taskId)),
+        ...(extraText === undefined ? [] : namedFiles(extraText)),
+      ]),
+    ];
     if (names.length === 0) return [];
     const tree = await resolveInvocationWorkerTree(db, taskId, worktreeRel);
     const tracked = tree === null ? null : await readTrackedFiles(tree);
@@ -199,7 +205,7 @@ export async function selectForDispatch(
     changedFiles !== null &&
     request.mode === 'write' &&
     request.estimatedFiles === undefined
-      ? await readNamedFiles(db, taskId, worktreeRel)
+      ? await readNamedFiles(db, taskId, worktreeRel, request.namedText)
       : [];
   return selectHouseRules({
     mode: request.mode,

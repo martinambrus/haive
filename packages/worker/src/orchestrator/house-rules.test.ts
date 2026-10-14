@@ -164,6 +164,15 @@ describe('houseRulesFor', () => {
     expect(houseRulesFor('custom.t', 'default', undefined, ['file_write'])).toBeUndefined();
   });
 
+  it('carries the text a prompt step names its files in, for a file_write step only', () => {
+    expect(
+      houseRulesFor('custom.t.s', 'default', undefined, ['file_write'], 'edit src/foo.ts'),
+    ).toEqual({ mode: 'write', namedText: 'edit src/foo.ts' });
+    expect(
+      houseRulesFor('custom.t.s', 'default', undefined, ['tool_use'], 'edit src/foo.ts'),
+    ).toBeUndefined();
+  });
+
   it('leaves a built-in id alone whatever capabilities are passed', () => {
     expect(houseRulesFor('09_5-skill-generation', 'default', undefined, ['file_write'])).toBe(
       undefined,

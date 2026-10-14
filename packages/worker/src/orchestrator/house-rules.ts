@@ -30,6 +30,8 @@ const OMITTED_TITLES_NAMED = 8;
 export interface HouseRulesRequest {
   mode: HouseRuleMode;
   estimatedFiles?: readonly string[];
+  /** Text whose named paths count like the task's own, for a writer whose prompt names its files. */
+  namedText?: string;
   findings?: boolean;
 }
 
@@ -40,9 +42,11 @@ export function houseRulesFor(
   role: string,
   estimatedFiles?: readonly string[],
   capabilities?: readonly string[],
+  namedText?: string,
 ): HouseRulesRequest | undefined {
   if (parseStepId(stepId)?.kind === 'custom') {
-    return capabilities?.includes('file_write') ? { mode: 'write' } : undefined;
+    if (!capabilities?.includes('file_write')) return undefined;
+    return namedText === undefined ? { mode: 'write' } : { mode: 'write', namedText };
   }
   if (!Object.hasOwn(HOUSE_RULE_ROLES, stepId)) return undefined;
   const roles = HOUSE_RULE_ROLES[stepId]!;
