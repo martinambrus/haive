@@ -35,6 +35,13 @@ const GET_PULL_REQUEST_STATE: IntegrationOperation = {
   access: 'read',
 };
 
+const GITHUB_TOKEN_URL = 'https://github.com/login/oauth/access_token';
+const GITHUB_USER_INFO = {
+  url: 'https://api.github.com/user',
+  idPointer: '/id',
+  labelPointer: '/login',
+};
+
 function tokenAuth(
   title: string,
   label: string,
@@ -78,8 +85,18 @@ export const CORE_FORGE_PROVIDER_SPECS: IntegrationProviderSpec[] = [
       {
         kind: 'device',
         deviceCodeUrl: 'https://github.com/login/device/code',
-        tokenUrl: 'https://github.com/login/oauth/access_token',
+        tokenUrl: GITHUB_TOKEN_URL,
         scopes: { read: ['repo'], write: ['repo'] },
+        userInfo: GITHUB_USER_INFO,
+      },
+      {
+        kind: 'oauth2',
+        authorizeUrl: 'https://github.com/login/oauth/authorize',
+        tokenUrl: GITHUB_TOKEN_URL,
+        scopes: { read: ['repo'], write: ['repo'] },
+        pkce: true,
+        clientRegistration: ['preregistered'],
+        userInfo: GITHUB_USER_INFO,
       },
     ],
   ),

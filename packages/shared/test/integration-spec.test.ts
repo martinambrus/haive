@@ -96,6 +96,10 @@ describe('integrationProviderSpecSchema', () => {
     ['a bad provider id', { ...forge, id: 'Bad Id' }],
     ['no auth method', { ...forge, auth: [] }],
     [
+      'a repeated auth kind',
+      { ...forge, auth: [oauth, { ...oauth, tokenUrl: 'https://other.example.com/token' }] },
+    ],
+    [
       'a token auth with a bad form',
       { ...forge, auth: [{ ...tokenAuth, form: { fields: 'nope' } }] },
     ],
@@ -109,6 +113,43 @@ describe('authMethodSpecSchema', () => {
     for (const a of [oauth, device, tokenAuth]) {
       expect(authMethodSpecSchema.safeParse(a).success).toBe(true);
     }
+  });
+
+  it('accepts userInfo on oauth2 and device methods and none on either', () => {
+    const userInfo = {
+      url: 'https://api.example.com/user',
+      idPointer: '/id',
+      labelPointer: '/profile/display~1name',
+    };
+    expect(authMethodSpecSchema.safeParse({ ...oauth, userInfo }).data).toEqual({
+      ...oauth,
+      userInfo,
+    });
+    expect(authMethodSpecSchema.safeParse({ ...device, userInfo }).data).toEqual({
+      ...device,
+      userInfo,
+    });
+    expect(authMethodSpecSchema.safeParse(oauth).data).toEqual(oauth);
+    expect(authMethodSpecSchema.safeParse(device).data).toEqual(device);
+  });
+
+  it.each([
+    ['an http userInfo url', { url: 'http://api.example.com/user' }],
+    ['a relative userInfo url', { url: '/user' }],
+    ['an id pointer without a leading slash', { idPointer: 'id' }],
+    ['an empty id pointer', { idPointer: '' }],
+    ['a label pointer with a bad escape', { labelPointer: '/a~2b' }],
+    ['no label pointer', { labelPointer: undefined }],
+    ['no id pointer', { idPointer: undefined }],
+  ])('rejects %s', (_name, over) => {
+    const userInfo = {
+      url: 'https://api.example.com/user',
+      idPointer: '/id',
+      labelPointer: '/login',
+      ...over,
+    };
+    expect(authMethodSpecSchema.safeParse({ ...oauth, userInfo }).success).toBe(false);
+    expect(authMethodSpecSchema.safeParse({ ...device, userInfo }).success).toBe(false);
   });
 
   it.each([

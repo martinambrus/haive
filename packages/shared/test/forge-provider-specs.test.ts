@@ -28,3 +28,38 @@ describe('CORE_FORGE_PROVIDER_SPECS', () => {
     },
   );
 });
+
+describe('github sign-in methods', () => {
+  const github = CORE_FORGE_PROVIDER_SPECS.find((s) => s.id === 'github')!;
+  const userInfo = { url: 'https://api.github.com/user', idPointer: '/id', labelPointer: '/login' };
+
+  it('reads the account from api.github.com/user on the device flow', () => {
+    expect(github.auth.find((a) => a.kind === 'device')).toEqual({
+      kind: 'device',
+      deviceCodeUrl: 'https://github.com/login/device/code',
+      tokenUrl: 'https://github.com/login/oauth/access_token',
+      scopes: { read: ['repo'], write: ['repo'] },
+      userInfo,
+    });
+  });
+
+  it('declares the web flow with PKCE, a preregistered client and no revoke url', () => {
+    expect(github.auth.find((a) => a.kind === 'oauth2')).toEqual({
+      kind: 'oauth2',
+      authorizeUrl: 'https://github.com/login/oauth/authorize',
+      tokenUrl: 'https://github.com/login/oauth/access_token',
+      scopes: { read: ['repo'], write: ['repo'] },
+      pkce: true,
+      clientRegistration: ['preregistered'],
+      userInfo,
+    });
+  });
+
+  it('keeps the token method first and gives no other forge an oauth2 method', () => {
+    expect(github.auth[0]?.kind).toBe('token');
+    const withOauth = CORE_FORGE_PROVIDER_SPECS.filter((s) =>
+      s.auth.some((a) => a.kind === 'oauth2'),
+    ).map((s) => s.id);
+    expect(withOauth).toEqual(['github']);
+  });
+});

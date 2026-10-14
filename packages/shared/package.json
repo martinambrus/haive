@@ -163,6 +163,10 @@
       "types": "./dist/forge/index.d.ts",
       "import": "./dist/forge/index.js"
     },
+    "./integrations": {
+      "types": "./dist/integrations/index.d.ts",
+      "import": "./dist/integrations/index.js"
+    },
     "./release": {
       "types": "./dist/release/index.d.ts",
       "import": "./dist/release/index.js"
