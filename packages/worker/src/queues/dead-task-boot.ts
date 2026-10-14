@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, TASK_DEAD_EVENT, type WorkflowType } from '@haive/shared';
+import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
 import { stepRegistry, type StepRegistry } from '../step-engine/registry.js';
 import { TERMINAL_TASK_STATUSES } from '../step-engine/step-ownership.js';
 import {
@@ -262,7 +263,10 @@ export async function reconcileDeadTasks(
             round: c.currentStepId === null ? undefined : c.currentRound,
           },
         );
-        if (landed) marked += 1;
+        if (landed) {
+          marked += 1;
+          await resyncAfterTaskEnd(db, c.id);
+        }
       }
     } catch (err) {
       log.error({ err, taskId: c.id }, 'dead task reconciliation failed for a task');
