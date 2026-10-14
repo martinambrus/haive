@@ -202,3 +202,14 @@ any other Haive path that conflicts stays the fixer's to resolve, or the merge c
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.
+
+A worktree that holds uncommitted work is never removed without an explicit choice. Merging takes
+only what was committed, and removal deletes the rest, so `12-worktree-cleanup` reads
+`git status --porcelain=v1 -z` (`readUncommittedChanges`, `repo/worktree-changes.ts`): when the tree
+is dirty, or git cannot read it, its form lists the paths, defaults to Keep, and removes only when
+"Delete the N uncommitted changes" is ticked; apply reads the status again right before removing. A
+directory already gone counts as clean, since removal reads absence as success. `13-pr-wait`'s
+finalize, which has no such choice, keeps a dirty or unreadable worktree and still finishes the task,
+and the completion of a custom type without step 12 reaps its worktree only while clean. Ignored
+files are not counted. `run_app`'s Finish and Cancel still remove the worktree: Cancel is the
+discard action, and `run_app` has no step that could ask.
