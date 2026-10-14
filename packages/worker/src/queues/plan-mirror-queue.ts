@@ -1,5 +1,5 @@
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, asc, eq, inArray, lt } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
@@ -328,6 +328,7 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
       and(
         eq(schema.tasks.repositoryId, repo.id),
         inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+        isNull(schema.tasks.deadAt),
       ),
     )
     .limit(1);

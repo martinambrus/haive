@@ -38,6 +38,7 @@ export async function checkoutHoldingTasks(
     where: and(
       eq(schema.tasks.repositoryId, repositoryId),
       inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+      isNull(schema.tasks.deadAt),
       opts.excludeTaskId ? ne(schema.tasks.id, opts.excludeTaskId) : undefined,
       opts.rootOnly ? isNull(schema.tasks.worktreePath) : undefined,
     ),
