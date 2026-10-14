@@ -26,6 +26,7 @@ import {
   putBackAfterFailure,
   putBackProjections,
   recoverAfterMoveFailure,
+  restoreKeptMetadata,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -565,6 +566,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       }
       if (repositoryId && res.code === 0) {
         await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+        await restoreKeptMetadata(ctx.repoPath, kept);
       } else if (repositoryId && asided) {
         await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept, putBackSection);
       }

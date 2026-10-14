@@ -2140,6 +2140,27 @@ async function main(): Promise<void> {
         { outcome: asideM7.outcome, m7Gone, m7Back },
       );
 
+      // M8. An untracked plan.json at 0600 that a refresh sets aside and the resync re-creates keeps that mode.
+      const m8 = await cloned();
+      const m8Id = m8.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: m8Id, origin: 'user' },
+      );
+      await writePlanMirror(db, m8Id, m8.dest);
+      const m8Plan = path.join(m8.dest, PLAN_REL);
+      await chmod(m8Plan, 0o600);
+      const m8Head = git(m8.dest, 'rev-parse', 'HEAD');
+      await push('m8-upstream.txt', 'x\n');
+      const m8Moved = await moveVia('refresh', m8);
+      const m8Mode = ((await stat(m8Plan).catch(() => null))?.mode ?? 0) & 0o777;
+      check(
+        'M8: an untracked plan.json at 0600 keeps that mode across a refresh that moves the checkout',
+        git(m8.dest, 'rev-parse', 'HEAD') !== m8Head && m8Mode === 0o600,
+        { m8Moved, m8Mode: m8Mode.toString(8) },
+      );
+
       // P2. A lone plan.md in a repository whose database holds no plan is not Haive's: refused and kept.
       const p2 = await cloned();
       const p2Md = path.join(p2.dest, HAIVE_DATA_FILES.planMarkdown);

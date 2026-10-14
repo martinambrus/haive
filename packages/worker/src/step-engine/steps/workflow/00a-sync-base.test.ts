@@ -38,6 +38,7 @@ vi.mock('../../../project-state/set-aside.js', () => ({
     await projections.putBack(...args.slice(0, 4));
     throw args[5];
   },
+  restoreKeptMetadata: async () => undefined,
   restoreProjectionsInTx: projections.restore,
   MOVE_ATTEMPTS: 3,
 }));

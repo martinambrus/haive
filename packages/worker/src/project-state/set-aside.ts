@@ -4,6 +4,8 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { HAIVE_DATA_FILES, logger } from '@haive/shared';
 import {
+  chmodNoFollow,
+  chownNoFollow,
   readFileNoFollow,
   lstatNoFollow,
   readdirNoFollow,
@@ -57,6 +59,8 @@ export interface KeptFile {
   bytes?: Buffer | null;
   index: string | null;
   mode?: number;
+  owner?: { uid: number; gid: number };
+  untracked?: boolean;
 }
 export type KeptFiles = Map<string, KeptFile>;
 
@@ -451,7 +455,10 @@ async function restoreJudged(
     const index = await indexEntry(repoPath, path);
     const entry = await lstatNoFollow(repoPath, path).catch(() => null);
     const mode = entry?.kind === 'file' ? Number(entry.stats.mode) & 0o7777 : undefined;
-    captured.set(path, bytes === undefined ? { index } : { bytes, index, mode });
+    const owner =
+      entry?.kind === 'file' ? { uid: entry.stats.uid, gid: entry.stats.gid } : undefined;
+    const untracked = (await headEntry(repoPath, path)) === null;
+    captured.set(path, bytes === undefined ? { index } : { bytes, index, mode, owner, untracked });
   }
   // A write landing during the capture would be taken for Haive's: the judged state must still hold.
   for (const path of mine) {
@@ -802,6 +809,25 @@ export async function resyncHaiveProjections(
   }
 }
 
+/** After the re-sync: an untracked projection the set-aside removed is a new file now, so it gets back the
+ *  owner and mode it had, while it is still owned by the process that wrote it. Never throws. */
+export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<void> {
+  const writer = process.getuid?.();
+  for (const [path, { bytes, owner, mode, untracked }] of kept) {
+    if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) continue;
+    const warn = (err: unknown) =>
+      logger.warn({ err, repoPath, path }, 'owner and mode not restored after a checkout move');
+    try {
+      const now = await lstatNoFollow(repoPath, path);
+      if (now?.kind !== 'file' || now.stats.uid !== writer) continue;
+      await chownNoFollow(repoPath, path, owner).catch(warn);
+      await chmodNoFollow(repoPath, path, (current) => (mode & ~0o111) | (current & 0o111));
+    } catch (err) {
+      warn(err);
+    }
+  }
+}
+
 /** After a set-aside that ends with no move: writes each kept file back as the set-aside found it, unless
  *  someone has written it since. The marks stay raised, so the sweep reconciles the rest later. A failure
  *  is thrown: a staged entry it could not put back is the person's, and no sweep can rebuild it. */
@@ -818,7 +844,7 @@ export async function putBackProjections(
     await lockProjectState(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
     // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
-    for (const [path, { bytes, index, mode }] of kept) {
+    for (const [path, { bytes, index, mode, owner }] of kept) {
       await putBackIndex(repoPath, path, index);
       if (bytes === undefined) continue;
       const head = await readBlob(repoPath, `HEAD:${path}`);
@@ -831,6 +857,7 @@ export async function putBackProjections(
             createParents: true,
             fileMode: mode,
           });
+          if (owner) await chownNoFollow(repoPath, path, owner).catch(() => undefined);
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
         }

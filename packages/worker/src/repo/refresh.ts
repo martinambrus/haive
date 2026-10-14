@@ -15,6 +15,7 @@ import {
   putBackAfterFailure,
   putBackProjections,
   recoverAfterMoveFailure,
+  restoreKeptMetadata,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -196,8 +197,10 @@ async function fastForward(
     }
     const { again, merge: merged } = moved;
     if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
-    if (merged?.code === 0) await resyncHaiveProjections(db, payload.repositoryId, dest);
-    else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
+    if (merged?.code === 0) {
+      await resyncHaiveProjections(db, payload.repositoryId, dest);
+      await restoreKeptMetadata(dest, kept);
+    } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
     if (again.outcome === 'refused') {
       return `Not refreshed: ${again.reason}. The checkout was not moved.`;
     }
