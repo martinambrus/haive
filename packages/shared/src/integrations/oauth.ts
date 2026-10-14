@@ -142,9 +142,13 @@ async function callVendor(fetchFn: FetchFn, request: VendorRequest): Promise<Jso
   return body;
 }
 
+function seconds(raw: unknown): number {
+  return typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : Number.NaN;
+}
+
 function positiveSeconds(raw: unknown): number | null {
-  const seconds = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : Number.NaN;
-  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+  const value = seconds(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function toTokenSet(body: Json | null, nowMs: number, operation: string): TokenSet {
@@ -153,7 +157,9 @@ function toTokenSet(body: Json | null, nowMs: number, operation: string): TokenS
     throw new OauthUnavailableError(`${operation} returned no access token`);
   }
   const refreshToken = body.refresh_token;
-  const lifetime = positiveSeconds(body.expires_in);
+  // RFC 6749 allows `expires_in: 0`: a token already expired, refreshed on its next read.
+  const raw = seconds(body.expires_in);
+  const lifetime = Number.isFinite(raw) && raw >= 0 ? raw : null;
   return {
     accessToken,
     refreshToken: typeof refreshToken === 'string' && refreshToken !== '' ? refreshToken : null,

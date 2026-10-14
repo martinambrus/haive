@@ -328,6 +328,21 @@ describe('vendor answers', () => {
     expect(((await rejection(refresh(long.fetchFn))) as OauthVendorError).code).toHaveLength(100);
   });
 
+  it('reads expires_in 0 as a token that has already expired, not as one that never does', async () => {
+    const { fetchFn } = stub(() =>
+      json(200, { access_token: 'stub-access-1', refresh_token: 'stub-refresh-1', expires_in: 0 }),
+    );
+    const before = Date.now();
+    const tokens = await refreshAccessToken(fetchFn, {
+      tokenUrl: TOKEN_URL,
+      client: CLIENT,
+      refreshToken: 'stub-refresh-0',
+    });
+    expect(tokens.expiresAt).not.toBeNull();
+    expect(tokens.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(tokens.expiresAt!.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
   it('keeps a known error code whole when a short secret happens to sit inside it', async () => {
     const { fetchFn } = stub(() => json(400, { error: 'invalid_grant' }));
     const err = (await rejection(
