@@ -386,6 +386,62 @@ describe('advanceStep LLM phase', () => {
     expect(enqueueCliInvocation).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])(
+    'fails a prompt step whose template persona cannot be read with the persona text, optional %s',
+    async (optional) => {
+      const state = freshState();
+      const enqueueCliInvocation = vi.fn();
+      const step = baseStep();
+      Object.assign(step.metadata, { id: 'custom.review.audit' });
+      step.llm = {
+        ...step.llm!,
+        ...(optional ? { optional: true } : {}),
+        buildPrompt: () => 'Act as [[HAIVE_TEMPLATE_PERSONA:reviewer]].',
+      };
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: null,
+        stepDef: step,
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation },
+      });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toContain('Prompt step persona "reviewer" cannot be used');
+        expect(result.error).not.toContain('no cli provider available');
+      }
+      expect(enqueueCliInvocation).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not read a template persona for a step that is not a prompt step', async () => {
+    const state = freshState();
+    const enqueueCliInvocation = vi.fn();
+    const step = baseStep();
+    step.llm = {
+      ...step.llm!,
+      buildPrompt: () => 'Quoted text [[HAIVE_TEMPLATE_PERSONA:reviewer]].',
+    };
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: null,
+      stepDef: step,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation },
+    });
+    if (result.status === 'failed') {
+      expect(result.error).not.toContain('Prompt step persona');
+    }
+  });
+
   it('injects the selected provider commit conventions into gate-3 generation', async () => {
     const state = freshState();
     state.taskStepRow.stepId = gate3CommitStep.metadata.id;

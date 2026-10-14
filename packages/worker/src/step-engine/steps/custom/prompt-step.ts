@@ -5,7 +5,6 @@ import {
   isCustomStepId,
   parsePromptTemplate,
   renderPromptTemplate,
-  TEMPLATE_PERSONA_MARKER_PATTERN,
   type PromptStepEntry,
 } from '@haive/shared/modularity';
 import type { StepDefinition } from '../../step-definition.js';
@@ -21,7 +20,6 @@ export const PROMPT_STEP_OUTPUT_CAP_BYTES = 16 * 1024;
 export const PROMPT_STEP_OUTPUTS_BUDGET_BYTES = 64 * 1024;
 /** Every field, task title and task description value in one prompt together, the same way. */
 export const PROMPT_STEP_VALUES_BUDGET_BYTES = 64 * 1024;
-export const PROMPT_STEP_PERSONAS_UNSUPPORTED = 'Prompt step personas are not supported yet';
 const NO_STEP_OUTPUT = '(no output recorded for this step)';
 
 export interface PromptStepDetect {
@@ -116,9 +114,6 @@ function renderTemplate(
 
 function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formValues: FormValues) {
   const { rendered, quoted } = renderTemplate(entry, detected, formValues, true);
-  if (rendered.search(TEMPLATE_PERSONA_MARKER_PATTERN) !== -1) {
-    throw new Error(PROMPT_STEP_PERSONAS_UNSUPPORTED);
-  }
   const containment = entry.capabilities.includes('file_write')
     ? REPO_IS_DATA_ACTING_LINES
     : REPO_IS_DATA_ANSWER_LINES;

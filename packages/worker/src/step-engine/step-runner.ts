@@ -45,6 +45,7 @@ import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
+import { parseStepId } from '@haive/shared/modularity';
 import { promptStepNamedText } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
@@ -96,6 +97,9 @@ import { augmentPromptWithLedger, capSummaryForLedger, recordLedgerEntry } from 
 import { augmentPromptWithTerseness } from './terseness-context.js';
 import { augmentPromptWithLearnedGuidance } from './guidance-context.js';
 import { writeStepContextUsage } from './step-context-usage.js';
+
+const isPromptStep = (stepDef: StepDefinition): boolean =>
+  parseStepId(stepDef.metadata.id)?.kind === 'custom';
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -834,6 +838,7 @@ async function resolveLlmPhase(
     },
     toolProfile: llmSpec.toolProfile,
     agentPool: llmSpec.agentPool,
+    ...(isPromptStep(stepDef) ? { promptStepPersonas: true } : {}),
     skipAgentRules: llmSpec.skipAgentRules,
     houseRules: houseRulesFor(
       stepDef.metadata.id,
@@ -854,7 +859,7 @@ async function resolveLlmPhase(
     // The worker supplies providers/deps even when every provider is disabled or
     // incompatible. Optional enrichment must degrade here just as it does when
     // dependencies are absent or an invocation fails.
-    if (llmSpec.optional) {
+    if (llmSpec.optional && plan.personaFailure === undefined) {
       ctx.logger.warn(
         { reason: plan.reason },
         'optional llm dispatch unavailable; degrading to null',
@@ -863,7 +868,7 @@ async function resolveLlmPhase(
     }
     const failed = await updateRow(db, current.id, {
       status: 'failed',
-      errorMessage: `no cli provider available: ${plan.reason}`,
+      errorMessage: plan.personaFailure ?? `no cli provider available: ${plan.reason}`,
       endedAt: new Date(),
     });
     return {
@@ -1081,6 +1086,7 @@ async function resolveAiFixPhase(
     providers: params.providers,
     preferredProviderId,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
+    ...(isPromptStep(stepDef) ? { promptStepPersonas: true } : {}),
     // Same step, so the same declared surface: a fix agent for a report-only step
     // must not be told it has tools the step never gets.
     toolProfile: stepDef.llm?.toolProfile,
@@ -1097,7 +1103,7 @@ async function resolveAiFixPhase(
   if (plan.mode === 'skip' || !plan.invocation) {
     const failed = await updateRow(db, current.id, {
       status: 'failed',
-      errorMessage: `retry_ai: no cli provider available: ${plan.reason}`,
+      errorMessage: plan.personaFailure ?? `retry_ai: no cli provider available: ${plan.reason}`,
       aiFixContext: null,
       endedAt: new Date(),
     });
