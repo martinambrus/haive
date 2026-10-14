@@ -1,9 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import type { ModuleDiffRow, ModuleState } from '@haive/shared/modularity';
-import { getModulesLoaded, type ApiError, type ModulesLoadedResponse } from '@/lib/api-client';
+import {
+  getModulesLoaded,
+  moduleOpenTasks,
+  patchModuleActive,
+  type ApiError,
+  type ModuleOpenTask,
+  type ModulesLoadedResponse,
+} from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
+import { ModuleActiveCell } from '@/components/module-active-cell';
+import { ModuleTasksOpenDialog } from '@/components/module-tasks-open-dialog';
 import { Badge, FormError } from '@/components/ui';
 
 const STATE_BADGE: Record<
@@ -44,8 +54,13 @@ function Versions({ row }: { row: ModuleDiffRow }) {
 export default function ModulesPage() {
   usePageTitle('Modules');
 
+  const router = useRouter();
   const [data, setData] = useState<ModulesLoadedResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [blocked, setBlocked] = useState<{ moduleId: string; tasks: ModuleOpenTask[] } | null>(
+    null,
+  );
 
   const load = useCallback(async () => {
     try {
@@ -59,6 +74,22 @@ export default function ModulesPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  async function toggle(row: ModuleDiffRow) {
+    setBusy(true);
+    setError(null);
+    try {
+      await patchModuleActive(row.id, row.deactivatedAt !== null);
+      await load();
+      router.refresh();
+    } catch (err) {
+      const tasks = moduleOpenTasks(err as ApiError);
+      if (tasks.length > 0) setBlocked({ moduleId: row.id, tasks });
+      else setError((err as ApiError).message ?? 'Failed to update the module');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const workerAt = data?.modules.workerAt ?? null;
 
@@ -87,6 +118,7 @@ export default function ModulesPage() {
                 <th className="px-3 py-2">Versions</th>
                 <th className="px-3 py-2">Entitlement</th>
                 <th className="px-3 py-2">State</th>
+                <th className="px-3 py-2">Active</th>
                 <th className="px-3 py-2">Last loaded</th>
                 <th className="px-3 py-2">Missing since</th>
               </tr>
@@ -94,7 +126,7 @@ export default function ModulesPage() {
             <tbody>
               {data.modules.rows.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-3 py-4 text-neutral-500">
+                  <td colSpan={9} className="px-3 py-4 text-neutral-500">
                     No modules recorded or loaded.
                   </td>
                 </tr>
@@ -120,6 +152,9 @@ export default function ModulesPage() {
                       {STATE_BADGE[row.state].label}
                     </Badge>
                   </td>
+                  <td className="px-3 py-2">
+                    <ModuleActiveCell row={row} busy={busy} onToggle={() => void toggle(row)} />
+                  </td>
                   <td className="whitespace-nowrap px-3 py-2 text-neutral-400">
                     {when(row.lastLoadedAt)}
                   </td>
@@ -132,6 +167,7 @@ export default function ModulesPage() {
           </table>
         </div>
       )}
+      <ModuleTasksOpenDialog blocked={blocked} onClose={() => setBlocked(null)} />
     </div>
   );
 }

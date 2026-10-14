@@ -11,14 +11,26 @@ it first, as do the `test` scripts of the api and worker.
 ## The four states
 
 Two things move independently: whether the code is **installed** (a rebuild moves it) and whether the
-module is **active** (a live flag that needs no rebuild; not built yet). The worker's boot is the
-only writer of a module's `modules` row (`syncModuleIntent`, `worker/src/modules/intent.ts`): it
-stamps `missing_at` on every recorded row it did not load and clears it when the module loads again.
+module is **active** (`modules.deactivated_at`, a live flag that needs no rebuild). The worker's boot
+records every module it loads in `modules` and is the only writer of `missing_at` (`syncModuleIntent`,
+`worker/src/modules/intent.ts`): it stamps it on every recorded row it did not load and clears it when
+the module loads again.
 
 - **Installed, active.** `pnpm module add <id>` and a rebuild. Everything runs: the module's api
   routes at `/m/<id>`, nav and pages, settings, dashboard widget, worker steps, jobs and database.
-- **Installed, deactivated.** Deactivate on `/admin/modules` (not built yet: M11a/b). The code stays
-  loaded; its routes, nav, pages, palette steps and new tasks go off. All data is kept.
+- **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
+  `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
+  `module_tasks_open`, which the page shows as a list of up to 200 tasks, while a live task's run list
+  names one of the module's steps or its type is one the module seeded. The code stays loaded: its api routes and
+  settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
+  pages and widgets render only for modules that list names) and the composer palette drops its steps.
+  The worker starts no job of a module that is deactivated when it boots; a job already running stops
+  at the next worker start. A task type that uses the module, as its source or through any step, is
+  listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
+  409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
+  at the same moment waits and then counts the new task. A task that reaches one of its steps later, after a Retry or a revive,
+  fails that step's own row with a message naming the module, without asking the step's `shouldRun`
+  or taking a runtime slot; Retry runs it once the module is active again. All data is kept.
 - **Uninstalled, data kept (`Missing`).** `pnpm module remove <id>` and a rebuild. Nothing runs: the
   api and worker do not load it and the web build does not import it. Kept: the `modules` row
   (`missing_at` set), the database `haive_module_<id>` (`-` as `_`) and the Redis settings
@@ -26,8 +38,7 @@ stamps `missing_at` on every recorded row it did not load and clears it when the
 - **Purged.** Purge on `/admin/modules`, offered for a `Missing` module only (not built yet: M11d).
   Nothing runs and nothing is kept: the data is deleted.
 
-Deactivate and Purge are actions of the admin page and land in later changes; until then a module is
-either installed or `Missing`. `pnpm module` never deactivates or purges anything and never touches
+Purge is an action of the admin page and lands in a later change. `pnpm module` never deactivates or purges anything and never touches
 the database or Redis: it moves a module between the first and third states, and nothing it does
 loses data. A task whose data names a step of a module this install no longer registers is marked
 dead, not failed (`UnresolvedStepError`, `step-engine/registry.ts`). A module this install never

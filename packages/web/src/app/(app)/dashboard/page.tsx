@@ -6,6 +6,7 @@ import { api, type Task } from '@/lib/api-client';
 import { Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { moduleDashboardWidgets } from '@/generated/module-dashboard';
 import { ModuleDashboardWidgets } from '@/lib/module-dashboard';
+import { useModules } from '@/lib/use-modules';
 import { usePageTitle } from '@/lib/use-page-title';
 import { rememberTaskOrigin } from '@/lib/task-origin';
 
@@ -16,6 +17,7 @@ export default function DashboardPage() {
   usePageTitle('Dashboard');
 
   const [active, setActive] = useState<Task[] | null>(null);
+  const { modules } = useModules();
 
   // The now-strip reuses the task listing rather than duplicating its status vocabulary.
   useEffect(() => {
@@ -72,7 +74,7 @@ export default function DashboardPage() {
         )}
       </Card>
 
-      <ModuleDashboardWidgets widgets={moduleDashboardWidgets} />
+      <ModuleDashboardWidgets widgets={moduleDashboardWidgets} modules={modules} />
 
       <div className="flex gap-3">
         <Link href="/tasks">
