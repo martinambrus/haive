@@ -11,8 +11,9 @@ describe('taskTypeAllowsNoRepository', () => {
     expect(taskTypeAllowsNoRepository('module:some-type')).toBe(true);
   });
 
-  it('keeps the repo-optional built-in', () => {
+  it('keeps the repo-optional built-ins', () => {
     expect(taskTypeAllowsNoRepository('kb_author')).toBe(true);
+    expect(taskTypeAllowsNoRepository('type_draft')).toBe(true);
   });
 
   it('refuses every other built-in', () => {

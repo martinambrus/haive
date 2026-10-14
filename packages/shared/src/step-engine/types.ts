@@ -394,6 +394,7 @@ export const CLI_DISPATCH_STEPS: readonly CliDispatchStep[] = [
   // Without this entry the mid-conversation CLI picker 404s: the provider PATCH
   // requires the step id to be in this set.
   { id: '01-plan-merge', workflowType: 'plan_merge', title: 'Resolve plan merge' },
+  { id: '01-type-draft', workflowType: 'type_draft', title: 'Draft a task type' },
 ];
 
 /** Ids only — the shape every pre-existing consumer reads. Derived so the two can

@@ -5,23 +5,12 @@ import { getDecryptedCredentials } from '../repo/credentials.js';
 import {
   ForgeError,
   credentialForgeProvider,
+  hostFromRemote,
   resolveForgeProvider,
   type ForgeContext,
 } from '@haive/shared/forge';
 
-/** Host portion of a git remote (https, ssh:// or scp-style), provider-independent —
- *  used to infer the forge for a well-known public host before the provider is known. */
-export function hostFromRemote(remoteUrl: string): string {
-  const trimmed = remoteUrl.trim();
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
-    try {
-      return new URL(trimmed).host;
-    } catch {
-      return '';
-    }
-  }
-  return trimmed.match(/^(?:[^@]+@)?([^:/]+):/)?.[1] ?? '';
-}
+export { hostFromRemote };
 
 /** Parse a git remote URL (https, ssh:// or scp-style git@host:owner/repo) into
  *  { host, owner, repo }. owner is everything between the host and the final path

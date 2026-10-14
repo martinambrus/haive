@@ -482,6 +482,20 @@ describe('a repository with a live onboarding or upgrade', () => {
     });
   }
 
+  it('answers when the task is dead, whatever status it keeps', async () => {
+    const s = await setup();
+    s.fake.insert(schema.tasks, {
+      id: randomUUID(),
+      userId: OWNER,
+      repositoryId: REPO,
+      type: 'onboarding_upgrade',
+      status: 'running',
+      title: 't',
+      deadAt: new Date(),
+    });
+    expect((await s.answer('keep_mine')).kind).toBe('resolved');
+  });
+
   it('answers when the task is finished, never enqueued, or another repository’s', async () => {
     const s = await setup();
     s.addTask('onboarding_upgrade', 'completed');

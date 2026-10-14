@@ -70,7 +70,7 @@ export function renderPlanMarkdownFrom(
   const byParent = indexChildren(nodes);
   const titleById = new Map(nodes.map((n) => [n.id, n.title]));
   const outgoing = new Map<string, typeof edges>();
-  for (const e of edges) {
+  for (const e of [...edges].sort(byEdge)) {
     const run = outgoing.get(e.fromNodeId);
     if (run) run.push(e);
     else outgoing.set(e.fromNodeId, [e]);
@@ -154,17 +154,50 @@ export async function renderPlanMarkdown(
   return renderPlanMarkdownFrom(nodes, edges, opts);
 }
 
-/** plan.json exactly as the flush writes it. */
+// By code unit, never localeCompare: the bytes must not depend on the machine's locale.
+const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const nullFirst = (a: string | null, b: string | null): number =>
+  a === null || b === null ? Number(a !== null) - Number(b !== null) : byCodeUnit(a, b);
+const bySibling = (
+  a: { ordinal: number; id: string },
+  b: { ordinal: number; id: string },
+): number => a.ordinal - b.ordinal || byCodeUnit(a.id, b.id);
+const byEdge = (
+  a: { fromNodeId: string; toNodeId: string; kind: string },
+  b: { fromNodeId: string; toNodeId: string; kind: string },
+): number =>
+  byCodeUnit(a.fromNodeId, b.fromNodeId) ||
+  byCodeUnit(a.toNodeId, b.toNodeId) ||
+  byCodeUnit(a.kind, b.kind);
+
+/** plan.json exactly as the flush writes it, in one order whatever order the rows were read in. */
 export function serializePlanMirror(mirror: PlanMirror): string {
-  return `${JSON.stringify(mirror, null, 2)}\n`;
+  const nodes = [...mirror.nodes].sort(bySibling);
+  const byParent = indexChildren(nodes);
+  const walked = new Set<(typeof nodes)[number]>();
+  const stack = [...(byParent.get(null) ?? [])].reverse();
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    walked.add(node);
+    stack.push(...[...(byParent.get(node.id) ?? [])].reverse());
+  }
+  const canonical: PlanMirror = {
+    ...mirror,
+    nodes: [...walked, ...nodes.filter((n) => !walked.has(n))],
+    edges: [...mirror.edges].sort(byEdge),
+    codeLinks: [...mirror.codeLinks].sort(
+      (a, b) =>
+        byCodeUnit(a.nodeId, b.nodeId) ||
+        byCodeUnit(a.repoPath, b.repoPath) ||
+        nullFirst(a.symbol, b.symbol) ||
+        byCodeUnit(a.role, b.role),
+    ),
+  };
+  return `${JSON.stringify(canonical, null, 2)}\n`;
 }
 
 /** plan.md for a mirror payload: the bytes the flush writes for the plan the payload holds. */
 export function renderPlanMarkdownFromMirror(payload: PlanMirrorPayload): string {
-  const ordered = payload.nodes
-    .map((n, rank) => ({ n, rank }))
-    .sort((a, b) => a.n.ordinal - b.n.ordinal || a.rank - b.rank)
-    .map(({ n }) => n);
+  const ordered = [...payload.nodes].sort(bySibling);
   const byId = new Map(ordered.map((n) => [n.id, n]));
   const pathOf = (id: string): string => {
     const chain = [id];
@@ -198,6 +231,6 @@ export function renderPlanMarkdownFromMirror(payload: PlanMirrorPayload): string
   }));
   return renderPlanMarkdownFrom(
     nodes,
-    payload.edges.map((e) => ({ ...e, kind: e.kind as PlanEdgeKind })),
+    [...payload.edges].sort(byEdge).map((e) => ({ ...e, kind: e.kind as PlanEdgeKind })),
   );
 }

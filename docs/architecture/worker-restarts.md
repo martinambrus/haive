@@ -236,3 +236,34 @@ invocation unnecessary. `resolveLlmPhase` then returns null output to apply
 before constructing the prompt or reserving a run. RAG finalization uses this
 when a parked PR's current history has no classifiable evidence; its initial
 `skipIf` must still allow refresh because reopening can have added queries.
+
+## Dead tasks
+
+A task is **dead** when its data names a step this install no longer registers: a module was removed, or a step its
+run list names went away (`UnresolvedStepError`). Dead is neither failed nor completed. `markTaskDead`
+(`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends `task.dead`
+(`TASK_DEAD_EVENT`) naming the missing ids, supersedes the runs that have not started, and tears nothing down, so a
+revive finds the task as it was. The api refuses every advancing action on a dead task with 409 `task_dead`
+(`api/src/lib/task-dead.ts`); Cancel stays.
+
+**What marks it.** At boot, `reconcileDeadTasks` (`queues/dead-task-boot.ts`) runs after the orphaned jobs are handed
+back and before orphaned steps are recovered; it checks every live task that has a run-list snapshot and marks one that
+names a missing step. At run time the hand-off marks a task whose current or next step does not resolve. A task with no
+snapshot (the dynamic types) is only ever marked at run time.
+
+**What revives it.** The same boot pass revives a dead task once what it was missing resolves again: a snapshot task
+when its whole run list does, a snapshot-less one when the step ids its last `task.dead` event named and its current
+step do. Judging a snapshot-less task by its current step alone revived one whose death named a step that was still
+missing, and its first job killed it again on every boot. `reviveDeadTask` clears the mark under the epoch
+compare-and-swap, records `task.revived`, and enqueues the job the task's status is owed: a start for a queued task,
+an advance for a running one, none for a form that is still parked.
+
+**Runs.** cli-exec ends a dead task's run instead of starting it (ended, superseded, exit 137): one dispatched after
+the mark, or requeued at run time, would otherwise still spend a CLI call. A run already started when the mark lands
+runs to its end; the next boot pass ends what is still open. A settled dead task's runtime runner can be preempted on
+demand, like a paused one's, instead of waiting for the grace sweep. After a mark lands the pass resyncs the project
+state (`resyncAfterTaskEnd`), as every other end of a task does.
+
+**Admission.** A dead task keeps its admission slot (one live onboarding or upgrade per repository): it can revive, and
+a second one started beside it would leave two live after the revive. Cancelling it frees the slot. It holds no
+checkout, so the checkout-holder checks skip it.
