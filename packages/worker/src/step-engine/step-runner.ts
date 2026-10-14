@@ -39,13 +39,13 @@ import type {
   StepCapability,
   StepStatus,
 } from '@haive/shared';
-import { parseStepId } from '@haive/shared/modularity';
 import { currentBuildStamp } from '../build-stamp.js';
 import { resolveModelLimits } from '../cli-adapters/model-capabilities.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
+import { promptStepNamedText } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
 import { closeAppRunnerExtraTabs, restoreAppRunnerBrowserWindow } from '../sandbox/app-runner.js';
@@ -785,7 +785,6 @@ async function resolveLlmPhase(
           truncationRetries,
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
-  const builtPrompt = prompt;
   // An uploaded archive becomes the tree it contains before anything describes
   // the attachments — otherwise the notice below names a `.zip` no agent can
   // open. Idempotent, never throws, and three indexed queries plus one directory
@@ -841,7 +840,7 @@ async function resolveLlmPhase(
       role,
       undefined,
       llmSpec.requiredCapabilities,
-      builtPrompt,
+      promptStepNamedText(stepDef, detected, formValues ?? {}),
     ),
     invokeOpts: {
       cwd: params.workspacePath,
@@ -991,20 +990,6 @@ async function resolveLlmPhase(
   return { resolved: false, result: { status: 'waiting_cli', row: updated } };
 }
 
-/** A prompt step's prompt as it was dispatched, rebuilt from the row's own detect and form values;
- *  undefined for any other step, or when it cannot be built. */
-function renderedCustomPrompt(stepDef: StepDefinition, row: TaskStepRow): string | undefined {
-  if (parseStepId(stepDef.metadata.id)?.kind !== 'custom') return undefined;
-  try {
-    return stepDef.llm?.buildPrompt({
-      detected: row.detectOutput,
-      formValues: (row.formValues ?? {}) as FormValues,
-    });
-  } catch {
-    return undefined;
-  }
-}
-
 /** AI-assisted retry: when the retry_ai action set `aiFixContext` on the step,
  *  run a diagnose-and-fix agent once (reusing the cli-invocation lifecycle), then
  *  clear the marker so apply re-runs against the fixed workspace. Designed for
@@ -1105,7 +1090,7 @@ async function resolveAiFixPhase(
       stepDef.loop?.resolveRole?.(stepIterationsAsRecords(current).length) ?? 'default',
       undefined,
       stepDef.llm?.requiredCapabilities,
-      renderedCustomPrompt(stepDef, current),
+      promptStepNamedText(stepDef, current.detectOutput, (current.formValues ?? {}) as FormValues),
     ),
     invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });

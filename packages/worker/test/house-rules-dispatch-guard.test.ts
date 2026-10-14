@@ -126,7 +126,7 @@ describe('every resolveTaskDispatch call says whether it is shown the house rule
     const stepRunner = at('step-engine/step-runner.ts');
     expect(
       stepRunner.filter((a) =>
-        /houseRulesFor\(\s*stepDef\.metadata\.id,\s*role,\s*undefined,\s*llmSpec\.requiredCapabilities,\s*builtPrompt,?\s*\)/.test(
+        /houseRulesFor\(\s*stepDef\.metadata\.id,\s*role,\s*undefined,\s*llmSpec\.requiredCapabilities,\s*promptStepNamedText\(stepDef, detected, formValues \?\? \{\}\),?\s*\)/.test(
           a,
         ),
       ),
@@ -135,7 +135,7 @@ describe('every resolveTaskDispatch call says whether it is shown the house rule
       stepRunner.filter(
         (a) =>
           /resolveRole\?\.\(stepIterationsAsRecords\(current\)\.length\)/.test(a) &&
-          /stepDef\.llm\?\.requiredCapabilities,\s*renderedCustomPrompt\(stepDef, current\)/.test(
+          /stepDef\.llm\?\.requiredCapabilities,\s*promptStepNamedText\(\s*stepDef,\s*current\.detectOutput,/.test(
             a,
           ),
       ),

@@ -11,6 +11,7 @@ import {
   PROMPT_STEP_OUTPUT_CAP_BYTES,
   PROMPT_STEP_PERSONAS_UNSUPPORTED,
   buildPromptStep,
+  promptStepNamedText,
 } from './prompt-step.js';
 
 const ID = 'custom.demo.summarise';
@@ -309,5 +310,30 @@ describe('prompt step quoted-output round', () => {
     const sql = new PgDialect().sqlToQuery(wheres[1] as never);
     expect(sql.sql).toMatch(/"round" <= \$\d+/);
     expect(sql.params).toContain(2);
+  });
+});
+
+describe('prompt step house-rule path text', () => {
+  it('names the template and form paths and never a path only a quoted output names', () => {
+    const def = buildPromptStep(
+      ID,
+      make({
+        template: 'Edit src/target.ts for {{field:topic}}\n{{step:01-first}}',
+        capabilities: ['file_write'],
+      }),
+      0,
+    );
+    const text = promptStepNamedText(
+      def,
+      detected({ stepOutputs: { '01-first': 'touch src/hostile.ts' } }),
+      { topic: 'lib/field.ts' },
+    );
+    expect(text).toContain('src/target.ts');
+    expect(text).toContain('lib/field.ts');
+    expect(text).not.toContain('src/hostile.ts');
+  });
+
+  it('is undefined for a step that is not a prompt step', () => {
+    expect(promptStepNamedText({}, detected(), {})).toBeUndefined();
   });
 });

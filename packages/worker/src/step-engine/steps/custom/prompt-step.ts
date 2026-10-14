@@ -67,7 +67,14 @@ function templateTokens(template: string) {
   return parsed.ok ? parsed.tokens : [];
 }
 
-function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formValues: FormValues) {
+/** The template with its values in. Quoted step output is left out when `quote` is false: it is
+ *  untrusted agent text, so nothing that selects house rules may read paths from it. */
+function renderTemplate(
+  entry: PromptStepEntry,
+  detected: PromptStepDetect,
+  formValues: FormValues,
+  quote: boolean,
+): { rendered: string; quoted: boolean } {
   // Null-prototype: a field id such as `__proto__` must land as an own key, not hit the setter.
   const fields: Record<string, string> = Object.create(null) as Record<string, string>;
   const steps: Record<string, string> = Object.create(null) as Record<string, string>;
@@ -91,9 +98,11 @@ function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formVal
     }
     if (token.kind === 'step') {
       const output = detected.stepOutputs?.[token.id];
-      steps[token.id] = fencedAgentBlock(
-        typeof output === 'string' ? capStepOutput(output, perQuote) : NO_STEP_OUTPUT,
-      );
+      steps[token.id] = !quote
+        ? ''
+        : fencedAgentBlock(
+            typeof output === 'string' ? capStepOutput(output, perQuote) : NO_STEP_OUTPUT,
+          );
     }
   }
   const rendered = renderPromptTemplate(entry.template, {
@@ -102,18 +111,38 @@ function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formVal
     taskDescription: capStepOutput(text(detected.taskDescription), perValue),
     steps,
   });
+  return { rendered, quoted: Object.keys(steps).length > 0 };
+}
+
+function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formValues: FormValues) {
+  const { rendered, quoted } = renderTemplate(entry, detected, formValues, true);
   if (rendered.search(TEMPLATE_PERSONA_MARKER_PATTERN) !== -1) {
     throw new Error(PROMPT_STEP_PERSONAS_UNSUPPORTED);
   }
   const containment = entry.capabilities.includes('file_write')
     ? REPO_IS_DATA_ACTING_LINES
     : REPO_IS_DATA_ANSWER_LINES;
-  return [
-    ...(Object.keys(steps).length > 0 ? [...UNTRUSTED_FENCE_LEGEND, ''] : []),
-    rendered,
-    '',
-    ...containment,
-  ].join('\n');
+  return [...(quoted ? [...UNTRUSTED_FENCE_LEGEND, ''] : []), rendered, '', ...containment].join(
+    '\n',
+  );
+}
+
+const entries = new WeakMap<object, PromptStepEntry>();
+
+/** The text a file-writing prompt step's house rules read paths from: its template with the task's
+ *  and the form's values, without any quoted step output. Undefined for any other step. */
+export function promptStepNamedText(
+  stepDef: object,
+  detected: unknown,
+  formValues: FormValues,
+): string | undefined {
+  const entry = entries.get(stepDef);
+  if (!entry) return undefined;
+  try {
+    return renderTemplate(entry, (detected ?? {}) as PromptStepDetect, formValues, false).rendered;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The step a task runs for a prompt step it pinned; see resolveTaskStep. */
@@ -122,7 +151,7 @@ export function buildPromptStep(
   entry: PromptStepEntry,
   index: number,
 ): StepDefinition<PromptStepDetect, PromptStepOutput> {
-  return {
+  const def: StepDefinition<PromptStepDetect, PromptStepOutput> = {
     metadata: {
       id: stepId,
       workflowType: 'custom',
@@ -206,4 +235,6 @@ export function buildPromptStep(
       return { raw: JSON.stringify(out) ?? '', parsed: out };
     },
   };
+  entries.set(def, entry);
+  return def;
 }
