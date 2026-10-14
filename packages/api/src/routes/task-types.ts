@@ -15,6 +15,7 @@ import {
 } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import { deactivatedModuleIds } from '../modules/activation.js';
 import {
   acceptsSavedDatabase,
   checkPromptSteps,
@@ -159,14 +160,17 @@ adminTaskTypeRoutes.get('/', async (c) => {
 });
 
 adminTaskTypeRoutes.get('/catalog', async (c) => {
-  const catalog = await loadCatalog(getDb());
+  const db = getDb();
+  const [catalog, off] = await Promise.all([loadCatalog(db), deactivatedModuleIds(db)]);
+  const offSources = new Set([...off].map((id) => `module:${id}`));
+  const steps = catalog.steps.filter((s) => !offSources.has(s.source));
   const known = new Set<string>(COMPOSABLE_STEP_GROUPS.map((g) => g.id));
-  const unknown = [...new Set(catalog.steps.map((s) => s.entry.group))]
+  const unknown = [...new Set(steps.map((s) => s.entry.group))]
     .filter((id) => !known.has(id))
     .sort()
     .map((id) => ({ id, label: id }));
   return c.json({
-    steps: catalog.steps,
+    steps,
     groups: [...COMPOSABLE_STEP_GROUPS.map(({ id, label }) => ({ id, label })), ...unknown],
     synced: catalog.synced,
   });

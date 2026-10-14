@@ -7,6 +7,9 @@ import {
 } from './contracts.js';
 
 const MODULE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+// databaseName('module', id) must fit Postgres' 63-byte identifier under the longest install id:
+// 63 - 33 ('<32 chars>_') - 7 ('module_') = 23.
+const MODULE_ID_MAX_LENGTH = 23;
 const PAGE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 const endpointSchema = z
@@ -171,7 +174,7 @@ function isUnique(values: string[]): boolean {
 
 export const moduleManifestSchema = z
   .object({
-    id: z.string().regex(MODULE_ID_PATTERN),
+    id: z.string().regex(MODULE_ID_PATTERN).max(MODULE_ID_MAX_LENGTH),
     name: z.string().min(1),
     version: z.string().min(1),
     schemaVersion: z.number().int().positive(),
