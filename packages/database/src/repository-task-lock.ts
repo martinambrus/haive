@@ -103,7 +103,10 @@ export async function checkRevive(tx: DbTx, taskId: string): Promise<ReviveCheck
     })
     .from(schema.tasks)
     .where(eq(schema.tasks.id, taskId));
-  if (!row?.repositoryId || (row.type !== 'onboarding' && row.type !== 'onboarding_upgrade')) {
+  if (!row?.repositoryId) return null;
+  // A revived task holds the checkout again, so it waits out a move that holds this lock, as creation does.
+  if (row.type !== 'onboarding' && row.type !== 'onboarding_upgrade') {
+    await lockRepositoryTasksKey(tx, row.repositoryId);
     return null;
   }
   const task: ReviveTask = {
