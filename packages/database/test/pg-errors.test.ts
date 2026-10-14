@@ -31,6 +31,7 @@ describe('isRefusedStatement', () => {
       '40001',
       '40P01',
       '55P03',
+      '57014',
       '53100',
       '0A000',
     ]) {
@@ -40,7 +41,7 @@ describe('isRefusedStatement', () => {
   });
 
   it('is false when the outcome is unknown', () => {
-    for (const code of ['08006', '08003', '57P01', '40003', 'XX000', '58030']) {
+    for (const code of ['08006', '08003', '57P01', '57P02', '57P03', '40003', 'XX000', '58030']) {
       expect(isRefusedStatement(pg(code))).toBe(false);
     }
     expect(

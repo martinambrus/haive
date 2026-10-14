@@ -99,8 +99,9 @@ export function isDuplicateDatabase(err: unknown): boolean {
 /** SQLSTATE classes whose statement Postgres refused and rolled back: data, integrity, transaction
  *  state, syntax and access, check option, resources, program limit, feature not supported. */
 const REFUSED_CLASSES = new Set(['22', '23', '25', '42', '44', '53', '54', '0A']);
-/** Rollbacks the server reports itself; 40003 statement_completion_unknown is not one of them. */
-const REFUSED_CODES = new Set(['40001', '40P01', LOCK_NOT_AVAILABLE]);
+/** Rollbacks and aborts the server reports itself: serialization failure, deadlock, lock timeout,
+ *  query_canceled (statement_timeout or a cancel). 40003 and the shutdown codes of class 57 are not. */
+const REFUSED_CODES = new Set(['40001', '40P01', LOCK_NOT_AVAILABLE, '57014']);
 
 /**
  * True when Postgres answered the statement with a SQLSTATE meaning it was refused, so nothing it
