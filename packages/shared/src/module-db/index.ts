@@ -16,6 +16,13 @@ export type ModuleDatabase = Omit<ModuleSchemaContext, 'moduleId'> & {
   close(): Promise<void>;
 };
 
+export type ModuleTeardownContext = {
+  moduleId: string;
+  logger: ReturnType<typeof logger.child>;
+  /** The teardown job closes every database it opened, so the hook need not. */
+  openDatabase(): Promise<ModuleDatabase>;
+};
+
 export const moduleDatabaseName = (moduleId: string): string =>
   databaseName('module', moduleId.replaceAll('-', '_'));
 

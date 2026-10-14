@@ -43,7 +43,7 @@ const OWNS_THE_SHAPE = ['shared/src/naming/'];
 const NOT_A_RESOURCE = [
   // BullMQ queue names. They live in THIS install's own Redis, which is already a separate
   // container per install, so namespacing them would change a key for no isolation gain.
-  /haive-(?:cli-exec|task|env-replicate|repo|bundle|runtime-ensure|ide-ensure|ddev-control|usage-poll|pr-poll|plan-mirror|global-kb-sync|kb-author)\b/,
+  /haive-(?:cli-exec|task|env-replicate|repo|bundle|runtime-ensure|ide-ensure|ddev-control|usage-poll|pr-poll|plan-mirror|module-control|global-kb-sync|kb-author)\b/,
   // Service identity, user agents and a download filename: strings a human or an HTTP peer reads.
   /haive-(?:api|worker|web|cli-version-fetcher|ddev-rootCA|migrate)\b/,
   /haive_(?:build|version)\b/, // column names

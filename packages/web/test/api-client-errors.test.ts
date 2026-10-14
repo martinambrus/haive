@@ -9,6 +9,7 @@ import {
   listTaskTypes,
   moduleOpenTasks,
   patchModuleActive,
+  postModuleTeardown,
   updateTaskType,
   type ApiError,
 } from '../src/lib/api-client.js';
@@ -174,5 +175,60 @@ describe('module activation helpers', () => {
     expect(
       moduleOpenTasks(await refusal(409, { error: 'x', code: 'module_tasks_open', tasks: [] })),
     ).toEqual([]);
+  });
+});
+
+describe('module teardown helper', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const record = (answers: { status: number; body: unknown }[]) => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body as string | undefined });
+        const answer = answers.shift()!;
+        return new Response(JSON.stringify(answer.body), { status: answer.status });
+      }),
+    );
+    return calls;
+  };
+  const refusal = async (status: number, body: unknown): Promise<ApiError> => {
+    failWith(status, body);
+    try {
+      await postModuleTeardown('statistics');
+    } catch (err) {
+      return err as ApiError;
+    }
+    throw new Error('request did not fail');
+  };
+
+  it('posts to /modules/:id/teardown with no body, and returns the stamp or the running notice as sent', async () => {
+    const done = { moduleId: 'statistics', tornDownAt: '2026-10-14T13:45:00.000Z' };
+    const calls = record([
+      { status: 200, body: done },
+      { status: 202, body: { status: 'running' } },
+    ]);
+    expect(await postModuleTeardown('statistics')).toEqual(done);
+    expect(await postModuleTeardown('statistics')).toEqual({ status: 'running' });
+    expect(calls.map((c) => [c.method, new URL(c.url).pathname, c.body])).toEqual([
+      ['POST', '/modules/statistics/teardown', undefined],
+      ['POST', '/modules/statistics/teardown', undefined],
+    ]);
+  });
+
+  it('escapes the module id in the path', async () => {
+    const calls = record([{ status: 200, body: {} }]);
+    await postModuleTeardown('a/b c');
+    expect(new URL(calls[0]!.url).pathname).toBe('/modules/a%2Fb%20c/teardown');
+  });
+
+  it.each([
+    [409, 'module_active', 'Deactivate the module first'],
+    [409, 'module_missing', 'The module is not loaded'],
+    [502, 'module_teardown_failed', 'drop failed: boom'],
+  ])('throws a %s %s refusal with the message the api sent', async (status, code, error) => {
+    const err = await refusal(status, { error, code });
+    expect([err.status, err.code, err.message]).toEqual([status, code, error]);
   });
 });

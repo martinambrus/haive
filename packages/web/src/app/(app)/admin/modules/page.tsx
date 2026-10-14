@@ -10,10 +10,12 @@ import {
   type ApiError,
   type ModuleOpenTask,
   type ModulesLoadedResponse,
+  type ModuleTeardownResponse,
 } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
 import { ModuleActiveCell } from '@/components/module-active-cell';
 import { ModuleTasksOpenDialog } from '@/components/module-tasks-open-dialog';
+import { ModuleTeardownDialog } from '@/components/module-teardown-dialog';
 import { Badge, FormError } from '@/components/ui';
 
 const STATE_BADGE: Record<
@@ -61,6 +63,8 @@ export default function ModulesPage() {
   const [blocked, setBlocked] = useState<{ moduleId: string; tasks: ModuleOpenTask[] } | null>(
     null,
   );
+  const [tearingDown, setTearingDown] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -78,6 +82,7 @@ export default function ModulesPage() {
   async function toggle(row: ModuleDiffRow) {
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       await patchModuleActive(row.id, row.deactivatedAt !== null);
       await load();
@@ -89,6 +94,16 @@ export default function ModulesPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function tornDown(result: ModuleTeardownResponse) {
+    setNotice(
+      'status' in result
+        ? `The teardown of ${tearingDown} is still running in the worker. Reload this page later to see whether it finished.`
+        : null,
+    );
+    setTearingDown(null);
+    void load();
   }
 
   const workerAt = data?.modules.workerAt ?? null;
@@ -107,6 +122,14 @@ export default function ModulesPage() {
         )}
       </div>
       <FormError message={error} />
+      {notice !== null && (
+        <div
+          role="status"
+          className="rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-200"
+        >
+          {notice}
+        </div>
+      )}
       {data && (
         <div className="overflow-x-auto rounded-md border border-neutral-800">
           <table className="w-full text-sm">
@@ -153,7 +176,12 @@ export default function ModulesPage() {
                     </Badge>
                   </td>
                   <td className="px-3 py-2">
-                    <ModuleActiveCell row={row} busy={busy} onToggle={() => void toggle(row)} />
+                    <ModuleActiveCell
+                      row={row}
+                      busy={busy}
+                      onToggle={() => void toggle(row)}
+                      onTeardown={() => setTearingDown(row.id)}
+                    />
                   </td>
                   <td className="whitespace-nowrap px-3 py-2 text-neutral-400">
                     {when(row.lastLoadedAt)}
@@ -168,6 +196,11 @@ export default function ModulesPage() {
         </div>
       )}
       <ModuleTasksOpenDialog blocked={blocked} onClose={() => setBlocked(null)} />
+      <ModuleTeardownDialog
+        moduleId={tearingDown}
+        onClose={() => setTearingDown(null)}
+        onDone={tornDown}
+      />
     </div>
   );
 }
