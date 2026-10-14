@@ -4,6 +4,7 @@ import { collapseToLine } from '../utils/collapse-line.js';
 import {
   isCustomStepId,
   isPersonaId,
+  parseStepId,
   PERSONA_ID_PATTERN_SOURCE,
   REPOSITORY_TOKEN,
   type ComposableStepEntry,
@@ -48,6 +49,20 @@ export const promptStepEntrySchema = z.object({
   agentPool: z.literal('*').optional(),
 });
 export type PromptStepEntry = z.infer<typeof promptStepEntrySchema>;
+
+/** A task's pinned prompt steps by id; an entry that does not parse or fit its key is dropped. */
+export function parsePinnedCustomSteps(raw: unknown): Record<string, PromptStepEntry> {
+  const out: Record<string, PromptStepEntry> = {};
+  if (typeof raw !== 'object' || raw === null) return out;
+  for (const [id, value] of Object.entries(raw)) {
+    const parsedId = parseStepId(id);
+    const parsed = promptStepEntrySchema.safeParse(value);
+    if (parsedId?.kind === 'custom' && parsed.success && parsed.data.slug === parsedId.stepSlug) {
+      out[id] = parsed.data;
+    }
+  }
+  return out;
+}
 
 /** Fields the form shows but never submits (validateFormValues drops them), so a template cannot read them. */
 const DISPLAY_ONLY_FIELD_TYPES: ReadonlySet<string> = new Set(['note', 'global-kb-status']);
