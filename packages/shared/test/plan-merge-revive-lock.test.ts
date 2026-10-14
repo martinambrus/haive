@@ -9,8 +9,8 @@ const TASK = '00000000-0000-4000-8000-0000000000c1';
 
 describe('reviving a task', () => {
   it.each([
-    ['plan_merge', [`plan-merge:${REPO}`]],
-    ['plan_chat', []],
+    ['plan_merge', [`plan-merge:${REPO}`, `onboarding-upgrade:${REPO}`]],
+    ['plan_chat', [`onboarding-upgrade:${REPO}`]],
   ])(
     'a %s takes the plan-merge lock only when it holds the scratch worktree',
     async (type, want) => {
