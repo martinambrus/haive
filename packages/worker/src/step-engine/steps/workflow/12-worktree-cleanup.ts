@@ -13,6 +13,11 @@ import { buildMergeFixPrompt } from '../../git-merge.js';
 import { gitRun } from '../../../repo/git-exec.js';
 import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
+import {
+  describeChanges,
+  readUncommittedChanges,
+  type UncommittedChanges,
+} from '../../../repo/worktree-changes.js';
 import { findWorktreePathClaimant } from '../../../repo/worktree-claims.js';
 import {
   ForgeError,
@@ -45,6 +50,8 @@ function credentialUsableForPr(
 
 type CleanupAction = 'merge_remove' | 'remove_only' | 'keep' | 'create_pr';
 
+const MAX_LISTED_UNCOMMITTED = 20;
+
 interface WorktreeCleanupDetect {
   mode: 'no-git' | 'inplace' | 'worktree' | 'unknown';
   worktreePath: string | null;
@@ -53,6 +60,9 @@ interface WorktreeCleanupDetect {
   baseBranch: string | null;
   /** The parent repo's current branch — must equal baseBranch to merge safely. */
   parentBranch: string | null;
+  /** What the worktree holds that no commit does, which the merge cannot carry. Null when git
+   *  could not say, or the output predates the field: never a clean tree. */
+  uncommitted: UncommittedChanges | null;
   /** For the manual-delete terminal deep-link on the remove-only path. */
   repositoryId: string | null;
   /** Whether the repo has a pushable `origin` remote (gates the base-push fields). */
@@ -90,6 +100,27 @@ interface CreatePrFormValues {
   prBaseBranch?: string;
   prCredentialId?: string;
   finalizeMode?: string;
+}
+
+function codeSpan(raw: string): string {
+  const text = raw.replace(/[\r\n]+/g, ' ');
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
+}
+
+function uncommittedNoteBody(uncommitted: UncommittedChanges | null): string {
+  if (uncommitted === null) {
+    return "Haive could not read this worktree's changes, so it cannot tell whether removing it would delete work. It is kept unless you choose to delete it anyway.";
+  }
+  const listed = uncommitted.paths.map((p) => `- ${codeSpan(p)}`);
+  const more = uncommitted.count - uncommitted.paths.length;
+  if (more > 0) listed.push(`- and ${more} more`);
+  return [
+    `The worktree holds **${describeChanges(uncommitted.count)}**. Merging carries only committed work, so removing the worktree would delete them:`,
+    '',
+    ...listed,
+  ].join('\n');
 }
 
 export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, WorktreeCleanupApply> = {
@@ -161,6 +192,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         branchName: null,
         baseBranch: null,
         parentBranch: null,
+        uncommitted: null,
         repositoryId,
         hasOrigin: false,
         originUrl: null,
@@ -179,6 +211,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // Only the worktree mode needs the parent branch (merge target) and the push
     // affordances (origin presence + the user's credentials).
     let parentBranch: string | null = null;
+    let uncommitted: UncommittedChanges | null = null;
     let hasOrigin = false;
     let originUrl: string | null = null;
     let boundCredentialId: string | null = null;
@@ -187,6 +220,8 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     if (mode === 'worktree') {
       const res = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       parentBranch = res.code === 0 ? res.stdout.trim() : null;
+      if (output.worktreePath)
+        uncommitted = await readUncommittedChanges(output.worktreePath, MAX_LISTED_UNCOMMITTED);
       hasOrigin = await detectOrigin(ctx.repoPath);
       originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
       const repo = repositoryId
@@ -227,6 +262,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       branchName: output.branchName ?? null,
       baseBranch: output.baseBranch ?? null,
       parentBranch,
+      uncommitted,
       repositoryId,
       hasOrigin,
       originUrl,
@@ -289,6 +325,20 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       );
     }
 
+    // Merging carries committed work only, so a worktree holding more, or one git could not read,
+    // is kept by default and removed only on an explicit choice.
+    const uncommitted = detected.uncommitted ?? null;
+    const holdsWork = uncommitted === null || uncommitted.count > 0;
+    if (holdsWork) {
+      fields.push({
+        type: 'note',
+        id: 'uncommittedNote',
+        label: 'Uncommitted changes',
+        body: uncommittedNoteBody(uncommitted),
+        variant: 'warning',
+      });
+    }
+
     const actionOptions = [
       {
         value: 'merge_remove',
@@ -305,15 +355,27 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       { value: 'remove_only', label: 'Remove the worktree, keep the branch' },
       { value: 'keep', label: 'Keep the worktree' },
     );
+    fields.push({
+      type: 'radio',
+      id: 'action',
+      label: 'What should happen to the worktree?',
+      options: actionOptions,
+      default: holdsWork ? 'keep' : 'merge_remove',
+      required: true,
+    });
+    if (holdsWork) {
+      fields.push({
+        type: 'checkbox',
+        id: 'discardUncommitted',
+        label:
+          uncommitted === null
+            ? 'Delete any uncommitted changes with the worktree'
+            : `Delete the ${describeChanges(uncommitted.count)} with the worktree`,
+        default: false,
+        visibleWhen: { field: 'action', in: ['merge_remove', 'remove_only'] },
+      });
+    }
     fields.push(
-      {
-        type: 'radio',
-        id: 'action',
-        label: 'What should happen to the worktree?',
-        options: actionOptions,
-        default: 'merge_remove',
-        required: true,
-      },
       {
         type: 'checkbox',
         id: 'squashMerge',
@@ -458,7 +520,11 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
 
   async apply(ctx, args): Promise<WorktreeCleanupApply> {
     const d = args.detected;
-    const values = args.formValues as { action?: string; deleteBranch?: boolean };
+    const values = args.formValues as {
+      action?: string;
+      deleteBranch?: boolean;
+      discardUncommitted?: boolean;
+    };
 
     if (d.mode !== 'worktree' || !d.worktreePath) {
       return {
@@ -480,13 +546,14 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         : 'keep';
 
     if (action === 'keep') {
+      const held = d.uncommitted?.count ?? 0;
       return {
         action,
         removed: false,
         merged: false,
         branchDeleted: false,
         mode: 'worktree',
-        message: `worktree kept at ${d.worktreePath}`,
+        message: `worktree kept at ${d.worktreePath}${held > 0 ? ` with ${describeChanges(held)}` : ''}`,
       };
     }
 
@@ -548,6 +615,26 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         mode: 'worktree',
         message: `${merged ? `merged ${d.branchName} into ${mergeTarget}; ` : ''}worktree kept: task "${sharer.title}" (${sharer.id}, ${sharer.status}) is still working in ${d.worktreePath}.`,
       };
+    }
+
+    // The merge carried commits only, and removing the directory deletes the rest. Read the tree
+    // again here rather than trust detect: work can land between the form and this pass.
+    if (values.discardUncommitted !== true) {
+      const held = await readUncommittedChanges(d.worktreePath, MAX_LISTED_UNCOMMITTED);
+      if (held === null || held.count > 0) {
+        ctx.logger.warn(
+          { worktreePath: d.worktreePath, uncommitted: held?.count ?? null },
+          'worktree kept: it holds uncommitted changes or git could not read it',
+        );
+        return {
+          action,
+          removed: false,
+          merged,
+          branchDeleted: false,
+          mode: 'worktree',
+          message: `${merged ? `merged ${d.branchName} into ${mergeTarget}; ` : ''}worktree kept at ${d.worktreePath}: ${held === null ? 'it could not be checked for uncommitted changes' : `removing it would delete ${describeChanges(held.count)}`}.`,
+        };
+      }
     }
 
     // Remove the worktree (merge_remove after a successful merge, or remove_only).

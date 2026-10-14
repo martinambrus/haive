@@ -1,4 +1,9 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -228,5 +233,140 @@ describe('finalization RAG review', () => {
     expect(await prWaitStep.llm!.prepare!({ ctx, detected, formValues: {} })).toBeUndefined();
     expect(detected.ragUsage.queries).toHaveLength(1);
     expect(detected.ragUsage.runs).toHaveLength(1);
+  });
+});
+
+describe('finalize: the worktree (real git)', () => {
+  const exec = promisify(execFile);
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  async function git(dir: string, args: string[]): Promise<void> {
+    await exec('git', args, { cwd: dir, env: GIT_ENV });
+  }
+  const exists = (p: string) =>
+    stat(p).then(
+      () => true,
+      () => false,
+    );
+
+  /** A parent repo on `main` and a `feature/x` worktree at .haive/worktrees/feature-x, as 01-worktree-setup lays it out. */
+  async function setupWorktree(): Promise<{ parent: string; wt: string }> {
+    const parent = await mkdtemp(path.join(tmpdir(), 'pr-wait-'));
+    await git(parent, ['init', '-b', 'main']);
+    await git(parent, ['config', 'gc.auto', '0']);
+    await writeFile(path.join(parent, 'base.txt'), 'base\n', 'utf8');
+    await git(parent, ['add', '-A']);
+    await git(parent, ['commit', '-m', 'initial']);
+    const wt = path.join(parent, '.haive', 'worktrees', 'feature-x');
+    await mkdir(path.dirname(wt), { recursive: true });
+    await git(parent, ['worktree', 'add', '-b', 'feature/x', wt, 'main']);
+    return { parent, wt };
+  }
+
+  /** Two changes no commit holds: an edited tracked file and an untracked one, its name with a space. */
+  async function leaveUncommitted(wt: string): Promise<void> {
+    await writeFile(path.join(wt, 'base.txt'), 'base, edited\n', 'utf8');
+    await writeFile(path.join(wt, 'learning notes.md'), 'not committed\n', 'utf8');
+  }
+
+  function finalizeCtx(parent: string): StepContext {
+    return {
+      taskId: randomUUID(),
+      taskStepId: randomUUID(),
+      repoPath: parent,
+      db: createFakeDb({ ragQueryLog: schema.ragQueryLog }).db,
+      throwIfCancelled: vi.fn(),
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as unknown as StepContext;
+  }
+
+  const finalize = (ctx: StepContext, worktreePath: string) =>
+    prWaitStep.apply!(ctx, {
+      detected: {
+        pending: true,
+        prUrl: 'https://example.test/pr/1',
+        prProvider: 'github',
+        finalizeMode: 'auto',
+        worktreePath,
+        branchName: 'feature/x',
+        ragUsage: { queries: [], runs: [] },
+      },
+      formValues: {},
+      llmOutput: null,
+      iteration: 0,
+      previousIterations: [],
+    });
+
+  it('keeps a worktree that holds uncommitted work, and says how much', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await leaveUncommitted(wt);
+      const ctx = finalizeCtx(parent);
+      const out = await finalize(ctx, wt);
+      expect(out).toMatchObject({ finalized: true, removed: false });
+      expect(out.message).toContain(`worktree kept at ${wt}`);
+      expect(out.message).toContain('2 uncommitted changes');
+      expect(await readFile(path.join(wt, 'base.txt'), 'utf8')).toBe('base, edited\n');
+      expect(await readFile(path.join(wt, 'learning notes.md'), 'utf8')).toBe('not committed\n');
+      expect(ctx.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ worktreePath: wt, uncommitted: 2 }),
+        expect.any(String),
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('removes a clean worktree and keeps its branch, as it always did', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      const out = await finalize(finalizeCtx(parent), wt);
+      expect(out).toEqual({
+        finalized: true,
+        removed: true,
+        message: `finalized: removed worktree ${wt}`,
+      });
+      expect(await exists(wt)).toBe(false);
+      await expect(
+        git(parent, ['rev-parse', '--verify', 'refs/heads/feature/x']),
+      ).resolves.toBeUndefined();
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a worktree git cannot read, which is not the same as a clean one', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await writeFile(path.join(wt, '.git'), 'gitdir: /nonexistent/haive-gitdir\n', 'utf8');
+      const ctx = finalizeCtx(parent);
+      const out = await finalize(ctx, wt);
+      expect(out).toMatchObject({ finalized: true, removed: false });
+      expect(out.message).toContain(`worktree kept at ${wt}`);
+      expect(out.message).toContain('could not be checked for uncommitted changes');
+      expect(await exists(wt)).toBe(true);
+      expect(ctx.logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ worktreePath: wt, uncommitted: null }),
+        expect.any(String),
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('finalizes a worktree that is already gone as removed, as before', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await git(parent, ['worktree', 'remove', '--force', wt]);
+      const out = await finalize(finalizeCtx(parent), wt);
+      expect(out).toMatchObject({ finalized: true, removed: true });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 });

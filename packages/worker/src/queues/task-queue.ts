@@ -102,7 +102,7 @@ import {
   taskTypeAllowsNoRepository,
   taskWasCreatedRepoLess,
 } from '../repo/scratch-workspace.js';
-import { gitRun } from '../repo/git-exec.js';
+import { readUncommittedChanges } from '../repo/worktree-changes.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { splitRepoStoragePath } from '../repo/worktree-paths.js';
 import { pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
@@ -863,10 +863,10 @@ export function setContainerCleanupRunner(runner: ContainerCleanupRunner | null)
 /** True unless the worktree is known to hold nothing uncommitted: a missing record or an unreadable status keeps it. */
 async function worktreeMayHoldWork(worktreePath: string | null, taskId: string): Promise<boolean> {
   if (!worktreePath) return true;
-  const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
-  if (status.code === 0 && status.stdout.trim() === '') return false;
+  const held = await readUncommittedChanges(worktreePath, 0);
+  if (held !== null && held.count === 0) return false;
   logger.warn(
-    { taskId, worktreePath, code: status.code },
+    { taskId, worktreePath, uncommitted: held?.count ?? null },
     'worktree kept on completion: uncommitted changes or unreadable status',
   );
   return true;
