@@ -1115,13 +1115,13 @@ export async function removeNoFollow(
 export async function removeFileIfNoFollow(
   anchor: string,
   rel: string,
-  accept: (data: Buffer) => boolean | Promise<boolean>,
+  accept: (data: Buffer, mode: number) => boolean | Promise<boolean>,
   opts: { maxBytes?: number; repairPermissions?: boolean } = {},
 ): Promise<'removed' | 'absent' | 'kept'> {
   const result = await settleParked(
     anchor,
     rel,
-    async (data) => ((await accept(data)) ? 'remove' : 'keep'),
+    async (data, mode) => ((await accept(data, mode)) ? 'remove' : 'keep'),
     opts,
     false,
   );
@@ -1157,13 +1157,13 @@ export async function removeFileIfIdentityNoFollow(
 export async function rewriteFileIfNoFollow(
   anchor: string,
   rel: string,
-  edit: (data: Buffer) => Buffer | null | Promise<Buffer | null>,
+  edit: (data: Buffer, mode: number) => Buffer | null | Promise<Buffer | null>,
   opts: { maxBytes?: number } = {},
 ): Promise<'rewritten' | 'absent' | 'kept'> {
   const result = await settleParked(
     anchor,
     rel,
-    async (data) => (await edit(data)) ?? 'keep',
+    async (data, mode) => (await edit(data, mode)) ?? 'keep',
     opts,
     true,
   );
@@ -1187,7 +1187,7 @@ function parkLeaf(leaf: string): string {
 async function settleParked(
   anchor: string,
   rel: string,
-  decide: (data: Buffer) => Promise<ParkedVerdict>,
+  decide: (data: Buffer, mode: number) => Promise<ParkedVerdict>,
   opts: { maxBytes?: number; repairPermissions?: boolean },
   writable: boolean,
   identity?: FileIdentity,
@@ -1286,7 +1286,7 @@ async function restoreNoReplace(dir: HeldDir, from: string, to: string): Promise
 async function judgeParked(
   dir: HeldDir,
   parked: string,
-  decide: (data: Buffer) => Promise<ParkedVerdict>,
+  decide: (data: Buffer, mode: number) => Promise<ParkedVerdict>,
   maxBytes: number | undefined,
   writable: boolean,
   anchor: string,
@@ -1313,7 +1313,7 @@ async function judgeParked(
       filled += bytesRead;
     }
     const original = buf.subarray(0, filled);
-    const verdict = await decide(original);
+    const verdict = await decide(original, st.mode);
     if (!Buffer.isBuffer(verdict)) return verdict;
     await replaceHeldBytes(fh, verdict, original);
     return 'rewritten';

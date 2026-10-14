@@ -56,6 +56,7 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 export interface KeptFile {
   bytes?: Buffer | null;
   index: string | null;
+  mode?: number;
 }
 export type KeptFiles = Map<string, KeptFile>;
 
@@ -438,7 +439,9 @@ async function restoreJudged(
   for (const path of mine) {
     const bytes = await keptBytes(repoPath, path);
     const index = await indexEntry(repoPath, path);
-    captured.set(path, bytes === undefined ? { index } : { bytes, index });
+    const entry = await lstatNoFollow(repoPath, path).catch(() => null);
+    const mode = entry?.kind === 'file' ? Number(entry.stats.mode) & 0o7777 : undefined;
+    captured.set(path, bytes === undefined ? { index } : { bytes, index, mode });
   }
   // A write landing during the capture would be taken for Haive's: the judged state must still hold.
   for (const path of mine) {
@@ -542,14 +545,19 @@ async function restoreFromHead(
       const res = await rewriteFileIfNoFollow(
         repoPath,
         path,
-        (now) => (now.equals(was) ? head : null),
+        (now, mode) => (now.equals(was) && (mode & 0o7777) === captured.mode ? head : null),
         { maxBytes },
       );
       if (res !== 'rewritten') return path;
     } else if (was !== null) {
-      const res = await removeFileIfNoFollow(repoPath, path, (now) => now.equals(was), {
-        maxBytes,
-      });
+      const res = await removeFileIfNoFollow(
+        repoPath,
+        path,
+        (now, mode) => now.equals(was) && (mode & 0o7777) === captured.mode,
+        {
+          maxBytes,
+        },
+      );
       if (res !== 'removed') return path;
     }
     if ((await indexEntry(repoPath, path)) !== captured.index) return path;
@@ -749,6 +757,8 @@ export async function resyncHaiveProjections(
   repositoryId: string,
   repoPath: string,
 ): Promise<void> {
+  // A merge or rebase still open holds an intermediate record: nothing is read in until it ends.
+  if (await gitOperationInProgress(repoPath)) return;
   try {
     restoreFaults.beforeResync?.('state');
     await syncProjectStateFromCheckout(db, { repositoryId, repoPath });

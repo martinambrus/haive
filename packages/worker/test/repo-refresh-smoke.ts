@@ -1357,6 +1357,68 @@ async function main(): Promise<void> {
       );
     }
 
+    // 11e14. A re-sync while a merge is open reads nothing in: the record in the checkout may be one
+    // the person is about to abort.
+    {
+      const c = await committedRecord();
+      const id = c.payload.repositoryId;
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] });
+      upstreamCommit('a teammate adds a seventh agent', '.haive-data/state');
+      git(c.dest, 'pull', '-q', '--ff-only', 'origin', 'main');
+      const baseOf = async () =>
+        JSON.stringify(
+          (
+            await db.query.projectStateSync.findFirst({
+              where: eq(schema.projectStateSync.repositoryId, id),
+            })
+          )?.baseSnapshot ?? null,
+        );
+      const before = await baseOf();
+      const mergeHead = path.join(c.dest, '.git', 'MERGE_HEAD');
+      await writeFile(mergeHead, `${git(c.dest, 'rev-parse', 'HEAD')}\n`);
+      try {
+        await resyncHaiveProjections(db, id, c.dest);
+      } finally {
+        await rm(mergeHead, { force: true });
+      }
+      const after = await baseOf();
+      check('a re-sync while a merge is open reads nothing in', after === before, {
+        changed: after !== before,
+      });
+    }
+
+    // 11e15. A mode change landing between the capture and the restore of an untracked projection keeps
+    // the file: the parked removal judges its mode as well as its bytes.
+    {
+      const c = await cloned();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const planPath = path.join(c.dest, PLAN_REL);
+      let fired = false;
+      restoreFaults.beforeRestore = async () => {
+        if (fired) return;
+        fired = true;
+        await chmod(planPath, 0o755);
+      };
+      let aside;
+      try {
+        aside = await setAsideHaiveProjections(db, id, c.dest);
+      } finally {
+        delete restoreFaults.beforeRestore;
+      }
+      const mode = ((await stat(planPath).catch(() => null))?.mode ?? 0) & 0o777;
+      check(
+        'a mode change landing before the restore keeps the untracked plan.json and refuses',
+        fired && aside.outcome === 'refused' && mode === 0o755,
+        { aside, mode: mode.toString(8) },
+      );
+    }
+
     // 11e4. A re-sync that fails after a clean move raises the domain's mark, so the sweep retries it.
     {
       const c = await withPendingRender();
