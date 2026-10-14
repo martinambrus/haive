@@ -268,6 +268,11 @@ jobs:
         env:
           HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
 
+      - name: Usage-auth stash script on a real Redis
+        run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
+        env:
+          USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/12
+
       # The migration runner's live-database coverage. Not part of smoke:ci, which is
       # worker-scoped; this package had no smoke of its own before.
       - name: Run migration smokes
