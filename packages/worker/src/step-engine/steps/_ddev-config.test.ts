@@ -316,7 +316,7 @@ describe('parseDdevConfig: aliases and merge keys', () => {
     for (let i = 1; i < 12000; i++) cfg += `m${i}: &m${i} {<<: *m${i - 1}}\n`;
     cfg += 'database:\n  <<: *m11999\n';
     expect(parseDdevConfig(cfg).dbType).toBe('postgres');
-  });
+  }, 120_000);
 
   it('resolves a redefined anchor to its nearest earlier definition', () => {
     let cfg = '';

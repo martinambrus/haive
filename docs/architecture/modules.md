@@ -6,7 +6,7 @@ A module is a workspace package under `modules/<id>/`, named `@haive/module-<id>
 ones into four gitignored registries (`packages/api/src/modules.generated.ts`,
 `packages/worker/src/modules.generated.ts`, `packages/web/src/generated/module-pages.ts` and
 `module-dashboard.ts`), and the `dev`, `build` and `typecheck` scripts of the api, worker and web run
-it first, as do the `test` scripts of the api and worker.
+it first, as do the `test` scripts of the api, worker and web.
 
 ## The four states
 
