@@ -339,6 +339,27 @@ describe('00a-sync-base detect + apply (real git)', () => {
     }
   });
 
+  it('a claim release that fails after a moved base fails the step rather than leaving the claim', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      projections.restore.mockResolvedValue({ outcome: 'clean' });
+      claimFake.releaseError = new Error('connection lost');
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      await expect(syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }))).rejects.toThrow(
+        'connection lost',
+      );
+    } finally {
+      claimFake.reset();
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
   it('a projection file Haive did not write refuses the fast-forward, naming the file', async () => {
     const { bare, seed } = await seedOrigin();
     const local = await cloneLocal(bare);

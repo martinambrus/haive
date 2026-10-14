@@ -2007,6 +2007,33 @@ async function main(): Promise<void> {
         { outcome: asideM5.outcome, m5Gone, m5Mode: m5Mode.toString(8) },
       );
 
+      // M6. A tracked plan.md deleted in the checkout comes back from HEAD for the move; a mode a person
+      // gives it meanwhile keeps it out of the put-back's removal.
+      const m6 = await cloned();
+      const m6Id = m6.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: m6Id, origin: 'user' },
+      );
+      await writePlanMirror(db, m6Id, m6.dest);
+      const m6Md = path.join(m6.dest, HAIVE_DATA_FILES.planMarkdown);
+      git(m6.dest, 'add', '--', PLAN_REL, HAIVE_DATA_FILES.planMarkdown);
+      git(m6.dest, 'commit', '-q', '-m', 'plan');
+      await rm(m6Md);
+      const asideM6 = await setAsideHaiveProjections(db, m6Id, m6.dest);
+      const m6Back = (await stat(m6Md).catch(() => null)) !== null;
+      await chmod(m6Md, 0o600).catch(() => undefined);
+      if (asideM6.outcome === 'set-aside') {
+        await putBackProjections(db, m6Id, m6.dest, asideM6.kept);
+      }
+      const m6Mode = ((await stat(m6Md).catch(() => null))?.mode ?? 0) & 0o777;
+      check(
+        'M6: a restored file whose mode a person changed is not removed by the put-back',
+        asideM6.outcome === 'set-aside' && m6Back && m6Mode === 0o600,
+        { outcome: asideM6.outcome, m6Back, m6Mode: m6Mode.toString(8) },
+      );
+
       // P2. A lone plan.md in a repository whose database holds no plan is not Haive's: refused and kept.
       const p2 = await cloned();
       const p2Md = path.join(p2.dest, HAIVE_DATA_FILES.planMarkdown);

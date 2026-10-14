@@ -577,10 +577,15 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         reason: `Task "${claim.holder.title}" (${claim.holder.id}) is merging in this checkout; the base was not moved. Retry this step once it finishes.`,
       };
     }
+    let out: SyncBaseApply;
     try {
-      return await moveBase();
-    } finally {
+      out = await moveBase();
+    } catch (err) {
       await releaseMergeDir(ctx.db, owner).catch(() => undefined);
+      throw err;
     }
+    // A claim left behind would hold every other task out of this checkout, so its release must land.
+    await releaseMergeDir(ctx.db, owner);
+    return out;
   },
 };

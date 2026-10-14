@@ -535,7 +535,7 @@ async function restoreFromHead(
     const was = captured.bytes;
     const maxBytes = Math.max(head?.length ?? 0, was?.length ?? 0) + 1;
     if (head !== null && was === null) {
-      const headMode = (await headEntry(repoPath, path))?.startsWith('100755') ? 0o755 : 0o644;
+      const headMode = await headFileMode(repoPath, path);
       try {
         await writeFileNoFollow(repoPath, path, head, {
           mode: 'create-exclusive',
@@ -820,7 +820,13 @@ export async function putBackProjections(
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
         }
       } else if (bytes === null) {
-        await removeFileIfNoFollow(repoPath, path, (now) => now.equals(head), { maxBytes });
+        const headMode = await headFileMode(repoPath, path);
+        await removeFileIfNoFollow(
+          repoPath,
+          path,
+          (now, onDisk) => now.equals(head) && (onDisk & 0o7777) === headMode,
+          { maxBytes },
+        );
       } else {
         await rewriteFileIfNoFollow(repoPath, path, (now) => (now.equals(head) ? bytes : null), {
           maxBytes,
@@ -881,6 +887,11 @@ export async function recoverAfterMoveFailure(
     throw err;
   }
   return putBackAfterFailure(db, repositoryId, repoPath, kept, err);
+}
+
+/** The mode the restore gives a file it recreates from HEAD. */
+async function headFileMode(repoPath: string, path: string): Promise<number> {
+  return (await headEntry(repoPath, path))?.startsWith('100755') ? 0o755 : 0o644;
 }
 
 /** A path's index entry as `mode sha`, or null when nothing is staged there. */
