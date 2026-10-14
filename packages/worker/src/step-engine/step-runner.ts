@@ -89,7 +89,7 @@ import {
 } from './step-ownership.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
-import { promptCarriesPastedPersona } from './steps/_retrieval-guidance.js';
+import { promptCarriesPastedPersona, templatePersonaIds } from './steps/_retrieval-guidance.js';
 import { fencedAgentBlock } from './steps/_untrusted-repo.js';
 import { ensureArchivesExpanded } from '../attachments/expand-archives.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
@@ -789,6 +789,9 @@ async function resolveLlmPhase(
           truncationRetries,
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
+  // Read before anything is appended: a marker in an attachment name, a ledger entry or learned
+  // guidance is quoted text, not a persona the prompt step's author chose.
+  const promptStepPersonaIds = isPromptStep(stepDef) ? templatePersonaIds(prompt) : undefined;
   // An uploaded archive becomes the tree it contains before anything describes
   // the attachments — otherwise the notice below names a `.zip` no agent can
   // open. Idempotent, never throws, and three indexed queries plus one directory
@@ -838,7 +841,7 @@ async function resolveLlmPhase(
     },
     toolProfile: llmSpec.toolProfile,
     agentPool: llmSpec.agentPool,
-    ...(isPromptStep(stepDef) ? { promptStepPersonas: true } : {}),
+    ...(promptStepPersonaIds ? { promptStepPersonaIds } : {}),
     skipAgentRules: llmSpec.skipAgentRules,
     houseRules: houseRulesFor(
       stepDef.metadata.id,
@@ -1086,7 +1089,6 @@ async function resolveAiFixPhase(
     providers: params.providers,
     preferredProviderId,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
-    ...(isPromptStep(stepDef) ? { promptStepPersonas: true } : {}),
     // Same step, so the same declared surface: a fix agent for a report-only step
     // must not be told it has tools the step never gets.
     toolProfile: stepDef.llm?.toolProfile,

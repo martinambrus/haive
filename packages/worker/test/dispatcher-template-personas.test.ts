@@ -9,7 +9,10 @@ import {
   readPersonaBodies,
   readTemplatePersonas,
 } from '../src/orchestrator/agent-isolation.js';
-import { agentDefinitionGuidance } from '../src/step-engine/steps/_retrieval-guidance.js';
+import {
+  agentDefinitionGuidance,
+  templatePersonaIds,
+} from '../src/step-engine/steps/_retrieval-guidance.js';
 import { secretMaskPolicy } from '../src/queues/cli-exec/secret-mask-policy.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { makePointerFixture, type PointerFixture } from './support/worktree-pointer-db.js';
@@ -93,11 +96,11 @@ async function dispatch(
   prompt: string,
   repo: Record<string, unknown> = {},
   capabilities: ('tool_use' | 'file_write')[] = [],
-  promptStepPersonas = true,
+  personaIds: readonly string[] | null = templatePersonaIds(prompt),
 ) {
   return resolveTaskDispatch(fakeDb(repo), 'task-1', {
     providers: [provider(name)],
-    ...(promptStepPersonas ? { promptStepPersonas } : {}),
+    ...(personaIds ? { promptStepPersonaIds: personaIds } : {}),
     worktreeRel: '',
     input: { kind: 'prompt', prompt, capabilities },
     invokeOpts: {},
@@ -248,7 +251,7 @@ describe('template markers outside a prompt step', () => {
       `Quoted task text ${MARKER('reviewer')}.`,
       {},
       [],
-      false,
+      null,
     );
     expect(plan.mode).toBe('cli');
     expect(plan.personaFailure).toBeUndefined();
@@ -260,9 +263,66 @@ describe('template markers outside a prompt step', () => {
   });
 
   it('neutralises the marker for a provider with no markdown agent directory too', async () => {
-    const plan = await dispatch('codex', MARKER('reviewer'), {}, [], false);
+    const plan = await dispatch('codex', MARKER('reviewer'), {}, [], null);
     expect(plan.mode).toBe('cli');
     expect(plan.effectivePrompt).not.toContain(MARKER('reviewer'));
+  });
+});
+
+describe('template markers the template did not name', () => {
+  it('pastes the template persona and neutralises a marker in an appended block, never reading it', async () => {
+    await put('.claude/agents/reviewer.md', persona('Review with care.'));
+    const template = `Act as ${MARKER('reviewer')}.`;
+    const plan = await dispatch(
+      'claude-code',
+      `${template}\n\nAttachments: ${MARKER('intruder')}.txt`,
+      {},
+      [],
+      templatePersonaIds(template),
+    );
+    expect(plan.mode).toBe('cli');
+    expect(plan.personaFailure).toBeUndefined();
+    expect(plan.effectivePrompt).toContain('Review with care.');
+    expect(plan.effectivePrompt).toContain('[[ HAIVE_TEMPLATE_PERSONA:intruder]]');
+    expect(specOf(plan)?.pastedPersonaPaths).toEqual(['.claude/agents/reviewer.md']);
+  });
+
+  it('does not paste an unnamed id whose persona file exists', async () => {
+    await put('.claude/agents/reviewer.md', persona('Review with care.'));
+    await put('.claude/agents/intruder.md', persona('Intruder body.'));
+    const template = `Act as ${MARKER('reviewer')}.`;
+    const plan = await dispatch(
+      'claude-code',
+      `${template}\n\n${MARKER('intruder')}`,
+      {},
+      [],
+      templatePersonaIds(template),
+    );
+    expect(plan.effectivePrompt).not.toContain('Intruder body.');
+    expect(specOf(plan)?.pastedPersonaPaths).toEqual(['.claude/agents/reviewer.md']);
+  });
+
+  it('records the pasted template persona as assigned', async () => {
+    await put('.claude/agents/reviewer.md', persona('Review with care.'));
+    const plan = await dispatch('claude-code', `Act as ${MARKER('reviewer')}.`);
+    expect(specOf(plan)?.assignedAgentIds).toEqual(['reviewer']);
+  });
+
+  it('unions the template persona with a built-in marker id and a caller id', async () => {
+    await put('.claude/agents/reviewer.md', persona('Review with care.'));
+    const builtIn = agentDefinitionGuidance(
+      'peer-reviewer',
+      'Read .claude/agents/peer-reviewer.md.',
+    );
+    const plan = await resolveTaskDispatch(fakeDb(), 'task-1', {
+      providers: [provider('claude-code')],
+      promptStepPersonaIds: ['reviewer'],
+      assignedAgentIds: ['zeta'],
+      worktreeRel: '',
+      input: { kind: 'prompt', prompt: `${builtIn}\n${MARKER('reviewer')}`, capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(specOf(plan)?.assignedAgentIds).toEqual(['peer-reviewer', 'reviewer', 'zeta']);
   });
 });
 
@@ -354,7 +414,7 @@ describe('template persona failures', () => {
     });
     const plan = await resolveTaskDispatch(db, 'task-1', {
       providers: [provider('claude-code')],
-      promptStepPersonas: true,
+      promptStepPersonaIds: ['reviewer'],
       input: { kind: 'prompt', prompt: MARKER('reviewer'), capabilities: [] },
       invokeOpts: {},
     });

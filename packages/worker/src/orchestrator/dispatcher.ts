@@ -25,6 +25,7 @@ import type {
   SubAgentInvocation,
   SubAgentSpec,
 } from '../cli-adapters/types.js';
+import { TEMPLATE_PERSONA_MARKER_PATTERN } from '@haive/shared/modularity';
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
 import {
   adaptPromptForCliCapabilities,
@@ -213,10 +214,12 @@ export interface DispatchRequest {
    *  provider is known; exposed on the pure resolver only for tests. Pasted whatever the isolation
    *  decision, and scanned like the built-in bodies when it is made. */
   templatePersonas?: Record<string, { body: string; rel: string }>;
-  /** Set only by a prompt step's dispatch (a `custom.*` step id): its `[[HAIVE_TEMPLATE_PERSONA:<id>]]`
-   *  markers are resolved. Absent, a marker is text a prompt quoted from elsewhere, so no persona is
-   *  read for it and the marker is neutralised in the prompt. */
-  promptStepPersonas?: boolean;
+  /** Set only by a prompt step's dispatch (a `custom.*` step id): the ids of the
+   *  `[[HAIVE_TEMPLATE_PERSONA:<id>]]` markers in its RENDERED TEMPLATE, taken before the attachment
+   *  notice, ledger and learned guidance are appended. Only these are resolved. Every other marker,
+   *  and every marker when this is absent, is text a prompt quoted from elsewhere: no persona is read
+   *  for it and it is neutralised in the prompt. */
+  promptStepPersonaIds?: readonly string[];
   /** The global switch for putting the provider's effective agent rules at the top of the prompt,
    *  resolved by `resolveTaskDispatch`; exposed on the pure resolver only for tests, like
    *  `agentIsolation`. Absent or false means no block. */
@@ -420,13 +423,17 @@ export async function resolveTaskDispatch(
   });
 }
 
-/** A marker is resolved only for a prompt step. Anywhere else the text is quoted data, so one space
- *  after the brackets breaks it, as the shared template renderer breaks a reserved marker in a value. */
+/** A marker is resolved only when its id is one the prompt step's own template named. Anywhere else
+ *  the text is quoted data, so one space after the brackets breaks it, as the shared template
+ *  renderer breaks a reserved marker in a value. */
 function neutraliseUnresolvedTemplateMarkers(req: DispatchRequest): DispatchInput {
-  if (req.promptStepPersonas === true || req.input.kind !== 'prompt') return req.input;
+  if (req.input.kind !== 'prompt') return req.input;
+  const allowed = new Set(req.promptStepPersonaIds ?? []);
   return {
     ...req.input,
-    prompt: req.input.prompt.replaceAll('[[HAIVE_TEMPLATE_PERSONA:', '[[ HAIVE_TEMPLATE_PERSONA:'),
+    prompt: req.input.prompt.replaceAll(TEMPLATE_PERSONA_MARKER_PATTERN, (marker, id: string) =>
+      allowed.has(id) ? marker : marker.replace('[[', '[[ '),
+    ),
   };
 }
 
@@ -443,7 +450,7 @@ async function resolveTemplatePersonas(
   | { failure: string }
   | null
 > {
-  if (resolved.promptStepPersonas !== true || resolved.input.kind !== 'prompt') return null;
+  if (resolved.input.kind !== 'prompt') return null;
   const ids = templatePersonaIds(stripHaivePreamble(resolved.input.prompt));
   if (ids.length === 0) return null;
 
@@ -872,7 +879,10 @@ function houseRulesInjection(req: DispatchRequest): {
  *  marker into the pointer sentence or its fallback line, and the stored prompt is the rewritten
  *  one, so this is the only moment the assignment can be read. */
 function assignedPersonaIds(req: DispatchRequest, prompts: string[]): string[] {
-  const ids = new Set(req.assignedAgentIds ?? []);
+  const ids = new Set([
+    ...(req.assignedAgentIds ?? []),
+    ...Object.keys(req.templatePersonas ?? {}),
+  ]);
   for (const prompt of prompts) {
     for (const id of agentGuidanceIds(prompt)) ids.add(id);
   }
