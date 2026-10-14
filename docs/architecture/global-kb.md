@@ -121,7 +121,9 @@ enrich task refuses to re-enrich an enforced entry, since a retry would demote i
 only when its (step, role) is in `HOUSE_RULE_ROLES` (`shared/src/step-engine/types.ts`), as `write`
 (04, the 05 corrector, 05a, 06b, the 06c coder, 07, 07a, the 07b fixer, the 08a fixer, 08b, 08e) or
 `review` (the 07b validator, and 08c's peer reviewer, which re-checks after 08b and the 08a fixer
-have written). Every other file-writing role is in `HOUSE_RULE_EXEMPT` with its
+have written). An admin's prompt step (`custom.<type>.<slug>`) is outside both tables because it
+is not a registered step: `houseRulesFor` gives it `write` when its entry asks for `file_write`
+and nothing when it only reads. Every other file-writing role is in `HOUSE_RULE_EXEMPT` with its
 reason: merge fixers, the 06c reviewer (a recorded risk: it does not see the rules, 07b checks the
 merged change), the 08a tester, skill writers, the KB author. A ratchet test keeps every
 `file_write` role in one table or the other, and a source guard makes every `resolveTaskDispatch`
