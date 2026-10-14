@@ -139,6 +139,7 @@ services:
       REPO_STORAGE_ROOT: /var/lib/haive/repos
       BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
       GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:-}
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs:ro
