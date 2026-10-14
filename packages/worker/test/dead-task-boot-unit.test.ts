@@ -114,6 +114,23 @@ describe('deadTaskResolution', () => {
     ).toEqual({ unresolved: ['gone'], outsideList: null });
   });
 
+  it.each(['static', 'workflow_paths', 'run_app_modes'] as const)(
+    'judges a %s task without a snapshot by its current step alone',
+    (strategy) => {
+      expect(deadTaskResolution(task({ runListSnapshot: null }), strategy, registry())).toEqual({
+        unresolved: [],
+        outsideList: null,
+      });
+      expect(
+        deadTaskResolution(
+          task({ runListSnapshot: null, currentStepId: 'gone' }),
+          strategy,
+          registry(),
+        ),
+      ).toEqual({ unresolved: ['gone'], outsideList: null });
+    },
+  );
+
   it('resolves a custom step only from the entry the task pinned', () => {
     const snapshot = ['a', CUSTOM];
     expect(
@@ -130,6 +147,26 @@ describe('deadTaskResolution', () => {
         registry(),
       ).unresolved,
     ).toEqual([CUSTOM]);
+  });
+
+  it('does not call a task dead for a pinned tool that no longer parses', () => {
+    const badTool = {
+      name: 'too_long',
+      description: 'd'.repeat(1025),
+      action: 'http-get',
+      url: 'https://api.example.com/v1/status',
+    };
+    expect(
+      deadTaskResolution(
+        task({
+          currentStepId: CUSTOM,
+          runListSnapshot: ['a', CUSTOM],
+          customSteps: { [CUSTOM]: { ...entry, tools: [badTool] } },
+        }),
+        'static',
+        registry(),
+      ),
+    ).toEqual({ unresolved: [], outsideList: null });
   });
 });
 

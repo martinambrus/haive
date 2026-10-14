@@ -575,11 +575,14 @@ describe('mergeOriginInto: plan.json merges three-way', () => {
       planOf([[NODE_X, 'X ours']]),
       planOf([[NODE_X, 'X ours']]),
     );
+    // One shared plan commit is the merge base, so plan.json merges cleanly to the garbled side.
+    const remoteDir = (await git(local, ['remote', 'get-url', 'origin'])).trim();
+    await git(remoteDir, ['fetch', '-q', local, 'HEAD']);
+    await git(remoteDir, ['reset', '-q', '--hard', 'FETCH_HEAD']);
     await removePlanMergeWorktree(local);
     await write(local, PLAN_JSON, '{"nodes":["local"]}\n');
     await write(local, PLAN_MD, '# local edit\n');
     await commitAll(local, 'garbled');
-    const remoteDir = (await git(local, ['remote', 'get-url', 'origin'])).trim();
     await git(remoteDir, ['rm', '-q', '-f', PLAN_MD]);
     await commitAll(remoteDir, 'drop md');
     await git(local, ['fetch', 'origin', 'main']);

@@ -152,10 +152,9 @@ function httpGetText(response: GuardedResponse, maxBytes: number): string {
 }
 
 async function ragQuery(tool: RagQueryTool, taskId: string, query: string): Promise<string> {
-  const hits = await executeRagSearch(taskId, query, tool.topK);
-  const own = tool.scope === 'project' ? 'local' : 'global';
-  const kept = tool.scope === 'all' ? hits : hits.filter((hit) => hit.scope === own);
-  return cutToBytes(kept.length > 0 ? formatRagHits(kept) : NO_RESULTS_TEXT, tool.maxResponseBytes);
+  const scope = tool.scope === 'project' ? 'local' : tool.scope;
+  const hits = await executeRagSearch(taskId, query, tool.topK, scope);
+  return cutToBytes(hits.length > 0 ? formatRagHits(hits) : NO_RESULTS_TEXT, tool.maxResponseBytes);
 }
 
 // Sandbox-facing like /rag and /ddev: the bearer is a task token, not a user session.

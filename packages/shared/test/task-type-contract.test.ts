@@ -7,6 +7,7 @@ import {
   customTaskTypeCreateSchema,
   isCustomStepId,
   moduleIdsOfTaskType,
+  parsePromptSteps,
   publicTaskTypeSchema,
   resolveTaskTypeAvailability,
   taskTypeDefinitionSeedSchema,
@@ -853,6 +854,46 @@ describe('task type schemas', () => {
       );
       expect(taskTypeUpdateSchema.safeParse({ promptSteps }).success).toBe(false);
     }
+  });
+
+  it('never carries invalidTools through a create or an update, whatever a body says', () => {
+    const step = {
+      slug: 'review',
+      title: 'Review',
+      template: 'Review it',
+      timeoutMs: 300_000,
+      invalidTools: ['forged'],
+    };
+    const created = customTaskTypeCreateSchema.parse({
+      ...valid,
+      stepIds: ['custom.my-type.review'],
+      promptSteps: { review: step },
+    });
+    expect(created.promptSteps?.review).not.toHaveProperty('invalidTools');
+    const updated = taskTypeUpdateSchema.parse({ promptSteps: { review: step } });
+    expect(updated.promptSteps?.review).not.toHaveProperty('invalidTools');
+  });
+
+  it('drops the invalidTools of a step read back by parsePromptSteps when it is sent as a save', () => {
+    const tool = {
+      name: 'too_long',
+      description: 'd'.repeat(1025),
+      action: 'http-get',
+      url: 'https://api.example.com/v1/status',
+    };
+    const read = parsePromptSteps({
+      review: {
+        slug: 'review',
+        title: 'Review',
+        template: 'Review it',
+        timeoutMs: 300_000,
+        tools: [tool],
+      },
+    });
+    expect(read.review?.invalidTools).toEqual(['too_long']);
+    const saved = taskTypeUpdateSchema.parse({ promptSteps: read });
+    expect(saved.promptSteps?.review).not.toHaveProperty('invalidTools');
+    expect(saved.promptSteps?.review?.tools).toEqual([]);
   });
 
   it('public dto carries available and an optional reason', () => {

@@ -563,3 +563,102 @@ describe('RAG result snapshots', () => {
     expect(h.recorded).toEqual([]);
   });
 });
+
+describe('executeRagSearch: the scope', () => {
+  const page = (prefix: string, sourceType: string, top: number): Hit[] =>
+    Array.from({ length: 4 }, (_, i) =>
+      hit(`${prefix}${i}`, sourceType, Number((top - i * 0.001).toFixed(3))),
+    );
+  const seen = (hits: Array<{ sourcePath: string; scope?: string }>) =>
+    hits.map((x) => [x.sourcePath, x.scope]);
+
+  beforeEach(() => {
+    h.localHits = page('src/local-', 'code', 0.09);
+    h.globalHits = page('global_kb/rule-', 'kb', 0.05);
+  });
+
+  it('gives a global scope every slot of topK, where the merge kept one', async () => {
+    const hits = await executeRagSearch('task-1', 'q', 3, 'global');
+
+    expect(seen(hits)).toEqual([
+      ['global_kb/rule-0', 'global'],
+      ['global_kb/rule-1', 'global'],
+      ['global_kb/rule-2', 'global'],
+    ]);
+  });
+
+  it('gives a local scope every slot of topK', async () => {
+    const hits = await executeRagSearch('task-1', 'q', 3, 'local');
+
+    expect(seen(hits)).toEqual([
+      ['src/local-0', 'local'],
+      ['src/local-1', 'local'],
+      ['src/local-2', 'local'],
+    ]);
+  });
+
+  it('never opens or embeds for the local store on a global scope', async () => {
+    await executeRagSearch('task-1', 'q', 3, 'global');
+
+    expect(h.localOpenOptions).toEqual([]);
+    expect(h.localStatements).toEqual([]);
+    expect(h.events).toEqual(['embed:global', 'open']);
+    expect(searches().local).toHaveLength(0);
+    expect(searches().global).toHaveLength(1);
+  });
+
+  it('never opens or embeds for the global KB on a local scope', async () => {
+    await executeRagSearch('task-1', 'q', 3, 'local');
+
+    expect(h.events).toEqual(['embed:local']);
+    expect(h.statements).toEqual([]);
+    expect(searches().global).toHaveLength(0);
+    expect(searches().local).toHaveLength(1);
+  });
+
+  it('searches both stores and keeps the global reserve on the all scope, given or not', async () => {
+    const unscoped = await executeRagSearch('task-1', 'q', 3);
+    const callsWithoutScope = searches();
+    h.search.mockClear();
+    h.events = [];
+    const scoped = await executeRagSearch('task-1', 'q', 3, 'all');
+
+    expect(seen(unscoped)).toEqual([
+      ['src/local-0', 'local'],
+      ['src/local-1', 'local'],
+      ['global_kb/rule-0', 'global'],
+    ]);
+    expect(scoped).toEqual(unscoped);
+    expect(callsWithoutScope.local).toHaveLength(1);
+    expect(callsWithoutScope.global).toHaveLength(1);
+    expect(searches().local).toHaveLength(1);
+    expect(searches().global).toHaveLength(1);
+    expect(h.events).toEqual(['embed:local', 'embed:global', 'open']);
+  });
+
+  it('takes no scope from the body of an agent call: both stores are still searched', async () => {
+    const res = await app.request('/rag/search', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${signRagToken('task-1', SECRET)}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ query: 'q', scope: 'global' }),
+    });
+
+    const { hits } = (await res.json()) as { hits: Array<{ scope: string }> };
+    expect(res.status).toBe(200);
+    expect(new Set(hits.map((x) => x.scope))).toEqual(new Set(['local', 'global']));
+    expect(searches().local).toHaveLength(1);
+    expect(searches().global).toHaveLength(1);
+  });
+
+  it('answers a global scope with no hits, never the local ones, when the global KB search fails', async () => {
+    h.search.mockImplementation(async (_conn, _vec, _text, _config, filter) => {
+      if (filter !== undefined) throw new Error('statement timeout');
+      return h.localHits;
+    });
+
+    expect(await executeRagSearch('task-1', 'q', 3, 'global')).toEqual([]);
+  });
+});

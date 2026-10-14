@@ -27,3 +27,22 @@ export async function isProviderEnabled(db: Database | DbTx, providerId: string)
     .where(eq(schema.integrationProviderConfigs.providerId, providerId));
   return row ? row.enabled : defaultProviderEnabled(providerId);
 }
+
+/** The switch of every registered provider, as isProviderEnabled reads it, from one query. */
+export async function loadProviderEnablement(
+  db: Database | DbTx,
+): Promise<ReadonlyMap<string, boolean>> {
+  const rows = await db
+    .select({
+      providerId: schema.integrationProviderConfigs.providerId,
+      enabled: schema.integrationProviderConfigs.enabled,
+    })
+    .from(schema.integrationProviderConfigs);
+  const configured = new Map(rows.map((row) => [row.providerId, row.enabled]));
+  return new Map(
+    listIntegrationProviders().map((provider) => [
+      provider.id,
+      configured.get(provider.id) ?? defaultProviderEnabled(provider.id),
+    ]),
+  );
+}
