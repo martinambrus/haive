@@ -28,8 +28,8 @@
     "docker:logs": "bash scripts/dev.sh logs",
     "sandbox:build": "bash scripts/dev.sh sandbox-build",
     "module": "node scripts/module.mjs",
-    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,mjs,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mjs,json,md}\"",
     "prepare": "husky"
   },
   "engines": {
@@ -51,7 +51,7 @@
     "vitest": "^5.0.3"
   },
   "lint-staged": {
-    "*.{ts,tsx,js,jsx,json,md}": "prettier --write"
+    "*.{ts,tsx,js,jsx,mjs,json,md}": "prettier --write"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
