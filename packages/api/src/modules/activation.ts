@@ -50,12 +50,17 @@ function liveDependents(db: Reader, moduleId: string): Promise<ModuleDependent[]
       and(
         inArray(schema.tasks.status, [...LIVE_TASK_STATES]),
         isNull(schema.tasks.deadAt),
-        sql`CASE WHEN jsonb_typeof(${schema.tasks.runListSnapshot}) = 'array'
+        sql`(EXISTS (
+            SELECT 1 FROM ${schema.taskTypeDefinitions}
+            WHERE ${schema.taskTypeDefinitions.slug} = ${schema.tasks.type}
+              AND ${schema.taskTypeDefinitions.source} = ${`module:${moduleId}`}
+          )
+          OR CASE WHEN jsonb_typeof(${schema.tasks.runListSnapshot}) = 'array'
           THEN EXISTS (
             SELECT 1 FROM jsonb_array_elements_text(${schema.tasks.runListSnapshot}) AS s(id)
             WHERE starts_with(s.id, ${`module.${moduleId}.`})
           )
-          ELSE false END`,
+          ELSE false END)`,
       ),
     )
     .orderBy(desc(schema.tasks.updatedAt))

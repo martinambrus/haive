@@ -455,6 +455,23 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect((await patchModule('alpha', false)).status).toBe(200);
     });
 
+    it('answers 409 for a live task of a type the module seeded, though its steps are all core', async () => {
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: TYPE,
+        displayName: 'Module type',
+        runListStrategy: 'static',
+        stepIds: ['01-worktree-setup'],
+        source: 'module:alpha',
+      });
+      const t = await task({ title: 'Module-owned', runListSnapshot: ['01-worktree-setup'] });
+      const res = await patchModule('alpha', false);
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { tasks: { id: string }[] }).tasks).toEqual([
+        expect.objectContaining({ id: t.id, title: 'Module-owned' }),
+      ]);
+      expect(await stampOf('alpha')).toBeNull();
+    });
+
     it('is not held up by a task that only looks like it uses the module', async () => {
       await task({ runListSnapshot: ['module.beta.x', '01-worktree-setup'] });
       await task({ runListSnapshot: ['module.alpha-two.x'] });
