@@ -2744,14 +2744,27 @@ async function main(): Promise<void> {
       const saved = await attempt(() =>
         save({ repositoryId: y.repositoryId, userId: y.userId, push: true }),
       );
+      const headAfter = git(y.repoPath, 'rev-parse', 'HEAD');
+      const originAfter = git(origin, 'rev-parse', 'main');
       check(
         'C11: the Save reports the conflict, moves nothing and pushes nothing',
         saved.error === null &&
           saved.value?.pushed === false &&
           saved.value.conflict?.paths.includes('README.md') === true &&
-          git(y.repoPath, 'rev-parse', 'HEAD') === head &&
-          git(origin, 'rev-parse', 'main') === sent,
-        { error: saved.error, conflict: saved.value?.conflict },
+          headAfter === head &&
+          originAfter === sent,
+        {
+          error: saved.error,
+          conflict: saved.value?.conflict,
+          pushed: saved.value?.pushed,
+          committed: saved.value?.committed,
+          head,
+          headAfter,
+          sent,
+          originAfter,
+          log: git(y.repoPath, 'log', '--format=%h %s', '-4').split('\n'),
+          changed: headAfter === head ? [] : git(y.repoPath, 'diff', '--stat', head, headAfter),
+        },
       );
       check(
         "C11: and B's render change is back on disk byte for byte, still uncommitted",
