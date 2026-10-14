@@ -9,6 +9,8 @@ export interface MergeDirClaimFake {
   fenced: boolean;
   /** Where each release happened, and whether a section was open around it. */
   released: { mergeDir: string; inSection: boolean }[];
+  /** A release that fails, as a database error would. */
+  releaseError: Error | null;
   sections: number;
   reset(): void;
 }
@@ -18,11 +20,13 @@ export function createMergeDirClaimFake(): MergeDirClaimFake {
     claims: new Map(),
     fenced: false,
     released: [],
+    releaseError: null,
     sections: 0,
     reset() {
       this.claims.clear();
       this.fenced = false;
       this.released = [];
+      this.releaseError = null;
       this.sections = 0;
     },
   };
@@ -56,7 +60,23 @@ export function mergeDirClaimOverrides(fake: MergeDirClaimFake = claimFake) {
         open = false;
       }
     },
+    inMergeDirUnlessClaimed: async <T>(
+      db: unknown,
+      owner: { mergeDir: string; taskId: string },
+      fn: (tx: unknown) => Promise<T>,
+    ) => {
+      const held = fake.claims.get(owner.mergeDir);
+      if (held && held.taskId !== owner.taskId) {
+        throw new Error(`task "${held.title}" (${held.taskId}) holds this checkout`);
+      }
+      return fn(db);
+    },
+    otherLiveClaim: async (_tx: unknown, mergeDir: string, taskId: string) => {
+      const held = fake.claims.get(mergeDir);
+      return held && held.taskId !== taskId ? { id: held.taskId, title: held.title } : null;
+    },
     releaseMergeDir: async (_tx: unknown, owner: { mergeDir: string; stepId: string }) => {
+      if (fake.releaseError) throw fake.releaseError;
       fake.released.push({ mergeDir: owner.mergeDir, inSection: open });
       if (fake.claims.get(owner.mergeDir)?.stepId === owner.stepId) {
         fake.claims.delete(owner.mergeDir);

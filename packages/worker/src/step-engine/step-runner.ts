@@ -2451,6 +2451,7 @@ function buildStepContext(
     | 'cliProviderId'
     | 'stepDef'
     | 'round'
+    | 'epoch'
   >,
   row: TaskStepRow,
   signal: AbortSignal,
@@ -2467,6 +2468,7 @@ function buildStepContext(
     sandboxWorkdir: SANDBOX_WORKDIR,
     cliProviderId: params.cliProviderId,
     round,
+    epoch: params.epoch,
     db,
     logger: log.child({ stepId: params.stepDef.metadata.id, taskId, taskStepId: row.id }),
     signal,
