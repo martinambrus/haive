@@ -36,6 +36,7 @@ export async function readUncommittedChanges(
     '--porcelain=v1',
     '-z',
     '--untracked-files=normal',
+    '--ignore-submodules=none',
   ]);
   if (status.code !== 0) {
     return (await worktreeGone(worktreePath)) ? { count: 0, paths: [] } : null;

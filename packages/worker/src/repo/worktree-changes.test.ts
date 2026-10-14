@@ -128,3 +128,29 @@ describe('readUncommittedChanges', () => {
     }
   });
 });
+
+describe('readUncommittedChanges and submodules', () => {
+  it('counts an edit inside a submodule even when the repository config ignores it', async () => {
+    const sub = await mkdtemp(path.join(tmpdir(), 'wt-changes-sub-'));
+    const root = await mkdtemp(path.join(tmpdir(), 'wt-changes-super-'));
+    try {
+      await git(sub, ['init', '-b', 'main']);
+      await git(sub, ['config', 'gc.auto', '0']);
+      await writeIn(sub, { 'inner.txt': 'one\n' });
+      await git(sub, ['add', '-A']);
+      await git(sub, ['commit', '-m', 'inner']);
+      await git(root, ['init', '-b', 'main']);
+      await git(root, ['config', 'gc.auto', '0']);
+      await git(root, ['-c', 'protocol.file.allow=always', 'submodule', 'add', sub, 'mod']);
+      await git(root, ['commit', '-m', 'add submodule']);
+      await git(root, ['config', 'submodule.mod.ignore', 'all']);
+      await writeIn(root, { 'mod/inner.txt': 'edited\n' });
+      const held = await readUncommittedChanges(root);
+      expect(held?.count).toBeGreaterThan(0);
+      expect(held?.paths).toContain('mod');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(sub, { recursive: true, force: true });
+    }
+  });
+});
