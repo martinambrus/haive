@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
-import { parseStepId, promptStepEntrySchema, type PromptStepEntry } from '@haive/shared/modularity';
+import { parseStepId, type PromptStepEntry } from '@haive/shared/modularity';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
 import { stepRegistry, UnresolvedStepError, type StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
@@ -47,20 +47,7 @@ export interface ResolvedTaskContext {
   deadAt?: Date | null;
 }
 
-/** The prompt steps a task pinned, by step id. An entry that does not parse, or whose slug is not the
- *  one its key names, is left out, so its id reads as a step that does not resolve. */
-export function parseCustomSteps(raw: unknown): Record<string, PromptStepEntry> {
-  const out: Record<string, PromptStepEntry> = {};
-  if (typeof raw !== 'object' || raw === null) return out;
-  for (const [id, value] of Object.entries(raw)) {
-    const parsedId = parseStepId(id);
-    const parsed = promptStepEntrySchema.safeParse(value);
-    if (parsedId?.kind === 'custom' && parsed.success && parsed.data.slug === parsedId.stepSlug) {
-      out[id] = parsed.data;
-    }
-  }
-  return out;
-}
+export { parsePinnedCustomSteps as parseCustomSteps } from '@haive/shared/modularity';
 
 const SYNTHESISED_STEP_LIMIT = 256;
 const synthesisedSteps = new Map<string, StepDefinition>();
