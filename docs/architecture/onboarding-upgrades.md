@@ -558,17 +558,25 @@ is rendered from it on every flush and is never judged. A file that is not what 
 (one the sync could not take, such as an unreadable edit, or one held back by a pending conflict)
 refuses the move and is named in the caller's own outcome (00a `skipped`, refresh's status
 message). Otherwise the revision is bumped first, under the domain's lock (`markProjectStateDirty`,
-`markPlanMirrorDirty`), so a crash leaves the files stale and the sweep re-renders them; tracked
-paths return to HEAD with `git checkout HEAD --`, the rest are removed (`git rm --cached`, then
-`removeNoFollow`, then any directory that leaves empty under `.haive-data/state`, since an empty one
-reads as a record with no format file; a removed file and each directory its removal empties keep
-the owner and mode captured with them, which whatever re-creates them, the put-back or the writer
-during the re-sync after a move, gets back while the writer still owns it (`restoreKeptMetadata`,
-best-effort, as fs-safe's inherited owner is), and every put-back 00a triggers runs under its
-checkout's merge-dir lock (`inMergeDirUnlessClaimed`) and is refused while another task's claim holds
-it); each restore runs under the domain's lock, after the caller's
-fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there, and a
-task that started meanwhile answers `held` with the files untouched; 00a runs that restore and its move in its claim's merge-dir section (`withMergeDirSection`, fenced on the pass's epoch), so a Stop or a cancel refuses both; and the sync base is pointed at
+`markPlanMirrorDirty`), so a crash leaves the files stale and the sweep re-renders them. Each path
+then returns to HEAD as a compare-and-swap on what the capture recorded: the file is rewritten,
+re-created from HEAD or removed through a parked fs-safe judge only while it still holds the captured
+bytes, mode and owner (`rewriteFileIfNoFollow`, `removeFileIfNoFollow`), and its index entry moves to
+HEAD's through `git apply --cached` of a full-context patch whose preimage is the captured entry, which
+git checks and writes under its own index lock, so a `git add` landing meanwhile refuses the swap
+instead of being overwritten. Because git matches hunk context only, the entry the apply leaves is
+compared with HEAD's and undone unless it is exactly that; an intent-to-add entry, which a diff cannot
+show, refuses the move by name. Anything that moved sends the set-aside round again, and a path still
+moving after `MOVE_ATTEMPTS` refuses it. Any directory the removals leave empty under
+`.haive-data/state` goes too, since an empty one reads as a record with no format file. A removed
+file and each directory its removal empties keep the owner and mode captured with them, which
+whatever re-creates them, the put-back or the writer during the re-sync after a move, gets back while
+the writer still owns it (`restoreKeptMetadata`, best-effort, as fs-safe's inherited owner is). The
+put-back is the same steps in reverse under the same rules (the stored patch applied with `-R`), and
+every put-back 00a triggers runs under its checkout's merge-dir lock (`inMergeDirUnlessClaimed`) and
+is refused while another task's claim holds it. Each restore runs under the domain's lock, after the
+caller's fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there,
+and a task that started meanwhile answers `held` with the files untouched; 00a runs that restore and its move in its claim's merge-dir section (`withMergeDirSection`, fenced on the pass's epoch), so a Stop or a cancel refuses both; and the sync base is pointed at
 the record now in the checkout (`rebaseProjectStateOnCheckout`; a checkout with no record gets an
 EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
 a clash is asked about, never imported over it, and one whose record cannot be read keeps the old
