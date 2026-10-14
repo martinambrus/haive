@@ -820,6 +820,8 @@ export interface Task {
    *  derived here for the badge and the ?status=paused filter — same shape as slotWait, which
    *  is suppressed while this is set. */
   pausedAt?: string | null;
+  /** The pause in force is an administrator's, not the owner's own; absent on an older api. */
+  pausedByAdmin?: boolean;
   /** ISO time the worker marked the task dead; null otherwise. Read it through isTaskDead. */
   deadAt?: string | null;
   /** Up/down vote score in [-5, +5], 0 by default. Shifts this task's fair-scheduling band

@@ -91,6 +91,7 @@ import {
   enrichStepsWithCliUsage,
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
+  findAdminPausedTaskIds,
   findQueuedInvocationStepIds,
   loadTaskTypeLabels,
   resolveCurrentStepCliProviderIds,
@@ -330,6 +331,10 @@ taskRoutes.get('/', async (c) => {
     : [];
   // Steps whose CLI job is enqueued but not yet picked up — the agent-slot half of the wait.
   const queuedInvocationStepIds = await findQueuedInvocationStepIds(db, taskIds);
+  const adminPausedIds = await findAdminPausedTaskIds(
+    db,
+    rows.filter((r) => r.pausedAt).map((r) => r.id),
+  );
   const stepsByTask = new Map<string, (typeof stepRows)[number][]>();
   for (const s of stepRows) {
     const list = stepsByTask.get(s.taskId);
@@ -389,6 +394,7 @@ taskRoutes.get('/', async (c) => {
     return {
       ...t,
       typeLabel: typeLabels.get(t.type) ?? null,
+      pausedByAdmin: adminPausedIds.has(t.id),
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
@@ -1036,11 +1042,13 @@ taskRoutes.get('/:id', async (c) => {
   });
   const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
   const typeLabels = await loadTaskTypeLabels(db, [task.type]);
+  const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
   // The pinned prompt steps fed the step flags above; the page never reads them, so they stay off the poll.
   const { customSteps: _pinned, ...taskFields } = task;
   const taskWithActive = {
     ...taskFields,
     typeLabel: typeLabels.get(task.type) ?? null,
+    pausedByAdmin: adminPausedIds.has(id),
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,
     // Same derivation as the listing, over the rows already fetched above, so the header badge

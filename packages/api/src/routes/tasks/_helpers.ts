@@ -1087,6 +1087,29 @@ export async function appendTaskEvent(
   });
 }
 
+/** Ids among `taskIds` whose newest `task.paused` event is an administrator's (`byAdmin`). */
+export async function findAdminPausedTaskIds(
+  db: Pick<ReturnType<typeof getDb>, 'select'>,
+  taskIds: string[],
+): Promise<Set<string>> {
+  if (taskIds.length === 0) return new Set();
+  const events = await db
+    .select({ taskId: schema.taskEvents.taskId, payload: schema.taskEvents.payload })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        inArray(schema.taskEvents.taskId, taskIds),
+        eq(schema.taskEvents.eventType, 'task.paused'),
+      ),
+    )
+    .orderBy(desc(schema.taskEvents.createdAt));
+  const newest = new Map<string, boolean>();
+  for (const { taskId, payload } of events) {
+    if (!newest.has(taskId)) newest.set(taskId, payload?.byAdmin === true);
+  }
+  return new Set([...newest].filter(([, byAdmin]) => byAdmin).map(([taskId]) => taskId));
+}
+
 /** The model-health canary validates THE task's model, so swapping the CLI on a
  *  canary step (typically because the canary rejected the original model) is a
  *  task-level decision, not a per-step one: rewrite tasks.cli_provider_id so every

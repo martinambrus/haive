@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { taskBadgeKind, taskMenuKeys, taskStatusWord } from './task-state';
+import { pausedByLabel, taskBadgeKind, taskMenuKeys, taskStatusWord } from './task-state';
 
 const DEAD_AT = '2026-10-14T10:00:00.000Z';
 const PAUSED_AT = '2026-10-14T09:00:00.000Z';
@@ -123,5 +123,17 @@ describe('taskStatusWord', () => {
 
   it('keys on dead_at and never on a dead_reason that outlived it', () => {
     expect(taskStatusWord(COPY_ONLY)).toBe('running');
+  });
+});
+
+describe('pausedByLabel', () => {
+  it('says an administrator paused it when the api says so', () => {
+    expect(pausedByLabel({ pausedByAdmin: true })).toBe('Paused by an administrator');
+  });
+
+  it("keeps the owner's own pause as Paused by you", () => {
+    // NEGATIVE CONTROL: a version that always says an administrator fails these two.
+    expect(pausedByLabel({ pausedByAdmin: false })).toBe('Paused by you');
+    expect(pausedByLabel({})).toBe('Paused by you');
   });
 });
