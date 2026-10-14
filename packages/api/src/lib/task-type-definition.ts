@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -10,6 +10,7 @@ import {
   composableStepEntrySchema,
   derivePromptStepComposable,
   isCustomStepId,
+  moduleIdsOfTaskType,
   promptStepEntrySchema,
   promptStepId,
   resolveTaskTypeAvailability,
@@ -213,6 +214,21 @@ async function readCatalog(handle: Pick<Database, 'select'>) {
   };
 }
 
+// KEY SHARE holds the rows until the caller's commit against deactivate's FOR UPDATE, which then
+// counts the new task, while the boot's own non-key updates of the same rows still pass.
+async function deactivatedAmong(
+  handle: Pick<Database, 'select'>,
+  moduleIds: string[],
+): Promise<Set<string>> {
+  if (moduleIds.length === 0) return new Set();
+  const rows = await handle
+    .select({ moduleId: schema.modules.moduleId, deactivatedAt: schema.modules.deactivatedAt })
+    .from(schema.modules)
+    .where(inArray(schema.modules.moduleId, moduleIds))
+    .for('key share');
+  return new Set(rows.filter((row) => row.deactivatedAt !== null).map((row) => row.moduleId));
+}
+
 export async function definitionForCreate(
   handle: Pick<Database, 'select'>,
   slug: string,
@@ -233,6 +249,7 @@ export async function definitionForCreate(
     }
     return unseededBuiltin(slug);
   }
+  const deactivatedModules = await deactivatedAmong(handle, moduleIdsOfTaskType(def));
   const storedCatalog =
     def.runListStrategy === 'static' && def.stepIds !== null ? await readCatalog(handle) : null;
   const catalog = storedCatalog && mergePromptStepCatalog(storedCatalog, def);
@@ -246,6 +263,7 @@ export async function definitionForCreate(
         !def.source.startsWith('module:') ||
         (await configService.getBoolean(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, false)),
     },
+    deactivatedModules,
     catalog,
     generic: opts.generic,
   });
@@ -259,6 +277,12 @@ export async function definitionForCreate(
         throw new HttpError(403, 'Custom task types are disabled on this install');
       case 'module-types-off':
         throw new HttpError(403, 'Module task types are disabled on this install');
+      case 'module-deactivated':
+        throw new HttpError(
+          409,
+          `Task type ${slug} uses deactivated modules: ${availability.moduleIds?.join(', ')}`,
+          availability.reason,
+        );
       case 'missing-step':
         throw new HttpError(
           409,
@@ -271,6 +295,10 @@ export async function definitionForCreate(
           `Task type ${slug} has an invalid step composition: ${(availability.issues ?? []).map(describeIssue).join(', ')}`,
           availability.reason,
         );
+      default: {
+        const unhandled: never = availability.reason;
+        throw new HttpError(409, `Task type ${slug} is unavailable (${String(unhandled)})`);
+      }
     }
   }
   const custom = def.source === 'admin';

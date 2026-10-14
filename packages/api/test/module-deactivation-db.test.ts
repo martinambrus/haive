@@ -11,10 +11,12 @@ const h = vi.hoisted(() => ({
   role: 'admin',
   anonymous: false,
   stored: new Map<string, string>(),
+  flags: new Map<string, boolean>(),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
+vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/middleware/auth.js')>();
   return {
@@ -39,14 +41,17 @@ vi.mock('@haive/shared', async (importOriginal) => ({
       h.stored.set(key, value);
     },
     setIfAbsent: async () => undefined,
-    getBoolean: async (_key: string, fallback: boolean) => fallback,
+    getBoolean: async (key: string, fallback: boolean) => h.flags.get(key) ?? fallback,
   },
 }));
 
 import { Hono } from 'hono';
+import { CONFIG_KEYS } from '@haive/shared';
 import { moduleManifestSchema, type ComposableStepEntry } from '@haive/shared/modularity';
+import { definitionForCreate } from '../src/lib/task-type-definition.js';
 import { mountModules, moduleRoutes } from '../src/modules/loader.js';
-import { adminTaskTypeRoutes } from '../src/routes/task-types.js';
+import { taskRoutes } from '../src/routes/tasks/index.js';
+import { adminTaskTypeRoutes, taskTypeRoutes } from '../src/routes/task-types.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -99,6 +104,10 @@ const catalogRow = (
 let selects = 0;
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
+app.use(async (c, next) => {
+  c.set('maintenanceState', 'normal');
+  await next();
+});
 
 const send = (method: string, path: string, body?: unknown) =>
   app.request(path, {
@@ -183,11 +192,14 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     );
     app.route('/modules', moduleRoutes(loaded));
     app.route('/admin/task-types', adminTaskTypeRoutes);
+    app.route('/task-types', taskTypeRoutes);
+    app.route('/tasks', taskRoutes);
 
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, USER_EMAIL_INDEX));
     const [user] = await db
       .insert(schema.users)
       .values({
+        id: ACTOR,
         emailEncrypted: 'module-deactivation-api-test@test.local',
         emailBlindIndex: USER_EMAIL_INDEX,
         passwordHash: 'not-real',
@@ -211,6 +223,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     h.role = 'admin';
     h.anonymous = false;
     h.stored = new Map();
+    h.flags = new Map();
     selects = 0;
     await clean();
     for (const id of ['alpha', 'alpha-two', 'beta', 'gamma']) await setModule(id);
@@ -570,6 +583,191 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       });
       expect(raced).toBe('blocked');
       expect((await pending).status).toBe(200);
+    });
+  });
+
+  describe('a task type that uses a deactivated module', () => {
+    const insertType = (over: Partial<typeof schema.taskTypeDefinitions.$inferInsert> = {}) =>
+      db.insert(schema.taskTypeDefinitions).values({
+        slug: TYPE,
+        displayName: 'Uses alpha',
+        runListStrategy: 'static',
+        stepIds: ['md-core', 'module.alpha.x'],
+        source: 'admin',
+        requiresRepository: false,
+        ...over,
+      });
+    const postTask = () =>
+      send('POST', '/tasks', { type: TYPE, title: 'Uses alpha', description: 'do it' });
+    const typeTasks = () => db.select().from(schema.tasks).where(eq(schema.tasks.type, TYPE));
+    const json = async <T>(path: string) => JSON.parse((await read(path)).body) as T;
+    const published = async () =>
+      (
+        await json<{ taskTypes: { slug: string; available: boolean; reason?: string }[] }>(
+          '/task-types',
+        )
+      ).taskTypes.find((t) => t.slug === TYPE);
+    const detail = async () =>
+      (await json<{ availability: unknown }>(`/admin/task-types/${TYPE}`)).availability;
+    const listed = async () =>
+      (
+        await json<{ taskTypes: { slug: string; availability: unknown }[] }>('/admin/task-types')
+      ).taskTypes.find((t) => t.slug === TYPE)?.availability;
+    const settled = (pending: Promise<Response>) =>
+      Promise.race([
+        pending.then(() => 'done'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 400)),
+      ]);
+    const unavailable = { available: false, reason: 'module-deactivated', moduleIds: ['alpha'] };
+
+    beforeEach(async () => {
+      h.flags.set(CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED, true);
+      h.flags.set(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, true);
+      await db
+        .insert(schema.stepCatalog)
+        .values([
+          catalogRow('md-core', 'core', 'build'),
+          catalogRow('module.alpha.x', 'module:alpha', 'alpha-group'),
+          catalogRow('module.beta.z', 'module:beta', 'beta-group'),
+        ]);
+    });
+
+    it.each([
+      ['an admin type that names one of its steps', { stepIds: ['md-core', 'module.alpha.x'] }],
+      ['a type it seeded', { source: 'module:alpha', stepIds: ['md-core'] }],
+    ])(
+      'creates no task from %s while the module is deactivated, and says why',
+      async (_label, over) => {
+        await insertType(over);
+        expect((await postTask()).status).toBe(201);
+        await db.delete(schema.tasks).where(eq(schema.tasks.type, TYPE));
+
+        expect((await patchModule('alpha', false)).status).toBe(200);
+        const refused = await postTask();
+        expect(refused.status).toBe(409);
+        expect(await refused.json()).toEqual({
+          error: expect.stringContaining('alpha'),
+          code: 'module-deactivated',
+        });
+        expect(await typeTasks()).toHaveLength(0);
+
+        expect((await patchModule('alpha', true)).status).toBe(200);
+        expect((await postTask()).status).toBe(201);
+        expect(await typeTasks()).toHaveLength(1);
+      },
+    );
+
+    it('lists the type unavailable with the reason, and the module on the admin routes, until the module is back', async () => {
+      await insertType();
+      expect(await published()).toMatchObject({ available: true });
+      expect(await detail()).toEqual({ available: true });
+      expect(await listed()).toEqual({ available: true });
+
+      await patchModule('alpha', false);
+      expect(await published()).toMatchObject({ available: false, reason: 'module-deactivated' });
+      expect(await detail()).toEqual(unavailable);
+      expect(await listed()).toEqual(unavailable);
+
+      await patchModule('alpha', true);
+      expect(await published()).toMatchObject({ available: true });
+      expect((await published())?.reason).toBeUndefined();
+      expect(await detail()).toEqual({ available: true });
+      expect(await listed()).toEqual({ available: true });
+    });
+
+    it("leaves a type that uses only another module's steps available and creatable", async () => {
+      await insertType({ stepIds: ['md-core', 'module.beta.z'] });
+      await patchModule('alpha', false);
+      expect(await published()).toMatchObject({ available: true });
+      expect(await detail()).toEqual({ available: true });
+      expect((await postTask()).status).toBe(201);
+    });
+
+    it('still accepts a definition that names the module, on create and on edit', async () => {
+      await patchModule('alpha', false);
+      const create = await send('POST', '/admin/task-types', {
+        slug: TYPE,
+        displayName: 'Uses alpha',
+        stepIds: ['md-core', 'module.alpha.x'],
+        requiresRepository: false,
+      });
+      expect(create.status).toBe(201);
+      const edit = await send('PATCH', `/admin/task-types/${TYPE}`, {
+        displayName: 'Renamed',
+        stepIds: ['module.alpha.x'],
+      });
+      expect(edit.status).toBe(200);
+      expect(await detail()).toEqual(unavailable);
+    });
+
+    it('holds the module row until the create commits, so a deactivate that arrives meanwhile waits and then finds the new task', async () => {
+      await insertType();
+      let pending!: Promise<Response>;
+      let raced: string | undefined;
+      let madeId = '';
+      await db.transaction(async (tx) => {
+        const { runListSnapshot } = await definitionForCreate(tx, TYPE, { generic: true });
+        const [made] = await tx
+          .insert(schema.tasks)
+          .values({ userId, type: TYPE, title: 'Mid-create', status: 'created', runListSnapshot })
+          .returning();
+        madeId = made!.id;
+        pending = Promise.resolve(patchModule('alpha', false));
+        raced = await settled(pending);
+      });
+      expect(raced).toBe('blocked');
+      const res = await pending;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        code: 'module_tasks_open',
+        tasks: [{ id: madeId, title: 'Mid-create' }],
+      });
+      expect(await stampOf('alpha')).toBeNull();
+    });
+
+    it("lets the boot's own update of the module row through while a create holds it", async () => {
+      await insertType();
+      let raced: string | undefined;
+      await db.transaction(async (tx) => {
+        await definitionForCreate(tx, TYPE, { generic: true });
+        const update = db
+          .update(schema.modules)
+          .set({ missingAt: null })
+          .where(eq(schema.modules.moduleId, 'alpha'))
+          .then(() => 'done');
+        raced = await Promise.race([
+          update,
+          new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 400)),
+        ]);
+        await update;
+      });
+      expect(raced).toBe('done');
+    });
+
+    it('makes a create that arrives while a deactivate holds the module row wait, then refuse by name', async () => {
+      await insertType();
+      let pending!: Promise<Response>;
+      let raced: string | undefined;
+      await db.transaction(async (tx) => {
+        await tx
+          .select()
+          .from(schema.modules)
+          .where(eq(schema.modules.moduleId, 'alpha'))
+          .for('update');
+        await tx
+          .update(schema.modules)
+          .set({ deactivatedAt: new Date() })
+          .where(eq(schema.modules.moduleId, 'alpha'));
+        pending = Promise.resolve(postTask());
+        raced = await settled(pending);
+      });
+      expect(raced).toBe('blocked');
+      const res = await pending;
+      expect([res.status, ((await res.json()) as { code: string }).code]).toEqual([
+        409,
+        'module-deactivated',
+      ]);
+      expect(await typeTasks()).toHaveLength(0);
     });
   });
 });

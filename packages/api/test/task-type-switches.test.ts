@@ -50,13 +50,15 @@ const defRow = (slug: string, source: string) => ({
   stepLoopLimitDefaults: {},
 });
 
-const handle = (rows: unknown[]) =>
+const handle = (rows: unknown[], modules: unknown[] = []) =>
   ({
     select: () => ({
       from: (table: unknown) =>
         table === schema.stepCatalog
           ? Promise.resolve([])
-          : { where: () => ({ limit: () => ({ for: async () => rows }) }) },
+          : table === schema.modules
+            ? { where: () => ({ for: async () => modules }) }
+            : { where: () => ({ limit: () => ({ for: async () => rows }) }) },
     }),
   }) as unknown as Pick<Database, 'select'>;
 
@@ -108,6 +110,21 @@ describe('definitionForCreate and the task type switches', () => {
 
     h.flags = new Map([[CUSTOM_KEY, true]]);
     expect((await refusal(create('module:acme'))).status).toBe(403);
+  });
+
+  it('refuses a type that uses a deactivated module with a 409 naming it, and not an active one', async () => {
+    h.flags.set(MODULE_KEY, true);
+    const create = (modules: unknown[]) =>
+      definitionForCreate(handle([defRow('x-type', 'module:acme')], modules), 'x-type', {
+        generic: false,
+      });
+    const err = await refusal(create([{ moduleId: 'acme', deactivatedAt: new Date() }]));
+    expect([err.status, err.code]).toEqual([409, 'module-deactivated']);
+    expect(err.message).toContain('acme');
+
+    await expect(create([{ moduleId: 'acme', deactivatedAt: null }])).resolves.toMatchObject({
+      runListSnapshot: ['00-a'],
+    });
   });
 
   it('never touches a built-in, with a row or without', async () => {

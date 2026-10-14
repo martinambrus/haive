@@ -79,11 +79,13 @@ function availabilityOf(
   row: DefinitionRow,
   switches: Awaited<ReturnType<typeof readSwitches>>,
   catalog: Catalog,
+  deactivatedModules: ReadonlySet<string>,
 ) {
   const own = mergePromptStepCatalog(catalog, row);
   return resolveTaskTypeAvailability({
     definition: row,
     switches,
+    deactivatedModules,
     catalog: own.synced ? { stepIds: own.stepIds, composable: own.composable } : null,
     generic: true,
   });
@@ -135,7 +137,7 @@ adminTaskTypeRoutes.use('*', requireAdmin);
 
 adminTaskTypeRoutes.get('/', async (c) => {
   const db = getDb();
-  const [rows, counts, catalog, switches] = await Promise.all([
+  const [rows, counts, catalog, switches, deactivated] = await Promise.all([
     db
       .select()
       .from(schema.taskTypeDefinitions)
@@ -146,6 +148,7 @@ adminTaskTypeRoutes.get('/', async (c) => {
       .groupBy(schema.tasks.type),
     loadCatalog(db),
     readSwitches(),
+    deactivatedModuleIds(db),
   ]);
   const taskCounts = new Map(counts.map((r) => [r.type, r.count]));
   return c.json({
@@ -153,7 +156,7 @@ adminTaskTypeRoutes.get('/', async (c) => {
       ...row,
       builtin: row.source === 'builtin',
       editableFields: editableFieldsOf(row),
-      availability: availabilityOf(row, switches, catalog),
+      availability: availabilityOf(row, switches, catalog, deactivated),
       taskCount: taskCounts.get(row.slug) ?? 0,
     })),
   });
@@ -180,7 +183,11 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
   const db = getDb();
   const row = await findDefinition(db, c.req.param('slug'));
   if (!row) throw new HttpError(404, 'Task type not found');
-  const [catalog, switches] = await Promise.all([loadCatalog(db), readSwitches()]);
+  const [catalog, switches, deactivated] = await Promise.all([
+    loadCatalog(db),
+    readSwitches(),
+    deactivatedModuleIds(db),
+  ]);
   const compositionIssues =
     row.source === 'admin' && catalog.synced
       ? validateComposition(row.stepIds ?? [], mergePromptStepCatalog(catalog, row).composable, {
@@ -189,7 +196,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
       : [];
   return c.json({
     taskType: { ...row, editableFields: editableFieldsOf(row) },
-    availability: availabilityOf(row, switches, catalog),
+    availability: availabilityOf(row, switches, catalog, deactivated),
     compositionIssues,
   });
 });
@@ -382,7 +389,7 @@ taskTypeRoutes.use('*', requireAuth);
 
 taskTypeRoutes.get('/', async (c) => {
   const db = getDb();
-  const [rows, catalog, switches] = await Promise.all([
+  const [rows, catalog, switches, deactivated] = await Promise.all([
     db
       .select()
       .from(schema.taskTypeDefinitions)
@@ -395,10 +402,11 @@ taskTypeRoutes.get('/', async (c) => {
       .orderBy(asc(schema.taskTypeDefinitions.sortOrder), asc(schema.taskTypeDefinitions.slug)),
     loadCatalog(db),
     readSwitches(),
+    deactivatedModuleIds(db),
   ]);
   // Rows behind a switch that is off stay listed, unavailable with that reason, so the form can say why.
   const taskTypes = rows.map((row) => {
-    const availability = availabilityOf(row, switches, catalog);
+    const availability = availabilityOf(row, switches, catalog, deactivated);
     return publicTaskTypeSchema.parse({
       slug: row.slug,
       displayName: row.displayName,
