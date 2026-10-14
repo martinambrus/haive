@@ -1247,6 +1247,25 @@ describe('syncProjectStateFromCheckout: a repository with a live onboarding or u
     );
   });
 
+  it.each(['onboarding', 'onboarding_upgrade'])(
+    'does not defer for a dead %s task, whatever status it keeps',
+    async (type) => {
+      const s = await setup();
+      await s.putRecord(record(BASE));
+      s.fake.insert(schema.tasks, {
+        id: randomUUID(),
+        userId: USER,
+        repositoryId: REPO,
+        type,
+        status: 'running',
+        title: 't',
+        deadAt: new Date(),
+      });
+
+      expect((await s.run()).outcome).toBe('applied');
+    },
+  );
+
   it('writes nothing while deferred even when there is a change and a sync row to write it to', async () => {
     const s = await setup({ ...synced(BASE), sync: { base: baseOf(BASE), lastError: 'earlier' } });
     await s.putRecord(record(TEAM));

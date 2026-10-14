@@ -32,7 +32,7 @@ const app = new Hono<AppEnv>();
 app.route('/', repoRoutes);
 app.onError(errorHandler);
 
-function setup(repo: Record<string, unknown>, taskStatus?: string) {
+function setup(repo: Record<string, unknown>, taskStatus?: string, task = {}) {
   const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -48,6 +48,7 @@ function setup(repo: Record<string, unknown>, taskStatus?: string) {
       type: 'workflow',
       title: 't',
       status: taskStatus,
+      ...task,
     });
   }
   h.db = fake.db;
@@ -100,5 +101,13 @@ describe('refreshing a repository', () => {
 
     setup({ source: 'git_https', remoteUrl: 'https://example.com/r.git' }, 'created');
     expect((await refresh()).status).toBe(200);
+  });
+
+  it('does not count a dead task as holding the checkout', async () => {
+    setup({ source: 'git_https', remoteUrl: 'https://example.com/r.git' }, 'running', {
+      deadAt: new Date(),
+    });
+    expect((await refresh()).status).toBe(200);
+    expect(h.add.mock.calls[0]![0]).toBe(REPO_JOB_NAMES.REFRESH);
   });
 });
