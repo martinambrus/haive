@@ -71,46 +71,46 @@ export function PlanCardGrid({
         return (
           <div
             key={node.id}
-            role="button"
-            tabIndex={0}
-            onClick={() => onSelect(node)}
-            onDoubleClick={() => node.directChildren > 0 && onDescend(node)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') onSelect(node);
-              if (e.key === 'ArrowRight' && node.directChildren > 0) onDescend(node);
-            }}
-            className={`flex cursor-pointer flex-col gap-2 rounded-md border bg-neutral-950 px-4 py-3 text-left transition-colors ${
+            className={`relative flex flex-col gap-2 rounded-md border bg-neutral-950 px-4 py-3 text-left transition-colors ${
               selected
                 ? 'border-indigo-500 ring-1 ring-indigo-500/40'
                 : 'border-neutral-800 hover:border-neutral-700'
             }`}
           >
             <div className="flex items-start gap-2">
+              {/* Its ::after covers the card; the tick, Open and body links sit above it. */}
+              <button
+                type="button"
+                onClick={() => onSelect(node)}
+                onDoubleClick={() => node.directChildren > 0 && onDescend(node)}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowRight' && node.directChildren > 0) onDescend(node);
+                }}
+                className="order-1 flex flex-1 cursor-pointer items-start gap-2 text-left after:absolute after:inset-0 after:rounded-md focus-visible:outline-none focus-visible:after:outline-2 focus-visible:after:outline-indigo-400"
+              >
+                <span
+                  className={`relative z-10 shrink-0 rounded border px-1 py-0.5 font-mono text-[10px] tabular-nums ${sequenceChip(node.blockedBy.length)}`}
+                  title={`${sequenceLabel(node.sequence)} in build order`}
+                >
+                  {node.sequence}
+                </span>
+                <span
+                  className={`relative z-10 mt-1.5 h-2 w-2 shrink-0 rounded-full ${statusDot(node.rolledStatus)}`}
+                  title={statusLabel(node.rolledStatus)}
+                />
+                <span className="flex-1 text-sm font-medium text-neutral-100">{node.title}</span>
+              </button>
               {onPick && !humanPlanAction(node) && (
-                // Its own click target, stopping propagation: the card body
-                // selects, and a tick that also moved the detail panel would
-                // make building a set of five nodes scroll the panel five times.
+                // Not in the select button, or each tick would also select and scroll the panel.
                 <input
                   type="checkbox"
                   checked={picked?.has(node.id) ?? false}
                   aria-label={`Include "${node.title}" in one task`}
                   title="Include in one task"
-                  onClick={(e) => e.stopPropagation()}
                   onChange={(e) => onPick(node, e.target.checked)}
-                  className="mt-1 h-3.5 w-3.5 shrink-0 accent-indigo-500"
+                  className="relative z-10 mt-1 h-3.5 w-3.5 shrink-0 accent-indigo-500"
                 />
               )}
-              <span
-                className={`shrink-0 rounded border px-1 py-0.5 font-mono text-[10px] tabular-nums ${sequenceChip(node.blockedBy.length)}`}
-                title={`${sequenceLabel(node.sequence)} in build order`}
-              >
-                {node.sequence}
-              </span>
-              <span
-                className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${statusDot(node.rolledStatus)}`}
-                title={statusLabel(node.rolledStatus)}
-              />
-              <span className="flex-1 text-sm font-medium text-neutral-100">{node.title}</span>
             </div>
 
             {/* Named, not just counted: "waiting on 2 things" tells you to stop,
@@ -128,7 +128,7 @@ export function PlanCardGrid({
             )}
 
             {node.body && (
-              <div className="line-clamp-2 text-xs text-neutral-500">
+              <div className="line-clamp-2 text-xs text-neutral-500 [&_a]:relative [&_a]:z-10">
                 <InlineMarkdown body={node.body} />
               </div>
             )}
@@ -150,7 +150,7 @@ export function PlanCardGrid({
               {(unread?.[node.id] ?? 0) > 0 && (
                 <span
                   title={`${unread?.[node.id]} unread chat repl${unread?.[node.id] === 1 ? 'y' : 'ies'}`}
-                  className="rounded-full bg-indigo-500 px-1.5 text-[10px] font-medium text-white"
+                  className="relative z-10 rounded-full bg-indigo-500 px-1.5 text-[10px] font-medium text-white"
                 >
                   {unread?.[node.id]}
                 </span>
@@ -161,17 +161,14 @@ export function PlanCardGrid({
               {/* Both numbers, never just the total: "3" hides that those three
                   children carry 412 descendants, which is the one thing a
                   drill-down has to convey. */}
-              <span title="direct children / all descendants">
+              <span title="direct children / all descendants" className="relative z-10">
                 {countLabel(node.directChildren, node.totalDescendants)}
               </span>
               {node.directChildren > 0 && (
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDescend(node);
-                  }}
-                  className="text-indigo-300 underline"
+                  onClick={() => onDescend(node)}
+                  className="relative z-10 text-indigo-300 underline"
                 >
                   Open →
                 </button>
