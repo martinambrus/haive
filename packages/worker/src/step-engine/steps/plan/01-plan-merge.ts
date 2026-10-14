@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, inArray, ne, or } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { lockRepositoryTasksKey, schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   PLAN_MERGE_MESSAGE_EVENT,
@@ -24,6 +24,16 @@ import {
 import { HAIVE_OWN_FILES_LINE } from '../../git-merge.js';
 import { isSingleLine, REPO_IS_DATA_MERGE_LINES, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
+import {
+  MOVE_ATTEMPTS,
+  putBackProjections,
+  recoverAfterMoveFailure,
+  restoreKeptMetadata,
+  restoreProjectionsInTx,
+  resyncHaiveProjections,
+  setAsideHaiveProjections,
+  type KeptFiles,
+} from '../../../project-state/set-aside.js';
 import {
   commitMerge,
   conflictCount,
@@ -62,6 +72,7 @@ import {
 import { commitPlanSnapshotFiles } from '../../../plan/snapshot-git.js';
 import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
 import { pushBranch, gitRun } from '../../../repo/git-push.js';
+import { checkoutHoldingTasks } from '../../../repo/refresh.js';
 import { WORKTREE_SUBDIR } from '../../../repo/worktree-paths.js';
 
 /** Must match the directory `planMergeWorktreePath` builds. */
@@ -215,6 +226,9 @@ function conflictList(found: Pick<ConflictedPaths, 'paths' | 'undecodable'>): st
   const more = found.undecodable > 0 ? [`${found.undecodable} more whose names are not UTF-8`] : [];
   return [...found.paths, ...more].join(', ');
 }
+
+const otherTasksWorking = (n: number): string =>
+  `${n} other task${n === 1 ? ' is' : 's are'} working in this checkout; confirm again once ${n === 1 ? 'it finishes' : 'they finish'}`;
 
 /** A name that would open a line of its own stays off the prompt: the agent would read it as text. */
 function fitsPromptLine(path: string): boolean {
@@ -615,19 +629,85 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     const sha = await commitMerge(d.worktreePath, `Merge origin/${d.branch}`, identity);
     if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
     await seedPlanBaseFromCheckout(ctx.db, d.repositoryId, ctx.repoPath);
-    await landPlanMerge(ctx.repoPath, sha);
-    result.landed = true;
 
-    // The merge brought in the other side's plan.json; fold it into the database and
-    // rewrite both files from there, so what is pushed is the union rather than
-    // whichever side the text merge happened to keep.
-    await reconcilePlanFromCheckout(ctx.db, d.repositoryId, ctx.repoPath);
-    await flushPlanMirrorForRepository(ctx.db, d.repositoryId);
-    await commitPlanSnapshotFiles({
-      repoPath: ctx.repoPath,
-      message: 'docs: save project plan',
-      identity,
-    });
+    const repositoryId = d.repositoryId;
+    // Another task working in the checkout itself (no worktree of its own) has it moved under it.
+    const fence = (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
+      checkoutHoldingTasks(conn, repositoryId, { excludeTaskId: ctx.taskId, rootOnly: true });
+    const kept: KeptFiles = new Map();
+    const before = (await gitRun(ctx.repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+    let refusal: string | null = null;
+    try {
+      for (let attempt = 1; ; attempt++) {
+        const aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
+        if (aside.outcome === 'held') {
+          refusal = otherTasksWorking(aside.holding);
+          break;
+        }
+        if (aside.outcome === 'refused') {
+          refusal = aside.reason;
+          break;
+        }
+        if (aside.outcome === 'set-aside') {
+          for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
+        }
+        // A file found rewritten ends the transaction unmoved and goes back to the set-aside.
+        const moved = await ctx.db.transaction(async (tx) => {
+          await lockPlanMerge(tx, repositoryId);
+          // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
+          await lockRepositoryTasksKey(tx, repositoryId);
+          const found = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
+          if (found.outcome !== 'clean') return { found, holding: 0 };
+          const holding = await fence(tx);
+          if (holding === 0) await landPlanMerge(ctx.repoPath, sha);
+          return { found, holding };
+        });
+        if (moved.holding > 0) {
+          refusal = otherTasksWorking(moved.holding);
+          break;
+        }
+        if (moved.found.outcome === 'clean') break;
+        if (moved.found.outcome === 'refused') {
+          refusal = moved.found.reason;
+          break;
+        }
+        if (attempt === MOVE_ATTEMPTS) {
+          refusal = "Haive's project files kept changing under the move";
+          break;
+        }
+      }
+      if (refusal === null) {
+        result.landed = true;
+
+        // The merge brought in the other side's plan.json; fold it into the database and
+        // rewrite both files from there, so what is pushed is the union rather than
+        // whichever side the text merge happened to keep.
+        await reconcilePlanFromCheckout(ctx.db, d.repositoryId, ctx.repoPath);
+        await flushPlanMirrorForRepository(ctx.db, d.repositoryId);
+        await commitPlanSnapshotFiles({
+          repoPath: ctx.repoPath,
+          message: 'docs: save project plan',
+          identity,
+        });
+        await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+        await restoreKeptMetadata(ctx.repoPath, kept);
+      }
+    } catch (err) {
+      return recoverAfterMoveFailure(ctx.db, repositoryId, ctx.repoPath, kept, before, err);
+    }
+    if (refusal !== null) {
+      await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
+      await recordMessage(
+        ctx.db,
+        ctx.taskId,
+        ctx.taskStepId,
+        'assistant',
+        `Cannot merge that in — ${refusal}. Your checkout has not moved.`,
+      );
+      result.summary = `Refused: ${refusal}.`;
+      result.continueRequested = true;
+      return result;
+    }
 
     const repo = await ctx.db.query.repositories.findFirst({
       where: eq(schema.repositories.id, d.repositoryId),

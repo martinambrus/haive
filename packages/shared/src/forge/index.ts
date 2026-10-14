@@ -7,3 +7,4 @@ export * from './bitbucket-cloud.js';
 export * from './bitbucket-server.js';
 export * from './registry.js';
 export * from './provider-specs.js';
+export * from './known-hosts.js';

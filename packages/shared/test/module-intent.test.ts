@@ -71,6 +71,7 @@ describe('diffModuleIntent', () => {
       missingAt: null,
       deactivatedAt: null,
       tornDownAt: null,
+      skippedSeeds: [],
     });
     expect(result.rows[0]!.missingAt).toBe(GONE.toISOString());
   });
@@ -186,5 +187,101 @@ describe('diffModuleIntent', () => {
     const result = diffModuleIntent([], [api('m')], worker);
     expect(result.workerAt).toBeNull();
     expect(stateOf(result, 'm')).toBe('unrecorded');
+  });
+});
+
+describe('diffModuleIntent skipped task type seeds', () => {
+  const reportWith = (taskTypes: unknown, id = 'm') => ({
+    at: '2026-10-13T10:00:00.000Z',
+    modules: [{ id, version: '1.0.0', taskTypes }],
+  });
+  const skippedOf = (worker: unknown, id = 'm') =>
+    diffModuleIntent([intent(id)], [api(id)], worker).rows.find((r) => r.id === id)!.skippedSeeds;
+
+  it('carries a slug another row holds, with the source that holds it', () => {
+    const worker = reportWith({
+      seeded: ['m__daily'],
+      conflicts: [{ slug: 'm__weekly', heldBy: 'admin' }],
+    });
+    expect(skippedOf(worker)).toEqual([{ slug: 'm__weekly', reason: 'conflict', heldBy: 'admin' }]);
+  });
+
+  it('carries a seed that failed the checks with the kind of each problem, once each', () => {
+    const worker = reportWith({
+      seeded: [],
+      conflicts: [],
+      invalid: [
+        {
+          slug: 'm__weekly',
+          issues: [
+            { kind: 'unmet-need', index: 0, stepId: 'module.m.x', needs: 'repository', reason: '' },
+            { kind: 'unknown-step', index: 1, stepId: 'gone' },
+            { kind: 'unmet-need', index: 2, stepId: 'module.m.y', needs: 'repository', reason: '' },
+          ],
+        },
+      ],
+    });
+    expect(skippedOf(worker)).toEqual([
+      { slug: 'm__weekly', reason: 'invalid', issues: ['unmet-need', 'unknown-step'] },
+    ]);
+  });
+
+  it('lists conflicts before invalid seeds, each in report order', () => {
+    const worker = reportWith({
+      seeded: [],
+      conflicts: [
+        { slug: 'm__b', heldBy: 'admin' },
+        { slug: 'm__a', heldBy: 'builtin' },
+      ],
+      invalid: [{ slug: 'm__c', issues: [{ kind: 'empty' }] }],
+    });
+    expect(skippedOf(worker).map((s) => s.slug)).toEqual(['m__b', 'm__a', 'm__c']);
+  });
+
+  it('reads each module its own entry and leaves the others with none', () => {
+    const worker = {
+      at: '2026-10-13T10:00:00.000Z',
+      modules: [
+        {
+          id: 'a',
+          version: '1.0.0',
+          taskTypes: { conflicts: [{ slug: 'a__x', heldBy: 'admin' }] },
+        },
+        { id: 'b', version: '1.0.0', taskTypes: { seeded: ['b__x'], conflicts: [] } },
+      ],
+    };
+    const result = diffModuleIntent([intent('a'), intent('b'), intent('c')], [], worker);
+    expect(result.rows.map((r) => [r.id, r.skippedSeeds.length])).toEqual([
+      ['a', 1],
+      ['b', 0],
+      ['c', 0],
+    ]);
+  });
+
+  it('gives none for a module the worker did not report, or a report with no seed outcome', () => {
+    expect(skippedOf(report())).toEqual([]);
+    expect(skippedOf(null)).toEqual([]);
+    expect(skippedOf(report(api('m')))).toEqual([]);
+  });
+
+  it.each([
+    ['no outcome', undefined],
+    ['a string outcome', 'junk'],
+    ['lists that are not lists', { conflicts: 3, invalid: 'x' }],
+    ['entries that are not objects', { conflicts: [null, 7, 'x'], invalid: [null, 7] }],
+    ['entries missing their fields', { conflicts: [{ slug: 'm__a' }, { heldBy: 'admin' }] }],
+    ['an invalid entry with no slug', { invalid: [{ issues: [{ kind: 'empty' }] }] }],
+  ])('skips what it cannot read in %s without dropping the report', (_label, taskTypes) => {
+    const result = diffModuleIntent([intent('m')], [api('m')], reportWith(taskTypes));
+    expect(result.workerAt).toBe('2026-10-13T10:00:00.000Z');
+    expect(result.rows[0]).toMatchObject({ state: 'loaded', skippedSeeds: [] });
+  });
+
+  it('keeps an invalid seed whose problems it cannot name, with no kinds', () => {
+    const worker = reportWith({ invalid: [{ slug: 'm__a', issues: 'x' }, { slug: 'm__b' }] });
+    expect(skippedOf(worker)).toEqual([
+      { slug: 'm__a', reason: 'invalid', issues: [] },
+      { slug: 'm__b', reason: 'invalid', issues: [] },
+    ]);
   });
 });

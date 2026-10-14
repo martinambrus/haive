@@ -1,23 +1,13 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { forgeProviderSchema, type ForgeProviderName } from '@haive/shared';
+import type { ForgeProviderName } from '@haive/shared';
 import { getDecryptedCredentials } from '../repo/credentials.js';
-import { ForgeError, resolveForgeProvider, type ForgeContext } from '@haive/shared/forge';
-
-/** Public hosts whose forge software is unambiguous, so an unset credential provider can
- *  be inferred. A self-hosted host can't be inferred (a hostname can't reveal the forge),
- *  so it still requires an explicit provider on the credential. */
-const KNOWN_HOST_PROVIDERS: Record<string, ForgeProviderName> = {
-  'github.com': 'github',
-  'gitlab.com': 'gitlab',
-  'codeberg.org': 'gitea',
-  'bitbucket.org': 'bitbucket_cloud',
-};
-
-/** The forge a well-known public host runs, or null for a self-hosted / unknown host. */
-export function inferForgeProviderFromHost(host: string): ForgeProviderName | null {
-  return KNOWN_HOST_PROVIDERS[host.trim().toLowerCase()] ?? null;
-}
+import {
+  ForgeError,
+  credentialForgeProvider,
+  resolveForgeProvider,
+  type ForgeContext,
+} from '@haive/shared/forge';
 
 /** Host portion of a git remote (https, ssh:// or scp-style), provider-independent —
  *  used to infer the forge for a well-known public host before the provider is known. */
@@ -31,17 +21,6 @@ export function hostFromRemote(remoteUrl: string): string {
     }
   }
   return trimmed.match(/^(?:[^@]+@)?([^:/]+):/)?.[1] ?? '';
-}
-
-/** The forge a credential can open PRs against: its explicit provider when set, else the
- *  forge inferred from `host` (pass the credential's own host, or a repo's origin host).
- *  null when neither resolves — a self-hosted host with no explicit provider. */
-export function credentialForgeProvider(
-  provider: string | null | undefined,
-  host: string,
-): ForgeProviderName | null {
-  const explicit = forgeProviderSchema.safeParse(provider);
-  return explicit.success ? explicit.data : inferForgeProviderFromHost(host);
 }
 
 /** Parse a git remote URL (https, ssh:// or scp-style git@host:owner/repo) into

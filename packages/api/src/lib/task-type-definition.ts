@@ -8,17 +8,14 @@ import {
 } from '@haive/shared';
 import {
   composableStepEntrySchema,
-  derivePromptStepComposable,
-  isCustomStepId,
+  mergePromptStepCatalog,
   moduleIdsOfTaskType,
-  promptStepEntrySchema,
+  parsePromptSteps,
   promptStepId,
   resolveTaskTypeAvailability,
-  validatePromptStep,
   type ComposableStepEntry,
   type CompositionIssue,
   type PromptStepEntry,
-  type PromptStepProblemKind,
   type TaskTypeModuleRef,
   type TaskTypeModuleState,
 } from '@haive/shared/modularity';
@@ -55,108 +52,6 @@ const SAVED_DATABASE_BUILTINS = ['workflow', 'run_app'];
 /** Whether a task of this type may be created from a saved database. */
 export function acceptsSavedDatabase(slug: string, restores: boolean): boolean {
   return SAVED_DATABASE_BUILTINS.includes(slug) || restores;
-}
-
-/** Stored prompt steps by slug; an entry that no longer parses is left out, so its id reads as a missing step. */
-export function parsePromptSteps(raw: unknown): Record<string, PromptStepEntry> {
-  const out: Record<string, PromptStepEntry> = {};
-  if (typeof raw !== 'object' || raw === null) return out;
-  for (const [slug, value] of Object.entries(raw)) {
-    const parsed = promptStepEntrySchema.safeParse(value);
-    if (parsed.success) out[slug] = parsed.data;
-  }
-  return out;
-}
-
-interface CatalogSets {
-  stepIds: Set<string>;
-  dispatchesCli: Set<string>;
-  composable: Map<string, ComposableStepEntry>;
-}
-
-/** The catalog as one type sees it: the worker's steps plus that type's own prompt steps. */
-export function mergePromptStepCatalog<C extends CatalogSets>(
-  catalog: C,
-  def: { slug: string; source: string; requiresRepository: boolean; promptSteps: unknown },
-): C {
-  if (def.source !== 'admin') return catalog;
-  const entries = Object.values(parsePromptSteps(def.promptSteps));
-  if (entries.length === 0) return catalog;
-  const merged = {
-    ...catalog,
-    stepIds: new Set(catalog.stepIds),
-    dispatchesCli: new Set(catalog.dispatchesCli),
-    composable: new Map(catalog.composable),
-  };
-  for (const entry of entries) {
-    const composable = derivePromptStepComposable(entry, def.slug, def.requiresRepository);
-    merged.stepIds.add(composable.stepId);
-    merged.dispatchesCli.add(composable.stepId);
-    merged.composable.set(composable.stepId, composable);
-  }
-  return merged;
-}
-
-export type PromptStepIssueKind =
-  PromptStepProblemKind | 'prompt-step-missing' | 'prompt-step-orphan';
-
-export interface PromptStepIssue {
-  kind: PromptStepIssueKind;
-  stepId: string;
-  index?: number;
-  message: string;
-  raw?: string;
-  start?: number;
-}
-
-/** Every custom id in the step list has an entry of this type, every entry is used, and each validates where it stands. */
-export function checkPromptSteps(
-  def: { slug: string; stepIds: readonly string[]; requiresRepository: boolean },
-  promptSteps: Record<string, PromptStepEntry>,
-  catalog: { composable: ReadonlyMap<string, ComposableStepEntry> },
-): PromptStepIssue[] {
-  const issues: PromptStepIssue[] = [];
-  const byId = new Map(
-    Object.values(promptSteps).map((entry) => [promptStepId(def.slug, entry.slug), entry]),
-  );
-  const quotableStepIds = new Set([
-    ...[...catalog.composable.values()]
-      .filter((entry) => entry.agentAuthoredOutput === true)
-      .map((entry) => entry.stepId),
-    ...byId.keys(),
-  ]);
-  def.stepIds.forEach((stepId, index) => {
-    if (!isCustomStepId(stepId)) return;
-    const entry = byId.get(stepId);
-    if (!entry) {
-      issues.push({
-        kind: 'prompt-step-missing',
-        stepId,
-        index,
-        message: `${stepId} has no prompt step on this task type.`,
-      });
-      return;
-    }
-    const problems = validatePromptStep(entry, {
-      typeSlug: def.slug,
-      requiresRepository: def.requiresRepository,
-      stepIdsBefore: def.stepIds.slice(0, index),
-      quotableStepIds,
-    });
-    for (const { kind, message, raw, start } of problems) {
-      issues.push({ kind, stepId, index, message, raw, start });
-    }
-  });
-  for (const stepId of byId.keys()) {
-    if (!def.stepIds.includes(stepId)) {
-      issues.push({
-        kind: 'prompt-step-orphan',
-        stepId,
-        message: `${stepId} is not in the step list.`,
-      });
-    }
-  }
-  return issues;
 }
 
 export interface TaskTypeDefinitionForCreate {

@@ -112,6 +112,18 @@ export async function requestedScopes(
   return [...new Set(scopes)];
 }
 
+export function writeAccessOf(spec: IntegrationProviderSpec) {
+  const writeScopes: Partial<Record<'oauth2' | 'device', string[]>> = {};
+  for (const auth of spec.auth) {
+    if (auth.kind !== 'token') writeScopes[auth.kind] = auth.scopes.write;
+  }
+  // An MCP surface lists its tools at run time and the spec gives them no access level.
+  const canWrite =
+    spec.mcp !== undefined ||
+    (spec.operations ?? []).some((operation) => operation.access === 'write');
+  return { canWrite, writeScopes };
+}
+
 export const isForgeProvider = (spec: IntegrationProviderSpec) => spec.categories.includes('forge');
 
 type SignInMethod = Extract<AuthMethodSpec, { kind: 'oauth2' | 'device' }>;
@@ -119,11 +131,6 @@ type SignInMethod = Extract<AuthMethodSpec, { kind: 'oauth2' | 'device' }>;
 /** The host a sign-in method's own endpoints live on; for a hosted forge that is the Git host. */
 export const endpointHost = (method: SignInMethod) =>
   new URL(method.kind === 'device' ? method.deviceCodeUrl : method.authorizeUrl).host;
-
-export function forgeHostOf(spec: IntegrationProviderSpec): string | null {
-  const method = spec.auth.find((auth): auth is SignInMethod => auth.kind !== 'token');
-  return method ? endpointHost(method) : null;
-}
 
 /** The provider's RFC 7009 endpoint, declared on its web method; it revokes a token whichever grant issued it. */
 export function revokeUrlOf(spec: IntegrationProviderSpec): string | undefined {

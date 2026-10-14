@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 
 const calls: string[] = [];
@@ -38,14 +38,18 @@ vi.mock('../src/modules/loader.js', () => ({
 }));
 
 describe('bootStepEngine module intent', () => {
+  beforeAll(async () => {
+    await import('../src/step-engine/boot.js');
+  }, 120_000);
+
   beforeEach(() => {
     calls.length = 0;
   });
 
-  it('records module intent after the schemas are ensured and before the boot report', async () => {
+  it('records module intent after the schemas are ensured and before the task types are seeded', async () => {
     const { bootStepEngine } = await import('../src/step-engine/boot.js');
     await bootStepEngine({} as Database);
-    expect(calls).toEqual(['catalog', 'taskTypes', 'schemas', 'intent', 'report']);
+    expect(calls).toEqual(['catalog', 'schemas', 'intent', 'taskTypes', 'report']);
   });
 
   it('seeds task types from the loaded modules and reports what they seeded', async () => {
