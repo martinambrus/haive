@@ -344,6 +344,11 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       throw new Error(`${JSON.stringify(base)} is not a branch name git accepts`);
     }
 
+    // A claim this step left when its release failed would hold every other task out of the checkout.
+    if (await taskRepositoryId(ctx)) {
+      await releaseMergeDir(ctx.db, { mergeDir: ctx.repoPath, stepId: ctx.taskStepId });
+    }
+
     if (!d.hasOrigin) {
       return { synced: false, base, strategy: 'skipped', behindBy: 0, reason: 'no origin remote' };
     }

@@ -360,6 +360,23 @@ describe('00a-sync-base detect + apply (real git)', () => {
     }
   });
 
+  it('a claim the step left behind is released even when the base needs no move', async () => {
+    const { bare } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    try {
+      claimFake.claims.set(local, { taskId: 't1', stepId: 'step1', title: '' });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ strategy: 'noop' });
+      expect(claimFake.claims.has(local)).toBe(false);
+    } finally {
+      claimFake.reset();
+      await rm(bare, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
   it('a projection file Haive did not write refuses the fast-forward, naming the file', async () => {
     const { bare, seed } = await seedOrigin();
     const local = await cloneLocal(bare);

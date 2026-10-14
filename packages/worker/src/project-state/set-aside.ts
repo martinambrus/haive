@@ -241,11 +241,18 @@ async function stagedIsHaives(
   return bytes !== null && haives(bytes);
 }
 
+// plan.md repeats a target's title (and an edge's note) once per edge, so it can outgrow the plan.json it renders.
+const PLAN_MD_MAX_BYTES = 8 * PLAN_JSON_MAX_BYTES;
+
+/** The most bytes the set-aside reads of a projection it may have to hold. */
+function projectionCap(rel: string): number {
+  if (rel.startsWith(STATE_PREFIX)) return PROJECT_STATE_LIMITS.maxFileBytes;
+  return rel === HAIVE_DATA_FILES.planMarkdown ? PLAN_MD_MAX_BYTES : PLAN_JSON_MAX_BYTES;
+}
+
 /** The working-tree bytes, the index blob and any mode change of `rel` as one string, to tell later whether any moved. */
 async function fingerprint(repoPath: string, rel: string): Promise<string> {
-  const maxBytes = rel.startsWith(STATE_PREFIX)
-    ? PROJECT_STATE_LIMITS.maxFileBytes
-    : PLAN_JSON_MAX_BYTES;
+  const maxBytes = projectionCap(rel);
   let work = 'unreadable';
   try {
     const read = await readFileNoFollow(repoPath, rel, { maxBytes, strict: true });
@@ -461,9 +468,7 @@ async function restoreJudged(
 
 /** The judged bytes of a path about to be restored: null when absent, undefined when they cannot be held. */
 async function keptBytes(repoPath: string, rel: string): Promise<Buffer | null | undefined> {
-  const maxBytes = rel.startsWith(STATE_PREFIX)
-    ? PROJECT_STATE_LIMITS.maxFileBytes
-    : PLAN_JSON_MAX_BYTES;
+  const maxBytes = projectionCap(rel);
   try {
     const read = await readFileNoFollow(repoPath, rel, { maxBytes, strict: true });
     if (read === null) return null;

@@ -2034,6 +2034,30 @@ async function main(): Promise<void> {
         { outcome: asideM6.outcome, m6Back, m6Mode: m6Mode.toString(8) },
       );
 
+      // M7. A generated plan.md larger than plan.json's cap is still held and put back whole.
+      const m7 = await cloned();
+      const m7Id = m7.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: m7Id, origin: 'user' },
+      );
+      await writePlanMirror(db, m7Id, m7.dest);
+      const m7Md = path.join(m7.dest, HAIVE_DATA_FILES.planMarkdown);
+      const m7Big = Buffer.alloc(17 * 1024 * 1024, 'x');
+      await writeFile(m7Md, m7Big);
+      const asideM7 = await setAsideHaiveProjections(db, m7Id, m7.dest);
+      const m7Gone = (await stat(m7Md).catch(() => null)) === null;
+      if (asideM7.outcome === 'set-aside') {
+        await putBackProjections(db, m7Id, m7.dest, asideM7.kept);
+      }
+      const m7Back = (await readFile(m7Md).catch(() => null))?.equals(m7Big) === true;
+      check(
+        'M7: a plan.md over 16 MiB is set aside and put back whole',
+        asideM7.outcome === 'set-aside' && m7Gone && m7Back,
+        { outcome: asideM7.outcome, m7Gone, m7Back },
+      );
+
       // P2. A lone plan.md in a repository whose database holds no plan is not Haive's: refused and kept.
       const p2 = await cloned();
       const p2Md = path.join(p2.dest, HAIVE_DATA_FILES.planMarkdown);
