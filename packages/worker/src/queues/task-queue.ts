@@ -108,6 +108,9 @@ import {
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import {
   buildRunList,
+  parseCustomSteps,
+  requireTaskStep,
+  resolveTaskStep,
   resolveFixLoopTarget,
   taskTypeRuntimeFor,
   type ResolvedTaskContext,
@@ -254,6 +257,7 @@ async function resolveTaskContext(
     completedAt: task.completedAt ?? null,
     ...(await taskTypeRuntimeFor(db, task.type)),
     runListSnapshot: task.runListSnapshot ?? null,
+    customSteps: parseCustomSteps(task.customSteps),
     deadAt: task.deadAt ?? null,
   };
 }
@@ -1604,7 +1608,7 @@ export async function handleResult(
   stepId: string,
   result: AdvanceStepResult,
 ): Promise<void> {
-  const stepDef = stepRegistry.require(stepId);
+  const stepDef = requireTaskStep(ctx, stepId);
   // The pass ran under the epoch its job was picked up at. A Retry, a reset or a cancel that moved
   // the task on while it ran owns the task now, so this result hands nothing off.
   if (result.status !== 'superseded' && (await taskEpochMoved(db, ctx))) {
@@ -1958,7 +1962,7 @@ export async function handleResult(
       // (e.g. gate-1 reject → re-plan 04, 03c reject → re-mine 03b). No cap, because the
       // loop is human-gated (the review form re-parks every cycle). The target reads its
       // revise feedback from task_events, which survives across rounds.
-      const target = stepRegistry.get(result.targetStepId);
+      const target = resolveTaskStep(ctx, result.targetStepId);
       if (!target) {
         await markTaskDeadOnStep(db, ctx, result.row.id, result.row.round, stepId, [
           result.targetStepId,
@@ -2365,7 +2369,7 @@ async function handleAdvanceStep(
     return;
   }
 
-  const stepDef = stepRegistry.get(payload.stepId);
+  const stepDef = resolveTaskStep(ctx, payload.stepId);
   if (!stepDef) {
     // Only the step the task stands on can kill it; any other job, answered ones included, is stale.
     if (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) {

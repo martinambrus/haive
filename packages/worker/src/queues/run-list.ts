@@ -1,9 +1,11 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { ExecutionPath, WorkflowType } from '@haive/shared';
+import { parseStepId, promptStepEntrySchema, type PromptStepEntry } from '@haive/shared/modularity';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
 import { stepRegistry, UnresolvedStepError, type StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
+import { buildPromptStep } from '../step-engine/steps/custom/prompt-step.js';
 import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
 import { builtinTaskTypeRows } from '../step-engine/task-type-seed.js';
@@ -38,15 +40,73 @@ export interface ResolvedTaskContext {
   completedAt: Date | null;
   runListStrategy: 'static' | 'workflow_paths' | 'run_app_modes';
   runListSnapshot: string[] | null;
+  /** The prompt steps this task pinned at create, by step id (tasks.custom_steps, invalid entries dropped). */
+  customSteps?: Record<string, PromptStepEntry>;
   fixLoop?: FixLoopDef | null;
   /** When the task was marked dead (see markTaskDead); null on a live task. */
   deadAt?: Date | null;
 }
 
+/** The prompt steps a task pinned, by step id. An entry that does not parse, or whose slug is not the
+ *  one its key names, is left out, so its id reads as a step that does not resolve. */
+export function parseCustomSteps(raw: unknown): Record<string, PromptStepEntry> {
+  const out: Record<string, PromptStepEntry> = {};
+  if (typeof raw !== 'object' || raw === null) return out;
+  for (const [id, value] of Object.entries(raw)) {
+    const parsedId = parseStepId(id);
+    const parsed = promptStepEntrySchema.safeParse(value);
+    if (parsedId?.kind === 'custom' && parsed.success && parsed.data.slug === parsedId.stepSlug) {
+      out[id] = parsed.data;
+    }
+  }
+  return out;
+}
+
+const SYNTHESISED_STEP_LIMIT = 256;
+const synthesisedSteps = new Map<string, StepDefinition>();
+
+type TaskStepScope = Partial<
+  Pick<ResolvedTaskContext, 'taskId' | 'customSteps' | 'runListSnapshot'>
+>;
+
+/** The step a task runs under an id. A core or module id comes from the registry; a `custom.*` id is
+ *  built from the entry this task pinned, so no registry holds it and an edit never reaches a task. */
+export function resolveTaskStep(
+  ctx: TaskStepScope,
+  stepId: string,
+  registry: Pick<StepRegistry, 'get'> = stepRegistry,
+): StepDefinition | undefined {
+  if (parseStepId(stepId)?.kind !== 'custom') return registry.get(stepId);
+  const entry = ctx.customSteps?.[stepId];
+  if (!entry) return undefined;
+  const key = ctx.taskId === undefined ? null : `${ctx.taskId}|${stepId}`;
+  const known = key === null ? undefined : synthesisedSteps.get(key);
+  if (known) return known;
+  const position = ctx.runListSnapshot?.indexOf(stepId) ?? -1;
+  const def = buildPromptStep(stepId, entry, Math.max(position, 0));
+  if (key !== null) {
+    if (synthesisedSteps.size >= SYNTHESISED_STEP_LIMIT) {
+      synthesisedSteps.delete(synthesisedSteps.keys().next().value!);
+    }
+    synthesisedSteps.set(key, def);
+  }
+  return def;
+}
+
+export function requireTaskStep(
+  ctx: TaskStepScope,
+  stepId: string,
+  registry: Pick<StepRegistry, 'get'> = stepRegistry,
+): StepDefinition {
+  const def = resolveTaskStep(ctx, stepId, registry);
+  if (!def) throw new UnresolvedStepError([stepId]);
+  return def;
+}
+
 /** A static task's run list, split into the steps that resolve and the ids that do not. A task
  *  created before run-list snapshots existed has none and keeps the live list. */
 export function resolveRunList(
-  ctx: Pick<ResolvedTaskContext, 'workflowType' | 'runListSnapshot'>,
+  ctx: Pick<ResolvedTaskContext, 'workflowType' | 'runListSnapshot'> & TaskStepScope,
   registry: Pick<StepRegistry, 'get' | 'listByWorkflow'> = stepRegistry,
 ): { steps: StepDefinition[]; unresolved: string[] } {
   if (!ctx.runListSnapshot) {
@@ -55,7 +115,7 @@ export function resolveRunList(
   const steps: StepDefinition[] = [];
   const unresolved: string[] = [];
   for (const id of ctx.runListSnapshot) {
-    const def = registry.get(id);
+    const def = resolveTaskStep(ctx, id, registry);
     if (def) steps.push(def);
     else unresolved.push(id);
   }

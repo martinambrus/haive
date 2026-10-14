@@ -45,6 +45,7 @@ import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
+import { promptStepNamedText } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
 import { closeAppRunnerExtraTabs, restoreAppRunnerBrowserWindow } from '../sandbox/app-runner.js';
@@ -834,7 +835,13 @@ async function resolveLlmPhase(
     toolProfile: llmSpec.toolProfile,
     agentPool: llmSpec.agentPool,
     skipAgentRules: llmSpec.skipAgentRules,
-    houseRules: houseRulesFor(stepDef.metadata.id, role),
+    houseRules: houseRulesFor(
+      stepDef.metadata.id,
+      role,
+      undefined,
+      llmSpec.requiredCapabilities,
+      promptStepNamedText(stepDef, detected, formValues ?? {}),
+    ),
     invokeOpts: {
       cwd: params.workspacePath,
       effortLevel: preferredEffort ?? undefined,
@@ -1081,6 +1088,9 @@ async function resolveAiFixPhase(
     houseRules: houseRulesFor(
       stepDef.metadata.id,
       stepDef.loop?.resolveRole?.(stepIterationsAsRecords(current).length) ?? 'default',
+      undefined,
+      stepDef.llm?.requiredCapabilities,
+      promptStepNamedText(stepDef, current.detectOutput, (current.formValues ?? {}) as FormValues),
     ),
     invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });

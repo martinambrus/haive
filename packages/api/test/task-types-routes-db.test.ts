@@ -67,7 +67,7 @@ const catalogRow = (
 });
 
 const CATALOG = [
-  catalogRow('ta-a', true, entry('ta-a', { provides: ['x'] })),
+  catalogRow('ta-a', true, entry('ta-a', { provides: ['x'], agentAuthoredOutput: true })),
   catalogRow(
     'ta-b',
     true,
@@ -757,7 +757,8 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         ...over,
       });
     const issues = async (res: Response) =>
-      ((await res.json()) as { issues: { kind: string; stepId?: string }[] }).issues;
+      ((await res.json()) as { issues: { kind: string; stepId?: string; message: string }[] })
+        .issues;
 
     it('stores a valid prompt step with its type and reads the type as available', async () => {
       const res = await send('POST', '/admin/task-types', withStep());
@@ -804,6 +805,45 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       );
       expect(late.status).toBe(400);
       expect((await issues(late)).map((i) => i.kind)).toContain('step-token-not-earlier');
+    });
+
+    it('lets a step quote a flagged or same-type earlier step and refuses any other', async () => {
+      const second = step('second', { template: 'Use\n{{step:custom.tt-ps.review}}\n' });
+      const same = await send(
+        'POST',
+        '/admin/task-types',
+        withStep({
+          stepIds: ['ta-a', CUSTOM_ID, 'custom.tt-ps.second'],
+          promptSteps: { review: step('review'), second },
+        }),
+      );
+      expect(same.status).toBe(201);
+      const refused = await send(
+        'POST',
+        '/admin/task-types',
+        withStep({
+          slug: 'tt-ps3',
+          stepIds: ['ta-a', 'ta-b', CUSTOM_ID.replace('tt-ps', 'tt-ps3')],
+          promptSteps: { review: step('review', { template: 'Use\n{{step:ta-b}}\n' }) },
+        }),
+      );
+      expect(refused.status).toBe(400);
+      const found = await issues(refused);
+      expect(found.map((i) => i.kind)).toEqual(['step-token-not-quotable']);
+      expect(found[0]!.message).toContain('ta-b');
+    });
+
+    it('applies the same rule to a PATCH', async () => {
+      await send('POST', '/admin/task-types', withStep());
+      const patch = (stepId: string) =>
+        send('PATCH', '/admin/task-types/tt-ps', {
+          stepIds: ['ta-a', 'ta-b', CUSTOM_ID],
+          promptSteps: { review: step('review', { template: `Use\n{{step:${stepId}}}\n` }) },
+        });
+      const refused = await patch('ta-b');
+      expect(refused.status).toBe(400);
+      expect((await issues(refused)).map((i) => i.kind)).toEqual(['step-token-not-quotable']);
+      expect((await patch('ta-a')).status).toBe(200);
     });
 
     it.each([

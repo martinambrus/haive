@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   REPO_IS_DATA_ACTING_LINES,
+  REPO_IS_DATA_ANSWER_LINES,
   REPO_IS_DATA_AUTHORING_LINES,
   REPO_IS_DATA_LINES,
   REPO_IS_DATA_ONE_CLASS_LINES,
@@ -79,6 +80,7 @@ describe('the persona carve-out', () => {
     ['one-class', REPO_IS_DATA_ONE_CLASS_LINES],
     ['acting', REPO_IS_DATA_ACTING_LINES],
     ['authoring', REPO_IS_DATA_AUTHORING_LINES],
+    ['answer', REPO_IS_DATA_ANSWER_LINES],
   ] as const;
 
   it('every variant makes it, so no step is told its own persona is data', () => {

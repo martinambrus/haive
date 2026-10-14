@@ -110,11 +110,18 @@ export interface PromptStepIssue {
 export function checkPromptSteps(
   def: { slug: string; stepIds: readonly string[]; requiresRepository: boolean },
   promptSteps: Record<string, PromptStepEntry>,
+  catalog: { composable: ReadonlyMap<string, ComposableStepEntry> },
 ): PromptStepIssue[] {
   const issues: PromptStepIssue[] = [];
   const byId = new Map(
     Object.values(promptSteps).map((entry) => [promptStepId(def.slug, entry.slug), entry]),
   );
+  const quotableStepIds = new Set([
+    ...[...catalog.composable.values()]
+      .filter((entry) => entry.agentAuthoredOutput === true)
+      .map((entry) => entry.stepId),
+    ...byId.keys(),
+  ]);
   def.stepIds.forEach((stepId, index) => {
     if (!isCustomStepId(stepId)) return;
     const entry = byId.get(stepId);
@@ -131,6 +138,7 @@ export function checkPromptSteps(
       typeSlug: def.slug,
       requiresRepository: def.requiresRepository,
       stepIdsBefore: def.stepIds.slice(0, index),
+      quotableStepIds,
     });
     for (const { kind, message, raw, start } of problems) {
       issues.push({ kind, stepId, index, message, raw, start });

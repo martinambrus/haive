@@ -14,7 +14,7 @@ branch of each conditional and no other, and an unmodelled branch would still pa
 see what the dispatch-time augmenters ADD — `augmentPromptWithLedger` and its siblings run after
 every builder — which is why the ledger's own fence is pinned in `task-ledger.test.ts` instead.
 
-**FOUR VARIANTS, AND THE ENDING IS THE WHOLE CHOICE.** They share a first half; what differs is
+**FIVE VARIANTS, AND THE ENDING IS THE WHOLE CHOICE.** They share a first half; what differs is
 what the pass is told to DO about text that tried to steer it, which has to match what its
 output can carry:
 
@@ -32,6 +32,10 @@ output can carry:
   the spec writer, the sprint planner, every plan writer. The longest reach of the three shapes
   these four blocks cover — a reviewer that swallows an injected line files a skewed report, a
   coder WRITES it, an author turns it into an order nobody authorised.
+- `REPO_IS_DATA_ANSWER_LINES` — for an admin's read-only prompt step (`custom.<type>.<slug>`),
+  whose output contract is whatever its template asks for. Protection with NO reporting duty:
+  such a step has no findings array, and a template asking for strict JSON or a one-line answer
+  would be corrupted by an order to report. A file-writing prompt step takes the acting variant.
 
 The plan-writer set is DERIVED, not listed: whatever emits `PLAN_PATCH_CONTRACT`. A hand list
 missed `01f-external-plan-sync` and `11f-plan-reconcile`, which are plan writers living under

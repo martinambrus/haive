@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { promptNamesAgentPath } from '@haive/shared';
+import { promptStepEntrySchema } from '@haive/shared/modularity';
 import { StepRegistry } from '../registry.js';
 import { SANDBOX_WORKDIR } from '../../sandbox/sandbox-runner.js';
 import {
@@ -8,10 +9,12 @@ import {
   buildRetrievalGuidance,
   stripAgentGuidanceBlocks,
 } from './_retrieval-guidance.js';
+import { buildPromptStep } from './custom/prompt-step.js';
 import { registerAllSteps } from './index.js';
 import { PLAN_PATCH_CONTRACT } from './plan/_plan-prompt.js';
 import {
   REPO_IS_DATA_ACTING_LINES,
+  REPO_IS_DATA_ANSWER_LINES,
   REPO_IS_DATA_AUTHORING_LINES,
   REPO_IS_DATA_LINES,
   REPO_IS_DATA_ONE_CLASS_LINES,
@@ -909,6 +912,38 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         ),
     })),
   ),
+  // A prompt step is built per task from the entry the task pinned and is never in the registry, so
+  // neither registry path reaches it. One fixture per containment variant: read-only and file_write.
+  ...(['read', 'write'] as const).map((kind) => ({
+    label: `custom prompt step (${kind})`,
+    exportKey: 'step-engine/steps/custom/prompt-step.ts#buildPromptStep',
+    build: () => {
+      const step = buildPromptStep(
+        `custom.fixture.${kind}`,
+        promptStepEntrySchema.parse({
+          slug: kind,
+          title: 'Fixture prompt step',
+          template:
+            'Topic: {{field:topic}}\nTitle: {{task.title}}\nBrief: {{task.description}}\n{{step:01-first}}',
+          paramFormSchema: {
+            title: 'Params',
+            fields: [{ id: 'topic', label: 'Topic', type: 'text' }],
+          },
+          capabilities: kind === 'write' ? ['tool_use', 'file_write'] : ['tool_use'],
+          timeoutMs: 120_000,
+        }),
+        0,
+      );
+      return step.llm!.buildPrompt({
+        detected: {
+          taskTitle: 'The title',
+          taskDescription: 'The brief',
+          stepOutputs: { '01-first': 'An earlier step wrote this.' },
+        },
+        formValues: { topic: 'cats' },
+      });
+    },
+  })),
 ];
 
 /**
@@ -935,6 +970,16 @@ const SCANNED_PROMPT_EXPORTS = [
  * waves, then dag-executor's direct dispatches were each found one review at a time.
  */
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
+  'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUT_CAP_BYTES':
+    'a byte limit for an earlier step output, not text',
+  'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUTS_BUDGET_BYTES':
+    'a byte limit for all quoted step outputs together, not text',
+  'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_VALUES_BUDGET_BYTES':
+    'a byte limit for all field and task values together, not text',
+  'step-engine/steps/custom/prompt-step.ts#promptStepNamedText':
+    'text house rules read file paths from, never sent to a CLI',
+  'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_PERSONAS_UNSUPPORTED':
+    'the failure reason of a step that never reaches a CLI, not prompt text',
   'step-engine/steps/workflow/_rag-usage.ts#buildRagUsagePrompt':
     '13-pr-wait llm builder, already scanned through the registry',
   'cli-adapters/antigravity.ts#antigravityStdinPrompt':
@@ -1616,7 +1661,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(192);
+    ).toBe(194);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1774,6 +1819,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const ONE_CLASS = 'your findings array holds one kind of thing';
     const ACTING = 'You EDIT files, so the stakes are higher here';
     const AUTHORING = 'becomes another agent\u2019s ASSIGNMENT';
+    const ANSWER = 'Answer exactly what';
 
     // Every variant carries the persona carve-out. ONE_CLASS was the one that did not, and
     // 05's reviewer is wrapped in `agentDefinitionGuidance` — so it would have been told the
@@ -1783,6 +1829,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       ['one-class', REPO_IS_DATA_ONE_CLASS_LINES],
       ['acting', REPO_IS_DATA_ACTING_LINES],
       ['authoring', REPO_IS_DATA_AUTHORING_LINES],
+      ['answer', REPO_IS_DATA_ANSWER_LINES],
     ] as const) {
       expect(block.join('\n'), label).toContain('is your PERSONA');
     }
@@ -1807,6 +1854,8 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       ['05a-resolve-spec-warnings', AUTHORING, REVIEWING],
       ['08b-test-management', ACTING, REVIEWING],
       ['01-plan-chat', AUTHORING, REVIEWING],
+      ['custom prompt step (read)', ANSWER, REVIEWING],
+      ['custom prompt step (write)', ACTING, REVIEWING],
     ] as const) {
       for (const { key, prompt } of await eachPrompt(prefix)) {
         expect(prompt, key).toContain(expected);
