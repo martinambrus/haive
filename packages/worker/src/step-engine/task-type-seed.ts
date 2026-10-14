@@ -39,6 +39,7 @@ const DISPLAY_NAMES: Record<string, string> = {
   advisory: 'Advisory research',
   plan_sequence: 'Plan sequence',
   plan_merge: 'Plan merge',
+  type_draft: 'Task type draft',
 };
 
 const DYNAMIC_STRATEGIES: Record<string, RunListStrategy> = {

@@ -56,6 +56,20 @@ describe('seeded built-in requiresRepository', () => {
   });
 });
 
+describe('the type_draft built-in', () => {
+  it('is seeded hidden, with its one step, and needs no repository', () => {
+    const row = builtinTaskTypeRows(stepRegistry).find((r) => r.slug === 'type_draft');
+    expect(row).toMatchObject({
+      source: 'builtin',
+      runListStrategy: 'static',
+      stepIds: ['01-type-draft'],
+      selectable: false,
+      requiresRepository: false,
+    });
+    expect(taskTypeAllowsNoRepository('type_draft')).toBe(true);
+  });
+});
+
 function startJob(): Job {
   return {
     id: 'job-1',
@@ -93,6 +107,20 @@ describe('resolveTaskContext for a task with no repository', () => {
     h.state.task = task({ metadata: { anchorRepositoryId: null } });
     await processTaskJob(startJob()).catch(() => undefined);
     expect(h.state.ensured).toEqual([['user-1', 'task-1']]);
+  });
+
+  it('hands a type_draft task created without a repository a scratch workspace', async () => {
+    h.state.task = task({ type: 'type_draft', metadata: { anchorRepositoryId: null } });
+    await processTaskJob(startJob()).catch(() => undefined);
+    expect(h.state.ensured).toEqual([['user-1', 'task-1']]);
+  });
+
+  it('refuses a type_draft task with no recorded anchor and no repository', async () => {
+    h.state.task = task({ type: 'type_draft', metadata: null });
+    await expect(processTaskJob(startJob())).rejects.toThrow(
+      /anchored to a repository that no longer exists/,
+    );
+    expect(h.state.ensured).toEqual([]);
   });
 
   it('refuses a custom task with no recorded anchor and no repository', async () => {

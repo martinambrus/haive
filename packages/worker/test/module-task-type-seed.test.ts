@@ -490,7 +490,7 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
   describe('what a module seeding changes outside its own rows', () => {
     it('leaves every built-in row as a plain sync wrote it', async () => {
       const before = await bySource('builtin');
-      expect(before).toHaveLength(11);
+      expect(before).toHaveLength(12);
       await sync(moduleOf([seedOf()]));
       expect(await one('fx__weekly')).toBeDefined();
       expect((await bySource('builtin')).map((r) => withoutTime(r))).toEqual(

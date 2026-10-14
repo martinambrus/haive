@@ -224,6 +224,7 @@ jobs:
           worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test pg
           worker test/module-task-type-seed.test.ts MODULE_TASK_TYPE_SEED_TEST_URL module_task_type_seed_test pg
           worker test/step-catalog-sync.test.ts STEP_CATALOG_TEST_URL step_catalog_test pg
+          worker test/type-draft-detect.test.ts TYPE_DRAFT_DETECT_TEST_URL type_draft_detect_test pg
           worker test/module-intent.test.ts MODULE_INTENT_TEST_URL module_intent_test pg
           worker test/module-deactivated-step.test.ts MODULE_DEACTIVATED_STEP_TEST_URL module_deactivated_step_test pg
           worker test/module-teardown.test.ts MODULE_TEARDOWN_TEST_URL module_teardown_test pg
