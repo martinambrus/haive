@@ -95,8 +95,9 @@ gpu_guard() {
 # (postgres/redis/repos/…), the user's own ddev-* projects, the pull-through
 # registry, and per-task runtimes are deliberately never named here, so rebuild
 # and reset physically cannot touch them.
-# Compose's rule for a directory name: lower-case, [a-z0-9_-] only, no leading _ or -.
-PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')}"
+# Compose's order (environment, .env, directory) and name rule: lower-case, [a-z0-9_-] only, no leading _ or -.
+PROJECT="${COMPOSE_PROJECT_NAME:-$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env 2>/dev/null | tail -n 1 || true)}"
+PROJECT="$(printf '%s' "${PROJECT:-$(basename "$PWD")}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')"
 NM_VOLUMES=(
   "${PROJECT}_haive_node_modules_root"
   "${PROJECT}_haive_node_modules_shared"
