@@ -2044,6 +2044,187 @@ async function main(): Promise<void> {
         { asideR2, stagedR2 },
       );
 
+      // I1b and I2b stage plan.md for the set-aside; a person then stages other bytes there as the index swap runs.
+      const stagedPlanMd = async (...addFlags: string[]) => {
+        const c = await cloned();
+        const id = c.payload.repositoryId;
+        await applyPlanPatch(
+          db,
+          { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+          { repositoryId: id, origin: 'user' },
+        );
+        await writePlanMirror(db, id, c.dest);
+        git(c.dest, 'add', ...addFlags, '--', mdRel);
+        return { id, dest: c.dest };
+      };
+      const stagePerson = async (
+        dest: string,
+        body = '# staged by a person during the index swap\n',
+      ) => {
+        await writeFile(path.join(dest, mdRel), body);
+        git(dest, 'add', '--', mdRel);
+        return git(dest, 'ls-files', '-s', '--', mdRel);
+      };
+
+      // I1b. Bytes a person stages between the set-aside's read of the index and its swap stay in the index.
+      const i1 = await stagedPlanMd();
+      let i1Staged = '';
+      restoreFaults.beforeIndexSwap = async () => {
+        delete restoreFaults.beforeIndexSwap;
+        i1Staged = await stagePerson(i1.dest);
+      };
+      let asideI1;
+      try {
+        asideI1 = await setAsideHaiveProjections(db, i1.id, i1.dest);
+      } finally {
+        delete restoreFaults.beforeIndexSwap;
+      }
+      const i1After = git(i1.dest, 'ls-files', '-s', '--', mdRel);
+      check(
+        'I1b: bytes staged while the set-aside swaps the index entry of plan.md stay in the index',
+        i1Staged !== '' && i1After === i1Staged,
+        { outcome: asideI1.outcome, i1Staged, i1After },
+      );
+
+      // I2b. Bytes a person stages between the put-back's read of the index and its swap stay in the index.
+      const i2 = await stagedPlanMd();
+      const asideI2 = await setAsideHaiveProjections(db, i2.id, i2.dest);
+      let i2Staged = '';
+      restoreFaults.beforeIndexPutBack = async () => {
+        delete restoreFaults.beforeIndexPutBack;
+        i2Staged = await stagePerson(i2.dest);
+      };
+      try {
+        if (asideI2.outcome === 'set-aside') {
+          await putBackProjections(db, i2.id, i2.dest, asideI2.kept);
+        }
+      } finally {
+        delete restoreFaults.beforeIndexPutBack;
+      }
+      const i2After = git(i2.dest, 'ls-files', '-s', '--', mdRel);
+      check(
+        'I2b: bytes staged while the put-back swaps the index entry of plan.md stay in the index',
+        asideI2.outcome === 'set-aside' && i2Staged !== '' && i2After === i2Staged,
+        { outcome: asideI2.outcome, i2Staged, i2After },
+      );
+
+      // I1c and I2c track plan.md in HEAD under an earlier heading, so the swap is a patch git matches by hunk context.
+      const trackedPlanMd = async () => {
+        const c = await stagedPlanMd();
+        const file = path.join(c.dest, mdRel);
+        const staged = await readFile(file, 'utf8');
+        const head = staged.replace(/^.*\n/, '# an earlier heading\n');
+        await writeFile(file, head);
+        git(c.dest, 'add', '--', mdRel);
+        git(c.dest, 'commit', '-q', '-m', 'an earlier plan.md');
+        await writeFile(file, staged);
+        git(c.dest, 'add', '--', mdRel);
+        return { ...c, staged, head };
+      };
+
+      // I1c. Haive's staged lines plus one a person appends as the swap runs are not overwritten by a patch matching only context.
+      const i1c = await trackedPlanMd();
+      let i1cStaged = '';
+      restoreFaults.beforeIndexSwap = async () => {
+        delete restoreFaults.beforeIndexSwap;
+        i1cStaged = await stagePerson(i1c.dest, `${i1c.staged}a line a person appended\n`);
+      };
+      let asideI1c;
+      try {
+        asideI1c = await setAsideHaiveProjections(db, i1c.id, i1c.dest);
+      } finally {
+        delete restoreFaults.beforeIndexSwap;
+      }
+      const i1cAfter = git(i1c.dest, 'ls-files', '-s', '--', mdRel);
+      check(
+        "I1c: a line appended to the staged plan.md while the set-aside swaps the entry leaves exactly the person's blob in the index",
+        i1cStaged !== '' && i1cAfter === i1cStaged,
+        { outcome: asideI1c.outcome, i1cStaged, i1cAfter },
+      );
+
+      // I2c. HEAD's lines plus one a person appends as the put-back swaps stay exactly as staged.
+      const i2c = await trackedPlanMd();
+      const asideI2c = await setAsideHaiveProjections(db, i2c.id, i2c.dest);
+      let i2cStaged = '';
+      restoreFaults.beforeIndexPutBack = async () => {
+        delete restoreFaults.beforeIndexPutBack;
+        i2cStaged = await stagePerson(i2c.dest, `${i2c.head}a line a person appended\n`);
+      };
+      try {
+        if (asideI2c.outcome === 'set-aside') {
+          await putBackProjections(db, i2c.id, i2c.dest, asideI2c.kept);
+        }
+      } finally {
+        delete restoreFaults.beforeIndexPutBack;
+      }
+      const i2cAfter = git(i2c.dest, 'ls-files', '-s', '--', mdRel);
+      check(
+        "I2c: a line appended to HEAD's plan.md while the put-back swaps the entry leaves exactly the person's blob in the index",
+        asideI2c.outcome === 'set-aside' && i2cStaged !== '' && i2cAfter === i2cStaged,
+        { outcome: asideI2c.outcome, i2cStaged, i2cAfter },
+      );
+
+      // I3. A git failure that is not a lost race, a held index.lock here, is thrown with git's own message.
+      const i3 = await stagedPlanMd();
+      const i3Lock = path.join(i3.dest, '.git', 'index.lock');
+      restoreFaults.beforeIndexSwap = async () => {
+        delete restoreFaults.beforeIndexSwap;
+        await writeFile(i3Lock, '');
+      };
+      let i3Error = '';
+      try {
+        await setAsideHaiveProjections(db, i3.id, i3.dest);
+      } catch (err) {
+        i3Error = err instanceof Error ? err.message : String(err);
+      } finally {
+        delete restoreFaults.beforeIndexSwap;
+        await rm(i3Lock, { force: true });
+      }
+      check(
+        'I3: an index.lock held while the set-aside swaps the entry is thrown',
+        /index\.lock/.test(i3Error),
+        { i3Error },
+      );
+
+      // I4. An intent-to-add entry is absent from `git diff --cached`, so the set-aside refuses and names the cause.
+      const i4 = await stagedPlanMd('-N');
+      const asideI4 = await setAsideHaiveProjections(db, i4.id, i4.dest);
+      check(
+        'I4: a plan.md marked intent-to-add refuses the set-aside and says why',
+        asideI4.outcome === 'refused' &&
+          asideI4.file === mdRel &&
+          /intent-to-add/.test(asideI4.reason),
+        asideI4,
+      );
+
+      // I5. A staged plan.md is not judged, and the patch that swaps a 40 MiB copy for a 40 MiB HEAD holds both.
+      const i5 = await stagedPlanMd();
+      const i5Md = path.join(i5.dest, mdRel);
+      const i5Haives = await readFile(i5Md);
+      for (const [byte, committed] of [
+        ['y', true],
+        ['x', false],
+      ] as const) {
+        await writeFile(i5Md, Buffer.alloc(40 * 1024 * 1024, byte));
+        git(i5.dest, 'add', '--', mdRel);
+        if (committed) git(i5.dest, 'commit', '-q', '-m', 'a large plan.md');
+      }
+      await writeFile(i5Md, i5Haives);
+      let asideI5;
+      let i5Error = '';
+      try {
+        asideI5 = await setAsideHaiveProjections(db, i5.id, i5.dest);
+      } catch (err) {
+        i5Error = err instanceof Error ? err.message : String(err);
+      }
+      const i5Index = git(i5.dest, 'rev-parse', `:${mdRel}`);
+      const i5Head = git(i5.dest, 'rev-parse', `HEAD:${mdRel}`);
+      check(
+        "I5: a 40 MiB staged plan.md that differs from HEAD's 40 MiB one is set aside, and the index holds HEAD's",
+        asideI5?.outcome === 'set-aside' && i5Index === i5Head,
+        { outcome: asideI5?.outcome, i5Error, i5Index, i5Head },
+      );
+
       // M4. A projection neither HEAD nor the index holds shows its mode only on disk: an executable
       // plan.json with Haive's bytes refuses the set-aside and keeps its mode.
       const m4 = await cloned();
@@ -2154,6 +2335,31 @@ async function main(): Promise<void> {
         'M6: a restored file whose mode a person changed is not removed by the put-back',
         asideM6.outcome === 'set-aside' && m6Back && m6Mode === 0o600,
         { outcome: asideM6.outcome, m6Back, m6Mode: m6Mode.toString(8) },
+      );
+
+      // X6. A tracked plan.md deleted in the checkout comes back from HEAD for the move, and the put-back removes it again.
+      const x6 = await cloned();
+      const x6Id = x6.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: x6Id, origin: 'user' },
+      );
+      await writePlanMirror(db, x6Id, x6.dest);
+      const x6Md = path.join(x6.dest, HAIVE_DATA_FILES.planMarkdown);
+      git(x6.dest, 'add', '--', PLAN_REL, HAIVE_DATA_FILES.planMarkdown);
+      git(x6.dest, 'commit', '-q', '-m', 'plan');
+      await rm(x6Md);
+      const asideX6 = await setAsideHaiveProjections(db, x6Id, x6.dest);
+      const x6Back = (await stat(x6Md).catch(() => null)) !== null;
+      if (asideX6.outcome === 'set-aside') {
+        await putBackProjections(db, x6Id, x6.dest, asideX6.kept);
+      }
+      const x6Gone = (await stat(x6Md).catch(() => null)) === null;
+      check(
+        'X6: a tracked plan.md deleted locally is restored for the move and removed again by the put-back',
+        asideX6.outcome === 'set-aside' && x6Back && x6Gone,
+        { outcome: asideX6.outcome, x6Back, x6Gone },
       );
 
       // M7. A generated plan.md larger than plan.json's cap is still held and put back whole.

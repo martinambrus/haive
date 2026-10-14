@@ -58,6 +58,8 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 export interface KeptFile {
   bytes?: Buffer | null;
   index: string | null;
+  /** Turns the index entry the restore left (HEAD's) back into `index`; set once the swap landed. */
+  indexPatch?: Buffer;
   mode?: number;
   owner?: { uid: number; gid: number };
   untracked?: boolean;
@@ -389,6 +391,8 @@ export const restoreFaults: {
   beforeRestore?: () => void | Promise<void>;
   beforeCapture?: () => void | Promise<void>;
   beforePutBack?: () => void | Promise<void>;
+  beforeIndexSwap?: () => void | Promise<void>;
+  beforeIndexPutBack?: () => void | Promise<void>;
 } = {};
 
 interface RestoreGuard {
@@ -470,7 +474,8 @@ async function restoreJudged(
   for (const [path, was] of captured) if (!kept.has(path)) kept.set(path, was);
   await restoreFaults.beforeRestore?.();
   const raced = await restoreFromHead(repoPath, mine, kept);
-  if (raced !== null) return { changed: raced };
+  if (typeof raced === 'string') return { changed: raced };
+  if (raced !== null) return refuse(raced.path, raced.reason);
   await restoreFaults.afterRestore?.();
   await after?.(tx);
   return null;
@@ -537,12 +542,12 @@ const planGuard = (
 
 /** Puts each path back to HEAD, in the file and the index, only while it still holds what the set-aside
  *  captured; returns the first path written by someone else meanwhile, or not captured at all, which
- *  sends the set-aside round again. */
+ *  sends the set-aside round again. An intent-to-add entry, which git diff cannot show, comes back with its reason. */
 async function restoreFromHead(
   repoPath: string,
   paths: readonly string[],
   kept: KeptFiles,
-): Promise<string | null> {
+): Promise<string | { path: string; reason: string } | null> {
   for (const path of paths) {
     const captured = kept.get(path);
     const head = await readBlob(repoPath, `HEAD:${path}`);
@@ -587,18 +592,19 @@ async function restoreFromHead(
     if ((await indexEntry(repoPath, path)) !== captured.index) return path;
     const headIdx = await headEntry(repoPath, path);
     if (headIdx !== captured.index) {
-      const res =
-        headIdx === null
-          ? await gitRun(repoPath, ['update-index', '--force-remove', '--', path])
-          : await gitRun(repoPath, [
-              'update-index',
-              '--add',
-              '--cacheinfo',
-              `${headIdx.replace(' ', ',')},${path}`,
-            ]);
-      if (res.code !== 0) {
-        throw new Error(`git update-index failed: ${res.stderr.trim().slice(0, 300)}`);
+      const patch = await indexToHeadPatch(repoPath, path);
+      if (patch.length === 0) {
+        if ((await indexEntry(repoPath, path)) !== captured.index) return path;
+        return {
+          path,
+          reason: `is marked intent-to-add in the index; unstage it (git reset -- ${path}) or stage it fully, then retry`,
+        };
       }
+      if (patchPreimage(patch) !== captured.index) return path;
+      await restoreFaults.beforeIndexSwap?.();
+      if (!(await swapIndexEntry(repoPath, path, patch, false, captured.index, headIdx)))
+        return path;
+      captured.indexPatch ??= patch;
     }
     if (head === null) await pruneEmptyStateDirs(repoPath, path, kept);
   }
@@ -884,8 +890,8 @@ export async function putBackProjections(
     await lockProjectState(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
     // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
-    for (const [path, { bytes, index, mode, owner, parents }] of kept) {
-      await putBackIndex(repoPath, path, index);
+    for (const [path, { bytes, index, indexPatch, mode, owner, parents }] of kept) {
+      await putBackIndex(repoPath, path, index, indexPatch);
       if (bytes === undefined) continue;
       const head = await readBlob(repoPath, `HEAD:${path}`);
       const maxBytes = Math.max(head?.length ?? 0, bytes?.length ?? 0) + 1;
@@ -996,25 +1002,109 @@ async function headEntry(repoPath: string, path: string): Promise<string | null>
   return m ? `${m[1]} ${m[2]}` : null;
 }
 
+/** The patch that turns the index entry of `path` into HEAD's; latin1 keeps every byte of a non-UTF-8 blob. */
+async function indexToHeadPatch(repoPath: string, path: string): Promise<Buffer> {
+  const res = await gitRun(
+    repoPath,
+    [
+      '--no-optional-locks',
+      'diff',
+      '--cached',
+      '-R',
+      '--no-color',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      '-U2147483647',
+      '--binary',
+      '--full-index',
+      '--no-textconv',
+      '--no-ext-diff',
+      '--',
+      literal(path),
+    ],
+    undefined,
+    // The patch holds both images in full context, a binary one a quarter larger each.
+    { encoding: 'latin1', maxBuffer: 3 * projectionCap(path) + 2 ** 20 },
+  );
+  if (res.code !== 0) {
+    const why = res.stderr.trim().slice(0, 300);
+    throw new Error(
+      why === ''
+        ? `the staged copy of ${path} is too large to set aside`
+        : `git diff failed: ${why}`,
+    );
+  }
+  return Buffer.from(res.stdout, 'latin1');
+}
+
+const PATCH_HEADER =
+  /^(?:diff --git .*|(new file mode|deleted file mode|old mode|new mode) (\d+)|index ([0-9a-f]+)\.\.[0-9a-f]+(?: (\d+))?)$/;
+
+/** The index entry (`mode sha`, null for none) the patch expects; undefined where its header names none. */
+function patchPreimage(patch: Buffer): string | null | undefined {
+  let created = false;
+  let mode: string | undefined;
+  let blob: string | undefined;
+  for (const line of patch.toString('latin1', 0, 4096).split('\n')) {
+    const m = PATCH_HEADER.exec(line);
+    if (!m) break;
+    if (m[1] === 'new file mode') created = true;
+    else if (m[1] === 'deleted file mode' || m[1] === 'old mode') mode = m[2];
+    else if (m[3] !== undefined) {
+      blob = m[3];
+      mode ??= m[4];
+    }
+  }
+  if (created) return null;
+  return blob !== undefined && mode !== undefined ? `${mode} ${blob}` : undefined;
+}
+
+/** git checks the patch against the index entry and writes the result under one index lock, so no writer lands between. */
+function applyIndexPatch(repoPath: string, patch: Buffer, reverse: boolean) {
+  const flags = ['--cached', '--whitespace=nowarn', ...(reverse ? ['-R'] : [])];
+  return gitRun(repoPath, ['-c', 'apply.ignoreWhitespace=no', 'apply', ...flags, '-'], undefined, {
+    input: patch,
+  });
+}
+
+/** git matches hunk context only, so a result other than `to` is a blend with a concurrent blob and is undone. */
+async function swapIndexEntry(
+  repoPath: string,
+  path: string,
+  patch: Buffer,
+  reverse: boolean,
+  from: string | null,
+  to: string | null,
+): Promise<boolean> {
+  const res = await applyIndexPatch(repoPath, patch, reverse);
+  const now = await indexEntry(repoPath, path);
+  if (res.code !== 0) {
+    if (now === from) throw new Error(`git apply failed: ${res.stderr.trim().slice(0, 300)}`);
+    return false;
+  }
+  if (now === to) return true;
+  const undo = await applyIndexPatch(repoPath, patch, !reverse);
+  if (undo.code !== 0 && (await indexEntry(repoPath, path)) === now) {
+    throw new Error(
+      `git apply could not undo a blended index entry: ${undo.stderr.trim().slice(0, 300)}`,
+    );
+  }
+  return false;
+}
+
 /** Stages the entry the set-aside found again, only while the index still holds what the restore left. */
 async function putBackIndex(
   repoPath: string,
   path: string,
   original: string | null,
+  patch: Buffer | undefined,
 ): Promise<void> {
   const left = await headEntry(repoPath, path);
   if (original === left || (await indexEntry(repoPath, path)) !== left) return;
-  const res =
-    original === null
-      ? await gitRun(repoPath, ['update-index', '--force-remove', '--', path])
-      : await gitRun(repoPath, [
-          'update-index',
-          '--add',
-          '--cacheinfo',
-          `${original.replace(' ', ',')},${path}`,
-        ]);
-  if (res.code !== 0)
-    throw new Error(`git update-index failed: ${res.stderr.trim().slice(0, 300)}`);
+  // No patch means the restore never swapped this entry, so whatever sits there now is someone else's.
+  if (patch === undefined) return;
+  await restoreFaults.beforeIndexPutBack?.();
+  await swapIndexEntry(repoPath, path, patch, true, left, original);
 }
 
 /** A failed re-sync leaves the domain's mark raised so the sweep retries it; a repository with no row
