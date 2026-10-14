@@ -15,6 +15,7 @@ import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
   claudeTokenNeedsRefresh,
+  isClaudeRefreshRejected,
   refreshClaudeToken,
   type ClaudeOauthTokens,
 } from '@haive/shared/claude-oauth';
@@ -183,8 +184,7 @@ async function resolveOauthRefreshToken(
       deadUsageRefreshToken.delete(provider.id); // recovered (or was never dead)
       return { token: fresh.accessToken };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('invalid_grant')) {
+      if (isClaudeRefreshRejected(err)) {
         // Permanently rejected (revoked, or superseded by a sibling provider sharing
         // the account). Retrying only re-fires the 400/401 pair each tick. Mark it dead
         // to stop the churn, and record ONE needs_reconnect snapshot so the UI can
