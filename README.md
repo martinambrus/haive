@@ -223,10 +223,10 @@ Testing
 
 ## Development
 
-Everything builds and runs inside containers — never `pnpm install` or
-`pnpm --filter … build` on the host (it writes root-owned `node_modules` and
-poisons the bind-mounted `dist`). Manage the whole stack with `scripts/dev.sh`,
-aliased as `pnpm docker:dev` and `pnpm docker <cmd>`:
+The stack runs in containers. Host-side `pnpm build`, `pnpm typecheck` and `pnpm test` are
+supported; a dependency or lockfile change reaches the containers only through
+`pnpm docker rebuild`, because each service keeps its own `node_modules` volume. Manage the
+whole stack with `scripts/dev.sh`, aliased as `pnpm docker:dev` and `pnpm docker <cmd>`:
 
 | Command                     | What it does                                                                                                                                                                                                              |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -239,7 +239,7 @@ aliased as `pnpm docker:dev` and `pnpm docker <cmd>`:
 | `pnpm docker rebuild [svc]` | Pick up a dependency/lockfile change (rebuild image + recreate node_modules volumes). No args = full rebuild; a root/shared/database dep needs the full rebuild.                                                          |
 | `pnpm docker reset`         | Full rebuild + wipe compiled `dist` to recover a stale/corrupt build. Preserves all data.                                                                                                                                 |
 | `pnpm docker sandbox-build` | Build the CLI sandbox base image `haive-cli-sandbox:latest`, which every agent container derives from. The worker builds it on its own when it is missing, so this is the manual path — reach for it if that build fails. |
-| `pnpm docker migrate`       | Push the DB schema (`drizzle-kit push --force`).                                                                                                                                                                          |
+| `pnpm docker migrate`       | Apply pending migrations with the migration runner (the `db-migrate` one-shot).                                                                                                                                           |
 
 `rebuild`/`reset` only touch the `node_modules` and `.next` caches — data volumes
 (postgres/redis/repos/…), your own `ddev-*` projects, and per-task runtimes are
@@ -249,6 +249,10 @@ never touched. Never run `down -v` or `docker volume prune` against this stack.
 # Database
 pnpm db:push        # drizzle-kit push (apply schema directly, dev only)
 pnpm db:studio      # drizzle-kit studio
+
+# Modules (docs/architecture/modules.md); follow either with `pnpm docker rebuild`
+pnpm module add <id>     # install modules/<id>: api, worker and web dependencies + lockfile
+pnpm module remove <id>  # uninstall it; its folder, database and settings stay
 
 # Tests
 pnpm test           # vitest across all packages

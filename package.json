@@ -15,6 +15,7 @@
     "test:visual": "bash scripts/visual.sh",
     "pretest:e2e": "playwright install chromium",
     "test:e2e:setup": "playwright install --with-deps chromium",
+    "test:scripts": "node --test \"scripts/test/*.test.mjs\"",
     "smoke": "pnpm --filter @haive/worker smoke:all",
     "typecheck": "turbo run typecheck",
     "typecheck:e2e": "tsc --noEmit -p tests",
@@ -26,8 +27,9 @@
     "docker:down": "bash scripts/dev.sh down",
     "docker:logs": "bash scripts/dev.sh logs",
     "sandbox:build": "bash scripts/dev.sh sandbox-build",
-    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "module": "node scripts/module.mjs",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,mjs,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mjs,json,md}\"",
     "prepare": "husky"
   },
   "engines": {
@@ -49,7 +51,7 @@
     "vitest": "^5.0.3"
   },
   "lint-staged": {
-    "*.{ts,tsx,js,jsx,json,md}": "prettier --write"
+    "*.{ts,tsx,js,jsx,mjs,json,md}": "prettier --write"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
