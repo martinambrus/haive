@@ -75,6 +75,17 @@ describe('a module task type seed in a manifest', () => {
     expect(problems(manifest([seed({ sortOrder: 2147483647 })]))).toEqual([]);
   });
 
+  const limited = (limit: number) =>
+    problems(manifest([seed({ stepLoopLimitDefaults: { 'module.fx.report': limit } })]));
+
+  it.each([0, 51, 1.5])('refuses a loop limit of %s, as an admin type does', (limit) => {
+    expect(limited(limit).join('\n')).toContain('stepLoopLimitDefaults');
+  });
+
+  it.each([1, 50])('accepts a loop limit of %s', (limit) => {
+    expect(limited(limit)).toEqual([]);
+  });
+
   it('refuses a source longer than its column, counting the module id', () => {
     const id = 'f'.repeat(122);
     const found = problems(manifest([seed({ slug: 'x', stepIds: ['01-env-detect'] })], id));

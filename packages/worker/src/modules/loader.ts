@@ -8,6 +8,7 @@ import {
   moduleManifestSchema,
   type ComposableStepEntry,
   type ModuleManifest,
+  type TaskTypeDefaultsIssue,
 } from '@haive/shared/modularity';
 import { openModuleDatabase, type ModuleSchemaContext } from '@haive/shared/module-db';
 import { getBullRedis } from '../redis.js';
@@ -42,6 +43,7 @@ export type LoadedWorkerModule = {
 export type ModuleTaskTypeOutcome = {
   seeded: string[];
   conflicts: { slug: string; heldBy: string }[];
+  invalid?: { slug: string; issues: TaskTypeDefaultsIssue[] }[];
 };
 
 const namespaced = (moduleId: string, localId: string) => `module.${moduleId}.${localId}`;

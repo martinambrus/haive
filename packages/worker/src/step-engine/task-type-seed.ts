@@ -2,8 +2,14 @@ import { createHash } from 'node:crypto';
 import { and, eq, inArray, notInArray } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { REPO_OPTIONAL_BUILTIN_TASK_TYPES, logger } from '@haive/shared';
-import { moduleTaskTypeSlug, type ModuleManifest } from '@haive/shared/modularity';
+import {
+  moduleTaskTypeSlug,
+  validateTaskTypeDefaults,
+  type ComposableStepEntry,
+  type ModuleManifest,
+} from '@haive/shared/modularity';
 import type { LoadedWorkerModule, ModuleTaskTypeOutcome } from '../modules/loader.js';
+import { CORE_COMPOSABLE_STEPS } from './composable-core.js';
 import type { StepRegistry } from './registry.js';
 
 type RunListStrategy = (typeof schema.runListStrategyEnum.enumValues)[number];
@@ -68,9 +74,10 @@ async function seedModuleTaskTypes(
   tx: DbTx,
   manifest: ModuleManifest,
   now: Date,
+  composables: ReadonlyMap<string, ComposableStepEntry>,
 ): Promise<ModuleTaskTypeOutcome> {
   const source = `module:${manifest.id}`;
-  const rows = (manifest.taskTypes ?? []).map((seed) => ({
+  const declared = (manifest.taskTypes ?? []).map((seed) => ({
     slug: moduleTaskTypeSlug(manifest.id, seed.slug),
     displayName: seed.displayName,
     description: seed.description ?? null,
@@ -85,6 +92,27 @@ async function seedModuleTaskTypes(
     sortOrder: seed.sortOrder ?? 0,
     contentHash: contentHashOf(seed.runListStrategy, seed.stepIds),
   }));
+  const invalid = declared
+    .map((row) => ({
+      slug: row.slug,
+      issues: validateTaskTypeDefaults(
+        {
+          stepIds: row.stepIds ?? [],
+          preAnswerDefaults: row.preAnswerDefaults,
+          stepLoopLimitDefaults: row.stepLoopLimitDefaults,
+        },
+        composables,
+      ),
+    }))
+    .filter(({ issues }) => issues.length > 0);
+  for (const { slug, issues } of invalid) {
+    logger.warn(
+      { module: manifest.id, slug, issues },
+      'module task type seed skipped: its defaults fail the checks an admin task type gets',
+    );
+  }
+  const rejected = new Set(invalid.map((i) => i.slug));
+  const rows = declared.filter((row) => !rejected.has(row.slug));
   const slugs = rows.map((r) => r.slug);
 
   for (const row of rows) {
@@ -135,10 +163,14 @@ async function seedModuleTaskTypes(
     .where(
       and(
         eq(schema.taskTypeDefinitions.source, source),
-        notInArray(schema.taskTypeDefinitions.slug, slugs),
+        notInArray(
+          schema.taskTypeDefinitions.slug,
+          declared.map((r) => r.slug),
+        ),
         eq(schema.taskTypeDefinitions.selectable, true),
       ),
     );
+  if (invalid.length > 0) outcome.invalid = invalid;
   return outcome;
 }
 
@@ -149,6 +181,11 @@ export async function syncTaskTypeDefinitions(
 ): Promise<Record<string, ModuleTaskTypeOutcome>> {
   const now = new Date();
   const wanted = builtinTaskTypeRows(registry);
+  const composables = new Map(
+    [...CORE_COMPOSABLE_STEPS, ...loaded.flatMap((m) => m.composable)].map(
+      (entry) => [entry.stepId, entry] as const,
+    ),
+  );
   const outcomes: Record<string, ModuleTaskTypeOutcome> = {};
 
   await db.transaction(async (tx) => {
@@ -197,7 +234,7 @@ export async function syncTaskTypeDefinitions(
     }
 
     for (const { manifest } of loaded) {
-      outcomes[manifest.id] = await seedModuleTaskTypes(tx, manifest, now);
+      outcomes[manifest.id] = await seedModuleTaskTypes(tx, manifest, now, composables);
     }
   });
   return outcomes;

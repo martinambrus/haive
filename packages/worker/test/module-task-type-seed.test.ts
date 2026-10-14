@@ -15,25 +15,39 @@ if (url && !new URL(url).pathname.startsWith('/module_task_type_seed_test'))
 
 registerStepsOnce();
 
-const seedOf = (over: Record<string, unknown> = {}) => ({
-  slug: 'weekly',
-  displayName: 'Weekly report',
-  description: 'Builds the weekly report.',
-  runListStrategy: 'static',
-  stepIds: ['module.fx.report'],
-  selectable: true,
-  requiresRepository: false,
-  preAnswerDefaults: { 'module.fx.report': { depth: 'brief' } },
-  stepLoopLimitDefaults: { 'module.fx.report': 3 },
-  sortOrder: 7,
-  ...over,
-});
+const seedOf = (over: Record<string, unknown> = {}) => {
+  const stepIds = (over.stepIds as string[] | undefined) ?? ['module.fx.report'];
+  return {
+    slug: 'weekly',
+    displayName: 'Weekly report',
+    description: 'Builds the weekly report.',
+    runListStrategy: 'static',
+    stepIds,
+    selectable: true,
+    requiresRepository: false,
+    preAnswerDefaults: { [stepIds[0]!]: { depth: 'brief' } },
+    stepLoopLimitDefaults: { [stepIds[0]!]: 3 },
+    sortOrder: 7,
+    ...over,
+  };
+};
+
+const LOCAL_STEPS = ['report', 'extra', 'plain'];
 
 function moduleOf(taskTypes: unknown[] | undefined, id = 'fx'): LoadedWorkerModule {
-  const steps = ['report', 'extra'].map(
+  const steps = LOCAL_STEPS.map(
     (local) =>
       ({ metadata: { id: local, workflowType: 'x', title: local } }) as unknown as StepDefinition,
   );
+  const composableSteps = LOCAL_STEPS.map((local) => ({
+    stepId: local,
+    label: local,
+    group: 'build',
+    dispatchesCli: false,
+    requires: [],
+    provides: [],
+    loopBudgetEditable: local !== 'plain',
+  }));
   const [loaded] = registerModuleSteps(new StepRegistry(), [
     {
       packageName: `@haive/module-${id}`,
@@ -42,6 +56,7 @@ function moduleOf(taskTypes: unknown[] | undefined, id = 'fx'): LoadedWorkerModu
         name: id,
         version: '1.0.0',
         schemaVersion: 1,
+        composableSteps,
         ...(taskTypes ? { taskTypes } : {}),
       },
       steps,
@@ -312,6 +327,102 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
       const outcome = await sync(fx);
       expect(outcome.fx!.conflicts).toEqual([{ slug: 'fx__weekly', heldBy: 'admin' }]);
       expect(await one('fx__weekly')).toMatchObject({ source: 'admin', stepIds: ['held-step'] });
+    });
+  });
+
+  describe('a seed whose defaults fail the checks an admin type gets', () => {
+    const wrong: [string, Record<string, unknown>, Record<string, unknown>][] = [
+      [
+        'a preset answer for a step it does not run',
+        { preAnswerDefaults: { 'module.fx.extra': { depth: 'brief' } } },
+        { kind: 'default-key-not-in-steps', field: 'preAnswerDefaults', stepId: 'module.fx.extra' },
+      ],
+      [
+        'a loop limit for a step it does not run',
+        { stepLoopLimitDefaults: { 'module.fx.extra': 2 } },
+        {
+          kind: 'default-key-not-in-steps',
+          field: 'stepLoopLimitDefaults',
+          stepId: 'module.fx.extra',
+        },
+      ],
+      [
+        'a loop limit on a module step whose loop budget is not editable',
+        { stepIds: ['module.fx.plain'], stepLoopLimitDefaults: { 'module.fx.plain': 2 } },
+        { kind: 'loop-limit-not-editable', stepId: 'module.fx.plain' },
+      ],
+      [
+        'a loop limit on a core step whose loop budget is not editable',
+        {
+          stepIds: ['04-phase-0b-pre-planning'],
+          stepLoopLimitDefaults: { '04-phase-0b-pre-planning': 2 },
+        },
+        { kind: 'loop-limit-not-editable', stepId: '04-phase-0b-pre-planning' },
+      ],
+    ];
+
+    it.each(wrong)(
+      'is not written but reported and warned about, and a valid seed beside it is written: %s',
+      async (_what, over, issue) => {
+        const warn = vi.spyOn(logger, 'warn');
+
+        const outcome = await sync(
+          moduleOf([seedOf({ slug: 'bad', ...over }), seedOf({ slug: 'good' })]),
+        );
+
+        expect(await one('fx__bad')).toBeUndefined();
+        expect(await one('fx__good')).toMatchObject({ source: 'module:fx', selectable: true });
+        expect(outcome).toEqual({
+          fx: {
+            seeded: ['fx__good'],
+            conflicts: [],
+            invalid: [{ slug: 'fx__bad', issues: [issue] }],
+          },
+        });
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ module: 'fx', slug: 'fx__bad', issues: [issue] }),
+          expect.any(String),
+        );
+        warn.mockRestore();
+      },
+    );
+
+    it('writes a seed whose loop limit sits on a core step whose loop budget is editable', async () => {
+      const outcome = await sync(
+        moduleOf([
+          seedOf({
+            stepIds: ['07b-phase-4-validate'],
+            stepLoopLimitDefaults: { '07b-phase-4-validate': 2 },
+          }),
+        ]),
+      );
+      expect(outcome).toEqual({ fx: { seeded: ['fx__weekly'], conflicts: [] } });
+      expect(await one('fx__weekly')).toMatchObject({
+        stepIds: ['07b-phase-4-validate'],
+        stepLoopLimitDefaults: { '07b-phase-4-validate': 2 },
+      });
+    });
+
+    it('leaves a row already stored under that slug exactly as it is', async () => {
+      await sync(moduleOf([seedOf()]));
+      await db
+        .update(schema.taskTypeDefinitions)
+        .set({ enabled: false, displayName: 'My name', sortOrder: 99 })
+        .where(eq(schema.taskTypeDefinitions.slug, 'fx__weekly'));
+      const before = await one('fx__weekly');
+
+      const outcome = await sync(
+        moduleOf([
+          seedOf({
+            description: 'Changed.',
+            preAnswerDefaults: { 'module.fx.extra': { depth: 'deep' } },
+          }),
+        ]),
+      );
+
+      expect(await one('fx__weekly')).toEqual(before);
+      expect(outcome.fx!.seeded).toEqual([]);
+      expect(outcome.fx!.invalid?.map((i) => i.slug)).toEqual(['fx__weekly']);
     });
   });
 

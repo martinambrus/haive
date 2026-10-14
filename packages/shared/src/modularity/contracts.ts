@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { formSchemaSchema } from '../schemas/form.js';
+import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 
 export const MODULES_LOADED_WORKER_KEY = 'haive:modules:loaded:worker';
 
@@ -163,7 +164,7 @@ export const taskTypeDefinitionSeedSchema = z
     selectable: z.boolean(),
     requiresRepository: z.boolean(),
     preAnswerDefaults: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
-    stepLoopLimitDefaults: z.record(z.string(), z.number()).optional(),
+    stepLoopLimitDefaults: stepLoopLimitsSchema,
     sortOrder: z.number().int().min(-2147483648).max(2147483647).optional(),
   })
   .refine(
