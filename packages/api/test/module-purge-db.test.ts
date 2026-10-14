@@ -468,6 +468,27 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
     }, 30_000);
   });
 
+  describe('when a step after the drop fails', () => {
+    it('answers 502 module_purge_incomplete, and running the purge again finishes it', async () => {
+      h.beforeTransaction = async () => {
+        throw new Error('connection lost');
+      };
+      const res = await purge();
+      expect([res.status, (await json(res)).code]).toEqual([502, 'module_purge_incomplete']);
+      const mid = await snapshot();
+      expect(mid.databases).toEqual([moduleDatabaseName(OTHER)]);
+      expect(mid.modules).toEqual(before.modules);
+      expect(mid.types).toEqual(before.types);
+
+      h.beforeTransaction = undefined;
+      const again = await purge();
+      expect(again.status).toBe(200);
+      const after = await snapshot();
+      expect(after.modules).toEqual([OTHER]);
+      expect(after.types).toEqual([OTHER_TYPE, USED].sort());
+    });
+  });
+
   describe('when the module loads again between the checks and the delete', () => {
     it('answers 409 and keeps the row and every task type, though the database and settings are gone', async () => {
       h.beforeTransaction = async () => {

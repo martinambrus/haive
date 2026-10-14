@@ -32,7 +32,7 @@ import {
   liveDependents,
   setModuleActive,
 } from './activation.js';
-import { purgeModule } from './purge.js';
+import { PurgeIncompleteError, purgeModule } from './purge.js';
 
 export type ApiModuleEntry = {
   packageName: string;
@@ -307,7 +307,14 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         409,
       );
     }
-    const result = await purgeModule(db, getRedis(), id);
+    const result = await purgeModule(db, getRedis(), id).catch((err: unknown) => {
+      if (!(err instanceof PurgeIncompleteError)) throw err;
+      throw new HttpError(
+        502,
+        'The module database was dropped, but removing its settings, task types and row failed. Run the purge again to finish it.',
+        'module_purge_incomplete',
+      );
+    });
     if (result.kind === 'in-use') {
       throw new HttpError(
         409,

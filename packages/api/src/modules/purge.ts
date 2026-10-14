@@ -28,6 +28,17 @@ class NotPurged extends Error {
   }
 }
 
+/** The database is already dropped and a later step failed; running the purge again finishes it. */
+export class PurgeIncompleteError extends Error {
+  constructor(
+    readonly database: string,
+    options?: ErrorOptions,
+  ) {
+    super(`module database ${database} was dropped but the purge did not finish`, options);
+    this.name = 'PurgeIncompleteError';
+  }
+}
+
 /** No FORCE: a backend still connected is somebody's, so it is reported rather than terminated. */
 async function dropModuleDatabase(db: Database, name: string): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -68,6 +79,20 @@ export async function purgeModule(
   const database = moduleDatabaseName(moduleId);
   if (!(await dropModuleDatabase(db, database))) return { kind: 'in-use', database };
   log.info({ moduleId, database }, 'module database dropped');
+  try {
+    return await purgeAfterDrop(db, redis, moduleId, database);
+  } catch (err) {
+    log.error({ err, moduleId, database }, 'module purge stopped after the database was dropped');
+    throw new PurgeIncompleteError(database, { cause: err });
+  }
+}
+
+async function purgeAfterDrop(
+  db: Database,
+  redis: Redis,
+  moduleId: string,
+  database: string,
+): Promise<ModulePurge> {
   const configKeysDeleted = await deleteModuleSettings(redis, moduleId);
   log.info({ moduleId, configKeysDeleted }, 'module settings deleted');
 
