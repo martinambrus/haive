@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
@@ -598,11 +599,13 @@ globalKbRoutes.post('/enrich', async (c) => {
     return presentEntry(row!, await houseRuleContext(settings.namespace));
   });
 
+  const taskId = randomUUID();
   let task: typeof schema.tasks.$inferSelect | undefined;
   try {
     [task] = await db
       .insert(schema.tasks)
       .values({
+        id: taskId,
         userId,
         type: 'kb_author',
         title: `Enrich: ${data.title}`.slice(0, 512),
@@ -635,15 +638,24 @@ globalKbRoutes.post('/enrich', async (c) => {
       .returning();
     if (!task) throw new HttpError(500, 'failed to create enrichment task');
   } catch (err) {
-    // The entry lives in the global KB database, so no transaction spans both writes.
-    await withGlobalKb(db, ({ db: gdb }) =>
-      gdb.delete(globalKbEntries).where(eq(globalKbEntries.id, entry.id)),
-    ).catch((cleanupErr) =>
-      logger.warn(
-        { err: cleanupErr, entryId: entry.id },
-        'could not remove the skeleton entry of a failed enrich',
-      ),
-    );
+    // The entry lives in the global KB database, so no transaction spans both writes. A rejected
+    // insert can still have committed, so the entry goes only once the task is known to be absent.
+    const taskExists = await db.query.tasks
+      .findFirst({ where: eq(schema.tasks.id, taskId), columns: { id: true } })
+      .then(
+        (row) => row !== undefined,
+        () => true,
+      );
+    if (!taskExists) {
+      await withGlobalKb(db, ({ db: gdb }) =>
+        gdb.delete(globalKbEntries).where(eq(globalKbEntries.id, entry.id)),
+      ).catch((cleanupErr) =>
+        logger.warn(
+          { err: cleanupErr, entryId: entry.id },
+          'could not remove the skeleton entry of a failed enrich',
+        ),
+      );
+    }
     throw err;
   }
 

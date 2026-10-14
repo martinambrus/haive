@@ -96,6 +96,55 @@ describe('POST /enrich pins the kb_author step list', () => {
     expect(fake.rows(globalKbEntries)).toHaveLength(0);
   });
 
+  it('keeps the skeleton entry when the task insert committed but its reply was lost', async () => {
+    const real = fake.db;
+    h.db = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop !== 'insert') return Reflect.get(target, prop, receiver);
+        return (table: unknown) => {
+          const builder = real.insert(table as typeof schema.tasks);
+          if (table !== schema.tasks) return builder;
+          return {
+            values: (v: unknown) => ({
+              returning: async () => {
+                await builder.values(v as never).returning();
+                throw new Error('connection dropped');
+              },
+            }),
+          };
+        };
+      },
+    });
+    expect((await enrich()).status).toBe(500);
+    const [task] = fake.rows(schema.tasks);
+    expect(task).toBeDefined();
+    const [entry] = fake.rows(globalKbEntries);
+    expect(entry?.id).toBe((task!.metadata as { globalKbEntryId: string }).globalKbEntryId);
+  });
+
+  it('keeps the skeleton entry when it cannot tell whether the task was written', async () => {
+    fake.hooks.beforeInsert = (table) => {
+      if (table === schema.tasks) throw new Error('connection dropped');
+    };
+    const real = fake.db;
+    h.db = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop !== 'query') return Reflect.get(target, prop, receiver);
+        return {
+          ...real.query,
+          tasks: {
+            findFirst: async () => {
+              throw new Error('database unreachable');
+            },
+          },
+        };
+      },
+    });
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(schema.tasks)).toHaveLength(0);
+    expect(fake.rows(globalKbEntries)).toHaveLength(1);
+  });
+
   it('creates neither the entry nor the task when the type is refused', async () => {
     h.definition.mockRejectedValueOnce(new HttpError(403, 'Task type kb_author is disabled'));
     expect((await enrich()).status).toBe(403);
