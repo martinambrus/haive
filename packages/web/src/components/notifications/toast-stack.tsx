@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type KeyboardEvent } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -54,15 +54,31 @@ export function ToastStack({
   // server as part of the (app) layout, so wait for mount.
   const [mounted, setMounted] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [seenKeys, setSeenKeys] = useState<string[]>([]);
+  const [announcement, setAnnouncement] = useState({ id: 0, text: '' });
   useEffect(() => setMounted(true), []);
   // Nothing is folded at three or fewer, so the next burst starts collapsed.
   if (expanded && toasts.length <= COLLAPSED_VISIBLE) setExpanded(false);
-  if (!mounted || toasts.length === 0) return null;
+  // A dismiss or an expand must not re-read the line, so only a key new to the list sets it.
+  const keys = toasts.map((t) => t.key);
+  if (keys.length !== seenKeys.length || keys.some((key, i) => key !== seenKeys[i])) {
+    setSeenKeys(keys);
+    const fresh = toasts.findLast((t) => !seenKeys.includes(t.key));
+    if (fresh) {
+      setAnnouncement((last) => ({ id: last.id + 1, text: `${fresh.message}: ${fresh.title}` }));
+    }
+  }
+  if (!mounted) return null;
 
   const shown = expanded ? toasts : toasts.slice(-COLLAPSED_VISIBLE);
 
   return createPortal(
     <div className="fixed bottom-4 right-4 z-40 flex max-h-[calc(50dvh-1rem)] w-80 max-w-[calc(100vw-2rem)] flex-col gap-2">
+      {/* Kept with no toast: a live region created with its first message is not announced. */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {/* New key per line: an identical line (a returning toast) must still change the DOM. */}
+        <span key={announcement.id}>{announcement.text}</span>
+      </p>
       {toasts.length > 1 && (
         <div className="flex justify-end gap-2">
           {toasts.length > COLLAPSED_VISIBLE && (
@@ -84,62 +100,68 @@ export function ToastStack({
         </div>
       )}
       {/* Padding offset by the margin: a focused card's ring would otherwise be clipped. */}
-      <div className="-m-1 flex flex-col gap-2 overflow-y-auto overscroll-contain p-1">
-        {shown.map((toast) => {
-          const tint = TOAST_TINT[toast.status];
-          const openable = Boolean(toast.taskId);
-          return (
-            <div
-              key={toast.key}
-              {...(openable
-                ? {
-                    role: 'button',
-                    tabIndex: 0,
-                    onClick: () => onOpen(toast),
-                    onKeyDown: (e: KeyboardEvent) => {
-                      if (e.key === 'Enter' || e.key === ' ') onOpen(toast);
-                    },
-                  }
-                : {})}
-              className={cn(
-                'flex items-start gap-2 rounded-lg border bg-neutral-900 p-3 shadow-xl transition-colors',
-                openable && 'cursor-pointer hover:bg-neutral-800',
-                tint.border,
-              )}
-            >
-              <div className="min-w-0 flex-1">
-                <p className={cn('text-xs font-semibold uppercase tracking-wider', tint.label)}>
+      {toasts.length > 0 && (
+        <div className="-m-1 flex flex-col gap-2 overflow-y-auto overscroll-contain p-1">
+          {shown.map((toast) => {
+            const tint = TOAST_TINT[toast.status];
+            const openable = Boolean(toast.taskId);
+            const body = (
+              <>
+                <span
+                  className={cn('block text-xs font-semibold uppercase tracking-wider', tint.label)}
+                >
                   {toast.message}
-                </p>
+                </span>
                 {/* Task titles are user-supplied and unbounded, so they truncate. A
                     non-task toast carries its own short detail line and must show all
                     of it — truncating cut the reset time off the usage warning. */}
-                <p
+                <span
                   className={cn(
-                    'text-sm font-medium text-neutral-100',
+                    'block text-sm font-medium text-neutral-100',
                     openable ? 'truncate' : 'text-pretty',
                   )}
                 >
                   {toast.title}
-                </p>
-                {openable && <p className="text-xs text-neutral-500">Click to open the task</p>}
-              </div>
-              <button
-                type="button"
-                aria-label="Dismiss notification"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDismiss(toast.key);
-                }}
-                onKeyDown={(e) => e.stopPropagation()}
-                className="rounded p-0.5 text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
+                </span>
+                {openable && (
+                  <span className="block text-xs text-neutral-500">Click to open the task</span>
+                )}
+              </>
+            );
+            return (
+              <div
+                key={toast.key}
+                className={cn(
+                  'relative flex items-start gap-2 rounded-lg border bg-neutral-900 p-3 shadow-xl transition-colors',
+                  openable && 'hover:bg-neutral-800',
+                  tint.border,
+                )}
               >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          );
-        })}
-      </div>
+                {/* The ::after stretches the open button over the card; the X sits above it. */}
+                {openable ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpen(toast)}
+                    className="min-w-0 flex-1 cursor-pointer text-left after:absolute after:inset-0 after:rounded-lg focus-visible:outline-none focus-visible:after:outline-2 focus-visible:after:outline-indigo-400"
+                  >
+                    {body}
+                  </button>
+                ) : (
+                  <div className="min-w-0 flex-1">{body}</div>
+                )}
+                <button
+                  type="button"
+                  aria-label={`Dismiss notification: ${toast.title}`}
+                  onClick={() => onDismiss(toast.key)}
+                  className="relative z-10 rounded p-0.5 text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>,
     document.body,
   );
