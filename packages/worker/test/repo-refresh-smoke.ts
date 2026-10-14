@@ -23,7 +23,7 @@ import path from 'node:path';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { schema } from '@haive/database';
+import { schema, type MergeResolveState } from '@haive/database';
 import { HAIVE_DATA_FILES, logger, type RepoJobPayload } from '@haive/shared';
 import { applyPlanPatch } from '@haive/shared/plan';
 import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
@@ -33,6 +33,7 @@ import { StepSupersededError } from '../src/step-engine/step-ownership.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
 import {
+  MOVE_ATTEMPTS,
   putBackProjections,
   recoverAfterMoveFailure,
   restoreFaults,
@@ -41,10 +42,12 @@ import {
   setAsideHaiveProjections,
 } from '../src/project-state/set-aside.js';
 import { lockProjectState, writeProjectStateColumn } from '../src/project-state/write.js';
-import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import { refreshProjectState, sweepDirtyProjectStates } from '../src/project-state/refresh.js';
 import { writePlanMirror } from '../src/plan/mirror.js';
 import { syncBaseStep } from '../src/step-engine/steps/workflow/00a-sync-base.js';
-import type { StepContext } from '../src/step-engine/step-definition.js';
+import { resolveMergePhase } from '../src/step-engine/merge-resolver.js';
+import { claimMergeDir } from '../src/step-engine/merge-dir-claim.js';
+import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
 
 const log = logger.child({ module: 'repo-refresh-smoke' });
 
@@ -2835,6 +2838,449 @@ async function main(): Promise<void> {
         { inDb, now },
       );
     }
+
+    // 13. A merge opened in the checkout itself sets Haive's pending files aside first, as a fast-forward does (B3.1b).
+    const step = syncBaseStep as unknown as StepDefinition;
+    const attempt = async (name: string, run: () => Promise<void>): Promise<void> => {
+      try {
+        await run();
+      } catch (err) {
+        check(name, false, String(err));
+      }
+    };
+    const isAncestor = (dir: string, a: string, b: string): boolean => {
+      try {
+        git(dir, 'merge-base', '--is-ancestor', a, b);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const mergeOpen = (dir: string): boolean => {
+      try {
+        git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD');
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const mergeIn = async (c: Awaited<ReturnType<typeof cloned>>, state?: MergeResolveState) => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: c.payload.repositoryId,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id, epoch: schema.tasks.orchestrationEpoch });
+      try {
+        const ctx = { ...(await taskCtx(c.dest, task!.id)), epoch: task!.epoch };
+        const detected = await syncBaseStep.detect!(ctx);
+        const row = (await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, ctx.taskStepId),
+        }))!;
+        // The pending phase takes the claim itself; a state mid-way through the fixer loop is past it.
+        if (state) {
+          await claimMergeDir(db, {
+            mergeDir: c.dest,
+            stepId: row.id,
+            taskId: task!.id,
+            epoch: task!.epoch,
+          });
+        }
+        const current = {
+          ...row,
+          detectOutput: detected,
+          formValues: { base: 'main', syncAction: 'merge' },
+          mergeResolveState: state ?? null,
+        };
+        const params = {
+          db,
+          taskId: task!.id,
+          userId,
+          repoPath: c.dest,
+          workspacePath: c.dest,
+          cliProviderId: null,
+          stepDef: step,
+          epoch: task!.epoch,
+          ...(state ? { providers: [], deps: {} } : {}),
+        };
+        return await resolveMergePhase(db, step, current as never, ctx, params as never);
+      } finally {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, task!.id));
+      }
+    };
+    const haltOf = (out: Awaited<ReturnType<typeof mergeIn>>): string =>
+      out.resolved ? '' : out.result.status === 'failed' ? out.result.error : out.result.status;
+    const divergedOverPendingRender = async () => {
+      const c = await withPendingRender();
+      const local = await commitFile(c.dest, 'local.txt', 'local\n', 'local work');
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      const upstream = upstreamCommit('a teammate adds an agent', '.haive-data/state');
+      return { c, id: c.payload.repositoryId, local, upstream };
+    };
+    const survives = async (c: Awaited<ReturnType<typeof cloned>>) => {
+      const col = await columnOf(c.payload.repositoryId);
+      const now = JSON.parse(await readFile(path.join(c.dest, RENDER_REL), 'utf8')) as {
+        acceptedAgentIds: string[];
+        lspLanguages: string[];
+      };
+      return (
+        isDeepEqual(col?.acceptedAgentIds, ['a', 'b']) &&
+        isDeepEqual(col?.lspLanguages, ['php']) &&
+        isDeepEqual(now.acceptedAgentIds, ['a', 'b']) &&
+        isDeepEqual(now.lspLanguages, ['php'])
+      );
+    };
+
+    await attempt('C1: the merge lands past a pending state file', async () => {
+      const { c, local, upstream } = await divergedOverPendingRender();
+      const out = await mergeIn(c);
+      check(
+        'C1: the merge lands past a pending change to a state file the incoming commit touches',
+        out.resolved &&
+          isAncestor(c.dest, upstream, 'HEAD') &&
+          isAncestor(c.dest, local, 'HEAD') &&
+          !mergeOpen(c.dest),
+        out,
+      );
+      check(
+        'C1: and the pending change survives beside the incoming agent, in the database and on disk',
+        await survives(c),
+      );
+    });
+
+    await attempt('C2: a hand-edited state file halts the merge', async () => {
+      const { c } = await divergedOverPendingRender();
+      const before = git(c.dest, 'rev-parse', 'HEAD');
+      await writeFile(path.join(c.dest, RENDER_REL), '{ edited by hand');
+      const out = await mergeIn(c);
+      const why = haltOf(out);
+      check(
+        'C2: a hand-edited state file halts the merge naming it, with the set-aside wording, and nothing moves',
+        !out.resolved &&
+          why.includes(RENDER_REL) &&
+          /holds changes Haive did not write/.test(why) &&
+          /commit or discard that change/.test(why) &&
+          !/git refused/.test(why) &&
+          git(c.dest, 'rev-parse', 'HEAD') === before &&
+          !mergeOpen(c.dest) &&
+          (await readFile(path.join(c.dest, RENDER_REL), 'utf8')) === '{ edited by hand',
+        { why },
+      );
+    });
+
+    await attempt('C3: the reopen lands past a rewritten projection', async () => {
+      const { c, local, upstream } = await divergedOverPendingRender();
+      const state: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'origin/main',
+        mergeDir: c.dest,
+        sandboxMergeDir: '/haive/workdir',
+        fixInvocationId: null,
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        squashAfterMerge: false,
+        baseShaBefore: git(c.dest, 'rev-parse', 'HEAD'),
+        merged: false,
+        skipReason: null,
+        pushed: false,
+        mergeStage: 'feature',
+        baseSyncRounds: 0,
+      };
+      const out = await mergeIn(c, state);
+      check(
+        'C3: a reopened merge lands past the projection the sweep rewrote, and the pending change survives',
+        out.resolved &&
+          isAncestor(c.dest, upstream, 'HEAD') &&
+          isAncestor(c.dest, local, 'HEAD') &&
+          (await survives(c)),
+        out,
+      );
+    });
+
+    await attempt('C4: a refused merge puts the set-aside files back', async () => {
+      const c = await withPendingRender();
+      await commitFile(c.dest, 'local.txt', 'local\n', 'local work');
+      git(c.dest, 'add', '--', RENDER_REL);
+      await push('blocked.txt', 'theirs\n');
+      await writeFile(path.join(c.dest, 'blocked.txt'), 'mine\n');
+      const head = git(c.dest, 'rev-parse', 'HEAD');
+      const bytes = await readFile(path.join(c.dest, RENDER_REL));
+      const staged = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      let restored = false;
+      let putBack = false;
+      restoreFaults.beforeRestore = () => {
+        restored = true;
+      };
+      restoreFaults.beforePutBack = () => {
+        putBack = true;
+      };
+      let out;
+      try {
+        out = await mergeIn(c);
+      } finally {
+        delete restoreFaults.beforeRestore;
+        delete restoreFaults.beforePutBack;
+      }
+      check(
+        'C4: a merge git refused over an untracked file leaves the state file as it was, in bytes and in the index',
+        !out.resolved &&
+          restored &&
+          putBack &&
+          git(c.dest, 'rev-parse', 'HEAD') === head &&
+          !mergeOpen(c.dest) &&
+          (await readFile(path.join(c.dest, RENDER_REL))).equals(bytes) &&
+          git(c.dest, 'ls-files', '-s', '--', RENDER_REL) === staged,
+        { restored, putBack, why: haltOf(out) },
+      );
+    });
+
+    // C5 rewrites plan.json right after each restore, which the check inside the merge section then finds.
+    for (const keeps of [false, true]) {
+      await attempt(
+        `C5: a rewrite under the merge (${keeps ? 'every' : 'one'} round)`,
+        async () => {
+          const { c, id, upstream } = await divergedOverPendingRender();
+          await applyPlanPatch(
+            db,
+            { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+            { repositoryId: id, origin: 'user' },
+          );
+          await writePlanMirror(db, id, c.dest);
+          const planPath = path.join(c.dest, PLAN_REL);
+          const planBytes = await readFile(planPath);
+          const head = git(c.dest, 'rev-parse', 'HEAD');
+          const renderBytes = await readFile(path.join(c.dest, RENDER_REL));
+          const headPlan = (() => {
+            try {
+              return execFileSync('git', ['show', `HEAD:${PLAN_REL}`], {
+                cwd: c.dest,
+                env: gitEnv,
+              });
+            } catch {
+              return null;
+            }
+          })();
+          let rewrites = 0;
+          restoreFaults.afterRestore = async () => {
+            if (!keeps && rewrites > 0) return;
+            const now = await readFile(planPath).catch(() => null);
+            if (now === null ? headPlan !== null : headPlan === null || !now.equals(headPlan))
+              return;
+            rewrites += 1;
+            await writeFile(planPath, planBytes);
+          };
+          let out;
+          try {
+            out = await mergeIn(c);
+          } finally {
+            delete restoreFaults.afterRestore;
+          }
+          if (keeps) {
+            check(
+              'C5: a file that keeps changing under the merge ends the attempts with the halt wording and nothing merged',
+              !out.resolved &&
+                haltOf(out).includes('kept changing under the merge') &&
+                rewrites === MOVE_ATTEMPTS &&
+                git(c.dest, 'rev-parse', 'HEAD') === head &&
+                !mergeOpen(c.dest) &&
+                (await readFile(path.join(c.dest, RENDER_REL))).equals(renderBytes),
+              { rewrites, why: haltOf(out) },
+            );
+          } else {
+            check(
+              'C5: a file rewritten once under the merge goes round again, then the merge lands',
+              out.resolved &&
+                rewrites === 1 &&
+                isAncestor(c.dest, upstream, 'HEAD') &&
+                (await survives(c)),
+              { rewrites, out },
+            );
+          }
+        },
+      );
+    }
+
+    // C6 opens the merge while the sweep waits for the project-state lock, after its own check.
+    await attempt('C6: the sweep writes nothing into a merge that opened under it', async () => {
+      const c = await committedRecord();
+      const id = c.payload.repositoryId;
+      const target = path.join(c.dest, RENDER_REL);
+      const bytes = await readFile(target);
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column({ lspLanguages: ['php'] }) })
+        .where(eq(schema.repositories.id, id));
+      await markProjectStateDirty(db, id);
+      let release!: () => void;
+      let held!: () => void;
+      const locked = new Promise<void>((r) => (held = r));
+      const holder = db.transaction(async (tx) => {
+        await lockProjectState(tx, id);
+        held();
+        await new Promise<void>((r) => (release = r));
+      });
+      await locked;
+      const sweeping = refreshProjectState(db, id);
+      let queued = false;
+      for (let i = 0; i < 300 && !queued; i++) {
+        const rows = (await db.execute(
+          sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`,
+        )) as unknown as { n: number }[];
+        queued = Number(rows[0]?.n) > 0;
+        if (!queued) await new Promise((r) => setTimeout(r, 100));
+      }
+      const mergeHead = path.join(c.dest, '.git', 'MERGE_HEAD');
+      await writeFile(mergeHead, `${git(c.dest, 'rev-parse', 'HEAD')}\n`);
+      release();
+      await holder;
+      let written: boolean;
+      try {
+        written = await sweeping;
+      } finally {
+        await rm(mergeHead, { force: true });
+      }
+      const during = await readFile(target);
+      const outbox = await db.query.projectStateOutbox.findFirst({
+        where: eq(schema.projectStateOutbox.repositoryId, id),
+      });
+      const later = await refreshProjectState(db, id);
+      check(
+        'C6: a sweep whose write waited for the lock writes nothing into a merge that opened meanwhile',
+        queued &&
+          !written &&
+          during.equals(bytes) &&
+          (outbox?.writtenRevision ?? 0) < (outbox?.revision ?? 0),
+        { queued, written },
+      );
+      check(
+        'C6: and writes once the merge is over',
+        later && (await readFile(target, 'utf8')).includes('php'),
+      );
+    });
+
+    // C7. Run as root the file is seen to change hands; run as anyone, only a name that is not UTF-8 is reported.
+    for (const via of ['refresh', '00a'] as const) {
+      await attempt(`C7: ${via}`, async () => {
+        const c = await cloned();
+        const oddName = Buffer.concat([
+          Buffer.from('odd-'),
+          Buffer.from([0xff]),
+          Buffer.from(`-${via}.txt`),
+        ]);
+        await writeFile(Buffer.concat([Buffer.from(`${seed}/`), oddName]), 'x\n');
+        await writeFile(path.join(seed, `plain-${via}.txt`), 'x\n');
+        git(seed, 'add', '-A');
+        git(seed, 'commit', '-q', '-m', 'files for the hand-back');
+        git(seed, 'push', '-q', 'origin', 'HEAD:main');
+        const warned: { fields: Record<string, unknown>; msg: string }[] = [];
+        const realWarn = logger.warn;
+        const realGetuid = process.getuid;
+        logger.warn = ((fields: Record<string, unknown>, msg?: string) => {
+          warned.push({ fields, msg: msg ?? '' });
+        }) as never;
+        process.getuid = () => 0;
+        try {
+          await moveVia(via, c);
+        } finally {
+          logger.warn = realWarn;
+          process.getuid = realGetuid;
+        }
+        check(
+          `C7: ${via}: the names a fast-forward wrote reach the hand-back`,
+          warned.some(
+            (w) =>
+              /not UTF-8/.test(w.msg) &&
+              Array.isArray(w.fields.names) &&
+              w.fields.names.some(
+                (n) => typeof n === 'string' && n.startsWith('odd-') && n.endsWith(`-${via}.txt`),
+              ),
+          ),
+          warned,
+        );
+        if (process.getuid?.() === 0) {
+          check(
+            `C7: ${via}: run as root, the file the fast-forward wrote belongs to the sandbox user`,
+            (await lstat(path.join(c.dest, `plain-${via}.txt`))).uid === 1000,
+          );
+        }
+      });
+    }
+
+    await attempt('C8: a throw from the merge section', async () => {
+      const { c, id } = await divergedOverPendingRender();
+      const head = git(c.dest, 'rev-parse', 'HEAD');
+      const bytes = await readFile(path.join(c.dest, RENDER_REL));
+      let restored = false;
+      let putBack = false;
+      restoreFaults.afterRestore = async () => {
+        delete restoreFaults.afterRestore;
+        restored = true;
+        await db
+          .update(schema.tasks)
+          .set({ status: 'cancelled' })
+          .where(eq(schema.tasks.repositoryId, id));
+      };
+      restoreFaults.beforePutBack = () => {
+        putBack = true;
+      };
+      let thrown: unknown = null;
+      try {
+        await mergeIn(c);
+      } catch (err) {
+        thrown = err;
+      } finally {
+        delete restoreFaults.afterRestore;
+        delete restoreFaults.beforePutBack;
+      }
+      check(
+        'C8: a merge section that throws after the set-aside puts the state file back and the throw reaches the caller',
+        thrown instanceof StepSupersededError &&
+          restored &&
+          putBack &&
+          git(c.dest, 'rev-parse', 'HEAD') === head &&
+          !mergeOpen(c.dest) &&
+          (await readFile(path.join(c.dest, RENDER_REL))).equals(bytes),
+        { thrown: String(thrown), restored, putBack },
+      );
+    });
+
+    await attempt('C9: a conflicted merge that is given up', async () => {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await push('conflict.txt', 'base\n');
+      git(c.dest, 'pull', '-q', '--ff-only', 'origin', 'main');
+      await commitFile(c.dest, 'conflict.txt', 'local\n', 'local edit');
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b'] });
+      await writeFile(path.join(seed, 'conflict.txt'), 'theirs\n');
+      git(seed, 'add', 'conflict.txt');
+      upstreamCommit(
+        'a teammate edits the conflicting file and adds an agent',
+        '.haive-data/state',
+      );
+      const head = git(c.dest, 'rev-parse', 'HEAD');
+      const out = await mergeIn(c);
+      await refreshProjectState(db, id);
+      const now = JSON.parse(await readFile(path.join(c.dest, RENDER_REL), 'utf8')) as {
+        lspLanguages: string[];
+      };
+      check(
+        'C9: a conflicted merge given up is opened past the pending state file, aborted, and the sweep writes the pending change back',
+        !out.resolved &&
+          /requires a CLI provider/.test(haltOf(out)) &&
+          git(c.dest, 'rev-parse', 'HEAD') === head &&
+          !mergeOpen(c.dest) &&
+          isDeepEqual((await columnOf(id))?.lspLanguages, ['php']) &&
+          isDeepEqual(now.lspLanguages, ['php']),
+        { why: haltOf(out), now },
+      );
+    });
 
     if (failures > 0) {
       log.error({ failures, checks }, 'smoke FAILED');
