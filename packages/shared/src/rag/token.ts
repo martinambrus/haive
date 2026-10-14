@@ -1,12 +1,12 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-/** Task-scoped bearer token for the haive-rag MCP proxy -> API path.
+/** Legacy task-scoped bearer token for the haive-rag MCP proxy -> API path.
  *
- *  The token is minted server-side (worker, when wiring the per-task MCP
- *  config) and handed to the sandbox via the MCP server's env. The sandbox
- *  presents it to `POST /rag/search`; the API verifies it and trusts the
- *  embedded taskId. This lets a sandbox query ONLY its own task's project
- *  without ever holding a user session or DB credentials.
+ *  It carries no audience, so the worker mints audience-scoped tokens
+ *  (task-token.ts) and `POST /rag/search` is the only route that verifies this
+ *  one, for sandboxes already holding it. The API trusts the embedded taskId,
+ *  so a sandbox can query ONLY its own task's project without ever holding a
+ *  user session or DB credentials.
  *
  *  Format: `<base64url(payload)>.<base64url(hmac-sha256(payload))>` where
  *  payload is `{ taskId, exp }` (exp = unix seconds). Signed with a server

@@ -6,8 +6,9 @@ import {
   type DdevControlPayload,
   type DdevControlResult,
 } from '@haive/shared';
-import { verifyRagToken } from '@haive/shared/rag';
+import { verifyTaskToken } from '@haive/shared/task-token';
 import { HttpError, type AppEnv } from '../context.js';
+import { sandboxBodyLimit } from '../middleware/sandbox-body-limit.js';
 import { getDdevControlQueue, getDdevControlQueueEvents } from '../queues.js';
 
 // Sandbox-facing control surface for the ddev-control MCP. The task's AI CLI (via the
@@ -19,6 +20,8 @@ import { getDdevControlQueue, getDdevControlQueueEvents } from '../queues.js';
 
 export const ddevControlRoutes = new Hono<AppEnv>();
 
+ddevControlRoutes.use('*', sandboxBodyLimit);
+
 /** api-side await budgets. `restart` can trigger a cold-boot recovery in the worker, so
  *  it is generous; status/logs are quick reads. */
 const AWAIT_TIMEOUTS: Record<DdevControlPayload['action'], number> = {
@@ -27,13 +30,13 @@ const AWAIT_TIMEOUTS: Record<DdevControlPayload['action'], number> = {
   restart: 1_200_000,
 };
 
-/** Verify the Bearer token (HMAC, same as /rag) and return the taskId it is scoped to,
- *  or throw 401. */
+/** Verify the Bearer token (a 'ddev' task token; a RAG token never opens this) and return the
+ *  taskId it is scoped to, or throw 401. */
 function taskIdFromBearer(authHeader: string | undefined): string {
   const secret = process.env.CONFIG_ENCRYPTION_KEY;
   if (!secret) throw new HttpError(500, 'server misconfigured: CONFIG_ENCRYPTION_KEY unset');
   const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  const verified = token ? verifyRagToken(token, secret) : null;
+  const verified = token ? verifyTaskToken(token, 'ddev', secret) : null;
   if (!verified) throw new HttpError(401, 'invalid or missing ddev token');
   return verified.taskId;
 }
