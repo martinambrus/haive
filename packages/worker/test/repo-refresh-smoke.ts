@@ -2409,6 +2409,73 @@ async function main(): Promise<void> {
         );
       }
 
+      // M12. A mode a person gives the re-created plan.json before the restore is theirs and is kept.
+      const m12 = await cloned();
+      const m12Id = m12.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: m12Id, origin: 'user' },
+      );
+      await writePlanMirror(db, m12Id, m12.dest);
+      const m12Plan = path.join(m12.dest, PLAN_REL);
+      await chmod(m12Plan, 0o600);
+      const m12Head = git(m12.dest, 'rev-parse', 'HEAD');
+      await push('m12-upstream.txt', 'x\n');
+      let m12Fired = false;
+      restoreFaults.beforeKeptMetadata = async () => {
+        delete restoreFaults.beforeKeptMetadata;
+        m12Fired = true;
+        await chmod(m12Plan, 0o640);
+      };
+      let m12Moved;
+      try {
+        m12Moved = await moveVia('refresh', m12);
+      } finally {
+        delete restoreFaults.beforeKeptMetadata;
+      }
+      const m12Mode = ((await stat(m12Plan).catch(() => null))?.mode ?? 0) & 0o777;
+      check(
+        'M12: a mode a person gives the re-created plan.json before the restore is kept',
+        m12Fired && git(m12.dest, 'rev-parse', 'HEAD') !== m12Head && m12Mode === 0o640,
+        { m12Fired, m12Moved, m12Mode: m12Mode.toString(8) },
+      );
+
+      // M13. A group a person gives the re-created plan.json before the restore is theirs and is kept.
+      const m13Gid = process.getgroups?.().find((gid) => gid !== process.getgid?.());
+      if (m13Gid === undefined) {
+        check('M13: skipped — this user has no second group to change to', true, {});
+      } else {
+        const m13 = await cloned();
+        const m13Id = m13.payload.repositoryId;
+        await applyPlanPatch(
+          db,
+          { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+          { repositoryId: m13Id, origin: 'user' },
+        );
+        await writePlanMirror(db, m13Id, m13.dest);
+        const m13Plan = path.join(m13.dest, PLAN_REL);
+        const m13Head = git(m13.dest, 'rev-parse', 'HEAD');
+        await push('m13-upstream.txt', 'x\n');
+        let m13Fired = false;
+        restoreFaults.beforeKeptMetadata = async () => {
+          delete restoreFaults.beforeKeptMetadata;
+          m13Fired = true;
+          await chown(m13Plan, process.getuid?.() ?? 0, m13Gid);
+        };
+        try {
+          await moveVia('refresh', m13);
+        } finally {
+          delete restoreFaults.beforeKeptMetadata;
+        }
+        const m13Gidnow = (await stat(m13Plan).catch(() => null))?.gid;
+        check(
+          'M13: a group a person gives the re-created plan.json before the restore is kept',
+          m13Fired && git(m13.dest, 'rev-parse', 'HEAD') !== m13Head && m13Gidnow === m13Gid,
+          { m13Fired, m13Gid, m13Gidnow },
+        );
+      }
+
       // M9 and M11 need a remote of their own: the shared one's committed record already holds every directory.
       const untrackedRecord = async (name: string) => {
         const origin = path.join(tmp, `origin-${name}.git`);

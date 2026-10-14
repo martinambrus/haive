@@ -393,6 +393,7 @@ export const restoreFaults: {
   beforePutBack?: () => void | Promise<void>;
   beforeIndexSwap?: () => void | Promise<void>;
   beforeIndexPutBack?: () => void | Promise<void>;
+  beforeKeptMetadata?: () => void | Promise<void>;
 } = {};
 
 interface RestoreGuard {
@@ -839,9 +840,13 @@ export async function resyncHaiveProjections(
 const metadataWarn = (repoPath: string, path: string) => (err: unknown) =>
   logger.warn({ err, repoPath, path }, 'owner and mode not restored after a checkout move');
 
-/** After the re-sync: an untracked projection the set-aside removed, and the directories it pruned, are new
- *  now, so each gets back its owner and mode while the process that wrote it still owns it. Never throws. */
+/** The mode fs-safe's createExclusive gives a file it creates; a file at any other mode was changed since. */
+const WRITER_FILE_MODE = 0o644;
+
+/** After the re-sync: an untracked projection the set-aside removed, and the directories it pruned, are new now and
+ *  get back their owner and mode while the writer still owns them; a group or file mode changed meanwhile stays. */
 export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<void> {
+  await restoreFaults.beforeKeptMetadata?.();
   const writer = process.getuid?.();
   for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
     await restoreKeptParents(repoPath, parents);
@@ -850,12 +855,22 @@ export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Pr
     try {
       const now = await lstatNoFollow(repoPath, path);
       if (now?.kind !== 'file' || now.stats.uid !== writer) continue;
-      await chownNoFollow(repoPath, path, owner).catch(warn);
-      await chmodNoFollow(repoPath, path, (current) => (mode & ~0o111) | (current & 0o111));
+      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid)).catch(warn);
+      await chmodNoFollow(repoPath, path, (current) =>
+        (current & ~0o111) === WRITER_FILE_MODE ? (mode & ~0o111) | (current & 0o111) : current,
+      );
     } catch (err) {
       warn(err);
     }
   }
+}
+
+/** The captured owner, keeping a group someone set since: the writer's own gid is the only one it gives a new node. */
+function keptOwner(
+  owner: { uid: number; gid: number },
+  gidNow: number,
+): { uid: number; gid: number } {
+  return { uid: owner.uid, gid: gidNow === process.getgid?.() ? owner.gid : gidNow };
 }
 
 /** The directory half of `restoreKeptMetadata`, deepest first, which the put-back shares. Never throws. */
@@ -866,7 +881,7 @@ async function restoreKeptParents(repoPath: string, parents: KeptFile['parents']
     try {
       const now = await lstatNoFollow(repoPath, path);
       if (now?.kind !== 'directory' || now.stats.uid !== writer) continue;
-      await chownNoFollow(repoPath, path, owner).catch(warn);
+      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid)).catch(warn);
       await chmodNoFollow(repoPath, path, mode);
     } catch (err) {
       warn(err);
