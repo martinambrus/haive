@@ -12,8 +12,14 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   switchOn: undefined as boolean | undefined,
   search: undefined as
-    undefined | ((taskId: string, query: string, topK?: number) => Promise<unknown[]>),
-  searches: [] as Array<{ taskId: string; query: string; topK: number | undefined }>,
+    | undefined
+    | ((taskId: string, query: string, topK?: number, scope?: string) => Promise<unknown[]>),
+  searches: [] as Array<{
+    taskId: string;
+    query: string;
+    topK: number | undefined;
+    scope: string | undefined;
+  }>,
   get: undefined as undefined | (() => Promise<unknown>),
   gets: [] as Array<{ url: string; timeoutMs: number; maxBytes: number }>,
   resolve: undefined as undefined | (() => Promise<Array<{ address: string; family: number }>>),
@@ -38,11 +44,16 @@ vi.mock('../src/routes/rag.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/routes/rag.js')>();
   return {
     ...actual,
-    executeRagSearch: (taskId: string, query: string, topK?: number) => {
-      h.searches.push({ taskId, query, topK });
+    executeRagSearch: (
+      taskId: string,
+      query: string,
+      topK?: number,
+      scope?: 'local' | 'global' | 'all',
+    ) => {
+      h.searches.push({ taskId, query, topK, scope });
       return h.search
-        ? h.search(taskId, query, topK)
-        : actual.executeRagSearch(taskId, query, topK);
+        ? h.search(taskId, query, topK, scope)
+        : actual.executeRagSearch(taskId, query, topK, scope);
     },
   };
 });
@@ -579,7 +590,7 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
       const res = await callTool('beta_only', { query: 'q' }, token);
 
       expect(res.status).toBe(200);
-      expect(h.searches).toEqual([{ taskId: fx.taskId, query: 'q', topK: 2 }]);
+      expect(h.searches).toEqual([{ taskId: fx.taskId, query: 'q', topK: 2, scope: 'global' }]);
     });
 
     it.each([
@@ -917,29 +928,35 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
       await callTool('project_notes', { query: 'q' });
 
       expect(h.searches).toEqual([
-        { taskId: fx.taskId, query: 'padded', topK: 3 },
-        { taskId: fx.taskId, query: 'q', topK: 5 },
+        { taskId: fx.taskId, query: 'padded', topK: 3, scope: 'global' },
+        { taskId: fx.taskId, query: 'q', topK: 5, scope: 'local' },
       ]);
     });
 
     it.each([
-      ['project_notes', ['src/local.ts'], ['global_kb/rule.md']],
-      ['house_rules', ['global_kb/rule.md'], ['src/local.ts']],
-      ['everything', ['src/local.ts', 'global_kb/rule.md'], []],
-    ])('keeps the hits of its scope: %s', async (tool, kept, dropped) => {
+      ['project_notes', 'local'],
+      ['house_rules', 'global'],
+      ['everything', 'all'],
+    ])('asks the search for the scope of the tool before it merges: %s', async (tool, scope) => {
+      await callTool(tool, { query: 'q' });
+
+      expect(h.searches.map((search) => search.scope)).toEqual([scope]);
+    });
+
+    it('answers with the hits the search gave and filters none of them afterwards', async () => {
       h.search = async () => [
         hit({ sourcePath: 'src/local.ts', scope: 'local' }),
         hit({ sourcePath: 'global_kb/rule.md', scope: 'global' }),
       ];
 
-      const answer = await okBody(await callTool(tool, { query: 'q' }));
+      const answer = await okBody(await callTool('house_rules', { query: 'q' }));
 
-      for (const path of kept) expect(answer.text).toContain(path);
-      for (const path of dropped) expect(answer.text).not.toContain(path);
+      expect(answer.text).toContain('[local] src/local.ts');
+      expect(answer.text).toContain('[global] global_kb/rule.md');
     });
 
-    it('says so when nothing is left', async () => {
-      h.search = async () => [hit({ scope: 'local' })];
+    it('says so when the search found nothing', async () => {
+      h.search = async () => [];
 
       const res = await callTool('house_rules', { query: 'q' });
 

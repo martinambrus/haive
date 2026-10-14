@@ -480,6 +480,10 @@ describe('describePromptStepIssue', () => {
       expect(text('tool-name-invalid', 't')).toContain('40');
     });
 
+    it('says a tool description may carry no invisible characters either', () => {
+      expect(text('tool-description-invalid', 't')).toContain('no control or invisible characters');
+    });
+
     it('names what is wrong with a url in plain words', () => {
       expect(text('tool-url-not-https', 't')).toContain('https://');
       expect(text('tool-url-userinfo', 't')).toContain('password');

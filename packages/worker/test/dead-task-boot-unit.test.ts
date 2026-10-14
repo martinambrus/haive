@@ -148,6 +148,26 @@ describe('deadTaskResolution', () => {
       ).unresolved,
     ).toEqual([CUSTOM]);
   });
+
+  it('does not call a task dead for a pinned tool that no longer parses', () => {
+    const badTool = {
+      name: 'too_long',
+      description: 'd'.repeat(1025),
+      action: 'http-get',
+      url: 'https://api.example.com/v1/status',
+    };
+    expect(
+      deadTaskResolution(
+        task({
+          currentStepId: CUSTOM,
+          runListSnapshot: ['a', CUSTOM],
+          customSteps: { [CUSTOM]: { ...entry, tools: [badTool] } },
+        }),
+        'static',
+        registry(),
+      ),
+    ).toEqual({ unresolved: [], outsideList: null });
+  });
 });
 
 describe('worker boot order', () => {

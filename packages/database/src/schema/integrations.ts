@@ -114,6 +114,12 @@ export const integrationGrants = pgTable(
     index('integration_grants_task_id_idx').on(table.taskId),
     index('integration_grants_repository_id_idx').on(table.repositoryId),
     index('integration_grants_connection_id_idx').on(table.connectionId),
+    uniqueIndex('integration_grants_task_category_key_idx')
+      .on(table.taskId, table.categoryId)
+      .where(sql`${table.targetKind} = 'task'`),
+    uniqueIndex('integration_grants_repository_connection_key_idx')
+      .on(table.repositoryId, table.connectionId)
+      .where(sql`${table.targetKind} = 'repository'`),
   ],
 );
 
@@ -138,12 +144,31 @@ export const integrationCategoryPreferences = pgTable(
     categoryId: varchar('category_id', { length: 256 }).notNull(),
     providerId: varchar('provider_id', { length: 256 }).notNull(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    connectionId: uuid('connection_id').references(() => integrationConnections.id, {
+      onDelete: 'set null',
+    }),
   },
   (table) => [
     unique('integration_category_preferences_user_category_unique')
       .on(table.userId, table.categoryId)
       .nullsNotDistinct(),
   ],
+);
+
+export const taskIntegrationChoices = pgTable(
+  'task_integration_choices',
+  {
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    categoryId: varchar('category_id', { length: 256 }).notNull(),
+    providerId: varchar('provider_id', { length: 256 }).notNull(),
+    connectionId: uuid('connection_id').references(() => integrationConnections.id, {
+      onDelete: 'set null',
+    }),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.taskId, table.categoryId] })],
 );
 
 export const integrationCalls = pgTable(

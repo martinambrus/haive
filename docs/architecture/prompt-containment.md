@@ -29,7 +29,9 @@ output can carry:
   sharper reason: a coder's `concerns` reaches `recordLedgerEntry`, so quoting hostile text
   there manufactures a relay into every later prompt in the task.
 - `REPO_IS_DATA_AUTHORING_LINES` — for a pass whose output becomes another agent's ASSIGNMENT:
-  the spec writer, the sprint planner, every plan writer. The longest reach of the three shapes
+  the spec writer, the sprint planner, every plan writer, and the creator-mode drafter
+  (`01-type-draft`), whose draft becomes a prompt step's template. It fences the current draft,
+  its own earlier replies and a failed draft, never the administrator's messages. The longest reach of the three shapes
   these four blocks cover — a reviewer that swallows an injected line files a skewed report, a
   coder WRITES it, an author turns it into an order nobody authorised.
 - `REPO_IS_DATA_ANSWER_LINES` — for an admin's read-only prompt step (`custom.<type>.<slug>`),
