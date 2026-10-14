@@ -96,6 +96,7 @@ const GITHUB = {
 const ADMIN_CLIENT = { id: 'stub-admin-client-id', secret: 'stub-admin-client-secret' };
 const GITHUB_CLIENT = { id: 'gh-env-client-id', secret: 'stub-env-client-secret' };
 const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
+const CORE_FORGES = ['github', 'gitea', 'gitlab', 'bitbucket_cloud', 'bitbucket_server'];
 const INVALID_STATE = /invalid, expired or already used/;
 const EXPIRING = /issues expiring tokens; use an OAuth App/;
 
@@ -1882,6 +1883,41 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       expect((await link(a, gitlab.id, 'nosuchprovider')).status).toBe(404);
       expect((await link(a, gitlab.id, 'gitlab')).status).toBe(201);
     });
+
+    it.each([
+      { providerId: 'gitlab', host: 'gitlab.com' },
+      { providerId: 'gitea', host: 'codeberg.org' },
+      { providerId: 'bitbucket_cloud', host: 'bitbucket.org' },
+    ])(
+      'turns a credential on $host with no provider set into a $providerId connection',
+      async ({ providerId, host }) => {
+        const credential = await insertCredential(a.id, { host });
+        const res = await link(a, credential.id, providerId);
+
+        expect(res.status).toBe(201);
+        const rows = await connectionsOf(a.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ providerId, repoCredentialId: credential.id });
+      },
+    );
+
+    it('does not guess the forge of a self-hosted host with no provider set', async () => {
+      const credential = await insertCredential(a.id, { host: 'git.example.test' });
+
+      for (const providerId of CORE_FORGES) {
+        expect((await link(a, credential.id, providerId)).status).toBe(400);
+      }
+      expect(await connectionsOf(a.id)).toHaveLength(0);
+    });
+
+    it('refuses a credential with no provider for a forge its host does not run', async () => {
+      const gitlab = await insertCredential(a.id, { host: 'gitlab.com' });
+
+      for (const providerId of CORE_FORGES.filter((id) => id !== 'gitlab')) {
+        expect((await link(a, gitlab.id, providerId)).status).toBe(400);
+      }
+      expect(await connectionsOf(a.id)).toHaveLength(0);
+    });
   });
 
   describe('provider list and the GitHub client', () => {
@@ -1897,10 +1933,17 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
         categories: ['forge'],
         enabled: true,
         writeEnabled: false,
+        canWrite: true,
+        writeScopes: { oauth2: ['repo'], device: ['repo'] },
         connect: [],
       });
-      expect(byId.get('gitea')).toMatchObject({ enabled: true, connect: [] });
+      expect(byId.get('gitea')).toMatchObject({ enabled: true, canWrite: true, connect: [] });
+      expect(byId.get('gitea')!.writeScopes).toEqual({});
       expect(byId.get(STUB_ID)).toMatchObject({ enabled: true, writeEnabled: false });
+      expect(byId.get(STUB_ID)!.writeScopes).toEqual({
+        oauth2: ['files.write'],
+        device: ['files.write'],
+      });
       expect([...byId.get(STUB_ID)!.connect].sort()).toEqual(['device', 'oauth2']);
       expect(JSON.stringify(providers)).not.toContain(ADMIN_CLIENT.id);
     });
@@ -1944,6 +1987,27 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       expect(cleared.status).toBe(200);
       expect(await read()).toEqual({ configured: true, source: 'admin' });
       expect((await call(b, 'GET', '/integrations/github')).body.source).toBe('admin');
+    });
+
+    it('PUT /integrations/github is audited as booleans: a client id was set, or cleared', async () => {
+      const put = (clientId: string) => call(a, 'PUT', '/integrations/github', { clientId });
+      expect((await put('gh-user-client-id')).status).toBe(200);
+      expect((await put('   ')).status).toBe(200);
+
+      const events = await auditsOf(a.id, 'integration.github_client.update');
+      expect(events.map((event) => event.metadata)).toEqual([
+        { clientIdSet: true },
+        { clientIdSet: false },
+      ]);
+      expect(events[0]).toMatchObject({ targetType: 'integration_provider', targetId: null });
+      expect(JSON.stringify(events)).not.toContain('gh-user-client-id');
+    });
+
+    it('a PUT /integrations/github that is refused leaves no audit event', async () => {
+      const refused = await call(a, 'PUT', '/integrations/github', { clientId: 'x'.repeat(257) });
+
+      expect(refused.status).toBe(400);
+      expect(await auditsOf(a.id, 'integration.github_client.update')).toHaveLength(0);
     });
   });
 });

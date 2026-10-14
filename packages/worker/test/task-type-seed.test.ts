@@ -77,12 +77,17 @@ if (url && !new URL(url).pathname.startsWith('/task_type_seed_test'))
 describe.skipIf(!url)('task type definitions sync on Postgres', () => {
   let db: Database;
 
+  const dropCustom = () =>
+    db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, 'custom-x'));
+
   beforeAll(async () => {
     db = createDatabase(url as string);
+    await dropCustom();
     await syncTaskTypeDefinitions(db, stepRegistry, []);
   });
 
   afterAll(async () => {
+    await dropCustom();
     await db.$client.end({ timeout: 5 });
   });
 
