@@ -147,7 +147,9 @@ export function TaskTypeComposer({
       ? base
       : withPromptStepEntries(base, typeSlug, requiresRepository, promptSteps);
   }, [catalog, typeSlug, requiresRepository, promptSteps]);
-  const [openStepId, setOpenStepId] = useState<string | null>(null);
+  const [openPromptSlug, setOpenPromptSlug] = useState<string | null>(null);
+  const openStepId =
+    prompt && openPromptSlug !== null ? promptStepId(prompt.typeSlug, openPromptSlug) : null;
   const [query, setQuery] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [announcement, setAnnouncement] = useState('');
@@ -263,7 +265,7 @@ export function TaskTypeComposer({
       const { [slug]: _gone, ...kept } = promptSteps;
       prompt.set(kept);
     }
-    if (openStepId === id) setOpenStepId(null);
+    if (openStepId === id) setOpenPromptSlug(null);
   }
 
   function addPromptStep() {
@@ -274,7 +276,7 @@ export function TaskTypeComposer({
     const at = openIndex < 0 ? stepIds!.length : openIndex + 1;
     prompt.set({ ...promptSteps, [entry.slug]: entry });
     commit(insertStep(stepIds!, at, id), `Added prompt step at position ${at + 1}`);
-    setOpenStepId(id);
+    setOpenPromptSlug(entry.slug);
   }
 
   function add(stepId: string, at: number = stepIds!.length) {
@@ -441,7 +443,7 @@ export function TaskTypeComposer({
                         disabled={disabled}
                         aria-expanded={openStepId === stepId}
                         aria-label={`${openStepId === stepId ? 'Close' : 'Edit'} prompt step ${label}`}
-                        onClick={() => setOpenStepId(openStepId === stepId ? null : stepId)}
+                        onClick={() => setOpenPromptSlug(openStepId === stepId ? null : promptSlug)}
                       >
                         {openStepId === stepId ? 'Close editor' : 'Edit'}
                       </Button>
