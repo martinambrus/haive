@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -28,6 +36,7 @@ case "$1" in
     shift
     while [ "$1" = -f ]; do shift 2; done
     if [ "$1" = build ] && [ -n "$STUB_DOCKER_BUILD_FAILS" ]; then exit 1; fi
+    if [ "$1" = rm ] && [ -n "$STUB_DOCKER_RM_FAILS" ]; then exit 1; fi
     if [ "$1" = run ] && [ -n "$STUB_DOCKER_RUN_FAILS" ]; then exit 1; fi ;;
 esac
 exit 0
@@ -62,8 +71,18 @@ const kind = (call) => {
   return first === 'volume' ? `${first} ${second}` : first;
 };
 
+// dev.sh names its project after the directory it sits in, so the copy goes in one of that name.
+const scriptIn = (t, dirName) => {
+  const root = mkdtempSync(join(tmpdir(), 'haive-dev-sh-dir-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, dirName, 'scripts'), { recursive: true });
+  const script = join(root, dirName, 'scripts', 'dev.sh');
+  copyFileSync(devScript, script);
+  return script;
+};
+
 // HAIVE_GPU=cpu skips dev.sh's GPU probes, so the host's card cannot change the path it takes.
-const run = (t, args, { buildFails = false, gpu = false, stub = {} } = {}) => {
+const run = (t, args, { buildFails = false, gpu = false, stub = {}, script = devScript } = {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'haive-dev-sh-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, 'docker.log');
@@ -73,7 +92,7 @@ const run = (t, args, { buildFails = false, gpu = false, stub = {} } = {}) => {
       writeFileSync(join(dir, name), body, { mode: 0o755 });
     }
   }
-  const out = spawnSync('bash', [devScript, ...args], {
+  const out = spawnSync('bash', [script, ...args], {
     encoding: 'utf8',
     env: {
       ...process.env,
@@ -86,8 +105,8 @@ const run = (t, args, { buildFails = false, gpu = false, stub = {} } = {}) => {
       ...stub,
     },
   });
-  const calls = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map(kind) : [];
-  return { out, calls };
+  const lines = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
+  return { out, calls: lines.map(kind), lines };
 };
 
 describe('dev.sh builds before it tears anything down', () => {
@@ -113,6 +132,37 @@ describe('dev.sh rebuild with a service it does not know', () => {
     const { out, calls } = run(t, ['rebuild', 'api', 'nope']);
     assert.notEqual(out.status, 0, out.stdout);
     assert.deepEqual(calls, []);
+  });
+});
+
+describe('dev.sh names the node_modules volumes the way compose names the project', () => {
+  const NODE_MODULES = ['root', 'shared', 'database', 'api', 'worker', 'web']
+    .map((name) => `haive_node_modules_${name}`)
+    .concat('haive_web_next');
+  const INSPECT = 'volume inspect ';
+  const inspected = (lines) =>
+    lines.filter((l) => l.startsWith(INSPECT)).map((l) => l.slice(INSPECT.length));
+
+  for (const [dirName, project] of [
+    ['My.Haive_Dir', 'myhaive_dir'],
+    ['_-My.Haive_Dir (2)', 'myhaive_dir2'],
+  ]) {
+    it(`a checkout in "${dirName}" targets ${project}_*`, (t) => {
+      const script = scriptIn(t, dirName);
+      const { out, lines } = run(t, ['rebuild'], { script, stub: { COMPOSE_PROJECT_NAME: '' } });
+      assert.equal(out.status, 0, out.stdout + out.stderr);
+      assert.deepEqual(
+        inspected(lines),
+        NODE_MODULES.map((name) => `${project}_${name}`),
+      );
+    });
+  }
+
+  it('COMPOSE_PROJECT_NAME still wins over the directory', (t) => {
+    const script = scriptIn(t, 'My.Haive_Dir');
+    const { out, lines } = run(t, ['rebuild'], { script });
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.deepEqual(inspected(lines), NODE_MODULES.map(volume));
   });
 });
 
@@ -145,6 +195,19 @@ describe('dev.sh does not report a teardown it could not finish as a success', (
     assert.notEqual(out.status, 0, out.stdout);
     assert.equal(calls.at(-1), 'up');
     assert.match(out.stdout, /wipe/);
+  });
+
+  it('restart: removes dev-libs, then recreates the stack', (t) => {
+    const { out, calls } = run(t, ['restart']);
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.deepEqual(calls, ['rm', 'up']);
+  });
+
+  it('restart: a dev-libs it cannot remove still brings the stack up, then fails naming it', (t) => {
+    const { out, calls } = run(t, ['restart'], { stub: { STUB_DOCKER_RM_FAILS: '1' } });
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.deepEqual(calls, ['rm', 'up']);
+    assert.match(out.stdout, /FAILED: .*dev-libs/);
   });
 });
 

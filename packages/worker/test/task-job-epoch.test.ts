@@ -298,7 +298,10 @@ const db = {
 };
 
 vi.mock('../src/db.js', () => ({ getDb: () => db }));
-vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
+vi.mock('../src/redis.js', () => ({
+  getBullRedis: () => ({}),
+  getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
+}));
 vi.mock('bullmq', async (importOriginal) => ({
   ...(await importOriginal<typeof import('bullmq')>()),
   Queue: class {
@@ -342,6 +345,14 @@ vi.mock('../src/sandbox/app-runner.js', async (importOriginal) => ({
 vi.mock('../src/sandbox/ide-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/ide-runner.js')>()),
   killTaskIdeContainers: vi.fn(async () => 0),
+}));
+vi.mock('../src/sandbox/ollama-provision.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/ollama-provision.js')>()),
+  unloadTaskOllamaCliModels: vi.fn(async () => undefined),
+}));
+vi.mock('@haive/shared/rag', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared/rag')>()),
+  resolveTaskEmbedTarget: vi.fn(async () => null),
 }));
 
 // 07 is the fix loop's fixed re-entry target.
@@ -1930,6 +1941,7 @@ describe('a START job', () => {
   });
 
   it('fails a task still waiting to start when it cannot resolve it', async () => {
+    setContainerCleanupRunner(vi.fn(async () => 0));
     h.state.taskStatus = 'queued';
     h.state.repoGone = true;
     await expect(processTaskJob(start(), 'tok')).rejects.toThrow('no resolvable repo path');

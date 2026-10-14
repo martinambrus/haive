@@ -43,7 +43,7 @@ describe('validateRequired', () => {
       id: 'dirs',
       label: 'Dirs',
       required: true,
-      tree: { name: 'root', path: '', type: 'dir', children: [] },
+      tree: [{ path: '', label: 'root', children: [] }],
     });
     expect(validateRequired(s, { dirs: [] })).toBe('Dirs is required');
     expect(validateRequired(s, { dirs: ['a'] })).toBeNull();

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 
 const calls: string[] = [];
@@ -38,6 +38,10 @@ vi.mock('../src/modules/loader.js', () => ({
 }));
 
 describe('bootStepEngine module intent', () => {
+  beforeAll(async () => {
+    await import('../src/step-engine/boot.js');
+  }, 120_000);
+
   beforeEach(() => {
     calls.length = 0;
   });

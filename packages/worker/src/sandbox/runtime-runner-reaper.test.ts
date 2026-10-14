@@ -107,6 +107,64 @@ const pausedTask = (over: Partial<ReaperTask> = {}): ReaperTask => ({
   ...over,
 });
 
+/** A dead task keeps its real status, like a paused one, and carries `dead_at` instead. */
+const deadTask = (over: Partial<ReaperTask> = {}): ReaperTask => ({
+  status: 'running',
+  completedAt: null,
+  pausedAt: null,
+  deadAt: ago(60 * 60_000),
+  settled: true,
+  ...over,
+});
+
+describe('reapDecision: a dead task', () => {
+  it('reaps a long-dead settled task on the paused grace, anchored to dead_at', () => {
+    expect(
+      reapDecision(freshRunner, deadTask({ deadAt: ago(3.5 * 60 * 60_000) }), GRACE, NOW),
+    ).toBe('dead-grace');
+    const oldContainer = { running: true, taskId: 't1', startedAtMs: NOW - 5 * 60 * 60_000 };
+    expect(reapDecision(oldContainer, deadTask({ deadAt: ago(10 * 60_000) }), GRACE, NOW)).toBe(
+      null,
+    );
+  });
+
+  it.each(['running', 'queued', 'waiting_user', 'waiting_pr', 'created'])(
+    'reaps the runner of a dead %s task after the grace and not before',
+    (status) => {
+      expect(
+        reapDecision(freshRunner, deadTask({ status, deadAt: ago(GRACE - 1) }), GRACE, NOW),
+      ).toBe(null);
+      expect(reapDecision(freshRunner, deadTask({ status, deadAt: ago(GRACE) }), GRACE, NOW)).toBe(
+        'dead-grace',
+      );
+    },
+  );
+
+  it('never reaps a dead task whose final CLI run is still going', () => {
+    const busy = deadTask({ deadAt: ago(99 * 60 * 60_000), settled: false });
+    expect(reapDecision(freshRunner, busy, GRACE, NOW)).toBe(null);
+  });
+
+  it('keeps a dead task’s runner when the grace is disabled (0)', () => {
+    expect(reapDecision(freshRunner, deadTask({ deadAt: ago(99 * 60 * 60_000) }), 0, NOW)).toBe(
+      null,
+    );
+  });
+
+  it('keeps the runner of a task that is not dead', () => {
+    expect(reapDecision(freshRunner, deadTask({ deadAt: null }), GRACE, NOW)).toBe(null);
+  });
+
+  it('leaves a dead failed task to the failed grace, anchored to its failure', () => {
+    const failed = deadTask({
+      status: 'failed',
+      completedAt: ago(10 * 60_000),
+      deadAt: ago(99 * 60 * 60_000),
+    });
+    expect(reapDecision(freshRunner, failed, GRACE, NOW)).toBe(null);
+  });
+});
+
 describe('pickPreemptibleRunner', () => {
   it.each(['failed', 'completed', 'cancelled'])(
     'preempts a running %s task’s runner (demand outranks the retry-cache)',

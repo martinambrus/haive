@@ -51,6 +51,7 @@ import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
+import { refuseDeadTask } from '../../lib/task-dead.js';
 import { loadStepFlags, withTaskCustomSteps } from '../../lib/step-flags.js';
 import {
   appendTaskEvent,
@@ -670,9 +671,10 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true, type: true, repositoryId: true },
+    columns: { id: true, status: true, type: true, repositoryId: true, deadAt: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  refuseDeadTask(task);
   // Answering a failed upgrade's form revives it in the worker, which the index refuses there.
   if (task.status === 'failed' && task.type === 'onboarding_upgrade' && task.repositoryId) {
     await refuseBesideLiveUpgrade(db, task.repositoryId);
@@ -748,9 +750,10 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true },
+    columns: { id: true, status: true, deadAt: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  refuseDeadTask(task);
 
   const stepRows = await db
     .select()
@@ -823,6 +826,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  if (body.action !== 'abort') refuseDeadTask(task);
 
   // Act on the round the caller named. A fix-loop step recurs once per round
   // (round 0 = original pass), each rendered as its own row with its own
@@ -1635,12 +1639,14 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       customSteps: true,
       // stamped on the re-advance below so a later task retry can invalidate it
       orchestrationEpoch: true,
+      deadAt: true,
     },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   if (task.status === 'completed' || task.status === 'cancelled') {
     throw new HttpError(409, `Cannot change provider for ${task.status} task`);
   }
+  refuseDeadTask(task);
 
   // Act on the caller's round, latest as fallback (see the action endpoint):
   // a looped step recurs once per round; don't grab an arbitrary (round-0) row.
