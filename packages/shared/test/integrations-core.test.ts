@@ -328,6 +328,14 @@ describe('vendor answers', () => {
     expect(((await rejection(refresh(long.fetchFn))) as OauthVendorError).code).toHaveLength(100);
   });
 
+  it('keeps a known error code whole when a short secret happens to sit inside it', async () => {
+    const { fetchFn } = stub(() => json(400, { error: 'invalid_grant' }));
+    const err = (await rejection(
+      refreshAccessToken(fetchFn, { tokenUrl: TOKEN_URL, client: CLIENT, refreshToken: 'grant' }),
+    )) as OauthVendorError;
+    expect(err.code).toBe('invalid_grant');
+  });
+
   it('hides the whole text when it echoes a secret too short to blank in place', async () => {
     const { fetchFn } = stub(() =>
       json(400, { error: 'invalid_grant', error_description: 'refresh token r7x was revoked' }),

@@ -9,6 +9,30 @@ const DEVICE_SLOW_DOWN_SECONDS = 5;
 const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 const DESCRIPTION_MAX_LENGTH = 500;
 const ERROR_CODE_MAX_LENGTH = 100;
+/** The codes RFC 6749, RFC 7009 and RFC 8628 define, and GitHub's own: constants, so one can pass
+ *  through whole and branching on it never meets a redaction. */
+const KNOWN_ERROR_CODES = new Set([
+  'invalid_request',
+  'invalid_client',
+  'invalid_grant',
+  'unauthorized_client',
+  'unsupported_grant_type',
+  'invalid_scope',
+  'access_denied',
+  'unsupported_response_type',
+  'server_error',
+  'temporarily_unavailable',
+  'unsupported_token_type',
+  'authorization_pending',
+  'slow_down',
+  'expired_token',
+  'bad_refresh_token',
+  'bad_verification_code',
+  'incorrect_client_credentials',
+  'incorrect_device_code',
+  'redirect_uri_mismatch',
+  'device_flow_disabled',
+]);
 const MIN_REDACTED_LENGTH = 8;
 
 export interface OauthClientCredentials {
@@ -107,7 +131,9 @@ async function callVendor(fetchFn: FetchFn, request: VendorRequest): Promise<Jso
       typeof raw === 'string' && raw.length > 0
         ? redact(raw, request.secrets).slice(0, DESCRIPTION_MAX_LENGTH)
         : null;
-    const code = redact(body.error, request.secrets).slice(0, ERROR_CODE_MAX_LENGTH);
+    const code = KNOWN_ERROR_CODES.has(body.error)
+      ? body.error
+      : redact(body.error, request.secrets).slice(0, ERROR_CODE_MAX_LENGTH);
     throw new OauthVendorError(request.operation, code, description, res.status);
   }
   if (!res.ok) {
