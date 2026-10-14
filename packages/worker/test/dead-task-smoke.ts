@@ -1,13 +1,14 @@
 /**
  * A task whose run list names a step this install does not register is dead: no job fails it,
- * completes it or re-drives it. Real database and Redis; the steps are stubs and no CLI runs.
+ * completes it or re-drives it, and boot marks one and revives it once the steps resolve again.
+ * Real database and Redis; the steps are stubs and no CLI runs.
  * The task state is read through to_jsonb so the same checks run before the dead columns exist.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -22,6 +23,7 @@ import { initDatabase } from '../src/db.js';
 import { closeRedis, initRedis } from '../src/redis.js';
 import {
   closeTaskQueue,
+  enqueueAdvance,
   getTaskQueue,
   handleResult,
   markTaskDead,
@@ -37,6 +39,7 @@ import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { checkProviderRecovery } from '../src/queues/usage-poll-queue.js';
 import { closePrPollQueue, runPrPollTick } from '../src/queues/pr-poll-queue.js';
 import { defaultDeps, redriveStalledTasks } from '../src/queues/stalled-redrive.js';
+import { reconcileDeadTasks } from '../src/queues/dead-task-boot.js';
 import { buildRunList, resolveRunList, type ResolvedTaskContext } from '../src/queues/run-list.js';
 import { stepRegistry, UnresolvedStepError } from '../src/step-engine/registry.js';
 
@@ -66,6 +69,8 @@ const TYPE = 'p4b_dead_smoke';
 const STALE_MS = 5 * 60_000;
 const longAgo = new Date(Date.now() - 10 * 60_000);
 
+const applied: Record<string, number> = {};
+
 function stub(id: string, index: number) {
   stepRegistry.register({
     metadata: {
@@ -80,9 +85,10 @@ function stub(id: string, index: number) {
       return {};
     },
     form() {
-      return { title: id, fields: [] };
+      return { title: id, fields: [{ id: 'note', label: 'note', type: 'text' }] };
     },
     async apply() {
+      applied[id] = (applied[id] ?? 0) + 1;
       return {};
     },
   });
@@ -129,6 +135,13 @@ async function main(): Promise<void> {
         .from(schema.taskEvents)
         .where(eq(schema.taskEvents.taskId, taskId))
     ).map((r) => r.t);
+  const eventPayloads = async (taskId: string, type: string) =>
+    (
+      await db
+        .select({ payload: schema.taskEvents.payload })
+        .from(schema.taskEvents)
+        .where(and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, type)))
+    ).map((r) => r.payload as Record<string, unknown>);
   const stepRowCount = async (taskId: string) =>
     (
       await db
@@ -498,6 +511,12 @@ async function main(): Promise<void> {
           (await jobsFor(id)).length === 0,
         v,
       );
+      const [payload] = await eventPayloads(id, 'task.dead');
+      check(
+        'the forward walk records no unresolved id when the finished step is registered',
+        JSON.stringify(payload?.unresolved) === '[]' && payload?.stepId === 'p4b-a',
+        payload,
+      );
     }
     {
       const id = await makeTask('gate-missing', { snapshot: ['p4b-b', 'p4b-c'] });
@@ -513,6 +532,12 @@ async function main(): Promise<void> {
           (await eventTypes(id)).includes('task.dead') &&
           (await jobsFor(id)).length === 0,
         v,
+      );
+      const [payload] = await eventPayloads(id, 'task.dead');
+      check(
+        'the fix-loop gate accept walk records no unresolved id when its step is registered',
+        JSON.stringify(payload?.unresolved) === '[]' && payload?.stepId === 'p4b-a',
+        payload,
       );
     }
     {
@@ -561,6 +586,12 @@ async function main(): Promise<void> {
           v.errorMessage === null &&
           (await jobsFor(id)).length === 0,
         v,
+      );
+      const [payload] = await eventPayloads(id, 'task.dead');
+      check(
+        'a revise to an unregistered step records that step as unresolved',
+        JSON.stringify(payload?.unresolved) === JSON.stringify([GONE]),
+        payload,
       );
     }
 
@@ -871,6 +902,243 @@ async function main(): Promise<void> {
         (await stepStatuses(fenceTargets['dead-reset']!.id)).every((st) => st === 'waiting_cli'),
       { liveReset, deadReset, steps: await stepStatuses(fenceTargets['dead-reset']!.id) },
     );
+
+    // --- the boot pass --------------------------------------------------------------
+    const jobsOf = async (taskId: string) =>
+      (await queue.getJobs(['waiting', 'active', 'delayed', 'prioritized', 'completed', 'failed']))
+        .filter((j) => j?.data?.taskId === taskId)
+        .map((j) => ({ name: j.name, data: j.data as unknown as Record<string, unknown> }));
+    const names = async (taskId: string) => (await jobsOf(taskId)).map((j) => j.name);
+    const ADVANCE = TASK_JOB_NAMES.ADVANCE_STEP;
+    const START = TASK_JOB_NAMES.START;
+    const stepDone = async (taskId: string) =>
+      (await eventTypes(taskId)).filter((t) => t === 'step.done').length;
+
+    const revive: Record<string, string> = {};
+    for (const [name, over, row] of [
+      ['queued', { status: 'queued' as const, currentStepId: null }, null],
+      ['running', {}, null],
+      ['created', { status: 'created' as const, currentStepId: null }, null],
+      ['failed', { status: 'failed' as const }, 'failed'],
+      ['waiting-pr', { status: 'waiting_pr' as const }, 'awaiting'],
+      ['waiting-awaiting', { status: 'waiting_user' as const }, 'awaiting'],
+      ['waiting-answered', { status: 'waiting_user' as const }, 'answered'],
+    ] as const) {
+      const id = await makeTask(`boot-${name}`, over);
+      if (row === 'failed') await makeRow(id, 'p4b-a', 'failed');
+      if (row === 'awaiting') await makeRow(id, 'p4b-a', 'waiting_form', { waitingStartedAt: now });
+      if (row === 'answered') {
+        await makeRow(id, 'p4b-a', 'waiting_form', {
+          waitingStartedAt: null,
+          formValues: { note: 'kept' },
+        });
+      }
+      await markDeadRaw(id);
+      revive[name] = id;
+    }
+    const cancelledDead = await makeTask('boot-cancelled-dead', { status: 'cancelled' });
+    const stillMissing = await makeTask('boot-still-missing', { snapshot: ['p4b-a', GONE] });
+    await markDeadRaw(cancelledDead);
+    await markDeadRaw(stillMissing);
+    const untouchedBefore = [await view(cancelledDead), await view(stillMissing)];
+
+    await reconcileDeadTasks(db);
+
+    for (const [name, jobs] of [
+      ['queued', [START]],
+      ['running', [ADVANCE]],
+      ['created', []],
+      ['failed', []],
+      ['waiting-pr', []],
+      ['waiting-awaiting', []],
+      ['waiting-answered', [ADVANCE]],
+    ] as const) {
+      const id = revive[name]!;
+      const v = await view(id);
+      const advance = (await jobsOf(id)).find((j) => j.name === ADVANCE);
+      check(
+        `boot revives a dead ${name} task and queues exactly ${jobs.length === 0 ? 'no job' : jobs[0]}`,
+        v.deadAt === null &&
+          v.deadReason === null &&
+          v.epoch === 4 &&
+          JSON.stringify(await names(id)) === JSON.stringify(jobs) &&
+          (jobs[0] !== ADVANCE ||
+            (advance?.data.stepId === 'p4b-a' &&
+              advance?.data.round === 0 &&
+              advance?.data.epoch === 4)) &&
+          (await eventTypes(id)).filter((t) => t === 'task.revived').length === 1,
+        { v, jobs: await jobsOf(id) },
+      );
+    }
+    const untouchedAfter = [await view(cancelledDead), await view(stillMissing)];
+    check(
+      'boot leaves a task cancelled while dead, and one whose step is still missing, exactly as it was',
+      JSON.stringify(untouchedAfter) === JSON.stringify(untouchedBefore) &&
+        (await jobsOf(cancelledDead)).length === 0 &&
+        (await jobsOf(stillMissing)).length === 0 &&
+        (await eventTypes(cancelledDead)).length === 0 &&
+        (await eventTypes(stillMissing)).length === 0,
+      { untouchedBefore, untouchedAfter },
+    );
+
+    const epochsBefore = await Promise.all(
+      Object.values(revive).map(async (id) => (await view(id)).epoch),
+    );
+    const jobCountBefore = (await Promise.all(Object.values(revive).map(jobsOf))).flat().length;
+    await reconcileDeadTasks(db);
+    check(
+      'a second boot pass writes nothing and queues nothing',
+      JSON.stringify(
+        await Promise.all(Object.values(revive).map(async (id) => (await view(id)).epoch)),
+      ) === JSON.stringify(epochsBefore) &&
+        (await Promise.all(Object.values(revive).map(jobsOf))).flat().length === jobCountBefore,
+      epochsBefore,
+    );
+
+    {
+      const id = await makeTask('boot-race');
+      await markDeadRaw(id);
+      await Promise.all([reconcileDeadTasks(db), reconcileDeadTasks(db)]);
+      check(
+        'two boot passes racing for one dead task queue one job',
+        JSON.stringify(await names(id)) === JSON.stringify([ADVANCE]) &&
+          (await view(id)).epoch === 4,
+        await jobsOf(id),
+      );
+    }
+    {
+      const id = await makeTask('boot-mark', { snapshot: ['p4b-a', GONE] });
+      const row = await makeRow(id, 'p4b-a', 'waiting_cli');
+      const [queued] = await db
+        .insert(schema.cliInvocations)
+        .values({ taskId: id, taskStepId: row.id, mode: 'cli', prompt: 'dead-task-smoke' })
+        .returning();
+      await reconcileDeadTasks(db);
+      const v = await view(id);
+      const [after] = await db
+        .select()
+        .from(schema.cliInvocations)
+        .where(eq(schema.cliInvocations.id, queued!.id));
+      check(
+        'boot marks a live task whose run list names a missing step dead, and supersedes its unstarted run',
+        v.deadAt !== null &&
+          v.status === 'running' &&
+          v.epoch === 3 &&
+          after?.supersededAt != null &&
+          after.endedAt != null &&
+          (await eventTypes(id)).includes('task.dead'),
+        { v, after },
+      );
+    }
+
+    // --- a revived task is driven by the real handlers ----------------------------------
+    const reviveAndTake = async (id: string) => {
+      await markDeadRaw(id);
+      await reconcileDeadTasks(db);
+      return (await jobsOf(id)).find((j) => j.name === ADVANCE);
+    };
+    {
+      const id = await makeTask('boot-walk-done');
+      await makeRow(id, 'p4b-a', 'done', { endedAt: now, output: {} });
+      const appliedBefore = applied['p4b-a'] ?? 0;
+      const advance = await reviveAndTake(id);
+      const threw = await run(ADVANCE, advance!.data);
+      const v = await view(id);
+      const next = (await jobsOf(id)).filter(
+        (j) => j.name === ADVANCE && j.data.stepId === 'p4b-b',
+      );
+      check(
+        'a revived running task whose step is done walks on from the row: the step is not applied again and the task moves to the next step',
+        threw === null &&
+          (applied['p4b-a'] ?? 0) === appliedBefore &&
+          v.currentStepId === 'p4b-b' &&
+          v.deadAt === null &&
+          next.length === 1,
+        { threw: String(threw), v, jobs: await jobsOf(id), applied },
+      );
+      check(
+        'walking a revived done step on records its step.done once',
+        (await stepDone(id)) === 1,
+        await eventTypes(id),
+      );
+    }
+    {
+      const id = await makeTask('boot-walk-answered', { status: 'waiting_user' });
+      await makeRow(id, 'p4b-a', 'waiting_form', {
+        waitingStartedAt: null,
+        formValues: { note: 'kept' },
+      });
+      const appliedBefore = applied['p4b-a'] ?? 0;
+      const advance = await reviveAndTake(id);
+      const threw = await run(ADVANCE, advance!.data);
+      const [answered] = await db
+        .select()
+        .from(schema.taskSteps)
+        .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, 'p4b-a')));
+      const v = await view(id);
+      check(
+        'a revived waiting_user task with a saved answer applies that answer once and walks on',
+        threw === null &&
+          answered?.status === 'done' &&
+          JSON.stringify(answered.formValues) === JSON.stringify({ note: 'kept' }) &&
+          (applied['p4b-a'] ?? 0) === appliedBefore + 1 &&
+          v.currentStepId === 'p4b-b',
+        { threw: String(threw), answered, v, applied },
+      );
+    }
+    {
+      const id = await makeTask('boot-walk-queued', { status: 'queued', currentStepId: null });
+      await markDeadRaw(id);
+      await reconcileDeadTasks(db);
+      const threw = await run(START, { taskId: id, userId });
+      const v = await view(id);
+      check(
+        'a revived queued task is claimed by its START',
+        threw === null &&
+          (await eventTypes(id)).includes('task.running') &&
+          v.status !== 'queued' &&
+          v.deadAt === null,
+        { threw: String(threw), v, events: await eventTypes(id) },
+      );
+    }
+
+    // --- revive, then reconcile ---------------------------------------------------------
+    {
+      const id = await makeTask('boot-order');
+      const row = await makeRow(id, 'p4b-a', 'waiting_cli');
+      const [orphan] = await db
+        .insert(schema.cliInvocations)
+        .values({
+          taskId: id,
+          taskStepId: row.id,
+          mode: 'cli',
+          prompt: 'dead-task-smoke',
+          startedAt: longAgo,
+        })
+        .returning();
+      await markDeadRaw(id);
+      await reconcileDeadTasks(db);
+      await reconcileOrphanedSteps(db, {
+        enqueueAdvance,
+        queuedInvocationIds: async () => new Set<string>(),
+      });
+      const [after] = await db
+        .select()
+        .from(schema.cliInvocations)
+        .where(eq(schema.cliInvocations.id, orphan!.id));
+      const epochs = (await jobsOf(id)).map((j) => Number(j.data.epoch)).sort();
+      const [stale] = (await jobsOf(id)).filter((j) => j.data.epoch === 4);
+      await run(ADVANCE, stale!.data);
+      const v = await view(id);
+      check(
+        'revive then reconcile ends the orphaned run, and the revive advance is left stale for the reconcile one',
+        after?.endedAt != null &&
+          JSON.stringify(epochs) === JSON.stringify([4, 5]) &&
+          v.epoch === 5 &&
+          (await stepRowCount(id)) === 1,
+        { after, epochs, v },
+      );
+    }
   } finally {
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     await db
