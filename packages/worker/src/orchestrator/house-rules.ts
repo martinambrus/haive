@@ -1,5 +1,6 @@
 import picomatch from 'picomatch';
 import { collapseToLine, HOUSE_RULE_ROLES, type HouseRuleMode } from '@haive/shared';
+import { parseStepId } from '@haive/shared/modularity';
 import {
   HOUSE_RULES_END,
   houseRuleBytes,
@@ -38,7 +39,11 @@ export function houseRulesFor(
   stepId: string,
   role: string,
   estimatedFiles?: readonly string[],
+  capabilities?: readonly string[],
 ): HouseRulesRequest | undefined {
+  if (parseStepId(stepId)?.kind === 'custom') {
+    return capabilities?.includes('file_write') ? { mode: 'write' } : undefined;
+  }
   if (!Object.hasOwn(HOUSE_RULE_ROLES, stepId)) return undefined;
   const roles = HOUSE_RULE_ROLES[stepId]!;
   if (!Object.hasOwn(roles, role)) return undefined;

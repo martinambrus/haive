@@ -152,6 +152,27 @@ describe('houseRulesFor', () => {
     expect(houseRulesFor('no-such-step', 'default')).toBeUndefined();
   });
 
+  it('gives a file_write prompt step the write framing and a read-only one nothing', () => {
+    expect(houseRulesFor('custom.t.s', 'default', undefined, ['file_write'])).toEqual({
+      mode: 'write',
+    });
+    expect(houseRulesFor('custom.t.s', 'default', undefined, ['tool_use', 'file_write'])).toEqual({
+      mode: 'write',
+    });
+    expect(houseRulesFor('custom.t.s', 'default', undefined, ['tool_use'])).toBeUndefined();
+    expect(houseRulesFor('custom.t.s', 'default')).toBeUndefined();
+    expect(houseRulesFor('custom.t', 'default', undefined, ['file_write'])).toBeUndefined();
+  });
+
+  it('leaves a built-in id alone whatever capabilities are passed', () => {
+    expect(houseRulesFor('09_5-skill-generation', 'default', undefined, ['file_write'])).toBe(
+      undefined,
+    );
+    expect(houseRulesFor('07-phase-2-implement', 'default', undefined, [])).toEqual({
+      mode: 'write',
+    });
+  });
+
   it('does not read an inherited property as a step or a role', () => {
     expect(houseRulesFor('constructor', 'default')).toBeUndefined();
     expect(houseRulesFor('07-phase-2-implement', 'toString')).toBeUndefined();

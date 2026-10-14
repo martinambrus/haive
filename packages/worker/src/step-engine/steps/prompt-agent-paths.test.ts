@@ -14,6 +14,7 @@ import { registerAllSteps } from './index.js';
 import { PLAN_PATCH_CONTRACT } from './plan/_plan-prompt.js';
 import {
   REPO_IS_DATA_ACTING_LINES,
+  REPO_IS_DATA_ANSWER_LINES,
   REPO_IS_DATA_AUTHORING_LINES,
   REPO_IS_DATA_LINES,
   REPO_IS_DATA_ONE_CLASS_LINES,
@@ -1812,6 +1813,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     const ONE_CLASS = 'your findings array holds one kind of thing';
     const ACTING = 'You EDIT files, so the stakes are higher here';
     const AUTHORING = 'becomes another agent\u2019s ASSIGNMENT';
+    const ANSWER = 'Answer exactly what';
 
     // Every variant carries the persona carve-out. ONE_CLASS was the one that did not, and
     // 05's reviewer is wrapped in `agentDefinitionGuidance` — so it would have been told the
@@ -1821,6 +1823,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       ['one-class', REPO_IS_DATA_ONE_CLASS_LINES],
       ['acting', REPO_IS_DATA_ACTING_LINES],
       ['authoring', REPO_IS_DATA_AUTHORING_LINES],
+      ['answer', REPO_IS_DATA_ANSWER_LINES],
     ] as const) {
       expect(block.join('\n'), label).toContain('is your PERSONA');
     }
@@ -1845,6 +1848,8 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       ['05a-resolve-spec-warnings', AUTHORING, REVIEWING],
       ['08b-test-management', ACTING, REVIEWING],
       ['01-plan-chat', AUTHORING, REVIEWING],
+      ['custom prompt step (read)', ANSWER, REVIEWING],
+      ['custom prompt step (write)', ACTING, REVIEWING],
     ] as const) {
       for (const { key, prompt } of await eachPrompt(prefix)) {
         expect(prompt, key).toContain(expected);

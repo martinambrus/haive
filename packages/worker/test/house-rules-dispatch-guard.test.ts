@@ -125,11 +125,17 @@ describe('every resolveTaskDispatch call says whether it is shown the house rule
     const at = (file: string) => calls.filter((c) => c.file === file).map((c) => c.args);
     const stepRunner = at('step-engine/step-runner.ts');
     expect(
-      stepRunner.filter((a) => /houseRulesFor\(\s*stepDef\.metadata\.id,\s*role\s*\)/.test(a)),
+      stepRunner.filter((a) =>
+        /houseRulesFor\(\s*stepDef\.metadata\.id,\s*role,\s*undefined,\s*llmSpec\.requiredCapabilities\s*\)/.test(
+          a,
+        ),
+      ),
     ).toHaveLength(1);
     expect(
-      stepRunner.filter((a) =>
-        /resolveRole\?\.\(stepIterationsAsRecords\(current\)\.length\)/.test(a),
+      stepRunner.filter(
+        (a) =>
+          /resolveRole\?\.\(stepIterationsAsRecords\(current\)\.length\)/.test(a) &&
+          /stepDef\.llm\?\.requiredCapabilities/.test(a),
       ),
     ).toHaveLength(1);
     expect(

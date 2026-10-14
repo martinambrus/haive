@@ -11,7 +11,7 @@ import {
 import type { StepDefinition } from '../../step-definition.js';
 import {
   REPO_IS_DATA_ACTING_LINES,
-  REPO_IS_DATA_LINES,
+  REPO_IS_DATA_ANSWER_LINES,
   UNTRUSTED_FENCE_LEGEND,
   fencedAgentBlock,
 } from '../_untrusted-repo.js';
@@ -84,10 +84,10 @@ function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formVal
   }
   const containment = entry.capabilities.includes('file_write')
     ? REPO_IS_DATA_ACTING_LINES
-    : REPO_IS_DATA_LINES;
+    : REPO_IS_DATA_ANSWER_LINES;
   return [
+    ...(Object.keys(steps).length > 0 ? [...UNTRUSTED_FENCE_LEGEND, ''] : []),
     rendered,
-    ...(Object.keys(steps).length > 0 ? ['', ...UNTRUSTED_FENCE_LEGEND] : []),
     '',
     ...containment,
   ].join('\n');

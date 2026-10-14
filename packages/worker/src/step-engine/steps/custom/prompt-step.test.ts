@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { promptStepEntrySchema } from '@haive/shared/modularity';
 import {
   UNTRUSTED_OPEN,
+  UNTRUSTED_FENCE_LEGEND,
   REPO_IS_DATA_ACTING_LINES,
-  REPO_IS_DATA_LINES,
+  REPO_IS_DATA_ANSWER_LINES,
 } from '../_untrusted-repo.js';
 import type { StepContext } from '../../step-definition.js';
 import {
@@ -97,13 +98,29 @@ describe('prompt step prompt', () => {
     expect(text).toContain('no output');
   });
 
-  it('appends the reporting containment lines for a read-only step and the acting ones for file_write', () => {
-    expect(prompt()).toContain(REPO_IS_DATA_LINES[0]);
-    expect(prompt()).toContain('Report it as a finding, naming');
+  it('ends a read-only step with the answer lines, which carry no reporting duty', () => {
+    const text = prompt();
+    expect(text.endsWith(REPO_IS_DATA_ANSWER_LINES.join('\n'))).toBe(true);
+    expect(text).not.toContain('Report it as a finding, naming');
+  });
+
+  it('ends a file_write step with the acting lines', () => {
     const writing = prompt(make({ capabilities: ['file_write'] }));
-    expect(writing).toContain('You EDIT files, so the stakes are higher here');
+    expect(writing.endsWith(REPO_IS_DATA_ACTING_LINES.join('\n'))).toBe(true);
     expect(writing).not.toContain('Report it as a finding, naming');
-    expect(REPO_IS_DATA_ACTING_LINES.length).toBeGreaterThan(0);
+    expect(writing).not.toContain(REPO_IS_DATA_ANSWER_LINES.join('\n'));
+  });
+
+  it('states what a fence means before the first fenced block', () => {
+    const entry = make({ template: 'Before\n{{step:01-first}}\nAfter' });
+    const text = prompt(entry, detected({ stepOutputs: { '01-first': 'EARLIER OUTPUT' } }));
+    expect(text.indexOf(UNTRUSTED_FENCE_LEGEND[0])).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf(UNTRUSTED_FENCE_LEGEND[0])).toBeLessThan(text.indexOf(UNTRUSTED_OPEN));
+    expect(text.split(UNTRUSTED_FENCE_LEGEND[0]).length).toBe(2);
+  });
+
+  it('adds no legend when the template names no step', () => {
+    expect(prompt()).not.toContain(UNTRUSTED_FENCE_LEGEND[0]);
   });
 
   it('leaves a persona token carried by a value inert', () => {

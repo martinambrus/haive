@@ -834,7 +834,7 @@ async function resolveLlmPhase(
     toolProfile: llmSpec.toolProfile,
     agentPool: llmSpec.agentPool,
     skipAgentRules: llmSpec.skipAgentRules,
-    houseRules: houseRulesFor(stepDef.metadata.id, role),
+    houseRules: houseRulesFor(stepDef.metadata.id, role, undefined, llmSpec.requiredCapabilities),
     invokeOpts: {
       cwd: params.workspacePath,
       effortLevel: preferredEffort ?? undefined,
@@ -1081,6 +1081,8 @@ async function resolveAiFixPhase(
     houseRules: houseRulesFor(
       stepDef.metadata.id,
       stepDef.loop?.resolveRole?.(stepIterationsAsRecords(current).length) ?? 'default',
+      undefined,
+      stepDef.llm?.requiredCapabilities,
     ),
     invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
