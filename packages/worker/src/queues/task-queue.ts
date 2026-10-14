@@ -78,6 +78,10 @@ import {
 import { computeFoldContribution } from '@haive/shared/timing';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
+import {
+  AGENT_PERSONA_UNRESOLVED_EVENT,
+  checkPinnedStepPersonas,
+} from '../orchestrator/persona-start-check.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import {
@@ -2206,6 +2210,15 @@ async function handleStartTask(
   }
   if (held) held.claimed = true;
   await appendEvent(db, ctx.taskId, null, 'task.running', {});
+  await checkPinnedStepPersonas({
+    db,
+    taskId: ctx.taskId,
+    repoPath: ctx.repoPath,
+    customSteps: ctx.customSteps,
+    cliProviderId: ctx.cliProviderId,
+    record: (unresolved) =>
+      appendEvent(db, ctx.taskId, null, AGENT_PERSONA_UNRESOLVED_EVENT, { ...unresolved }),
+  });
 
   // This handler calls advanceStep DIRECTLY, so it bypasses handleAdvanceStep's pause gate
   // entirely — without this a task created (or retried) while paused would run its whole first
