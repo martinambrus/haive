@@ -874,6 +874,14 @@ function usageAuthStateKey(userId: string, providerId: string): string {
   return `usage-auth:claude:${userId}:${providerId}`;
 }
 
+// Compare and delete in one script: two completes cannot both take it; a wrong state keeps it.
+const TAKE_USAGE_AUTH_STASH_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return false end
+if cjson.decode(raw).state ~= ARGV[1] then return 0 end
+redis.call('DEL', KEYS[1])
+return raw`;
+
 cliProviderRoutes.post('/:providerId/usage-auth/start', async (c) => {
   const userId = c.get('userId');
   const providerId = c.req.param('providerId');
@@ -903,22 +911,32 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
   const db = getDb();
   await loadOwnedProvider(db, userId, providerId);
 
-  const redis = getRedis();
-  const stashKey = usageAuthStateKey(userId, providerId);
-  const stashed = await redis.get(stashKey);
-  if (!stashed) throw new HttpError(400, 'Authorization expired or not started; please restart.');
-  const { verifier, state: expectedState } = JSON.parse(stashed) as {
-    verifier: string;
-    state: string;
-  };
-
   const { code, state } = parseClaudeAuthCode(body.code);
-  if (state && state !== expectedState) {
-    throw new HttpError(400, 'OAuth state mismatch; please restart the authorization.');
+  if (!state) {
+    throw new HttpError(
+      400,
+      'The pasted code is missing its state part; copy the whole code, including the part after #.',
+    );
   }
+  const taken = (await getRedis().eval(
+    TAKE_USAGE_AUTH_STASH_SCRIPT,
+    1,
+    usageAuthStateKey(userId, providerId),
+    state,
+  )) as string | 0 | null;
+  if (taken === null) {
+    throw new HttpError(400, 'Authorization expired or not started; please restart.');
+  }
+  if (taken === 0) {
+    throw new HttpError(
+      400,
+      'The pasted code belongs to a different authorization; paste the code from this one, or restart it.',
+    );
+  }
+  const { verifier } = JSON.parse(taken) as { verifier: string };
   let tokens;
   try {
-    tokens = await exchangeClaudeAuthCode(code, verifier, state ?? expectedState);
+    tokens = await exchangeClaudeAuthCode(code, verifier, state);
   } catch (err) {
     throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
   }
@@ -928,7 +946,6 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       'The granted token is missing the user:profile scope required for usage tracking.',
     );
   }
-  await redis.del(stashKey);
   await upsertProviderSecret(db, {
     providerId,
     name: CLAUDE_USAGE_OAUTH_SECRET,

@@ -35,6 +35,7 @@ import {
   reconcileOrphanedSteps,
   startTaskWorker,
 } from './queues/task-queue.js';
+import { reconcileDeadTasks } from './queues/dead-task-boot.js';
 import { defaultDeps, redriveStalledTasks, StalledTaskSweeper } from './queues/stalled-redrive.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
@@ -62,6 +63,7 @@ import {
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
 import { startModuleJobs } from './modules/loader.js';
+import { startModuleControlWorker } from './queues/module-control-queue.js';
 import { deactivatedModuleIds } from './modules/activation.js';
 
 async function main(): Promise<void> {
@@ -109,6 +111,10 @@ async function main(): Promise<void> {
   // Before this process starts a worker, whose connection would read as the owner of every active job.
   await requeueOrphanedActiveJobs(getTaskQueue(), () => true);
   await requeueOrphanedActiveJobs(getCliExecQueue(), cliExecJobRequeuedAtBoot);
+  // Before the reconcile, which skips a dead task: a revived task's orphaned run is ended there and nowhere else.
+  await reconcileDeadTasks(getDb()).catch((err) => {
+    logger.warn({ err }, 'dead-task reconciliation on boot failed');
+  });
   // Recover steps a prior worker orphaned mid-step (their sandboxes were reaped
   // above): resume waiting_cli steps and re-drive running steps whose advance-step
   // job died mid-execution, so neither hangs after a restart/crash/power loss.
@@ -260,6 +266,11 @@ async function main(): Promise<void> {
     moduleEntries,
     await deactivatedModuleIds(getDb()),
   );
+  // After the module jobs: a teardown refuses a module whose jobs this worker started.
+  const moduleControlWorker = startModuleControlWorker({
+    loaded: loadedModules,
+    entries: moduleEntries,
+  });
 
   logger.info('haive-worker ready');
 
@@ -294,6 +305,7 @@ async function main(): Promise<void> {
       usagePollWorker.close(true),
       prPollWorker.close(true),
       planMirrorWorker.close(true),
+      moduleControlWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
       closePrPollQueue(),
