@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ComposableStepEntry, PromptStepEntry } from '@haive/shared/modularity';
+import type { ComposableStepEntry, CustomTool, PromptStepEntry } from '@haive/shared/modularity';
 import { catalogEntries } from './composition-messages';
 import { TEST_CATALOG } from './composition-test-catalog';
 import {
@@ -20,6 +20,7 @@ const entry = (slug: string, over: Partial<PromptStepEntry> = {}): PromptStepEnt
   title: `Title ${slug}`,
   template: 'Do the thing',
   capabilities: [],
+  tools: [],
   timeoutMs: 300_000,
   ...over,
 });
@@ -36,12 +37,13 @@ const agentAuthored: ComposableStepEntry = {
 };
 
 describe('newPromptStep', () => {
-  it('starts empty with the default timeout and no capabilities', () => {
+  it('starts empty with the default timeout, no capabilities and no tools', () => {
     expect(newPromptStep([])).toEqual({
       slug: 'prompt-step',
       title: 'Prompt step',
       template: '',
       capabilities: [],
+      tools: [],
       timeoutMs: DEFAULT_PROMPT_STEP_TIMEOUT_MS,
     });
     expect(DEFAULT_PROMPT_STEP_TIMEOUT_MS).toBe(300_000);
@@ -174,6 +176,24 @@ describe('promptStepIssues', () => {
     expect(issues(['custom.t.gone'], {})).toEqual([]);
     expect(issues(['04-phase-0b-pre-planning'], { a: entry('a', { template: '' }) })).toEqual([]);
   });
+
+  it('refuses tools for now and names the tool of each tool problem', () => {
+    const tool: CustomTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of one repository.',
+      action: 'http-get',
+      url: 'http://api.example.com/v1/status',
+      query: [],
+      params: [],
+      timeoutMs: 10_000,
+      maxResponseBytes: 32_768,
+    };
+    const out = issues(['custom.t.a'], { a: entry('a', { tools: [tool] }) });
+    expect(out.map((i) => [i.kind, i.raw, i.stepId])).toEqual([
+      ['tool-url-not-https', 'repo_status', 'custom.t.a'],
+      ['tools-not-supported-yet', '', 'custom.t.a'],
+    ]);
+  });
 });
 
 describe('renamePromptStepTokens', () => {
@@ -182,6 +202,7 @@ describe('renamePromptStepTokens', () => {
     title: slug,
     template,
     capabilities: [],
+    tools: [],
     timeoutMs: 300_000,
   });
 

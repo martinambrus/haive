@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { CompositionIssue } from '@haive/shared/modularity';
-import { PROMPT_STEP_PROBLEM_KINDS, validateComposition } from '@haive/shared/modularity';
+import {
+  CUSTOM_TOOL_PROBLEM_KINDS,
+  PROMPT_STEP_PROBLEM_KINDS,
+  validateComposition,
+} from '@haive/shared/modularity';
 import {
   catalogEntries,
   compositionProblems,
@@ -328,6 +332,60 @@ describe('describePromptStepIssue', () => {
       '16 KiB',
     );
   });
+
+  describe('tools', () => {
+    const text = (kind: Parameters<typeof describePromptStepIssue>[0]['kind'], raw?: string) =>
+      describePromptStepIssue({ kind, stepId: 's', ...(raw === undefined ? {} : { raw }) });
+
+    it('says tools are not supported yet and what to do', () => {
+      expect(text('tools-not-supported-yet')).toContain('not supported yet');
+      expect(text('tools-not-supported-yet')).toContain('Remove');
+    });
+
+    it('names the tool in a code span for every problem that is about one tool', () => {
+      const aboutOneTool = CUSTOM_TOOL_PROBLEM_KINDS.filter((kind) => kind !== 'too-many-tools');
+      expect(aboutOneTool.length).toBe(CUSTOM_TOOL_PROBLEM_KINDS.length - 1);
+      for (const kind of aboutOneTool) {
+        expect(text(kind, 'repo_status'), kind).toContain('`repo_status`');
+        expect(text(kind), kind).not.toContain('undefined');
+        expect(text(kind), kind).toMatch(/tool/i);
+      }
+    });
+
+    it('keeps a backtick in the tool name from closing the code span', () => {
+      expect(text('tool-url-not-https', 'a`b')).toContain('`` a`b ``');
+    });
+
+    it('puts the limits of a tool in the words of its refusals', () => {
+      expect(text('too-many-tools')).toContain('8 tools');
+      expect(text('tool-too-many-params', 't')).toContain('10 parameters');
+      expect(text('tool-timeout-out-of-range', 't')).toContain('1 and 30 seconds');
+      expect(text('tool-response-cap-out-of-range', 't')).toContain('1 and 64 KiB');
+      expect(text('tool-top-k-out-of-range', 't')).toContain('1 and 20');
+      expect(text('tool-description-invalid', 't')).toContain('1024');
+      expect(text('tool-name-invalid', 't')).toContain('40');
+    });
+
+    it('names what is wrong with a url in plain words', () => {
+      expect(text('tool-url-not-https', 't')).toContain('https://');
+      expect(text('tool-url-userinfo', 't')).toContain('password');
+      expect(text('tool-url-fragment', 't')).toContain('#');
+      expect(text('tool-host-ip-literal', 't')).toContain('IP address');
+      expect(text('tool-host-not-public', 't')).toContain('.internal');
+      expect(text('tool-placeholder-outside-path', 't')).toContain('path');
+    });
+
+    it('lists the names a tool may not take', () => {
+      const reserved = text('tool-name-reserved', 't');
+      for (const name of ['rag_search', 'ddev_status', 'ddev_logs', 'ddev_restart']) {
+        expect(reserved).toContain(name);
+      }
+    });
+
+    it('tells a type with no repository how to keep a project search', () => {
+      expect(text('tool-scope-needs-repository', 't')).toContain("'Requires a repository'");
+    });
+  });
 });
 
 describe('promptStepIssuesOf', () => {
@@ -355,5 +413,18 @@ describe('promptStepIssuesOf', () => {
 
   it('tolerates a body with no issues', () => {
     expect(promptStepIssuesOf(undefined)).toEqual([]);
+  });
+
+  it('keeps the tool kinds an api save answers with', () => {
+    const out = promptStepIssuesOf([
+      { kind: 'tools-not-supported-yet', stepId: 'custom.t.a', index: 0, raw: '', start: 0 },
+      { kind: 'tool-url-not-https', stepId: 'custom.t.a', index: 0, raw: 'repo_status', start: 0 },
+      { kind: 'too-many-tools', stepId: 'custom.t.a', index: 0, raw: '', start: 0 },
+    ]);
+    expect(out.map((i) => [i.kind, i.raw])).toEqual([
+      ['tools-not-supported-yet', ''],
+      ['tool-url-not-https', 'repo_status'],
+      ['too-many-tools', ''],
+    ]);
   });
 });

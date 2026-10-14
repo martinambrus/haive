@@ -214,6 +214,7 @@ describe('prompt steps in the bodies', () => {
     title: `T ${slug}`,
     template,
     capabilities: [] as ('tool_use' | 'file_write' | 'vision')[],
+    tools: [],
     timeoutMs: 300_000,
   });
   const values = {
@@ -323,6 +324,7 @@ describe('compositionChanged with prompt steps', () => {
     title: 'A',
     template: 'x',
     capabilities: [] as [],
+    tools: [],
     timeoutMs: 300_000,
   };
   const saved = { stepIds: ['custom.t.a'], stepLoopLimitDefaults: {}, promptSteps: { a: step } };
