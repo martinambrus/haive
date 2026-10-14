@@ -96,7 +96,8 @@ maintenanceRoutes.get('/blocking', async (c) => {
     })
     .from(schema.tasks)
     .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
-    .where(inArray(schema.tasks.status, [...LIVE_TASK_STATES]))
+    // A dead task runs nothing, and none of this page's actions reach it; its owner cancels it.
+    .where(and(inArray(schema.tasks.status, [...LIVE_TASK_STATES]), isNull(schema.tasks.deadAt)))
     .orderBy(desc(schema.tasks.updatedAt))
     .limit(200);
   const fieldKey = await configService.getEncryptionKey();
