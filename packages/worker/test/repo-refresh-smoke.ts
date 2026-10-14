@@ -33,6 +33,7 @@ import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
 import {
   putBackProjections,
+  recoverAfterMoveFailure,
   restoreFaults,
   restoreProjectionsInTx,
   resyncHaiveProjections,
@@ -2140,25 +2141,128 @@ async function main(): Promise<void> {
         { outcome: asideM7.outcome, m7Gone, m7Back },
       );
 
-      // M8. An untracked plan.json at 0600 that a refresh sets aside and the resync re-creates keeps that mode.
-      const m8 = await cloned();
-      const m8Id = m8.payload.repositoryId;
+      // M8. An untracked plan.json at 0600 that a move sets aside and the resync re-creates keeps that mode.
+      for (const via of ['refresh', '00a'] as const) {
+        const m8 = await cloned();
+        const m8Id = m8.payload.repositoryId;
+        await applyPlanPatch(
+          db,
+          { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+          { repositoryId: m8Id, origin: 'user' },
+        );
+        await writePlanMirror(db, m8Id, m8.dest);
+        const m8Plan = path.join(m8.dest, PLAN_REL);
+        await chmod(m8Plan, 0o600);
+        const m8Head = git(m8.dest, 'rev-parse', 'HEAD');
+        await push(`m8-${via}-upstream.txt`, 'x\n');
+        const m8Moved = await moveVia(via, m8);
+        const m8Mode = ((await stat(m8Plan).catch(() => null))?.mode ?? 0) & 0o777;
+        check(
+          `M8: ${via}: an untracked plan.json at 0600 keeps that mode across a move of the checkout`,
+          git(m8.dest, 'rev-parse', 'HEAD') !== m8Head && m8Mode === 0o600,
+          { m8Moved, m8Mode: m8Mode.toString(8) },
+        );
+      }
+
+      // M9 and M11 need a remote of their own: the shared one's committed record already holds every directory.
+      const untrackedRecord = async (name: string) => {
+        const origin = path.join(tmp, `origin-${name}.git`);
+        git(tmp, 'init', '-q', '--bare', '-b', 'main', origin);
+        const seedDir = path.join(tmp, `seed-${name}`);
+        git(tmp, 'clone', '-q', `file://${origin}`, seedDir);
+        await commitFile(seedDir, 'README.md', 'seed\n', 'seed');
+        git(seedDir, 'push', '-q', 'origin', 'HEAD:main');
+        const c = await cloned(origin);
+        const id = c.payload.repositoryId;
+        await db
+          .update(schema.repositories)
+          .set({ renderContext: column() })
+          .where(eq(schema.repositories.id, id));
+        await markProjectStateDirty(db, id);
+        await sweepDirtyProjectStates(db);
+        const dir = path.join(c.dest, path.dirname(RENDER_REL));
+        const root = path.join(c.dest, '.haive-data/state');
+        await chmod(dir, 0o700);
+        await chmod(root, 0o750);
+        const untracked = git(c.dest, 'status', '--porcelain', '--', RENDER_REL);
+        const modeOf = async (p: string) => ((await stat(p).catch(() => null))?.mode ?? 0) & 0o7777;
+        const modes = () => Promise.all([modeOf(dir), modeOf(root)]);
+        return { c, id, seedDir, dir, untracked, held: await readdir(dir), modes };
+      };
+
+      // M9. The state directories the set-aside empties and removes come back at the modes they had.
+      for (const via of ['refresh', '00a'] as const) {
+        const m9 = await untrackedRecord(`m9-${via}`);
+        const m9Head = git(m9.c.dest, 'rev-parse', 'HEAD');
+        await commitFile(m9.seedDir, 'm9-upstream.txt', 'x\n', 'upstream');
+        git(m9.seedDir, 'push', '-q', 'origin', 'HEAD:main');
+        const m9Moved = await moveVia(via, m9.c);
+        const m9Advanced = git(m9.c.dest, 'rev-parse', 'HEAD') !== m9Head;
+        const m9Modes = (await m9.modes()).map((m) => m.toString(8));
+        check(
+          `M9: ${via}: the state directories the set-aside empties keep their modes across a move of the checkout`,
+          m9.untracked.startsWith('??') &&
+            isDeepEqual(m9.held, ['render.json']) &&
+            m9Advanced &&
+            isDeepEqual(m9Modes, ['700', '750']),
+          { untracked: m9.untracked, held: m9.held, m9Moved, m9Advanced, m9Modes },
+        );
+      }
+
+      // M10. A throw after the move landed re-syncs, and the untracked plan.json still gets its mode back.
+      const m10 = await cloned();
+      const m10Id = m10.payload.repositoryId;
       await applyPlanPatch(
         db,
         { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
-        { repositoryId: m8Id, origin: 'user' },
+        { repositoryId: m10Id, origin: 'user' },
       );
-      await writePlanMirror(db, m8Id, m8.dest);
-      const m8Plan = path.join(m8.dest, PLAN_REL);
-      await chmod(m8Plan, 0o600);
-      const m8Head = git(m8.dest, 'rev-parse', 'HEAD');
-      await push('m8-upstream.txt', 'x\n');
-      const m8Moved = await moveVia('refresh', m8);
-      const m8Mode = ((await stat(m8Plan).catch(() => null))?.mode ?? 0) & 0o777;
+      await writePlanMirror(db, m10Id, m10.dest);
+      const m10Plan = path.join(m10.dest, PLAN_REL);
+      await chmod(m10Plan, 0o600);
+      const m10Head = git(m10.dest, 'rev-parse', 'HEAD');
+      await push('m10-upstream.txt', 'x\n');
+      const asideM10 = await setAsideHaiveProjections(db, m10Id, m10.dest);
+      git(m10.dest, 'fetch', '-q', 'origin', 'main');
+      git(m10.dest, 'merge', '-q', '--ff-only', 'origin/main');
+      const m10Err = new Error('the move threw after it landed');
+      let m10Thrown: unknown = null;
+      if (asideM10.outcome === 'set-aside') {
+        try {
+          await recoverAfterMoveFailure(db, m10Id, m10.dest, asideM10.kept, m10Head, m10Err);
+        } catch (err) {
+          m10Thrown = err;
+        }
+      }
+      const m10Mode = ((await stat(m10Plan).catch(() => null))?.mode ?? 0) & 0o777;
       check(
-        'M8: an untracked plan.json at 0600 keeps that mode across a refresh that moves the checkout',
-        git(m8.dest, 'rev-parse', 'HEAD') !== m8Head && m8Mode === 0o600,
-        { m8Moved, m8Mode: m8Mode.toString(8) },
+        'M10: a throw after the move landed still gives an untracked plan.json its 0600 mode back',
+        asideM10.outcome === 'set-aside' &&
+          git(m10.dest, 'rev-parse', 'HEAD') !== m10Head &&
+          m10Thrown === m10Err &&
+          m10Mode === 0o600,
+        { outcome: asideM10.outcome, m10Thrown: String(m10Thrown), m10Mode: m10Mode.toString(8) },
+      );
+
+      // M11. The same directories come back at those modes when no move follows and the files are put back.
+      const m11 = await untrackedRecord('m11');
+      const m11Render = await readFile(path.join(m11.c.dest, RENDER_REL));
+      const asideM11 = await setAsideHaiveProjections(db, m11.id, m11.c.dest);
+      const m11Gone = (await stat(m11.dir).catch(() => null)) === null;
+      if (asideM11.outcome === 'set-aside') {
+        await putBackProjections(db, m11.id, m11.c.dest, asideM11.kept);
+      }
+      const m11Back = await readFile(path.join(m11.c.dest, RENDER_REL)).catch(() => null);
+      const m11Modes = (await m11.modes()).map((m) => m.toString(8));
+      check(
+        'M11: the state directories the set-aside empties keep their modes when the files are put back',
+        m11.untracked.startsWith('??') &&
+          isDeepEqual(m11.held, ['render.json']) &&
+          asideM11.outcome === 'set-aside' &&
+          m11Gone &&
+          m11Back?.equals(m11Render) === true &&
+          isDeepEqual(m11Modes, ['700', '750']),
+        { untracked: m11.untracked, outcome: asideM11.outcome, m11Gone, m11Modes },
       );
 
       // P2. A lone plan.md in a repository whose database holds no plan is not Haive's: refused and kept.

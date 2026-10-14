@@ -61,6 +61,7 @@ export interface KeptFile {
   mode?: number;
   owner?: { uid: number; gid: number };
   untracked?: boolean;
+  parents?: { path: string; owner: { uid: number; gid: number }; mode: number }[];
 }
 export type KeptFiles = Map<string, KeptFile>;
 
@@ -593,16 +594,30 @@ async function restoreFromHead(
         throw new Error(`git update-index failed: ${res.stderr.trim().slice(0, 300)}`);
       }
     }
-    if (head === null) await pruneEmptyStateDirs(repoPath, path);
+    if (head === null) await pruneEmptyStateDirs(repoPath, path, kept);
   }
   return null;
 }
 
 /** A directory left empty under the state directory reads as a record with no format file, not as no record. */
-async function pruneEmptyStateDirs(repoPath: string, removed: string): Promise<void> {
+async function pruneEmptyStateDirs(
+  repoPath: string,
+  removed: string,
+  kept: KeptFiles,
+): Promise<void> {
   if (!removed.startsWith(STATE_PREFIX)) return;
+  const entry = kept.get(removed);
+  // Only the first attempt's snapshot: a later attempt finds the directories as the writer re-created them.
+  const snapshot = entry !== undefined && entry.parents === undefined ? entry : null;
   for (let dir = posix.dirname(removed); dir.length >= PROJECT_STATE_DIR.length;) {
     if (((await readdirNoFollow(repoPath, dir)) ?? ['.']).length > 0) return;
+    if (snapshot) {
+      const info = await lstatNoFollow(repoPath, dir);
+      if (info?.kind === 'directory') {
+        const { uid, gid, mode } = info.stats;
+        (snapshot.parents ??= []).push({ path: dir, owner: { uid, gid }, mode: mode & 0o7777 });
+      }
+    }
     await removeNoFollow(repoPath, dir);
     dir = posix.dirname(dir);
   }
@@ -809,19 +824,38 @@ export async function resyncHaiveProjections(
   }
 }
 
-/** After the re-sync: an untracked projection the set-aside removed is a new file now, so it gets back the
- *  owner and mode it had, while it is still owned by the process that wrote it. Never throws. */
+const metadataWarn = (repoPath: string, path: string) => (err: unknown) =>
+  logger.warn({ err, repoPath, path }, 'owner and mode not restored after a checkout move');
+
+/** After the re-sync: an untracked projection the set-aside removed, and the directories it pruned, are new
+ *  now, so each gets back its owner and mode while the process that wrote it still owns it. Never throws. */
 export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<void> {
   const writer = process.getuid?.();
-  for (const [path, { bytes, owner, mode, untracked }] of kept) {
+  for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
+    await restoreKeptParents(repoPath, parents);
     if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) continue;
-    const warn = (err: unknown) =>
-      logger.warn({ err, repoPath, path }, 'owner and mode not restored after a checkout move');
+    const warn = metadataWarn(repoPath, path);
     try {
       const now = await lstatNoFollow(repoPath, path);
       if (now?.kind !== 'file' || now.stats.uid !== writer) continue;
       await chownNoFollow(repoPath, path, owner).catch(warn);
       await chmodNoFollow(repoPath, path, (current) => (mode & ~0o111) | (current & 0o111));
+    } catch (err) {
+      warn(err);
+    }
+  }
+}
+
+/** The directory half of `restoreKeptMetadata`, deepest first, which the put-back shares. Never throws. */
+async function restoreKeptParents(repoPath: string, parents: KeptFile['parents']): Promise<void> {
+  const writer = process.getuid?.();
+  for (const { path, owner, mode } of parents ?? []) {
+    const warn = metadataWarn(repoPath, path);
+    try {
+      const now = await lstatNoFollow(repoPath, path);
+      if (now?.kind !== 'directory' || now.stats.uid !== writer) continue;
+      await chownNoFollow(repoPath, path, owner).catch(warn);
+      await chmodNoFollow(repoPath, path, mode);
     } catch (err) {
       warn(err);
     }
@@ -844,7 +878,7 @@ export async function putBackProjections(
     await lockProjectState(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
     // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
-    for (const [path, { bytes, index, mode, owner }] of kept) {
+    for (const [path, { bytes, index, mode, owner, parents }] of kept) {
       await putBackIndex(repoPath, path, index);
       if (bytes === undefined) continue;
       const head = await readBlob(repoPath, `HEAD:${path}`);
@@ -858,6 +892,7 @@ export async function putBackProjections(
             fileMode: mode,
           });
           if (owner) await chownNoFollow(repoPath, path, owner).catch(() => undefined);
+          await restoreKeptParents(repoPath, parents);
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
         }
@@ -928,6 +963,7 @@ export async function recoverAfterMoveFailure(
         'projections not re-synced after a failed move',
       ),
     );
+    await restoreKeptMetadata(repoPath, kept);
     throw err;
   }
   return putBackAfterFailure(db, repositoryId, repoPath, kept, err, section);
