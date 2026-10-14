@@ -239,6 +239,7 @@ jobs:
           api test/module-missing-db.test.ts MODULE_MISSING_API_TEST_URL module_missing_api_test pg
           api test/module-purge-db.test.ts MODULE_PURGE_API_TEST_URL module_purge_api_test pg
           api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test pg
+          api test/task-list-dead.test.ts TASK_LIST_DEAD_TEST_URL task_list_dead_test pg
           api test/integrations-broker.test.ts INTEGRATIONS_BROKER_TEST_URL integrations_broker_test pg
           api test/custom-mcp-db.test.ts CUSTOM_MCP_TEST_URL custom_mcp_test pg
           shared test/create-database-race.test.ts RACE_PG_URL create_database_race_test pg
