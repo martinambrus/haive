@@ -18,11 +18,14 @@ the module loads again.
 
 - **Installed, active.** `pnpm module add <id>` and a rebuild. Everything runs: the module's api
   routes at `/m/<id>`, nav and pages, settings, dashboard widget, worker steps, jobs and database.
-- **Installed, deactivated.** `PATCH /modules/:id` with `{"active": false}` (admin; audited as
-  `module.deactivate`). It is refused with 409 `module_tasks_open`, listing up to 200 tasks, while a
-  live task's run list names one of the module's steps. The code stays loaded: its api routes and
-  settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget) and the composer
-  palette drops its steps. A task type that uses the module, as its source or through any step, is
+- **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
+  `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
+  `module_tasks_open`, which the page shows as a list of up to 200 tasks, while a live task's run list
+  names one of the module's steps or its type is one the module seeded. The code stays loaded: its api routes and
+  settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
+  pages and widgets render only for modules that list names) and the composer palette drops its steps.
+  The worker starts no job of a module that is deactivated when it boots; a job already running stops
+  at the next worker start. A task type that uses the module, as its source or through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
   at the same moment waits and then counts the new task. A task that reaches one of its steps later, after a Retry or a revive,
