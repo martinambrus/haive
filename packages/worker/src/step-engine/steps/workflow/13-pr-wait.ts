@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { StepSupersededError, updateOwnedStep } from '../../step-ownership.js';
+import { describeChanges, readUncommittedChanges } from '../../../repo/worktree-changes.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import { killTaskDdevRunners } from '../../../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../../../sandbox/app-runner.js';
@@ -113,7 +114,7 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
           variant: 'info',
         },
       ],
-      submitLabel: 'Finalize now (remove the worktree and finish)',
+      submitLabel: 'Finalize now (finish; a clean worktree is removed)',
     };
   },
 
@@ -170,6 +171,20 @@ export const prWaitStep: StepDefinition<PrWaitDetect, PrWaitApply> = {
     }
     if (!d.worktreePath) {
       return { finalized: true, removed: false, message: 'finalized (no worktree recorded)' };
+    }
+    // Removal also deletes what no commit holds, so a worktree that holds any, or that git cannot
+    // read, stays; the task still finishes.
+    const held = await readUncommittedChanges(d.worktreePath, 0);
+    if (held === null || held.count > 0) {
+      ctx.logger.warn(
+        { worktreePath: d.worktreePath, uncommitted: held?.count ?? null },
+        'pr-wait worktree kept: it holds uncommitted changes or git could not read it',
+      );
+      return {
+        finalized: true,
+        removed: false,
+        message: `finalized; worktree kept at ${d.worktreePath}: ${held === null ? 'it could not be checked for uncommitted changes' : `removing it would delete ${describeChanges(held.count)}`}`,
+      };
     }
     // Finalize: remove the worktree (keep the local branch — the merge is on the remote).
     // Loud on failure like 12-worktree-cleanup: a silent removed:false would leak the
