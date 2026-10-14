@@ -119,6 +119,33 @@ export function claudeTokenNeedsRefresh(expiresAt: number, now = Date.now()): bo
   return now >= expiresAt - CLAUDE_TOKEN_REFRESH_SKEW_MS;
 }
 
+/** A refusal from the token endpoint, with the RFC 6749 `error` code when the body carried one. */
+export class ClaudeOauthError extends Error {
+  constructor(
+    grantType: string,
+    readonly status: number,
+    readonly code: string | null,
+    body: string,
+  ) {
+    super(`claude oauth ${grantType}: http ${status} ${body.slice(0, 200)}`);
+    this.name = 'ClaudeOauthError';
+  }
+}
+
+function oauthErrorCode(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    return typeof parsed.error === 'string' ? parsed.error : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The refresh token itself was refused (revoked or superseded), so retrying cannot succeed. */
+export function isClaudeRefreshRejected(err: unknown): boolean {
+  return err instanceof ClaudeOauthError && err.code === 'invalid_grant';
+}
+
 // OAuth2 token endpoints are form-encoded per RFC 6749. (Some OSS impls POST JSON and it
 // also works; the body PARAMS are the invariant, the content-type is the volatile bit.)
 async function postToken(params: Record<string, string>): Promise<ClaudeOauthTokens> {
@@ -129,7 +156,7 @@ async function postToken(params: Record<string, string>): Promise<ClaudeOauthTok
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`claude oauth ${params.grant_type}: http ${res.status} ${body.slice(0, 200)}`);
+    throw new ClaudeOauthError(params.grant_type ?? '', res.status, oauthErrorCode(body), body);
   }
   const prior = params.grant_type === 'refresh_token' ? params.refresh_token : undefined;
   return toTokens((await res.json()) as TokenResponse, prior);
