@@ -2308,6 +2308,7 @@ export interface ModuleSummary {
   pages: Record<string, DashboardSpec>;
   hasGlobalSettings: boolean;
   hasAdminSettings: boolean;
+  compiledWeb: boolean;
 }
 
 export type ModuleSettingsKind = 'global' | 'admin';

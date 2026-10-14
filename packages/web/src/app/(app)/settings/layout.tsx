@@ -1,9 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { TabNav } from '@/components/tabs';
-import { getModules } from '@/lib/api-client';
+import { useModules } from '@/lib/use-modules';
 
 const SETTINGS_TABS = [
   { label: 'Account', href: '/settings/account' },
@@ -18,14 +17,9 @@ const SETTINGS_TABS = [
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const [hasModuleSettings, setHasModuleSettings] = useState(false);
-  useEffect(() => {
-    getModules()
-      .then((modules) =>
-        setHasModuleSettings(modules.some((m) => m.hasGlobalSettings || m.hasAdminSettings)),
-      )
-      .catch(() => setHasModuleSettings(false));
-  }, []);
+  const { modules } = useModules();
+  const hasModuleSettings =
+    modules?.some((m) => m.hasGlobalSettings || m.hasAdminSettings) === true;
   const tabs = hasModuleSettings
     ? [...SETTINGS_TABS, { label: 'Modules', href: '/settings/m' }]
     : SETTINGS_TABS;

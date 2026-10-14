@@ -116,7 +116,7 @@ export async function insertOwnedRun(
 
 class ClaimOvertaken extends Error {}
 
-/** Open a pass on its `pending` row (claim it, or skip it). With the job's epoch, the fence is read
+/** Open a pass on its `pending` row (claim it, skip it, or fail it). With the job's epoch, the fence is read
  *  FOR SHARE after the flip, so a reset's uncommitted epoch bump holds it and then refuses it. */
 export async function openPendingStep(
   db: Database,

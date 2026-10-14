@@ -1,21 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { getModules, type ApiError, type ModuleSummary } from '@/lib/api-client';
+import { useModules } from '@/lib/use-modules';
 import { usePageTitle } from '@/lib/use-page-title';
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 
 export default function ModuleSettingsIndexPage() {
   usePageTitle('Module settings');
-  const [modules, setModules] = useState<ModuleSummary[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    getModules()
-      .then((all) => setModules(all.filter((m) => m.hasGlobalSettings || m.hasAdminSettings)))
-      .catch((err) => setError((err as ApiError).message ?? 'Failed to load modules'));
-  }, []);
+  const { modules: all, error } = useModules();
+  const modules = all?.filter((m) => m.hasGlobalSettings || m.hasAdminSettings);
 
   return (
     <div className="flex flex-col gap-4">
