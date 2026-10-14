@@ -25,6 +25,7 @@ import {
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { parseAgentFile } from '../step-engine/steps/workflow/_agent-loader.js';
+import { parseFlatToml } from '../bundle-parser/decoders/codex-toml.js';
 import {
   secretMaskDeniesPath,
   secretMaskPolicy,
@@ -189,6 +190,7 @@ async function readPersonaFile(args: {
   tracked: () => Promise<Set<string> | null>;
   remaining: number;
   strict: boolean;
+  format?: 'markdown' | 'toml';
 }): Promise<PersonaFileOutcome> {
   // With no tracked set the predicate treats everything as untracked and masks more, so a "not
   // denied" verdict here is final and needs no git at all — the overwhelmingly common case, since no
@@ -218,9 +220,17 @@ async function readPersonaFile(args: {
     return { kind: 'oversized', size: read.size };
   }
 
-  const parsed = parseAgentFile(read.data.toString('utf8'));
-  if (!parsed) return { kind: 'unparseable' };
-  const body = parsed.body.trim();
+  const text = read.data.toString('utf8');
+  let body: string;
+  if (args.format === 'toml') {
+    const instructions = parseFlatToml(text).developer_instructions;
+    if (instructions === undefined) return { kind: 'unparseable' };
+    body = instructions.trim();
+  } else {
+    const parsed = parseAgentFile(text);
+    if (!parsed) return { kind: 'unparseable' };
+    body = parsed.body.trim();
+  }
   if (!body) return { kind: 'empty' };
   return { kind: 'ok', body, size: read.size };
 }
@@ -295,6 +305,15 @@ const MARKDOWN_AGENT_DIRS: readonly string[] = [
   ),
 ];
 
+/** Every TOML agent directory (Codex), looked in only after no markdown directory holds the id. */
+const TOML_AGENT_DIRS: readonly string[] = [
+  ...new Set(
+    CLI_PROVIDER_LIST.flatMap((p) =>
+      p.agentFileFormat === 'toml' && p.projectAgentsDir ? [p.projectAgentsDir] : [],
+    ),
+  ),
+];
+
 export type TemplatePersonasResult =
   | { ok: true; personas: Record<string, { body: string; rel: string }>; used: number }
   | { ok: false; failure: string };
@@ -312,7 +331,8 @@ export function templatePersonaFailure(id: string, reason: string): string {
  * and the reason. Each id is looked up in the selected provider's markdown directory first (when it
  * has one), then in every markdown directory in catalog order, and the first that holds `<id>.md`
  * decides — a refused, masked, empty or over-budget file there is a failure, never a reason to try
- * the next directory. A path the mask policy denies counts as held only when a file exists there. Same reader, mask policy and budget as the built-in bodies.
+ * the next directory. When no markdown directory holds the id, a Codex `<id>.toml` is the persona
+ * (its `developer_instructions` is the body). A path the mask policy denies counts as held only when a file exists there. Same reader, mask policy and budget as the built-in bodies.
  */
 export async function readTemplatePersonas(args: {
   workerTree: string;
@@ -331,14 +351,17 @@ export async function readTemplatePersonas(args: {
       ...MARKDOWN_AGENT_DIRS,
     ]),
   ];
+  const candidates = (id: string): { rel: string; format: 'markdown' | 'toml' }[] => [
+    ...dirs.map((dir) => ({ rel: `${dir}/${id}.md`, format: 'markdown' as const })),
+    ...TOML_AGENT_DIRS.map((dir) => ({ rel: `${dir}/${id}.toml`, format: 'toml' as const })),
+  ];
   const start = args.budget ?? MAX_PERSONA_BODY_BYTES;
   let remaining = start;
   const personas: Record<string, { body: string; rel: string }> = {};
 
   for (const id of args.ids) {
     let resolved = false;
-    for (const dir of dirs) {
-      const rel = `${dir}/${id}.md`;
+    for (const { rel, format } of candidates(id)) {
       const outcome = await readPersonaFile({
         anchor,
         rel,
@@ -346,6 +369,7 @@ export async function readTemplatePersonas(args: {
         tracked,
         remaining,
         strict: true,
+        format,
       });
       if (outcome.kind === 'absent') continue;
       const fail = (reason: string): TemplatePersonasResult => ({
@@ -365,7 +389,11 @@ export async function readTemplatePersonas(args: {
               `${MAX_PERSONA_BODY_BYTES}-byte persona budget`,
           );
         case 'unparseable':
-          return fail(`${rel} has no frontmatter that can be parsed`);
+          return fail(
+            format === 'toml'
+              ? `${rel} has no developer_instructions that can be read`
+              : `${rel} has no frontmatter that can be parsed`,
+          );
         case 'empty':
           return fail(`${rel} has an empty body`);
         case 'ok':
@@ -378,7 +406,10 @@ export async function readTemplatePersonas(args: {
     if (!resolved) {
       return {
         ok: false,
-        failure: templatePersonaFailure(id, `no ${id}.md found in ${dirs.join(', ')}`),
+        failure: templatePersonaFailure(
+          id,
+          `no ${id}.md found in ${dirs.join(', ')}, and no ${id}.toml in ${TOML_AGENT_DIRS.join(', ')}`,
+        ),
       };
     }
   }

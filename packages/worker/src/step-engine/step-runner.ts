@@ -45,7 +45,7 @@ import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
-import { parseStepId } from '@haive/shared/modularity';
+import { TEMPLATE_PERSONA_MARKER_PATTERN, parseStepId } from '@haive/shared/modularity';
 import { promptStepNamedText } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
@@ -100,6 +100,28 @@ import { writeStepContextUsage } from './step-context-usage.js';
 
 const isPromptStep = (stepDef: StepDefinition): boolean =>
   parseStepId(stepDef.metadata.id)?.kind === 'custom';
+
+const breakTemplatePersonaMarkers = (text: string): string =>
+  text.replaceAll(TEMPLATE_PERSONA_MARKER_PATTERN, (marker) => marker.replace('[[', '[[ '));
+
+/** What an augmentation put around the rendered template, with its template persona markers broken
+ *  so only the template's own resolve. Attachments and the ledger go in front of the template, the
+ *  learned guidance and the terseness directive behind it; the template stays verbatim. A result
+ *  that does not hold the template where its side says is broken whole, never left intact. */
+export function breakAugmentationMarkers(
+  template: string,
+  augmented: string,
+  side: 'before' | 'after',
+): string {
+  if (side === 'before' && augmented.endsWith(template)) {
+    const at = augmented.length - template.length;
+    return breakTemplatePersonaMarkers(augmented.slice(0, at)) + template;
+  }
+  if (side === 'after' && augmented.startsWith(template)) {
+    return template + breakTemplatePersonaMarkers(augmented.slice(template.length));
+  }
+  return breakTemplatePersonaMarkers(augmented);
+}
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -792,6 +814,14 @@ async function resolveLlmPhase(
   // Read before anything is appended: a marker in an attachment name, a ledger entry or learned
   // guidance is quoted text, not a persona the prompt step's author chose.
   const promptStepPersonaIds = isPromptStep(stepDef) ? templatePersonaIds(prompt) : undefined;
+  const augmentWithin = async (
+    template: string,
+    side: 'before' | 'after',
+    augment: (template: string) => Promise<string>,
+  ): Promise<string> => {
+    const augmented = await augment(template);
+    return promptStepPersonaIds ? breakAugmentationMarkers(template, augmented, side) : augmented;
+  };
   // An uploaded archive becomes the tree it contains before anything describes
   // the attachments — otherwise the notice below names a `.zip` no agent can
   // open. Idempotent, never throws, and three indexed queries plus one directory
@@ -799,19 +829,25 @@ async function resolveLlmPhase(
   await ensureArchivesExpanded(db, params.taskId);
   // Make every CLI adapter aware of user-attached task files (the prompt flows
   // through the dispatcher unchanged). No-op when the task has no attachments.
-  prompt = await augmentPromptWithAttachments(db, params.taskId, prompt);
+  prompt = await augmentWithin(prompt, 'before', (p) =>
+    augmentPromptWithAttachments(db, params.taskId, p),
+  );
   // Carry what earlier steps established (sandbox/tooling/runtime facts) into this
   // agent's fresh CLI process. No-op (byte-identical prompt) while the ledger is empty,
   // so every pre-implementation step pays nothing.
-  prompt = await augmentPromptWithLedger(db, params.taskId, prompt);
+  prompt = await augmentWithin(prompt, 'before', (p) =>
+    augmentPromptWithLedger(db, params.taskId, p),
+  );
   // Append human-approved guidance learned from earlier runs of THIS step. Append
   // only — a stored row never replaces the built prompt, so the result still flows
   // through resolveTaskDispatch and its per-CLI capability adaptation below. No-op
   // (byte-identical prompt) when the feature is off or nothing matches.
-  prompt = await augmentPromptWithLearnedGuidance(db, params.taskId, stepDef.metadata.id, prompt);
+  prompt = await augmentWithin(prompt, 'after', (p) =>
+    augmentPromptWithLearnedGuidance(db, params.taskId, stepDef.metadata.id, p),
+  );
   // Append the global, admin-configured terseness directive (prose only; structured
   // output and reasoning are carved out / untouched). Default level is 'full'.
-  prompt = await augmentPromptWithTerseness(prompt);
+  prompt = await augmentWithin(prompt, 'after', (p) => augmentPromptWithTerseness(p));
   if (trailingTruncations > 0) prompt = `${prompt}\n\n${TRUNCATION_RETRY_NOTICE}`;
   // Multi-CLI loop steps pick a role per iteration (e.g. reviewer vs corrector);
   // the resolved provider differs per role. Non-loop steps resolve 'default'.

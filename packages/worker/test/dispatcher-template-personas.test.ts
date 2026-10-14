@@ -3,6 +3,7 @@ import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Database } from '@haive/database';
 import { CONFIG_KEYS, configService } from '@haive/shared';
+import { augmentPromptWithAttachments } from '../src/step-engine/attachments-context.js';
 import { resolveDispatch, resolveTaskDispatch } from '../src/orchestrator/dispatcher.js';
 import {
   MAX_PERSONA_BODY_BYTES,
@@ -13,6 +14,7 @@ import {
   agentDefinitionGuidance,
   templatePersonaIds,
 } from '../src/step-engine/steps/_retrieval-guidance.js';
+import { breakAugmentationMarkers } from '../src/step-engine/step-runner.js';
 import { secretMaskPolicy } from '../src/queues/cli-exec/secret-mask-policy.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { makePointerFixture, type PointerFixture } from './support/worktree-pointer-db.js';
@@ -508,5 +510,113 @@ describe('readTemplatePersonas and the shared budget', () => {
       loadTracked: async () => new Set(['.claude/agents/reviewer.md']),
     });
     expect(tracked.ok).toBe(true);
+  });
+});
+
+const toml = (instructions: string) =>
+  `name = "reviewer"\ndescription = "d"\ndeveloper_instructions = \"\"\"\n${instructions}\n\"\"\"\n`;
+
+describe('a persona held only as a Codex TOML file', () => {
+  const OPEN = { globs: { deny: [], ignore: [] }, tracked: null };
+  const read = () =>
+    readTemplatePersonas({
+      workerTree: fx.repoRoot,
+      providerAgentsDir: null,
+      ids: ['reviewer'],
+      policy: OPEN,
+      loadTracked: async () => null,
+    });
+
+  it('takes developer_instructions as the body and records the toml path', async () => {
+    await put('.codex/agents/reviewer.toml', toml('Be terse.'));
+    const result = await read();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.personas['reviewer']).toEqual({
+      body: 'Be terse.',
+      rel: '.codex/agents/reviewer.toml',
+    });
+  });
+
+  it('fails by name when the toml has no developer_instructions', async () => {
+    await put('.codex/agents/reviewer.toml', 'name = "reviewer"\ndescription = "d"\n');
+    const result = await read();
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure).toContain('"reviewer"');
+    expect(result.failure).toContain('.codex/agents/reviewer.toml');
+    expect(result.failure).toContain('developer_instructions');
+  });
+
+  it('fails when developer_instructions is empty', async () => {
+    await put('.codex/agents/reviewer.toml', toml('   '));
+    const result = await read();
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure).toContain('empty body');
+  });
+
+  it('prefers a markdown file over the toml when both exist', async () => {
+    await put('.claude/agents/reviewer.md', persona('Markdown body.'));
+    await put('.codex/agents/reviewer.toml', toml('Toml body.'));
+    const result = await read();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.personas['reviewer']).toEqual({
+      body: 'Markdown body.',
+      rel: '.claude/agents/reviewer.md',
+    });
+  });
+
+  it('still fails with both extensions named when neither exists', async () => {
+    const result = await read();
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure).toContain('reviewer.md');
+    expect(result.failure).toContain('reviewer.toml');
+  });
+
+  it('pastes it into a codex prompt and records the path', async () => {
+    await put('.codex/agents/reviewer.toml', toml('Be terse.'));
+    const plan = await dispatch('codex', `Act as ${MARKER('reviewer')}.`);
+    expect(plan.mode).toBe('cli');
+    expect(plan.personaFailure).toBeUndefined();
+    expect(plan.effectivePrompt).toContain('Be terse.');
+    expect(specOf(plan)?.pastedPersonaPaths).toEqual(['.codex/agents/reviewer.toml']);
+  });
+});
+
+describe('a template marker quoted in an attachment notice', () => {
+  it('pastes the body once and breaks the quoted marker', async () => {
+    await put('.claude/agents/reviewer.md', persona('Review with care.'));
+    const template = `Act as ${MARKER('reviewer')}.`;
+    const db = fakeDb();
+    (db.query as unknown as Record<string, unknown>)['taskAttachments'] = {
+      findMany: async () => [
+        {
+          filename: `${MARKER('reviewer')}.txt`,
+          description: null,
+          expandedAt: null,
+          expansionNote: null,
+        },
+      ],
+    };
+    const noticed = await augmentPromptWithAttachments(db, 'task-1', template);
+    const guarded = breakAugmentationMarkers(template, noticed, 'before');
+    const plan = await resolveTaskDispatch(fakeDb(), 'task-1', {
+      providers: [provider('claude-code')],
+      promptStepPersonaIds: templatePersonaIds(template),
+      worktreeRel: '',
+      input: { kind: 'prompt', prompt: guarded, capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt?.split('Review with care.')).toHaveLength(2);
+    expect(plan.effectivePrompt).toContain('[[ HAIVE_TEMPLATE_PERSONA:reviewer]].txt');
+  });
+
+  it('pastes the body twice when the template itself names the id twice', async () => {
+    await put('.claude/agents/reviewer.md', persona('Review with care.'));
+    const plan = await dispatch('claude-code', `${MARKER('reviewer')} and ${MARKER('reviewer')}`);
+    expect(plan.effectivePrompt?.split('Review with care.')).toHaveLength(3);
   });
 });
