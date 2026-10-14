@@ -12,6 +12,7 @@ import {
   SHARED_VOLUME,
   TASK_JOB_NAMES,
   configService,
+  effectiveNetworkPolicy,
   isReadOnlyLocalRepo,
   type CliExecJobPayload,
   type CliNetworkPolicy,
@@ -143,8 +144,7 @@ async function resolveTaskEgressOverride(
     where: eq(schema.tasks.id, taskId),
     columns: { metadata: true },
   });
-  const override = (task?.metadata as { egress?: CliNetworkPolicy } | null)?.egress;
-  return override ?? providerPolicy;
+  return effectiveNetworkPolicy(task?.metadata, providerPolicy);
 }
 
 export interface McpResolution {

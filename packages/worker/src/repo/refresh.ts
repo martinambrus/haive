@@ -182,7 +182,7 @@ async function fastForward(
     let moved;
     try {
       moved = await db.transaction(async (tx) => {
-        // Task creation takes this lock, so no task can start between the fence and the move.
+        // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
         await lockRepositoryTasksKey(tx, payload.repositoryId);
         const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
         if (check.outcome !== 'clean') return { again: check, merge: null };

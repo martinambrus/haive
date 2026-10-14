@@ -48,7 +48,7 @@ export async function markCliParkBegin(db: Database, stepId: string): Promise<vo
     );
 }
 
-/** Park ends: fold `now() - waiting_started_at` into `idle_ms` and clear the marker. Guarded
+/** Park ends: fold `now() - waiting_started_at` into idle time and clear the marker. Guarded
  *  on the marker being set, so the first invocation to start running folds the wait and any
  *  parallel starters no-op. greatest(0, …) guards against clock skew. Call when work resumes:
  *  when an invocation begins running (agent park) and at the pending -> running flip
@@ -108,7 +108,7 @@ export async function foldOtherTaskParks(
   );
 }
 
-/** The one fold statement every caller shares: credit the elapsed park to idle_ms and clear the
+/** The one fold statement every caller shares: credit the elapsed park to idle time and clear the
  *  marker.
  *
  *  `requireMarker` (default true) keeps it a no-op unless a park is actually open. Dropping it

@@ -1,4 +1,4 @@
-import { eq, inArray, like } from 'drizzle-orm';
+import { asc, eq, inArray, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 
@@ -428,6 +428,244 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect((await send('PATCH', '/admin/task-types/tt-none', { displayName: 'x' })).status).toBe(
         404,
       );
+    });
+
+    describe('the updatedAt precondition', () => {
+      const MICROS = '2026-03-04 05:06:07.123956';
+      const stamp = (slug: string, at = '2026-03-04 05:06:07.123') =>
+        db.execute(sql`update task_type_definitions set updated_at = ${at} where slug = ${slug}`);
+      const read = async (slug: string) =>
+        (
+          (await (await send('GET', `/admin/task-types/${slug}`)).json()) as {
+            taskType: { updatedAt: string };
+          }
+        ).taskType;
+      const created = async (slug: string, over: Record<string, unknown> = {}) => {
+        expect((await send('POST', '/admin/task-types', valid(slug, over))).status).toBe(201);
+        await stamp(slug);
+        return read(slug);
+      };
+
+      it('refuses an edit made from a stale read with 409 and the current row, writing nothing', async () => {
+        const seen = await created('tt-stale');
+        const first = await send('PATCH', '/admin/task-types/tt-stale', {
+          displayName: 'First',
+          expectedUpdatedAt: seen.updatedAt,
+        });
+        expect(first.status).toBe(200);
+        const afterFirst = await read('tt-stale');
+        const second = await send('PATCH', '/admin/task-types/tt-stale', {
+          displayName: 'Second',
+          expectedUpdatedAt: seen.updatedAt,
+        });
+        expect(second.status).toBe(409);
+        expect((await read('tt-stale')).updatedAt).toBe(afterFirst.updatedAt);
+        const body = (await second.json()) as { error: string; code: string; taskType: unknown };
+        expect(body.code).toBe('task_type_changed');
+        expect(body.error.length).toBeGreaterThan(0);
+        expect(body.taskType).toEqual(await read('tt-stale'));
+        expect(body.taskType).toMatchObject({ displayName: 'First' });
+        expect((await row('tt-stale'))?.displayName).toBe('First');
+        expect(await audits()).toEqual(['task_type.create:tt-stale', 'task_type.update:tt-stale']);
+      });
+
+      it('takes an edit made from the current read and moves updated_at forward', async () => {
+        const seen = await created('tt-fresh');
+        const res = await send('PATCH', '/admin/task-types/tt-fresh', {
+          displayName: 'Fresh',
+          expectedUpdatedAt: seen.updatedAt,
+        });
+        expect(res.status).toBe(200);
+        const { taskType } = (await res.json()) as { taskType: { updatedAt: string } };
+        expect(Date.parse(taskType.updatedAt)).toBeGreaterThan(Date.parse(seen.updatedAt));
+        expect(taskType.updatedAt).toBe((await read('tt-fresh')).updatedAt);
+        const next = await send('PATCH', '/admin/task-types/tt-fresh', {
+          displayName: 'Again',
+          expectedUpdatedAt: taskType.updatedAt,
+        });
+        expect(next.status).toBe(200);
+      });
+
+      it('still takes an edit that carries no precondition, whatever changed since', async () => {
+        await created('tt-compat');
+        expect(
+          (await send('PATCH', '/admin/task-types/tt-compat', { displayName: 'One' })).status,
+        ).toBe(200);
+        expect(
+          (await send('PATCH', '/admin/task-types/tt-compat', { displayName: 'Two' })).status,
+        ).toBe(200);
+        expect((await row('tt-compat'))?.displayName).toBe('Two');
+      });
+
+      it('compares to the millisecond, so a row stamped with microseconds matches a JS Date', async () => {
+        await created('tt-us');
+        await stamp('tt-us', MICROS);
+        const seen = await read('tt-us');
+        const [stored] = await db.execute(
+          sql`select to_char(updated_at, 'US') as us from task_type_definitions where slug = 'tt-us'`,
+        );
+        expect(stored?.us).toBe('123956');
+        expect(seen.updatedAt).toBe('2026-03-04T05:06:07.123Z');
+        const instant = new Date(seen.updatedAt).toISOString();
+        for (const off of ['2026-03-04T05:06:07.122Z', '2026-03-04T05:06:07.124Z']) {
+          const res = await send('PATCH', '/admin/task-types/tt-us', {
+            sortOrder: 1,
+            expectedUpdatedAt: off,
+          });
+          expect(res.status).toBe(409);
+        }
+        expect((await row('tt-us'))?.sortOrder).toBe(0);
+        const ok = await send('PATCH', '/admin/task-types/tt-us', {
+          sortOrder: 3,
+          expectedUpdatedAt: instant,
+        });
+        expect(ok.status).toBe(200);
+        expect((await row('tt-us'))?.sortOrder).toBe(3);
+        await stamp('tt-us', MICROS);
+        const micros = await send('PATCH', '/admin/task-types/tt-us', {
+          sortOrder: 4,
+          expectedUpdatedAt: '2026-03-04T05:06:07.123956Z',
+        });
+        expect(micros.status).toBe(200);
+      });
+
+      it('lets exactly one of two edits from the same read through', async () => {
+        const seen = await created('tt-race');
+        const results = await Promise.all(
+          ['A', 'B'].map((displayName) =>
+            send('PATCH', '/admin/task-types/tt-race', {
+              displayName,
+              expectedUpdatedAt: seen.updatedAt,
+            }),
+          ),
+        );
+        expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+        const winner = results[0]!.status === 200 ? 'A' : 'B';
+        expect((await row('tt-race'))?.displayName).toBe(winner);
+      });
+
+      it('applies to a built-in row, ahead of the field check, and after the 404', async () => {
+        await stamp('workflow');
+        const seen = await read('workflow');
+        expect((await send('PATCH', '/admin/task-types/workflow', { sortOrder: 5 })).status).toBe(
+          200,
+        );
+        const stale = await send('PATCH', '/admin/task-types/workflow', {
+          sortOrder: 6,
+          stepIds: ['ta-a'],
+          expectedUpdatedAt: seen.updatedAt,
+        });
+        expect(stale.status).toBe(409);
+        expect((await row('workflow'))?.sortOrder).toBe(5);
+        const none = await send('PATCH', '/admin/task-types/tt-none', {
+          displayName: 'x',
+          expectedUpdatedAt: seen.updatedAt,
+        });
+        expect(none.status).toBe(404);
+      });
+
+      it('refuses a precondition that is not an ISO timestamp, writing nothing', async () => {
+        const seen = await created('tt-bad-token');
+        for (const bad of ['yesterday', '', 12, null]) {
+          const res = await send('PATCH', '/admin/task-types/tt-bad-token', {
+            displayName: 'Nope',
+            expectedUpdatedAt: bad,
+          });
+          expect(res.status, JSON.stringify(bad)).toBe(400);
+        }
+        expect((await row('tt-bad-token'))?.displayName).toBe('Type tt-bad-token');
+        expect((await read('tt-bad-token')).updatedAt).toBe(seen.updatedAt);
+        const good = await send('PATCH', '/admin/task-types/tt-bad-token', {
+          displayName: 'Yes',
+          expectedUpdatedAt: seen.updatedAt,
+        });
+        expect(good.status).toBe(200);
+      });
+    });
+
+    describe('a step removal that sends the step list alone', () => {
+      const withFourth = () =>
+        db
+          .insert(schema.stepCatalog)
+          .values(catalogRow('ta-d', true, entry('ta-d', { loopBudgetEditable: true })));
+      const created = async () => {
+        await withFourth();
+        const res = await send(
+          'POST',
+          '/admin/task-types',
+          valid('tt-prune', {
+            stepIds: ['ta-a', 'ta-b', 'ta-d'],
+            preAnswerDefaults: { 'ta-a': { depth: 1 }, 'ta-d': { depth: 2 } },
+            stepLoopLimitDefaults: { 'ta-b': 3, 'ta-d': 2 },
+          }),
+        );
+        expect(res.status).toBe(201);
+      };
+      const auditedFields = async () =>
+        (
+          await db
+            .select()
+            .from(schema.auditEvents)
+            .where(eq(schema.auditEvents.action, 'task_type.update'))
+            .orderBy(asc(schema.auditEvents.createdAt))
+        )
+          .map((e) => (e.metadata as { fields: string[] }).fields)
+          .at(-1);
+
+      it("drops the removed step's preset and loop limit, and keeps a concurrent edit to a retained step", async () => {
+        await created();
+        const other = await send('PATCH', '/admin/task-types/tt-prune', {
+          preAnswerDefaults: { 'ta-a': { depth: 9 }, 'ta-d': { depth: 2 } },
+          stepLoopLimitDefaults: { 'ta-b': 5, 'ta-d': 2 },
+        });
+        expect(other.status).toBe(200);
+        const res = await send('PATCH', '/admin/task-types/tt-prune', {
+          stepIds: ['ta-a', 'ta-b'],
+        });
+        expect(res.status).toBe(200);
+        expect(await row('tt-prune')).toMatchObject({
+          stepIds: ['ta-a', 'ta-b'],
+          preAnswerDefaults: { 'ta-a': { depth: 9 } },
+          stepLoopLimitDefaults: { 'ta-b': 5 },
+        });
+        expect(await auditedFields()).toEqual([
+          'stepIds',
+          'preAnswerDefaults',
+          'stepLoopLimitDefaults',
+        ]);
+      });
+
+      it('leaves the defaults alone when no step is removed', async () => {
+        await created();
+        const res = await send('PATCH', '/admin/task-types/tt-prune', {
+          stepIds: ['ta-a', 'ta-d', 'ta-b'],
+        });
+        expect(res.status).toBe(200);
+        expect(await row('tt-prune')).toMatchObject({
+          stepIds: ['ta-a', 'ta-d', 'ta-b'],
+          preAnswerDefaults: { 'ta-a': { depth: 1 }, 'ta-d': { depth: 2 } },
+          stepLoopLimitDefaults: { 'ta-b': 3, 'ta-d': 2 },
+        });
+        expect(await auditedFields()).toEqual(['stepIds']);
+      });
+
+      it('still refuses a removal whose own request keeps a default for the removed step', async () => {
+        await created();
+        for (const field of ['preAnswerDefaults', 'stepLoopLimitDefaults']) {
+          const res = await send('PATCH', '/admin/task-types/tt-prune', {
+            stepIds: ['ta-a', 'ta-b'],
+            [field]: { 'ta-d': field === 'preAnswerDefaults' ? { depth: 1 } : 1 },
+          });
+          expect(res.status).toBe(400);
+          const { issues } = (await res.json()) as { issues: unknown[] };
+          expect(issues).toContainEqual({
+            kind: 'default-key-not-in-steps',
+            field,
+            stepId: 'ta-d',
+          });
+        }
+        expect((await row('tt-prune'))?.stepIds).toEqual(['ta-a', 'ta-b', 'ta-d']);
+      });
     });
   });
 

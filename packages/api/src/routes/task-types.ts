@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
@@ -120,6 +121,20 @@ function allowedFields(row: DefinitionRow): string[] | null {
 }
 
 const UPDATABLE_FIELDS = Object.keys(taskTypeUpdateSchema.shape);
+
+const taskTypePatchSchema = taskTypeUpdateSchema.extend({
+  expectedUpdatedAt: z.iso.datetime().optional(),
+});
+
+/** The map without the steps that left the list, or undefined when none of its keys did. */
+function withoutRemovedSteps<T>(
+  map: Record<string, T>,
+  stepIds: readonly string[],
+): Record<string, T> | undefined {
+  const listed = new Set(stepIds);
+  const kept = Object.entries(map).filter(([id]) => listed.has(id));
+  return kept.length < Object.keys(map).length ? Object.fromEntries(kept) : undefined;
+}
 
 function editableFieldsOf(row: DefinitionRow): string[] {
   return allowedFields(row) ?? UPDATABLE_FIELDS;
@@ -276,7 +291,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
 
 adminTaskTypeRoutes.patch('/:slug', async (c) => {
   const slug = c.req.param('slug');
-  const body = taskTypeUpdateSchema.parse(await c.req.json());
+  const { expectedUpdatedAt, ...body } = taskTypePatchSchema.parse(await c.req.json());
   const db = getDb();
   const fields = Object.keys(body);
   // Locked and reread, so two concurrent edits cannot each validate against the same stale row.
@@ -287,10 +302,27 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       .where(eq(schema.taskTypeDefinitions.slug, slug))
       .for('update');
     if (!row) throw new HttpError(404, 'Task type not found');
+    // A JS Date holds milliseconds and the column microseconds, so the two are compared as Dates.
+    if (
+      expectedUpdatedAt !== undefined &&
+      row.updatedAt.getTime() !== Date.parse(expectedUpdatedAt)
+    ) {
+      return { changed: row } as const;
+    }
     const allowed = allowedFields(row);
     const refused = allowed ? fields.filter((f) => !allowed.includes(f)) : [];
     if (refused.length > 0) {
       throw new HttpError(400, `Cannot change ${refused.join(', ')} on this task type`);
+    }
+    // A removed step takes its preset and loop limit with it, unless the request sends that map itself.
+    const dropped: Partial<Pick<DefinitionRow, 'preAnswerDefaults' | 'stepLoopLimitDefaults'>> = {};
+    if (body.stepIds !== undefined && body.preAnswerDefaults === undefined) {
+      const kept = withoutRemovedSteps(row.preAnswerDefaults, body.stepIds);
+      if (kept) dropped.preAnswerDefaults = kept;
+    }
+    if (body.stepIds !== undefined && body.stepLoopLimitDefaults === undefined) {
+      const kept = withoutRemovedSteps(row.stepLoopLimitDefaults, body.stepIds);
+      if (kept) dropped.stepLoopLimitDefaults = kept;
     }
     if (
       body.stepIds !== undefined ||
@@ -337,8 +369,12 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       const defaultIssues = validateTaskTypeDefaults(
         {
           stepIds,
-          preAnswerDefaults: body.preAnswerDefaults ?? row.preAnswerDefaults,
-          stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? row.stepLoopLimitDefaults,
+          preAnswerDefaults:
+            body.preAnswerDefaults ?? dropped.preAnswerDefaults ?? row.preAnswerDefaults,
+          stepLoopLimitDefaults:
+            body.stepLoopLimitDefaults ??
+            dropped.stepLoopLimitDefaults ??
+            row.stepLoopLimitDefaults,
         },
         composable,
       );
@@ -348,11 +384,22 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     }
     const [updated] = await tx
       .update(schema.taskTypeDefinitions)
-      .set({ ...body, updatedAt: new Date() })
+      .set({ ...body, ...dropped, updatedAt: new Date() })
       .where(eq(schema.taskTypeDefinitions.slug, slug))
       .returning();
-    return { updated } as const;
+    return { updated, droppedFields: Object.keys(dropped) } as const;
   });
+  const changed = outcome.changed;
+  if (changed) {
+    return c.json(
+      {
+        error: 'This task type was changed since it was loaded',
+        code: 'task_type_changed',
+        taskType: { ...changed, editableFields: editableFieldsOf(changed) },
+      },
+      409,
+    );
+  }
   if ('invalid' in outcome) return c.json(outcome.invalid, 400);
   const updated = outcome.updated;
   if (!updated) throw new HttpError(404, 'Task type not found');
@@ -360,7 +407,7 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     actorUserId: c.get('userId'),
     action: 'task_type.update',
     targetType: 'task_type',
-    metadata: { slug, fields },
+    metadata: { slug, fields: [...fields, ...outcome.droppedFields] },
   });
   return c.json({ taskType: { ...updated, editableFields: editableFieldsOf(updated) } });
 });

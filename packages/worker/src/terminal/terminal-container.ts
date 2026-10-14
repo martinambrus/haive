@@ -28,20 +28,24 @@ const log = logger.child({ module: 'terminal-container' });
 
 /** In-container path + source of the git credential helper used by repo-scope
  *  terminals. Dependency-free Node ESM. On `get`, it POSTs the repo-scoped
- *  token (env HAIVE_GIT_CRED_TOKEN) to the API and emits the username/password
- *  git asks for. Holds no secret itself; on any failure it emits nothing and
- *  git falls through to manual auth. */
+ *  token (the file at GIT_CRED_TOKEN_PATH, else env HAIVE_GIT_CRED_TOKEN) to the
+ *  API and emits the username/password git asks for. Holds no secret itself; on
+ *  any failure it emits nothing and git falls through to manual auth. */
 // Under the sandbox user's home (node-writable). NOT under /haive — Docker
 // creates /haive as root for the workdir mount, so a `node`-user write there is
 // denied.
-const GIT_CRED_HELPER_PATH = `${SANDBOX_USER_HOME}/.haive-git-credential-helper.mjs`;
-const GIT_CRED_HELPER_JS = String.raw`import http from 'node:http';
+export const GIT_CRED_HELPER_PATH = `${SANDBOX_USER_HOME}/.haive-git-credential-helper.mjs`;
+export const GIT_CRED_TOKEN_PATH = `${SANDBOX_USER_HOME}/.haive-git-credential-token`;
+export const GIT_CRED_HELPER_JS = String.raw`import fs from 'node:fs';
+import http from 'node:http';
 
 const op = process.argv[2] || '';
 if (op !== 'get') process.exit(0);
 
 const endpoint = process.env.HAIVE_GIT_CRED_URL || '';
-const token = process.env.HAIVE_GIT_CRED_TOKEN || '';
+let token = '';
+try { token = fs.readFileSync(${JSON.stringify(GIT_CRED_TOKEN_PATH)}, 'utf8').trim(); } catch (e) {}
+if (!token) token = process.env.HAIVE_GIT_CRED_TOKEN || '';
 if (!endpoint || !token) process.exit(0);
 
 // Drain git's stdin request (protocol/host/path) so the pipe doesn't block.
@@ -151,6 +155,8 @@ export interface EnsureShellContainerResult {
   shell: 'bash' | 'sh';
   imageTag: string;
   cliName: CliProviderRecord['name'];
+  /** When this call wrote a git credential token file; unset when it wrote none. */
+  gitCredMintedAt?: number;
 }
 
 /** Ensure the per-(user, task, provider) shell container exists and is
@@ -194,6 +200,7 @@ export async function ensureShellContainer(
   }
 
   const containerName = buildShellContainerName(userId, scope, scopeId, providerId);
+  const gitCredSecret = process.env.CONFIG_ENCRYPTION_KEY;
 
   // Reuse an existing container when one is still alive — covers the
   // "navigate away then back within 2 min" path described in the plan.
@@ -207,8 +214,27 @@ export async function ensureShellContainer(
       await applyTmuxSettings(docker, containerName).catch((err) => {
         log.warn({ err, containerName }, 'tmux settings not applied to reused container');
       });
+      // A reused container's token may be near expiry and its helper may predate the token file.
+      const gitCredMintedAt =
+        scope === 'repo' && gitCredSecret
+          ? await provisionGitCredential(
+              docker,
+              containerName,
+              scopeId,
+              userId,
+              gitCredSecret,
+              'reuse',
+            )
+          : undefined;
       log.info({ containerName, scope, scopeId, providerId }, 'reusing existing shell container');
-      return { containerName, created: false, shell, imageTag, cliName: provider.name };
+      return {
+        containerName,
+        created: false,
+        shell,
+        imageTag,
+        cliName: provider.name,
+        gitCredMintedAt,
+      };
     }
     // Container exists but isn't running (likely killed by reaper between
     // inspect and now, or a crash). Remove it and recreate cleanly.
@@ -306,14 +332,11 @@ export async function ensureShellContainer(
   // repo-scoped token (no DB creds) the in-container helper exchanges with the
   // API for the repo's bound push credential, so `git push` works without ever
   // persisting the secret in the container. Task shells skip this (the workflow
-  // pushes server-side). Baked into the container env so the helper — and only
-  // the helper, via git — can read it.
-  const gitCredSecret = process.env.CONFIG_ENCRYPTION_KEY;
+  // pushes server-side). The token is written to a file once the container
+  // runs: an env var cannot change, and the token expires.
   if (scope === 'repo' && gitCredSecret) {
     const apiBase = process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
-    const token = signRepoGitCredToken(scopeId, userId, gitCredSecret);
     envList.push(`HAIVE_GIT_CRED_URL=${apiBase}/internal/git-credential`);
-    envList.push(`HAIVE_GIT_CRED_TOKEN=${token}`);
   }
   let shellContainer: Docker.Container;
   try {
@@ -408,8 +431,9 @@ export async function ensureShellContainer(
   });
 
   // Repo-scope: dual-home onto the internal sandbox network so the git
-  // credential helper can reach the API, then install the helper + git config.
-  // Best-effort — on failure `git push` just falls back to manual auth.
+  // credential helper can reach the API, then install the helper + git config
+  // and its token. Best-effort — on failure `git push` just falls back to manual auth.
+  let gitCredMintedAt: number | undefined;
   if (scope === 'repo' && gitCredSecret) {
     await connectSandboxNetwork(docker, containerName).catch((err) => {
       log.warn(
@@ -417,9 +441,14 @@ export async function ensureShellContainer(
         'sandbox network connect failed — git push helper unreachable',
       );
     });
-    await installGitCredentialHelper(docker, containerName).catch((err) => {
-      log.warn({ err, containerName }, 'git credential helper install failed');
-    });
+    gitCredMintedAt = await provisionGitCredential(
+      docker,
+      containerName,
+      scopeId,
+      userId,
+      gitCredSecret,
+      'create',
+    );
   }
 
   const shell = await detectShell(docker, containerName);
@@ -427,7 +456,14 @@ export async function ensureShellContainer(
     { containerName, scope, scopeId, providerId, imageTag, shell },
     'spawned shell container',
   );
-  return { containerName, created: true, shell, imageTag, cliName: provider.name };
+  return {
+    containerName,
+    created: true,
+    shell,
+    imageTag,
+    cliName: provider.name,
+    gitCredMintedAt,
+  };
 }
 
 /** Force-remove the container if it exists. Safe to call concurrently with
@@ -711,8 +747,52 @@ async function connectSandboxNetwork(docker: Docker, containerName: string): Pro
   await docker.getNetwork(network).connect({ Container: containerName });
 }
 
-async function installGitCredentialHelper(docker: Docker, containerName: string): Promise<void> {
-  await writeFileInto(docker, containerName, GIT_CRED_HELPER_PATH, GIT_CRED_HELPER_JS);
+async function provisionGitCredential(
+  docker: Docker,
+  containerName: string,
+  repositoryId: string,
+  userId: string,
+  secret: string,
+  when: 'create' | 'reuse',
+): Promise<number | undefined> {
+  await installGitCredentialHelper(docker, containerName, when).catch((err) => {
+    log.warn({ err, containerName }, 'git credential helper install failed');
+  });
+  return refreshGitCredentialToken(docker, containerName, repositoryId, userId, secret).catch(
+    (err) => {
+      log.warn({ err, containerName }, 'git credential token write failed');
+      return undefined;
+    },
+  );
+}
+
+/** Writes a fresh git credential token where the helper reads it; returns its mint time. */
+export async function refreshGitCredentialToken(
+  docker: Docker,
+  containerName: string,
+  repositoryId: string,
+  userId: string,
+  secret: string,
+): Promise<number> {
+  const mintedAt = Date.now();
+  const token = signRepoGitCredToken(repositoryId, userId, secret);
+  await writeFileInto(docker, containerName, GIT_CRED_TOKEN_PATH, token, {
+    atomic: true,
+    ownerOnly: true,
+  });
+  return mintedAt;
+}
+
+async function installGitCredentialHelper(
+  docker: Docker,
+  containerName: string,
+  when: 'create' | 'reuse',
+): Promise<void> {
+  await writeFileInto(docker, containerName, GIT_CRED_HELPER_PATH, GIT_CRED_HELPER_JS, {
+    atomic: true,
+  });
+  // A reused container keeps the git config its user may have changed since.
+  if (when === 'reuse') return;
   const code = await execDrain(docker, containerName, [
     'git',
     'config',
@@ -767,6 +847,7 @@ async function writeFileInto(
   containerName: string,
   targetPath: string,
   content: string,
+  opts: { atomic?: boolean; ownerOnly?: boolean } = {},
 ): Promise<void> {
   const container = docker.getContainer(containerName);
   const parent = parentDir(targetPath);
@@ -778,8 +859,12 @@ async function writeFileInto(
     ]);
     if (code !== 0) throw new Error(`mkdir ${parent} exited ${code}`);
   }
+  // atomic: rename a temp file over the target so no reader sees half of it. ownerOnly: mode 0600.
+  const target = shellQuote(targetPath);
+  const temp = `${target}.$$`;
+  const command = opts.atomic ? `cat > ${temp} && mv -f ${temp} ${target}` : `cat > ${target}`;
   const write = await container.exec({
-    Cmd: ['sh', '-c', `cat > ${shellQuote(targetPath)}`],
+    Cmd: ['sh', '-c', opts.ownerOnly ? `umask 077 && ${command}` : command],
     AttachStdin: true,
     AttachStdout: true,
     AttachStderr: true,

@@ -193,6 +193,10 @@ limit; Hono's default throws an `HTTPException` that `errorHandler` answers with
 plain text. The git credential helper's token (`signRepoGitCredToken`, `shared/src/git/token.ts`)
 has the same `v1.<payload>.<mac>` shape, the payload `{repositoryId, userId, exp}` with a 12-hour
 expiry and a MAC key derived for that one purpose, so no task token opens `/internal/git-credential`
-and this token opens nothing else. That route still takes the older two-part token, keyed with the
+and this token opens nothing else. The worker writes it into the repo shell as a file,
+`~/.haive-git-credential-token` (mode 0600, replaced by a rename so a push never reads half of it),
+not into the env, and writes a fresh one each time the shell is opened again and, from the terminal
+reaper, once half its expiry has passed, so a shell kept open for days still pushes. The helper falls
+back to `HAIVE_GIT_CRED_TOKEN` for a shell started before the file existed. That route still takes the older two-part token, keyed with the
 raw secret, until the ones minted before the change expire (drop `verifyLegacyRepoGitCredToken`
 then).

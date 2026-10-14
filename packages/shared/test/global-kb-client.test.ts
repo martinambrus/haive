@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type Store = { mode: 'internal' | 'external'; connectionString: string | null };
 
@@ -68,6 +68,11 @@ async function load() {
 }
 
 const haiveDb = {} as Parameters<Awaited<ReturnType<typeof load>>>[0];
+
+// The first import transforms the module graph (over 5 s at host load 16); every later load reuses it.
+beforeAll(async () => {
+  await load();
+}, 60_000);
 
 beforeEach(() => {
   h.ensure.mockReset();
