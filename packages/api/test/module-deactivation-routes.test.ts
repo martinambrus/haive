@@ -227,6 +227,7 @@ describe('GET /modules/loaded', () => {
         lastLoadedAt: off,
         missingAt: null,
         deactivatedAt: off,
+        tornDownAt: null,
         updatedAt: off,
       },
     ];

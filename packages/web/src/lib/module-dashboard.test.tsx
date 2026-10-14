@@ -6,7 +6,7 @@ import { api } from './api-client';
 const Alpha = ({ moduleId }: { moduleId: string }) => <p>alpha-{moduleId}</p>;
 const Beta = ({ moduleId }: { moduleId: string }) => <p>beta-{moduleId}</p>;
 
-const listed = (...ids: string[]) => ids.map((id) => ({ id }));
+const listed = (...ids: string[]) => ids.map((id) => ({ id, compiledWeb: true }));
 
 describe('ModuleDashboardWidgets', () => {
   it('renders nothing for an empty list', () => {
@@ -95,5 +95,21 @@ describe('ModuleDashboardWidgets', () => {
       />,
     );
     expect(html).toBe('');
+  });
+
+  it('renders no widget for a module whose compiled web parts the list withholds', () => {
+    const html = renderToStaticMarkup(
+      <ModuleDashboardWidgets
+        widgets={[
+          { moduleId: 'stats', id: 'a', Component: Alpha },
+          { moduleId: 'locked', id: 'b', Component: Beta },
+        ]}
+        modules={[
+          { id: 'stats', compiledWeb: true },
+          { id: 'locked', compiledWeb: false },
+        ]}
+      />,
+    );
+    expect(html).toBe('<p>alpha-stats</p>');
   });
 });

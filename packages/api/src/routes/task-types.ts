@@ -4,23 +4,24 @@ import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
   COMPOSABLE_STEP_GROUPS,
+  checkPromptSteps,
   composableStepEntrySchema,
   customTaskTypeCreateSchema,
+  mergePromptStepCatalog,
+  parsePromptSteps,
   publicTaskTypeSchema,
   resolveTaskTypeAvailability,
   taskTypeUpdateSchema,
   validateComposition,
   validateTaskTypeDefaults,
   type ComposableStepEntry,
+  type TaskTypeModuleState,
 } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
-import { deactivatedModuleIds } from '../modules/activation.js';
 import {
   acceptsSavedDatabase,
-  checkPromptSteps,
-  mergePromptStepCatalog,
-  parsePromptSteps,
+  readModuleStates,
   restoresDatabase,
 } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
@@ -79,13 +80,13 @@ function availabilityOf(
   row: DefinitionRow,
   switches: Awaited<ReturnType<typeof readSwitches>>,
   catalog: Catalog,
-  deactivatedModules: ReadonlySet<string>,
+  modules: ReadonlyMap<string, TaskTypeModuleState>,
 ) {
   const own = mergePromptStepCatalog(catalog, row);
   return resolveTaskTypeAvailability({
     definition: row,
     switches,
-    deactivatedModules,
+    modules,
     catalog: own.synced ? { stepIds: own.stepIds, composable: own.composable } : null,
     generic: true,
   });
@@ -137,7 +138,7 @@ adminTaskTypeRoutes.use('*', requireAdmin);
 
 adminTaskTypeRoutes.get('/', async (c) => {
   const db = getDb();
-  const [rows, counts, catalog, switches, deactivated] = await Promise.all([
+  const [rows, counts, catalog, switches, modules] = await Promise.all([
     db
       .select()
       .from(schema.taskTypeDefinitions)
@@ -148,7 +149,7 @@ adminTaskTypeRoutes.get('/', async (c) => {
       .groupBy(schema.tasks.type),
     loadCatalog(db),
     readSwitches(),
-    deactivatedModuleIds(db),
+    readModuleStates(db),
   ]);
   const taskCounts = new Map(counts.map((r) => [r.type, r.count]));
   return c.json({
@@ -156,16 +157,23 @@ adminTaskTypeRoutes.get('/', async (c) => {
       ...row,
       builtin: row.source === 'builtin',
       editableFields: editableFieldsOf(row),
-      availability: availabilityOf(row, switches, catalog, deactivated),
+      availability: availabilityOf(row, switches, catalog, modules),
       taskCount: taskCounts.get(row.slug) ?? 0,
     })),
   });
 });
 
+function catalogModuleState(row: TaskTypeModuleState): 'missing' | 'deactivated' | 'loaded' {
+  if (row.missing) return 'missing';
+  return row.deactivated ? 'deactivated' : 'loaded';
+}
+
 adminTaskTypeRoutes.get('/catalog', async (c) => {
   const db = getDb();
-  const [catalog, off] = await Promise.all([loadCatalog(db), deactivatedModuleIds(db)]);
-  const offSources = new Set([...off].map((id) => `module:${id}`));
+  const [catalog, modules] = await Promise.all([loadCatalog(db), readModuleStates(db)]);
+  const offSources = new Set(
+    [...modules].filter(([, row]) => row.deactivated).map(([id]) => `module:${id}`),
+  );
   const steps = catalog.steps.filter((s) => !offSources.has(s.source));
   const known = new Set<string>(COMPOSABLE_STEP_GROUPS.map((g) => g.id));
   const unknown = [...new Set(steps.map((s) => s.entry.group))]
@@ -176,6 +184,10 @@ adminTaskTypeRoutes.get('/catalog', async (c) => {
     steps,
     groups: [...COMPOSABLE_STEP_GROUPS.map(({ id, label }) => ({ id, label })), ...unknown],
     synced: catalog.synced,
+    modules: [...modules]
+      .map(([id, row]) => ({ id, name: row.name, state: catalogModuleState(row) }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    registeredStepIds: [...catalog.stepIds],
   });
 });
 
@@ -183,10 +195,10 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
   const db = getDb();
   const row = await findDefinition(db, c.req.param('slug'));
   if (!row) throw new HttpError(404, 'Task type not found');
-  const [catalog, switches, deactivated] = await Promise.all([
+  const [catalog, switches, modules] = await Promise.all([
     loadCatalog(db),
     readSwitches(),
-    deactivatedModuleIds(db),
+    readModuleStates(db),
   ]);
   const compositionIssues =
     row.source === 'admin' && catalog.synced
@@ -196,7 +208,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
       : [];
   return c.json({
     taskType: { ...row, editableFields: editableFieldsOf(row) },
-    availability: availabilityOf(row, switches, catalog, deactivated),
+    availability: availabilityOf(row, switches, catalog, modules),
     compositionIssues,
   });
 });
@@ -389,7 +401,7 @@ taskTypeRoutes.use('*', requireAuth);
 
 taskTypeRoutes.get('/', async (c) => {
   const db = getDb();
-  const [rows, catalog, switches, deactivated] = await Promise.all([
+  const [rows, catalog, switches, modules] = await Promise.all([
     db
       .select()
       .from(schema.taskTypeDefinitions)
@@ -402,11 +414,11 @@ taskTypeRoutes.get('/', async (c) => {
       .orderBy(asc(schema.taskTypeDefinitions.sortOrder), asc(schema.taskTypeDefinitions.slug)),
     loadCatalog(db),
     readSwitches(),
-    deactivatedModuleIds(db),
+    readModuleStates(db),
   ]);
   // Rows behind a switch that is off stay listed, unavailable with that reason, so the form can say why.
   const taskTypes = rows.map((row) => {
-    const availability = availabilityOf(row, switches, catalog, deactivated);
+    const availability = availabilityOf(row, switches, catalog, modules);
     return publicTaskTypeSchema.parse({
       slug: row.slug,
       displayName: row.displayName,
@@ -416,7 +428,13 @@ taskTypeRoutes.get('/', async (c) => {
       restoresDatabase: acceptsSavedDatabase(row.slug, restoresDatabase(row)),
       dispatchesCli: dispatchesCliOf(row, catalog),
       available: availability.available,
-      ...(availability.available ? {} : { reason: availability.reason }),
+      ...(availability.available
+        ? {}
+        : {
+            reason: availability.reason,
+            stepIds: availability.stepIds,
+            modules: availability.modules,
+          }),
     });
   });
   return c.json({ taskTypes });

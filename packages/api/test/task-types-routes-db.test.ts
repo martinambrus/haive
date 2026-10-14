@@ -123,6 +123,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       .delete(schema.taskTypeDefinitions)
       .where(inArray(schema.taskTypeDefinitions.slug, ['workflow', 'plan_merge', 'run_app']));
     await db.delete(schema.auditEvents).where(eq(schema.auditEvents.targetType, 'task_type'));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'acme'));
   };
   const seedCatalog = async () => {
     await db.delete(schema.stepCatalog);
@@ -686,6 +687,12 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
 
   describe('GET /task-types', () => {
     it('lists a type behind an off switch as unavailable with that reason, not hidden', async () => {
+      await db.insert(schema.modules).values({
+        moduleId: 'acme',
+        packageName: '@haive/module-acme',
+        name: 'Acme',
+        installedVersion: '1.0.0',
+      });
       await send('POST', '/admin/task-types', valid('tt-pub'));
       await send('POST', '/admin/task-types', valid('tt-off', { enabled: false }));
       await send('POST', '/admin/task-types', valid('tt-hidden', { selectable: false }));

@@ -27,14 +27,20 @@ export type ModuleRoute =
  *  `modules` (the api omits a deactivated one), which is null until the list has loaded. */
 export function resolveModuleRoute(
   registry: Readonly<Record<string, ModulePages>>,
-  modules: readonly { id: string; pages: Readonly<Record<string, DashboardSpec>> }[] | null,
+  modules:
+    | readonly {
+        id: string;
+        compiledWeb: boolean;
+        pages: Readonly<Record<string, DashboardSpec>>;
+      }[]
+    | null,
   moduleId: string,
   page: string[] | undefined,
 ): ModuleRoute {
   if (modules === null) return { kind: 'loading' };
   const listed = modules.find((m) => m.id === moduleId);
   if (listed === undefined) return { kind: 'not-found' };
-  const Page = resolveModulePage(registry, moduleId, page);
+  const Page = listed.compiledWeb ? resolveModulePage(registry, moduleId, page) : null;
   if (Page !== null) return { kind: 'component', Page };
   const segments = page ?? [];
   if (segments.length !== 1 || !Object.hasOwn(listed.pages, segments[0]!)) {

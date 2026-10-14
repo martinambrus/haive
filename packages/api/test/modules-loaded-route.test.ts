@@ -142,6 +142,7 @@ describe('GET /modules/loaded', () => {
       lastLoadedAt: '2026-10-02T00:00:00.000Z',
       missingAt: '2026-10-03T00:00:00.000Z',
       deactivatedAt: null,
+      tornDownAt: null,
       updatedAt: '2026-10-03T00:00:00.000Z',
     };
     h.intentRows = [row];
@@ -217,6 +218,10 @@ describe('GET /modules pages', () => {
   const navFor = async (app: Hono<AppEnv>) =>
     ((await (await app.request('/modules')).json()) as { modules: { nav: unknown[] }[] })
       .modules[0]!.nav;
+  const compiledWebFor = async (app: Hono<AppEnv>) =>
+    (
+      (await (await app.request('/modules')).json()) as { modules: { compiledWeb: unknown }[] }
+    ).modules.map((m) => m.compiledWeb);
 
   it("leaves nav to each item's adminOnly, whatever the api requires", async () => {
     h.role = 'user';
@@ -237,4 +242,27 @@ describe('GET /modules pages', () => {
     h.role = 'user';
     expect(await pagesFor(await appWith(false))).toEqual(pages);
   });
+
+  it('withholds the compiled web parts of an admin-only module from a user', async () => {
+    h.role = 'user';
+    expect(await compiledWebFor(await appWith(true))).toEqual([false]);
+  });
+
+  it('gives an admin the compiled web parts of an admin-only module', async () => {
+    h.role = 'admin';
+    expect(await compiledWebFor(await appWith(true))).toEqual([true]);
+  });
+
+  it('gives a user the compiled web parts of a module whose api is open', async () => {
+    h.role = 'user';
+    expect(await compiledWebFor(await appWith(false))).toEqual([true]);
+  });
+
+  it.each(['admin', 'user'])(
+    'role %s: gives the compiled web parts of a module that sets no flag',
+    async (role) => {
+      h.role = role;
+      expect(await compiledWebFor(await buildApp())).toEqual([true, true]);
+    },
+  );
 });

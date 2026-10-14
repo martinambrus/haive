@@ -25,6 +25,12 @@ const OWN_CLIENT_SOURCES = new Map([
 
 type Handle = Database | DbTx;
 
+/** For a provider whose client can also come from the environment: the variable and whether it is set. */
+export function envClientSource(providerId: string): { envVar: string; envSet: boolean } | null {
+  const own = OWN_CLIENT_SOURCES.get(providerId);
+  return own ? { envVar: own.idEnv, envSet: Boolean(process.env[own.idEnv]?.trim()) } : null;
+}
+
 async function userClient(
   db: Handle,
   kek: string,

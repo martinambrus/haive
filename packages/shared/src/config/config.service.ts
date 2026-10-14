@@ -280,6 +280,10 @@ export const CONFIG_KEYS = {
   // server everywhere (no redeploy). Read at cli-exec invocation build time.
   DDEV_CONTROL_MCP_ENABLED: 'config:ddev:controlMcpEnabled',
 
+  // Global kill-switch for custom tools on prompt steps: 'false' refuses every
+  // POST /custom-mcp/call with 403 'switched-off'. Read per call within the ~30s config cache.
+  CUSTOM_MCP_TOOLS_ENABLED: 'config:customMcp:toolsEnabled',
+
   // Hard per-call wall-clock cap (ms) on the chrome-devtools MCP server, emitted as that
   // server's `timeout` field in the generated MCP config. Progress notifications do NOT
   // extend it, which is what makes it bite on a hung browser tool. 0 disables the cap
@@ -694,6 +698,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED]: 'true',
+  [CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED]: 'true',
   [CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS]: String(DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS),
   [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED]: 'true',
   [CONFIG_KEYS.ALLOWANCE_WATCH_MODE]: 'notify',

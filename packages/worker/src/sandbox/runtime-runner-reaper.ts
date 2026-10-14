@@ -26,7 +26,8 @@ const TERMINAL_STATUSES = new Set(['completed', 'cancelled']);
  *  preempted. */
 const PREEMPTIBLE_TASK_STATUSES = new Set(['failed', 'completed', 'cancelled']);
 
-export type ReapReason = 'exited' | 'orphan' | 'terminal' | 'failed-grace' | 'paused-grace';
+export type ReapReason =
+  'exited' | 'orphan' | 'terminal' | 'failed-grace' | 'paused-grace' | 'dead-grace';
 
 /** A task as the reap/preempt rules see it.
  *
@@ -40,6 +41,8 @@ export interface ReaperTask {
   status: string;
   completedAt: Date | null;
   pausedAt?: Date | null;
+  /** When the task was marked dead: a hold like a pause, with nothing running on it. */
+  deadAt?: Date | null;
   settled?: boolean;
   /** Up/down vote score, read by the score tier. Absent reads as neutral (0). */
   voteScore?: number;
@@ -79,10 +82,12 @@ export function reapDecision(
   // never to the container start: anchoring the failed path to the container is what once let a
   // long-dead task re-arm a full grace on every stray (re)boot and squat a slot for hours.
   // `settled` is required — a hold whose final CLI run is still going may be driving this very
-  // container.
-  if (task.pausedAt && task.settled) {
+  // container. A dead task is held the same way, from `dead_at`.
+  const heldAt = task.pausedAt ?? task.deadAt;
+  if (heldAt && task.settled) {
     if (failedGraceMs <= 0) return null; // grace disabled — keep for an immediate resume
-    if (nowMs - task.pausedAt.getTime() >= failedGraceMs) return 'paused-grace';
+    if (nowMs - heldAt.getTime() >= failedGraceMs)
+      return task.pausedAt ? 'paused-grace' : 'dead-grace';
     return null;
   }
   // running / waiting_* / created / queued — in use, keep.
@@ -252,7 +257,7 @@ export interface RuntimeRunnerReaperOptions {
  *  the system, so this keys on task STATUS + container age, never on "is anyone watching
  *  the VNC": it reaps runners whose task is completed/cancelled/missing, whose container
  *  has exited, whose task has been `failed` longer than the grace, or whose task has been
- *  PAUSED (and has no CLI run still finishing) longer than that same grace — and never
+ *  PAUSED or marked dead (and has no CLI run still finishing) longer than that same grace — and never
  *  touches an actively running/waiting task's runner. Task-end cleanup still owns the normal
  *  path; this is the backstop for the leak.
  */
@@ -342,7 +347,7 @@ export class RuntimeRunnerReaper {
         return null;
       });
       if (!reason) continue;
-      if (reason === 'paused-grace' && c.taskId) {
+      if ((reason === 'paused-grace' || reason === 'dead-grace') && c.taskId) {
         const taskId = c.taskId;
         const reapedHeld = await withRunnersFenced(taskId, async (idle) => {
           if (!(await runnerSettled(this.db, taskId).catch(() => false)) || !idle()) return false;
@@ -479,14 +484,14 @@ export class RuntimeRunnerReaper {
     try {
       const row = await this.db.query.tasks.findFirst({
         where: eq(schema.tasks.id, c.taskId),
-        columns: { status: true, completedAt: true, pausedAt: true },
+        columns: { status: true, completedAt: true, pausedAt: true, deadAt: true },
       });
-      // Only a paused task can reach the settled test, so the extra query stays off the hot
+      // Only a held task can reach the settled test, so the extra query stays off the hot
       // path of an ordinary sweep.
       task = row
         ? {
             ...row,
-            settled: row.pausedAt ? await runnerSettled(this.db, c.taskId) : false,
+            settled: row.pausedAt || row.deadAt ? await runnerSettled(this.db, c.taskId) : false,
           }
         : undefined;
     } catch (err) {

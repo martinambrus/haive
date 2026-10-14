@@ -18,6 +18,9 @@ the module loads again.
 
 - **Installed, active.** `pnpm module add <id>` and a rebuild. Everything runs: the module's api
   routes at `/m/<id>`, nav and pages, settings, dashboard widget, worker steps, jobs and database.
+  A module whose manifest sets `apiRequiresAdmin` is listed for a non-admin with
+  `compiledWeb: false`: its compiled pages answer not-found and its compiled dashboard widgets do not
+  render for that user, while its declared pages without data endpoints still do.
 - **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
   `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
   `module_tasks_open`, which the page shows as a list of up to 200 tasks, while a live task's run list
@@ -34,7 +37,10 @@ the module loads again.
 - **Uninstalled, data kept (`Missing`).** `pnpm module remove <id>` and a rebuild. Nothing runs: the
   api and worker do not load it and the web build does not import it. Kept: the `modules` row
   (`missing_at` set), the database `haive_module_<id>` (`-` as `_`) and the Redis settings
-  `config:module:<id>:*`.
+  `config:module:<id>:*`. A task type that uses the module, as its source or through any step, is
+  listed unavailable with the reason `module-missing` naming the module (by its recorded name, or its
+  id once no row is left), and creating a task of it is refused with 409 `module-missing`; this
+  reason is checked before `module-deactivated` and before `missing-step`.
 - **Purged.** Purge on `/admin/modules`, offered for a `Missing` module only (not built yet: M11d).
   Nothing runs and nothing is kept: the data is deleted.
 

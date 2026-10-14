@@ -163,6 +163,73 @@ describe('TaskTypeComposer', () => {
     }
   });
 
+  describe('a step with no composable entry', () => {
+    const catalog = {
+      ...TEST_CATALOG,
+      modules: [
+        { id: 'fx', name: 'Fx Reports', state: 'missing' as const },
+        { id: 'hx', name: 'Hx Tools', state: 'deactivated' as const },
+        { id: 'ix', name: 'Ix Loaded', state: 'loaded' as const },
+      ],
+      registeredStepIds: [
+        ...TEST_CATALOG.registeredStepIds,
+        'module.fx.run',
+        'module.hx.run',
+        'module.ix.internal',
+        '01-internal',
+      ],
+    };
+    const rowOf = (stepId: string, readOnly: boolean) =>
+      renderToStaticMarkup(
+        <TaskTypeComposer {...base} catalog={catalog} readOnly={readOnly} stepIds={[stepId]} />,
+      ).split('<li ')[1]!;
+
+    it('says which module a step comes from when that module is not installed, read-only or not', () => {
+      for (const readOnly of [true, false]) {
+        const row = rowOf('module.fx.run', readOnly);
+        expect(row, String(readOnly)).toContain(
+          'Provided by module Fx Reports, which is not installed',
+        );
+        expect(row).toContain('text-amber-300');
+      }
+      expect(rowOf('module.gx.run', true)).toContain(
+        'Provided by module gx, which is not installed',
+      );
+    });
+
+    it('says an administrator turned the module off', () => {
+      for (const readOnly of [true, false]) {
+        const row = rowOf('module.hx.run', readOnly);
+        expect(row).toContain('Provided by module Hx Tools, which an administrator turned off');
+        expect(row).toContain('text-amber-300');
+      }
+    });
+
+    it('labels a read-only internal step of a module that is there as that module step, not built-in', () => {
+      const row = rowOf('module.ix.internal', true);
+      expect(row).toContain('Module Ix Loaded step, not composable');
+      expect(row).not.toContain('Built-in step');
+      expect(row).not.toContain('text-amber-300');
+    });
+
+    it('keeps the built-in label for a registered core step, and the catalog words when editing', () => {
+      expect(rowOf('01-internal', true)).toContain('Built-in step, not composable');
+      expect(rowOf('01-internal', false)).toContain('Not in the step catalog');
+      expect(rowOf('module.ix.internal', false)).toContain('Not in the step catalog');
+    });
+
+    it('says a step the install does not register is not registered', () => {
+      for (const readOnly of [true, false]) {
+        for (const stepId of ['99-gone', 'module.ix.gone']) {
+          const row = rowOf(stepId, readOnly);
+          expect(row, `${stepId} ${readOnly}`).toContain('Not registered on this install');
+          expect(row).not.toContain('Built-in step');
+        }
+      }
+      expect(rowOf('99-gone', true)).toContain('text-amber-300');
+    });
+  });
+
   describe('prompt steps', () => {
     const step = {
       slug: 'ask',

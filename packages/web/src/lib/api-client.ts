@@ -2308,6 +2308,7 @@ export interface ModuleSummary {
   pages: Record<string, DashboardSpec>;
   hasGlobalSettings: boolean;
   hasAdminSettings: boolean;
+  compiledWeb: boolean;
 }
 
 export type ModuleSettingsKind = 'global' | 'admin';
@@ -2466,6 +2467,8 @@ export interface TaskTypeCatalog {
   steps: { stepId: string; source: string; title: string; entry: ComposableStepEntry }[];
   groups: { id: string; label: string }[];
   synced: boolean;
+  modules: { id: string; name: string; state: 'loaded' | 'missing' | 'deactivated' }[];
+  registeredStepIds: string[];
 }
 
 export const listAdminTaskTypes = () =>
@@ -2520,5 +2523,16 @@ export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
     ? (tasks as ModuleOpenTask[])
     : [];
 }
+
+export interface ModuleTeardownDone {
+  moduleId: string;
+  tornDownAt: string;
+}
+
+/** `{ status: 'running' }` is a 202: the worker was still at it when the api stopped waiting. */
+export type ModuleTeardownResponse = ModuleTeardownDone | { status: 'running' };
+
+export const postModuleTeardown = (moduleId: string) =>
+  api.post<ModuleTeardownResponse>(`/modules/${encodeURIComponent(moduleId)}/teardown`);
 
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');
