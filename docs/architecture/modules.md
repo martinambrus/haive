@@ -41,10 +41,16 @@ the module loads again.
   listed unavailable with the reason `module-missing` naming the module (by its recorded name, or its
   id once no row is left), and creating a task of it is refused with 409 `module-missing`; this
   reason is checked before `module-deactivated` and before `missing-step`.
-- **Purged.** Purge on `/admin/modules`, offered for a `Missing` module only (not built yet: M11d).
-  Nothing runs and nothing is kept: the data is deleted.
+- **Purged.** "Purge data..." on `/admin/modules`, offered for a `Missing` module only and confirmed
+  by typing its id. It is refused while the api or the worker loads the module, before the worker
+  has reported what it loaded, and while a live task (a dead one included) uses it. It drops the
+  module database without FORCE (a connection still on it refuses the purge), deletes the
+  `config:module:<id>:*` settings, deletes the module's task types no task uses (the others are kept
+  and listed) and deletes the `modules` row. Every step is safe to repeat: a purge that failed after
+  the drop answers 502 `module_purge_incomplete`, and the next one finishes it. The dialog warns
+  when the module's teardown hook never ran.
 
-Purge is an action of the admin page and lands in a later change. `pnpm module` never deactivates or purges anything and never touches
+Purge is an action of the admin page only. `pnpm module` never deactivates or purges anything and never touches
 the database or Redis: it moves a module between the first and third states, and nothing it does
 loses data. A task whose data names a step of a module this install no longer registers is marked
 dead, not failed (`UnresolvedStepError`, `step-engine/registry.ts`). A module this install never

@@ -20,6 +20,10 @@ export interface ModuleIntentRow {
   tornDownAt: Date | string | null;
 }
 
+export type SkippedSeed =
+  | { slug: string; reason: 'conflict'; heldBy: string }
+  | { slug: string; reason: 'invalid'; issues: string[] };
+
 export interface ModuleDiffRow {
   id: string;
   name: string | null;
@@ -34,6 +38,7 @@ export interface ModuleDiffRow {
   missingAt: string | null;
   deactivatedAt: string | null;
   tornDownAt: string | null;
+  skippedSeeds: SkippedSeed[];
 }
 
 export interface ModuleDiff {
@@ -44,20 +49,55 @@ export interface ModuleDiff {
 const iso = (value: Date | string | null): string | null =>
   value === null ? null : typeof value === 'string' ? value : value.toISOString();
 
-function readWorkerReport(raw: unknown): { at: string | null; versions: Map<string, string> } {
+function skippedSeedsOf(taskTypes: unknown): SkippedSeed[] {
+  const { conflicts, invalid } = (taskTypes ?? {}) as { conflicts?: unknown; invalid?: unknown };
+  const out: SkippedSeed[] = [];
+  for (const entry of Array.isArray(conflicts) ? (conflicts as unknown[]) : []) {
+    const { slug, heldBy } = (entry ?? {}) as { slug?: unknown; heldBy?: unknown };
+    if (typeof slug === 'string' && typeof heldBy === 'string') {
+      out.push({ slug, reason: 'conflict', heldBy });
+    }
+  }
+  for (const entry of Array.isArray(invalid) ? (invalid as unknown[]) : []) {
+    const { slug, issues } = (entry ?? {}) as { slug?: unknown; issues?: unknown };
+    if (typeof slug !== 'string') continue;
+    const kinds = (Array.isArray(issues) ? (issues as unknown[]) : []).map(
+      (issue) => ((issue ?? {}) as { kind?: unknown }).kind,
+    );
+    out.push({
+      slug,
+      reason: 'invalid',
+      issues: [...new Set(kinds.filter((kind): kind is string => typeof kind === 'string'))],
+    });
+  }
+  return out;
+}
+
+function readWorkerReport(raw: unknown): {
+  at: string | null;
+  versions: Map<string, string>;
+  skipped: Map<string, SkippedSeed[]>;
+} {
   const versions = new Map<string, string>();
-  if (typeof raw !== 'object' || raw === null) return { at: null, versions };
+  const skipped = new Map<string, SkippedSeed[]>();
+  if (typeof raw !== 'object' || raw === null) return { at: null, versions, skipped };
   const { at, modules } = raw as { at?: unknown; modules?: unknown };
   if (typeof at !== 'string' || Number.isNaN(Date.parse(at)) || !Array.isArray(modules)) {
-    return { at: null, versions };
+    return { at: null, versions, skipped };
   }
   for (const entry of modules as unknown[]) {
-    const { id, version } = (entry ?? {}) as { id?: unknown; version?: unknown };
-    if (typeof id !== 'string' || typeof version !== 'string')
-      return { at: null, versions: new Map() };
+    const { id, version, taskTypes } = (entry ?? {}) as {
+      id?: unknown;
+      version?: unknown;
+      taskTypes?: unknown;
+    };
+    if (typeof id !== 'string' || typeof version !== 'string') {
+      return { at: null, versions: new Map(), skipped: new Map() };
+    }
     versions.set(id, version);
+    skipped.set(id, skippedSeedsOf(taskTypes));
   }
-  return { at, versions };
+  return { at, versions, skipped };
 }
 
 /**
@@ -104,6 +144,7 @@ export function diffModuleIntent(
       missingAt: row ? iso(row.missingAt) : null,
       deactivatedAt: row ? iso(row.deactivatedAt) : null,
       tornDownAt: row ? iso(row.tornDownAt) : null,
+      skippedSeeds: worker.skipped.get(id) ?? [],
     };
   });
   return { workerAt: worker.at, rows: out };

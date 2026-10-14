@@ -139,6 +139,57 @@ describe('detectTransitions', () => {
   });
 });
 
+describe('dead tasks', () => {
+  const DEAD_AT = '2026-10-14T10:00:00.000Z';
+  const dead = (id: string, status = 'waiting_user') => ({ ...task(id, status), deadAt: DEAD_AT });
+
+  it('raises no baseline notification for a dead task waiting on the user', () => {
+    expect(detectTransitions(null, [dead('a')])).toEqual([]);
+  });
+
+  it('raises one for the same task alive', () => {
+    const events = detectTransitions(null, [task('a', 'waiting_user')]);
+    expect(events.map((e) => `${e.taskId}:${e.status}:${e.baseline}`)).toEqual([
+      'a:waiting_user:true',
+    ]);
+  });
+
+  it('raises nothing when a running task is found dead at a gate mid-session', () => {
+    const prev = snapshotIdentities([task('a', 'running')]);
+    expect(detectTransitions(prev, [dead('a')])).toEqual([]);
+  });
+
+  it('raises nothing for a dead task that died failed', () => {
+    const prev = snapshotIdentities([task('a', 'running')]);
+    expect(detectTransitions(prev, [dead('a', 'failed')])).toEqual([]);
+  });
+
+  it('still raises the live tasks around a dead one', () => {
+    const events = detectTransitions(null, [dead('a'), task('b', 'waiting_user')]);
+    expect(events.map((e) => e.taskId)).toEqual(['b']);
+  });
+
+  it('keeps a dead task out of the snapshot, so reviving it announces the gate again', () => {
+    const prev = snapshotIdentities([dead('a')]);
+    expect(prev.has('a')).toBe(false);
+    const events = detectTransitions(prev, [task('a', 'waiting_user')]);
+    expect(events.map((e) => e.taskId)).toEqual(['a']);
+    expect(events[0]!.baseline).toBe(false);
+  });
+
+  it('does not treat a cancelled or completed task as dead for a dead_at it still carries', () => {
+    const prev = snapshotIdentities([task('a', 'running'), task('b', 'running')]);
+    const events = detectTransitions(prev, [dead('a', 'completed'), dead('b', 'failed')]);
+    expect(events.map((e) => `${e.taskId}:${e.status}`)).toEqual(['a:completed']);
+  });
+
+  it('keys on dead_at and never on a dead_reason that outlived it', () => {
+    // NEGATIVE CONTROL: a version keyed on dead_reason silences this live gate.
+    const copyOnly = { ...task('a', 'waiting_user'), deadAt: null, deadReason: 'a step is gone' };
+    expect(detectTransitions(null, [copyOnly]).map((e) => e.taskId)).toEqual(['a']);
+  });
+});
+
 describe('snapshotIdentities', () => {
   it('keys each task by status+step+wait so any of them changing is a new identity', () => {
     const a = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-1', 't0')]);

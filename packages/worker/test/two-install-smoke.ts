@@ -28,19 +28,23 @@ import {
   PROJECT_STATE_IMPORT_STEP_ID,
   renderProjectState,
 } from '@haive/shared/project-state';
-import { applyPlanPatch } from '@haive/shared/plan';
+import { applyPlanPatch, lockPlanMerge } from '@haive/shared/plan';
 import { upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
+import { initDatabase } from '../src/db.js';
 import { handleClone, handleScan } from '../src/repo/clone.js';
+import { landPlanMerge } from '../src/plan/merge.js';
 import { reconcilePlanFromCheckout, writePlanMirror } from '../src/plan/mirror.js';
+import { pull, save } from '../src/queues/plan-mirror-queue.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   markProjectStatesDirtyAtBoot,
   sweepDirtyProjectStates,
 } from '../src/project-state/refresh.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
+import { restoreFaults } from '../src/project-state/set-aside.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
-import { writeProjectStateRecord } from '../src/project-state/write.js';
+import { writeProjectStateColumn, writeProjectStateRecord } from '../src/project-state/write.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
 import {
   TaskCancelledError,
@@ -63,6 +67,7 @@ import {
   type UpgradePlanDetect,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import { planMergeStep } from '../src/step-engine/steps/plan/01-plan-merge.js';
 
 const log = logger.child({ module: 'two-install-smoke' });
 
@@ -467,8 +472,10 @@ async function main(): Promise<void> {
   let createdB = false;
   let dbA: Database | null = null;
   let dbB: Database | null = null;
+  let poolB: Database | null = null;
   let tmp: string | null = null;
   let userA: string | null = null;
+  const landUsers: string[] = [];
 
   try {
     await admin.unsafe(`CREATE DATABASE "${nameB}"`);
@@ -2252,6 +2259,618 @@ async function main(): Promise<void> {
       askedOnA,
     );
 
+    // ---- a plan Pull, a Save & push and 01's confirm set Haive's pending files aside (B3.1b-1) ----
+    // Each check has its own remote and pair of installs, so a failing one leaves the next a clean start.
+    // B's pending change is a render.json value Haive wrote and has not committed; A's commit touches it too.
+    poolB = initDatabase(urlB.toString());
+    const RENDER_BASE = {
+      projectInfo: { name: 'two-install-smoke' },
+      framework: null,
+      acceptedAgentIds: ['a'],
+      customAgentSpecs: [],
+      lspLanguages: [],
+      rtkChoiceRecorded: true,
+    };
+    const attempt = async <T>(
+      run: () => Promise<T>,
+    ): Promise<{ value: T | null; error: string | null }> => {
+      try {
+        return { value: await run(), error: null };
+      } catch (err) {
+        return { value: null, error: err instanceof Error ? err.message : String(err) };
+      }
+    };
+    const landing = async (label: string) => {
+      const origin = path.join(tmp!, `land-${label}.git`);
+      git(tmp!, 'init', '-q', '--bare', '-b', 'main', origin);
+      const seedDir = path.join(tmp!, `land-${label}-seed`);
+      git(tmp!, 'clone', '-q', `file://${origin}`, seedDir);
+      await writeFile(path.join(seedDir, 'README.md'), `# ${label}\n`);
+      git(seedDir, 'add', 'README.md');
+      git(seedDir, 'commit', '-q', '-m', 'seed');
+      git(seedDir, 'push', '-q', 'origin', 'HEAD:main');
+      const url = `file://${origin}`;
+      const userOfA = randomUUID();
+      landUsers.push(userOfA);
+      const x = await cloneInstall('A', dbA!, path.join(tmp!, `land-${label}-a`), url, userOfA);
+      await x.db
+        .update(schema.repositories)
+        .set({ renderContext: RENDER_BASE })
+        .where(eq(schema.repositories.id, x.repositoryId));
+      await writeProjectStateColumn(x.db, {
+        repositoryId: x.repositoryId,
+        repoPath: x.repoPath,
+        column: RENDER_BASE,
+      });
+      await applyPlanPatch(
+        x.db,
+        {
+          ops: [
+            { op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Landing plan' },
+            { op: 'upsert', nodeRef: 'one', parentRef: 'root', title: 'First' },
+            { op: 'upsert', nodeRef: 'two', parentRef: 'root', title: 'Second' },
+          ],
+        },
+        { repositoryId: x.repositoryId, origin: 'user' },
+      );
+      await writePlanMirror(x.db, x.repositoryId, x.repoPath);
+      git(x.repoPath, 'add', '.haive-data/state', planFileRel, planMdRel);
+      git(x.repoPath, 'commit', '-q', '-m', 'A: the record and the plan');
+      git(x.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+      const y = await cloneInstall('B', dbB!, path.join(tmp!, `land-${label}-b`), url);
+      await y.db
+        .update(schema.users)
+        .set({ gitName: 't', gitEmail: 't@example.com' })
+        .where(eq(schema.users.id, y.userId));
+      return { x, y, origin };
+    };
+    /** One value of the render record changed in the column and written by a sweep: dirty, uncommitted. */
+    const setRender = async (install: Install, over: Record<string, unknown>) => {
+      await install.db
+        .update(schema.repositories)
+        .set({ renderContext: { ...RENDER_BASE, ...over } })
+        .where(eq(schema.repositories.id, install.repositoryId));
+      await markProjectStateDirty(install.db, install.repositoryId);
+      await sweepDirtyProjectStates(install.db);
+    };
+    const editPlan = async (install: Install, nth: number, title: string) => {
+      const children = (await planOf(install)).filter((n) => n.parentId !== null);
+      await applyPlanPatch(
+        install.db,
+        { ops: [{ op: 'upsert', nodeRef: children[nth]!.id, title }] },
+        { repositoryId: install.repositoryId, origin: 'user' },
+      );
+    };
+    const pushFrom = (install: Install, message: string, ...paths: string[]) => {
+      git(install.repoPath, 'add', ...paths);
+      git(install.repoPath, 'commit', '-q', '-m', message);
+      git(install.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+      return git(install.repoPath, 'rev-parse', 'HEAD');
+    };
+    type Render = { acceptedAgentIds?: string[]; lspLanguages?: string[] } | null;
+    const columnOf = async (install: Install): Promise<Render> => {
+      const [row] = await install.db
+        .select({ renderContext: schema.repositories.renderContext })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, install.repositoryId));
+      return (row?.renderContext ?? null) as Render;
+    };
+    const fileOf = async (install: Install, rel: string): Promise<string> =>
+      readFile(path.join(install.repoPath, rel), 'utf8').catch(() => '');
+    /** Whether the render column and render.json both hold A's agent and B's own pending language. */
+    const holdsBoth = async (install: Install): Promise<boolean> => {
+      const column = await columnOf(install);
+      const record = JSON.parse((await fileOf(install, RECORD_RENDER)) || 'null') as Render;
+      return [column, record].every(
+        (r) =>
+          isDeepStrictEqual(sorted(r?.acceptedAgentIds), ['a', 'b']) &&
+          isDeepStrictEqual(r?.lspLanguages, ['php']),
+      );
+    };
+    const dirtyOn = (install: Install) =>
+      git(install.repoPath, 'status', '--porcelain', '--untracked-files=no');
+    const contains = (install: Install, sha: string): boolean => {
+      try {
+        git(install.repoPath, 'merge-base', '--is-ancestor', sha, 'HEAD');
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    /** A live merge conversation's task and step, as 01's confirm finds them. */
+    const conversation = async (install: Install) => {
+      const [task] = await install.db
+        .insert(schema.tasks)
+        .values({
+          userId: install.userId,
+          repositoryId: install.repositoryId,
+          type: 'plan_merge',
+          title: 'two-install-smoke',
+          status: 'waiting_user',
+        })
+        .returning({ id: schema.tasks.id });
+      const [step] = await install.db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: planMergeStep.metadata.id,
+          stepIndex: planMergeStep.metadata.index,
+          title: planMergeStep.metadata.title,
+          status: 'running',
+        })
+        .returning({ id: schema.taskSteps.id });
+      const ctx = ctxFor(install, task!.id, step!.id);
+      return { ctx, detect: () => planMergeStep.detect!(ctx) };
+    };
+    const confirm = (
+      ctx: StepContext,
+      detected: Parameters<typeof planMergeStep.apply>[1]['detected'],
+    ) =>
+      planMergeStep.apply(ctx, {
+        detected,
+        formValues: { decision: 'confirm' },
+        iteration: 0,
+        previousIterations: [],
+      });
+    /** Runs `start` while another session holds the merge lock, and has a sweep rewrite the record
+     *  files once `start` waits for it: a write that lands between the set-aside and the move. */
+    const rewrittenWhileWaiting = async <T>(install: Install, start: () => Promise<T>) => {
+      let release!: () => void;
+      let held!: () => void;
+      const locked = new Promise<void>((r) => (held = r));
+      const holder = install.db.transaction(async (tx) => {
+        await lockPlanMerge(tx, install.repositoryId);
+        held();
+        await new Promise<void>((r) => (release = r));
+      });
+      await locked;
+      const running = start();
+      let blocked = false;
+      for (let i = 0; i < 300 && !blocked; i++) {
+        const waiting = await rowsOf<{ n: number }>(
+          install.db,
+          sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`,
+        );
+        blocked = 'rows' in waiting && waiting.rows[0]!.n > 0;
+        if (!blocked) await new Promise((r) => setTimeout(r, 100));
+      }
+      await sweepDirtyProjectStates(install.db);
+      const rewritten = dirtyOn(install);
+      release();
+      await holder;
+      return { blocked, rewritten, result: await running };
+    };
+
+    // C3: a Pull lands past the files Haive wrote, and B's pending changes survive.
+    {
+      const { x, y } = await landing('c3');
+      await setRender(y, { lspLanguages: ['php'] });
+      await editPlan(y, 0, 'Edited on B');
+      await writePlanMirror(y.db, y.repositoryId, y.repoPath);
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      await editPlan(x, 1, 'Edited on A');
+      await writePlanMirror(x.db, x.repositoryId, x.repoPath);
+      const sent = pushFrom(
+        x,
+        'A: an agent and a plan edit',
+        '.haive-data/state',
+        planFileRel,
+        planMdRel,
+      );
+      const dirty = dirtyOn(y);
+      check(
+        'C3: B holds a render change and a plan edit Haive wrote and has not committed',
+        dirty.includes(RECORD_RENDER) && dirty.includes(planFileRel),
+        dirty.split('\n'),
+      );
+      const pulled = await attempt(() => pull({ repositoryId: y.repositoryId, userId: y.userId }));
+      check(
+        'C3: a Pull lands the commit A pushed past the files Haive wrote',
+        pulled.error === null && contains(y, sent) && pulled.value?.pulled?.fastForwarded === true,
+        { error: pulled.error, pulled: pulled.value?.pulled },
+      );
+      const titles = await titlesOf(y);
+      const planText = await fileOf(y, planFileRel);
+      check(
+        "C3: and B's pending render change and plan edit survive beside A's, in its database and on disk",
+        (await holdsBoth(y)) &&
+          titles.includes('Edited on A') &&
+          titles.includes('Edited on B') &&
+          planText.includes('Edited on A') &&
+          planText.includes('Edited on B'),
+        { column: await columnOf(y), titles, status: dirtyOn(y).split('\n') },
+      );
+    }
+
+    // C4: a Save & push lands past the files Haive wrote, pushes, and B's pending change survives.
+    {
+      const { x, y, origin } = await landing('c4');
+      await setRender(y, { lspLanguages: ['php'] });
+      await editPlan(y, 0, 'Edited on B');
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      const sent = pushFrom(x, 'A: an agent', '.haive-data/state');
+      check(
+        'C4: B holds a render change Haive wrote and has not committed, and a plan edit to save',
+        dirtyOn(y).includes(RECORD_RENDER),
+        dirtyOn(y).split('\n'),
+      );
+      const saved = await attempt(() =>
+        save({ repositoryId: y.repositoryId, userId: y.userId, push: true }),
+      );
+      const tip = git(origin, 'rev-parse', 'main');
+      check(
+        'C4: a Save & push lands the commit A pushed past the file Haive wrote, and pushes',
+        saved.error === null &&
+          saved.value?.pushed === true &&
+          tip === git(y.repoPath, 'rev-parse', 'HEAD') &&
+          tip !== sent &&
+          git(origin, 'show', 'main:.haive-data/plan.json').includes('Edited on B'),
+        { error: saved.error, tip, sent },
+      );
+      check(
+        "C4: and B's pending render change survives beside A's, in its database and on disk",
+        await holdsBoth(y),
+        { column: await columnOf(y), status: dirtyOn(y).split('\n') },
+      );
+    }
+
+    // C5: 01's confirm lands past the files Haive wrote while its own task is live, and pushes.
+    {
+      const { x, y, origin } = await landing('c5');
+      await setRender(y, { lspLanguages: ['php'] });
+      await writeFile(path.join(y.repoPath, 'b-local.txt'), 'b\n');
+      git(y.repoPath, 'add', 'b-local.txt');
+      git(y.repoPath, 'commit', '-q', '-m', 'B: a local commit');
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      pushFrom(x, 'A: an agent', '.haive-data/state');
+      const { ctx, detect } = await conversation(y);
+      const confirmed = await attempt(async () => confirm(ctx, await detect()));
+      check(
+        "C5: 01's confirm lands the merge past the file Haive wrote, and pushes it",
+        confirmed.error === null &&
+          confirmed.value?.landed === true &&
+          confirmed.value.pushed === true &&
+          git(origin, 'rev-parse', 'main') === git(y.repoPath, 'rev-parse', 'HEAD'),
+        confirmed.error ?? confirmed.value,
+      );
+      check(
+        "C5: and B's pending render change survives beside A's, in its database and on disk",
+        await holdsBoth(y),
+        { column: await columnOf(y), status: dirtyOn(y).split('\n') },
+      );
+    }
+
+    // C16: 01's confirm is refused while another task works in the checkout, found on a clean tree, a dirty one, or after the set-aside.
+    for (const shape of ['clean', 'dirty', 'late'] as const) {
+      const { x, y } = await landing(`c16-${shape}`);
+      if (shape !== 'clean') await setRender(y, { lspLanguages: ['php'] });
+      await writeFile(path.join(y.repoPath, 'b-local.txt'), 'b\n');
+      git(y.repoPath, 'add', 'b-local.txt');
+      git(y.repoPath, 'commit', '-q', '-m', 'B: a local commit');
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      pushFrom(x, 'A: an agent', '.haive-data/state');
+      const { ctx, detect } = await conversation(y);
+      const started: string[] = [];
+      let restores = 0;
+      const startOther = async () => {
+        if (started.length > 0) return;
+        const [row] = await y.db
+          .insert(schema.tasks)
+          .values({
+            userId: y.userId,
+            repositoryId: y.repositoryId,
+            type: 'onboarding',
+            title: 'two-install-smoke',
+            status: 'running',
+          })
+          .returning({ id: schema.tasks.id });
+        started.push(row!.id);
+      };
+      try {
+        restoreFaults.beforeRestore = () => {
+          restores += 1;
+        };
+        if (shape === 'late') restoreFaults.afterRestore = startOther;
+        else await startOther();
+        const head = git(y.repoPath, 'rev-parse', 'HEAD');
+        const status = dirtyOn(y);
+        const pending = await fileOf(y, RECORD_RENDER);
+        const confirmed = await attempt(async () => confirm(ctx, await detect()));
+        check(
+          `C16: 01's confirm is refused while another task works in the checkout (${shape}), and the checkout does not move`,
+          started.length === 1 &&
+            confirmed.error === null &&
+            confirmed.value?.landed === false &&
+            confirmed.value.continueRequested === true &&
+            confirmed.value.summary.startsWith('Refused:') &&
+            confirmed.value.summary.includes('working in this checkout') &&
+            git(y.repoPath, 'rev-parse', 'HEAD') === head,
+          confirmed.error ?? confirmed.value,
+        );
+        check(
+          `C16: and the files Haive wrote are back on disk as they were (${shape})`,
+          (shape === 'clean' || status.includes(RECORD_RENDER)) &&
+            (await fileOf(y, RECORD_RENDER)) === pending &&
+            dirtyOn(y) === status,
+          { before: status.split('\n'), after: dirtyOn(y).split('\n') },
+        );
+        check(
+          `C16: and they were set aside only when the task started after (${shape})`,
+          restores === (shape === 'late' ? 1 : 0),
+          { restores },
+        );
+      } finally {
+        delete restoreFaults.beforeRestore;
+        delete restoreFaults.afterRestore;
+        for (const id of started) await y.db.delete(schema.tasks).where(eq(schema.tasks.id, id));
+      }
+    }
+
+    // C6: a Pull refuses a state file Haive did not write, naming it, and nothing moves.
+    {
+      const { x, y } = await landing('c6');
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      pushFrom(x, 'A: an agent', '.haive-data/state');
+      const head = git(y.repoPath, 'rev-parse', 'HEAD');
+      await writeFile(path.join(y.repoPath, RECORD_RENDER), '{ edited by hand');
+      const pulled = await attempt(() => pull({ repositoryId: y.repositoryId, userId: y.userId }));
+      check(
+        'C6: a Pull refuses a state file edited by hand, naming it, and the checkout does not move',
+        pulled.error !== null &&
+          pulled.error.includes(RECORD_RENDER) &&
+          git(y.repoPath, 'rev-parse', 'HEAD') === head &&
+          (await fileOf(y, RECORD_RENDER)) === '{ edited by hand',
+        pulled.error,
+      );
+    }
+
+    // C7: a Save & push is refused while a task holds the checkout, on a clean tree and on a dirty one.
+    for (const dirtyTree of [false, true]) {
+      const label = dirtyTree ? 'c7b' : 'c7';
+      const { x, y, origin } = await landing(label);
+      await editPlan(y, 0, 'Edited on B');
+      if (dirtyTree) await setRender(y, { lspLanguages: ['php'] });
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      const sent = pushFrom(x, 'A: an agent', '.haive-data/state');
+      await y.db.insert(schema.tasks).values({
+        userId: y.userId,
+        repositoryId: y.repositoryId,
+        type: 'workflow',
+        title: 'two-install-smoke',
+        status: 'running',
+      });
+      const before = dirtyOn(y);
+      const saved = await attempt(() =>
+        save({ repositoryId: y.repositoryId, userId: y.userId, push: true }),
+      );
+      check(
+        `${label.toUpperCase()}: a Save & push is refused while a task holds a ${dirtyTree ? 'dirty' : 'clean'} checkout, and nothing is pushed`,
+        saved.error !== null &&
+          saved.error.includes('task in flight') &&
+          saved.error.includes('nothing was pushed') &&
+          git(origin, 'rev-parse', 'main') === sent &&
+          (!dirtyTree || (dirtyOn(y).includes(RECORD_RENDER) && before.includes(RECORD_RENDER))),
+        { error: saved.error, status: dirtyOn(y).split('\n') },
+      );
+    }
+
+    // C8: a fast-forward git refuses over a local change says so, not that the checkout moved.
+    {
+      const origin = path.join(tmp!, 'land-c8.git');
+      git(tmp!, 'init', '-q', '--bare', '-b', 'main', origin);
+      const remote = path.join(tmp!, 'land-c8-remote');
+      const local = path.join(tmp!, 'land-c8-local');
+      git(tmp!, 'clone', '-q', `file://${origin}`, remote);
+      await writeFile(path.join(remote, 'README.md'), 'one\n');
+      git(remote, 'add', 'README.md');
+      git(remote, 'commit', '-q', '-m', 'seed');
+      git(remote, 'push', '-q', 'origin', 'HEAD:main');
+      git(tmp!, 'clone', '-q', `file://${origin}`, local);
+      await writeFile(path.join(remote, 'README.md'), 'two\n');
+      git(remote, 'commit', '-q', '-am', 'edit');
+      git(remote, 'push', '-q', 'origin', 'HEAD:main');
+      git(local, 'fetch', '-q', 'origin');
+      await writeFile(path.join(local, 'README.md'), 'mine\n');
+      const landed = await attempt(() =>
+        landPlanMerge(local, git(local, 'rev-parse', 'origin/main')),
+      );
+      check(
+        'C8: landing over a local change says the checkout has uncommitted changes, naming the file',
+        landed.error !== null &&
+          landed.error.includes('uncommitted changes') &&
+          landed.error.includes('README.md'),
+        landed.error,
+      );
+    }
+
+    // C9: a file Haive rewrites while a Pull waits for the merge lock sends the move round again.
+    {
+      const { x, y } = await landing('c9');
+      await setRender(y, { lspLanguages: ['php'] });
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      const sent = pushFrom(x, 'A: an agent', '.haive-data/state');
+      const waited = await rewrittenWhileWaiting(y, () =>
+        attempt(() => pull({ repositoryId: y.repositoryId, userId: y.userId })),
+      );
+      check(
+        'C9: a sweep rewrote the record file between the Pull setting it aside and moving',
+        waited.blocked && waited.rewritten.includes(RECORD_RENDER),
+        waited,
+      );
+      check(
+        "C9: and the Pull lands the commit A pushed, with B's pending change beside A's",
+        waited.result.error === null && contains(y, sent) && (await holdsBoth(y)),
+        { error: waited.result.error, column: await columnOf(y) },
+      );
+    }
+
+    // C10: the same for 01's confirm.
+    {
+      const { x, y } = await landing('c10');
+      await setRender(y, { lspLanguages: ['php'] });
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      const sent = pushFrom(x, 'A: an agent', '.haive-data/state');
+      const { ctx, detect } = await conversation(y);
+      const detected = await detect();
+      const waited = await rewrittenWhileWaiting(y, () =>
+        attempt(async () => confirm(ctx, detected)),
+      );
+      check(
+        "C10: a sweep rewrote the record file between 01's confirm setting it aside and moving",
+        waited.blocked && waited.rewritten.includes(RECORD_RENDER),
+        waited,
+      );
+      check(
+        "C10: and the confirm lands the commit A pushed, with B's pending change beside A's",
+        waited.result.error === null &&
+          waited.result.value?.landed === true &&
+          contains(y, sent) &&
+          (await holdsBoth(y)),
+        { error: waited.result.error, column: await columnOf(y) },
+      );
+    }
+
+    // C11: a Save & push that finds conflicts puts the files Haive wrote back as they were.
+    {
+      const { x, y, origin } = await landing('c11');
+      await setRender(y, { lspLanguages: ['php'] });
+      await writeFile(path.join(y.repoPath, 'README.md'), '# B\n');
+      git(y.repoPath, 'add', 'README.md');
+      git(y.repoPath, 'commit', '-q', '-m', 'B: the README');
+      await writeFile(path.join(x.repoPath, 'README.md'), '# A\n');
+      const sent = pushFrom(x, 'A: the README', 'README.md');
+      const head = git(y.repoPath, 'rev-parse', 'HEAD');
+      const pending = await fileOf(y, RECORD_RENDER);
+      const saved = await attempt(() =>
+        save({ repositoryId: y.repositoryId, userId: y.userId, push: true }),
+      );
+      const headAfter = git(y.repoPath, 'rev-parse', 'HEAD');
+      const originAfter = git(origin, 'rev-parse', 'main');
+      // Save commits its own plan snapshot before it integrates, so HEAD may sit on that commit.
+      const ownCommit = saved.value?.committed ? saved.value.commitSha : head;
+      check(
+        'C11: the Save reports the conflict, moves nothing past its own plan commit and pushes nothing',
+        saved.error === null &&
+          saved.value?.pushed === false &&
+          saved.value.conflict?.paths.includes('README.md') === true &&
+          headAfter === ownCommit &&
+          (ownCommit === head || git(y.repoPath, 'rev-parse', `${ownCommit}^`) === head) &&
+          originAfter === sent,
+        {
+          error: saved.error,
+          conflict: saved.value?.conflict,
+          pushed: saved.value?.pushed,
+          committed: saved.value?.committed,
+          head,
+          headAfter,
+          sent,
+          originAfter,
+          log: git(y.repoPath, 'log', '--format=%h %s', '-4').split('\n'),
+          changed: headAfter === head ? [] : git(y.repoPath, 'diff', '--stat', head, headAfter),
+        },
+      );
+      check(
+        "C11: and B's render change is back on disk byte for byte, still uncommitted",
+        (await fileOf(y, RECORD_RENDER)) === pending && dirtyOn(y).includes(RECORD_RENDER),
+        dirtyOn(y).split('\n'),
+      );
+    }
+
+    // C12: a Pull with nothing to land leaves the files Haive wrote as they were.
+    {
+      const { y } = await landing('c12');
+      await setRender(y, { lspLanguages: ['php'] });
+      await editPlan(y, 0, 'Edited on B');
+      await writePlanMirror(y.db, y.repositoryId, y.repoPath);
+      const files = [RECORD_RENDER, planFileRel, planMdRel];
+      const before = await Promise.all(files.map((rel) => fileOf(y, rel)));
+      const status = dirtyOn(y);
+      const pulled = await attempt(() => pull({ repositoryId: y.repositoryId, userId: y.userId }));
+      const after = await Promise.all(files.map((rel) => fileOf(y, rel)));
+      check(
+        'C12: a Pull with nothing to land changes none of the files Haive wrote',
+        pulled.error === null &&
+          pulled.value?.pulled?.fastForwarded === false &&
+          isDeepStrictEqual(after, before) &&
+          dirtyOn(y) === status,
+        { error: pulled.error, status: dirtyOn(y).split('\n') },
+      );
+    }
+
+    // C13: a Pull whose fetch fails, after the files Haive wrote were set aside, puts them back.
+    {
+      const { y } = await landing('c13');
+      await setRender(y, { lspLanguages: ['php'] });
+      await editPlan(y, 0, 'Edited on B');
+      await writePlanMirror(y.db, y.repositoryId, y.repoPath);
+      git(
+        y.repoPath,
+        'remote',
+        'set-url',
+        'origin',
+        `file://${path.join(tmp!, 'land-nowhere.git')}`,
+      );
+      const files = [RECORD_RENDER, planFileRel, planMdRel];
+      const before = await Promise.all(files.map((rel) => fileOf(y, rel)));
+      const status = dirtyOn(y);
+      const pulled = await attempt(() => pull({ repositoryId: y.repositoryId, userId: y.userId }));
+      const after = await Promise.all(files.map((rel) => fileOf(y, rel)));
+      check(
+        'C13: a Pull whose fetch fails leaves the files Haive wrote as they were',
+        pulled.error !== null &&
+          pulled.error.includes('git fetch failed') &&
+          isDeepStrictEqual(after, before) &&
+          dirtyOn(y) === status,
+        { error: pulled.error, status: dirtyOn(y).split('\n') },
+      );
+    }
+
+    // C14: a Save & push with nothing to land moves no checkout, so a task or a hand edit does not stop it.
+    {
+      const { y, origin } = await landing('c14');
+      await editPlan(y, 0, 'Edited on B');
+      await writeFile(path.join(y.repoPath, RECORD_RENDER), '{ edited by hand');
+      await y.db.insert(schema.tasks).values({
+        userId: y.userId,
+        repositoryId: y.repositoryId,
+        type: 'workflow',
+        title: 'two-install-smoke',
+        status: 'running',
+      });
+      const saved = await attempt(() =>
+        save({ repositoryId: y.repositoryId, userId: y.userId, push: true }),
+      );
+      check(
+        'C14: a Save & push with nothing to land pushes past a running task and a hand-edited state file',
+        saved.error === null &&
+          saved.value?.pushed === true &&
+          git(origin, 'rev-parse', 'main') === git(y.repoPath, 'rev-parse', 'HEAD') &&
+          (await fileOf(y, RECORD_RENDER)) === '{ edited by hand',
+        saved.error,
+      );
+    }
+
+    // C15: a Save & push over a state file edited by hand is refused, naming it, and nothing is pushed.
+    {
+      const { x, y, origin } = await landing('c15');
+      await editPlan(y, 0, 'Edited on B');
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      const sent = pushFrom(x, 'A: an agent', '.haive-data/state');
+      await writeFile(path.join(y.repoPath, RECORD_RENDER), '{ edited by hand');
+      const saved = await attempt(() =>
+        save({ repositoryId: y.repositoryId, userId: y.userId, push: true }),
+      );
+      check(
+        'C15: a Save & push over a state file edited by hand is refused, naming it, and nothing is pushed',
+        saved.error !== null &&
+          saved.error.includes(RECORD_RENDER) &&
+          saved.error.includes('nothing was pushed') &&
+          git(origin, 'rev-parse', 'main') === sent &&
+          (await fileOf(y, RECORD_RENDER)) === '{ edited by hand',
+        saved.error,
+      );
+    }
+
     for (const name of Object.keys(KNOWN_GAPS)) {
       if (gapsChecked.has(name)) continue;
       failures += 1;
@@ -2259,6 +2878,9 @@ async function main(): Promise<void> {
     }
   } finally {
     if (userA && dbA) await dbA.delete(schema.users).where(eq(schema.users.id, userA));
+    if (dbA)
+      for (const id of landUsers) await dbA.delete(schema.users).where(eq(schema.users.id, id));
+    await poolB?.$client.end({ timeout: 5 });
     await dbA?.$client.end({ timeout: 5 });
     await dbB?.$client.end({ timeout: 5 });
     if (createdB) await admin.unsafe(`DROP DATABASE IF EXISTS "${nameB}" WITH (FORCE)`);

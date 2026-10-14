@@ -41,6 +41,7 @@ import {
   ArrowLeft,
   Ban,
   CheckCircle2,
+  CircleAlert,
   CircleDot,
   Pause,
   Pencil,
@@ -54,7 +55,15 @@ import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
-import { failureBanner, modelIdentityBanner, parkBanner } from '@/lib/step-banners';
+import {
+  deadBanner,
+  failureBanner,
+  isTaskDead,
+  modelIdentityBanner,
+  parkBanner,
+  type DeadStepRow,
+} from '@/lib/step-banners';
+import { taskBadgeKind, taskMenuKeys } from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
 import {
   defaultRetryTimeoutMinutes,
@@ -555,6 +564,8 @@ interface LinkedTask {
 
 interface TaskDetailResponse {
   task: Task;
+  /** The steps the worker could not resolve; null while the task is alive. */
+  dead?: { at: string; steps: DeadStepRow[] } | null;
   steps: TaskStep[];
   /** CLI steps with no row yet — the CLIs tab's content. Absent on an older server. */
   upcomingCliSteps?: UpcomingCliStep[];
@@ -653,6 +664,18 @@ function TaskDescription({ text }: { text: string }) {
   );
 }
 
+function DeadTaskBanner({ text }: { text: string }) {
+  return (
+    <div
+      role="status"
+      className="flex items-start gap-3 rounded-md border border-red-900 bg-red-950/40 px-4 py-3 text-red-300"
+    >
+      <CircleAlert className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+      <InlineMarkdown className="min-w-0 text-sm [overflow-wrap:anywhere]" body={text} />
+    </div>
+  );
+}
+
 export default function TaskDetailPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
@@ -666,6 +689,7 @@ export default function TaskDetailPage() {
   const [planNodeCount, setPlanNodeCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
+  const [deadSteps, setDeadSteps] = useState<DeadStepRow[]>([]);
   const history = useTaskHistory(id, steps);
   const [historyStepToFocus, setHistoryStepToFocus] = useState<string | null>(null);
   const [upcomingCliSteps, setUpcomingCliSteps] = useState<UpcomingCliStep[]>([]);
@@ -767,6 +791,7 @@ export default function TaskDetailPage() {
       const data = await api.get<TaskDetailResponse>(`/tasks/${id}`);
       setTask(data.task);
       setSteps(data.steps);
+      setDeadSteps(data.dead?.steps ?? []);
       setUpcomingCliSteps(data.upcomingCliSteps ?? []);
       setProviderBreakdown(data.providerBreakdown ?? []);
       setCostDisplay(data.costDisplay ?? USD_DISPLAY);
@@ -1150,12 +1175,12 @@ export default function TaskDetailPage() {
   // The single step (if any) currently blocked on user input. Its focused-and-
   // visible time is tracked as "user active time"; everything else pauses.
   // A terminal task can leave a step parked in waiting_form (e.g. cancelled
-  // mid-gate) — nothing waits on the user anymore, so don't count or post.
+  // mid-gate) — nothing waits on the user anymore, so don't count or post. A dead task likewise.
+  const taskDead = task != null && isTaskDead(task);
   const taskEnded =
     task?.status === 'completed' || task?.status === 'failed' || task?.status === 'cancelled';
-  const activeWaitingStep = taskEnded
-    ? null
-    : (steps.find((s) => s.status === 'waiting_form') ?? null);
+  const activeWaitingStep =
+    taskEnded || taskDead ? null : (steps.find((s) => s.status === 'waiting_form') ?? null);
   const userActive = useUserActiveTimer(
     id,
     // The step ROW id (unique per fix-loop round), so the live timer + the task total
@@ -1531,12 +1556,13 @@ export default function TaskDetailPage() {
   const backHref = origin?.href ?? (isUpgradeTask ? '/repos' : '/tasks');
   const backLabel = origin?.label ?? (isUpgradeTask ? 'Back to repositories' : 'Back to tasks');
   const taskFinished = task.status === 'completed' || task.status === 'cancelled';
-  const canCancel = !taskFinished;
+  const badgeKind = taskBadgeKind(task);
+  const deadNote = deadBanner(task, deadSteps);
   // A CLI step is actively executing. The Stop buttons (top-right + the running
   // step row) target it: stop the CLI, keep the environment, task stays open.
   // Cancel, by contrast, ends the whole task and tears the environment down.
   const stepRunning = steps.some((s) => s.status === 'running' || s.status === 'waiting_cli');
-  const canRetry = task.status === 'failed';
+  const menu = taskMenuKeys(task, { stepRunning });
   // A failed task failed AT a step. The top-level Retry must re-run that step
   // (reset it + downstream, re-execute), which is exactly the per-step Retry —
   // NOT the task-level `start` action, which re-walks from the first step and
@@ -1636,11 +1662,15 @@ export default function TaskDetailPage() {
             {task.title}
           </p>
           {/* Keep the final status visible after the main header scrolls away. */}
-          {taskFinished ? (
+          {badgeKind === 'finished' ? (
             <Badge variant={taskStatusVariant(task.status)} className="shrink-0">
               {task.status}
             </Badge>
-          ) : task.pausedAt ? (
+          ) : badgeKind === 'dead' ? (
+            <Badge variant="error" className="shrink-0">
+              dead
+            </Badge>
+          ) : badgeKind === 'paused' ? (
             <Badge variant="warning" className="shrink-0">
               paused
             </Badge>
@@ -1766,16 +1796,21 @@ export default function TaskDetailPage() {
                 {/* Paused, or queued behind a capacity cap: the task row still says
                     `running` in both cases, so show the real state instead (same precedence
                     as the tasks listing — paused wins, and the server suppresses slotWait
-                    while it is set, so the two can never both be true). */}
-                {taskFinished ? (
+                    while it is set, so the two can never both be true). A dead task keeps the
+                    status it died in, so it is named ahead of both. */}
+                {badgeKind === 'finished' ? (
                   <Badge variant={taskStatusVariant(task.status)} className="shrink-0">
                     {task.status}
                   </Badge>
-                ) : task.pausedAt ? (
+                ) : badgeKind === 'dead' ? (
+                  <Badge variant="error" className="shrink-0">
+                    dead
+                  </Badge>
+                ) : badgeKind === 'paused' ? (
                   <Badge variant="warning" className="shrink-0">
                     paused
                   </Badge>
-                ) : task.slotWait ? (
+                ) : badgeKind === 'slotWait' && task.slotWait ? (
                   <SlotWaitBadge slotWait={task.slotWait} className="shrink-0" />
                 ) : (
                   <Badge variant={taskStatusVariant(task.status)} className="shrink-0">
@@ -1834,7 +1869,7 @@ export default function TaskDetailPage() {
                 // STATUS, which is what actually proves it never started; the
                 // metadata only records how it was made. Idempotent server-side, so
                 // a double-click cannot enqueue two starts.
-                task.status === 'created' && {
+                menu.includes('start') && {
                   key: 'start',
                   label: 'Start',
                   icon: Play,
@@ -1842,7 +1877,7 @@ export default function TaskDetailPage() {
                   title:
                     'Start this task. It was created without being started so its attachments could be uploaded first.',
                 },
-                canRetry && {
+                menu.includes('retry') && {
                   key: 'retry',
                   label: headerRecovery?.label ?? 'Retry',
                   // Keyed on the ACTION, never on the label — that string is generated
@@ -1858,25 +1893,23 @@ export default function TaskDetailPage() {
                 },
                 // Pause/Resume: hold this task so the CLI concurrency goes to the others. No
                 // confirm() — nothing is killed and nothing is lost, so it is cheap to undo.
-                canCancel &&
-                  task.pausedAt != null && {
-                    key: 'resume',
-                    label: 'Resume',
-                    icon: Play,
-                    onClick: () => void runAction('resume'),
-                    title:
-                      'Continue this task from where it stopped. It picks up within ~30 seconds.',
-                  },
-                canCancel &&
-                  task.pausedAt == null && {
-                    key: 'pause',
-                    label: 'Pause',
-                    icon: Pause,
-                    onClick: () => void runAction('pause'),
-                    title:
-                      'Let the CLI run in flight finish, then hold the task so its subscription budget goes to your other tasks. Nothing is killed and the task stays open. The environment stays up, but another task may reclaim its runtime slot while this one is held.',
-                  },
-                stepRunning && {
+                menu.includes('resume') && {
+                  key: 'resume',
+                  label: 'Resume',
+                  icon: Play,
+                  onClick: () => void runAction('resume'),
+                  title:
+                    'Continue this task from where it stopped. It picks up within ~30 seconds.',
+                },
+                menu.includes('pause') && {
+                  key: 'pause',
+                  label: 'Pause',
+                  icon: Pause,
+                  onClick: () => void runAction('pause'),
+                  title:
+                    'Let the CLI run in flight finish, then hold the task so its subscription budget goes to your other tasks. Nothing is killed and the task stays open. The environment stays up, but another task may reclaim its runtime slot while this one is held.',
+                },
+                menu.includes('stop') && {
                   key: 'stop',
                   label: 'Stop',
                   icon: Square,
@@ -1889,7 +1922,7 @@ export default function TaskDetailPage() {
                   title:
                     'Stop the running CLI for the current step. Keeps the environment; the task stays open and restartable.',
                 },
-                canCancel && {
+                menu.includes('cancel') && {
                   key: 'cancel',
                   label: 'Cancel',
                   icon: Ban,
@@ -1975,9 +2008,11 @@ export default function TaskDetailPage() {
         </div>
       )}
 
+      {deadNote && <DeadTaskBanner text={deadNote.text} />}
+
       {/* Task-scoped hold. The GLOBAL pause has its own app-wide banner, so it is not
           repeated here — this one only ever means "you paused this task". */}
-      {!taskFinished && task.pausedAt && (
+      {badgeKind === 'paused' && task.pausedAt && (
         <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
           <span className="font-semibold">Paused</span> since{' '}
           {new Date(task.pausedAt).toLocaleString()}. Any CLI run that was already in flight
@@ -2066,6 +2101,7 @@ export default function TaskDetailPage() {
                   isPastStep={isPastStep}
                   taskId={task.id}
                   taskStatus={task.status}
+                  taskDead={taskDead}
                   taskCompletedAt={task.completedAt}
                   taskRepositoryId={task.repositoryId}
                   userActiveDisplayMs={
@@ -2158,6 +2194,7 @@ export default function TaskDetailPage() {
               </Link>
             </div>
           )}
+          {deadNote && <DeadTaskBanner text={deadNote.text} />}
           {taskFinished && (
             <div
               role="status"
@@ -2214,7 +2251,7 @@ export default function TaskDetailPage() {
             taskCliProviderId={task.cliProviderId ?? null}
             busyStepId={stepProviderBusy}
             error={stepProviderError}
-            disabled={task.status === 'cancelled' || task.status === 'completed'}
+            disabled={task.status === 'cancelled' || task.status === 'completed' || taskDead}
             onChangeCli={(stepId, cliProviderId, role, effortLevel, remember) =>
               changeStepProvider(stepId, cliProviderId, role, 0, effortLevel, remember)
             }
@@ -2577,6 +2614,8 @@ interface StepCardProps {
   isPastStep: boolean;
   taskId: string;
   taskStatus: TaskStatus;
+  /** Dead (see isTaskDead): nothing runs on it, so the card offers no way to advance it. */
+  taskDead: boolean;
   /** Caps step timers when the task ended without the step itself ending. */
   taskCompletedAt: string | null;
   taskRepositoryId: string | null;
@@ -3571,6 +3610,7 @@ function StepCardImpl({
   isPastStep,
   taskId,
   taskStatus,
+  taskDead,
   taskCompletedAt,
   taskRepositoryId,
   userActiveDisplayMs,
@@ -3619,7 +3659,7 @@ function StepCardImpl({
   // slot" line would otherwise promise a slot nothing is handing out. Cheap to read per card — the
   // hook shares ONE poller across every consumer on the page.
   const globalPaused = useGlobalPause();
-  const park = parkBanner(step, { taskEnded, paused: globalPaused });
+  const park = parkBanner(step, { taskEnded, paused: globalPaused, dead: taskDead });
   const failure = failureBanner(step);
   // The live browser/VNC needs a running task runtime; once the task is completed or
   // cancelled that runtime is torn down (cleanup/teardown), so hide the browser
@@ -3649,6 +3689,7 @@ function StepCardImpl({
   // retryable — that is the whole point of retry on a failed step).
   const canRetry =
     !taskCancelled &&
+    !taskDead &&
     taskStatus !== 'completed' &&
     !isAutoSkipped &&
     RETRYABLE_STEP_STATUSES.has(step.status);
@@ -3657,11 +3698,13 @@ function StepCardImpl({
   // hidden. A FAILED task is deliberately excluded (canActOnStep stays true) so
   // its failed step keeps Retry / Retry with AI / Abort for recovery. Gates the
   // whole action-button group below (the stepId label stays visible).
-  const canActOnStep = !taskCancelled && taskStatus !== 'completed' && !isDownstreamOfActive;
+  const canActOnStep =
+    !taskCancelled && !taskDead && taskStatus !== 'completed' && !isDownstreamOfActive;
   // Only steps that actually dispatch a CLI (llm | agentMining | dagExecute) get a
   // provider picker; deterministic steps never consume a per-step provider, so the
   // picker would be a dead control. usesCli comes from CLI_DISPATCH_STEP_IDS.
-  const showCliPicker = !taskCancelled && ACTIONABLE_STATUSES.has(step.status) && step.usesCli;
+  const showCliPicker =
+    !taskCancelled && !taskDead && ACTIONABLE_STATUSES.has(step.status) && step.usesCli;
   // Deterministic actionable steps show a subtle note in place of the picker so
   // its absence reads as intentional rather than a bug.
   const showDeterministicNote =
@@ -4082,7 +4125,7 @@ function StepCardImpl({
         </div>
       )}
 
-      {step.errorHint?.type === 'cli_login_required' && step.status === 'failed' && (
+      {step.errorHint?.type === 'cli_login_required' && step.status === 'failed' && !taskDead && (
         <div className="flex items-center gap-2">
           <Button size="sm" disabled={actionBusy} onClick={onCliLogin}>
             Log in to {step.errorHint.providerName}
@@ -4125,7 +4168,7 @@ function StepCardImpl({
             </div>
           )}
           <div>
-            <Button disabled={actionBusy} onClick={() => onAction('retry')}>
+            <Button disabled={actionBusy || taskDead} onClick={() => onAction('retry')}>
               {actionBusy ? 'Retrying…' : (schema.submitLabel ?? 'Retry')}
             </Button>
           </div>
@@ -4178,6 +4221,7 @@ function StepCardImpl({
               key={supportsPresets ? `${step.stepId}-${formKey}` : undefined}
               schema={schema}
               initialValues={supportsPresets ? (appliedValues ?? initialValues) : initialValues}
+              disabled={taskDead}
               submitting={submitting}
               errorMessage={submitError}
               onSubmit={supportsPresets ? handlePresetSubmit : onSubmit}
@@ -4214,7 +4258,7 @@ function StepCardImpl({
                   />
                 ) : undefined
               }
-              onSkip={step.canSkip ? () => onAction('skip') : undefined}
+              onSkip={step.canSkip && !taskDead ? () => onAction('skip') : undefined}
               skipLabel={
                 step.stepId === '01-worktree-setup' ? 'Skip — work from project root' : undefined
               }

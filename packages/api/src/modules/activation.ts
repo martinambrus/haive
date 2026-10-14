@@ -37,7 +37,11 @@ export async function isModuleDeactivated(db: Reader, moduleId: string): Promise
 
 // CASE, not AND: SQL does not order an AND's operands, and a snapshot that is not an array makes
 // jsonb_array_elements_text raise.
-function liveDependents(db: Reader, moduleId: string): Promise<ModuleDependent[]> {
+export function liveDependents(
+  db: Reader,
+  moduleId: string,
+  includeDead = false,
+): Promise<ModuleDependent[]> {
   return db
     .select({
       id: schema.tasks.id,
@@ -49,7 +53,7 @@ function liveDependents(db: Reader, moduleId: string): Promise<ModuleDependent[]
     .where(
       and(
         inArray(schema.tasks.status, [...LIVE_TASK_STATES]),
-        isNull(schema.tasks.deadAt),
+        includeDead ? undefined : isNull(schema.tasks.deadAt),
         sql`(EXISTS (
             SELECT 1 FROM ${schema.taskTypeDefinitions}
             WHERE ${schema.taskTypeDefinitions.slug} = ${schema.tasks.type}
