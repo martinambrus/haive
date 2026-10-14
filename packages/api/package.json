@@ -43,7 +43,7 @@
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
     "ws": "^8.22.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
