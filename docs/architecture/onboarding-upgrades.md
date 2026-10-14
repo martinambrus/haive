@@ -596,8 +596,14 @@ Save & push and the `01-plan-merge` confirm set aside the same way around their 
 (`integrateOrigin`): their fence is the checkout-holding task count (the confirm leaves out its own task
 and counts only tasks working in the checkout itself), a Save sets aside only once the remote is ahead,
 so a Save with nothing to land is never stopped by a waiting task, and a Pull refuses, by name, an
-untracked file under `.haive-data/state/` that Haive did not write. The merge resolver on the checkout,
-step 13 and the task-end hooks do not call it yet.
+untracked file under `.haive-data/state/` that Haive did not write. The merge resolver on the checkout
+and step 13 do not call it yet. An onboarding or upgrade that ends re-syncs at once
+(`resyncAfterTaskEnd`): the sync defers while such a task holds the checkout, so a change pending in
+the database, or an incoming record a move landed meanwhile, waited for the sweep. It runs once the
+ending has committed: on completion after the bookkeeping, on failure after the containers are
+cleaned, on a cancel once no sandbox is left, and on every path that marks the task dead. The API's
+Stop has no worker hook; the sweep covers it. A task marked dead holds no checkout: every
+checkout-holder check requires `dead_at IS NULL`, and its writer is refused as released.
 
 **The record carries the portable settings and the environment.** `portableSettingsOf`
 (`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:

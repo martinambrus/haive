@@ -837,6 +837,28 @@ export async function resyncHaiveProjections(
   }
 }
 
+/** The re-sync an onboarding or upgrade owes when it ends, since the sync deferred while it held the
+ *  checkout. Call it with no transaction open and the status write committed. Never throws. */
+export async function resyncAfterTaskEnd(db: Database, taskId: string): Promise<void> {
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { type: true, repositoryId: true },
+    });
+    if (!task?.repositoryId || (task.type !== 'onboarding' && task.type !== 'onboarding_upgrade')) {
+      return;
+    }
+    const repo = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, task.repositoryId),
+      columns: { storagePath: true, localPath: true },
+    });
+    const repoPath = repo?.storagePath ?? repo?.localPath;
+    if (repoPath) await resyncHaiveProjections(db, task.repositoryId, repoPath);
+  } catch (err) {
+    logger.warn({ err, taskId }, 'project state not re-synced after a task ended');
+  }
+}
+
 const metadataWarn = (repoPath: string, path: string) => (err: unknown) =>
   logger.warn({ err, repoPath, path }, 'owner and mode not restored after a checkout move');
 
