@@ -635,7 +635,11 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         pending.then(() => 'done'),
         new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 400)),
       ]);
-    const unavailable = { available: false, reason: 'module-deactivated', moduleIds: ['alpha'] };
+    const unavailable = {
+      available: false,
+      reason: 'module-deactivated',
+      modules: [{ id: 'alpha', name: 'alpha' }],
+    };
 
     beforeEach(async () => {
       h.flags.set(CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED, true);

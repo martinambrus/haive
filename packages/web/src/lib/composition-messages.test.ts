@@ -12,6 +12,7 @@ import {
   describeDefaultsIssue,
   describeIssue,
   describePromptStepIssue,
+  describeStepWithoutEntry,
   issuesByRow,
   promptStepIssuesOf,
   providersOf,
@@ -282,14 +283,117 @@ describe('describeAvailability', () => {
     );
   });
 
+  it('names the module a type needs when it is not installed', () => {
+    expect(
+      describeAvailability({
+        available: false,
+        reason: 'module-missing',
+        modules: [{ id: 'fx', name: 'Fx Reports' }],
+      }),
+    ).toBe('Unavailable: needs the module Fx Reports, which is not installed');
+  });
+
+  it('names a module with no row by its id, and each of several modules', () => {
+    expect(
+      describeAvailability({
+        available: false,
+        reason: 'module-missing',
+        modules: [{ id: 'fx', name: null }],
+      }),
+    ).toBe('Unavailable: needs the module fx, which is not installed');
+    expect(
+      describeAvailability({
+        available: false,
+        reason: 'module-missing',
+        modules: [
+          { id: 'fx', name: 'Fx Reports' },
+          { id: 'gx', name: null },
+        ],
+      }),
+    ).toBe('Unavailable: needs the modules Fx Reports and gx, which are not installed');
+  });
+
   it('names the deactivated modules a type uses', () => {
     expect(
       describeAvailability({
         available: false,
         reason: 'module-deactivated',
-        moduleIds: ['alpha', 'beta'],
+        modules: [
+          { id: 'alpha', name: 'Alpha' },
+          { id: 'beta', name: 'Beta' },
+        ],
       }),
-    ).toBe('Unavailable: deactivated modules alpha, beta');
+    ).toBe('Unavailable: needs the modules Alpha and Beta, which an administrator turned off');
+  });
+});
+
+describe('describeStepWithoutEntry', () => {
+  const modules = [
+    { id: 'fx', name: 'Fx Reports', state: 'missing' },
+    { id: 'hx', name: 'Hx Tools', state: 'deactivated' },
+    { id: 'ix', name: 'Ix Loaded', state: 'loaded' },
+  ] as const;
+  const registeredStepIds = ['01-internal', 'module.ix.internal', 'module.fx.run', 'module.hx.run'];
+  const note = (stepId: string, readOnly: boolean) =>
+    describeStepWithoutEntry(stepId, {
+      readOnly,
+      catalog: { modules: [...modules], registeredStepIds },
+    });
+
+  it('says a step of a module that is not installed comes from that module', () => {
+    for (const readOnly of [true, false]) {
+      expect(note('module.fx.run', readOnly)).toEqual({
+        text: 'Provided by module Fx Reports, which is not installed',
+        warning: true,
+      });
+    }
+  });
+
+  it('names a module with no row by its id', () => {
+    expect(note('module.gx.run', true)).toEqual({
+      text: 'Provided by module gx, which is not installed',
+      warning: true,
+    });
+  });
+
+  it('says a step of a deactivated module comes from a module an administrator turned off', () => {
+    for (const readOnly of [true, false]) {
+      expect(note('module.hx.run', readOnly)).toEqual({
+        text: 'Provided by module Hx Tools, which an administrator turned off',
+        warning: true,
+      });
+    }
+  });
+
+  it('calls a registered internal step of a module that is there a module step, not a built-in one', () => {
+    expect(note('module.ix.internal', true)).toEqual({
+      text: 'Module Ix Loaded step, not composable',
+      warning: false,
+    });
+    expect(note('module.ix.internal', false).text).toBe('Not in the step catalog');
+  });
+
+  it('says a step the install does not register is not registered, module step or not', () => {
+    for (const stepId of ['module.ix.gone', '99-gone']) {
+      for (const readOnly of [true, false]) {
+        expect(note(stepId, readOnly), `${stepId} ${readOnly}`).toEqual({
+          text: 'Not registered on this install',
+          warning: true,
+        });
+      }
+    }
+  });
+
+  it('keeps the old words for a registered core step and for an id the registry does not own', () => {
+    expect(note('01-internal', true)).toEqual({
+      text: 'Built-in step, not composable',
+      warning: false,
+    });
+    expect(note('01-internal', false).text).toBe('Not in the step catalog');
+    for (const stepId of ['custom.t.ask', 'Not A Step']) {
+      expect(note(stepId, true).text).toBe('Built-in step, not composable');
+      expect(note(stepId, false).text).toBe('Not in the step catalog');
+    }
   });
 });
 

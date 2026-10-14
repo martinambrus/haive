@@ -22,11 +22,32 @@ export const TASK_TYPE_UNAVAILABLE_REASONS = [
   'not-selectable',
   'custom-types-off',
   'module-types-off',
+  'module-missing',
   'module-deactivated',
   'missing-step',
   'invalid-composition',
 ] as const;
 export type TaskTypeUnavailableReason = (typeof TASK_TYPE_UNAVAILABLE_REASONS)[number];
+
+// The public list drops disabled and not-selectable rows before it asks, so a row never has them.
+export const PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS = [
+  'custom-types-off',
+  'module-types-off',
+  'module-missing',
+  'module-deactivated',
+  'missing-step',
+  'invalid-composition',
+] as const satisfies readonly TaskTypeUnavailableReason[];
+export type PublicTaskTypeUnavailableReason = (typeof PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS)[number];
+
+export interface TaskTypeModuleState {
+  name: string;
+  missing: boolean;
+  deactivated: boolean;
+}
+
+export const taskTypeModuleRefSchema = z.object({ id: z.string(), name: z.string().nullable() });
+export type TaskTypeModuleRef = z.infer<typeof taskTypeModuleRefSchema>;
 
 export interface TaskTypeAvailabilityInput {
   definition: {
@@ -38,7 +59,8 @@ export interface TaskTypeAvailabilityInput {
     requiresRepository: boolean;
   };
   switches: { customEnabled: boolean; moduleEnabled: boolean };
-  deactivatedModules: ReadonlySet<string>;
+  // Null when no rows were read, which turns the module reasons off; a module with no row is missing.
+  modules: ReadonlyMap<string, TaskTypeModuleState> | null;
   catalog: {
     stepIds: ReadonlySet<string>;
     composable: ReadonlyMap<string, ComposableStepEntry>;
@@ -53,7 +75,7 @@ export type TaskTypeAvailability =
       reason: TaskTypeUnavailableReason;
       stepIds?: string[];
       issues?: CompositionIssue[];
-      moduleIds?: string[];
+      modules?: TaskTypeModuleRef[];
     };
 
 export function moduleIdsOfTaskType(
@@ -76,7 +98,7 @@ export function moduleIdsOfTaskType(
 export function resolveTaskTypeAvailability(
   input: TaskTypeAvailabilityInput,
 ): TaskTypeAvailability {
-  const { definition, switches, deactivatedModules, catalog, generic } = input;
+  const { definition, switches, modules, catalog, generic } = input;
   if (!definition.enabled) return { available: false, reason: 'disabled' };
   if (generic && !definition.selectable) return { available: false, reason: 'not-selectable' };
   if (definition.source === 'admin' && !switches.customEnabled) {
@@ -85,14 +107,35 @@ export function resolveTaskTypeAvailability(
   if (definition.source.startsWith('module:') && !switches.moduleEnabled) {
     return { available: false, reason: 'module-types-off' };
   }
-  const moduleIds = moduleIdsOfTaskType(definition).filter((id) => deactivatedModules.has(id));
-  if (moduleIds.length > 0) return { available: false, reason: 'module-deactivated', moduleIds };
+  if (modules !== null) {
+    const used = moduleIdsOfTaskType(definition);
+    const refs = (ids: string[]): TaskTypeModuleRef[] =>
+      ids.map((id) => ({ id, name: modules.get(id)?.name ?? null }));
+    const missing = used.filter((id) => {
+      const state = modules.get(id);
+      return state === undefined || state.missing;
+    });
+    if (missing.length > 0) {
+      return { available: false, reason: 'module-missing', modules: refs(missing) };
+    }
+    const deactivated = used.filter((id) => modules.get(id)?.deactivated === true);
+    if (deactivated.length > 0) {
+      return { available: false, reason: 'module-deactivated', modules: refs(deactivated) };
+    }
+  }
   if (catalog === null || definition.runListStrategy !== 'static' || definition.stepIds === null) {
     return { available: true };
   }
-  const missing = definition.stepIds.filter((id) => !catalog.stepIds.has(id));
-  if (missing.length > 0) return { available: false, reason: 'missing-step', stepIds: missing };
-  if (definition.source === 'admin') {
+  const missingSteps = definition.stepIds.filter((id) => !catalog.stepIds.has(id));
+  if (missingSteps.length > 0) {
+    return { available: false, reason: 'missing-step', stepIds: missingSteps };
+  }
+  // A step with no composable entry is internal: what it requires and provides is unknown.
+  const checked =
+    definition.source === 'admin' ||
+    (definition.source.startsWith('module:') &&
+      definition.stepIds.every((id) => catalog.composable.has(id)));
+  if (checked) {
     const issues = validateComposition(definition.stepIds, catalog.composable, {
       requiresRepository: definition.requiresRepository,
     });
@@ -145,7 +188,9 @@ export const publicTaskTypeSchema = z.object({
   restoresDatabase: z.boolean(),
   dispatchesCli: z.boolean(),
   available: z.boolean(),
-  reason: z.enum(TASK_TYPE_UNAVAILABLE_REASONS).optional(),
+  reason: z.enum(PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS).optional(),
+  stepIds: z.array(z.string()).optional(),
+  modules: z.array(taskTypeModuleRefSchema).optional(),
 });
 export type PublicTaskType = z.infer<typeof publicTaskTypeSchema>;
 

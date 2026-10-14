@@ -2466,6 +2466,8 @@ export interface TaskTypeCatalog {
   steps: { stepId: string; source: string; title: string; entry: ComposableStepEntry }[];
   groups: { id: string; label: string }[];
   synced: boolean;
+  modules: { id: string; name: string; state: 'loaded' | 'missing' | 'deactivated' }[];
+  registeredStepIds: string[];
 }
 
 export const listAdminTaskTypes = () =>

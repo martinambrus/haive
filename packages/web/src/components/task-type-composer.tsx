@@ -13,6 +13,7 @@ import {
   describeDefaultsIssue,
   describeIssue,
   describePromptStepIssue,
+  describeStepWithoutEntry,
   issuesByRow,
   stepLabel,
   type CatalogEntries,
@@ -89,6 +90,23 @@ function StepFacts({ entry }: { entry: ComposableStepEntry }) {
       <Chips label="needs" tokens={[...new Set(entry.requires.map((r) => r.needs))]} />
       <Chips label="provides" tokens={entry.provides} />
     </div>
+  );
+}
+
+function StepWithoutEntryNote({
+  stepId,
+  readOnly,
+  catalog,
+}: {
+  stepId: string;
+  readOnly: boolean;
+  catalog: TaskTypeCatalog;
+}) {
+  const note = describeStepWithoutEntry(stepId, { readOnly, catalog });
+  return (
+    <p className={cn('text-[11px]', note.warning ? 'text-amber-300' : 'text-neutral-500')}>
+      {note.text}
+    </p>
   );
 }
 
@@ -431,9 +449,7 @@ export function TaskTypeComposer({
                         <StepFacts entry={entry} />
                       </>
                     ) : (
-                      <p className="text-[11px] text-neutral-500">
-                        {readOnly ? 'Built-in step, not composable' : 'Not in the step catalog'}
-                      </p>
+                      <StepWithoutEntryNote stepId={stepId} readOnly={readOnly} catalog={catalog} />
                     )}
                     {promptEntry && prompt && (
                       <Button

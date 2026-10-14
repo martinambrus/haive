@@ -84,6 +84,13 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
 
   beforeAll(async () => {
     db = createDatabase(url as string);
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'fx'));
+    await db.insert(schema.modules).values({
+      moduleId: 'fx',
+      packageName: '@haive/module-fx',
+      name: 'Fx',
+      installedVersion: '1.0.0',
+    });
     await db
       .delete(schema.taskTypeDefinitions)
       .where(inArray(schema.taskTypeDefinitions.slug, SLUGS));
@@ -101,6 +108,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
     await db
       .delete(schema.taskTypeDefinitions)
       .where(inArray(schema.taskTypeDefinitions.slug, SLUGS));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'fx'));
     await db.$client.end({ timeout: 5 });
   });
 
