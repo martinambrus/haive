@@ -2746,12 +2746,15 @@ async function main(): Promise<void> {
       );
       const headAfter = git(y.repoPath, 'rev-parse', 'HEAD');
       const originAfter = git(origin, 'rev-parse', 'main');
+      // Save commits its own plan snapshot before it integrates, so HEAD may sit on that commit.
+      const ownCommit = saved.value?.committed ? saved.value.commitSha : head;
       check(
-        'C11: the Save reports the conflict, moves nothing and pushes nothing',
+        'C11: the Save reports the conflict, moves nothing past its own plan commit and pushes nothing',
         saved.error === null &&
           saved.value?.pushed === false &&
           saved.value.conflict?.paths.includes('README.md') === true &&
-          headAfter === head &&
+          headAfter === ownCommit &&
+          (ownCommit === head || git(y.repoPath, 'rev-parse', `${ownCommit}^`) === head) &&
           originAfter === sent,
         {
           error: saved.error,
