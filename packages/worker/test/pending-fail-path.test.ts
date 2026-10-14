@@ -1,6 +1,7 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { computeTaskTiming } from '@haive/shared/timing';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -75,6 +76,24 @@ describe.skipIf(!url)('a step that throws before its pending row is opened, on P
     db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId));
   const moveEpochOn = () =>
     db.update(schema.tasks).set({ orchestrationEpoch: 1 }).where(eq(schema.tasks.id, taskId));
+  const parkRow = () =>
+    db.insert(schema.taskSteps).values({
+      taskId,
+      stepId: STEP_ID,
+      stepIndex: 100,
+      runSeq: 0,
+      round: 0,
+      title: STEP_ID,
+      status: 'pending',
+      waitingStartedAt: sql`now() - interval '90 seconds'`,
+    });
+  const expectParkFolded = async () => {
+    const [row] = await stepRows();
+    const idle = computeTaskTiming(row ? [row] : [], Date.now()).idleMs;
+    expect(idle).toBeGreaterThanOrEqual(89_000);
+    expect(idle).toBeLessThan(120_000);
+    expect(row?.waitingStartedAt).toBeNull();
+  };
 
   beforeAll(async () => {
     db = createDatabase(url as string);
@@ -138,6 +157,27 @@ describe.skipIf(!url)('a step that throws before its pending row is opened, on P
       ]);
     });
 
+    it('keeps the wait for a runtime slot as idle time when shouldRun throws on a parked row', async () => {
+      await parkRow();
+      await advance(stepDef({ ...extra, shouldRun: throws }));
+      await expectParkFolded();
+    });
+
+    it('folds the park, as a skip does, when the task epoch moved on before shouldRun threw', async () => {
+      await parkRow();
+      const movedOn = async () => {
+        await moveEpochOn();
+        return throws();
+      };
+      await expect(advance(stepDef({ ...extra, shouldRun: movedOn }))).resolves.toMatchObject({
+        status: 'superseded',
+      });
+      expect(await stepRows()).toMatchObject([
+        { status: 'pending', errorMessage: null, endedAt: null },
+      ]);
+      await expectParkFolded();
+    });
+
     it('records a throw after the pass opened the row', async () => {
       await expect(
         advance(stepDef({ ...extra, shouldRun: () => true, detect: throws })),
@@ -150,6 +190,21 @@ describe.skipIf(!url)('a step that throws before its pending row is opened, on P
       expect(row).toMatchObject({ status: rowStatus, errorMessage: BROKEN });
       expect(row?.startedAt).toBeInstanceOf(Date);
     });
+  });
+
+  it('folds the park of a parked row whose skip the task epoch refused', async () => {
+    await parkRow();
+    const movedOn = async () => {
+      await moveEpochOn();
+      return false;
+    };
+    await expect(advance(stepDef({ shouldRun: movedOn }))).resolves.toMatchObject({
+      status: 'superseded',
+    });
+    expect(await stepRows()).toMatchObject([
+      { status: 'pending', errorMessage: null, endedAt: null },
+    ]);
+    await expectParkFolded();
   });
 
   it('records a throw on a row that was already parked on a form', async () => {

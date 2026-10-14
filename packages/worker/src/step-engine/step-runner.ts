@@ -2540,6 +2540,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       errorMessage: deactivated,
       endedAt: new Date(),
     } as const;
+    // An open runtime-slot park stops counting as idle once ended_at is set, so fold it first.
+    if (row.status === 'pending') await foldCliParkOnResume(db, row.id);
     // updateRow refuses a pending row; openPendingStep opens it, under the job's epoch.
     const failed =
       row.status === 'pending'
@@ -3478,7 +3480,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     const writeEnd = (patch: UpdatePatch): Promise<TaskStepRow | null> =>
       (opened
         ? updateRow(db, row.id, patch)
-        : openPendingStep(db, taskId, params.epoch, row.id, patch)
+        : foldCliParkOnResume(db, row.id).then(() =>
+            openPendingStep(db, taskId, params.epoch, row.id, patch),
+          )
       ).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces
