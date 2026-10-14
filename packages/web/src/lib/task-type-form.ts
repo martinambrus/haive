@@ -6,6 +6,7 @@ import {
   type TaskTypeUpdate,
 } from '@haive/shared/modularity';
 import type { FormValues } from '@/components/form-validation';
+import { pruneLoopLimits } from './composition-order';
 import { listedPromptSteps, samePromptSteps, type PromptSteps } from './prompt-step-editing';
 
 const FLAT_FIELDS = [
@@ -170,7 +171,6 @@ export function buildUpdateBody(
     saved: {
       stepIds: readonly string[] | null;
       stepLoopLimitDefaults: Record<string, number>;
-      preAnswerDefaults: Record<string, Record<string, unknown>>;
       promptSteps?: PromptSteps;
     };
   } | null,
@@ -184,15 +184,10 @@ export function buildUpdateBody(
   }
   if (composition && editableFields.includes('stepIds')) {
     const { saved: was } = composition;
-    if (!sameIds(composition.stepIds, was.stepIds ?? [])) {
-      const listed = new Set(composition.stepIds);
-      body.stepIds = composition.stepIds;
-      const kept = Object.entries(was.preAnswerDefaults).filter(([id]) => listed.has(id));
-      if (kept.length < Object.keys(was.preAnswerDefaults).length) {
-        body.preAnswerDefaults = Object.fromEntries(kept);
-      }
-    }
-    if (!sameLimits(composition.loopLimits, was.stepLoopLimitDefaults)) {
+    if (!sameIds(composition.stepIds, was.stepIds ?? [])) body.stepIds = composition.stepIds;
+    // The api drops what a removed step left behind, so a removal alone sends neither map.
+    const keptLimits = pruneLoopLimits(was.stepLoopLimitDefaults, composition.stepIds);
+    if (!sameLimits(composition.loopLimits, keptLimits)) {
       body.stepLoopLimitDefaults = composition.loopLimits;
     }
     if (editableFields.includes('promptSteps')) {

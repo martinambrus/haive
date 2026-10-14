@@ -90,8 +90,10 @@ cd ~/haive && ./uninstall.sh --purge    # …and repositories, CLI logins, built
 
 The default keeps your cloned repositories, uploaded bundles, CLI logins and the DDEV CA, and
 lists them by name; `--purge` removes those too. It only ever touches resources belonging to this
-install id, and it does not delete the directory it is running from — the last line prints the
-command that does.
+install id, and it does not delete the directory it is running from — after a clean `--purge` the
+last line prints the command that does. Before it says anything is gone it checks what is left: a
+container, network, volume or image it could not remove (or a Docker daemon it cannot reach) is
+listed with the command to remove it, and the script exits 1.
 
 ### More than one install on a machine
 

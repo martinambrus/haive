@@ -4,6 +4,7 @@ import { MODULES_LOADED_WORKER_KEY } from '@haive/shared/modularity';
 import {
   publishWorkerBootReport,
   registerModuleSteps,
+  type ModuleTaskTypeOutcome,
   type WorkerModuleEntry,
 } from '../src/modules/loader.js';
 import { StepRegistry } from '../src/step-engine/registry.js';
@@ -83,9 +84,7 @@ describe('module task type seeds at load', () => {
 });
 
 describe('the worker boot report', () => {
-  async function published(
-    taskTypes: Record<string, { seeded: string[]; conflicts: { slug: string; heldBy: string }[] }>,
-  ) {
+  async function published(taskTypes: Record<string, ModuleTaskTypeOutcome>) {
     const writes: [string, string][] = [];
     const redis = {
       set: async (key: string, value: string) => void writes.push([key, value]),
@@ -114,6 +113,14 @@ describe('the worker boot report', () => {
       seeded: ['fx__weekly'],
       conflicts: [{ slug: 'fx__daily', heldBy: 'admin' }],
     });
+  });
+
+  it('carries the seeds the checks refused, with each problem', async () => {
+    const invalid = [
+      { slug: 'fx__bad', issues: [{ kind: 'unknown-step' as const, index: 0, stepId: 'gone' }] },
+    ];
+    const report = await published({ fx: { seeded: [], conflicts: [], invalid } });
+    expect(report.modules[0]!.taskTypes).toEqual({ seeded: [], conflicts: [], invalid });
   });
 
   it('gives a module the seed said nothing about empty lists', async () => {
