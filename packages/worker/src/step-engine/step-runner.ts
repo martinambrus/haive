@@ -46,7 +46,7 @@ import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { TEMPLATE_PERSONA_MARKER_PATTERN, parseStepId } from '@haive/shared/modularity';
-import { assertModuleActive } from '../modules/activation.js';
+import { moduleDeactivationMessage } from '../modules/activation.js';
 import { promptStepNamedText } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
@@ -2508,7 +2508,6 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   const meta = stepDef.metadata;
   const round = params.round ?? 0;
 
-  await assertModuleActive(db, meta.id);
   const row = await upsertRow(db, taskId, stepDef, round, params.runSeq);
 
   // Terminal short-circuit. A `done`/`skipped` row reaching advanceStep is always a
@@ -2524,6 +2523,26 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   // A failed row is reopened only by a write that resets it first, so it fails the task again.
   if (row.status === 'failed') {
     return { status: 'failed', row, error: row.errorMessage ?? 'the step failed' };
+  }
+
+  const deactivated = await moduleDeactivationMessage(db, meta.id);
+  if (deactivated !== null) {
+    const patch = {
+      status: 'failed',
+      statusMessage: null,
+      errorMessage: deactivated,
+      endedAt: new Date(),
+    } as const;
+    // updateRow refuses a pending row; openPendingStep opens it, under the job's epoch.
+    const failed =
+      row.status === 'pending'
+        ? await openPendingStep(db, taskId, params.epoch, row.id, patch)
+        : await updateRow(db, row.id, patch).catch((err: unknown) => {
+            if (err instanceof StepSupersededError) return null;
+            throw err;
+          });
+    if (!failed) return { status: 'superseded', row };
+    return { status: 'failed', row: failed, error: deactivated };
   }
 
   const controller = new AbortController();

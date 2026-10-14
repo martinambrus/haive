@@ -50,6 +50,7 @@ import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
 import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
+import { moduleDeactivationMessage } from '../modules/activation.js';
 import { completePlanNodesForTask } from '../plan/task-link.js';
 import { stampRepositoryOnboarded } from '../repo/onboarded.js';
 import { markPlanCodeLinksStale } from '../plan/code-link-staleness.js';
@@ -2714,8 +2715,14 @@ async function handleAdvanceStep(
   // remains the last-resort backstop for the rare pre-check -> cold-boot race. A null kind means
   // this step will spawn no runner at all, so it takes no gate, no queue ticket and no
   // reservation — see resolveAdmissionRuntimeKind.
+  // A step of a deactivated module asks its shouldRun nothing and takes no slot here;
+  // advanceStep fails its row.
+  const moduleOff = stepDef.needsRuntime
+    ? (await moduleDeactivationMessage(db, payload.stepId)) !== null
+    : false;
   // A fresh step whose own shouldRun says skip takes no slot, ticket or preemption first.
   const skipsBeforeAdmission =
+    !moduleOff &&
     stepDef.needsRuntime &&
     stepDef.shouldRun &&
     (existing == null || isFreshStepEntry(existing.status))
@@ -2725,7 +2732,7 @@ async function handleAdvanceStep(
         )
       : false;
   const runtimeKind =
-    stepDef.needsRuntime && !skipsBeforeAdmission
+    stepDef.needsRuntime && !moduleOff && !skipsBeforeAdmission
       ? await resolveAdmissionRuntimeKind(db, ctx, stepDef.needsRuntime)
       : null;
   if (runtimeKind) {
