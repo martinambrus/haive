@@ -1,6 +1,6 @@
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, asc, eq, inArray, lt } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { lockRepositoryTasksKey, schema } from '@haive/database';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
   PLAN_MIRROR_JOB_NAMES,
@@ -17,10 +17,22 @@ import type {
 } from '@haive/shared/project-state';
 import { resolveProjectStateConflict } from '../project-state/resolve.js';
 import { markProjectStatesDirtyAtBoot, sweepDirtyProjectStates } from '../project-state/refresh.js';
+import {
+  MOVE_ATTEMPTS,
+  putBackProjections,
+  recoverAfterMoveFailure,
+  restoreKeptMetadata,
+  restoreProjectionsInTx,
+  resyncHaiveProjections,
+  setAsideHaiveProjections,
+  type CheckoutFence,
+  type KeptFiles,
+} from '../project-state/set-aside.js';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
+import { checkoutHoldingTasks } from '../repo/refresh.js';
 import {
   PlanMirrorHeldError,
   advancePlanBaseFromCommit,
@@ -52,6 +64,9 @@ const FALLBACK_GIT_IDENTITY = {
   GIT_COMMITTER_NAME: 'Haive',
   GIT_COMMITTER_EMAIL: 'worker@haive.local',
 };
+const PULL_BUSY = 'this repository has a task in flight; finish or cancel it before pulling';
+const SAVE_BUSY =
+  'this repository has a task in flight; the plan commit stays local and nothing was pushed; finish or cancel it before saving and pushing';
 
 async function requireOwnedRepository(repositoryId: string, userId?: string) {
   const repo = await getDb().query.repositories.findFirst({
@@ -124,6 +139,16 @@ async function flushCurrentPlanMirror(
   throw new Error('the plan changed repeatedly while its snapshot was being saved; try again');
 }
 
+export interface IntegrateOutcome {
+  landed: boolean;
+  previousCommit: string | null;
+  conflict?: PlanMergeConflict;
+  /** Tasks holding the checkout when it was to move; it did not. */
+  held?: number;
+  /** Why Haive's own files could not make way for the move; it did not happen. */
+  refused?: string;
+}
+
 /**
  * Bring `origin/<branch>` into the checkout, or report why it cannot be done here.
  *
@@ -138,6 +163,9 @@ async function flushCurrentPlanMirror(
  * merge behind: the resolution conversation is a task, it builds its own worktree,
  * and two owners for one mid-merge tree is how a half-resolved state outlives the
  * thing that made it.
+ *
+ * Haive's own pending projection files are set aside before the branch moves: `kept` holds
+ * them, and they are put back here unless the checkout moved, when the caller re-syncs.
  */
 export async function integrateOrigin(args: {
   repositoryId: string;
@@ -146,7 +174,8 @@ export async function integrateOrigin(args: {
   userId: string;
   credentialId?: string | null;
   identity: Record<string, string>;
-}): Promise<{ landed: boolean; previousCommit: string | null; conflict?: PlanMergeConflict }> {
+  kept: KeptFiles;
+}): Promise<IntegrateOutcome> {
   const db = getDb();
   const head = await gitRun(args.repoPath, ['rev-parse', 'HEAD']);
   const previousCommit = head.code === 0 ? head.stdout.trim() : null;
@@ -159,32 +188,60 @@ export async function integrateOrigin(args: {
     ...(args.credentialId ? { credentialId: args.credentialId } : {}),
   });
   const gap = await divergence(args.repoPath, args.branch);
-  if (gap.behind === 0) return { landed: false, previousCommit };
+  const putBack = () => putBackProjections(db, args.repositoryId, args.repoPath, args.kept);
+  if (gap.behind === 0) {
+    await putBack();
+    return { landed: false, previousCommit };
+  }
 
-  return db.transaction(async (tx) => {
-    await lockPlanMerge(tx, args.repositoryId);
-    // The api refuses a save while a conversation is open, but one can open after that check.
-    const [open] = await tx
-      .select({ id: schema.tasks.id })
-      .from(schema.tasks)
-      .where(
-        and(
-          eq(schema.tasks.repositoryId, args.repositoryId),
-          eq(schema.tasks.type, 'plan_merge'),
-          inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
-        ),
-      )
-      .limit(1);
-    if (open) throw new Error('A merge conversation is open for this repository');
-    return mergeInScratch(args, gap, previousCommit);
-  });
+  const fence = (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
+    checkoutHoldingTasks(conn, args.repositoryId);
+  for (let attempt = 1; ; attempt++) {
+    const aside = await setAsideHaiveProjections(db, args.repositoryId, args.repoPath, fence);
+    if (aside.outcome === 'held' || aside.outcome === 'refused') {
+      await putBack();
+      return aside.outcome === 'held'
+        ? { landed: false, previousCommit, held: aside.holding }
+        : { landed: false, previousCommit, refused: aside.reason };
+    }
+    if (aside.outcome === 'set-aside') {
+      for (const [file, was] of aside.kept) if (!args.kept.has(file)) args.kept.set(file, was);
+    }
+
+    // A file found rewritten ends the transaction unmoved and goes back to the set-aside.
+    const moved = await db.transaction(async (tx) => {
+      await lockPlanMerge(tx, args.repositoryId);
+      // The api refuses a save while a conversation is open, but one can open after that check.
+      const [open] = await tx
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(
+          and(
+            eq(schema.tasks.repositoryId, args.repositoryId),
+            eq(schema.tasks.type, 'plan_merge'),
+            inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
+          ),
+        )
+        .limit(1);
+      if (open) throw new Error('A merge conversation is open for this repository');
+      return mergeInScratch(tx, args, gap, previousCommit, fence);
+    });
+    if (moved.retry && attempt < MOVE_ATTEMPTS) continue;
+    const { retry, ...outcome } = moved;
+    if (!outcome.landed) await putBack();
+    return retry
+      ? { ...outcome, refused: "Haive's project files kept changing under the move" }
+      : outcome;
+  }
 }
 
 async function mergeInScratch(
+  tx: Parameters<typeof restoreProjectionsInTx>[0],
   args: Parameters<typeof integrateOrigin>[0],
   gap: Awaited<ReturnType<typeof divergence>>,
   previousCommit: string | null,
-): Promise<Awaited<ReturnType<typeof integrateOrigin>>> {
+  fence: CheckoutFence,
+): Promise<IntegrateOutcome & { retry?: true }> {
   const db = getDb();
   const worktree = await ensurePlanMergeWorktree(args.repoPath);
   // An abandoned conversation's merge is discarded below, but not what its fixers left: a failure
@@ -206,6 +263,15 @@ async function mergeInScratch(
     }
     const sha = await commitMerge(worktree, `Merge origin/${args.branch}`, args.identity);
     if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
+    // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
+    await lockRepositoryTasksKey(tx, args.repositoryId);
+    const check = await restoreProjectionsInTx(tx, args.repositoryId, args.repoPath);
+    if (check.outcome === 'retry') return { landed: false, previousCommit, retry: true };
+    if (check.outcome === 'refused') {
+      return { landed: false, previousCommit, refused: check.reason };
+    }
+    const holding = await fence(tx);
+    if (holding > 0) return { landed: false, previousCommit, held: holding };
     await landPlanMerge(args.repoPath, sha);
     return { landed: true, previousCommit };
   } finally {
@@ -213,7 +279,7 @@ async function mergeInScratch(
   }
 }
 
-async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
+export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);
   let files: string[] = [];
@@ -247,36 +313,51 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
       if (!(await detectOrigin(repoPath))) {
         throw new Error('this repository has no origin remote to push to');
       }
-      // Integrate BEFORE pushing rather than pushing and reading the rejection: a
-      // push that fails prints a hint git is free to reword, and branching on that
-      // text would break silently on a git upgrade. Ahead/behind counts say the same
-      // thing structurally.
-      const integrated = await integrateOrigin({
-        repositoryId: repo.id,
-        repoPath,
-        branch,
-        userId: payload.userId,
-        credentialId: repo.credentialsSecretId,
-        identity,
-      });
-      if (integrated.conflict) {
-        // Nothing was pushed and nothing was lost — the plan commit above stands and
-        // the checkout never moved. The caller offers the resolution conversation.
-        return resultFor(repo.id, files, {
-          committed,
-          commitSha,
-          pushed: false,
+      const kept: KeptFiles = new Map();
+      const before = (await gitRun(repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+      try {
+        // Integrate BEFORE pushing rather than pushing and reading the rejection: a
+        // push that fails prints a hint git is free to reword, and branching on that
+        // text would break silently on a git upgrade. Ahead/behind counts say the same
+        // thing structurally.
+        const integrated = await integrateOrigin({
+          repositoryId: repo.id,
+          repoPath,
           branch,
-          conflict: integrated.conflict,
+          userId: payload.userId,
+          credentialId: repo.credentialsSecretId,
+          identity,
+          kept,
         });
-      }
-      if (integrated.landed) {
-        // The merge brought in the other side's plan; fold it into the database and
-        // rewrite the files, exactly as a pull does, so what is pushed is the union
-        // rather than only this side.
-        await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
-        await flushPlanMirrorForRepository(getDb(), repo.id);
-        await commitPlanSnapshotFiles({ repoPath, message, identity });
+        if (integrated.held !== undefined) throw new Error(SAVE_BUSY);
+        if (integrated.refused !== undefined) {
+          throw new Error(
+            `${integrated.refused}; the plan commit stays local and nothing was pushed`,
+          );
+        }
+        if (integrated.conflict) {
+          // Nothing was pushed and nothing was lost — the plan commit above stands and
+          // the checkout never moved. The caller offers the resolution conversation.
+          return resultFor(repo.id, files, {
+            committed,
+            commitSha,
+            pushed: false,
+            branch,
+            conflict: integrated.conflict,
+          });
+        }
+        if (integrated.landed) {
+          // The merge brought in the other side's plan; fold it into the database and
+          // rewrite the files, exactly as a pull does, so what is pushed is the union
+          // rather than only this side.
+          await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
+          await flushPlanMirrorForRepository(getDb(), repo.id);
+          await commitPlanSnapshotFiles({ repoPath, message, identity });
+          await resyncHaiveProjections(getDb(), repo.id, repoPath);
+          await restoreKeptMetadata(repoPath, kept);
+        }
+      } catch (err) {
+        return recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
       }
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
       const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
@@ -304,12 +385,13 @@ async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
 /**
  * The only direction that reads the repository INTO the database.
  *
- * Fast-forward ONLY. A diverged branch is a real merge, with conflicts a person
+ * The checkout only fast-forwards, onto a merge made in a scratch worktree.
+ * A diverged branch is a real merge, with conflicts a person
  * has to resolve in a checkout; doing it here would either lose one side or
  * leave a half-merged tree that every later step then runs against. Refusing and
  * saying why is the honest option.
  */
-async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
+export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
   const db = getDb();
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);
@@ -332,7 +414,7 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     )
     .limit(1);
   if (busy.length > 0) {
-    throw new Error('this repository has a task in flight; finish or cancel it before pulling');
+    throw new Error(PULL_BUSY);
   }
 
   try {
@@ -346,67 +428,93 @@ async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult>
     const branchResult = await gitRun(repoPath, ['branch', '--show-current']);
     const branch = branchResult.code === 0 ? branchResult.stdout.trim() : '';
     if (!branch) throw new Error('cannot pull onto a detached HEAD');
-    // Untracked files are fine — the sandbox leaves plenty. A MODIFIED tracked
-    // file is what a fast-forward would refuse to touch, and the message it gives
-    // is worse than this one.
-    const dirty = await gitRun(repoPath, [
-      '--no-optional-locks',
-      'status',
-      '--porcelain',
-      '--untracked-files=no',
-    ]);
-    if (dirty.code === 0 && dirty.stdout.trim().length > 0) {
-      throw new Error('this checkout has uncommitted changes; commit or discard them first');
-    }
-
-    const resolvedIdentity = await resolveGitEnv(db, {
-      userId: payload.userId,
-      repositoryId: repo.id,
-    });
-    const identity =
-      Object.keys(resolvedIdentity).length > 0 ? resolvedIdentity : FALLBACK_GIT_IDENTITY;
+    // The set-aside replaces plan.json, which a row stamped before 0196 takes its base from.
     await seedPlanBaseFromCheckout(db, repo.id, repoPath);
-    // A real merge, not --ff-only. Refusing a diverged branch was defensible while
-    // nothing could resolve one; it also meant a plan could never reach a repository
-    // that had a README before Haive did.
-    const integrated = await integrateOrigin({
-      repositoryId: repo.id,
-      repoPath,
-      branch,
-      userId: payload.userId,
-      credentialId: repo.credentialsSecretId,
-      identity,
-    });
-    const previousCommit = integrated.previousCommit;
-    if (integrated.conflict) {
-      return resultFor(repo.id, [], {
+    const kept: KeptFiles = new Map();
+    const before = (await gitRun(repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+    // Before the dirty check below, which would refuse a file Haive wrote.
+    const aside = await setAsideHaiveProjections(db, repo.id, repoPath, (conn) =>
+      checkoutHoldingTasks(conn, repo.id),
+    );
+    if (aside.outcome === 'held') throw new Error(PULL_BUSY);
+    if (aside.outcome === 'refused') {
+      throw new Error(`${aside.reason}; nothing was pulled and the checkout was not moved`);
+    }
+    if (aside.outcome === 'set-aside') for (const [file, was] of aside.kept) kept.set(file, was);
+
+    try {
+      // Untracked files are fine — the sandbox leaves plenty. A MODIFIED tracked
+      // file is what a fast-forward would refuse to touch, and the message it gives
+      // is worse than this one.
+      const dirty = await gitRun(repoPath, [
+        '--no-optional-locks',
+        'status',
+        '--porcelain',
+        '--untracked-files=no',
+      ]);
+      if (dirty.code === 0 && dirty.stdout.trim().length > 0) {
+        throw new Error('this checkout has uncommitted changes; commit or discard them first');
+      }
+
+      const resolvedIdentity = await resolveGitEnv(db, {
+        userId: payload.userId,
+        repositoryId: repo.id,
+      });
+      const identity =
+        Object.keys(resolvedIdentity).length > 0 ? resolvedIdentity : FALLBACK_GIT_IDENTITY;
+      // A real merge, not --ff-only. Refusing a diverged branch was defensible while
+      // nothing could resolve one; it also meant a plan could never reach a repository
+      // that had a README before Haive did.
+      const integrated = await integrateOrigin({
+        repositoryId: repo.id,
+        repoPath,
+        branch,
+        userId: payload.userId,
+        credentialId: repo.credentialsSecretId,
+        identity,
+        kept,
+      });
+      if (integrated.held !== undefined) throw new Error(PULL_BUSY);
+      if (integrated.refused !== undefined) {
+        throw new Error(`${integrated.refused}; nothing was pulled and the checkout was not moved`);
+      }
+      const previousCommit = integrated.previousCommit;
+      if (integrated.conflict) {
+        return resultFor(repo.id, [], {
+          committed: false,
+          commitSha: previousCommit,
+          pushed: false,
+          branch,
+          conflict: integrated.conflict,
+        });
+      }
+      const after = await gitRun(repoPath, ['rev-parse', 'HEAD']);
+      const currentCommit = after.code === 0 ? after.stdout.trim() : null;
+
+      const outcome = await reconcilePlanFromCheckout(db, repo.id, repoPath);
+      // Files are rewritten from the database afterwards, not trusted as pulled:
+      // the reconcile keeps local-only nodes and local values under a question, so the
+      // checkout's plan.json no longer says everything the plan does.
+      const files = outcome.skipped ? [] : (await flushPlanMirrorForRepository(db, repo.id)).files;
+      if (integrated.landed) {
+        await resyncHaiveProjections(db, repo.id, repoPath);
+        await restoreKeptMetadata(repoPath, kept);
+      }
+
+      return resultFor(repo.id, files, {
         committed: false,
-        commitSha: previousCommit,
+        commitSha: currentCommit,
         pushed: false,
         branch,
-        conflict: integrated.conflict,
+        pulled: {
+          ...outcome,
+          previousCommit,
+          fastForwarded: previousCommit !== currentCommit,
+        },
       });
+    } catch (err) {
+      return recoverAfterMoveFailure(db, repo.id, repoPath, kept, before, err);
     }
-    const after = await gitRun(repoPath, ['rev-parse', 'HEAD']);
-    const currentCommit = after.code === 0 ? after.stdout.trim() : null;
-
-    const outcome = await reconcilePlanFromCheckout(db, repo.id, repoPath);
-    // Files are rewritten from the database afterwards, not trusted as pulled:
-    // the reconcile keeps local-only nodes and local values under a question, so the
-    // checkout's plan.json no longer says everything the plan does.
-    const files = outcome.skipped ? [] : (await flushPlanMirrorForRepository(db, repo.id)).files;
-
-    return resultFor(repo.id, files, {
-      committed: false,
-      commitSha: currentCommit,
-      pushed: false,
-      branch,
-      pulled: {
-        ...outcome,
-        previousCommit,
-        fastForwarded: previousCommit !== currentCommit,
-      },
-    });
   } catch (err) {
     await recordPlanMirrorError(db, repo.id, err).catch(() => undefined);
     throw err;
