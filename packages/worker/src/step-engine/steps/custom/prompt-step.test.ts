@@ -213,3 +213,33 @@ describe('prompt step detect', () => {
     });
   });
 });
+
+describe('prompt step apply with a recorded invocation', () => {
+  const ctxWith = (row: { rawOutput: string | null; parsedOutput: unknown } | undefined) =>
+    ({
+      db: {
+        select: () => ({
+          from: () => ({ where: () => ({ limit: async () => (row ? [row] : []) }) }),
+        }),
+      },
+    }) as unknown as StepContext;
+  const applyWith = (ctx: StepContext, llmOutput: unknown) =>
+    buildPromptStep(ID, make(), 0).apply(ctx, {
+      detected: detected(),
+      formValues: {},
+      llmOutput,
+      llmInvocationId: 'inv-1',
+      iteration: 0,
+      previousIterations: [],
+    });
+
+  it('keeps the exact reply of a JSON string instead of the value parsed out of it', async () => {
+    const ctx = ctxWith({ rawOutput: '"approved"', parsedOutput: 'approved' });
+    expect(await applyWith(ctx, 'approved')).toEqual({ raw: '"approved"', parsed: 'approved' });
+  });
+
+  it('keeps the reply text of a JSON object as the CLI sent it', async () => {
+    const ctx = ctxWith({ rawOutput: '{ "a": 1 }', parsedOutput: { a: 1 } });
+    expect(await applyWith(ctx, { a: 1 })).toEqual({ raw: '{ "a": 1 }', parsed: { a: 1 } });
+  });
+});

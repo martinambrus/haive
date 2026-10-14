@@ -154,7 +154,22 @@ export function buildPromptStep(
       bypassStub: () => `Test bypass: prompt step ${stepId} ran no agent.`,
     },
 
-    async apply(_ctx, args): Promise<PromptStepOutput> {
+    async apply(ctx, args): Promise<PromptStepOutput> {
+      // The runner hands apply the parsed value when the reply was JSON; the stored reply is
+      // what a later {{step:}} quotes, so it is read back exactly as the CLI sent it.
+      if (args.llmInvocationId) {
+        const [invocation] = await ctx.db
+          .select({
+            rawOutput: schema.cliInvocations.rawOutput,
+            parsedOutput: schema.cliInvocations.parsedOutput,
+          })
+          .from(schema.cliInvocations)
+          .where(eq(schema.cliInvocations.id, args.llmInvocationId))
+          .limit(1);
+        if (invocation?.rawOutput !== null && invocation?.rawOutput !== undefined) {
+          return { raw: invocation.rawOutput, parsed: invocation.parsedOutput ?? null };
+        }
+      }
       const out = args.llmOutput;
       if (typeof out === 'string') {
         try {
