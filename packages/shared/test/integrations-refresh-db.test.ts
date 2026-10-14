@@ -332,6 +332,20 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
       expect(row.lastError).toBe('invalid_grant');
     });
 
+    it("reads GitHub's bad_refresh_token as needing a new connection", async () => {
+      const id = await createConnection();
+      const vendor = answering(() =>
+        json(200, {
+          error: 'bad_refresh_token',
+          error_description: 'The refresh token passed is incorrect or expired.',
+        }),
+      );
+      expect(
+        await rejection(getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn })),
+      ).toBeInstanceOf(NeedsReauthError);
+      expect((await readRow(id)).status).toBe('needs_reauth');
+    });
+
     it('goes by the code, never by the words around it', async () => {
       const flagged = await createConnection();
       const words = answering(() =>

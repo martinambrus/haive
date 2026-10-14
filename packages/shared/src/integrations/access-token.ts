@@ -16,6 +16,8 @@ import { getIntegrationProvider } from './providers.js';
 
 const REFRESH_MARGIN_MS = 5 * 60_000;
 const REFRESH_LOCK_TIMEOUT_MS = 30_000;
+/** OAuth's code for a refresh token the vendor will not take again, and GitHub's own name for it. */
+const REFRESH_REJECTED_CODES = new Set(['invalid_grant', 'bad_refresh_token']);
 
 type ConnectionRow = typeof schema.integrationConnections.$inferSelect;
 type Outcome = { accessToken: string } | { needsReauth: true };
@@ -129,7 +131,7 @@ async function refreshLocked(
         now,
       });
     } catch (err) {
-      if (err instanceof OauthVendorError && err.code === 'invalid_grant') {
+      if (err instanceof OauthVendorError && REFRESH_REJECTED_CODES.has(err.code)) {
         return needsReauth(err.description ?? err.code);
       }
       throw err;

@@ -63,7 +63,13 @@ function parseObject(text: string): Json | null {
 function redact(text: string, secrets: VendorRequest['secrets']): string {
   let out = text;
   for (const secret of secrets) {
-    if (secret && secret.length >= MIN_REDACTED_LENGTH) out = out.split(secret).join('[redacted]');
+    if (!secret) continue;
+    if (secret.length >= MIN_REDACTED_LENGTH) {
+      out = out.split(secret).join('[redacted]');
+    } else if (out.includes(secret)) {
+      // Blanking a short secret in place would blank ordinary words too, so its echo hides the text.
+      return '[redacted]';
+    }
   }
   return out;
 }

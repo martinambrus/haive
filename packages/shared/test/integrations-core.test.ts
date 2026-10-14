@@ -328,6 +328,18 @@ describe('vendor answers', () => {
     expect(((await rejection(refresh(long.fetchFn))) as OauthVendorError).code).toHaveLength(100);
   });
 
+  it('hides the whole text when it echoes a secret too short to blank in place', async () => {
+    const { fetchFn } = stub(() =>
+      json(400, { error: 'invalid_grant', error_description: 'refresh token r7x was revoked' }),
+    );
+    const err = (await rejection(
+      refreshAccessToken(fetchFn, { tokenUrl: TOKEN_URL, client: CLIENT, refreshToken: 'r7x' }),
+    )) as OauthVendorError;
+    expect(err.code).toBe('invalid_grant');
+    expect(err.description).toBe('[redacted]');
+    expect(err.message).not.toContain('r7x');
+  });
+
   it('keeps a description to 500 characters', async () => {
     const { fetchFn } = stub(() =>
       json(400, { error: 'invalid_grant', error_description: 'x'.repeat(2000) }),
