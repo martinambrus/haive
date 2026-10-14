@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono } from 'hono';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
@@ -279,10 +280,14 @@ bundleRoutes.post('/', async (c) => {
   await assertRepositoryOwned(userId, body.repositoryId);
   if (body.gitCredentialsId) await assertCredentialsOwned(userId, body.gitCredentialsId);
 
+  // Chosen before the insert so the row is never visible with an empty storage_root.
+  const bundleId = randomUUID();
+  const storageRoot = path.join(bundleDirFor(userId, bundleId), 'extracted');
   const bundle = await db.transaction(async (tx) => {
     const [row] = await tx
       .insert(schema.customBundles)
       .values({
+        id: bundleId,
         userId,
         repositoryId: body.repositoryId,
         name: body.name,
@@ -290,7 +295,7 @@ bundleRoutes.post('/', async (c) => {
         gitUrl: body.gitUrl,
         gitBranch: body.gitBranch ?? 'main',
         gitCredentialsId: body.gitCredentialsId ?? null,
-        storageRoot: '',
+        storageRoot,
         enabledKinds: body.enabledKinds,
         status: 'syncing',
       })
@@ -298,12 +303,6 @@ bundleRoutes.post('/', async (c) => {
     await markProjectStateDirty(tx, body.repositoryId);
     return row!;
   });
-
-  const storageRoot = path.join(bundleDirFor(userId, bundle.id), 'extracted');
-  await db
-    .update(schema.customBundles)
-    .set({ storageRoot, updatedAt: new Date() })
-    .where(eq(schema.customBundles.id, bundle.id));
 
   const queue = getBundleQueue();
   const payload: BundleJobPayload = { bundleId: bundle.id, userId };
@@ -314,10 +313,7 @@ bundleRoutes.post('/', async (c) => {
   });
 
   const counts = await loadItemCounts([bundle.id]);
-  return c.json(
-    { bundle: bundleSummaryFromRow({ ...bundle, storageRoot }, counts.get(bundle.id)) },
-    201,
-  );
+  return c.json({ bundle: bundleSummaryFromRow(bundle, counts.get(bundle.id)) }, 201);
 });
 
 bundleRoutes.post('/uploads/init', async (c) => {
@@ -337,9 +333,14 @@ bundleRoutes.post('/uploads/init', async (c) => {
 
   const anchor = await ensureUploadsDir(userId, bundleStorageRoot());
 
+  const sessionId = randomUUID();
+  const archiveRel = `${uploadsRel(userId)}/${sessionId}.${archiveExt(format)}.partial`;
+  const archivePath = path.join(anchor, archiveRel);
+
   const inserted = await db
     .insert(schema.customBundleUploads)
     .values({
+      id: sessionId,
       userId,
       repositoryId: body.repositoryId,
       name: body.name,
@@ -349,26 +350,17 @@ bundleRoutes.post('/uploads/init', async (c) => {
       totalSize: body.totalSize,
       bytesReceived: 0,
       chunkSize: body.chunkSize,
-      archivePath: '',
+      archivePath,
       status: 'uploading',
     })
     .returning();
-  const session = inserted[0]!;
 
-  const archiveRel = `${uploadsRel(userId)}/${session.id}.${archiveExt(format)}.partial`;
-  const archivePath = path.join(anchor, archiveRel);
   // `open(path, 'w')` truncated whatever stood at the name, a link included. The name embeds a
   // fresh session id, so exclusive creation is the same outcome for every legitimate call.
   const fh = await openFileNoFollow(anchor, archiveRel, 'create-exclusive', { fileMode: 0o644 });
   await fh.close();
 
-  const updated = await db
-    .update(schema.customBundleUploads)
-    .set({ archivePath, updatedAt: new Date() })
-    .where(eq(schema.customBundleUploads.id, session.id))
-    .returning();
-
-  return c.json({ session: uploadSessionFromRow(updated[0]!) }, 201);
+  return c.json({ session: uploadSessionFromRow(inserted[0]!) }, 201);
 });
 
 bundleRoutes.get('/uploads/:id', async (c) => {
@@ -492,19 +484,22 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     throw new HttpError(409, 'archive size mismatch on disk');
   }
 
-  // Create the bundle row first so we know the bundleId; then move the staged
-  // archive into the bundle's per-bundle directory.
+  // Create the bundle row first, under an id chosen here so it is inserted with its storage_root;
+  // then move the staged archive into the bundle's per-bundle directory.
+  const bundleId = randomUUID();
+  const storageRoot = path.join(bundleDirFor(userId, bundleId), 'extracted');
   const bundle = await db.transaction(async (tx) => {
     const [created] = await tx
       .insert(schema.customBundles)
       .values({
+        id: bundleId,
         userId,
         repositoryId: row.repositoryId,
         name: row.name,
         sourceType: 'zip',
         archiveFilename: row.filename,
         archiveFormat: row.archiveFormat,
-        storageRoot: '',
+        storageRoot,
         enabledKinds: row.enabledKinds,
         status: 'syncing',
       })
@@ -513,14 +508,12 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     return created!;
   });
 
-  const bundleDir = bundleDirFor(userId, bundle.id);
   const finalRel = bundleRel(
     userId,
     bundle.id,
     `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`,
   );
   const finalArchive = path.join(anchor, finalRel);
-  const storageRoot = path.join(bundleDir, 'extracted');
 
   try {
     // `createParents` walks the bundle directory into place, which is what the separate `mkdir`
@@ -533,7 +526,7 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
 
   await db
     .update(schema.customBundles)
-    .set({ archivePath: finalArchive, storageRoot, updatedAt: new Date() })
+    .set({ archivePath: finalArchive, updatedAt: new Date() })
     .where(eq(schema.customBundles.id, bundle.id));
 
   await db
@@ -562,10 +555,7 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
   const counts = await loadItemCounts([bundle.id]);
   return c.json(
     {
-      bundle: bundleSummaryFromRow(
-        { ...bundle, archivePath: finalArchive, storageRoot },
-        counts.get(bundle.id),
-      ),
+      bundle: bundleSummaryFromRow({ ...bundle, archivePath: finalArchive }, counts.get(bundle.id)),
       session: { id: row.id, status: 'complete' as const },
     },
     201,
@@ -631,9 +621,14 @@ bundleRoutes.post('/:id/replace/init', async (c) => {
 
   const anchor = await ensureUploadsDir(userId, bundleStorageRoot());
 
+  const sessionId = randomUUID();
+  const archiveRel = `${uploadsRel(userId)}/${sessionId}.${archiveExt(format)}.partial`;
+  const archivePath = path.join(anchor, archiveRel);
+
   const inserted = await db
     .insert(schema.customBundleUploads)
     .values({
+      id: sessionId,
       userId,
       bundleId,
       repositoryId: bundle.repositoryId,
@@ -644,23 +639,15 @@ bundleRoutes.post('/:id/replace/init', async (c) => {
       totalSize,
       bytesReceived: 0,
       chunkSize,
-      archivePath: '',
+      archivePath,
       status: 'uploading',
     })
     .returning();
-  const session = inserted[0]!;
-  const archiveRel = `${uploadsRel(userId)}/${session.id}.${archiveExt(format)}.partial`;
-  const archivePath = path.join(anchor, archiveRel);
   // `open(path, 'w')` truncated whatever stood at the name, a link included. The name embeds a
   // fresh session id, so exclusive creation is the same outcome for every legitimate call.
   const fh = await openFileNoFollow(anchor, archiveRel, 'create-exclusive', { fileMode: 0o644 });
   await fh.close();
-  const updated = await db
-    .update(schema.customBundleUploads)
-    .set({ archivePath, updatedAt: new Date() })
-    .where(eq(schema.customBundleUploads.id, session.id))
-    .returning();
-  return c.json({ session: uploadSessionFromRow(updated[0]!) }, 201);
+  return c.json({ session: uploadSessionFromRow(inserted[0]!) }, 201);
 });
 
 bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
