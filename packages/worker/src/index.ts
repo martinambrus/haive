@@ -62,6 +62,7 @@ import {
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
 import { startModuleJobs } from './modules/loader.js';
+import { deactivatedModuleIds } from './modules/activation.js';
 
 async function main(): Promise<void> {
   const buildStamp = initBuildStamp();
@@ -254,7 +255,11 @@ async function main(): Promise<void> {
   const cliStreamLogReaper = new CliStreamLogReaper({ db: getDb() });
   cliStreamLogReaper.start();
 
-  const stopModuleJobs = await startModuleJobs(loadedModules, moduleEntries);
+  const stopModuleJobs = await startModuleJobs(
+    loadedModules,
+    moduleEntries,
+    await deactivatedModuleIds(getDb()),
+  );
 
   logger.info('haive-worker ready');
 

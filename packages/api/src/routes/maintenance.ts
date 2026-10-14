@@ -39,7 +39,7 @@ maintenanceRoutes.use('*', requireAdmin);
 
 /** Task states that still hold a maintenance window open. `waiting_user` counts: a task parked on
  *  a form is live work whose owner will come back to it, and stopping it loses their place. */
-const LIVE_TASK_STATES = [
+export const LIVE_TASK_STATES = [
   'created',
   'queued',
   'running',

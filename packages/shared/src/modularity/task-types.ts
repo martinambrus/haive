@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 import { validateComposition, type CompositionIssue } from './composition.js';
-import { RESERVED_TASK_TYPE_SLUGS, type ComposableStepEntry } from './contracts.js';
+import { RESERVED_TASK_TYPE_SLUGS, parseStepId, type ComposableStepEntry } from './contracts.js';
 import { promptStepEntrySchema } from './prompt-steps.js';
 
 export const CUSTOM_TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -22,6 +22,7 @@ export const TASK_TYPE_UNAVAILABLE_REASONS = [
   'not-selectable',
   'custom-types-off',
   'module-types-off',
+  'module-deactivated',
   'missing-step',
   'invalid-composition',
 ] as const;
@@ -37,6 +38,7 @@ export interface TaskTypeAvailabilityInput {
     requiresRepository: boolean;
   };
   switches: { customEnabled: boolean; moduleEnabled: boolean };
+  deactivatedModules: ReadonlySet<string>;
   catalog: {
     stepIds: ReadonlySet<string>;
     composable: ReadonlyMap<string, ComposableStepEntry>;
@@ -51,12 +53,30 @@ export type TaskTypeAvailability =
       reason: TaskTypeUnavailableReason;
       stepIds?: string[];
       issues?: CompositionIssue[];
+      moduleIds?: string[];
     };
+
+export function moduleIdsOfTaskType(
+  definition: Pick<
+    TaskTypeAvailabilityInput['definition'],
+    'source' | 'runListStrategy' | 'stepIds'
+  >,
+): string[] {
+  const ids = new Set<string>();
+  if (definition.source.startsWith('module:')) ids.add(definition.source.slice('module:'.length));
+  if (definition.runListStrategy === 'static') {
+    for (const stepId of definition.stepIds ?? []) {
+      const parsed = parseStepId(stepId);
+      if (parsed?.kind === 'module') ids.add(parsed.moduleId);
+    }
+  }
+  return [...ids].sort();
+}
 
 export function resolveTaskTypeAvailability(
   input: TaskTypeAvailabilityInput,
 ): TaskTypeAvailability {
-  const { definition, switches, catalog, generic } = input;
+  const { definition, switches, deactivatedModules, catalog, generic } = input;
   if (!definition.enabled) return { available: false, reason: 'disabled' };
   if (generic && !definition.selectable) return { available: false, reason: 'not-selectable' };
   if (definition.source === 'admin' && !switches.customEnabled) {
@@ -65,6 +85,8 @@ export function resolveTaskTypeAvailability(
   if (definition.source.startsWith('module:') && !switches.moduleEnabled) {
     return { available: false, reason: 'module-types-off' };
   }
+  const moduleIds = moduleIdsOfTaskType(definition).filter((id) => deactivatedModules.has(id));
+  if (moduleIds.length > 0) return { available: false, reason: 'module-deactivated', moduleIds };
   if (catalog === null || definition.runListStrategy !== 'static' || definition.stepIds === null) {
     return { available: true };
   }

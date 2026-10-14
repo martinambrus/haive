@@ -23,6 +23,7 @@ const UNAVAILABLE_REASON_TEXT: Record<TaskTypeUnavailableReason, string> = {
   'not-selectable': 'this task type cannot be started from this form',
   'custom-types-off': 'custom task types are turned off by an administrator',
   'module-types-off': 'module task types are turned off by an administrator',
+  'module-deactivated': 'a module it uses is deactivated',
   'missing-step': 'a step it needs is not installed',
   'invalid-composition': 'its steps no longer fit together',
 };

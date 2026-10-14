@@ -3,11 +3,19 @@ import { formSchemaSchema, statusSummaryItemSchema, type FormSchema } from '../s
 import {
   composableStepEntrySchema,
   isCoreStepId,
+  moduleTaskTypeSlug,
+  parseStepId,
   taskTypeDefinitionSeedSchema,
 } from './contracts.js';
+import { STEP_ID_MAX_LENGTH } from './prompt-steps.js';
 
 const MODULE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+// databaseName('module', id) must fit Postgres' 63-byte identifier under the longest install id:
+// 63 - 33 ('<32 chars>_') - 7 ('module_') = 23.
+const MODULE_ID_MAX_LENGTH = 23;
 const PAGE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+/** The `task_type_definitions.slug` column. */
+const TASK_TYPE_SLUG_MAX_LENGTH = 128;
 
 const endpointSchema = z
   .string()
@@ -171,7 +179,7 @@ function isUnique(values: string[]): boolean {
 
 export const moduleManifestSchema = z
   .object({
-    id: z.string().regex(MODULE_ID_PATTERN),
+    id: z.string().regex(MODULE_ID_PATTERN).max(MODULE_ID_MAX_LENGTH),
     name: z.string().min(1),
     version: z.string().min(1),
     schemaVersion: z.number().int().positive(),
@@ -214,6 +222,46 @@ export const moduleManifestSchema = z
   .refine((m) => isUnique((m.taskTypes ?? []).map((t) => t.slug)), {
     message: 'task type slugs must be unique within a manifest',
     path: ['taskTypes'],
+  })
+  .superRefine((m, ctx) => {
+    (m.taskTypes ?? []).forEach((seed, index) => {
+      const fail = (message: string) =>
+        ctx.addIssue({
+          code: 'custom',
+          message: `task type "${seed.slug}": ${message}`,
+          path: ['taskTypes', index],
+        });
+      const stored = moduleTaskTypeSlug(m.id, seed.slug);
+      if (stored.length > TASK_TYPE_SLUG_MAX_LENGTH) {
+        fail(
+          `stored slug is ${stored.length} characters; the limit is ${TASK_TYPE_SLUG_MAX_LENGTH}`,
+        );
+      }
+      if (`module:${m.id}`.length > TASK_TYPE_SLUG_MAX_LENGTH) {
+        fail(`its source "module:${m.id}" is longer than ${TASK_TYPE_SLUG_MAX_LENGTH} characters`);
+      }
+      if (seed.runListStrategy !== 'static') {
+        fail('a module task type must use the static strategy');
+      }
+      const seen = new Set<string>();
+      for (const stepId of seed.stepIds ?? []) {
+        if (seen.has(stepId)) fail(`step "${stepId}" appears twice`);
+        seen.add(stepId);
+        if (stepId.length > STEP_ID_MAX_LENGTH) {
+          fail(`step "${stepId}" is longer than ${STEP_ID_MAX_LENGTH} characters`);
+        }
+        const parsed = parseStepId(stepId);
+        if (parsed?.kind === 'custom') {
+          fail(
+            `step "${stepId}" is a custom step; a module task type names core steps and its own`,
+          );
+        } else if (parsed?.kind === 'module' && parsed.moduleId !== m.id) {
+          fail(
+            `step "${stepId}" belongs to module "${parsed.moduleId}"; a module task type names core steps and its own`,
+          );
+        }
+      }
+    });
   })
   .refine((m) => defaultsMatchForm(m.globalSettings), {
     message: 'every default must name a field of the form',

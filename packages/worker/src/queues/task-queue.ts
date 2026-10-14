@@ -50,6 +50,7 @@ import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
 import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
+import { moduleDeactivationMessage } from '../modules/activation.js';
 import { completePlanNodesForTask } from '../plan/task-link.js';
 import { stampRepositoryOnboarded } from '../repo/onboarded.js';
 import { markPlanCodeLinksStale } from '../plan/code-link-staleness.js';
@@ -2714,8 +2715,13 @@ async function handleAdvanceStep(
   // remains the last-resort backstop for the rare pre-check -> cold-boot race. A null kind means
   // this step will spawn no runner at all, so it takes no gate, no queue ticket and no
   // reservation — see resolveAdmissionRuntimeKind.
+  // A step of a deactivated module asks its shouldRun nothing and takes no slot here;
+  // advanceStep fails its row.
+  const moduleDeactivation = await moduleDeactivationMessage(db, payload.stepId);
+  const moduleOff = moduleDeactivation !== null;
   // A fresh step whose own shouldRun says skip takes no slot, ticket or preemption first.
   const skipsBeforeAdmission =
+    !moduleOff &&
     stepDef.needsRuntime &&
     stepDef.shouldRun &&
     (existing == null || isFreshStepEntry(existing.status))
@@ -2725,7 +2731,7 @@ async function handleAdvanceStep(
         )
       : false;
   const runtimeKind =
-    stepDef.needsRuntime && !skipsBeforeAdmission
+    stepDef.needsRuntime && !moduleOff && !skipsBeforeAdmission
       ? await resolveAdmissionRuntimeKind(db, ctx, stepDef.needsRuntime)
       : null;
   if (runtimeKind) {
@@ -2902,6 +2908,10 @@ async function handleAdvanceStep(
     );
     return;
   }
+  // Now that the task is live a deactivation must count it, and one already under way is waited
+  // out; on can still turn off here, never the reverse, which would run a step admission skipped.
+  const moduleDecision =
+    moduleDeactivation ?? (await moduleDeactivationMessage(db, payload.stepId, { lock: true }));
 
   const providers = await loadProviders(db, ctx.userId);
   try {
@@ -2920,6 +2930,7 @@ async function handleAdvanceStep(
       providers,
       deps: workerDeps,
       epoch: ctx.orchestrationEpoch,
+      moduleDeactivation: moduleDecision,
     });
     await handleResult(db, ctx, payload.stepId, result);
   } finally {

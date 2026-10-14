@@ -23,21 +23,28 @@ export type ModuleRoute =
   | { kind: 'loading' }
   | { kind: 'not-found' };
 
-/** A compiled page wins; otherwise a declared page of exactly one segment. `modules` is null until
- *  the module list has loaded. */
+/** A compiled page wins; otherwise a declared page of exactly one segment. Both need the module in
+ *  `modules` (the api omits a deactivated one), which is null until the list has loaded. */
 export function resolveModuleRoute(
   registry: Readonly<Record<string, ModulePages>>,
-  modules: readonly { id: string; pages: Readonly<Record<string, DashboardSpec>> }[] | null,
+  modules:
+    | readonly {
+        id: string;
+        compiledWeb: boolean;
+        pages: Readonly<Record<string, DashboardSpec>>;
+      }[]
+    | null,
   moduleId: string,
   page: string[] | undefined,
 ): ModuleRoute {
-  const Page = resolveModulePage(registry, moduleId, page);
-  if (Page !== null) return { kind: 'component', Page };
   if (modules === null) return { kind: 'loading' };
-  const pages = modules.find((m) => m.id === moduleId)?.pages;
+  const listed = modules.find((m) => m.id === moduleId);
+  if (listed === undefined) return { kind: 'not-found' };
+  const Page = listed.compiledWeb ? resolveModulePage(registry, moduleId, page) : null;
+  if (Page !== null) return { kind: 'component', Page };
   const segments = page ?? [];
-  if (pages === undefined || segments.length !== 1 || !Object.hasOwn(pages, segments[0]!)) {
+  if (segments.length !== 1 || !Object.hasOwn(listed.pages, segments[0]!)) {
     return { kind: 'not-found' };
   }
-  return { kind: 'dashboard', spec: pages[segments[0]!]! };
+  return { kind: 'dashboard', spec: listed.pages[segments[0]!]! };
 }

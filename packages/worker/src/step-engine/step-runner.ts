@@ -46,6 +46,7 @@ import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { TEMPLATE_PERSONA_MARKER_PATTERN, parseStepId } from '@haive/shared/modularity';
+import { moduleDeactivationMessage } from '../modules/activation.js';
 import { promptStepNamedText } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
@@ -311,6 +312,8 @@ export interface AdvanceStepParams {
   /** The task epoch this pass runs under. A pass whose task moves past it (a Retry) stops at its
    *  next cancellation check and writes no outcome. Undefined never stops on it. */
   epoch?: number | null;
+  /** The caller's module decision: a message is off, null is on. Undefined reads it here. */
+  moduleDeactivation?: string | null;
 }
 
 export type AdvanceStepResult =
@@ -2448,6 +2451,7 @@ function buildStepContext(
     | 'cliProviderId'
     | 'stepDef'
     | 'round'
+    | 'epoch'
   >,
   row: TaskStepRow,
   signal: AbortSignal,
@@ -2464,6 +2468,7 @@ function buildStepContext(
     sandboxWorkdir: SANDBOX_WORKDIR,
     cliProviderId: params.cliProviderId,
     round,
+    epoch: params.epoch,
     db,
     logger: log.child({ stepId: params.stepDef.metadata.id, taskId, taskStepId: row.id }),
     signal,
@@ -2524,6 +2529,29 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     return { status: 'failed', row, error: row.errorMessage ?? 'the step failed' };
   }
 
+  const deactivated =
+    params.moduleDeactivation === undefined
+      ? await moduleDeactivationMessage(db, meta.id)
+      : params.moduleDeactivation;
+  if (deactivated !== null) {
+    const patch = {
+      status: 'failed',
+      statusMessage: null,
+      errorMessage: deactivated,
+      endedAt: new Date(),
+    } as const;
+    // updateRow refuses a pending row; openPendingStep opens it, under the job's epoch.
+    const failed =
+      row.status === 'pending'
+        ? await openPendingStep(db, taskId, params.epoch, row.id, patch)
+        : await updateRow(db, row.id, patch).catch((err: unknown) => {
+            if (err instanceof StepSupersededError) return null;
+            throw err;
+          });
+    if (!failed) return { status: 'superseded', row };
+    return { status: 'failed', row: failed, error: deactivated };
+  }
+
   const controller = new AbortController();
   let superseded = false;
   const throwIfCancelled = (): void => {
@@ -2565,6 +2593,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   }, CANCEL_POLL_INTERVAL_MS);
 
   const ctx = buildStepContext(params, row, controller.signal, throwIfCancelled);
+  let opened = row.status !== 'pending';
 
   try {
     if (stepDef.shouldRun && isFreshStepEntry(row.status)) {
@@ -2597,6 +2626,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       });
       if (!claimed) return supersededPass(current);
       current = claimed;
+      opened = true;
     } else if (current.status === 'waiting_cli') {
       // Same fold, for the CLI continuation. The invocation ended, markCliParkBegin stamped the
       // wait (cli-exec/handlers.ts), and THIS advance is where work actually resumes — so the
@@ -3444,6 +3474,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     } else {
       log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
     }
+    // A pass that threw before opening its row left it pending, which updateRow refuses.
+    const writeEnd = (patch: UpdatePatch): Promise<TaskStepRow | null> =>
+      (opened
+        ? updateRow(db, row.id, patch)
+        : openPendingStep(db, taskId, params.epoch, row.id, patch)
+      ).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces
     // the round cap; at the cap the task fails with this diagnosis. A predicate form
@@ -3451,12 +3487,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // and still hard-fail on the ones no amount of re-implementing would clear.
     const routeErrorToFixLoop = routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
-      const finished = await updateRow(db, row.id, {
+      const finished = await writeEnd({
         status: 'done',
         statusMessage: null,
         errorMessage,
         endedAt: new Date(),
-      }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
+      });
       // After the step's own write, so a Resume never finds the agents ended on a step still running;
       // not when that write errored (the catch hands back the stale row) and the step is not terminal.
       if (stepDef.agentMining && finished !== row)
@@ -3475,12 +3511,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         ...(advised?.advice ? { guidance: advised.advice } : {}),
       };
     }
-    const failed = await updateRow(db, row.id, {
+    const failed = await writeEnd({
       status: 'failed',
       statusMessage: null,
       errorMessage,
       endedAt: new Date(),
-    }).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
+    });
     if (stepDef.agentMining && failed !== row) await releaseStepAgents(db, row.id, errorMessage);
     if (!failed) return supersededPass(row);
     return { status: 'failed', row: failed, error: errorMessage };

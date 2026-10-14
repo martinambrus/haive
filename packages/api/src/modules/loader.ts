@@ -16,8 +16,10 @@ import {
 } from '@haive/shared/module-host';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
+import { recordAuditEvent } from '../lib/audit.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { getRedis } from '../redis.js';
+import { deactivatedModuleIds, isModuleDeactivated, setModuleActive } from './activation.js';
 
 export type ApiModuleEntry = {
   packageName: string;
@@ -32,6 +34,7 @@ export type LoadedApiModule = {
 };
 
 const putBodySchema = z.object({ values: z.record(z.string(), z.unknown()) });
+const patchBodySchema = z.object({ active: z.boolean() }).strict();
 
 function settingsOf(manifest: ModuleManifest, kind: ModuleSettingsKind) {
   return kind === 'global' ? manifest.globalSettings : manifest.adminSettings;
@@ -80,6 +83,10 @@ export async function mountModules(
     if (entry.routes) {
       const sub = new Hono<AppEnv>();
       sub.use('*', requireAuth);
+      sub.use('*', async (c, next) => {
+        if (await isModuleDeactivated(ctx.db, manifest.id)) return c.notFound();
+        await next();
+      });
       if (manifest.apiRequiresAdmin === true) sub.use('*', requireAdmin);
       sub.route('/', entry.routes(ctx));
       app.route(`/m/${manifest.id}`, sub);
@@ -101,17 +108,21 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
   const routes = new Hono<AppEnv>();
   routes.use('*', requireAuth);
 
-  const settingsFor = (id: string, kind: ModuleSettingsKind) => {
+  const settingsFor = async (id: string, kind: ModuleSettingsKind) => {
     const module = loaded.find((m) => m.manifest.id === id);
     const settings = module ? settingsOf(module.manifest, kind) : undefined;
-    if (!module || !settings) throw new HttpError(404, 'Module settings not found');
+    if (!module || !settings || (await isModuleDeactivated(getDb(), id))) {
+      throw new HttpError(404, 'Module settings not found');
+    }
     return settings;
   };
 
-  routes.get('/', (c) => {
+  routes.get('/', async (c) => {
     const isAdmin = c.get('userRole') === 'admin';
+    const off = await deactivatedModuleIds(getDb());
+    const active = loaded.filter(({ manifest }) => !off.has(manifest.id));
     return c.json({
-      modules: loaded.map(({ manifest }) => ({
+      modules: active.map(({ manifest }) => ({
         id: manifest.id,
         name: manifest.name,
         version: manifest.version,
@@ -126,6 +137,8 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
               ),
         hasGlobalSettings: manifest.globalSettings !== undefined,
         hasAdminSettings: isAdmin && manifest.adminSettings !== undefined,
+        // Compiled pages and widgets call the module's api, and an admin-only one refuses a user.
+        compiledWeb: isAdmin || manifest.apiRequiresAdmin !== true,
       })),
     });
   });
@@ -156,10 +169,40 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     });
   });
 
+  routes.patch('/:id', requireAdmin, async (c) => {
+    const id = c.req.param('id');
+    const { active } = patchBodySchema.parse(await c.req.json());
+    const db = getDb();
+    const result = await setModuleActive(db, id, active);
+    if (result.kind === 'missing') throw new HttpError(404, 'Module not found');
+    if (result.kind === 'open') {
+      return c.json(
+        {
+          error: 'Live tasks still use this module. Finish or cancel them first.',
+          code: 'module_tasks_open',
+          tasks: result.tasks,
+        },
+        409,
+      );
+    }
+    await recordAuditEvent(db, {
+      actorUserId: c.get('userId'),
+      action: active ? 'module.activate' : 'module.deactivate',
+      targetType: 'module',
+      targetId: null,
+      metadata: { moduleId: id },
+    });
+    return c.json({
+      moduleId: id,
+      active,
+      deactivatedAt: result.deactivatedAt?.toISOString() ?? null,
+    });
+  });
+
   routes.get('/:id/settings/:kind', async (c) => {
     const id = c.req.param('id');
     const kind = parseKind(c.req.param('kind'));
-    const settings = settingsFor(id, kind);
+    const settings = await settingsFor(id, kind);
     if (kind === 'admin' && c.get('userRole') !== 'admin') {
       throw new HttpError(403, 'Admin access required');
     }
@@ -184,7 +227,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     if (c.get('userRole') !== 'admin') throw new HttpError(403, 'Admin access required');
     const id = c.req.param('id');
     const kind = parseKind(c.req.param('kind'));
-    const settings = settingsFor(id, kind);
+    const settings = await settingsFor(id, kind);
     const body = putBodySchema.parse(await c.req.json());
     const result = validateFormValues(settings.form, body.values);
     if (!result.success) throw new HttpError(400, result.issues.join('; '));

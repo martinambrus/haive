@@ -65,7 +65,7 @@ export class PlanMirrorHeldError extends Error {
 }
 
 // A plan this size is far past any real plan; a larger file is held rather than buffered.
-const PLAN_JSON_MAX_BYTES = 16 * 1024 * 1024;
+export const PLAN_JSON_MAX_BYTES = 16 * 1024 * 1024;
 const PLAN_WRITE_TOO_LARGE = `the plan renders to more than ${PLAN_JSON_MAX_BYTES / 1024 / 1024} MiB, so its plan.json is not written; nothing was written.`;
 const PLAN_TOO_LARGE = `the committed plan snapshot is larger than ${PLAN_JSON_MAX_BYTES / 1024 / 1024} MiB`;
 

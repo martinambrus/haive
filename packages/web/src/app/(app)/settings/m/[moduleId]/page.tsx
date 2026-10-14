@@ -5,14 +5,13 @@ import { useParams } from 'next/navigation';
 import {
   api,
   getModuleSettings,
-  getModules,
   putModuleSettings,
   type ApiError,
   type ModuleSettingsKind,
   type ModuleSettingsPayload,
-  type ModuleSummary,
   type User,
 } from '@/lib/api-client';
+import { useModules } from '@/lib/use-modules';
 import { usePageTitle } from '@/lib/use-page-title';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { Card, FormError } from '@/components/ui';
@@ -77,19 +76,19 @@ function SettingsSection({
 export default function ModuleSettingsPage() {
   const params = useParams<{ moduleId: string }>();
   const moduleId = params.moduleId;
-  const [module, setModule] = useState<ModuleSummary | null | undefined>(undefined);
+  const { modules, error: modulesError } = useModules();
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [meError, setMeError] = useState<string | null>(null);
+  const module = modules === null ? undefined : (modules.find((m) => m.id === moduleId) ?? null);
+  const error = modulesError ?? meError;
   usePageTitle(module ? `${module.name} settings` : 'Module settings');
 
   useEffect(() => {
-    Promise.all([getModules(), api.get<{ user: User }>('/auth/me')])
-      .then(([modules, me]) => {
-        setModule(modules.find((m) => m.id === moduleId) ?? null);
-        setIsAdmin(me.user.role === 'admin');
-      })
-      .catch((err) => setError((err as ApiError).message ?? 'Failed to load module'));
-  }, [moduleId]);
+    api
+      .get<{ user: User }>('/auth/me')
+      .then((me) => setIsAdmin(me.user.role === 'admin'))
+      .catch((err) => setMeError((err as ApiError).message ?? 'Failed to load module'));
+  }, []);
 
   if (error) return <FormError message={error} />;
   if (module === undefined || isAdmin === null) return null;

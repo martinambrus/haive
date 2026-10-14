@@ -1,33 +1,18 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { notFound, useParams } from 'next/navigation';
 import { FormError } from '@haive/web-kit/ui';
 import { moduleWebPages } from '@/generated/module-pages';
 import { DashboardRenderer } from '@/components/dashboard-renderer';
 import { MarkdownView } from '@/components/markdown/markdown-view';
-import { api, getModules, type ModuleSummary } from '@/lib/api-client';
-import { resolveModulePage, resolveModuleRoute } from '@/lib/module-pages';
+import { api } from '@/lib/api-client';
+import { resolveModuleRoute } from '@/lib/module-pages';
+import { useModules } from '@/lib/use-modules';
 
 export default function ModulePage() {
   const params = useParams<{ moduleId: string; page?: string[] }>();
   const path = params.page ?? [];
-  const compiled = resolveModulePage(moduleWebPages, params.moduleId, path) !== null;
-  const [modules, setModules] = useState<ModuleSummary[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (compiled) return;
-    let live = true;
-    getModules()
-      .then((list) => live && setModules(list))
-      .catch((err: unknown) => {
-        if (live) setError(err instanceof Error ? err.message : 'Failed to load modules.');
-      });
-    return () => {
-      live = false;
-    };
-  }, [compiled]);
+  const { modules, error } = useModules();
 
   const route = resolveModuleRoute(moduleWebPages, modules, params.moduleId, path);
   switch (route.kind) {

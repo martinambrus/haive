@@ -10,10 +10,16 @@ export type ModuleDashboardWidgetEntry = ModuleDashboardWidget & { moduleId: str
 
 export function ModuleDashboardWidgets({
   widgets,
+  modules,
 }: {
   widgets: readonly ModuleDashboardWidgetEntry[];
+  modules: readonly { id: string; compiledWeb: boolean }[] | null;
 }) {
-  return widgets.map(({ moduleId, id, Component }) => (
-    <Component key={`${moduleId}:${id}`} moduleId={moduleId} api={api} />
-  ));
+  if (modules === null) return null;
+  const listed = new Set(modules.filter((m) => m.compiledWeb).map((m) => m.id));
+  return widgets
+    .filter(({ moduleId }) => listed.has(moduleId))
+    .map(({ moduleId, id, Component }) => (
+      <Component key={`${moduleId}:${id}`} moduleId={moduleId} api={api} />
+    ));
 }

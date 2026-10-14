@@ -71,12 +71,21 @@ describe('buildNewTaskTypeOptions', () => {
     expect(ok).toMatchObject({ value: 'b-ok', disabled: false, reason: null });
   });
 
+  it('blames a deactivated module when that is why a type is unavailable', () => {
+    const [, , option] = buildNewTaskTypeOptions([
+      row({ slug: 'uses-alpha', available: false, reason: 'module-deactivated' }),
+    ]);
+    expect(option).toMatchObject({ value: 'uses-alpha', disabled: true });
+    expect(option!.reason).toMatch(/module.*deactivated/i);
+  });
+
   it('explains every unavailable reason', () => {
     for (const reason of [
       'disabled',
       'not-selectable',
       'custom-types-off',
       'module-types-off',
+      'module-deactivated',
       'missing-step',
       'invalid-composition',
     ] as const) {

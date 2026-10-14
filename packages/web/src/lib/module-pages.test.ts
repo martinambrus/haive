@@ -31,18 +31,55 @@ describe('resolveModulePage', () => {
 
 describe('resolveModuleRoute', () => {
   const spec: DashboardSpec = { title: 'Overview', widgets: [{ type: 'markdown', body: 'x' }] };
-  const modules: { id: string; pages: Record<string, DashboardSpec> }[] = [
-    { id: 'stats', pages: { overview: spec, '': spec } },
-    { id: 'acme', pages: { overview: spec } },
-    { id: 'bare', pages: {} },
+  const modules: { id: string; compiledWeb: boolean; pages: Record<string, DashboardSpec> }[] = [
+    { id: 'stats', compiledWeb: true, pages: { overview: spec, '': spec } },
+    { id: 'acme', compiledWeb: true, pages: { overview: spec } },
+    { id: 'bare', compiledWeb: true, pages: {} },
   ];
 
   it('lets the compiled page win over a declared page of the same path', () => {
     const route = resolveModuleRoute(registry, modules, 'stats', []);
     expect(route).toEqual({ kind: 'component', Page: Index });
-    expect(resolveModuleRoute(registry, null, 'stats', [])).toEqual({
+    expect(resolveModuleRoute(registry, modules, 'stats', ['detail', 'one'])).toEqual({
+      kind: 'component',
+      Page: Detail,
+    });
+  });
+
+  it('renders a compiled page only for a module the list names', () => {
+    const withoutStats = modules.filter((m) => m.id !== 'stats');
+    expect(resolveModuleRoute(registry, withoutStats, 'stats', [])).toEqual({ kind: 'not-found' });
+    expect(resolveModuleRoute(registry, withoutStats, 'stats', ['detail', 'one'])).toEqual({
+      kind: 'not-found',
+    });
+    expect(resolveModuleRoute(registry, [], 'stats', [])).toEqual({ kind: 'not-found' });
+  });
+
+  it('renders a compiled page only for a module whose compiled web parts the list allows', () => {
+    const withheld = modules.map((m) => (m.id === 'stats' ? { ...m, compiledWeb: false } : m));
+    expect(resolveModuleRoute(registry, withheld, 'stats', [])).toEqual({ kind: 'not-found' });
+    expect(resolveModuleRoute(registry, withheld, 'stats', ['detail', 'one'])).toEqual({
+      kind: 'not-found',
+    });
+    expect(resolveModuleRoute(registry, modules, 'stats', [])).toEqual({
       kind: 'component',
       Page: Index,
+    });
+  });
+
+  it('falls back to the declared page of a path whose compiled page is withheld', () => {
+    const Overview = () => null;
+    const compiled = { acme: { overview: Overview } };
+    const listed = (compiledWeb: boolean) => [
+      { id: 'acme', compiledWeb, pages: { overview: spec } },
+    ];
+    expect(resolveModuleRoute(compiled, listed(false), 'acme', ['overview'])).toEqual({
+      kind: 'dashboard',
+      spec,
+    });
+    expect(resolveModuleRoute(compiled, listed(true), 'acme', ['overview'])).toEqual({
+      kind: 'component',
+      Page: Overview,
     });
   });
 
@@ -53,8 +90,12 @@ describe('resolveModuleRoute', () => {
     });
   });
 
-  it('waits for the module list before deciding', () => {
+  it('waits for the module list before deciding, a compiled page included', () => {
     expect(resolveModuleRoute(registry, null, 'acme', ['overview'])).toEqual({ kind: 'loading' });
+    expect(resolveModuleRoute(registry, null, 'stats', [])).toEqual({ kind: 'loading' });
+    expect(resolveModuleRoute(registry, null, 'stats', ['detail', 'one'])).toEqual({
+      kind: 'loading',
+    });
   });
 
   it('answers not-found for a nested path, an unknown module or page, and the module root', () => {
