@@ -258,3 +258,19 @@ describe('prompt step quoted-output budget', () => {
     expect(text).toContain('[truncated:');
   });
 });
+
+describe('prompt step inline-value budget', () => {
+  it('keeps every field and task value inside one budget however often the template repeats it', async () => {
+    const template = Array.from({ length: 200 }, () => '{{task.description}} {{field:topic}}').join(
+      '\n',
+    );
+    const text = await prompt(
+      make({ template }),
+      detected({ taskDescription: '§'.repeat(8 * 1024) }),
+      { topic: '¶'.repeat(8 * 1024) },
+    );
+    const inline = Buffer.byteLength((text.match(/[§¶]/g) ?? []).join(''), 'utf8');
+    expect(inline).toBeLessThanOrEqual(64 * 1024);
+    expect(text).toContain('[truncated:');
+  });
+});

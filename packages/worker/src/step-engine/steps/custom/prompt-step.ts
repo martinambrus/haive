@@ -19,6 +19,8 @@ import {
 export const PROMPT_STEP_OUTPUT_CAP_BYTES = 16 * 1024;
 /** Every quoted step output in one prompt together, however often the template repeats a token. */
 export const PROMPT_STEP_OUTPUTS_BUDGET_BYTES = 64 * 1024;
+/** Every field, task title and task description value in one prompt together, the same way. */
+export const PROMPT_STEP_VALUES_BUDGET_BYTES = 64 * 1024;
 export const PROMPT_STEP_PERSONAS_UNSUPPORTED = 'Prompt step personas are not supported yet';
 const NO_STEP_OUTPUT = '(no output recorded for this step)';
 
@@ -74,8 +76,18 @@ function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formVal
     PROMPT_STEP_OUTPUT_CAP_BYTES,
     Math.floor(PROMPT_STEP_OUTPUTS_BUDGET_BYTES / Math.max(quotes, 1)),
   );
+  const values = tokens.filter(
+    (token) =>
+      token.kind === 'field' || token.kind === 'task.title' || token.kind === 'task.description',
+  ).length;
+  const perValue = Math.min(
+    PROMPT_STEP_OUTPUT_CAP_BYTES,
+    Math.floor(PROMPT_STEP_VALUES_BUDGET_BYTES / Math.max(values, 1)),
+  );
   for (const token of tokens) {
-    if (token.kind === 'field') fields[token.id] = fieldText(formValues[token.id]);
+    if (token.kind === 'field') {
+      fields[token.id] = capStepOutput(fieldText(formValues[token.id]), perValue);
+    }
     if (token.kind === 'step') {
       const output = detected.stepOutputs?.[token.id];
       steps[token.id] = fencedAgentBlock(
@@ -85,8 +97,8 @@ function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formVal
   }
   const rendered = renderPromptTemplate(entry.template, {
     fields,
-    taskTitle: text(detected.taskTitle),
-    taskDescription: text(detected.taskDescription),
+    taskTitle: capStepOutput(text(detected.taskTitle), perValue),
+    taskDescription: capStepOutput(text(detected.taskDescription), perValue),
     steps,
   });
   if (rendered.search(TEMPLATE_PERSONA_MARKER_PATTERN) !== -1) {
