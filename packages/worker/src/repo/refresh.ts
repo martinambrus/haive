@@ -12,6 +12,7 @@ import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@ha
 import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
 import {
   MOVE_ATTEMPTS,
+  putBackAfterFailure,
   putBackProjections,
   restoreProjectionsInTx,
   resyncHaiveProjections,
@@ -160,8 +161,7 @@ async function fastForward(
     try {
       aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
     } catch (err) {
-      if (asided)
-        await putBackProjections(db, payload.repositoryId, dest, kept).catch(() => undefined);
+      if (asided) await putBackAfterFailure(db, payload.repositoryId, dest, kept, err);
       throw err;
     }
     if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {

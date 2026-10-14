@@ -22,6 +22,7 @@ import {
 } from '../../merge-dir-claim.js';
 import {
   MOVE_ATTEMPTS,
+  putBackAfterFailure,
   putBackProjections,
   restoreProjectionsInTx,
   resyncHaiveProjections,
@@ -410,9 +411,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       try {
         aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
       } catch (err) {
-        if (asided) {
-          await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept).catch(() => undefined);
-        }
+        if (asided) await putBackAfterFailure(ctx.db, repositoryId, ctx.repoPath, kept, err);
         throw err;
       }
       if (aside.outcome === 'set-aside') {
@@ -467,7 +466,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         for (let attempt = 1; ; attempt++) {
           // Under the dir's lock, so a merge section in this checkout (12, 13) never interleaves with the move.
           const moved = await inMergeDirLock(ctx.db, ctx.repoPath, async (tx) => {
-            // Task creation takes this lock, so no task can start between the fence and the move.
+            // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
             await lockRepositoryTasksKey(tx, repositoryId);
             const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
             if (again.outcome !== 'clean') return { again, res: null, holding: 0 };

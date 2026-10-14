@@ -372,6 +372,7 @@ export const restoreFaults: {
   beforeResync?: (domain: 'state' | 'plan') => void;
   beforeRestore?: () => void | Promise<void>;
   beforeCapture?: () => void | Promise<void>;
+  beforePutBack?: () => void | Promise<void>;
 } = {};
 
 interface RestoreGuard {
@@ -615,9 +616,7 @@ export async function setAsideHaiveProjections(
     try {
       result = await setAsideOnce(db, repositoryId, repoPath, restored, kept, fence);
     } catch (err) {
-      if (kept.size > 0)
-        await putBackProjections(db, repositoryId, repoPath, kept).catch(() => undefined);
-      throw err;
+      return putBackAfterFailure(db, repositoryId, repoPath, kept, err);
     }
     if (!('changed' in result)) {
       if (result.outcome === 'clean' && restored.size > 0) {
@@ -791,6 +790,7 @@ export async function putBackProjections(
   kept: KeptFiles,
 ): Promise<void> {
   if (kept.size === 0) return;
+  await restoreFaults.beforePutBack?.();
   await db.transaction(async (tx) => {
     await lockProjectState(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
@@ -819,6 +819,36 @@ export async function putBackProjections(
       }
     }
   });
+}
+
+/** The put-back when the caller is failing: the snapshot dies with the call, so a put-back that fails too
+ *  is thrown with the first error and names the files, rather than dropped. */
+export async function putBackAfterFailure(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+  kept: KeptFiles,
+  err: unknown,
+): Promise<never> {
+  try {
+    await putBackProjections(db, repositoryId, repoPath, kept);
+  } catch (putErr) {
+    const paths = [...kept.keys()].sort();
+    logger.error(
+      {
+        err: putErr,
+        failure: err instanceof Error ? err.message : String(err),
+        repositoryId,
+        paths,
+      },
+      'set-aside files not put back',
+    );
+    throw new AggregateError(
+      [err, putErr],
+      `${err instanceof Error ? err.message : String(err)}; Haive's set-aside files (${paths.join(', ')}) could not be put back: ${putErr instanceof Error ? putErr.message : String(putErr)}`,
+    );
+  }
+  throw err;
 }
 
 /** A path's index entry as `mode sha`, or null when nothing is staged there. */

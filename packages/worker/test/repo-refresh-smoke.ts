@@ -1705,6 +1705,22 @@ async function main(): Promise<void> {
         { thrown: String(k1.thrown), crashed: k1.crashed, col: k1.col, disk: k1.disk },
       );
 
+      const putErr = new Error('put-back refused');
+      restoreFaults.beforePutBack = () => {
+        throw putErr;
+      };
+      const k1b = await crashing('afterRestore', (c) =>
+        setAsideHaiveProjections(db, c.payload.repositoryId, c.dest),
+      ).finally(() => delete restoreFaults.beforePutBack);
+      const k1bErrs = k1b.thrown instanceof AggregateError ? k1b.thrown.errors : [];
+      check(
+        'K1b: a put-back that fails after a failure is thrown with it, naming the files, never dropped',
+        k1bErrs[0] === crash &&
+          k1bErrs[1] === putErr &&
+          String((k1b.thrown as Error).message).includes(RENDER_REL),
+        { thrown: String(k1b.thrown) },
+      );
+
       let inTx = '';
       const k2 = await crashing(null, (c) =>
         db.transaction(async (tx) => {

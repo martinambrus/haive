@@ -29,6 +29,10 @@ vi.mock('../../../project-state/set-aside.js', () => ({
   setAsideHaiveProjections: projections.setAside,
   resyncHaiveProjections: projections.resync,
   putBackProjections: projections.putBack,
+  putBackAfterFailure: async (...args: unknown[]) => {
+    await projections.putBack(...args.slice(0, 4));
+    throw args[4];
+  },
   restoreProjectionsInTx: projections.restore,
   MOVE_ATTEMPTS: 3,
 }));
