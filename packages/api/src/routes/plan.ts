@@ -54,6 +54,7 @@ import { appendPlanAnswer, humanPlanAction } from '@haive/shared/plan-resolution
 import { resolveRepoRoot } from './repos.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
+import { requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { enqueuePlanTask, spawnPlanTask } from '../lib/spawn-plan-task.js';
 import { loadUsableProvider, writeStepCliChoice } from '../lib/step-cli-choice.js';
@@ -1161,7 +1162,7 @@ planRoutes.get('/:id/plan/build/clis', async (c) => {
   });
 });
 
-planRoutes.post('/:id/plan/build', async (c) => {
+planRoutes.post('/:id/plan/build', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = planBuildRequestSchema.parse(await c.req.json());
@@ -1228,7 +1229,7 @@ planRoutes.post('/:id/plan/build', async (c) => {
 /** Order an existing plan. Its own endpoint for the same reason the other plan
  *  task types have theirs: it needs a repository the generic create-task form
  *  has no field for. */
-planRoutes.post('/:id/plan/sequence', async (c) => {
+planRoutes.post('/:id/plan/sequence', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = planSequenceRequestSchema.parse(await c.req.json().catch(() => ({})));
@@ -1254,7 +1255,7 @@ planRoutes.post('/:id/plan/sequence', async (c) => {
  * whatever they can, and auto-resolve the mirror's own two files, so what is left
  * here is a genuine two-sided decision.
  */
-planRoutes.post('/:id/plan/merge', async (c) => {
+planRoutes.post('/:id/plan/merge', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = planMergeStartRequestSchema.parse(await c.req.json().catch(() => ({})));
@@ -1339,7 +1340,7 @@ planRoutes.delete('/:id/plan/merge', async (c) => {
   return c.json({ ok: true, cancelled: true, taskId: task.id });
 });
 
-planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {
+planRoutes.post('/:id/plan/nodes/:nodeId/chat', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const nodeId = c.req.param('nodeId');
@@ -1382,7 +1383,7 @@ planRoutes.post('/:id/plan/nodes/:nodeId/chat', async (c) => {
   return c.json({ taskId }, 201);
 });
 
-planRoutes.post('/:id/plan/nodes/:nodeId/advisory', async (c) => {
+planRoutes.post('/:id/plan/nodes/:nodeId/advisory', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const nodeId = c.req.param('nodeId');

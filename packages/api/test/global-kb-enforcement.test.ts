@@ -80,6 +80,10 @@ const ALWAYS: EnforceSpec = { mode: 'always' };
 const HEAVY = E_ACUTE.repeat(Math.ceil(HOUSE_RULES_ALWAYS_CAP_BYTES * 0.3));
 
 const app = new Hono<AppEnv>();
+app.use(async (c, next) => {
+  c.set('maintenanceState', 'normal');
+  await next();
+});
 app.route('/', globalKbRoutes);
 app.onError(errorHandler);
 

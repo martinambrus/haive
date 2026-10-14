@@ -56,6 +56,7 @@ import {
 } from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
   ledgerImportedSince,
@@ -987,7 +988,7 @@ export async function lastUpgradeRemovedContent(
  * `metadata.mode === 'rollback'` and reverts the most recent completed
  * onboarding_upgrade task for this repository.
  */
-upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
+upgradeRoutes.post('/:id/rollback-upgrade', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const repositoryId = c.req.param('id');
   const db = getDb();

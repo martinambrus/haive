@@ -50,6 +50,10 @@ const ENTRY = '00000000-0000-4000-8000-0000000000b1';
 const PROVIDER = '00000000-0000-4000-8000-0000000000c1';
 
 const app = new Hono<AppEnv>();
+app.use(async (c, next) => {
+  c.set('maintenanceState', 'normal');
+  await next();
+});
 app.route('/', globalKbRoutes);
 app.onError(errorHandler);
 

@@ -6,12 +6,13 @@ import {
   configService,
   locksOutNonAdmins,
   parseMaintenanceState,
+  refusesNewWork,
   type MaintenanceState,
 } from '@haive/shared';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { getAccessCookie } from '../auth/cookies.js';
 import { getDb } from '../db.js';
-import type { AppEnv } from '../context.js';
+import { HttpError, type AppEnv } from '../context.js';
 
 /**
  * Paths that stay reachable in every state, and each one is load-bearing:
@@ -76,4 +77,16 @@ export const maintenanceGate: MiddlewareHandler<AppEnv> = async (c, next) => {
     },
     503,
   );
+};
+
+/** A route that creates a task answers 503 once the system drains or is in maintenance. */
+export const requireNewWorkAllowed: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (refusesNewWork(c.get('maintenanceState'))) {
+    throw new HttpError(
+      503,
+      'Haive is preparing for maintenance, so new tasks are not being started. Work already ' +
+        'running will finish.',
+    );
+  }
+  await next();
 };

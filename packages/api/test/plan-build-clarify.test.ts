@@ -39,6 +39,10 @@ const CLAUDE = '00000000-0000-4000-8000-0000000000e1';
 const CODEX = '00000000-0000-4000-8000-0000000000e2';
 const OFF = '00000000-0000-4000-8000-0000000000e3';
 const app = new Hono<AppEnv>();
+app.use(async (c, next) => {
+  c.set('maintenanceState', 'normal');
+  await next();
+});
 app.route('/', planRoutes);
 app.onError(errorHandler);
 

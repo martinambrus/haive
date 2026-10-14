@@ -53,6 +53,7 @@ import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import { requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 
 // Global KB is instance/namespace-scoped (not per-user). haive is self-hosted
@@ -541,7 +542,7 @@ globalKbRoutes.post('/release-embed-model', async (c) => {
 // Repo-anchored AI enrichment (plan §5.1/§5.3): create a `skeleton` entry, then a
 // kb_author task that reads the chosen repo with the chosen CLI to expand the
 // skeleton into a version-scoped `draft`. The user reviews + activates the draft.
-globalKbRoutes.post('/enrich', async (c) => {
+globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   const parsed = enrichSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid enrich request', 'invalid_body');
   const data = parsed.data;

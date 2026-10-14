@@ -46,7 +46,6 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
-import { refusesNewWork } from '@haive/shared';
 import {
   blockersOutsideSet,
   computePlanSequence,
@@ -66,6 +65,7 @@ import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
 import { requireAuth } from '../../middleware/auth.js';
+import { requireNewWorkAllowed } from '../../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import {
@@ -432,18 +432,8 @@ taskRoutes.get('/', async (c) => {
   return c.json({ tasks, total, page, pageSize, repositories, globalPause });
 });
 
-taskRoutes.post('/', async (c) => {
+taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
-  // Both non-normal states refuse NEW work while letting in-flight work finish — that is the
-  // whole point of draining, and it is why the state has three values rather than two. The gate
-  // has already resolved this for the request, so there is no second config read here.
-  if (refusesNewWork(c.get('maintenanceState'))) {
-    throw new HttpError(
-      503,
-      'Haive is preparing for maintenance, so new tasks are not being started. Work already ' +
-        'running will finish.',
-    );
-  }
   const body = createTaskRequestSchema.parse(await c.req.json());
   const db = getDb();
 
