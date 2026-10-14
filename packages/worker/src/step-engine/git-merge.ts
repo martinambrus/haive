@@ -205,6 +205,13 @@ async function handBackWritten(
   }
 }
 
+/** After a fast-forward of `dir` from `before`: what the move wrote goes to the sandbox user, as
+ *  `openMerge` does for a merge. */
+export async function handBackAfterMove(dir: string, before: string): Promise<void> {
+  const plan = await handBackPlan(dir);
+  if (plan) await handBackWritten(plan, dir, await differingFrom(dir, before));
+}
+
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
  *  that is not UTF-8 as other bytes. */
 async function gitWithPathspecs(

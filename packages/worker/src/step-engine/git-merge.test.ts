@@ -22,6 +22,7 @@ import {
   captureFixBaseline,
   completeMergeHostSide,
   fixerLeftoversWarning,
+  handBackAfterMove,
   mergeCommitted,
   openMerge,
   recordFixerLeftovers,
@@ -1510,6 +1511,88 @@ describe('a root abort that cannot hand back a name', () => {
     }
   });
 });
+
+/** `main` behind `feature/x`, which edits `base.txt` and adds `top.txt` and `dir/sub/deep.txt`. */
+async function setupFastForward(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-ff-'));
+  await initRepo(dir);
+  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, 'base.txt'), 'feature\n', 'utf8');
+  await writeFile(path.join(dir, 'top.txt'), 'top\n', 'utf8');
+  await mkdir(path.join(dir, 'dir', 'sub'), { recursive: true });
+  await writeFile(path.join(dir, 'dir', 'sub', 'deep.txt'), 'deep\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'feature']);
+  await git(dir, ['checkout', 'main']);
+  return dir;
+}
+
+const FAST_FORWARDED = ['base.txt', 'dir', 'dir/sub', 'dir/sub/deep.txt', 'top.txt'];
+
+describe('handBackAfterMove', () => {
+  it('hands each name a fast-forward wrote, and the directories above it, to the sandbox user', async () => {
+    const dir = await setupFastForward();
+    const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+    const chowned: { rel: string; owner: { uid: number; gid: number } }[] = [];
+    vi.resetModules();
+    vi.doMock('@haive/shared/fs-safe', async (importOriginal) => {
+      const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+      return {
+        ...real,
+        lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+          const info = await real.lstatNoFollow(...args);
+          return info && { ...info, stats: { ...info.stats, uid: 0 } };
+        },
+        chownNoFollow: async (
+          _anchor: string,
+          rel: string,
+          owner: { uid: number; gid: number },
+        ) => {
+          chowned.push({ rel, owner });
+        },
+      };
+    });
+    try {
+      const moved = await import('./git-merge.js');
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--ff-only', 'feature/x']);
+      await moved.handBackAfterMove(dir, before);
+      expect(chowned.map((c) => c.rel).sort()).toEqual(FAST_FORWARDED);
+      expect(chowned.every((c) => c.owner.uid === 1000 && c.owner.gid === 1000)).toBe(true);
+    } finally {
+      vi.doUnmock('@haive/shared/fs-safe');
+      vi.resetModules();
+      asRoot.mockRestore();
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+describe.runIf(process.getuid?.() === 0)(
+  'a root fast-forward in a tree the sandbox user owns',
+  () => {
+    it('hands what the move wrote, and the directories it created, to the tree owner', async () => {
+      const dir = await setupFastForward();
+      await exec('chown', ['-R', '1000:1000', dir]);
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['merge', '--ff-only', 'feature/x']);
+        expect(await ownersOf(dir, FAST_FORWARDED)).toEqual(
+          Object.fromEntries(FAST_FORWARDED.map((r) => [r, 0])),
+        );
+        await handBackAfterMove(dir, before);
+        expect(await ownersOf(dir, FAST_FORWARDED)).toEqual(
+          Object.fromEntries(FAST_FORWARDED.map((r) => [r, 1000])),
+        );
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    });
+  },
+);
 
 describe('squashMergeCommit (real git)', () => {
   it('collapses a landed merge into one commit with an identical tree', async () => {

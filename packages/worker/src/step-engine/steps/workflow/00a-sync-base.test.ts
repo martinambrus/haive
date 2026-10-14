@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -42,11 +42,30 @@ vi.mock('../../../project-state/set-aside.js', () => ({
   restoreProjectionsInTx: projections.restore,
   MOVE_ATTEMPTS: 3,
 }));
+// As the root worker, which the hand-back after a move is for: every path reads as the worker's own,
+// and a hand-back is recorded instead of made.
+const handBack = vi.hoisted(() => ({ asRoot: false, chowned: [] as string[] }));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+      const info = await real.lstatNoFollow(...args);
+      return handBack.asRoot && info ? { ...info, stats: { ...info.stats, uid: 0 } } : info;
+    },
+    chownNoFollow: async (...args: Parameters<typeof real.chownNoFollow>) => {
+      if (handBack.asRoot) handBack.chowned.push(args[1]);
+      else await real.chownNoFollow(...args);
+    },
+  };
+});
 vi.mock('../../merge-dir-claim.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../merge-dir-claim.js')>()),
   ...(await import('../../../../test/merge-dir-claim-fake.js')).mergeDirClaimOverrides(),
 }));
 beforeEach(() => {
+  handBack.asRoot = false;
+  handBack.chowned = [];
   claimFake.reset();
   projections.setAside.mockReset();
   projections.resync.mockReset();
@@ -196,6 +215,28 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(atResync).not.toBe(before);
       expect(atResync).toBe(await head());
     } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('hands what the fast-forward wrote to the sandbox user, as the root worker', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await mkdir(path.join(seed, 'dir', 'sub'), { recursive: true });
+    await writeFile(path.join(seed, 'dir', 'sub', 'c.txt'), 'c\n', 'utf8');
+    await advanceOrigin(seed, 'b.txt');
+    const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      handBack.asRoot = true;
+      const ctx = mkCtx(local);
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: true, base: 'main', strategy: 'ff' });
+      expect([...handBack.chowned].sort()).toEqual(['b.txt', 'dir', 'dir/sub', 'dir/sub/c.txt']);
+    } finally {
+      asRoot.mockRestore();
       await rm(bare, { recursive: true, force: true });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
@@ -597,6 +638,7 @@ describe('00a-sync-base divergence (real git + merge phase)', () => {
       projections.seed.mockImplementation(async () => {
         atSeed = (await git(local, ['rev-parse', 'HEAD'])).trim();
       });
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
       const d = await syncBaseStep.detect!(mkCtx(local));
       const h = makeMergeDb('repo-1');
       const step = syncBaseStep as unknown as StepDefinition;

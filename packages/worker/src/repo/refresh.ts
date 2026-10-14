@@ -22,6 +22,7 @@ import {
   type KeptFiles,
 } from '../project-state/set-aside.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
+import { handBackAfterMove } from '../step-engine/git-merge.js';
 import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-push.js';
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -198,6 +199,7 @@ async function fastForward(
     const { again, merge: merged } = moved;
     if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
     if (merged?.code === 0) {
+      await handBackAfterMove(dest, before);
       await resyncHaiveProjections(db, payload.repositoryId, dest);
       await restoreKeptMetadata(dest, kept);
     } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
