@@ -70,9 +70,9 @@ jobs:
       # `# shellcheck disable=` directives written for a linter nothing ever ran.
       #
       # MEASURED before adding this: shellcheck reports ZERO findings on that file, so the gate has
-      # no backlog to work through. It is scoped to the installer rather than every `*.sh` because
-      # the other four scripts carry style notes (SC2034 on loop counters, one SC2086) that belong
-      # to their own change, not to this one.
+      # no backlog to work through. It is scoped to the installer and dev.sh rather than every
+      # `*.sh` because the other four scripts carry style notes (SC2034 on loop counters, one
+      # SC2086) that belong to their own change, not to this one.
       #
       # It is not hypothetical coverage: a `die "… `docker compose up -d` succeeded …"` written
       # while fixing the installer put a live COMMAND SUBSTITUTION inside an error message, which
@@ -84,13 +84,14 @@ jobs:
       # ubuntu's build reported SC2015 on a line that 0.11.0 passes, so the gate went red on code
       # that had been checked. An unpinned linter fails builds nobody caused, and the fix for the
       # finding it did raise is in `install.sh`, not in a suppression here.
-      - name: Shellcheck the installer
+      - name: Shellcheck the installer and dev.sh
         run: |
           set -euo pipefail
           image=koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
           scripts/ci-retry.sh docker pull "$image"
           docker run --rm -v "$PWD:/mnt:ro" "$image" \
             --shell=sh install/install.sh install/test/boot-failures.sh
+          docker run --rm -v "$PWD:/mnt:ro" "$image" --shell=bash scripts/dev.sh
 
       # The installer's BOOT block, which nothing else runs. `platform-checks.yml` installs with
       # `--no-start` and boots through the generated `./haive`, deliberately — a full `up` pulls
