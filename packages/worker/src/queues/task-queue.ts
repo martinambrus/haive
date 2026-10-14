@@ -26,6 +26,7 @@ import {
   CONFIG_KEYS,
   configService,
   QUEUE_NAMES,
+  TASK_DEAD_EVENT,
   TASK_JOB_NAMES,
   ideSessionKey,
   repoIdeSessionId,
@@ -689,7 +690,7 @@ export async function markTaskDead(
       tx,
       and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.startedAt)),
     );
-    await appendEvent(tx, taskId, null, 'task.dead', {
+    await appendEvent(tx, taskId, null, TASK_DEAD_EVENT, {
       reason,
       unresolved: fence.unresolved ?? [],
       stepId: fence.stepId ?? null,

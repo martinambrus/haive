@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger, type WorkflowType } from '@haive/shared';
+import { logger, TASK_DEAD_EVENT, type WorkflowType } from '@haive/shared';
 import { stepRegistry, type StepRegistry } from '../step-engine/registry.js';
 import { TERMINAL_TASK_STATUSES } from '../step-engine/step-ownership.js';
 import {
@@ -161,7 +161,9 @@ export async function reviveDeadTask(
     const [lastDead] = await tx
       .select({ payload: schema.taskEvents.payload })
       .from(schema.taskEvents)
-      .where(and(eq(schema.taskEvents.taskId, c.id), eq(schema.taskEvents.eventType, 'task.dead')))
+      .where(
+        and(eq(schema.taskEvents.taskId, c.id), eq(schema.taskEvents.eventType, TASK_DEAD_EVENT)),
+      )
       .orderBy(desc(schema.taskEvents.createdAt))
       .limit(1);
     const named = (lastDead?.payload as { unresolved?: unknown } | undefined)?.unresolved;
