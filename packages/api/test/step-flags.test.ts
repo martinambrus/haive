@@ -184,6 +184,37 @@ describe('withTaskCustomSteps', () => {
     expect(flags.has('custom.t.first')).toBe(false);
   });
 
+  it('keeps the flags of a copy whose tool no longer parses', async () => {
+    const base = await loadStepFlags(fakeDb(() => [row('a')]).db);
+    const tool = {
+      name: 'bad_tool',
+      description: 'd'.repeat(1025),
+      action: 'http-get',
+      url: 'https://api.example.com/v1/status',
+    };
+    const flags = withTaskCustomSteps(base, {
+      ...owner,
+      runListSnapshot: snapshot,
+      customSteps: { 'custom.t.first': { ...entry('first', 'First step'), tools: [tool] } },
+    });
+    expect(flags.get('custom.t.first')).toMatchObject({
+      title: 'First step',
+      workflowType: 'custom',
+      dispatchesStepCli: true,
+      stepIndex: 3,
+    });
+  });
+
+  it('still gives no flags to a copy whose template does not parse', async () => {
+    const base = await loadStepFlags(fakeDb(() => [row('a')]).db);
+    const flags = withTaskCustomSteps(base, {
+      ...owner,
+      runListSnapshot: snapshot,
+      customSteps: { 'custom.t.first': { ...entry('first', 'First step'), template: '' } },
+    });
+    expect(flags.has('custom.t.first')).toBe(false);
+  });
+
   it('shows the custom step in the upcoming list in snapshot order and keeps it unskippable', async () => {
     const base = await loadStepFlags(fakeDb(() => [row('a'), row('b')]).db);
     const task = { ...owner, runListSnapshot: snapshot, customSteps };

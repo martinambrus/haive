@@ -103,3 +103,41 @@ describe('resolveRunList with pinned steps', () => {
     expect(unresolved).toEqual(['custom.demo.missing']);
   });
 });
+
+describe('a pinned step with a tool that no longer parses', () => {
+  const tool = (name: string, over: object = {}) => ({
+    name,
+    description: 'Fetches the status.',
+    action: 'http-get',
+    url: 'https://api.example.com/v1/status',
+    ...over,
+  });
+  const pinned = () =>
+    parseCustomSteps({
+      [ID]: {
+        ...entry,
+        tools: [tool('good'), tool('too_long', { description: 'd'.repeat(1025) })],
+      },
+    });
+
+  it('stays in the pinned entries, with its valid tool and the invalid one named', () => {
+    const parsed = pinned()[ID];
+    expect(parsed?.tools.map((t) => t.name)).toEqual(['good']);
+    expect(parsed?.invalidTools).toEqual(['too_long']);
+  });
+
+  it('resolves as the current step instead of a missing one', () => {
+    const scope = { taskId: 't8', customSteps: pinned(), runListSnapshot: ['a', ID] };
+    expect(resolveTaskStep(scope, ID, registry())?.metadata.id).toBe(ID);
+    expect(requireTaskStep(scope, ID, registry()).metadata.id).toBe(ID);
+  });
+
+  it('keeps the step in the run list', () => {
+    const { steps, unresolved } = resolveRunList(
+      { taskId: 't9', workflowType: 'demo', runListSnapshot: ['a', ID], customSteps: pinned() },
+      registry(),
+    );
+    expect(steps.map((s) => s.metadata.id)).toEqual(['a', ID]);
+    expect(unresolved).toEqual([]);
+  });
+});

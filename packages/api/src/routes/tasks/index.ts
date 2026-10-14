@@ -210,6 +210,8 @@ taskRoutes.get('/', async (c) => {
     // "Paused" would both claim the same rows. With the global switch on, nothing is waiting
     // for capacity at all.
     conds.push(isNull(schema.tasks.pausedAt));
+    // A dead task keeps its park marker, but nothing drives the park, so it waits for no slot.
+    conds.push(isNull(schema.tasks.deadAt));
     if (globalPause) conds.push(sql`false`);
   } else {
     const statuses = expandTaskStatusFilter(statusToken);
@@ -228,6 +230,8 @@ taskRoutes.get('/', async (c) => {
       // …and the paused half, which is also stored as `running`, so the three tokens name
       // disjoint sets.
       conds.push(isNull(schema.tasks.pausedAt));
+      // …and the dead half, which keeps the status it died in but has nothing working on it.
+      conds.push(isNull(schema.tasks.deadAt));
     }
     if (hidePaused) {
       // Exact negation of the PAUSED_FILTER_TOKEN predicate above, so "Paused" and "Hide paused"
@@ -374,7 +378,9 @@ taskRoutes.get('/', async (c) => {
     // forever and grows every time the list is polled — one such row read 670h against a 1.78h
     // wall. The web detail page already caps this way (tasks/[id]/page.tsx endMs, and
     // StepDuration's `endedAt ?? taskCompletedAt`); this endpoint was the divergence.
-    const endMs = t.completedAt ? t.completedAt.getTime() : now;
+    // A dead task stops where it died, as a finished one stops where it completed.
+    const stoppedAt = t.completedAt ?? t.deadAt;
+    const endMs = stoppedAt ? stoppedAt.getTime() : now;
     const { workMs, idleMs, userActiveMs } = computeTaskTiming(steps, endMs);
     const wallMs = startMs === null ? 0 : Math.max(0, endMs - startMs);
     // At most one step is in waiting_form at a time, so its waitingStartedAt tags THIS wait
@@ -402,15 +408,18 @@ taskRoutes.get('/', async (c) => {
       currentStepCliProviderIds: stepCliProviderIds.get(t.id) ?? [],
       // Running-but-queued: which capacity cap this task is parked behind, or null when it is
       // genuinely working. Derived per poll rather than stored, so it cannot go stale.
-      slotWait: deriveSlotWait({
-        taskStatus: t.status,
-        currentStepId: t.currentStepId,
-        currentRound: t.currentRound,
-        steps,
-        queuedInvocationStepRowIds: queuedInvocationStepIds,
-        paused: t.pausedAt !== null || globalPause,
-        nowMs: now,
-      }),
+      // A dead task waits for no slot, whatever park it died in.
+      slotWait: isTaskDead(t)
+        ? null
+        : deriveSlotWait({
+            taskStatus: t.status,
+            currentStepId: t.currentStepId,
+            currentRound: t.currentRound,
+            steps,
+            queuedInvocationStepRowIds: queuedInvocationStepIds,
+            paused: t.pausedAt !== null || globalPause,
+            nowMs: now,
+          }),
       allowanceReplenishedAt: t.allowanceReplenishedAt
         ? t.allowanceReplenishedAt.toISOString()
         : null,
@@ -1045,15 +1054,17 @@ taskRoutes.get('/:id', async (c) => {
     activeCliStepId: active?.taskStepId ?? null,
     // Same derivation as the listing, over the rows already fetched above, so the header badge
     // and the list badge can never disagree.
-    slotWait: deriveSlotWait({
-      taskStatus: task.status,
-      currentStepId: task.currentStepId,
-      currentRound: task.currentRound,
-      steps: stepRows,
-      queuedInvocationStepRowIds: await findQueuedInvocationStepIds(db, [id]),
-      paused: task.pausedAt !== null || globalPause,
-      nowMs: Date.now(),
-    }),
+    slotWait: isTaskDead(task)
+      ? null
+      : deriveSlotWait({
+          taskStatus: task.status,
+          currentStepId: task.currentStepId,
+          currentRound: task.currentRound,
+          steps: stepRows,
+          queuedInvocationStepRowIds: await findQueuedInvocationStepIds(db, [id]),
+          paused: task.pausedAt !== null || globalPause,
+          nowMs: Date.now(),
+        }),
     // Same helper the listing uses, over the already-ordered rows above, so the header
     // badge and the list badge render one identical string.
     currentStepLabel: currentStepLabel(stepRows, task.currentStepId, task.currentRound, flags),
