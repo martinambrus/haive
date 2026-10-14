@@ -31,12 +31,12 @@ export type ReapReason =
 
 /** A task as the reap/preempt rules see it.
  *
- *  `pausedAt` and `settled` describe a PAUSED task: the user is holding it, so its runner is
- *  serving nobody, but pause deliberately lets the CLI run in flight finish and that run may be
+ *  `pausedAt` (or `deadAt`) and `settled` describe a HELD task: paused by the user or dead, so its
+ *  runner is serving nobody, but pause deliberately lets the CLI run in flight finish and that run may be
  *  driving this very container. `settled` (no live CLI invocation) is what separates "held and
  *  idle" from "held but still finishing" — it is supplied by the caller because it needs a query
  *  these pure functions must not make. Callers that cannot determine it pass false, which keeps
- *  the runner. A task with a NULL pausedAt ignores both fields entirely. */
+ *  the runner. A task with neither pausedAt nor deadAt ignores `settled` entirely. */
 export interface ReaperTask {
   status: string;
   completedAt: Date | null;
@@ -129,12 +129,12 @@ export interface RunnerContainer {
  *   1. DEAD runners — no task label / task row gone (orphan), or failed/completed/cancelled.
  *      Reclaiming one costs nothing because nobody will ever use it again. Longest-dead first
  *      (oldest `completedAt`; orphan/unknown sorts oldest).
- *   2. PAUSED-and-settled runners, consulted ONLY when tier 1 is empty. A held task's runner is
+ *   2. HELD-and-settled runners, consulted ONLY when tier 1 is empty. A held task's runner is
  *      still a real environment the user may come back to, so tearing it down is a genuine cost
  *      — but a live task needing a slot outranks a held one, and three paused DDEV tasks holding
- *      every slot is precisely the deadlock Pause exists to prevent. Longest-paused first.
+ *      every slot is precisely the deadlock Pause exists to prevent. Longest-held first.
  *
- *  Tiering is what keeps this backward compatible: with nothing paused, tier 2 is always empty
+ *  Tiering is what keeps this backward compatible: with nothing held, tier 2 is always empty
  *  and the result is identical to the pre-pause behaviour.
  *
  *  `settled` gates tier 2 — pause lets the CLI run in flight finish, and that run may be driving
@@ -158,15 +158,17 @@ export function pickPreemptibleRunner(
       (c.taskId ? taskById.get(c.taskId) : undefined)?.completedAt?.getTime() ?? 0;
     return dead.reduce((best, c) => (deadAtMs(c) < deadAtMs(best) ? c : best));
   }
-  const paused = running.filter((c) => {
+  const held = running.filter((c) => {
     if (!c.taskId) return false; // already covered by tier 1
     const task = taskById.get(c.taskId);
-    return Boolean(task?.pausedAt && task.settled);
+    return Boolean((task?.pausedAt || task?.deadAt) && task.settled);
   });
-  if (paused.length > 0) {
-    const pausedAtMs = (c: RunnerContainer): number =>
-      (c.taskId ? taskById.get(c.taskId) : undefined)?.pausedAt?.getTime() ?? 0;
-    return paused.reduce((best, c) => (pausedAtMs(c) < pausedAtMs(best) ? c : best));
+  if (held.length > 0) {
+    const heldAtMs = (c: RunnerContainer): number => {
+      const task = c.taskId ? taskById.get(c.taskId) : undefined;
+      return (task?.pausedAt ?? task?.deadAt)?.getTime() ?? 0;
+    };
+    return held.reduce((best, c) => (heldAtMs(c) < heldAtMs(best) ? c : best));
   }
   // TIER 3 — a LIVE task the waiter outscores. Last, because unlike tiers 1 and 2 this takes an
   // environment somebody is still working in. It exists because holding a runner was otherwise a
@@ -366,7 +368,7 @@ export class RuntimeRunnerReaper {
 
   /** Reclaim ONE runtime runner for a WAITING live task by preempting a task no longer using
    *  its runtime (failed/completed/cancelled/orphan), or — only when there is no such runner —
-   *  one held by a settled PAUSE. Wired into the admission gate: called when the gate is full,
+   *  one under a settled hold. Wired into the admission gate: called when the gate is full,
    *  it frees a slot so a live task isn't starved behind a dead task's grace-runner or behind
    *  tasks the user deliberately put on hold. Preempts WITHOUT either grace: a live task's
    *  demand outranks a dead task's retry-cache and a held task's warm environment. Returns true
@@ -391,17 +393,25 @@ export class RuntimeRunnerReaper {
       try {
         const t = await this.db.query.tasks.findFirst({
           where: eq(schema.tasks.id, c.taskId),
-          columns: { status: true, completedAt: true, pausedAt: true, voteScore: true },
+          columns: {
+            status: true,
+            completedAt: true,
+            pausedAt: true,
+            deadAt: true,
+            voteScore: true,
+          },
         });
         // `settled` decides BOTH tier 2 and tier 3, so it is now needed for any live task the
-        // waiter outscores as well as for paused ones — but still not for every runner on every
+        // waiter outscores as well as for held ones — but still not for every runner on every
         // gate miss (a task that cannot be a candidate is not queried).
         if (t) {
           const couldBeScoreTier = scoreTier !== null && t.voteScore < scoreTier;
           taskById.set(c.taskId, {
             ...t,
             settled:
-              t.pausedAt || couldBeScoreTier ? await runnerSettled(this.db, c.taskId) : false,
+              t.pausedAt || t.deadAt || couldBeScoreTier
+                ? await runnerSettled(this.db, c.taskId)
+                : false,
           });
         }
       } catch (err) {
@@ -432,14 +442,15 @@ export class RuntimeRunnerReaper {
         try {
           const t = await this.db.query.tasks.findFirst({
             where: eq(schema.tasks.id, taskId),
-            columns: { status: true, pausedAt: true, voteScore: true },
+            columns: { status: true, pausedAt: true, deadAt: true, voteScore: true },
           });
           // Still a valid target if it is dead, or still held or outscored AND settled. The
           // settled re-check is the important half: the holder may have started an agent or an
           // exec since we listed, and taking its environment then is what tiers 2 and 3 must
           // never do.
           if (t && !PREEMPTIBLE_TASK_STATUSES.has(t.status)) {
-            const heldOrOutscored = !!t.pausedAt || (scoreTier !== null && t.voteScore < scoreTier);
+            const heldOrOutscored =
+              !!t.pausedAt || !!t.deadAt || (scoreTier !== null && t.voteScore < scoreTier);
             if (!heldOrOutscored || !(await runnerSettled(this.db, taskId))) return false;
           }
         } catch (err) {

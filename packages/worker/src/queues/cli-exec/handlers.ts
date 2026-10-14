@@ -105,6 +105,7 @@ import {
   recordCodexAppServerRuntimeFailure,
 } from '../../cli-adapters/codex-app-server-verdict.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
+import { supersedeDeadTaskRuns } from '../task-queue.js';
 import { agentRulesOf } from '../../orchestrator/agent-rules.js';
 import { houseRulesOf } from '../../orchestrator/house-rules.js';
 import { scoreHouseRulesInBackground } from '../../orchestrator/house-rules-similarity.js';
@@ -230,6 +231,7 @@ async function runCliExecJob(
 ): Promise<void> {
   const row = await db.query.cliInvocations.findFirst({
     where: eq(schema.cliInvocations.id, payload.invocationId),
+    with: { task: { columns: { status: true, deadAt: true } } },
   });
   if (!row) {
     log.warn({ invocationId: payload.invocationId }, 'cli invocation row missing');
@@ -243,6 +245,15 @@ async function runCliExecJob(
     log.info(
       { invocationId: payload.invocationId },
       'cli invocation already finalized; skipping redelivery',
+    );
+    return;
+  }
+  // The dead mark supersedes only runs not yet started; one dispatched or requeued since ends here.
+  if (row.task.deadAt && row.task.status !== 'cancelled' && row.task.status !== 'completed') {
+    await db.transaction((tx) => supersedeDeadTaskRuns(tx, eq(schema.cliInvocations.id, row.id)));
+    log.info(
+      { invocationId: payload.invocationId, taskId: row.taskId },
+      'cli invocation of a dead task ended without running',
     );
     return;
   }
