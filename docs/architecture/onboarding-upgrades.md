@@ -561,7 +561,12 @@ message). Otherwise the revision is bumped first, under the domain's lock (`mark
 `markPlanMirrorDirty`), so a crash leaves the files stale and the sweep re-renders them; tracked
 paths return to HEAD with `git checkout HEAD --`, the rest are removed (`git rm --cached`, then
 `removeNoFollow`, then any directory that leaves empty under `.haive-data/state`, since an empty one
-reads as a record with no format file); each restore runs under the domain's lock, after the caller's
+reads as a record with no format file; a removed file and each directory its removal empties keep
+the owner and mode captured with them, which whatever re-creates them, the put-back or the writer
+during the re-sync after a move, gets back while the writer still owns it (`restoreKeptMetadata`,
+best-effort, as fs-safe's inherited owner is), and every put-back 00a triggers runs under its
+checkout's merge-dir lock (`inMergeDirUnlessClaimed`) and is refused while another task's claim holds
+it); each restore runs under the domain's lock, after the caller's
 fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there, and a
 task that started meanwhile answers `held` with the files untouched; 00a runs that restore and its move in its claim's merge-dir section (`withMergeDirSection`, fenced on the pass's epoch), so a Stop or a cancel refuses both; and the sync base is pointed at
 the record now in the checkout (`rebaseProjectStateOnCheckout`; a checkout with no record gets an
