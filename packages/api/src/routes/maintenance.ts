@@ -202,14 +202,17 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
         failTask: true,
         actor: 'admin',
       });
-      await appendTaskEvent(db, taskId, null, 'task.stopped', {
-        by: actorUserId,
-        byAdmin: true,
-        reason: 'maintenance',
-        ...result,
-      });
-      await audit(result);
-      log.info({ taskId, ...result }, 'admin stopped a task for maintenance');
+      // The owner and the audit trail hear of a stop only when a run ended or a step failed.
+      if (result.cancelled > 0 || result.stopped > 0) {
+        await appendTaskEvent(db, taskId, null, 'task.stopped', {
+          by: actorUserId,
+          byAdmin: true,
+          reason: 'maintenance',
+          ...result,
+        });
+        await audit(result);
+        log.info({ taskId, ...result }, 'admin stopped a task for maintenance');
+      }
       return c.json({ ok: true, ...result });
     }
   }
