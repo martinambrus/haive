@@ -346,6 +346,28 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
       expect((await readRow(id)).status).toBe('needs_reauth');
     });
 
+    it.each([
+      [401, 'invalid_client'],
+      [200, 'incorrect_client_credentials'],
+    ] as const)(
+      'keeps a connection whose client was refused (HTTP %i, %s) and says why, naming the secret',
+      async (status, code) => {
+        const id = await createConnection();
+        const before = await readRow(id);
+        const vendor = answering(() => json(status, { error: code }));
+        const err = await rejection(getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn }));
+        expect(err).toBeInstanceOf(OauthVendorError);
+        expect(err).not.toBeInstanceOf(NeedsReauthError);
+        const row = await readRow(id);
+        expect(row.status).toBe('connected');
+        expect(row.accessTokenEncrypted).toBe(before.accessTokenEncrypted);
+        expect(row.refreshTokenEncrypted).toBe(before.refreshTokenEncrypted);
+        expect(row.lastError).toContain(code);
+        expect(row.lastError).toContain('client secret');
+        expect(vendor.calls()).toBe(1);
+      },
+    );
+
     it('goes by the code, never by the words around it', async () => {
       const flagged = await createConnection();
       const words = answering(() =>
@@ -365,7 +387,6 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
     });
 
     it.each([
-      ['invalid_client', () => json(401, { error: 'invalid_client' })],
       ['a 5xx that names invalid_grant', () => json(503, { error: 'invalid_grant' })],
       ['a 500 page', () => new Response('<html>oops</html>', { status: 500 })],
       ['a 502', () => new Response('', { status: 502 })],

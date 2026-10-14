@@ -18,9 +18,12 @@ const REFRESH_MARGIN_MS = 5 * 60_000;
 const REFRESH_LOCK_TIMEOUT_MS = 30_000;
 /** OAuth's code for a refresh token the vendor will not take again, and GitHub's own name for it. */
 const REFRESH_REJECTED_CODES = new Set(['invalid_grant', 'bad_refresh_token']);
+/** The provider refused the client, not the connection (GitHub's name included): fixing the
+ *  client's configuration, a missing secret among them, heals every connection, so none is stranded. */
+const CLIENT_REFUSED_CODES = new Set(['invalid_client', 'incorrect_client_credentials']);
 
 type ConnectionRow = typeof schema.integrationConnections.$inferSelect;
-type Outcome = { accessToken: string } | { needsReauth: true };
+type Outcome = { accessToken: string } | { needsReauth: true } | { refused: OauthVendorError };
 
 export interface AccessTokenOptions {
   fetchFn: typeof fetch;
@@ -150,6 +153,16 @@ async function refreshLocked(
         now,
       });
     } catch (err) {
+      if (err instanceof OauthVendorError && CLIENT_REFUSED_CODES.has(err.code)) {
+        await tx
+          .update(schema.integrationConnections)
+          .set({
+            lastError: `The provider refused this connection's OAuth client (${err.code}); its client secret may be missing or wrong.`,
+            updatedAt: new Date(now()),
+          })
+          .where(eq(schema.integrationConnections.id, connectionId));
+        return { refused: err };
+      }
       if (err instanceof OauthVendorError && REFRESH_REJECTED_CODES.has(err.code)) {
         return needsReauth(err.description ?? err.code);
       }
@@ -173,5 +186,6 @@ async function refreshLocked(
     return { accessToken: fresh.accessToken };
   });
   if ('needsReauth' in outcome) throw new NeedsReauthError(connectionId, 'needs_reauth');
+  if ('refused' in outcome) throw outcome.refused;
   return outcome.accessToken;
 }
