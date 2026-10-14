@@ -1,7 +1,7 @@
 import { pgTable, text, timestamp, check } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
-/** Three writers on different columns: the worker boot writes what it loaded last and since when a module that loaded before is missing; the admin toggle writes `deactivatedAt`, null while the module is active, and clears `tornDownAt`; the worker's teardown job stamps `tornDownAt` once a deactivated module's own teardown has run. */
+/** Four writers, three of them on different columns: the worker boot writes what it loaded last and since when a module that loaded before is missing; the admin toggle writes `deactivatedAt`, null while the module is active, and clears `tornDownAt`; the worker's teardown job stamps `tornDownAt` once a deactivated module's own teardown has run; the api's purge deletes the row of a missing module. */
 export const modules = pgTable(
   'modules',
   {

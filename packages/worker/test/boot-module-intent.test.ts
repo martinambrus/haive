@@ -46,10 +46,10 @@ describe('bootStepEngine module intent', () => {
     calls.length = 0;
   });
 
-  it('records module intent after the schemas are ensured and before the boot report', async () => {
+  it('records module intent after the schemas are ensured and before the task types are seeded', async () => {
     const { bootStepEngine } = await import('../src/step-engine/boot.js');
     await bootStepEngine({} as Database);
-    expect(calls).toEqual(['catalog', 'taskTypes', 'schemas', 'intent', 'report']);
+    expect(calls).toEqual(['catalog', 'schemas', 'intent', 'taskTypes', 'report']);
   });
 
   it('seeds task types from the loaded modules and reports what they seeded', async () => {
