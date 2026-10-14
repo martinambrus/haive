@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, lte } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormValues } from '@haive/shared';
 import {
@@ -150,6 +150,7 @@ export function buildPromptStep(
               eq(schema.taskSteps.taskId, ctx.taskId),
               eq(schema.taskSteps.stepId, token.id),
               eq(schema.taskSteps.status, 'done'),
+              lte(schema.taskSteps.round, ctx.round),
             ),
           )
           .orderBy(desc(schema.taskSteps.round))

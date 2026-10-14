@@ -291,3 +291,23 @@ describe('prompt step field names', () => {
     expect(text).toContain('Value: kept');
   });
 });
+
+describe('prompt step quoted-output round', () => {
+  it('reads a quoted step only from this round or an earlier one', async () => {
+    const { PgDialect } = await import('drizzle-orm/pg-core');
+    const wheres: unknown[] = [];
+    const queue: unknown[][] = [[{ title: 'T', description: '' }], [{ output: 'x' }]];
+    const chain: Record<string, unknown> = {};
+    for (const m of ['select', 'from', 'orderBy']) chain[m] = () => chain;
+    chain.where = (cond: unknown) => {
+      wheres.push(cond);
+      return chain;
+    };
+    chain.limit = () => Promise.resolve(queue.shift() ?? []);
+    const def = buildPromptStep(ID, make({ template: '{{step:a}}' }), 0);
+    await def.detect!({ taskId: 't', round: 2, db: chain } as unknown as StepContext);
+    const sql = new PgDialect().sqlToQuery(wheres[1] as never);
+    expect(sql.sql).toMatch(/"round" <= \$\d+/);
+    expect(sql.params).toContain(2);
+  });
+});
