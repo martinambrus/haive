@@ -7,6 +7,7 @@ import {
   parseStepId,
   taskTypeDefinitionSeedSchema,
 } from './contracts.js';
+import { STEP_ID_MAX_LENGTH } from './prompt-steps.js';
 
 const MODULE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 const PAGE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -233,10 +234,19 @@ export const moduleManifestSchema = z
           `stored slug is ${stored.length} characters; the limit is ${TASK_TYPE_SLUG_MAX_LENGTH}`,
         );
       }
+      if (`module:${m.id}`.length > TASK_TYPE_SLUG_MAX_LENGTH) {
+        fail(`its source "module:${m.id}" is longer than ${TASK_TYPE_SLUG_MAX_LENGTH} characters`);
+      }
       if (seed.runListStrategy !== 'static') {
         fail('a module task type must use the static strategy');
       }
+      const seen = new Set<string>();
       for (const stepId of seed.stepIds ?? []) {
+        if (seen.has(stepId)) fail(`step "${stepId}" appears twice`);
+        seen.add(stepId);
+        if (stepId.length > STEP_ID_MAX_LENGTH) {
+          fail(`step "${stepId}" is longer than ${STEP_ID_MAX_LENGTH} characters`);
+        }
         const parsed = parseStepId(stepId);
         if (parsed?.kind === 'custom') {
           fail(

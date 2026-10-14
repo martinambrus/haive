@@ -164,7 +164,7 @@ export const taskTypeDefinitionSeedSchema = z
     requiresRepository: z.boolean(),
     preAnswerDefaults: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
     stepLoopLimitDefaults: z.record(z.string(), z.number()).optional(),
-    sortOrder: z.number().int().optional(),
+    sortOrder: z.number().int().min(-2147483648).max(2147483647).optional(),
   })
   .refine(
     (s) =>

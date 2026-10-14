@@ -57,6 +57,30 @@ describe('a module task type seed in a manifest', () => {
     expect(problems(manifest([seed({ sortOrder: 2 })]))).toEqual([]);
   });
 
+  it('refuses a step that appears twice, naming it', () => {
+    const found = problems(manifest([seed({ stepIds: ['module.fx.report', 'module.fx.report'] })]));
+    expect(found.join('\n')).toContain('module.fx.report');
+    expect(found.join('\n')).toMatch(/twice/);
+  });
+
+  it('refuses a step id longer than a step row can hold', () => {
+    const long = `module.fx.${'a'.repeat(120)}`;
+    expect(problems(manifest([seed({ stepIds: [long] })])).join('\n')).toContain('"weekly"');
+    expect(problems(manifest([seed({ stepIds: [long.slice(0, 128)] })]))).toEqual([]);
+  });
+
+  it('refuses a sort order outside the integer column', () => {
+    expect(problems(manifest([seed({ sortOrder: 2147483648 })])).length).toBeGreaterThan(0);
+    expect(problems(manifest([seed({ sortOrder: -2147483649 })])).length).toBeGreaterThan(0);
+    expect(problems(manifest([seed({ sortOrder: 2147483647 })]))).toEqual([]);
+  });
+
+  it('refuses a source longer than its column, counting the module id', () => {
+    const id = 'f'.repeat(122);
+    const found = problems(manifest([seed({ slug: 'x', stepIds: ['01-env-detect'] })], id));
+    expect(found.join('\n')).toMatch(/source/);
+  });
+
   it('refuses a custom step id and names the slug and the id', () => {
     const found = problems(manifest([seed({ stepIds: ['01-env-detect', 'custom.mine.step'] })]));
     expect(found.length).toBeGreaterThan(0);
