@@ -21,6 +21,30 @@ describe('core composable catalog', () => {
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
   });
 
+  it('flags exactly the steps whose stored output is purely agent-authored', () => {
+    expect(
+      CORE_COMPOSABLE_STEPS.filter((e) => e.agentAuthoredOutput === true)
+        .map((e) => e.stepId)
+        .sort(),
+    ).toEqual(
+      [
+        '01-declare-deps',
+        '02-generate-dockerfile',
+        '04-verify-environment',
+        '01-debug-mode',
+        '01b-install-plugins',
+        '01d-browser-access',
+        '01c1-restore-database',
+        '07a-code-simplify',
+        '07b-phase-4-validate',
+        '08c-code-review',
+        '11d-skill-sync',
+        '11c-rag-reindex',
+        '11g-save-database',
+      ].sort(),
+    );
+  });
+
   it('counts the merge-fixer steps as CLI work', () => {
     const merging = stepRegistry
       .all()

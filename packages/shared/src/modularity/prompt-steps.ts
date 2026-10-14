@@ -213,6 +213,7 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'file-write-without-repository',
   'step-id-too-long',
   'step-token-not-earlier',
+  'step-token-not-quotable',
   'step-token-not-own-line',
 ] as const;
 export type PromptStepProblemKind = (typeof PROMPT_STEP_PROBLEM_KINDS)[number];
@@ -233,6 +234,8 @@ export interface PromptStepValidationContext {
   typeSlug: string;
   requiresRepository: boolean;
   stepIdsBefore: readonly string[];
+  /** When given, a quoted step must be in it: the steps whose stored output is purely agent-authored. */
+  quotableStepIds?: ReadonlySet<string>;
 }
 
 const NO_TOKEN = { raw: '', start: 0 } as const;
@@ -289,6 +292,12 @@ export function validatePromptStep(
           add(
             'step-token-not-earlier',
             `${token.raw} is not a step that runs before this one.`,
+            token,
+          );
+        } else if (ctx.quotableStepIds && !ctx.quotableStepIds.has(token.id)) {
+          add(
+            'step-token-not-quotable',
+            `${token.raw} names ${token.id}, whose output can carry a person's words; a step can quote only a step whose output an agent wrote.`,
             token,
           );
         }

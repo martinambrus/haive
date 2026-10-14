@@ -202,7 +202,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
   const catalog = await loadCatalog(db);
   requireSynced(catalog);
   const promptSteps = body.promptSteps ?? {};
-  const promptIssues = checkPromptSteps(body, promptSteps);
+  const promptIssues = checkPromptSteps(body, promptSteps, catalog);
   if (promptIssues.length > 0) {
     return c.json({ error: 'Invalid prompt steps', issues: promptIssues }, 400);
   }
@@ -286,7 +286,11 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
         body.requiresRepository !== undefined ||
         body.promptSteps !== undefined
       ) {
-        const promptIssues = checkPromptSteps({ slug, stepIds, requiresRepository }, promptSteps);
+        const promptIssues = checkPromptSteps(
+          { slug, stepIds, requiresRepository },
+          promptSteps,
+          catalog,
+        );
         if (promptIssues.length > 0) {
           return { invalid: { error: 'Invalid prompt steps', issues: promptIssues } } as const;
         }

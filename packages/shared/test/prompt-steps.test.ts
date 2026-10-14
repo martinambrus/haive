@@ -14,6 +14,7 @@ import {
   renderPromptTemplate,
   TEMPLATE_PERSONA_MARKER_PATTERN,
   validatePromptStep,
+  type PromptStepValidationContext,
   type PromptStepValidationInput,
   type PromptTemplateValues,
 } from '../src/modularity/prompt-steps.js';
@@ -43,7 +44,7 @@ const ctx = {
   stepIdsBefore: ['01-worktree-setup', 'custom.audit.first'],
 };
 
-const kinds = (e: PromptStepValidationInput, c = ctx): string[] =>
+const kinds = (e: PromptStepValidationInput, c: PromptStepValidationContext = ctx): string[] =>
   validatePromptStep(e, c).map((p) => p.kind);
 
 describe('renderPromptTemplate: one pass, values stay inert', () => {
@@ -354,6 +355,42 @@ describe('validatePromptStep', () => {
         'timeout-out-of-range',
       ]),
     );
+  });
+});
+
+describe('validatePromptStep: which earlier steps a {{step:}} may quote', () => {
+  const quotable = new Set(['07b-phase-4-validate', 'custom.audit.first']);
+  const withSet = {
+    ...ctx,
+    stepIdsBefore: [...ctx.stepIdsBefore, '06-gate-1-spec-approval', '07b-phase-4-validate'],
+    quotableStepIds: quotable,
+  };
+
+  it("refuses an earlier step whose output can carry a person's words, naming it", () => {
+    const found = validatePromptStep(
+      entry({ template: '{{step:06-gate-1-spec-approval}}' }),
+      withSet,
+    );
+    expect(found.map((p) => p.kind)).toEqual(['step-token-not-quotable']);
+    expect(found[0]!.message).toContain('06-gate-1-spec-approval');
+    expect(found[0]!.message).toContain("a person's words");
+  });
+
+  it('lets a step quote a flagged core step and an earlier step of the same type', () => {
+    expect(kinds(entry({ template: '{{step:07b-phase-4-validate}}' }), withSet)).toEqual([]);
+    expect(kinds(entry({ template: '{{step:custom.audit.first}}' }), withSet)).toEqual([]);
+  });
+
+  it('does not add the problem to a step that is not earlier, and does nothing without the set', () => {
+    expect(kinds(entry({ template: '{{step:custom.audit.later}}' }), withSet)).toEqual([
+      'step-token-not-earlier',
+    ]);
+    expect(
+      kinds(entry({ template: '{{step:06-gate-1-spec-approval}}' }), {
+        ...withSet,
+        quotableStepIds: undefined,
+      }),
+    ).toEqual([]);
   });
 });
 

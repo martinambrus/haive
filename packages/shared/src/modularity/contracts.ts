@@ -118,6 +118,7 @@ export const composableStepEntrySchema = z
     loopBudgetEditable: z.boolean().optional(),
     loopTargetStepId: stepIdSchema.optional(),
     closes: z.boolean().optional(),
+    agentAuthoredOutput: z.boolean().optional(),
     precedes: z.array(z.string()).optional(),
     removes: z.array(z.string()).optional(),
     entails: z.array(z.string()).optional(),

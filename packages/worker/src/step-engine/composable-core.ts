@@ -27,6 +27,7 @@ const EDITS_PRECEDE = [
 export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   {
     stepId: '01-declare-deps',
+    agentAuthoredOutput: true,
     label: 'Declare dependencies',
     group: 'env',
     dispatchesCli: false,
@@ -37,6 +38,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '02-generate-dockerfile',
+    agentAuthoredOutput: true,
     label: 'Generate Dockerfile',
     group: 'env',
     dispatchesCli: false,
@@ -56,6 +58,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '04-verify-environment',
+    agentAuthoredOutput: true,
     label: 'Verify environment',
     group: 'env',
     dispatchesCli: false,
@@ -91,6 +94,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '01-debug-mode',
+    agentAuthoredOutput: true,
     label: 'Debug mode',
     group: 'setup',
     dispatchesCli: false,
@@ -100,6 +104,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '01b-install-plugins',
+    agentAuthoredOutput: true,
     label: 'Install CLI plugins',
     group: 'setup',
     dispatchesCli: false,
@@ -117,6 +122,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '01d-browser-access',
+    agentAuthoredOutput: true,
     label: 'Browser access',
     group: 'runtime',
     dispatchesCli: false,
@@ -171,6 +177,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '01c1-restore-database',
+    agentAuthoredOutput: true,
     label: 'Restore database',
     group: 'runtime',
     dispatchesCli: false,
@@ -259,6 +266,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '07a-code-simplify',
+    agentAuthoredOutput: true,
     label: 'Phase 3.5: Code simplification',
     group: 'build',
     dispatchesCli: true,
@@ -273,6 +281,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '07b-phase-4-validate',
+    agentAuthoredOutput: true,
     label: 'Phase 4: Implementation validation',
     group: 'check',
     dispatchesCli: true,
@@ -336,6 +345,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '08c-code-review',
+    agentAuthoredOutput: true,
     label: 'Phase 6: Code review',
     group: 'check',
     dispatchesCli: true,
@@ -367,6 +377,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '11d-skill-sync',
+    agentAuthoredOutput: true,
     label: 'Sync skills',
     group: 'knowledge',
     dispatchesCli: true,
@@ -401,6 +412,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '11c-rag-reindex',
+    agentAuthoredOutput: true,
     label: 'Re-index knowledge base into RAG',
     group: 'knowledge',
     dispatchesCli: false,
@@ -426,6 +438,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
   },
   {
     stepId: '11g-save-database',
+    agentAuthoredOutput: true,
     label: 'Save database',
     group: 'finish',
     dispatchesCli: false,
