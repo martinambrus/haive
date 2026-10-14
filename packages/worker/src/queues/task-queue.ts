@@ -67,6 +67,7 @@ import {
   miningTimeoutInfo,
   trailingTimeoutInfo,
   upsertRow,
+  resolvePreferredCli,
   type AdvanceStepResult,
   type WorkerDeps,
 } from '../step-engine/index.js';
@@ -78,6 +79,11 @@ import {
 import { computeFoldContribution } from '@haive/shared/timing';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
+import {
+  AGENT_PERSONA_UNRESOLVED_EVENT,
+  checkPinnedStepPersonas,
+} from '../orchestrator/persona-start-check.js';
+import { dispatchCandidates } from '../orchestrator/dispatcher.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import {
@@ -2206,6 +2212,31 @@ async function handleStartTask(
   }
   if (held) held.claimed = true;
   await appendEvent(db, ctx.taskId, null, 'task.running', {});
+  let startProviders: CliProviderRecord[] | undefined;
+  await checkPinnedStepPersonas({
+    db,
+    taskId: ctx.taskId,
+    repoPath: ctx.repoPath,
+    customSteps: ctx.customSteps,
+    providerNameFor: async (stepId) => {
+      startProviders ??= await loadProviders(db, ctx.userId);
+      const { cliProviderId } = await resolvePreferredCli(
+        db,
+        ctx.userId,
+        stepId,
+        ctx.cliProviderId,
+        startProviders,
+        'default',
+        ctx.taskId,
+        ctx.ignoreSavedStepClis,
+      );
+      const needsVision = ctx.customSteps?.[stepId]?.capabilities.includes('vision') === true;
+      const first = dispatchCandidates(startProviders, cliProviderId, { needsVision }).next();
+      return first.done ? null : first.value.provider.name;
+    },
+    record: (unresolved) =>
+      appendEvent(db, ctx.taskId, null, AGENT_PERSONA_UNRESOLVED_EVENT, { ...unresolved }),
+  });
 
   // This handler calls advanceStep DIRECTLY, so it bypasses handleAdvanceStep's pause gate
   // entirely — without this a task created (or retried) while paused would run its whole first

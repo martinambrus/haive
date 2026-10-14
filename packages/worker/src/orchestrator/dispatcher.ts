@@ -557,27 +557,45 @@ async function resolveCodexAppServerVerdicts(
   return enabled ? loadCodexAppServerVerdicts(db, taskId) : null;
 }
 
+/** The providers a dispatch tries, in the order it tries them, after every check that needs no
+ *  plan: enabled, the preferred one first, an adapter that runs under CLI auth, and never a model
+ *  known to be blind for an input that needs vision. */
+export function* dispatchCandidates(
+  providers: CliProviderRecord[],
+  preferredProviderId: string | null,
+  opts: { needsVision: boolean; preferVision?: boolean; registry?: CliAdapterRegistry },
+): Generator<{ provider: CliProviderRecord; adapter: BaseCliAdapter }> {
+  const registry = opts.registry ?? cliAdapterRegistry;
+  const enabled = providers.filter((p) => p.enabled);
+  for (const provider of orderProviders(enabled, preferredProviderId, opts.preferVision === true)) {
+    if (!registry.has(provider.name)) continue;
+    const adapter = registry.get(provider.name);
+    if (!adapter.supportsCliAuth) continue;
+    // A hard exclusion, not a warning. The remedy for a blind model
+    // (NO_VISION_BOUNDARY_PROMPT) tells the agent not to open images at all, so
+    // handing it work that DEPENDS on one produces a confident answer that ignored
+    // the input — the one failure mode declaring this capability exists to stop.
+    if (opts.needsVision && isKnownBlind(provider)) continue;
+    yield { provider, adapter };
+  }
+}
+
 export function resolveDispatch(req: DispatchRequest): DispatchPlan {
-  const registry = req.registry ?? cliAdapterRegistry;
   const enabled = req.providers.filter((p) => p.enabled);
 
   if (enabled.length === 0) {
     return skipPlan('no enabled cli providers');
   }
 
-  const ordered = orderProviders(
-    enabled,
-    req.preferredProviderId ?? null,
-    req.preferVision === true,
-  );
   const needsSubagents = req.input.capabilities.includes('subagents');
   const needsVision = req.input.capabilities.includes('vision');
 
-  for (const provider of ordered) {
-    if (!registry.has(provider.name)) continue;
-    const adapter = registry.get(provider.name);
-
-    const plan = tryBuildPlan(adapter, provider, req, needsSubagents, needsVision);
+  for (const { provider, adapter } of dispatchCandidates(enabled, req.preferredProviderId ?? null, {
+    needsVision,
+    preferVision: req.preferVision,
+    registry: req.registry,
+  })) {
+    const plan = buildCliSidePlan(adapter, provider, req, needsSubagents);
     if (plan) return plan;
   }
 
@@ -619,22 +637,6 @@ function orderProviders(
     ...preferredFirst.filter((p) => !isKnownBlind(p)),
     ...preferredFirst.filter(isKnownBlind),
   ];
-}
-
-function tryBuildPlan(
-  adapter: BaseCliAdapter,
-  provider: CliProviderRecord,
-  req: DispatchRequest,
-  needsSubagents: boolean,
-  needsVision: boolean,
-): DispatchPlan | null {
-  if (!adapter.supportsCliAuth) return null;
-  // A hard exclusion, not a warning. The remedy for a blind model
-  // (NO_VISION_BOUNDARY_PROMPT) tells the agent not to open images at all, so
-  // handing it work that DEPENDS on one produces a confident answer that ignored
-  // the input — the one failure mode declaring this capability exists to stop.
-  if (needsVision && isKnownBlind(provider)) return null;
-  return buildCliSidePlan(adapter, provider, req, needsSubagents);
 }
 
 function buildCliSidePlan(
