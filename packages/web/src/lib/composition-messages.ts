@@ -1,13 +1,20 @@
 import {
+  PROMPT_STEP_PROBLEM_KINDS,
+  PROMPT_STEP_TEMPLATE_MAX_BYTES,
+  PROMPT_STEP_TIMEOUT_MAX_MS,
+  PROMPT_STEP_TIMEOUT_MIN_MS,
   REPOSITORY_TOKEN,
+  STEP_ID_MAX_LENGTH,
   validateComposition,
   validateTaskTypeDefaults,
   type ComposableStepEntry,
   type CompositionIssue,
+  type PromptStepProblemKind,
   type TaskTypeAvailability,
   type TaskTypeDefaultsIssue,
 } from '@haive/shared/modularity';
 import type { TaskTypeCatalog } from './api-client';
+import { inlineCode } from './project-state-conflicts';
 
 export type CatalogEntries = ReadonlyMap<string, ComposableStepEntry>;
 
@@ -216,5 +223,80 @@ export function describeAvailability(availability: TaskTypeAvailability): string
       const n = availability.issues?.length ?? 0;
       return `Unavailable: the step list has ${n} problem${n === 1 ? '' : 's'}`;
     }
+  }
+}
+
+export type PromptStepIssueKind =
+  | PromptStepProblemKind
+  | 'template-empty'
+  | 'title-empty'
+  | 'prompt-step-orphan'
+  | 'prompt-step-missing';
+
+export interface PromptStepIssue {
+  kind: PromptStepIssueKind;
+  stepId: string;
+  index?: number;
+  raw?: string;
+  start?: number;
+  message?: string;
+}
+
+const PROMPT_STEP_ISSUE_KINDS: ReadonlySet<string> = new Set<string>([
+  ...PROMPT_STEP_PROBLEM_KINDS,
+  'prompt-step-orphan',
+  'prompt-step-missing',
+]);
+
+/** Picks the prompt-step issues out of an error body's `issues`, which `splitServerIssues` leaves alone. */
+export function promptStepIssuesOf(issues: unknown): PromptStepIssue[] {
+  if (!Array.isArray(issues)) return [];
+  return (issues as Record<string, unknown>[]).filter(
+    (item) =>
+      typeof item?.kind === 'string' &&
+      PROMPT_STEP_ISSUE_KINDS.has(item.kind) &&
+      typeof item.stepId === 'string',
+  ) as unknown as PromptStepIssue[];
+}
+
+export function describePromptStepIssue(issue: PromptStepIssue): string {
+  const token = issue.raw ? inlineCode(issue.raw) : 'A token';
+  switch (issue.kind) {
+    case 'title-empty':
+      return 'Give the step a title.';
+    case 'template-empty':
+      return 'Write the prompt: the template is empty.';
+    case 'unknown-token':
+      return `${token} is not a template token. The tokens are \`task.title\`, \`task.description\`, \`field:<id>\`, \`step:<id>\` and \`agent:<id>\`.`;
+    case 'field-not-declared':
+      return `${token} names a field this step's form does not declare.`;
+    case 'persona-id-invalid':
+      return `${token} is not an agent id: use lowercase letters, digits and hyphens.`;
+    case 'reserved-marker-in-template':
+      return `The template may not contain ${inlineCode('[[HAIVE_')} or start with ${inlineCode('<haive_')}; both are reserved.`;
+    case 'integration-token':
+      return `${token} is not supported yet.`;
+    case 'template-too-large':
+      return `The template is over ${PROMPT_STEP_TEMPLATE_MAX_BYTES / 1024} KiB; shorten it.`;
+    case 'timeout-out-of-range':
+      return `The timeout must be between ${PROMPT_STEP_TIMEOUT_MIN_MS / 60_000} and ${PROMPT_STEP_TIMEOUT_MAX_MS / 60_000} minutes.`;
+    case 'capability-not-allowed':
+      return 'A capability on this step is not one a prompt step may have.';
+    case 'persona-without-repository':
+      return `${token} needs a repository to read the agent from: turn on 'Requires a repository' or remove the token.`;
+    case 'file-write-without-repository':
+      return "Writing files needs a repository: turn on 'Requires a repository' or untick 'Can write files'.";
+    case 'step-id-too-long':
+      return `The step id is longer than ${STEP_ID_MAX_LENGTH} characters; use a shorter task type slug.`;
+    case 'step-token-not-earlier':
+      return `${token} names a step that does not run before this one.`;
+    case 'step-token-not-quotable':
+      return `${token} names a step whose output can carry a person's words; only a step whose output an agent wrote can be quoted.`;
+    case 'step-token-not-own-line':
+      return `${token} must be alone on its line.`;
+    case 'prompt-step-orphan':
+      return `${issue.stepId} is defined but is not in the step list.`;
+    case 'prompt-step-missing':
+      return `${issue.stepId} is in the step list but has no prompt step defined.`;
   }
 }

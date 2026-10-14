@@ -73,6 +73,7 @@ import {
 import { resolveUsageChipState } from '@/lib/usage-chip-state';
 import { stepCliProviderIds } from '@/lib/step-cli-providers';
 import { resolveStepPanels, type PanelContext, type UiPanelSpec } from '@/lib/step-panels';
+import { promptStepReply } from '@/lib/prompt-step-output';
 import { selectMetersForProviderIds, type StripMeter } from '@/components/usage-strip-select';
 import {
   UsageBars,
@@ -3636,6 +3637,7 @@ function StepCardImpl({
   const formHeaderPanels = resolveStepPanels(step.stepId, 'formHeader', panelCtx);
   const formBeforeFieldsPanels = resolveStepPanels(step.stepId, 'formBeforeFields', panelCtx);
   const cardFooterPanels = resolveStepPanels(step.stepId, 'cardFooter', panelCtx);
+  const promptReply = promptStepReply(step.stepId, step.status, step.output);
   // Auto-skipped steps (shouldRun → false, or detect skipReason) have nothing
   // to retry — they were intentionally bypassed by the runner. Manually-skipped
   // steps remain retryable in case the user changed their mind.
@@ -4289,6 +4291,12 @@ function StepCardImpl({
 
       {showOutput && (
         <div className="flex flex-col gap-2">
+          {promptReply !== null && (
+            <div>
+              <div className="text-xs font-medium text-neutral-400">Reply</div>
+              <MarkdownView body={promptReply} />
+            </div>
+          )}
           {step.detectOutput !== null && (
             <div>
               <div className="text-xs font-medium text-neutral-400">Detect</div>

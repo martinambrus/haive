@@ -137,4 +137,112 @@ describe('TaskTypeComposer', () => {
     for (const tag of controls) expect(tag).toContain('disabled=""');
     expect(html).not.toContain('draggable="true"');
   });
+
+  describe('prompt steps', () => {
+    const step = {
+      slug: 'ask',
+      title: 'Ask the agent',
+      template: 'Summarise {{task.title}}',
+      capabilities: [] as [],
+      timeoutMs: 300_000,
+    };
+    const editing = {
+      ...base,
+      typeSlug: 't',
+      promptSteps: { ask: step },
+      onPromptStepsChange: noop,
+    };
+
+    it('offers no prompt-step controls unless the editor hands the composer a type and a handler', () => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer {...base} stepIds={['04-phase-0b-pre-planning']} />,
+      );
+      expect(html).not.toContain('Add prompt step');
+      expect(html).not.toContain('Prompt step<');
+      const readOnly = renderToStaticMarkup(
+        <TaskTypeComposer {...editing} readOnly stepIds={['custom.t.ask']} />,
+      );
+      expect(readOnly).not.toContain('Add prompt step');
+      expect(readOnly).not.toContain('Edit');
+    });
+
+    it('shows a prompt step as a badged agent row with an Edit control and no problems', () => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer {...editing} stepIds={['custom.t.ask']} />,
+      );
+      const row = html.split('<li ')[1]!;
+      expect(row).toContain('Ask the agent');
+      expect(row).toContain('Prompt step</span>');
+      expect(row).toContain('custom.t.ask');
+      expect(row).toContain('agent');
+      expect(row).toContain('aria-label="Edit prompt step Ask the agent"');
+      expect(row).toContain('aria-expanded="false"');
+      expect(row).not.toContain('Prompt template');
+      expect(html).toContain('No problems');
+      expect(html).not.toContain('is not in the step catalog');
+      expect(html).toContain('Add prompt step');
+    });
+
+    it('marks the row and says in words what is wrong with the template', () => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer
+          {...editing}
+          promptSteps={{ ask: { ...step, template: 'Use {{bogus}}' } }}
+          stepIds={['custom.t.ask']}
+        />,
+      );
+      const row = html.split('<li ')[1]!;
+      expect(row).toContain('border-red-800/70');
+      expect(row).toContain('<code>{{bogus}}</code> is not a template token');
+      expect(html).toContain('1 problem');
+    });
+
+    it('flags a prompt step that quotes one that runs later', () => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer
+          {...editing}
+          promptSteps={{
+            ask: { ...step, template: '{{step:custom.t.later}}' },
+            later: { ...step, slug: 'later', title: 'Later' },
+          }}
+          stepIds={['custom.t.ask', 'custom.t.later']}
+        />,
+      );
+      expect(html.split('<li ')[1]).toContain('does not run before this one');
+      expect(html.split('<li ')[2]).not.toContain('does not run before this one');
+    });
+
+    it('puts a server issue on the row of its step and one with no row in the general list', () => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer
+          {...editing}
+          stepIds={['custom.t.ask']}
+          serverPromptIssues={[
+            { kind: 'template-too-large', stepId: 'custom.t.ask' },
+            { kind: 'prompt-step-orphan', stepId: 'custom.t.gone' },
+          ]}
+        />,
+      );
+      expect(html.split('<li ')[1]).toContain('over 16 KiB');
+      expect(html).toContain('custom.t.gone is defined but is not in the step list');
+      expect(html).toContain('2 problems');
+    });
+
+    it('disables Add prompt step until the task type has a valid slug', () => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer {...editing} typeSlug="" stepIds={['04-phase-0b-pre-planning']} />,
+      );
+      expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Add prompt step<\/button>/);
+      expect(html).toContain('Enter a valid slug for the task type first');
+    });
+
+    it('makes the prompt-step controls inert while disabled', () => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer {...editing} disabled stepIds={['custom.t.ask']} />,
+      );
+      for (const tag of html.match(/<(button|input)\b[^>]*>/g) ?? []) {
+        expect(tag).toContain('disabled=""');
+      }
+    });
+  });
 });

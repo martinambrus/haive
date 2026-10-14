@@ -8,6 +8,7 @@ import type {
   DashboardSpec,
   ModuleDiff,
   ModuleIntentRow,
+  PromptStepEntry,
   PublicTaskType,
   TaskTypeAvailability,
   TaskTypeUpdate,
@@ -2442,6 +2443,7 @@ export interface AdminTaskType {
   stepIds: string[] | null;
   preAnswerDefaults: Record<string, Record<string, unknown>>;
   stepLoopLimitDefaults: Record<string, number>;
+  promptSteps: Record<string, PromptStepEntry>;
   fixLoop: unknown;
   enabled: boolean;
   selectable: boolean;
