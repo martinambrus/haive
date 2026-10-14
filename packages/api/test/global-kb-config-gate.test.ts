@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
@@ -13,6 +14,9 @@ const h = vi.hoisted(() => ({
     h.events.push(`set:${key}`);
   }),
   setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
+  db: undefined as unknown,
+  audits: [] as { table: unknown; row: unknown }[],
+  auditLog: { info: vi.fn(), error: vi.fn() },
   vectorType: null as string | null,
   checks: [] as unknown[],
   connect: vi.fn(async (_settings: unknown, _db: unknown) => ({
@@ -59,7 +63,7 @@ const rows = (text: string) => {
   return h.vectorType === null ? [] : [{ type: h.vectorType }];
 };
 
-vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getGlobalKbSyncQueue: vi.fn(), getTaskQueue: vi.fn() }));
 vi.mock('../src/lib/task-start.js', () => ({
   enqueueStart: vi.fn(async () => {}),
@@ -73,14 +77,24 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
     await next();
   },
 }));
-vi.mock('@haive/shared', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@haive/shared')>()),
-  configService: {
-    getBoolean: async (key: string, fallback: boolean) => h.flags.get(key) ?? fallback,
-    set: h.set,
-  },
-  secretsService: { set: h.setSecret },
-}));
+vi.mock('@haive/shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared')>();
+  return {
+    ...actual,
+    logger: new Proxy(actual.logger, {
+      get: (target, prop, receiver) =>
+        prop === 'child'
+          ? (bindings: { module?: string }) =>
+              bindings.module === 'audit' ? h.auditLog : target.child(bindings)
+          : Reflect.get(target, prop, receiver),
+    }),
+    configService: {
+      getBoolean: async (key: string, fallback: boolean) => h.flags.get(key) ?? fallback,
+      set: h.set,
+    },
+    secretsService: { set: h.setSecret },
+  };
+});
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
   resolveGlobalKbSettings: async () => {
@@ -97,6 +111,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
+import { schema } from '@haive/database';
 import { CONFIG_KEYS, SECRET_KEYS } from '@haive/shared';
 import { adminRoutes } from '../src/routes/admin.js';
 import { globalKbRoutes } from '../src/routes/global-kb.js';
@@ -146,6 +161,10 @@ beforeEach(() => {
   h.set.mockClear();
   h.setSecret.mockClear();
   h.connect.mockClear();
+  h.db = undefined;
+  h.audits = [];
+  h.auditLog.info.mockClear();
+  h.auditLog.error.mockClear();
   h.vectorType = null;
   h.events = [];
   h.lockFails = false;
@@ -343,6 +362,104 @@ describe('PUT /global-kb/config by an admin', () => {
       h.role = 'user';
 
       expect((await put({ mode: 'external' })).status).toBe(403);
+    });
+  });
+});
+
+describe('PUT /global-kb/config audit trail', () => {
+  const ADMIN_ID = '00000000-0000-4000-8000-0000000000a1';
+  const AUDIT_USER = `audit-u-${randomUUID().slice(0, 8)}`;
+  const AUDIT_PASS = `audit-p-${randomUUID().slice(0, 8)}`;
+  const AUDIT_HOST = 'db.example.test';
+  const target = new URL(`postgres://${AUDIT_HOST}/kb`);
+  target.username = AUDIT_USER;
+  target.password = AUDIT_PASS;
+  const NEW_STRING = target.toString();
+  const traces = () =>
+    JSON.stringify([
+      h.audits.map(({ row }) => row),
+      h.auditLog.info.mock.calls,
+      h.auditLog.error.mock.calls,
+    ]);
+
+  beforeEach(() => {
+    h.db = {
+      insert: (table: unknown) => ({
+        values: async (row: unknown) => {
+          h.audits.push({ table, row });
+        },
+      }),
+    };
+  });
+
+  it('records one event when an admin sets the connection string, and no part of the string', async () => {
+    const res = await put({ ...PAGE, connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.setSecret).toHaveBeenCalledWith(
+      SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
+      NEW_STRING,
+      expect.any(String),
+    );
+    expect(h.audits).toHaveLength(1);
+    expect(h.audits[0]?.table).toBe(schema.auditEvents);
+    expect(h.audits[0]?.row).toEqual({
+      actorUserId: ADMIN_ID,
+      action: 'global_kb.connection_string.update',
+      targetType: 'global_kb',
+      targetId: null,
+      metadata: { connectionStringSet: true },
+    });
+    expect(h.auditLog.info).toHaveBeenCalledTimes(1);
+    expect(h.auditLog.info.mock.calls[0]?.[0]).toMatchObject({
+      actorUserId: ADMIN_ID,
+      action: 'global_kb.connection_string.update',
+      connectionStringSet: true,
+    });
+    for (const part of [NEW_STRING, AUDIT_USER, AUDIT_PASS, AUDIT_HOST]) {
+      expect(traces()).not.toContain(part);
+    }
+  });
+
+  it.each([
+    ['sends none', { archiveRetentionDays: 7 }],
+    [
+      'sends it blank, as the page does while the field is untouched',
+      { ...PAGE, connectionString: '  ' },
+    ],
+  ])('records nothing when an admin saves other settings and %s', async (_how, body) => {
+    const res = await put(body);
+
+    expect(res.status).toBe(200);
+    expect(h.set).toHaveBeenCalled();
+    expect(h.setSecret).not.toHaveBeenCalled();
+    expect(h.audits).toEqual([]);
+    expect(h.auditLog.info).not.toHaveBeenCalled();
+  });
+
+  describe('by a regular user', () => {
+    beforeEach(() => {
+      h.role = 'user';
+      h.settings = { ...SAVED, connectionString: STORED_STRING };
+    });
+
+    it('records nothing for a connection string that is refused', async () => {
+      const res = await put({ ...PAGE, connectionString: NEW_STRING });
+
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { code: string }).code).toBe('admin_required');
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.audits).toEqual([]);
+      expect(h.auditLog.info).not.toHaveBeenCalled();
+    });
+
+    it('records nothing for the stored one re-sent, which is accepted and not written', async () => {
+      const res = await put({ ...PAGE, connectionString: STORED_STRING });
+
+      expect(res.status).toBe(200);
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.audits).toEqual([]);
+      expect(h.auditLog.info).not.toHaveBeenCalled();
     });
   });
 });
