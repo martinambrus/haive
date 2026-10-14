@@ -63,7 +63,7 @@ import {
   parkBanner,
   type DeadStepRow,
 } from '@/lib/step-banners';
-import { taskBadgeKind, taskMenuKeys } from '@/lib/task-state';
+import { taskBadgeKind, taskClockEndMs, taskMenuKeys, taskStoppedAt } from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
 import {
   defaultRetryTimeoutMinutes,
@@ -2102,7 +2102,7 @@ export default function TaskDetailPage() {
                   taskId={task.id}
                   taskStatus={task.status}
                   taskDead={taskDead}
-                  taskCompletedAt={task.completedAt}
+                  taskCompletedAt={taskStoppedAt(task)}
                   taskRepositoryId={task.repositoryId}
                   userActiveDisplayMs={
                     (userActive.activeStepId === step.id
@@ -2962,7 +2962,7 @@ function StepUsageStamp({ step }: { step: TaskStep }) {
  *  1s tick — like TaskTotalTime — so only this chip re-renders each second, not
  *  the whole task page. Renders as soon as the task has started: against a pace
  *  budget when one exists, else as a bare effort timer, so a task nobody
- *  estimated still gets a clock in the header. Effort freezes at completedAt. */
+ *  estimated still gets a clock in the header. Effort freezes when the task finishes or dies. */
 function HeaderPaceChip({
   task,
   steps,
@@ -2972,7 +2972,7 @@ function HeaderPaceChip({
   steps: TaskStep[];
   userActive: { activeStepId: string | null; displayMs: number };
 }) {
-  const ticking = !!task.startedAt && !task.completedAt;
+  const ticking = !!task.startedAt && !taskStoppedAt(task);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!ticking) return;
@@ -2980,7 +2980,7 @@ function HeaderPaceChip({
     return () => clearInterval(t);
   }, [ticking]);
   if (!task.startedAt) return null;
-  const endMs = task.completedAt ? new Date(task.completedAt).getTime() : now;
+  const endMs = taskClockEndMs(task, now);
   const effortMs = liveEffortMs(steps, userActive, endMs);
   const confirmedHours = task.estimatedTimeHours ?? 0;
   // AI's learned estimate (decimal hours). Zero on legacy tasks and on every task type
@@ -3344,7 +3344,7 @@ function TaskTotalTime({
   providerBreakdown: TaskProviderUsage[];
   costDisplay: CostDisplay;
 }) {
-  const ticking = !!task.startedAt && !task.completedAt;
+  const ticking = !!task.startedAt && !taskStoppedAt(task);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!ticking) return;
@@ -3353,7 +3353,8 @@ function TaskTotalTime({
   }, [ticking]);
   if (!task.startedAt) return null;
   const startMs = new Date(task.startedAt).getTime();
-  const endMs = task.completedAt ? new Date(task.completedAt).getTime() : now;
+  const stoppedAt = taskStoppedAt(task);
+  const endMs = taskClockEndMs(task, now);
   const wallMs = Math.max(0, endMs - startMs);
   // Work / idle / user from the shared helper (the same numbers the server sends
   // to the tasks listing). Work excludes idle waits and the gaps between steps;
@@ -3388,7 +3389,7 @@ function TaskTotalTime({
   // While running, show seconds even past 1h so the live values visibly tick:
   // the 1s interval advances them, but the compact h/m format hides sub-minute
   // changes (a multi-hour task looks frozen). Completed tasks stay compact.
-  const fmt = (ms: number) => formatDuration(ms, { alwaysSeconds: !task.completedAt });
+  const fmt = (ms: number) => formatDuration(ms, { alwaysSeconds: !taskStoppedAt(task) });
   // Estimate-vs-effort verdict (only when the developer set an estimate and the
   // task has finished). Same effort basis + colour thresholds as the header chip.
   const showVerdict =
@@ -3420,7 +3421,7 @@ function TaskTotalTime({
           <span className="text-sm font-medium text-neutral-200">Total time</span>
           <span className="text-xs text-neutral-500">
             {new Date(task.startedAt).toLocaleString()} →{' '}
-            {task.completedAt ? new Date(task.completedAt).toLocaleString() : '(running)'}
+            {stoppedAt ? new Date(stoppedAt).toLocaleString() : '(running)'}
           </span>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-x-6 gap-y-2">
@@ -4370,7 +4371,7 @@ function StepCardImpl({
         </button>
       )}
       {ranAgent && showRagStats && (
-        <RagStatsPanel taskId={taskId} stepId={step.stepId} live={!taskEnded} />
+        <RagStatsPanel taskId={taskId} stepId={step.stepId} live={!taskEnded && !taskDead} />
       )}
 
       {step.cliInvocationCount > 0 && (

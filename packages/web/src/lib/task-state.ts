@@ -31,3 +31,19 @@ export function taskMenuKeys(task: TaskToneLike, opts: { stepRunning: boolean })
 export function taskStatusWord(task: TaskToneLike): string {
   return isTaskDead(task) ? 'dead' : task.status;
 }
+
+interface TaskClockRow {
+  completedAt?: string | null;
+  deadAt?: string | null;
+}
+
+/** When a task's clocks stopped: it finished, else it died. Null while they still run. */
+export function taskStoppedAt(task: TaskClockRow): string | null {
+  return task.completedAt ?? task.deadAt ?? null;
+}
+
+/** The instant a task's timers read up to: where they stopped, else `nowMs`. */
+export function taskClockEndMs(task: TaskClockRow, nowMs: number): number {
+  const stoppedAt = taskStoppedAt(task);
+  return stoppedAt === null ? nowMs : new Date(stoppedAt).getTime();
+}

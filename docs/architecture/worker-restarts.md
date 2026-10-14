@@ -267,3 +267,7 @@ state (`resyncAfterTaskEnd`), as every other end of a task does.
 **Admission.** A dead task keeps its admission slot (one live onboarding or upgrade per repository): it can revive, and
 a second one started beside it would leave two live after the revive. Cancelling it frees the slot. It holds no
 checkout, so the checkout-holder checks skip it.
+
+**Display.** A dead task reads as stopped, not running. The Running and "Waiting for slot" filters leave it out, its
+clocks and its list row's timing stop at `dead_at`, it shows no slot wait, and an open plan chat or merge panel
+refreshes once when it first sees the task dead, then re-checks every 30 s so a revive is noticed.

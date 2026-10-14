@@ -24,6 +24,7 @@ import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { isAwaitingFormInput } from '@/lib/submit-state';
+import { isTaskDead } from '@/lib/step-banners';
 import { groupPlanConversations, liveConversation, type PlanChatGroup } from './plan-chat-groups';
 import {
   changeBadge,
@@ -54,6 +55,9 @@ import {
  *  page's own cadence; polling stops the moment the step parks or the task
  *  ends, so a settled conversation costs nothing. */
 const POLL_MS = 2000;
+
+/** How often a dead task is re-read, only to notice the worker reviving it. */
+const DEAD_POLL_MS = 30_000;
 
 /** How many past conversations the history section shows before asking. A node
  *  chatted about for weeks would otherwise open as a wall of folded boxes. */
@@ -97,6 +101,7 @@ export function PlanChat({
   providersRef.current = providers;
   const [providerId, setProviderId] = useState('');
   const [liveStep, setLiveStep] = useState<TaskStep | null>(null);
+  const [deadTaskId, setDeadTaskId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   // Whether history shows everything or just the most recent few.
   const [historyExpanded, setHistoryExpanded] = useState(false);
@@ -183,7 +188,10 @@ export function PlanChat({
   // Parked means the step is holding the form open for the next turn — the one
   // state in which this panel can send anything to an existing conversation.
   const parked = isAwaitingFormInput(liveStep);
-  const working = liveTaskId !== null && !parked;
+  const dead = liveTaskId !== null && deadTaskId === liveTaskId;
+  const working = liveTaskId !== null && !parked && !dead;
+  // A dead conversation takes no turn, parked or not: the api refuses it with 409 task_dead.
+  const locked = working || dead;
 
   // Poll only while the live task is actually doing something. The step landing
   // on its form (or the task ending) is the signal to refetch and stop.
@@ -194,13 +202,16 @@ export function PlanChat({
     }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let polledDead = false;
 
     const poll = async (): Promise<void> => {
       try {
         const res = await api.get<{ task: Task; steps: TaskStep[] }>(`/tasks/${liveTaskId}`);
         if (cancelled) return;
         const step = res.steps.find((s) => s.stepId === PLAN_CHAT_STEP_ID) ?? null;
+        const taskDead = isTaskDead(res.task);
         setLiveStep(step);
+        setDeadTaskId(taskDead ? liveTaskId : null);
         // A conversation already running has a provider of its own; the picker must show THAT
         // rather than what a new conversation would start with — and it is the STEP's CLI, not the
         // task's. Changing the CLI mid-conversation records a step choice for this task and
@@ -213,19 +224,21 @@ export function PlanChat({
         });
         if (running) setProviderId(running);
         const settled =
-          isAwaitingFormInput(step) ||
-          ['completed', 'cancelled', 'failed'].includes(res.task.status);
-        if (settled) {
+          !taskDead &&
+          (isAwaitingFormInput(step) ||
+            ['completed', 'cancelled', 'failed'].includes(res.task.status));
+        if (settled || (taskDead && !polledDead)) {
           await reloadMessages();
           if (!cancelled) onPatchedRef.current();
-          return;
         }
+        if (settled) return;
+        polledDead = taskDead;
       } catch {
         // A task that cannot be read is not a reason to spin; the next user
         // action re-reads everything anyway.
         return;
       }
-      if (!cancelled) timer = setTimeout(() => void poll(), POLL_MS);
+      if (!cancelled) timer = setTimeout(() => void poll(), polledDead ? DEAD_POLL_MS : POLL_MS);
     };
 
     void poll();
@@ -317,7 +330,9 @@ export function PlanChat({
     setSending(true);
     setError(null);
     try {
-      await endPlanChat(liveTaskId);
+      // A dead task refuses a form answer, a blank one included; Cancel is what it still takes.
+      if (dead) await api.post(`/tasks/${liveTaskId}/action`, { action: 'cancel' });
+      else await endPlanChat(liveTaskId);
       setPollRestart((n) => n + 1);
       await reloadMessages();
       onPatched();
@@ -423,7 +438,7 @@ export function PlanChat({
           aria-label="CLI that answers this conversation"
           title="CLI that answers this conversation"
           value={providerId}
-          disabled={working}
+          disabled={locked}
           onChange={(e) => void changeProvider(e.target.value)}
           className="h-7 w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 disabled:opacity-50"
         >
@@ -478,20 +493,16 @@ export function PlanChat({
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         rows={3}
-        disabled={working}
+        disabled={locked}
         placeholder="e.g. split Auth into signup and login, and note that the mobile app depends on both"
         className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 disabled:opacity-50"
       />
       <FormError message={error} />
       <div className="flex gap-2">
-        <Button
-          size="sm"
-          onClick={() => void send()}
-          disabled={sending || working || !draft.trim()}
-        >
+        <Button size="sm" onClick={() => void send()} disabled={sending || locked || !draft.trim()}>
           {sending ? 'Sending…' : 'Send'}
         </Button>
-        {parked && (
+        {(parked || dead) && (
           <Button size="sm" variant="secondary" disabled={sending} onClick={() => void finish()}>
             End conversation
           </Button>
