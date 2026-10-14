@@ -274,3 +274,20 @@ describe('prompt step inline-value budget', () => {
     expect(text).toContain('[truncated:');
   });
 });
+
+describe('prompt step field names', () => {
+  it('renders a field whose id is __proto__', async () => {
+    const text = await prompt(
+      make({
+        template: 'Value: {{field:__proto__}}',
+        paramFormSchema: {
+          title: 'P',
+          fields: [{ id: '__proto__', label: 'Odd', type: 'text' }],
+        },
+      }),
+      detected(),
+      JSON.parse('{"__proto__":"kept"}') as Record<string, unknown>,
+    );
+    expect(text).toContain('Value: kept');
+  });
+});

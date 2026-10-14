@@ -68,8 +68,9 @@ function templateTokens(template: string) {
 }
 
 function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formValues: FormValues) {
-  const fields: Record<string, string> = {};
-  const steps: Record<string, string> = {};
+  // Null-prototype: a field id such as `__proto__` must land as an own key, not hit the setter.
+  const fields: Record<string, string> = Object.create(null) as Record<string, string>;
+  const steps: Record<string, string> = Object.create(null) as Record<string, string>;
   const tokens = templateTokens(entry.template);
   const quotes = tokens.filter((token) => token.kind === 'step').length;
   const perQuote = Math.min(
