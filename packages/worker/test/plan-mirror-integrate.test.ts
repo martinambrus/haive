@@ -123,6 +123,7 @@ const integrate = (repoPath: string) =>
     userId: 'u1',
     credentialId: null,
     identity: IDENTITY,
+    kept: new Map(),
   });
 
 describe('plan snapshot save and pull: a merge a conversation left open', () => {

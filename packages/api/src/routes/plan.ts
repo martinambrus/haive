@@ -653,6 +653,7 @@ planRoutes.get('/:id/plan/nodes/:nodeId', async (c) => {
       taskId: schema.planNodeTasks.taskId,
       title: schema.tasks.title,
       status: schema.tasks.status,
+      deadAt: schema.tasks.deadAt,
       type: schema.tasks.type,
       createdAt: schema.tasks.createdAt,
     })

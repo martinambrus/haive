@@ -9,6 +9,8 @@ import { ModuleDashboardWidgets } from '@/lib/module-dashboard';
 import { useModules } from '@/lib/use-modules';
 import { usePageTitle } from '@/lib/use-page-title';
 import { rememberTaskOrigin } from '@/lib/task-origin';
+import { isTaskDead } from '@/lib/step-banners';
+import { taskStatusWord } from '@/lib/task-state';
 
 /** Statuses the listing's `active` token covers — what is running right now. */
 const ACTIVE_TOKEN = 'active';
@@ -35,6 +37,8 @@ export default function DashboardPage() {
     };
   }, []);
 
+  const inFlight = active?.filter((t) => !isTaskDead(t)).length ?? 0;
+
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -48,16 +52,18 @@ export default function DashboardPage() {
           <CardDescription>
             {active === null
               ? 'Checking...'
-              : active.length === 0
+              : inFlight === 0
                 ? 'Nothing is running.'
-                : `${active.length} task${active.length === 1 ? '' : 's'} in flight.`}
+                : `${inFlight} task${inFlight === 1 ? '' : 's'} in flight.`}
           </CardDescription>
         </CardHeader>
         {active && active.length > 0 && (
           <ul className="flex flex-col gap-1">
             {active.map((t) => (
               <li key={t.id} className="flex items-center gap-2 text-sm">
-                <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-indigo-400" />
+                <span
+                  className={`inline-block h-2 w-2 shrink-0 rounded-full ${isTaskDead(t) ? 'bg-red-400' : 'animate-pulse bg-indigo-400'}`}
+                />
                 <Link
                   href={`/tasks/${t.id}`}
                   onClick={() =>
@@ -67,7 +73,11 @@ export default function DashboardPage() {
                 >
                   {t.title}
                 </Link>
-                <span className="shrink-0 text-xs text-neutral-500">{t.status}</span>
+                <span
+                  className={`shrink-0 text-xs ${isTaskDead(t) ? 'text-red-400' : 'text-neutral-500'}`}
+                >
+                  {taskStatusWord(t)}
+                </span>
               </li>
             ))}
           </ul>

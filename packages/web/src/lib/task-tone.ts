@@ -8,20 +8,23 @@
  * report `status: 'running'` while nothing is running.
  *
  * The precedence is the tasks page's own (`app/(app)/tasks/page.tsx`, the badge block):
- * pausedAt -> slotWait -> status. Keep the two in step.
+ * dead -> pausedAt -> slotWait -> status. Keep the two in step.
  */
+
+import { isTaskDead } from './step-banners';
 
 export type TaskTone = 'failed' | 'waiting' | 'running' | 'idle';
 
 /** Minimal shape — not `Task`, so a test does not have to build an 80-field row. */
 export interface TaskToneLike {
   status: string;
+  deadAt?: string | null;
   pausedAt?: string | null;
   slotWait?: { kind: string } | null;
 }
 
 export function taskTone(task: TaskToneLike): TaskTone {
-  if (task.status === 'failed') return 'failed';
+  if (task.status === 'failed' || isTaskDead(task)) return 'failed';
   if (task.pausedAt) return 'waiting';
   if (task.slotWait) return 'waiting';
   if (task.status === 'waiting_user' || task.status === 'waiting_pr') return 'waiting';
@@ -65,6 +68,10 @@ export const TASK_TONE_LABEL: Record<TaskTone, string> = {
   running: 'running',
   idle: 'queued',
 };
+
+export function taskToneLabel(task: TaskToneLike): string {
+  return isTaskDead(task) ? 'dead' : TASK_TONE_LABEL[taskTone(task)];
+}
 
 /** The tones the sidebar offers as filters. `idle` is deliberately absent: it is the
  *  ABSENCE of a state worth colouring, so there is no swatch to put on a button — and a

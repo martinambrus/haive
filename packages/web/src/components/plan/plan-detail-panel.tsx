@@ -25,6 +25,7 @@ import { FormRenderer } from '@/components/form-renderer';
 import { humanPlanAction, planResolutionForm } from '@haive/shared/plan-resolution';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { bodyToSave } from '@/lib/body-edit';
+import { taskStatusWord } from '@/lib/task-state';
 import { CodePreviewDialog } from '@/components/code-preview-dialog';
 import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -808,7 +809,7 @@ export function PlanDetailPanel({
                   }
                   className="block truncate text-xs text-indigo-300 underline"
                 >
-                  {t.title} — {t.status}
+                  {t.title} — {taskStatusWord(t)}
                 </Link>
               ))}
             </div>
