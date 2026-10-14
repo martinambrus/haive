@@ -820,6 +820,8 @@ export interface Task {
    *  derived here for the badge and the ?status=paused filter — same shape as slotWait, which
    *  is suppressed while this is set. */
   pausedAt?: string | null;
+  /** ISO time the worker marked the task dead; null otherwise. Read it through isTaskDead. */
+  deadAt?: string | null;
   /** Up/down vote score in [-5, +5], 0 by default. Shifts this task's fair-scheduling band
    *  so its AI agents are picked up sooner (or later) when slots are scarce; it is not a
    *  priority class, so an unvoted task still makes progress. Also the listing's primary
@@ -1712,6 +1714,7 @@ export interface PlanNodeTask {
   taskId: string;
   title: string;
   status: TaskStatus;
+  deadAt?: string | null;
   type: WorkflowType;
   createdAt: string;
 }

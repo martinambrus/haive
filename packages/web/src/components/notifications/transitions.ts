@@ -1,6 +1,8 @@
 /** Pure diffing of task-list polls into attention events. DOM-free so it can
  *  run under vitest's node environment. */
 
+import { isTaskDead } from '@/lib/step-banners';
+
 export const NOTIFIABLE_STATUSES = ['waiting_user', 'failed', 'completed'] as const;
 export type NotifiableStatus = (typeof NOTIFIABLE_STATUSES)[number];
 
@@ -15,6 +17,8 @@ export interface TaskSnapshot {
   title: string;
   /** TaskStatus, kept as plain string so the helper stays decoupled. */
   status: string;
+  /** ISO time the worker marked the task dead. A dead task raises no attention event. */
+  deadAt?: string | null;
   /** The step the task is paused on (a gate / waiting_form). Part of the
    *  attention identity so advancing to a DIFFERENT step re-notifies even while
    *  the task status stays waiting_user across both gates. */
@@ -95,7 +99,7 @@ export function detectTransitions(
 ): TaskTransitionEvent[] {
   const events: TaskTransitionEvent[] = [];
   for (const task of next) {
-    if (!isNotifiable(task.status)) continue;
+    if (!isNotifiable(task.status) || isTaskDead(task)) continue;
     if (prev === null) {
       if (task.status === 'waiting_user') {
         events.push({
@@ -130,7 +134,9 @@ export function detectTransitions(
  *  detectTransitions. */
 export function snapshotIdentities(next: readonly TaskSnapshot[]): Map<string, string> {
   return new Map(
-    next.map((t) => [t.id, identityOf(t.status, t.currentStepId, t.currentWaitStartedAt)]),
+    next
+      .filter((t) => !isTaskDead(t))
+      .map((t) => [t.id, identityOf(t.status, t.currentStepId, t.currentWaitStartedAt)]),
   );
 }
 
