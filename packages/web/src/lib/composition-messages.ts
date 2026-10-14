@@ -18,6 +18,7 @@ import {
   RAG_QUERY_TOP_K_MIN,
   REPOSITORY_TOKEN,
   STEP_ID_MAX_LENGTH,
+  parseStepId,
   validateComposition,
   validateTaskTypeDefaults,
   type ComposableStepEntry,
@@ -25,6 +26,7 @@ import {
   type PromptStepProblemKind,
   type TaskTypeAvailability,
   type TaskTypeDefaultsIssue,
+  type TaskTypeModuleRef,
 } from '@haive/shared/modularity';
 import type { TaskTypeCatalog } from './api-client';
 import { inlineCode } from './project-state-conflicts';
@@ -219,6 +221,60 @@ export function splitServerIssues(issues: unknown): {
   return out;
 }
 
+export function moduleNeedText(
+  modules: readonly TaskTypeModuleRef[],
+  reason: 'module-missing' | 'module-deactivated',
+): string {
+  const names = modules.map((m) => m.name ?? m.id);
+  const several = names.length > 1;
+  const list = several ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : (names[0] ?? '');
+  const subject = names.length === 0 ? 'a module' : `the module${several ? 's' : ''} ${list}`;
+  const state =
+    reason === 'module-missing'
+      ? `${several ? 'are' : 'is'} not installed`
+      : 'an administrator turned off';
+  return `needs ${subject}, which ${state}`;
+}
+
+export interface StepNote {
+  text: string;
+  warning: boolean;
+}
+
+export function describeStepWithoutEntry(
+  stepId: string,
+  ctx: { readOnly: boolean; catalog: Pick<TaskTypeCatalog, 'modules' | 'registeredStepIds'> },
+): StepNote {
+  const { readOnly, catalog } = ctx;
+  const parsed = parseStepId(stepId);
+  const owner =
+    parsed?.kind === 'module' ? catalog.modules.find((m) => m.id === parsed.moduleId) : undefined;
+  if (parsed?.kind === 'module') {
+    const name = owner?.name ?? parsed.moduleId;
+    if (owner === undefined || owner.state === 'missing') {
+      return { text: `Provided by module ${name}, which is not installed`, warning: true };
+    }
+    if (owner.state === 'deactivated') {
+      return {
+        text: `Provided by module ${name}, which an administrator turned off`,
+        warning: true,
+      };
+    }
+  }
+  const registryOwned = parsed?.kind === 'core' || parsed?.kind === 'module';
+  if (registryOwned && !catalog.registeredStepIds.includes(stepId)) {
+    return { text: 'Not registered on this install', warning: true };
+  }
+  if (owner !== undefined) {
+    const text = readOnly ? `Module ${owner.name} step, not composable` : 'Not in the step catalog';
+    return { text, warning: false };
+  }
+  return {
+    text: readOnly ? 'Built-in step, not composable' : 'Not in the step catalog',
+    warning: false,
+  };
+}
+
 export function describeAvailability(availability: TaskTypeAvailability): string {
   if (availability.available) return 'Available';
   switch (availability.reason) {
@@ -230,8 +286,9 @@ export function describeAvailability(availability: TaskTypeAvailability): string
       return 'Unavailable: custom task types are switched off';
     case 'module-types-off':
       return 'Unavailable: module task types are switched off';
+    case 'module-missing':
     case 'module-deactivated':
-      return `Unavailable: deactivated modules ${(availability.moduleIds ?? []).join(', ')}`;
+      return `Unavailable: ${moduleNeedText(availability.modules ?? [], availability.reason)}`;
     case 'missing-step':
       return `Unavailable: missing steps ${(availability.stepIds ?? []).join(', ')}`;
     case 'invalid-composition': {

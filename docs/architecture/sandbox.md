@@ -188,6 +188,11 @@ audience it names. `haive-rag` gets a `rag` token for `/rag/search` and `ddev-co
 for `/ddev/*`; neither opens the other's routes. `/rag/search` still takes the older two-part token,
 which names no audience, until the ones minted before the change expire (drop `verifyRagToken` and
 `signRagToken` then); `/ddev/*` never takes it. Both refuse a body over 64 KiB with 413 before the
-token is read (`sandboxBodyLimit`), with a handler of its own, since Hono's default answers through
-`errorHandler` as a 500. The git credential helper's token (`shared/src/git/token.ts`) is still the
-two-part form.
+token is read (`sandboxBodyLimit`), with a handler of its own so the 413 is a JSON error naming the
+limit; Hono's default throws an `HTTPException` that `errorHandler` answers with its own status, as
+plain text. The git credential helper's token (`signRepoGitCredToken`, `shared/src/git/token.ts`)
+has the same `v1.<payload>.<mac>` shape, the payload `{repositoryId, userId, exp}` with a 12-hour
+expiry and a MAC key derived for that one purpose, so no task token opens `/internal/git-credential`
+and this token opens nothing else. That route still takes the older two-part token, keyed with the
+raw secret, until the ones minted before the change expire (drop `verifyLegacyRepoGitCredToken`
+then).

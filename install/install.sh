@@ -454,7 +454,6 @@ cd "$(dirname "$0")"
 
 PURGE=0
 ASSUME_YES=0
-NETWORKS_LEFT=0
 for arg in "$@"; do
   case "$arg" in
     --purge) PURGE=1 ;;
@@ -484,6 +483,13 @@ WORK_VOLUMES="repos bundles wrappers squid_configs ddev_ca npm_cache ddev_regist
 # developer's stack images from underneath them.
 IMAGE_REPOS="${ID}-cli-sandbox ${ID}-sandbox ${ID}-ddev-runner"
 
+# Without a daemon nothing can be removed, and nothing afterwards can be checked.
+if ! docker info >/dev/null 2>&1; then
+  echo "Cannot reach the Docker daemon, so nothing of the Haive install '${ID}' was removed." >&2
+  echo "Start Docker, then run this again." >&2
+  exit 1
+fi
+
 echo "Removing the Haive install '${ID}' (compose project ${PROJECT})."
 if [ "$PURGE" -eq 1 ]; then
   echo "--purge: cloned repositories, CLI credentials and built images will ALSO be removed."
@@ -498,7 +504,9 @@ fi
 
 # `down` first, so compose STOPS its own services rather than having them killed underneath it.
 # The work volumes survive a default uninstall and a worker can be mid-write to one of them.
-$DC down || true
+if ! $DC down; then
+  echo "  docker compose down failed (see above); the check at the end lists what is left."
+fi
 
 # Containers the WORKER creates — per-task sandboxes, terminals, DDEV and app runners, the
 # registry — are plain `docker run` and are NOT part of the compose project, so `down` neither
@@ -506,7 +514,7 @@ $DC down || true
 # is why `down` reports "resource is still in use" and leaves the network behind.
 swept=0
 for c in $(docker ps -aq --filter "name=^${ID}-" 2>/dev/null); do
-  docker rm -f "$c" >/dev/null 2>&1 && swept=$((swept + 1)) || true
+  if docker rm -f "$c" >/dev/null 2>&1; then swept=$((swept + 1)); fi
 done
 [ "$swept" -gt 0 ] && echo "  removed ${swept} container(s) outside the compose project"
 
@@ -519,59 +527,130 @@ for n in $(docker network ls -q --filter "name=^${ID}-" 2>/dev/null); do
   if docker network rm "$n" >/dev/null 2>&1; then
     echo "  removed network ${name}"
   else
-    attached=$(docker network inspect "$n" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)
+    attached=$(docker network inspect "$n" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || true)
     echo "  COULD NOT remove network ${name} — still attached: ${attached:-unknown}"
-    NETWORKS_LEFT=1
   fi
 done
 
+# rm fails the same way for an absent volume and a held one, so only a volume that exists is tried.
+remove_volume() {
+  docker volume inspect "$1" >/dev/null 2>&1 || return 0
+  if docker volume rm "$1" >/dev/null 2>&1; then
+    echo "  removed $1"
+  else
+    holders=$(docker ps -a --filter "volume=$1" --format '{{.Names}}' 2>/dev/null | paste -sd, -)
+    echo "  COULD NOT remove volume $1 — held by: ${holders:-no container listed}"
+  fi
+}
+
 for v in $RUNTIME_VOLUMES; do
-  docker volume rm "${PROJECT}_${v}" >/dev/null 2>&1 && echo "  removed ${PROJECT}_${v}" || true
+  remove_volume "${PROJECT}_${v}"
 done
 
 if [ "$PURGE" -eq 1 ]; then
   for v in $WORK_VOLUMES; do
-    docker volume rm "${ID}_${v}" >/dev/null 2>&1 && echo "  removed ${ID}_${v}" || true
+    remove_volume "${ID}_${v}"
   done
   # Per-task auth and IDE volumes are created at runtime, so they are found rather than listed.
   for v in $(docker volume ls -q --filter "name=^${ID}_cli_auth_" 2>/dev/null) \
            $(docker volume ls -q --filter "name=^${ID}_ide_" 2>/dev/null); do
-    docker volume rm "$v" >/dev/null 2>&1 && echo "  removed $v" || true
+    remove_volume "$v"
   done
   for repo in $IMAGE_REPOS; do
     for img in $(docker images -q "$repo" 2>/dev/null | sort -u); do
-      docker rmi -f "$img" >/dev/null 2>&1 && echo "  removed image $repo" || true
+      if docker rmi -f "$img" >/dev/null 2>&1; then echo "  removed image $repo"; fi
     done
   done
   # Replicated environments are `<id>-env-<slug>`, one repository per project, so they are
   # matched on the prefix rather than enumerated.
   for img in $(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${ID}-env-" || true); do
-    docker rmi -f "$img" >/dev/null 2>&1 && echo "  removed image $img" || true
+    if docker rmi -f "$img" >/dev/null 2>&1; then echo "  removed image $img"; fi
   done
-  echo ""
-  if [ "$NETWORKS_LEFT" -eq 1 ]; then
-    echo "Everything this install owned is gone EXCEPT the network(s) named above, which something"
-    echo "outside this install is still using. Detach or remove those containers, then:"
-    echo "  docker network ls -q --filter name=^${ID}- | xargs -r docker network rm"
-  else
-    echo "Everything this install owned is gone."
-  fi
-  echo "Delete this directory to finish:"
-  echo "  rm -rf $(pwd)"
 else
   echo ""
   echo "Kept, because it holds your work rather than this install's runtime state:"
-  kept=0
-  for v in $WORK_VOLUMES; do
-    docker volume inspect "${ID}_${v}" >/dev/null 2>&1 && { echo "  ${ID}_${v}"; kept=$((kept + 1)); }
-  done
-  for v in $(docker volume ls -q --filter "name=^${ID}_cli_auth_" 2>/dev/null) \
-           $(docker volume ls -q --filter "name=^${ID}_ide_" 2>/dev/null); do
-    echo "  $v"; kept=$((kept + 1))
-  done
-  [ "$kept" -eq 0 ] && echo "  (nothing — this install never cloned a repository or logged a CLI in)"
+  if ! docker info >/dev/null 2>&1; then
+    echo "  (unknown: Docker stopped answering, so the volumes could not be listed)"
+  else
+    kept=0
+    for v in $WORK_VOLUMES; do
+      docker volume inspect "${ID}_${v}" >/dev/null 2>&1 && { echo "  ${ID}_${v}"; kept=$((kept + 1)); }
+    done
+    for v in $(docker volume ls -q --filter "name=^${ID}_cli_auth_" 2>/dev/null) \
+             $(docker volume ls -q --filter "name=^${ID}_ide_" 2>/dev/null); do
+      echo "  $v"; kept=$((kept + 1))
+    done
+    [ "$kept" -eq 0 ] && echo "  (nothing — this install never cloned a repository or logged a CLI in)"
+  fi
   echo ""
   echo "To remove those too, re-run:  ./uninstall.sh --purge"
+fi
+
+# One final look decides the closing message and the exit status; a listing that fails is "unknown", not empty.
+left=""
+unchecked=0
+shown=0
+add() {
+  left="${left}$1 $2
+"
+}
+
+removes_volume() {
+  for k in $RUNTIME_VOLUMES; do if [ "$1" = "${PROJECT}_${k}" ]; then return 0; fi; done
+  if [ "$PURGE" -eq 0 ]; then return 1; fi
+  for k in $WORK_VOLUMES; do if [ "$1" = "${ID}_${k}" ]; then return 0; fi; done
+  case "$1" in "${ID}_cli_auth_"* | "${ID}_ide_"*) return 0 ;; esac
+  return 1
+}
+
+removes_image() {
+  case " $IMAGE_REPOS " in *" ${1%:*} "*) return 0 ;; esac
+  case "$1" in "${ID}-env-"*) return 0 ;; esac
+  return 1
+}
+
+show_left() {
+  names=""
+  for n in $(printf '%s' "$left" | sed -n "s/^$1 //p" | sort -u); do names="${names:+$names }$n"; done
+  if [ -n "$names" ]; then
+    if [ "$shown" -eq 0 ]; then echo "Still here, so this is NOT a clean uninstall:"; fi
+    shown=1
+    echo "  $2"
+    echo "    $3 $names"
+  fi
+}
+
+listing=$(docker ps -a --filter "name=^${ID}-" --format '{{.Names}}' 2>/dev/null) || unchecked=1
+for c in $listing; do add container "$c"; done
+listing=$(docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Names}}' 2>/dev/null) || unchecked=1
+for c in $listing; do add container "$c"; done
+listing=$(docker network ls --filter "name=^${ID}-" --format '{{.Name}}' 2>/dev/null) || unchecked=1
+for n in $listing; do add network "$n"; done
+listing=$(docker volume ls -q 2>/dev/null) || unchecked=1
+for v in $listing; do if removes_volume "$v"; then add volume "$v"; fi; done
+if [ "$PURGE" -eq 1 ]; then
+  listing=$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null) || unchecked=1
+  for img in $listing; do if removes_image "$img"; then add image "$img"; fi; done
+fi
+
+echo ""
+show_left container containers "docker rm -f"
+show_left network networks "docker network rm"
+show_left volume volumes "docker volume rm"
+show_left image images "docker rmi -f"
+if [ "$unchecked" -eq 1 ]; then
+  echo "Docker stopped answering while this was checked, so more than the above may be left."
+fi
+if [ "$shown" -eq 1 ] || [ "$unchecked" -eq 1 ]; then
+  echo "Once that is dealt with, run this again with the same options to confirm."
+  exit 1
+fi
+
+if [ "$PURGE" -eq 1 ]; then
+  echo "Everything this install owned is gone."
+  echo "Delete this directory to finish:"
+  echo "  rm -rf $(pwd)"
+else
   echo "The stack is gone either way; delete this directory when you are done with it."
 fi
 EOF

@@ -77,12 +77,17 @@ if (url && !new URL(url).pathname.startsWith('/task_type_seed_test'))
 describe.skipIf(!url)('task type definitions sync on Postgres', () => {
   let db: Database;
 
+  const dropCustom = () =>
+    db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, 'custom-x'));
+
   beforeAll(async () => {
     db = createDatabase(url as string);
+    await dropCustom();
     await syncTaskTypeDefinitions(db, stepRegistry, []);
   });
 
   afterAll(async () => {
+    await dropCustom();
     await db.$client.end({ timeout: 5 });
   });
 
@@ -100,13 +105,27 @@ describe.skipIf(!url)('task type definitions sync on Postgres', () => {
     expect(list.map((r) => r.slug).sort()).toEqual([...SLUGS].sort());
   });
 
-  it('a second sync changes nothing but updated_at', async () => {
+  it('a second sync changes nothing, updated_at included', async () => {
     const before = new Map((await rows()).map((r) => [r.slug, r]));
     await syncTaskTypeDefinitions(db, stepRegistry, []);
     const after = await rows();
     expect(after.length).toBe(before.size);
     for (const row of after) {
-      expect({ ...row, updatedAt: null }).toEqual({ ...before.get(row.slug), updatedAt: null });
+      expect(row, row.slug).toEqual(before.get(row.slug));
+    }
+  });
+
+  it('moves updated_at for a row it rewrites and for no other', async () => {
+    const old = new Date('2020-01-01T00:00:00.000Z');
+    await db.update(schema.taskTypeDefinitions).set({ updatedAt: old });
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({ stepIds: ['tampered'], contentHash: 'bad' })
+      .where(eq(schema.taskTypeDefinitions.slug, 'plan_chat'));
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
+    for (const row of await rows()) {
+      if (row.slug === 'plan_chat') expect(row.updatedAt.getTime()).toBeGreaterThan(old.getTime());
+      else expect(row.updatedAt, row.slug).toEqual(old);
     }
   });
 

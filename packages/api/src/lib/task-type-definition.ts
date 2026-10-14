@@ -8,17 +8,16 @@ import {
 } from '@haive/shared';
 import {
   composableStepEntrySchema,
-  derivePromptStepComposable,
-  isCustomStepId,
+  mergePromptStepCatalog,
   moduleIdsOfTaskType,
-  promptStepEntrySchema,
+  parsePromptSteps,
   promptStepId,
   resolveTaskTypeAvailability,
-  validatePromptStep,
   type ComposableStepEntry,
   type CompositionIssue,
   type PromptStepEntry,
-  type PromptStepProblemKind,
+  type TaskTypeModuleRef,
+  type TaskTypeModuleState,
 } from '@haive/shared/modularity';
 import { HttpError } from '../context.js';
 
@@ -53,108 +52,6 @@ const SAVED_DATABASE_BUILTINS = ['workflow', 'run_app'];
 /** Whether a task of this type may be created from a saved database. */
 export function acceptsSavedDatabase(slug: string, restores: boolean): boolean {
   return SAVED_DATABASE_BUILTINS.includes(slug) || restores;
-}
-
-/** Stored prompt steps by slug; an entry that no longer parses is left out, so its id reads as a missing step. */
-export function parsePromptSteps(raw: unknown): Record<string, PromptStepEntry> {
-  const out: Record<string, PromptStepEntry> = {};
-  if (typeof raw !== 'object' || raw === null) return out;
-  for (const [slug, value] of Object.entries(raw)) {
-    const parsed = promptStepEntrySchema.safeParse(value);
-    if (parsed.success) out[slug] = parsed.data;
-  }
-  return out;
-}
-
-interface CatalogSets {
-  stepIds: Set<string>;
-  dispatchesCli: Set<string>;
-  composable: Map<string, ComposableStepEntry>;
-}
-
-/** The catalog as one type sees it: the worker's steps plus that type's own prompt steps. */
-export function mergePromptStepCatalog<C extends CatalogSets>(
-  catalog: C,
-  def: { slug: string; source: string; requiresRepository: boolean; promptSteps: unknown },
-): C {
-  if (def.source !== 'admin') return catalog;
-  const entries = Object.values(parsePromptSteps(def.promptSteps));
-  if (entries.length === 0) return catalog;
-  const merged = {
-    ...catalog,
-    stepIds: new Set(catalog.stepIds),
-    dispatchesCli: new Set(catalog.dispatchesCli),
-    composable: new Map(catalog.composable),
-  };
-  for (const entry of entries) {
-    const composable = derivePromptStepComposable(entry, def.slug, def.requiresRepository);
-    merged.stepIds.add(composable.stepId);
-    merged.dispatchesCli.add(composable.stepId);
-    merged.composable.set(composable.stepId, composable);
-  }
-  return merged;
-}
-
-export type PromptStepIssueKind =
-  PromptStepProblemKind | 'prompt-step-missing' | 'prompt-step-orphan';
-
-export interface PromptStepIssue {
-  kind: PromptStepIssueKind;
-  stepId: string;
-  index?: number;
-  message: string;
-  raw?: string;
-  start?: number;
-}
-
-/** Every custom id in the step list has an entry of this type, every entry is used, and each validates where it stands. */
-export function checkPromptSteps(
-  def: { slug: string; stepIds: readonly string[]; requiresRepository: boolean },
-  promptSteps: Record<string, PromptStepEntry>,
-  catalog: { composable: ReadonlyMap<string, ComposableStepEntry> },
-): PromptStepIssue[] {
-  const issues: PromptStepIssue[] = [];
-  const byId = new Map(
-    Object.values(promptSteps).map((entry) => [promptStepId(def.slug, entry.slug), entry]),
-  );
-  const quotableStepIds = new Set([
-    ...[...catalog.composable.values()]
-      .filter((entry) => entry.agentAuthoredOutput === true)
-      .map((entry) => entry.stepId),
-    ...byId.keys(),
-  ]);
-  def.stepIds.forEach((stepId, index) => {
-    if (!isCustomStepId(stepId)) return;
-    const entry = byId.get(stepId);
-    if (!entry) {
-      issues.push({
-        kind: 'prompt-step-missing',
-        stepId,
-        index,
-        message: `${stepId} has no prompt step on this task type.`,
-      });
-      return;
-    }
-    const problems = validatePromptStep(entry, {
-      typeSlug: def.slug,
-      requiresRepository: def.requiresRepository,
-      stepIdsBefore: def.stepIds.slice(0, index),
-      quotableStepIds,
-    });
-    for (const { kind, message, raw, start } of problems) {
-      issues.push({ kind, stepId, index, message, raw, start });
-    }
-  });
-  for (const stepId of byId.keys()) {
-    if (!def.stepIds.includes(stepId)) {
-      issues.push({
-        kind: 'prompt-step-orphan',
-        stepId,
-        message: `${stepId} is not in the step list.`,
-      });
-    }
-  }
-  return issues;
 }
 
 export interface TaskTypeDefinitionForCreate {
@@ -214,20 +111,34 @@ async function readCatalog(handle: Pick<Database, 'select'>) {
   };
 }
 
-// KEY SHARE holds the rows until the caller's commit against deactivate's FOR UPDATE, which then
-// counts the new task, while the boot's own non-key updates of the same rows still pass.
-async function deactivatedAmong(
+// FOR KEY SHARE on named rows: a deactivate running meanwhile waits, then counts the new task.
+export async function readModuleStates(
   handle: Pick<Database, 'select'>,
-  moduleIds: string[],
-): Promise<Set<string>> {
-  if (moduleIds.length === 0) return new Set();
-  const rows = await handle
-    .select({ moduleId: schema.modules.moduleId, deactivatedAt: schema.modules.deactivatedAt })
-    .from(schema.modules)
-    .where(inArray(schema.modules.moduleId, moduleIds))
-    .for('key share');
-  return new Set(rows.filter((row) => row.deactivatedAt !== null).map((row) => row.moduleId));
+  only?: readonly string[],
+): Promise<Map<string, TaskTypeModuleState>> {
+  if (only?.length === 0) return new Map();
+  const read = handle
+    .select({
+      moduleId: schema.modules.moduleId,
+      name: schema.modules.name,
+      missingAt: schema.modules.missingAt,
+      deactivatedAt: schema.modules.deactivatedAt,
+    })
+    .from(schema.modules);
+  const rows =
+    only === undefined
+      ? await read
+      : await read.where(inArray(schema.modules.moduleId, [...only])).for('key share');
+  return new Map(
+    rows.map((row) => [
+      row.moduleId,
+      { name: row.name, missing: row.missingAt !== null, deactivated: row.deactivatedAt !== null },
+    ]),
+  );
 }
+
+const moduleNames = (modules: TaskTypeModuleRef[] = []): string =>
+  modules.map((m) => (m.name === null ? m.id : `${m.name} (${m.id})`)).join(', ');
 
 export async function definitionForCreate(
   handle: Pick<Database, 'select'>,
@@ -249,7 +160,7 @@ export async function definitionForCreate(
     }
     return unseededBuiltin(slug);
   }
-  const deactivatedModules = await deactivatedAmong(handle, moduleIdsOfTaskType(def));
+  const modules = await readModuleStates(handle, moduleIdsOfTaskType(def));
   const storedCatalog =
     def.runListStrategy === 'static' && def.stepIds !== null ? await readCatalog(handle) : null;
   const catalog = storedCatalog && mergePromptStepCatalog(storedCatalog, def);
@@ -263,7 +174,7 @@ export async function definitionForCreate(
         !def.source.startsWith('module:') ||
         (await configService.getBoolean(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, false)),
     },
-    deactivatedModules,
+    modules,
     catalog,
     generic: opts.generic,
   });
@@ -277,10 +188,16 @@ export async function definitionForCreate(
         throw new HttpError(403, 'Custom task types are disabled on this install');
       case 'module-types-off':
         throw new HttpError(403, 'Module task types are disabled on this install');
+      case 'module-missing':
+        throw new HttpError(
+          409,
+          `Task type ${slug} needs modules that are not installed: ${moduleNames(availability.modules)}`,
+          availability.reason,
+        );
       case 'module-deactivated':
         throw new HttpError(
           409,
-          `Task type ${slug} uses deactivated modules: ${availability.moduleIds?.join(', ')}`,
+          `Task type ${slug} needs modules an administrator turned off: ${moduleNames(availability.modules)}`,
           availability.reason,
         );
       case 'missing-step':

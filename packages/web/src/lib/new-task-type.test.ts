@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { PublicTaskType } from '@haive/shared/modularity';
+import {
+  PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS,
+  type PublicTaskType,
+} from '@haive/shared/modularity';
 import { SUMMARY_CLI_OFF } from './last-cli-choice';
 import {
   buildNewTaskBody,
@@ -71,24 +74,69 @@ describe('buildNewTaskTypeOptions', () => {
     expect(ok).toMatchObject({ value: 'b-ok', disabled: false, reason: null });
   });
 
-  it('blames a deactivated module when that is why a type is unavailable', () => {
-    const [, , option] = buildNewTaskTypeOptions([
-      row({ slug: 'uses-alpha', available: false, reason: 'module-deactivated' }),
-    ]);
-    expect(option).toMatchObject({ value: 'uses-alpha', disabled: true });
-    expect(option!.reason).toMatch(/module.*deactivated/i);
+  describe('a module the type needs', () => {
+    const reasonOf = (over: Partial<PublicTaskType>) =>
+      buildNewTaskTypeOptions([row({ slug: 'uses-fx', available: false, ...over })])[2]!;
+
+    it('is named when it is not installed', () => {
+      const option = reasonOf({
+        reason: 'module-missing',
+        modules: [{ id: 'fx', name: 'Fx Reports' }],
+      });
+      expect(option).toMatchObject({ value: 'uses-fx', disabled: true });
+      expect(option.reason).toBe('needs the module Fx Reports, which is not installed');
+    });
+
+    it('is named by id when its row is gone', () => {
+      expect(
+        reasonOf({ reason: 'module-missing', modules: [{ id: 'fx', name: null }] }).reason,
+      ).toBe('needs the module fx, which is not installed');
+    });
+
+    it('names each of several modules', () => {
+      const reason = (modules: { id: string; name: string | null }[]) =>
+        reasonOf({ reason: 'module-missing', modules }).reason;
+      expect(
+        reason([
+          { id: 'fx', name: 'Fx Reports' },
+          { id: 'gx', name: null },
+        ]),
+      ).toBe('needs the modules Fx Reports and gx, which are not installed');
+      expect(
+        reason([
+          { id: 'a', name: 'A' },
+          { id: 'b', name: 'B' },
+          { id: 'c', name: 'C' },
+        ]),
+      ).toBe('needs the modules A, B and C, which are not installed');
+    });
+
+    it('is named, and said to be turned off, when an administrator deactivated it', () => {
+      expect(
+        reasonOf({ reason: 'module-deactivated', modules: [{ id: 'alpha', name: 'Alpha' }] })
+          .reason,
+      ).toBe('needs the module Alpha, which an administrator turned off');
+    });
+
+    it('still reads as a sentence when the list names no module', () => {
+      expect(reasonOf({ reason: 'module-missing' }).reason).toBe(
+        'needs a module, which is not installed',
+      );
+    });
   });
 
-  it('explains every unavailable reason', () => {
-    for (const reason of [
-      'disabled',
-      'not-selectable',
-      'custom-types-off',
-      'module-types-off',
-      'module-deactivated',
-      'missing-step',
-      'invalid-composition',
-    ] as const) {
+  it('names the steps a type needs that are not installed', () => {
+    const reasonOf = (stepIds?: string[]) =>
+      buildNewTaskTypeOptions([
+        row({ slug: 'x', available: false, reason: 'missing-step', stepIds }),
+      ])[2]!.reason;
+    expect(reasonOf(['module.ix.gone'])).toBe('a step it needs is not installed: module.ix.gone');
+    expect(reasonOf(['a', 'b'])).toBe('steps it needs are not installed: a, b');
+    expect(reasonOf()).toBe('a step it needs is not installed');
+  });
+
+  it('explains every unavailable reason a listed type can have', () => {
+    for (const reason of PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS) {
       const [, , option] = buildNewTaskTypeOptions([row({ slug: 'x', available: false, reason })]);
       expect(option!.disabled).toBe(true);
       expect(option!.reason, reason).toMatch(/\w+ \w+/);

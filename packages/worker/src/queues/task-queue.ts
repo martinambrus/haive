@@ -26,6 +26,7 @@ import {
   CONFIG_KEYS,
   configService,
   QUEUE_NAMES,
+  TASK_DEAD_EVENT,
   TASK_JOB_NAMES,
   ideSessionKey,
   repoIdeSessionId,
@@ -621,13 +622,45 @@ async function writeTaskFailed(
   return failed !== undefined;
 }
 
-function deadReasonFor(ids: readonly string[]): string {
+/** With no unresolved id, `unlistedStepId` is a registered step outside the run list. */
+export function deadReasonFor(ids: readonly string[], unlistedStepId?: string): string {
+  if (ids.length === 0 && unlistedStepId !== undefined) {
+    return `the run list does not include the step the task is on: ${unlistedStepId}`;
+  }
   return `the run list names ${ids.length === 1 ? 'a step' : 'steps'} this install does not register: ${ids.join(', ')}`;
+}
+
+/** Ends and supersedes the open runs matching `runs`; one another transaction holds is skipped, as a Retry takes runs before steps. */
+export async function supersedeDeadTaskRuns(tx: DbHandle, runs: SQL | undefined): Promise<void> {
+  const open = await tx
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(runs, isNull(schema.cliInvocations.endedAt), isNull(schema.cliInvocations.supersededAt)),
+    )
+    .for('update', { skipLocked: true });
+  if (open.length === 0) return;
+  const now = new Date();
+  await tx
+    .update(schema.cliInvocations)
+    .set({
+      exitCode: 137,
+      errorMessage: 'cancelled: the task is dead',
+      endedAt: now,
+      supersededAt: now,
+    })
+    .where(
+      inArray(
+        schema.cliInvocations.id,
+        open.map((run) => run.id),
+      ),
+    );
 }
 
 /** Mark the task dead: it is neither failed nor completed, keeps its status and epoch, and tears
  *  nothing down, so a revive finds it as it was. Only while the task is not cancelled or completed,
- *  still at the epoch, and not already dead; false when nothing was written. */
+ *  still at the epoch, and not already dead; false when nothing was written. Its runs that have not
+ *  started are superseded. */
 export async function markTaskDead(
   db: Database | DbHandle,
   taskId: string,
@@ -653,7 +686,11 @@ export async function markTaskDead(
       )
       .returning({ id: schema.tasks.id });
     if (!dead) return false;
-    await appendEvent(tx, taskId, null, 'task.dead', {
+    await supersedeDeadTaskRuns(
+      tx,
+      and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.startedAt)),
+    );
+    await appendEvent(tx, taskId, null, TASK_DEAD_EVENT, {
       reason,
       unresolved: fence.unresolved ?? [],
       stepId: fence.stepId ?? null,
@@ -666,18 +703,20 @@ export async function markTaskDead(
 }
 
 /** Mark the task dead from a hand-off, while the finished step's row is still the pass's own: a
- *  Retry writes the steps before the epoch, as routableFixLoopTarget's failure does. */
+ *  Retry writes the steps before the epoch, as routableFixLoopTarget's failure does. Records only
+ *  the `ids` that do not resolve. */
 async function markTaskDeadOnStep(
   db: Database,
   ctx: ResolvedTaskContext,
   rowId: string,
   round: number,
   stepId: string,
-  unresolved: string[],
+  ids: string[],
 ): Promise<void> {
+  const unresolved = ids.filter((id) => !resolveTaskStep(ctx, id));
   await db.transaction(async (tx) => {
     if (!(await lockOwnedStep(tx, rowId))) return;
-    await markTaskDead(tx, ctx.taskId, deadReasonFor(unresolved), {
+    await markTaskDead(tx, ctx.taskId, deadReasonFor(unresolved, stepId), {
       epoch: ctx.orchestrationEpoch,
       unresolved,
       stepId,
@@ -2819,7 +2858,7 @@ async function handleAdvanceStep(
         // work+idle still reconciles with wall), then reset the live timing and OPEN the park
         // marker. iterations/output/detect are PRESERVED so it RESUMES when a slot frees — a
         // park is a transient resource wait, not a reset (the pending->running re-run folds the
-        // park into idle_ms and stamps a fresh started_at, step-runner.ts).
+        // park into carried_idle_ms and stamps a fresh started_at, step-runner.ts).
         const fold = computeFoldContribution(row, Date.now());
         // A parked step IS what the task is working on, so point current_step_id/current_round at
         // it. Only a step that RUNS stamped them before, which left the pointer addressing an

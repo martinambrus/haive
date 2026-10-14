@@ -85,7 +85,7 @@ export function buildClaudeAuthorizeUrl(challenge: string, state: string): strin
   return u.toString();
 }
 
-/** The callback shows `code#state`; the user pastes the whole thing. Tolerate a bare code. */
+/** The callback shows `code#state`; the user pastes the whole thing. A bare code parses with a null state. */
 export function parseClaudeAuthCode(pasted: string): { code: string; state: string | null } {
   const trimmed = pasted.trim();
   const hashIdx = trimmed.indexOf('#');

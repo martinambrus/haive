@@ -1,26 +1,28 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
   COMPOSABLE_STEP_GROUPS,
+  checkPromptSteps,
   composableStepEntrySchema,
   customTaskTypeCreateSchema,
+  mergePromptStepCatalog,
+  parsePromptSteps,
   publicTaskTypeSchema,
   resolveTaskTypeAvailability,
   taskTypeUpdateSchema,
   validateComposition,
   validateTaskTypeDefaults,
   type ComposableStepEntry,
+  type TaskTypeModuleState,
 } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
-import { deactivatedModuleIds } from '../modules/activation.js';
 import {
   acceptsSavedDatabase,
-  checkPromptSteps,
-  mergePromptStepCatalog,
-  parsePromptSteps,
+  readModuleStates,
   restoresDatabase,
 } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
@@ -79,13 +81,13 @@ function availabilityOf(
   row: DefinitionRow,
   switches: Awaited<ReturnType<typeof readSwitches>>,
   catalog: Catalog,
-  deactivatedModules: ReadonlySet<string>,
+  modules: ReadonlyMap<string, TaskTypeModuleState>,
 ) {
   const own = mergePromptStepCatalog(catalog, row);
   return resolveTaskTypeAvailability({
     definition: row,
     switches,
-    deactivatedModules,
+    modules,
     catalog: own.synced ? { stepIds: own.stepIds, composable: own.composable } : null,
     generic: true,
   });
@@ -120,6 +122,20 @@ function allowedFields(row: DefinitionRow): string[] | null {
 
 const UPDATABLE_FIELDS = Object.keys(taskTypeUpdateSchema.shape);
 
+const taskTypePatchSchema = taskTypeUpdateSchema.extend({
+  expectedUpdatedAt: z.iso.datetime().optional(),
+});
+
+/** The map without the steps that left the list, or undefined when none of its keys did. */
+function withoutRemovedSteps<T>(
+  map: Record<string, T>,
+  stepIds: readonly string[],
+): Record<string, T> | undefined {
+  const listed = new Set(stepIds);
+  const kept = Object.entries(map).filter(([id]) => listed.has(id));
+  return kept.length < Object.keys(map).length ? Object.fromEntries(kept) : undefined;
+}
+
 function editableFieldsOf(row: DefinitionRow): string[] {
   return allowedFields(row) ?? UPDATABLE_FIELDS;
 }
@@ -137,7 +153,7 @@ adminTaskTypeRoutes.use('*', requireAdmin);
 
 adminTaskTypeRoutes.get('/', async (c) => {
   const db = getDb();
-  const [rows, counts, catalog, switches, deactivated] = await Promise.all([
+  const [rows, counts, catalog, switches, modules] = await Promise.all([
     db
       .select()
       .from(schema.taskTypeDefinitions)
@@ -148,7 +164,7 @@ adminTaskTypeRoutes.get('/', async (c) => {
       .groupBy(schema.tasks.type),
     loadCatalog(db),
     readSwitches(),
-    deactivatedModuleIds(db),
+    readModuleStates(db),
   ]);
   const taskCounts = new Map(counts.map((r) => [r.type, r.count]));
   return c.json({
@@ -156,16 +172,23 @@ adminTaskTypeRoutes.get('/', async (c) => {
       ...row,
       builtin: row.source === 'builtin',
       editableFields: editableFieldsOf(row),
-      availability: availabilityOf(row, switches, catalog, deactivated),
+      availability: availabilityOf(row, switches, catalog, modules),
       taskCount: taskCounts.get(row.slug) ?? 0,
     })),
   });
 });
 
+function catalogModuleState(row: TaskTypeModuleState): 'missing' | 'deactivated' | 'loaded' {
+  if (row.missing) return 'missing';
+  return row.deactivated ? 'deactivated' : 'loaded';
+}
+
 adminTaskTypeRoutes.get('/catalog', async (c) => {
   const db = getDb();
-  const [catalog, off] = await Promise.all([loadCatalog(db), deactivatedModuleIds(db)]);
-  const offSources = new Set([...off].map((id) => `module:${id}`));
+  const [catalog, modules] = await Promise.all([loadCatalog(db), readModuleStates(db)]);
+  const offSources = new Set(
+    [...modules].filter(([, row]) => row.deactivated).map(([id]) => `module:${id}`),
+  );
   const steps = catalog.steps.filter((s) => !offSources.has(s.source));
   const known = new Set<string>(COMPOSABLE_STEP_GROUPS.map((g) => g.id));
   const unknown = [...new Set(steps.map((s) => s.entry.group))]
@@ -176,6 +199,10 @@ adminTaskTypeRoutes.get('/catalog', async (c) => {
     steps,
     groups: [...COMPOSABLE_STEP_GROUPS.map(({ id, label }) => ({ id, label })), ...unknown],
     synced: catalog.synced,
+    modules: [...modules]
+      .map(([id, row]) => ({ id, name: row.name, state: catalogModuleState(row) }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    registeredStepIds: [...catalog.stepIds],
   });
 });
 
@@ -183,10 +210,10 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
   const db = getDb();
   const row = await findDefinition(db, c.req.param('slug'));
   if (!row) throw new HttpError(404, 'Task type not found');
-  const [catalog, switches, deactivated] = await Promise.all([
+  const [catalog, switches, modules] = await Promise.all([
     loadCatalog(db),
     readSwitches(),
-    deactivatedModuleIds(db),
+    readModuleStates(db),
   ]);
   const compositionIssues =
     row.source === 'admin' && catalog.synced
@@ -196,7 +223,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
       : [];
   return c.json({
     taskType: { ...row, editableFields: editableFieldsOf(row) },
-    availability: availabilityOf(row, switches, catalog, deactivated),
+    availability: availabilityOf(row, switches, catalog, modules),
     compositionIssues,
   });
 });
@@ -264,7 +291,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
 
 adminTaskTypeRoutes.patch('/:slug', async (c) => {
   const slug = c.req.param('slug');
-  const body = taskTypeUpdateSchema.parse(await c.req.json());
+  const { expectedUpdatedAt, ...body } = taskTypePatchSchema.parse(await c.req.json());
   const db = getDb();
   const fields = Object.keys(body);
   // Locked and reread, so two concurrent edits cannot each validate against the same stale row.
@@ -275,10 +302,27 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       .where(eq(schema.taskTypeDefinitions.slug, slug))
       .for('update');
     if (!row) throw new HttpError(404, 'Task type not found');
+    // A JS Date holds milliseconds and the column microseconds, so the two are compared as Dates.
+    if (
+      expectedUpdatedAt !== undefined &&
+      row.updatedAt.getTime() !== Date.parse(expectedUpdatedAt)
+    ) {
+      return { changed: row } as const;
+    }
     const allowed = allowedFields(row);
     const refused = allowed ? fields.filter((f) => !allowed.includes(f)) : [];
     if (refused.length > 0) {
       throw new HttpError(400, `Cannot change ${refused.join(', ')} on this task type`);
+    }
+    // A removed step takes its preset and loop limit with it, unless the request sends that map itself.
+    const dropped: Partial<Pick<DefinitionRow, 'preAnswerDefaults' | 'stepLoopLimitDefaults'>> = {};
+    if (body.stepIds !== undefined && body.preAnswerDefaults === undefined) {
+      const kept = withoutRemovedSteps(row.preAnswerDefaults, body.stepIds);
+      if (kept) dropped.preAnswerDefaults = kept;
+    }
+    if (body.stepIds !== undefined && body.stepLoopLimitDefaults === undefined) {
+      const kept = withoutRemovedSteps(row.stepLoopLimitDefaults, body.stepIds);
+      if (kept) dropped.stepLoopLimitDefaults = kept;
     }
     if (
       body.stepIds !== undefined ||
@@ -325,8 +369,12 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       const defaultIssues = validateTaskTypeDefaults(
         {
           stepIds,
-          preAnswerDefaults: body.preAnswerDefaults ?? row.preAnswerDefaults,
-          stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? row.stepLoopLimitDefaults,
+          preAnswerDefaults:
+            body.preAnswerDefaults ?? dropped.preAnswerDefaults ?? row.preAnswerDefaults,
+          stepLoopLimitDefaults:
+            body.stepLoopLimitDefaults ??
+            dropped.stepLoopLimitDefaults ??
+            row.stepLoopLimitDefaults,
         },
         composable,
       );
@@ -336,11 +384,22 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     }
     const [updated] = await tx
       .update(schema.taskTypeDefinitions)
-      .set({ ...body, updatedAt: new Date() })
+      .set({ ...body, ...dropped, updatedAt: new Date() })
       .where(eq(schema.taskTypeDefinitions.slug, slug))
       .returning();
-    return { updated } as const;
+    return { updated, droppedFields: Object.keys(dropped) } as const;
   });
+  const changed = outcome.changed;
+  if (changed) {
+    return c.json(
+      {
+        error: 'This task type was changed since it was loaded',
+        code: 'task_type_changed',
+        taskType: { ...changed, editableFields: editableFieldsOf(changed) },
+      },
+      409,
+    );
+  }
   if ('invalid' in outcome) return c.json(outcome.invalid, 400);
   const updated = outcome.updated;
   if (!updated) throw new HttpError(404, 'Task type not found');
@@ -348,7 +407,7 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     actorUserId: c.get('userId'),
     action: 'task_type.update',
     targetType: 'task_type',
-    metadata: { slug, fields },
+    metadata: { slug, fields: [...fields, ...outcome.droppedFields] },
   });
   return c.json({ taskType: { ...updated, editableFields: editableFieldsOf(updated) } });
 });
@@ -389,7 +448,7 @@ taskTypeRoutes.use('*', requireAuth);
 
 taskTypeRoutes.get('/', async (c) => {
   const db = getDb();
-  const [rows, catalog, switches, deactivated] = await Promise.all([
+  const [rows, catalog, switches, modules] = await Promise.all([
     db
       .select()
       .from(schema.taskTypeDefinitions)
@@ -402,11 +461,11 @@ taskTypeRoutes.get('/', async (c) => {
       .orderBy(asc(schema.taskTypeDefinitions.sortOrder), asc(schema.taskTypeDefinitions.slug)),
     loadCatalog(db),
     readSwitches(),
-    deactivatedModuleIds(db),
+    readModuleStates(db),
   ]);
   // Rows behind a switch that is off stay listed, unavailable with that reason, so the form can say why.
   const taskTypes = rows.map((row) => {
-    const availability = availabilityOf(row, switches, catalog, deactivated);
+    const availability = availabilityOf(row, switches, catalog, modules);
     return publicTaskTypeSchema.parse({
       slug: row.slug,
       displayName: row.displayName,
@@ -416,7 +475,13 @@ taskTypeRoutes.get('/', async (c) => {
       restoresDatabase: acceptsSavedDatabase(row.slug, restoresDatabase(row)),
       dispatchesCli: dispatchesCliOf(row, catalog),
       available: availability.available,
-      ...(availability.available ? {} : { reason: availability.reason }),
+      ...(availability.available
+        ? {}
+        : {
+            reason: availability.reason,
+            stepIds: availability.stepIds,
+            modules: availability.modules,
+          }),
     });
   });
   return c.json({ taskTypes });

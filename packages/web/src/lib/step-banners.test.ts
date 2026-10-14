@@ -1,13 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import {
   archiveExpansionBanner,
+  deadBanner,
   failureBanner,
   invocationBanner,
+  isTaskDead,
   leftMergeBanners,
   modelIdentityBanner,
   parkBanner,
   PAUSED_WAIT_TEXT,
   QUEUED_WAIT_TEXT,
+  type DeadStepRow,
   type StepBannerRow,
   type InvocationBannerRow,
 } from './step-banners';
@@ -78,6 +81,15 @@ describe('parkBanner', () => {
       });
       expect(parkBanner(row, { taskEnded: false })).toBeNull();
     }
+  });
+
+  it('hides on a dead task that still holds a marker, paused or not', () => {
+    // A dead task is not ended, and its park loop is gone: the marker and its copy are all that is
+    // left, which is the copy-not-state trap the rest of this file exists to close.
+    const parked = step({ statusMessage: PARK_COPY, waitingStartedAt: '2026-07-24T13:00:00Z' });
+    expect(parkBanner(parked, { taskEnded: false, dead: true })).toBeNull();
+    expect(parkBanner(parked, { taskEnded: false, dead: true, paused: true })).toBeNull();
+    expect(parkBanner(parked, { taskEnded: false, dead: false })).toEqual({ text: PARK_COPY });
   });
 });
 
@@ -288,5 +300,181 @@ describe('leftMergeBanners', () => {
 
   it('shows nothing without an event', () => {
     expect(leftMergeBanners([], { taskStatus: 'cancelled' })).toEqual([]);
+  });
+});
+
+const DEAD_AT = '2026-10-14T10:00:00.000Z';
+const LIVE_STATUSES = ['created', 'queued', 'running', 'waiting_user', 'waiting_pr', 'failed'];
+
+describe('isTaskDead', () => {
+  it('is true for any task that is not finished and has dead_at set', () => {
+    for (const status of LIVE_STATUSES) {
+      expect(isTaskDead({ status, deadAt: DEAD_AT })).toBe(true);
+    }
+  });
+
+  it('takes a Date as well as the ISO string the api sends', () => {
+    expect(isTaskDead({ status: 'running', deadAt: new Date(DEAD_AT) })).toBe(true);
+  });
+
+  it('is false once the task is cancelled or completed, whatever dead_at says', () => {
+    for (const status of ['cancelled', 'completed']) {
+      expect(isTaskDead({ status, deadAt: DEAD_AT })).toBe(false);
+    }
+  });
+
+  it('is false without dead_at, including from an api that predates the column', () => {
+    expect(isTaskDead({ status: 'running', deadAt: null })).toBe(false);
+    expect(isTaskDead({ status: 'running' })).toBe(false);
+  });
+
+  it('reads the structural column and never the dead_reason copy', () => {
+    // NEGATIVE CONTROL: a version keyed on dead_reason fails both halves, the copy-only row and
+    // the stamp-only row.
+    const copyOnly = {
+      status: 'running',
+      deadAt: null,
+      deadReason: 'the run list names a step this install does not register: module.x.y',
+    };
+    const stampOnly = { status: 'running', deadAt: DEAD_AT, deadReason: null };
+    expect(isTaskDead(copyOnly)).toBe(false);
+    expect(isTaskDead(stampOnly)).toBe(true);
+  });
+});
+
+describe('deadBanner', () => {
+  const task = { status: 'waiting_user', deadAt: DEAD_AT };
+  const moduleStep = (
+    stepId: string,
+    over: Partial<NonNullable<DeadStepRow['module']>> = {},
+  ): DeadStepRow => ({
+    stepId,
+    module: { id: 'statistics', name: 'Statistics', missing: true, ...over },
+  });
+  const plain = (stepId: string): DeadStepRow => ({ stepId, module: null });
+
+  it('names the module that is not installed, and how to get the task moving again', () => {
+    expect(deadBanner(task, [moduleStep('module.statistics.collect')])).toEqual({
+      text:
+        'This task needs the module `Statistics`, which is not installed. Nothing runs on it ' +
+        'until the module is installed again and the worker restarts; until then you can only ' +
+        'cancel it.',
+    });
+  });
+
+  it('falls back to the module id when the module row is gone and has no name', () => {
+    const text = deadBanner(task, [moduleStep('module.statistics.collect', { name: null })])?.text;
+    expect(text).toContain('the module `statistics`, which is not installed');
+  });
+
+  it('names a module once however many of its steps are unresolved', () => {
+    const text = deadBanner(task, [
+      moduleStep('module.statistics.collect'),
+      moduleStep('module.statistics.report'),
+    ])?.text;
+    expect(text?.match(/`Statistics`/g)).toHaveLength(1);
+  });
+
+  it('says an installed module no longer provides the step, not that it is missing', () => {
+    const text = deadBanner(task, [
+      moduleStep('module.statistics.collect', { missing: false }),
+    ])?.text;
+    expect(text).toContain(
+      'the module `Statistics` no longer provides `module.statistics.collect`',
+    );
+    expect(text).not.toContain('not installed');
+  });
+
+  it('lists the steps one module stopped providing in a single sentence', () => {
+    const text = deadBanner(task, [
+      moduleStep('module.statistics.collect', { missing: false }),
+      moduleStep('module.statistics.report', { missing: false }),
+    ])?.text;
+    expect(text).toContain(
+      'the module `Statistics` no longer provides `module.statistics.collect` and `module.statistics.report`',
+    );
+  });
+
+  it('says a custom prompt step cannot be read from what the task was created with', () => {
+    const text = deadBanner(task, [plain('custom.review.audit')])?.text;
+    expect(text).toContain(
+      'its prompt step `custom.review.audit` cannot be read from what the task was created with; cancel it',
+    );
+  });
+
+  it('says a core step id is one this install does not have', () => {
+    const text = deadBanner(task, [plain('99-renamed')])?.text;
+    expect(text).toContain('its run list names steps this install does not have: `99-renamed`');
+  });
+
+  it('files an id no grammar reads with the core ones', () => {
+    const text = deadBanner(task, [plain('Not A Step')])?.text;
+    expect(text).toContain('does not have: `Not A Step`');
+  });
+
+  it('gives one generic sentence when the dead event listed nothing', () => {
+    expect(deadBanner(task, [])).toEqual({
+      text: 'This task is dead: a step it needs is no longer available. You can only cancel it.',
+    });
+  });
+
+  it('puts several unresolved steps in ONE banner, one sentence per kind', () => {
+    const banner = deadBanner(task, [
+      moduleStep('module.statistics.collect'),
+      moduleStep('module.billing.invoice', { id: 'billing', name: 'Billing', missing: false }),
+      plain('custom.review.audit'),
+      plain('99-renamed'),
+      plain('98-renamed'),
+    ]);
+    const text = banner?.text ?? '';
+    expect(text).toContain('the module `Statistics`, which is not installed');
+    expect(text).toContain('the module `Billing` no longer provides `module.billing.invoice`');
+    expect(text).toContain('its prompt step `custom.review.audit` cannot be read');
+    expect(text).toContain('does not have: `99-renamed` and `98-renamed`');
+    expect(text.split('\n\n')).toHaveLength(4);
+  });
+
+  it('lists several missing modules in one sentence', () => {
+    const text = deadBanner(task, [
+      moduleStep('module.statistics.collect'),
+      moduleStep('module.billing.invoice', { id: 'billing', name: 'Billing' }),
+    ])?.text;
+    expect(text).toContain('needs the modules `Statistics` and `Billing`, which are not installed');
+    expect(text).toContain('until they are installed again');
+  });
+
+  it('keeps a backtick in a module name from closing the code span', () => {
+    const text = deadBanner(task, [
+      moduleStep('module.odd.step', { id: 'odd', name: 'a`b' }),
+    ])?.text;
+    expect(text).toContain('the module ``a`b``, which is not installed');
+  });
+
+  it('is shown for a failed task as well: dead is not a status', () => {
+    expect(deadBanner({ status: 'failed', deadAt: DEAD_AT }, [])).not.toBeNull();
+  });
+
+  it('is null for a cancelled or completed task that still carries dead_at', () => {
+    for (const status of ['cancelled', 'completed']) {
+      expect(
+        deadBanner({ status, deadAt: DEAD_AT }, [moduleStep('module.statistics.collect')]),
+      ).toBeNull();
+    }
+  });
+
+  it('is null without dead_at, even with a dead_reason set', () => {
+    // NEGATIVE CONTROL: copy that outlived its stamp. Only the structural column tells it from a
+    // dead task, and a version keyed on dead_reason shows the banner here.
+    const copyOnly = {
+      status: 'running',
+      deadAt: null,
+      deadReason: 'the run list names a step this install does not register: module.x.y',
+    };
+    expect(deadBanner(copyOnly, [moduleStep('module.statistics.collect')])).toBeNull();
+  });
+
+  it('shows with dead_at and no dead_reason at all', () => {
+    const stampOnly = { status: 'running', deadAt: DEAD_AT, deadReason: null };
+    expect(deadBanner(stampOnly, [moduleStep('module.statistics.collect')])).not.toBeNull();
   });
 });

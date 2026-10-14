@@ -2540,6 +2540,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       errorMessage: deactivated,
       endedAt: new Date(),
     } as const;
+    // An open wait stops counting as idle once ended_at is set, so fold it first.
+    await foldCliParkOnResume(db, row.id);
     // updateRow refuses a pending row; openPendingStep opens it, under the job's epoch.
     const failed =
       row.status === 'pending'
@@ -2612,7 +2614,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     let current = row;
     if (current.status === 'pending') {
       // Work resumes: close any open runtime-slot park FIRST (fold `now - waiting_started_at`
-      // into idle_ms and clear the marker) so the queue wait stays booked as idle. Without the
+      // into carried_idle_ms and clear the marker) so the wait stays booked as idle. Without the
       // fold the marker would be dropped by the run and the recorded wait would vanish from
       // the totals the moment the step started; without clearing it, `pending` + marker (the
       // park's signature) would keep reading as queued. No-op when nothing was parked.
@@ -3478,7 +3480,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     const writeEnd = (patch: UpdatePatch): Promise<TaskStepRow | null> =>
       (opened
         ? updateRow(db, row.id, patch)
-        : openPendingStep(db, taskId, params.epoch, row.id, patch)
+        : foldCliParkOnResume(db, row.id).then(() =>
+            openPendingStep(db, taskId, params.epoch, row.id, patch),
+          )
       ).catch((writeErr: unknown) => (writeErr instanceof StepSupersededError ? null : row));
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces

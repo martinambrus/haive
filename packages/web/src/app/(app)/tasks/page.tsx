@@ -7,6 +7,7 @@ import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/ap
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { CircleDot, FolderGit2 } from 'lucide-react';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
+import { isTaskDead } from '@/lib/step-banners';
 import { TaskVote } from '@/components/task-vote';
 import { UsageStrip } from '@/components/usage-strip';
 import { formatDuration } from '@/lib/format-duration';
@@ -89,8 +90,16 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
               {/* Both a paused task and one queued behind a capacity cap stay `running` in the
                   DB, which made "working", "held" and "waiting in line" look identical here.
                   Paused wins: it is the deliberate state, and the server already suppresses
-                  slotWait for a paused task so the two can never both be set. */}
-              {task.pausedAt ? (
+                  slotWait for a paused task so the two can never both be set. A dead task keeps the
+                  status it died in, so it is named ahead of all three. */}
+              {isTaskDead(task) ? (
+                <Badge
+                  variant="error"
+                  title="A step this task needs is no longer available, so nothing runs on it. Open it to see which."
+                >
+                  dead
+                </Badge>
+              ) : task.pausedAt ? (
                 <Badge
                   variant="warning"
                   title={`Paused by you at ${new Date(task.pausedAt).toLocaleString()} — the orchestrator is not handing this task any work.`}

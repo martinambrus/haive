@@ -9,11 +9,16 @@ import {
   patchModuleActive,
   type ApiError,
   type ModuleOpenTask,
+  type ModulePurgeResponse,
   type ModulesLoadedResponse,
+  type ModuleTeardownResponse,
 } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
 import { ModuleActiveCell } from '@/components/module-active-cell';
+import { ModulePurgeDialog } from '@/components/module-purge-dialog';
+import { ModuleSkippedSeeds } from '@/components/module-skipped-seeds';
 import { ModuleTasksOpenDialog } from '@/components/module-tasks-open-dialog';
+import { ModuleTeardownDialog } from '@/components/module-teardown-dialog';
 import { Badge, FormError } from '@/components/ui';
 
 const STATE_BADGE: Record<
@@ -38,6 +43,8 @@ function ago(iso: string): string {
 
 const when = (iso: string | null) => (iso === null ? '—' : new Date(iso).toLocaleString());
 
+const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+
 function Versions({ row }: { row: ModuleDiffRow }) {
   return (
     <span className="font-mono text-neutral-300">
@@ -61,6 +68,9 @@ export default function ModulesPage() {
   const [blocked, setBlocked] = useState<{ moduleId: string; tasks: ModuleOpenTask[] } | null>(
     null,
   );
+  const [tearingDown, setTearingDown] = useState<string | null>(null);
+  const [purging, setPurging] = useState<{ id: string; tornDown: boolean } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -78,6 +88,7 @@ export default function ModulesPage() {
   async function toggle(row: ModuleDiffRow) {
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       await patchModuleActive(row.id, row.deactivatedAt !== null);
       await load();
@@ -89,6 +100,25 @@ export default function ModulesPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function tornDown(result: ModuleTeardownResponse) {
+    setNotice(
+      'status' in result
+        ? `The teardown of ${tearingDown} is still running in the worker. Reload this page later to see whether it finished.`
+        : null,
+    );
+    setTearingDown(null);
+    void load();
+  }
+
+  function purged(result: ModulePurgeResponse) {
+    const kept = result.taskTypesKept.length;
+    setNotice(
+      `Purged ${result.moduleId}: deleted its database, ${count(result.configKeysDeleted, 'setting')} and ${count(result.taskTypesDeleted.length, 'task type')}${kept > 0 ? `; kept ${count(kept, 'task type')} that tasks use` : ''}.`,
+    );
+    setPurging(null);
+    void load();
   }
 
   const workerAt = data?.modules.workerAt ?? null;
@@ -107,6 +137,14 @@ export default function ModulesPage() {
         )}
       </div>
       <FormError message={error} />
+      {notice !== null && (
+        <div
+          role="status"
+          className="rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-200"
+        >
+          {notice}
+        </div>
+      )}
       {data && (
         <div className="overflow-x-auto rounded-md border border-neutral-800">
           <table className="w-full text-sm">
@@ -153,7 +191,13 @@ export default function ModulesPage() {
                     </Badge>
                   </td>
                   <td className="px-3 py-2">
-                    <ModuleActiveCell row={row} busy={busy} onToggle={() => void toggle(row)} />
+                    <ModuleActiveCell
+                      row={row}
+                      busy={busy}
+                      onToggle={() => void toggle(row)}
+                      onTeardown={() => setTearingDown(row.id)}
+                      onPurge={() => setPurging({ id: row.id, tornDown: row.tornDownAt !== null })}
+                    />
                   </td>
                   <td className="whitespace-nowrap px-3 py-2 text-neutral-400">
                     {when(row.lastLoadedAt)}
@@ -167,7 +211,14 @@ export default function ModulesPage() {
           </table>
         </div>
       )}
+      {data && <ModuleSkippedSeeds rows={data.modules.rows} />}
       <ModuleTasksOpenDialog blocked={blocked} onClose={() => setBlocked(null)} />
+      <ModuleTeardownDialog
+        moduleId={tearingDown}
+        onClose={() => setTearingDown(null)}
+        onDone={tornDown}
+      />
+      <ModulePurgeDialog target={purging} onClose={() => setPurging(null)} onDone={purged} />
     </div>
   );
 }

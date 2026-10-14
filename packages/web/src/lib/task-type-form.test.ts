@@ -140,11 +140,7 @@ describe('buildUpdateBody', () => {
       {
         stepIds: ['a', 'b'],
         loopLimits: { a: 3 },
-        saved: {
-          stepIds: ['a', 'b'],
-          stepLoopLimitDefaults: { a: 2 },
-          preAnswerDefaults: { a: { x: 1 } },
-        },
+        saved: { stepIds: ['a', 'b'], stepLoopLimitDefaults: { a: 2 } },
       },
       SAVED,
     );
@@ -160,11 +156,7 @@ describe('buildUpdateBody', () => {
       {
         stepIds: ['b', 'a', 'c'],
         loopLimits: {},
-        saved: {
-          stepIds: ['a', 'b'],
-          stepLoopLimitDefaults: {},
-          preAnswerDefaults: { a: { x: 1 } },
-        },
+        saved: { stepIds: ['a', 'b'], stepLoopLimitDefaults: {} },
       },
       SAVED,
     );
@@ -172,25 +164,51 @@ describe('buildUpdateBody', () => {
     expect(body).not.toHaveProperty('preAnswerDefaults');
   });
 
-  it('sends the composition for a custom row and drops answers for removed steps', () => {
+  it('sends the step list and an edited loop limit for a removal, and no preset map', () => {
     const body = buildUpdateBody(
       values,
       ADMIN_FIELDS,
       {
         stepIds: ['a'],
         loopLimits: { a: 2 },
-        saved: {
-          stepIds: ['a', 'gone'],
-          stepLoopLimitDefaults: {},
-          preAnswerDefaults: { a: { x: 1 }, gone: { y: 2 } },
-        },
+        saved: { stepIds: ['a', 'gone'], stepLoopLimitDefaults: {} },
       },
       SAVED,
     );
     expect(body.stepIds).toEqual(['a']);
     expect(body.stepLoopLimitDefaults).toEqual({ a: 2 });
-    expect(body.preAnswerDefaults).toEqual({ a: { x: 1 } });
+    expect(body).not.toHaveProperty('preAnswerDefaults');
     expect(body.enabled).toBe(false);
+  });
+
+  it('leaves both default maps to the api when a removal only pruned what the removed step left', () => {
+    const body = buildUpdateBody(
+      values,
+      ADMIN_FIELDS,
+      {
+        stepIds: ['a'],
+        loopLimits: { a: 2 },
+        saved: { stepIds: ['a', 'gone'], stepLoopLimitDefaults: { a: 2, gone: 4 } },
+      },
+      SAVED,
+    );
+    expect(body.stepIds).toEqual(['a']);
+    expect(body).not.toHaveProperty('stepLoopLimitDefaults');
+    expect(body).not.toHaveProperty('preAnswerDefaults');
+  });
+
+  it('sends the whole loop-limit map when a limit was edited as well as a step removed', () => {
+    const body = buildUpdateBody(
+      values,
+      ADMIN_FIELDS,
+      {
+        stepIds: ['a'],
+        loopLimits: { a: 3 },
+        saved: { stepIds: ['a', 'gone'], stepLoopLimitDefaults: { a: 2, gone: 4 } },
+      },
+      SAVED,
+    );
+    expect(body.stepLoopLimitDefaults).toEqual({ a: 3 });
   });
 });
 
@@ -228,7 +246,6 @@ describe('prompt steps in the bodies', () => {
   const savedRow = (promptSteps: Record<string, ReturnType<typeof step>>, stepIds: string[]) => ({
     stepIds,
     stepLoopLimitDefaults: {},
-    preAnswerDefaults: {},
     promptSteps,
   });
   const fields = [...ADMIN_FIELDS, 'promptSteps'];

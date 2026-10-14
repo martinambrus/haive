@@ -19,6 +19,18 @@ vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   cleanupTaskAuthVolumes: vi.fn(async () => ({ removed: [], failed: [] })),
   syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
 }));
+vi.mock('../src/redis.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/redis.js')>()),
+  getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
+}));
+vi.mock('../src/sandbox/ollama-provision.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/ollama-provision.js')>()),
+  unloadTaskOllamaCliModels: vi.fn(async () => undefined),
+}));
+vi.mock('@haive/shared/rag', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared/rag')>()),
+  resolveTaskEmbedTarget: vi.fn(async () => null),
+}));
 
 const STEP_ID = 'epoch-fence-step';
 stepRegistry.register({

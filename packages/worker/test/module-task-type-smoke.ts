@@ -21,6 +21,7 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { initDatabase } from '../src/db.js';
+import { syncModuleIntent } from '../src/modules/intent.js';
 import { registerModuleSteps, type WorkerModuleEntry } from '../src/modules/loader.js';
 import { closeRedis, getBullRedis, initRedis } from '../src/redis.js';
 import {
@@ -173,6 +174,7 @@ async function main(): Promise<void> {
     registerStepsOnce();
     const loaded = registerModuleSteps(stepRegistry, [entry]);
     await syncStepCatalog(db, stepRegistry, new Map());
+    await syncModuleIntent(db, loaded);
     await syncTaskTypeDefinitions(db, stepRegistry, loaded);
 
     const [row] = await db
@@ -274,6 +276,7 @@ async function main(): Promise<void> {
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, SLUG));
     await db.delete(schema.stepCatalog).where(eq(schema.stepCatalog.source, 'module:fx'));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'fx'));
     await db.delete(schema.repositories).where(eq(schema.repositories.userId, userId));
     await db.delete(schema.users).where(eq(schema.users.id, userId));
     await rm(dir, { recursive: true, force: true });

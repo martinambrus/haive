@@ -38,7 +38,9 @@ type El = ReactElement<{
   tabIndex?: number;
   role?: string;
   'aria-label'?: string;
+  'aria-live'?: string;
   onClick?: (event: { stopPropagation: () => void }) => void;
+  onKeyDown?: unknown;
 }>;
 
 const flatten = (node: ReactNode): El[] =>
@@ -82,10 +84,21 @@ function mount(initial: AttentionToast[]) {
   draw();
 
   const button = (name: string) => buttonsIn(tree).find((el) => nameOf(el) === name);
+  const cards = () => flatten(tree).filter((el) => el.type === 'div' && el.key !== null);
+  const region = () => flatten(tree).find((el) => el.props.role === 'status');
+  const lineKey = () => {
+    const line = region()?.props.children;
+    return isValidElement(line) ? line.key : null;
+  };
   return {
     onOpen,
     onDismiss,
     button,
+    cards,
+    region,
+    tree: () => tree,
+    announced: () => textOf(region()?.props.children),
+    lineKey,
     update: (next: AttentionToast[]) => {
       toasts = next;
       draw();
@@ -100,11 +113,12 @@ function mount(initial: AttentionToast[]) {
       if (!isValidElement<El['props']>(tree)) throw new Error('nothing rendered');
       return tree as El;
     },
-    cards: () => flatten(tree).filter((el) => el.key !== null),
-    controls: () =>
-      buttonsIn(tree)
-        .map(nameOf)
-        .filter((name) => name !== 'Dismiss notification'),
+    controls: () => {
+      const inCards = cards().flatMap((card) => buttonsIn(card.props.children));
+      return buttonsIn(tree)
+        .filter((el) => !inCards.includes(el))
+        .map(nameOf);
+    },
   };
 }
 
@@ -117,6 +131,19 @@ const toast = (n: number): AttentionToast => ({
 });
 const toasts = (count: number) => Array.from({ length: count }, (_, i) => toast(i + 1));
 const keys = (count: number) => toasts(count).map((t) => t.key);
+const usage: AttentionToast = {
+  key: 'usage:claude',
+  title: '12% left on the 5h window',
+  status: 'usage_low',
+  message: 'Claude usage low',
+};
+const openName = (n: number) => `Waiting for your inputTask ${n}Click to open the task`;
+const announcement = (n: number) => `Waiting for your input: Task ${n}`;
+const cardButtons = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, i) => [
+    openName(from + i),
+    `Dismiss notification: Task ${from + i}`,
+  ]).flat();
 
 describe('ToastStack', () => {
   it('shows the newest three of ten and folds the other seven into one "+7 more" control', () => {
@@ -143,9 +170,9 @@ describe('ToastStack', () => {
     const view = mount(toasts(10));
     const scrolled = () =>
       flatten(view.root()).find((el) => classesOf(el).includes('overflow-y-auto'))?.props.children;
-    expect(buttonsIn(scrolled()).map(nameOf)).toEqual(Array(3).fill('Dismiss notification'));
+    expect(buttonsIn(scrolled()).map(nameOf)).toEqual(cardButtons(8, 10));
     view.click('+7 more');
-    expect(buttonsIn(scrolled()).map(nameOf)).toEqual(Array(10).fill('Dismiss notification'));
+    expect(buttonsIn(scrolled()).map(nameOf)).toEqual(cardButtons(1, 10));
   });
 
   it('leaves room inside the scroll for the focus ring of a card at its edge', () => {
@@ -206,26 +233,155 @@ describe('ToastStack', () => {
   });
 
   it('keeps each card as it was: click opens the task, the X dismisses without opening', () => {
-    const usage: AttentionToast = {
-      key: 'usage:claude',
-      title: '12% left on the 5h window',
-      status: 'usage_low',
-      message: 'Claude usage low',
-    };
     const view = mount([toast(1), usage]);
     const [task, inert] = view.cards();
-    expect(task!.props.role).toBe('button');
-    expect(task!.props.tabIndex).toBe(0);
+    expect(task!.props.role).toBeUndefined();
+    expect(task!.props.tabIndex).toBeUndefined();
+    expect(task!.props.onClick).toBeUndefined();
     expect(inert!.props.role).toBeUndefined();
     expect(inert!.props.onClick).toBeUndefined();
 
-    task!.props.onClick!({ stopPropagation: vi.fn() });
+    const [open, dismiss] = buttonsIn(task!.props.children);
+    expect([open, dismiss].map((el) => nameOf(el!))).toEqual([
+      openName(1),
+      'Dismiss notification: Task 1',
+    ]);
+    open!.props.onClick!({ stopPropagation: vi.fn() });
     expect(view.onOpen).toHaveBeenCalledWith(toast(1));
+    expect(view.onDismiss).not.toHaveBeenCalled();
 
     const stopPropagation = vi.fn();
-    buttonsIn(task!.props.children)[0]!.props.onClick!({ stopPropagation });
+    dismiss!.props.onClick!({ stopPropagation });
     expect(view.onDismiss).toHaveBeenCalledWith('t1');
-    expect(stopPropagation).toHaveBeenCalled();
+    expect(stopPropagation).not.toHaveBeenCalled();
     expect(view.onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives nothing the button role and nests no button in a button', () => {
+    const isButton = (el: El) => el.type === 'button' || el.props.role === 'button';
+    const view = mount([...toasts(5), usage]);
+    for (const expand of [false, true]) {
+      if (expand) view.click('+3 more');
+      const all = flatten(view.tree());
+      expect(all.filter((el) => el.props.role === 'button')).toEqual([]);
+      expect(all.filter((el) => el.props.tabIndex !== undefined)).toEqual([]);
+      expect(all.filter((el) => el.props.onKeyDown !== undefined)).toEqual([]);
+      for (const outer of all.filter(isButton)) {
+        expect(flatten(outer.props.children).filter(isButton), nameOf(outer)).toEqual([]);
+      }
+    }
+  });
+
+  it('holds the text and the hint in the open button, and gives a toast with no task a plain card', () => {
+    const [task, inert] = mount([toast(1), usage]).cards();
+    const [open] = buttonsIn(task!.props.children);
+    expect(open!.props.type).toBe('button');
+    expect(textOf(open!)).toBe('Waiting for your inputTask 1Click to open the task');
+    expect(buttonsIn(inert!.props.children).map(nameOf)).toEqual([
+      'Dismiss notification: 12% left on the 5h window',
+    ]);
+    expect(textOf(inert!.props.children)).toBe('Claude usage low12% left on the 5h window');
+  });
+
+  it('keeps the whole card clickable for the mouse: the open button stretches over it, the X sits above', () => {
+    const [card] = mount([toast(1)]).cards();
+    const [open, dismiss] = buttonsIn(card!.props.children);
+    expect(classesOf(card!)).toContain('relative');
+    expect(classesOf(open!)).toEqual(expect.arrayContaining(['after:absolute', 'after:inset-0']));
+    expect(classesOf(dismiss!)).toEqual(expect.arrayContaining(['relative', 'z-10']));
+  });
+
+  it('shows the keyboard focus of the open button as a ring around the whole card', () => {
+    const [card] = mount([toast(1)]).cards();
+    const [open] = buttonsIn(card!.props.children);
+    expect(classesOf(open!)).toEqual(
+      expect.arrayContaining(['focus-visible:outline-none', 'focus-visible:after:outline-2']),
+    );
+  });
+
+  it('keeps a polite live region while no toast shows, so one exists before the first toast', () => {
+    const view = mount([]);
+    const region = view.region();
+    expect(region?.props.role).toBe('status');
+    expect(region?.props['aria-live']).toBe('polite');
+    expect(classesOf(region!)).toContain('sr-only');
+    expect(view.announced()).toBe('');
+    expect(view.cards()).toEqual([]);
+    expect(view.controls()).toEqual([]);
+  });
+
+  it('renders the live region in the same place with and without toasts, so it is never recreated', () => {
+    const slotOfRegion = (node: ReactNode) => {
+      const parts = isValidElement<El['props']>(node) ? [node.props.children].flat() : [];
+      return parts.findIndex(
+        (part) => isValidElement<El['props']>(part) && part.props.role === 'status',
+      );
+    };
+    const view = mount([]);
+    const empty = slotOfRegion(view.tree());
+    view.update(toasts(2));
+    expect(empty).toBeGreaterThanOrEqual(0);
+    expect(slotOfRegion(view.tree())).toBe(empty);
+  });
+
+  it('announces "<message>: <title>" of a toast that was not in the list before', () => {
+    const view = mount([]);
+    view.update([toast(1)]);
+    expect(view.announced()).toBe(announcement(1));
+    view.update([toast(1), usage]);
+    expect(view.announced()).toBe('Claude usage low: 12% left on the 5h window');
+  });
+
+  it('keeps the text when the newest of two is dismissed, and when the list empties', () => {
+    const view = mount([]);
+    view.update(toasts(2));
+    const heard = [view.announced(), view.lineKey()];
+    expect(heard[0]).toBe(announcement(2));
+    view.update(toasts(1));
+    expect([view.announced(), view.lineKey()]).toEqual(heard);
+    view.update([]);
+    expect([view.announced(), view.lineKey()]).toEqual(heard);
+  });
+
+  it('keeps the text when the list is expanded and collapsed', () => {
+    const view = mount([]);
+    view.update(toasts(5));
+    const heard = [view.announced(), view.lineKey()];
+    expect(heard[0]).toBe(announcement(5));
+    view.click('+2 more');
+    expect([view.announced(), view.lineKey()]).toEqual(heard);
+    view.click('Show less');
+    expect([view.announced(), view.lineKey()]).toEqual(heard);
+  });
+
+  it('replaces the text with the newest of the keys that are new', () => {
+    const view = mount([]);
+    view.update(toasts(2));
+    view.update(toasts(3));
+    expect(view.announced()).toBe(announcement(3));
+    view.update([...toasts(3), toast(4), toast(5)]);
+    expect(view.announced()).toBe(announcement(5));
+  });
+
+  it('counts a key that left and came back as new, but not one that only moved', () => {
+    const view = mount([]);
+    view.update(toasts(2));
+    const heard = [view.announced(), view.lineKey()];
+    view.update([toast(2), toast(1)]);
+    expect([view.announced(), view.lineKey()]).toEqual(heard);
+    view.update([toast(2)]);
+    view.update([toast(2), toast(1)]);
+    expect(view.announced()).toBe(announcement(1));
+  });
+
+  it('announces a toast that comes back with the very same text as a new line', () => {
+    const view = mount([]);
+    view.update([toast(1)]);
+    const first = view.lineKey();
+    view.update([]);
+    expect(view.lineKey()).toBe(first);
+    view.update([toast(1)]);
+    expect(view.announced()).toBe(announcement(1));
+    expect(view.lineKey()).not.toBe(first);
   });
 });

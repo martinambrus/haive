@@ -78,8 +78,13 @@ for (const pkg of apiModules) {
   }
 }
 
-const workerParts = ['steps', 'ensure-schema', 'jobs'];
-const workerKeys = { steps: 'steps', 'ensure-schema': 'ensureSchema', jobs: 'jobs' };
+const workerParts = ['steps', 'ensure-schema', 'jobs', 'teardown'];
+const workerKeys = {
+  steps: 'steps',
+  'ensure-schema': 'ensureSchema',
+  jobs: 'jobs',
+  teardown: 'teardown',
+};
 const workerImports = apiModules.flatMap((pkg, i) => [
   `import m${i} from '${pkg.name}/manifest';`,
   ...workerParts

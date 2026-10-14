@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   api,
+  changedTaskType,
   createTaskType,
   deleteTaskType,
   getAdminTaskType,
@@ -9,6 +10,7 @@ import {
   listTaskTypes,
   moduleOpenTasks,
   patchModuleActive,
+  postModuleTeardown,
   updateTaskType,
   type ApiError,
 } from '../src/lib/api-client.js';
@@ -111,6 +113,58 @@ describe('task type helpers', () => {
   });
 });
 
+describe('task type update precondition', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const row = { slug: 'a-b', displayName: 'Theirs', updatedAt: '2026-10-14T12:30:00.456Z' };
+  const refusal = async (status: number, body: unknown): Promise<ApiError> => {
+    failWith(status, body);
+    try {
+      await updateTaskType('a-b', { displayName: 'B' });
+    } catch (err) {
+      return err as ApiError;
+    }
+    throw new Error('request did not fail');
+  };
+
+  it('sends the updatedAt the editor read along with an update', async () => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body as string | undefined });
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+    const body = { displayName: 'B', expectedUpdatedAt: '2026-10-14T12:00:00.123Z' };
+    await updateTaskType('a-b', body);
+    expect(calls.map((c) => [c.method, new URL(c.url).pathname, c.body])).toEqual([
+      ['PATCH', '/admin/task-types/a-b', JSON.stringify(body)],
+    ]);
+  });
+
+  it('reads the current row off the 409 that refuses a stale edit', async () => {
+    const err = await refusal(409, {
+      error: 'The task type was changed since it was loaded',
+      code: 'task_type_changed',
+      taskType: row,
+    });
+    expect(err.status).toBe(409);
+    expect(err.code).toBe('task_type_changed');
+    expect(changedTaskType(err)).toEqual(row);
+  });
+
+  it('reads no row off any other failure', async () => {
+    expect(changedTaskType(await refusal(404, { error: 'Task type not found' }))).toBeNull();
+    expect(
+      changedTaskType(await refusal(409, { error: 'x', code: 'other', taskType: row })),
+    ).toBeNull();
+    expect(
+      changedTaskType(await refusal(409, { error: 'x', code: 'task_type_changed' })),
+    ).toBeNull();
+  });
+});
+
 describe('module activation helpers', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -174,5 +228,60 @@ describe('module activation helpers', () => {
     expect(
       moduleOpenTasks(await refusal(409, { error: 'x', code: 'module_tasks_open', tasks: [] })),
     ).toEqual([]);
+  });
+});
+
+describe('module teardown helper', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const record = (answers: { status: number; body: unknown }[]) => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body as string | undefined });
+        const answer = answers.shift()!;
+        return new Response(JSON.stringify(answer.body), { status: answer.status });
+      }),
+    );
+    return calls;
+  };
+  const refusal = async (status: number, body: unknown): Promise<ApiError> => {
+    failWith(status, body);
+    try {
+      await postModuleTeardown('statistics');
+    } catch (err) {
+      return err as ApiError;
+    }
+    throw new Error('request did not fail');
+  };
+
+  it('posts to /modules/:id/teardown with no body, and returns the stamp or the running notice as sent', async () => {
+    const done = { moduleId: 'statistics', tornDownAt: '2026-10-14T13:45:00.000Z' };
+    const calls = record([
+      { status: 200, body: done },
+      { status: 202, body: { status: 'running' } },
+    ]);
+    expect(await postModuleTeardown('statistics')).toEqual(done);
+    expect(await postModuleTeardown('statistics')).toEqual({ status: 'running' });
+    expect(calls.map((c) => [c.method, new URL(c.url).pathname, c.body])).toEqual([
+      ['POST', '/modules/statistics/teardown', undefined],
+      ['POST', '/modules/statistics/teardown', undefined],
+    ]);
+  });
+
+  it('escapes the module id in the path', async () => {
+    const calls = record([{ status: 200, body: {} }]);
+    await postModuleTeardown('a/b c');
+    expect(new URL(calls[0]!.url).pathname).toBe('/modules/a%2Fb%20c/teardown');
+  });
+
+  it.each([
+    [409, 'module_active', 'Deactivate the module first'],
+    [409, 'module_missing', 'The module is not loaded'],
+    [502, 'module_teardown_failed', 'drop failed: boom'],
+  ])('throws a %s %s refusal with the message the api sent', async (status, code, error) => {
+    const err = await refusal(status, { error, code });
+    expect([err.status, err.code, err.message]).toEqual([status, code, error]);
   });
 });
