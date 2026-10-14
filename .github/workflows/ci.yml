@@ -220,6 +220,7 @@ jobs:
           worker test/database-snapshots.test.ts DATABASE_SNAPSHOT_TEST_URL snapshot_test pg
           worker test/task-type-seed.test.ts TASK_TYPE_SEED_TEST_URL task_type_seed_test pg
           worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test pg
+          worker test/module-task-type-seed.test.ts MODULE_TASK_TYPE_SEED_TEST_URL module_task_type_seed_test pg
           worker test/step-catalog-sync.test.ts STEP_CATALOG_TEST_URL step_catalog_test pg
           worker test/module-intent.test.ts MODULE_INTENT_TEST_URL module_intent_test pg
           worker test/cancel-sandbox-fence.test.ts CANCEL_FENCE_TEST_URL cancel_fence_test pg

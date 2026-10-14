@@ -3,10 +3,13 @@ import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import {
   isCoreStepId,
+  isModuleStepId,
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   type ComposableStepEntry,
+  type CompositionIssue,
   type ModuleManifest,
+  type TaskTypeDefaultsIssue,
 } from '@haive/shared/modularity';
 import { openModuleDatabase, type ModuleSchemaContext } from '@haive/shared/module-db';
 import { getBullRedis } from '../redis.js';
@@ -36,6 +39,12 @@ export type LoadedWorkerModule = {
   manifest: ModuleManifest;
   stepIds: string[];
   composable: ComposableStepEntry[];
+};
+
+export type ModuleTaskTypeOutcome = {
+  seeded: string[];
+  conflicts: { slug: string; heldBy: string }[];
+  invalid?: { slug: string; issues: (TaskTypeDefaultsIssue | CompositionIssue)[] }[];
 };
 
 const namespaced = (moduleId: string, localId: string) => `module.${moduleId}.${localId}`;
@@ -118,6 +127,17 @@ export function registerModuleSteps(
       return { ...composableEntry, stepId: namespaced(moduleId, composableEntry.stepId) };
     });
 
+    for (const seed of manifest.taskTypes ?? []) {
+      const unregistered = (seed.stepIds ?? []).find(
+        (id) => isModuleStepId(id) && !stepIds.includes(id),
+      );
+      if (unregistered !== undefined) {
+        throw new Error(
+          `Module ${moduleId} task type "${seed.slug}" step "${unregistered}" is not one of its steps`,
+        );
+      }
+    }
+
     return { packageName: entry.packageName, manifest, stepIds, composable };
   });
 }
@@ -196,6 +216,7 @@ export async function publishWorkerBootReport(
   redis: Redis,
   loaded: readonly LoadedWorkerModule[],
   schemas: Record<string, 'ok' | 'none'>,
+  taskTypes: Record<string, ModuleTaskTypeOutcome>,
 ): Promise<void> {
   await redis.set(
     MODULES_LOADED_WORKER_KEY,
@@ -208,6 +229,7 @@ export async function publishWorkerBootReport(
         stepIds: m.stepIds,
         composableStepIds: m.composable.map((c) => c.stepId),
         ensureSchema: schemas[m.manifest.id] ?? 'none',
+        taskTypes: taskTypes[m.manifest.id] ?? { seeded: [], conflicts: [] },
       })),
     }),
   );
