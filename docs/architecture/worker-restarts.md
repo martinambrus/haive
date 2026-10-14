@@ -161,7 +161,8 @@ mid-apply then releases what the failed task holds (`settleFailedTask`), as its 
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
 hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The writes that open a
-pass on its `pending` row, claiming it, skipping it or failing a deactivated module's step
+pass on its `pending` row, claiming it, skipping it, failing a deactivated module's step or failing a
+step whose pass threw before it opened the row
 (`openPendingStep`, `step-ownership.ts`), land only while it is still `pending`, so a Skip stands. A Retry leaves the row `pending` too, so the same
 transaction then reads the task under the job's fence (`taskWriteTarget`: its epoch, and not failed
 or finished) FOR SHARE and rolls the flip back when the fence fails. A reset's epoch bump in flight
