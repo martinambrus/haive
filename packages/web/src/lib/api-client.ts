@@ -2496,4 +2496,29 @@ export interface ModulesLoadedResponse {
 
 export const getModulesLoaded = () => api.get<ModulesLoadedResponse>('/modules/loaded');
 
+export interface ModuleActiveResponse {
+  moduleId: string;
+  active: boolean;
+  deactivatedAt: string | null;
+}
+
+/** Throws with `code: 'module_tasks_open'` and a `tasks` list (see `moduleOpenTasks`) when a live
+ *  task still uses the module being deactivated. */
+export const patchModuleActive = (moduleId: string, active: boolean) =>
+  api.patch<ModuleActiveResponse>(`/modules/${encodeURIComponent(moduleId)}`, { active });
+
+export interface ModuleOpenTask {
+  id: string;
+  title: string;
+  status: string;
+  ownerId: string;
+}
+
+export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
+  const tasks = (err.body as { tasks?: unknown } | undefined)?.tasks;
+  return err.code === 'module_tasks_open' && Array.isArray(tasks)
+    ? (tasks as ModuleOpenTask[])
+    : [];
+}
+
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');

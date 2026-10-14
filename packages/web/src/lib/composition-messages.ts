@@ -230,6 +230,8 @@ export function describeAvailability(availability: TaskTypeAvailability): string
       return 'Unavailable: custom task types are switched off';
     case 'module-types-off':
       return 'Unavailable: module task types are switched off';
+    case 'module-deactivated':
+      return `Unavailable: deactivated modules ${(availability.moduleIds ?? []).join(', ')}`;
     case 'missing-step':
       return `Unavailable: missing steps ${(availability.stepIds ?? []).join(', ')}`;
     case 'invalid-composition': {

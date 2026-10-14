@@ -46,7 +46,7 @@ export async function markProjectStatesDirtyAtBoot(db: Database): Promise<void> 
   `);
 }
 
-async function refreshProjectState(db: Database, repositoryId: string): Promise<boolean> {
+export async function refreshProjectState(db: Database, repositoryId: string): Promise<boolean> {
   const [repo] = await db
     .select({
       storagePath: schema.repositories.storagePath,

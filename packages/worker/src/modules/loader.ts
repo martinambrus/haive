@@ -180,6 +180,7 @@ export async function ensureModuleSchemas(
 export async function startModuleJobs(
   loaded: readonly LoadedWorkerModule[],
   entries: readonly WorkerModuleEntry[],
+  deactivated: ReadonlySet<string> = new Set(),
 ): Promise<() => Promise<void>> {
   const stops: Array<{ moduleId: string; stop: () => Promise<void> }> = [];
   const stopAll = async (): Promise<void> => {
@@ -194,6 +195,10 @@ export async function startModuleJobs(
     const jobs = entries[index]?.jobs;
     if (!jobs) continue;
     const moduleId = module.manifest.id;
+    if (deactivated.has(moduleId)) {
+      logger.info({ module: moduleId }, 'module jobs not started: the module is deactivated');
+      continue;
+    }
     try {
       const stop = await jobs({
         moduleId,

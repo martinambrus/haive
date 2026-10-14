@@ -281,6 +281,16 @@ describe('describeAvailability', () => {
       'Unavailable: disabled',
     );
   });
+
+  it('names the deactivated modules a type uses', () => {
+    expect(
+      describeAvailability({
+        available: false,
+        reason: 'module-deactivated',
+        moduleIds: ['alpha', 'beta'],
+      }),
+    ).toBe('Unavailable: deactivated modules alpha, beta');
+  });
 });
 
 describe('describePromptStepIssue', () => {

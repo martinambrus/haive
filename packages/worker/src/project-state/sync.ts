@@ -51,6 +51,7 @@ import {
   resolveRenderContext,
   unionExpandedFor,
 } from '../step-engine/_upgrade-render.js';
+import { readStateTree } from '../plan/projection-merge.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { claimDiskHash } from './claim-disk.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
@@ -159,11 +160,12 @@ type Checkout =
       environment: ProjectEnvironment | null;
     };
 
+const notRead = (detail: string): Checkout => ({
+  kind: 'refused',
+  reason: `the checkout's record was not read: ${oneLine(detail)}`,
+});
+
 async function readCheckout(repoPath: string): Promise<Checkout> {
-  const notRead = (detail: string): Checkout => ({
-    kind: 'refused',
-    reason: `the checkout's record was not read: ${oneLine(detail)}`,
-  });
   let files: Map<string, string> | null;
   try {
     files = await readStateFiles(repoPath);
@@ -171,6 +173,10 @@ async function readCheckout(repoPath: string): Promise<Checkout> {
     if (err instanceof Refusal || isPathContainmentError(err)) return notRead(err.message);
     throw err;
   }
+  return checkoutOf(files);
+}
+
+function checkoutOf(files: Map<string, string> | null): Checkout {
   if (files === null) return { kind: 'absent' };
   const parsed = parseProjectState(files);
   if (!parsed.ok) return notRead(listed(parsed.problems));
@@ -768,4 +774,105 @@ export async function syncProjectStateFromCheckout(
     }
     return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged' };
   });
+}
+
+/** Points the sync base at the record the checkout holds now, so a sync after the checkout moves merges
+ *  this install's pending changes against the record they were made on. A checkout holding no record
+ *  gets an empty base, so what an incoming commit adds is merged in rather than imported over the
+ *  pending state; one whose record cannot be read keeps its base and answers in `last_error`. */
+export async function rebaseProjectStateOnCheckout(
+  db: Database,
+  args: { repositoryId: string; repoPath: string },
+): Promise<void> {
+  const checkout = await readCheckout(args.repoPath);
+  await db.transaction((tx) => rebaseLocked(tx, args.repositoryId, checkout));
+}
+
+/** The rebase onto the record HEAD commits, read from the commit and written in the transaction the
+ *  caller holds the project-state lock in. Run before the files move, so a crash leaves the base at
+ *  HEAD with the files pending or at HEAD. */
+export async function rebaseProjectStateOnHeadLocked(
+  tx: Tx,
+  { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
+): Promise<void> {
+  let checkout: Checkout;
+  try {
+    const files = await readStateTree(repoPath, 'HEAD');
+    checkout = checkoutOf(files.size === 0 ? null : files);
+  } catch (err) {
+    checkout = notRead((err as Error).message);
+  }
+  await applyRebase(tx, repositoryId, checkout);
+}
+
+/** The sync row as one comparable string, so a caller can tell whether another writer changed it. */
+export async function readProjectStateBase(tx: Tx, repositoryId: string): Promise<string> {
+  return JSON.stringify(await readSyncRow(tx, repositoryId));
+}
+
+async function rebaseLocked(
+  tx: Tx,
+  repositoryId: string,
+  checkout: Awaited<ReturnType<typeof readCheckout>>,
+): Promise<void> {
+  await lockProjectState(tx, repositoryId);
+  await applyRebase(tx, repositoryId, checkout);
+}
+
+async function applyRebase(
+  tx: Tx,
+  repositoryId: string,
+  checkout: Awaited<ReturnType<typeof readCheckout>>,
+): Promise<void> {
+  if (checkout.kind === 'refused') {
+    const row = await readSyncRow(tx, repositoryId);
+    if (row !== null && row.lastError !== checkout.reason) {
+      await tx
+        .update(schema.projectStateSync)
+        .set({ lastError: checkout.reason, updatedAt: new Date() })
+        .where(eq(schema.projectStateSync.repositoryId, repositoryId));
+    }
+    return;
+  }
+  if (checkout.kind === 'absent') {
+    const synced = {
+      baseSnapshot: normalizeProjectState(emptyProjectState()),
+      lastError: null,
+      updatedAt: new Date(),
+    };
+    await tx
+      .insert(schema.projectStateSync)
+      .values({ repositoryId, ...synced })
+      .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
+    return;
+  }
+  const [repo] = await tx
+    .select({ renderContext: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  const rtkKept =
+    (repo?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true ||
+    (repo?.renderContext ?? null) === null;
+  const settings = Object.create(null) as Record<string, unknown>;
+  for (const [name, value] of Object.entries(intakeSettings(checkout.settings, {}).accepted)) {
+    if (rtkKept || name !== 'rtk-enabled') settings[name] = value;
+  }
+  const tooling = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
+  if (tooling) settings[TOOLING_UNIT_NAME] = tooling;
+  const synced = {
+    baseSnapshot: normalizeProjectState({
+      ...recordOf(checkout.render),
+      claims: checkout.claims,
+      bundles: checkout.bundles,
+      settings,
+      environment: checkout.environment && normalizeEnvironment(checkout.environment),
+    }),
+    lastError: null,
+    updatedAt: new Date(),
+  };
+  await tx
+    .insert(schema.projectStateSync)
+    .values({ repositoryId, ...synced })
+    .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
 }

@@ -22,6 +22,12 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   },
 }));
 
+vi.mock('../src/db.js', () => ({ getDb: () => ({}) }));
+vi.mock('../src/modules/activation.js', () => ({
+  deactivatedModuleIds: async () => new Set<string>(),
+  isModuleDeactivated: async () => false,
+}));
+
 import { Hono } from 'hono';
 import { moduleManifestSchema } from '@haive/shared/modularity';
 import { moduleRoutes } from '../src/modules/loader.js';
