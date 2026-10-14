@@ -8,6 +8,7 @@ export const TYPE_LABELS: Record<string, string> = {
   plan_chat: 'Plan chat',
   plan_sequence: 'Plan sequence',
   plan_merge: 'Plan merge',
+  type_draft: 'Task type draft',
   advisory: 'Advisory research',
   env_replicate: 'Env replicate', // legacy tasks only
 };

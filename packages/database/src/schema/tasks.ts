@@ -83,6 +83,8 @@ export const workflowTypeEnum = pgEnum('workflow_type', [
   'advisory',
   'plan_sequence',
   'plan_merge',
+  // Creator mode: an admin describes a task type in chat and gets a draft back, as a hidden built-in.
+  'type_draft',
 ]);
 export const taskStatusEnum = pgEnum('task_status', [
   'created',

@@ -22,31 +22,11 @@ import { findWorktreePathClaimant } from '../../../repo/worktree-claims.js';
 import {
   ForgeError,
   credentialForgeProvider,
-  hostFromRemote,
-  inferForgeProviderFromHost,
-  isForgeProviderName,
+  credentialUsableForPr,
   resolveForgeContext,
   resolveForgeProvider,
   type OpenPrResult,
 } from '../../../forge/index.js';
-
-/** Whether a stored credential can open a PR for this repo. The repo's forge is fixed by
- *  its origin URL; a credential is usable when its forge (explicit provider, else inferred
- *  from the credential's host) matches the repo's. For a self-hosted origin whose forge
- *  can't be inferred from the host, require a host match plus an explicit provider (which
- *  resolveForgeContext needs anyway). This keeps a GitHub credential out of a GitLab repo's
- *  picker while letting an "auto-detect" credential on a well-known host through. */
-function credentialUsableForPr(
-  c: { provider: string | null; host: string },
-  originUrl: string | null,
-): boolean {
-  if (!originUrl) return false;
-  const originHost = hostFromRemote(originUrl);
-  const repoForge = inferForgeProviderFromHost(originHost);
-  const credForge = credentialForgeProvider(c.provider, c.host);
-  if (repoForge) return credForge === repoForge;
-  return c.host === originHost && isForgeProviderName(c.provider);
-}
 
 type CleanupAction = 'merge_remove' | 'remove_only' | 'keep' | 'create_pr';
 

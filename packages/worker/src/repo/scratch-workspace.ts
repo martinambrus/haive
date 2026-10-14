@@ -52,16 +52,17 @@ export function taskScratchPath(userId: string, taskId: string): string {
 export async function ensureTaskScratchWorkspace(userId: string, taskId: string): Promise<string> {
   const dir = taskScratchPath(userId, taskId);
   // `<storage>/<userId>` is the anchor: it and its parents are the worker's, while everything below
-  // is reachable from a sandbox. The owner passed here applies to what this call CREATES.
+  // is reachable from a sandbox.
   const anchor = path.join(REPO_STORAGE_ROOT, userId);
   const rel = `${TASK_SCRATCH_DIR}/${taskId}`;
   const owner = { uid: SANDBOX_UID, gid: SANDBOX_GID };
   // A user whose first task has no repository has no directory here yet.
   await ensureDirNoFollow(REPO_STORAGE_ROOT, userId);
-  await ensureDirNoFollow(anchor, rel, { owner });
+  // No owner on the create: fs-safe makes that chown strict, and handing the directory over is
+  // best-effort, so a worker that may not chown still gets its workspace.
+  await ensureDirNoFollow(anchor, rel);
   try {
-    // Separate from the create above, which only hands over directories it made: a scratch dir an
-    // earlier run left root-owned still has to be repaired. A no-op when the owner already matches.
+    // Also repairs a scratch dir an earlier run left root-owned. A no-op when the owner already matches.
     await chownNoFollow(anchor, rel, owner);
   } catch (err) {
     // Best-effort, like `prepareAgentWritableDir`: on a host where chown is not permitted the

@@ -3522,6 +3522,7 @@ main()
       return;
     }
     log.info('[smoke] plan-canvas smoke passed');
+    console.log(JSON.stringify({ smoke: 'PLAN_CANVAS_OK' }));
   })
   .catch((err) => {
     log.error({ err }, '[smoke] plan-canvas smoke threw');
