@@ -243,3 +243,18 @@ describe('prompt step apply with a recorded invocation', () => {
     expect(await applyWith(ctx, { a: 1 })).toEqual({ raw: '{ "a": 1 }', parsed: { a: 1 } });
   });
 });
+
+describe('prompt step quoted-output budget', () => {
+  it('keeps every quoted step output inside one budget however often the template repeats it', async () => {
+    const template = Array.from({ length: 8 }, () => '{{step:01-worktree-setup}}').join('\n');
+    const big = '§'.repeat(8 * 1024);
+    const text = await prompt(
+      make({ template, paramFormSchema: undefined }),
+      detected({ stepOutputs: { '01-worktree-setup': big } }),
+      {},
+    );
+    const quoted = Buffer.byteLength((text.match(/§/g) ?? []).join(''), 'utf8');
+    expect(quoted).toBeLessThanOrEqual(64 * 1024);
+    expect(text).toContain('[truncated:');
+  });
+});

@@ -972,6 +972,8 @@ const SCANNED_PROMPT_EXPORTS = [
 const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUT_CAP_BYTES':
     'a byte limit for an earlier step output, not text',
+  'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUTS_BUDGET_BYTES':
+    'a byte limit for all quoted step outputs together, not text',
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_PERSONAS_UNSUPPORTED':
     'the failure reason of a step that never reaches a CLI, not prompt text',
   'step-engine/steps/workflow/_rag-usage.ts#buildRagUsagePrompt':

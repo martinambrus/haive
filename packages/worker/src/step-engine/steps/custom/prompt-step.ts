@@ -17,6 +17,8 @@ import {
 } from '../_untrusted-repo.js';
 
 export const PROMPT_STEP_OUTPUT_CAP_BYTES = 16 * 1024;
+/** Every quoted step output in one prompt together, however often the template repeats a token. */
+export const PROMPT_STEP_OUTPUTS_BUDGET_BYTES = 64 * 1024;
 export const PROMPT_STEP_PERSONAS_UNSUPPORTED = 'Prompt step personas are not supported yet';
 const NO_STEP_OUTPUT = '(no output recorded for this step)';
 
@@ -32,11 +34,11 @@ export interface PromptStepOutput {
   parsed: unknown;
 }
 
-export function capStepOutput(text: string): string {
+export function capStepOutput(text: string, cap: number = PROMPT_STEP_OUTPUT_CAP_BYTES): string {
   const bytes = Buffer.from(text, 'utf8');
-  if (bytes.length <= PROMPT_STEP_OUTPUT_CAP_BYTES) return text;
-  const head = bytes.subarray(0, PROMPT_STEP_OUTPUT_CAP_BYTES).toString('utf8').replace(/�+$/, '');
-  return `${head}\n[truncated: ${bytes.length - PROMPT_STEP_OUTPUT_CAP_BYTES} more bytes not shown]`;
+  if (bytes.length <= cap) return text;
+  const head = bytes.subarray(0, cap).toString('utf8').replace(/�+$/, '');
+  return `${head}\n[truncated: ${bytes.length - cap} more bytes not shown]`;
 }
 
 function stepOutputText(output: unknown, stepId: string): string {
@@ -66,11 +68,19 @@ function templateTokens(template: string) {
 function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formValues: FormValues) {
   const fields: Record<string, string> = {};
   const steps: Record<string, string> = {};
-  for (const token of templateTokens(entry.template)) {
+  const tokens = templateTokens(entry.template);
+  const quotes = tokens.filter((token) => token.kind === 'step').length;
+  const perQuote = Math.min(
+    PROMPT_STEP_OUTPUT_CAP_BYTES,
+    Math.floor(PROMPT_STEP_OUTPUTS_BUDGET_BYTES / Math.max(quotes, 1)),
+  );
+  for (const token of tokens) {
     if (token.kind === 'field') fields[token.id] = fieldText(formValues[token.id]);
     if (token.kind === 'step') {
       const output = detected.stepOutputs?.[token.id];
-      steps[token.id] = fencedAgentBlock(typeof output === 'string' ? output : NO_STEP_OUTPUT);
+      steps[token.id] = fencedAgentBlock(
+        typeof output === 'string' ? capStepOutput(output, perQuote) : NO_STEP_OUTPUT,
+      );
     }
   }
   const rendered = renderPromptTemplate(entry.template, {
