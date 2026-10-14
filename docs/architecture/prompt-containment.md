@@ -58,7 +58,9 @@ TEMPLATE before attachments, ledger entries and learned guidance were appended (
 non-prompt-step prompt, retry_ai — is neutralised and never read, and every block appended after the template is
 neutralised before it joins it, so even an allowed id is pasted once, at the template's own marker. A persona is read
 from the selected CLI's markdown agent dir, else any markdown agent dir, else `.codex/agents/<id>.toml`
-(`developer_instructions`).
+(`developer_instructions`). When the task starts, `checkPinnedStepPersonas` reads each pinned step's personas the
+same way, from the CLI that step resolves to (`resolvePreferredCli`), and records `agent_persona.unresolved` per id it
+cannot read. It is a warning only: the read at dispatch decides, against the tree the step actually mounts.
 
 **FENCE AGENT PROSE CARRIED INTO ANOTHER PROMPT.** `fencedAgentBlock` wraps a block between
 `UNTRUSTED_OPEN`/`CLOSE` and runs `fenceSafe`, which collapses any run of four or more `=` —
