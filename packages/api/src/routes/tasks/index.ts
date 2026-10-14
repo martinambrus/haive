@@ -77,6 +77,7 @@ import {
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
+import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { getTaskQueue } from '../../queues.js';
 import {
@@ -1073,6 +1074,7 @@ taskRoutes.get('/:id', async (c) => {
   );
   return c.json({
     task: taskWithActive,
+    dead: await loadTaskDead(db, task),
     steps,
     upcomingCliSteps,
     providerBreakdown,
@@ -1091,7 +1093,7 @@ taskRoutes.patch('/:id', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true, currentStepId: true, currentRound: true },
+    columns: { id: true, status: true, currentStepId: true, currentRound: true, deadAt: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
@@ -1116,7 +1118,12 @@ taskRoutes.patch('/:id', async (c) => {
     // Flipping auto-continue ON while the task waits on a form gives the
     // runner a chance to auto-pass it (pre-answered or zero-field steps);
     // a step that still needs input just re-enters waiting_form.
-    if (body.autoContinue === true && task.status === 'waiting_user' && task.currentStepId) {
+    if (
+      body.autoContinue === true &&
+      task.status === 'waiting_user' &&
+      task.currentStepId &&
+      !isTaskDead(task)
+    ) {
       await getTaskQueue().add(
         TASK_JOB_NAMES.ADVANCE_STEP,
         {
@@ -1151,6 +1158,7 @@ taskRoutes.post('/:id/action', async (c) => {
 
   switch (body.action) {
     case 'start': {
+      refuseDeadTask(task);
       // The second half of a two-phase create (POST /plan/build with
       // `deferStart`): the row was made unstarted so the caller could upload
       // attachments, and this enqueues it once they landed.
@@ -1183,6 +1191,7 @@ taskRoutes.post('/:id/action', async (c) => {
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
     case 'retry': {
+      refuseDeadTask(task);
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);
       }
@@ -1609,6 +1618,7 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
   if (task.status === 'completed' || task.status === 'cancelled') {
     throw new HttpError(409, `Cannot change provider for ${task.status} task`);
   }
+  refuseDeadTask(task);
 
   if (body.cliProviderId) {
     const provider = await db.query.cliProviders.findFirst({
