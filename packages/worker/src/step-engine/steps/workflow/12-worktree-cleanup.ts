@@ -7,15 +7,17 @@ import {
   type FormField,
   type FormSchema,
 } from '@haive/shared';
-import { lstatNoFollow } from '@haive/shared/fs-safe';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { parsePorcelainZ } from './_commit-diff.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { gitRun } from '../../../repo/git-exec.js';
 import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
-import { splitWorktreePath } from '../../../repo/worktree-paths.js';
+import {
+  describeChanges,
+  readUncommittedChanges,
+  type UncommittedChanges,
+} from '../../../repo/worktree-changes.js';
 import { findWorktreePathClaimant } from '../../../repo/worktree-claims.js';
 import {
   ForgeError,
@@ -49,13 +51,6 @@ function credentialUsableForPr(
 type CleanupAction = 'merge_remove' | 'remove_only' | 'keep' | 'create_pr';
 
 const MAX_LISTED_UNCOMMITTED = 20;
-
-interface UncommittedChanges {
-  /** What `git status` lists; a wholly untracked directory is one entry. */
-  count: number;
-  /** The first MAX_LISTED_UNCOMMITTED, in git's order. */
-  paths: string[];
-}
 
 interface WorktreeCleanupDetect {
   mode: 'no-git' | 'inplace' | 'worktree' | 'unknown';
@@ -107,44 +102,11 @@ interface CreatePrFormValues {
   finalizeMode?: string;
 }
 
-const describeChanges = (n: number): string => `${n} uncommitted change${n === 1 ? '' : 's'}`;
-
 function codeSpan(raw: string): string {
   const text = raw.replace(/[\r\n]+/g, ' ');
   const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
   const fence = '`'.repeat(longest + 1);
   return longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
-}
-
-/** Whether nothing stands at the worktree's path. Only a read that proves absence says yes. */
-async function worktreeGone(worktreePath: string): Promise<boolean> {
-  const split = splitWorktreePath(worktreePath);
-  if (!split) return false;
-  try {
-    return (await lstatNoFollow(split.anchor, split.rel, { strict: true })) === null;
-  } catch {
-    return false;
-  }
-}
-
-/** The worktree's changes no commit holds; null when git cannot say, which is not a clean tree.
- *  One already gone holds none: removal reads absence as success, and a re-driven apply must too. */
-async function readUncommitted(worktreePath: string): Promise<UncommittedChanges | null> {
-  const status = await gitRun(worktreePath, [
-    '--no-optional-locks',
-    'status',
-    '--porcelain=v1',
-    '-z',
-    '--untracked-files=normal',
-  ]);
-  if (status.code !== 0) {
-    return (await worktreeGone(worktreePath)) ? { count: 0, paths: [] } : null;
-  }
-  const entries = parsePorcelainZ(status.stdout);
-  return {
-    count: entries.length,
-    paths: entries.slice(0, MAX_LISTED_UNCOMMITTED).map((entry) => entry.path),
-  };
 }
 
 function uncommittedNoteBody(uncommitted: UncommittedChanges | null): string {
@@ -258,7 +220,8 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     if (mode === 'worktree') {
       const res = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       parentBranch = res.code === 0 ? res.stdout.trim() : null;
-      if (output.worktreePath) uncommitted = await readUncommitted(output.worktreePath);
+      if (output.worktreePath)
+        uncommitted = await readUncommittedChanges(output.worktreePath, MAX_LISTED_UNCOMMITTED);
       hasOrigin = await detectOrigin(ctx.repoPath);
       originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
       const repo = repositoryId
@@ -657,7 +620,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // The merge carried commits only, and removing the directory deletes the rest. Read the tree
     // again here rather than trust detect: work can land between the form and this pass.
     if (values.discardUncommitted !== true) {
-      const held = await readUncommitted(d.worktreePath);
+      const held = await readUncommittedChanges(d.worktreePath, MAX_LISTED_UNCOMMITTED);
       if (held === null || held.count > 0) {
         ctx.logger.warn(
           { worktreePath: d.worktreePath, uncommitted: held?.count ?? null },

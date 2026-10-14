@@ -59,11 +59,11 @@ afterEach(async () => {
   await rm(wt, { recursive: true, force: true });
 });
 
-function dbFor(type: string, runListSnapshot: string[] | null): Database {
+function dbFor(type: string, runListSnapshot: string[] | null, worktreePath = wt): Database {
   return {
     query: {
       tasks: {
-        findFirst: async () => ({ type, runListSnapshot, worktreePath: wt }),
+        findFirst: async () => ({ type, runListSnapshot, worktreePath }),
       },
     },
     insert: () => ({
@@ -78,8 +78,9 @@ async function release(
   type: string,
   snapshot: string[] | null,
   reason: 'completed' | 'failed' | 'cancelled' = 'completed',
+  worktreePath?: string,
 ): Promise<boolean> {
-  await releaseTaskWorktree(dbFor(type, snapshot), 'task-1', reason);
+  await releaseTaskWorktree(dbFor(type, snapshot, worktreePath), 'task-1', reason);
   return h.removed.length > 0;
 }
 
@@ -105,6 +106,19 @@ describe('releaseTaskWorktree on completion', () => {
   it('keeps it for an untracked file too', async () => {
     await untracked();
     expect(await release('review_only', CUSTOM)).toBe(false);
+  });
+
+  it('keeps one git cannot read, which is not the same as a clean one', async () => {
+    await rm(path.join(wt, '.git'), { recursive: true, force: true });
+    await writeFile(path.join(wt, '.git'), 'gitdir: /nonexistent/haive-gitdir\n', 'utf8');
+    expect(await release('review_only', CUSTOM)).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  it('reaches removal for a worktree directory that is already gone, which holds nothing', async () => {
+    const gone = path.join(wt, '.haive', 'worktrees', 'gone');
+    expect(await release('review_only', CUSTOM, 'completed', gone)).toBe(true);
+    expect(events).toEqual(['worktree.removed']);
   });
 
   it('leaves a custom type with its own 12-worktree-cleanup to that step', async () => {
