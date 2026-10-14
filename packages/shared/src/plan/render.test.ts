@@ -7,6 +7,7 @@ import {
 } from './render.js';
 import { planNodePath } from './paths.js';
 import type { PlanNodeRecord } from './read.js';
+import type { PlanMirror } from '../types/index.js';
 
 const ROOT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const API = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -108,6 +109,16 @@ describe('renderPlanMarkdownFrom', () => {
     expect(out).toContain('depends on: API');
     expect(out).toContain(`node:${API}`);
     expect(out).toContain('needs the router');
+  });
+
+  it('lists a node’s links in one order whatever order they were read in', () => {
+    const links = [
+      { fromNodeId: AUTH, toNodeId: API, kind: 'depends_on' as const, note: null },
+      { fromNodeId: AUTH, toNodeId: ROOT, kind: 'affects' as const, note: null },
+    ];
+    expect(renderPlanMarkdownFrom(NODES, [...links].reverse())).toBe(
+      renderPlanMarkdownFrom(NODES, links),
+    );
   });
 
   it('omits bodies under titlesOnly', () => {
@@ -267,5 +278,160 @@ describe('renderPlanMarkdownFromMirror', () => {
     expect(json).toBe(
       '{\n  "schemaVersion": 2,\n  "nodes": [],\n  "edges": [],\n  "codeLinks": []\n}\n',
     );
+  });
+});
+
+describe('serializePlanMirror canonical order', () => {
+  const SIB = '11111111-1111-4111-8111-111111111111';
+  const GONE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const LOST_A = '22222222-2222-4222-8222-222222222222';
+  const LOST_B = '33333333-3333-4333-8333-333333333333';
+  const LOST_C = '99999999-9999-4999-8999-999999999999';
+
+  const mirrorNode = (
+    id: string,
+    parentId: string | null,
+    ordinal: number,
+  ): PlanMirror['nodes'][number] => ({
+    id,
+    parentId,
+    ordinal,
+    title: id,
+    kind: 'component',
+    body: null,
+    status: 'todo',
+    taskable: false,
+  });
+  const edge = (
+    fromNodeId: string,
+    toNodeId: string,
+    kind: string,
+  ): PlanMirror['edges'][number] => ({
+    fromNodeId,
+    toNodeId,
+    kind,
+    note: null,
+  });
+  const link = (
+    nodeId: string,
+    repoPath: string,
+    symbol: string | null,
+  ): PlanMirror['codeLinks'][number] => ({
+    nodeId,
+    repoPath,
+    symbol,
+    evidence: null,
+    derivedAtCommit: null,
+    stale: false,
+    role: 'implements',
+  });
+  const rotate = <T>(items: T[], by: number): T[] => [...items.slice(by), ...items.slice(0, by)];
+  const written = (given: PlanMirror): PlanMirror => JSON.parse(serializePlanMirror(given));
+  const freeze = <T>(value: T): T => {
+    if (value !== null && typeof value === 'object') {
+      for (const inner of Object.values(value)) freeze(inner);
+      Object.freeze(value);
+    }
+    return value;
+  };
+
+  // ROOT, SIB and API tie on ordinal 0; AUTH (ordinal 5) comes right after API in tree order.
+  const mirror: PlanMirror = {
+    schemaVersion: 2,
+    nodes: [
+      mirrorNode(AUTH, API, 5),
+      mirrorNode(DB, ROOT, 1),
+      mirrorNode(API, ROOT, 0),
+      mirrorNode(SIB, ROOT, 0),
+      mirrorNode(ROOT, null, 0),
+    ],
+    edges: [
+      edge(AUTH, DB, 'depends_on'),
+      edge(API, AUTH, 'depends_on'),
+      edge(API, AUTH, 'affects'),
+    ],
+    codeLinks: [
+      link(AUTH, 'src/auth.ts', 'login'),
+      link(API, 'a.ts', null),
+      link(AUTH, 'src/auth.ts', null),
+      link(API, 'B.ts', null),
+    ],
+  };
+  const reversed: PlanMirror = {
+    ...mirror,
+    nodes: [...mirror.nodes].reverse(),
+    edges: [...mirror.edges].reverse(),
+    codeLinks: [...mirror.codeLinks].reverse(),
+  };
+  const rotated: PlanMirror = {
+    ...mirror,
+    nodes: rotate(mirror.nodes, 2),
+    edges: rotate(mirror.edges, 1),
+    codeLinks: rotate(mirror.codeLinks, 2),
+  };
+
+  it('writes the same bytes whatever order the rows were read in', () => {
+    const bytes = serializePlanMirror(mirror);
+    expect(serializePlanMirror(reversed)).toBe(bytes);
+    expect(serializePlanMirror(rotated)).toBe(bytes);
+
+    const out = written(mirror);
+    expect(out.nodes.map((n) => n.id)).toEqual([ROOT, SIB, API, AUTH, DB]);
+    expect(out.edges.map((e) => [e.fromNodeId, e.toNodeId, e.kind])).toEqual([
+      [API, AUTH, 'affects'],
+      [API, AUTH, 'depends_on'],
+      [AUTH, DB, 'depends_on'],
+    ]);
+    // Null sorts before any symbol, and 'B.ts' before 'a.ts': by code unit, not by locale.
+    expect(out.codeLinks.map((l) => [l.nodeId, l.repoPath, l.symbol])).toEqual([
+      [API, 'B.ts', null],
+      [API, 'a.ts', null],
+      [AUTH, 'src/auth.ts', null],
+      [AUTH, 'src/auth.ts', 'login'],
+    ]);
+  });
+
+  it('writes every node after its parent', () => {
+    for (const given of [mirror, reversed, rotated]) {
+      const { nodes } = written(given);
+      const position = new Map(nodes.map((n, i) => [n.id, i]));
+      for (const n of nodes) {
+        if (n.parentId !== null) {
+          expect(position.get(n.parentId)).toBeLessThan(position.get(n.id)!);
+        }
+      }
+    }
+  });
+
+  it('leaves the mirror it is given untouched', () => {
+    const given = freeze(structuredClone(mirror));
+    const before = structuredClone(given);
+
+    serializePlanMirror(given);
+
+    expect(given).toEqual(before);
+  });
+
+  it('puts a node whose parent is not in the plan after the tree, by ordinal then id', () => {
+    const out = written({
+      ...mirror,
+      nodes: [
+        mirrorNode(LOST_B, GONE, 1),
+        ...mirror.nodes,
+        mirrorNode(LOST_A, GONE, 1),
+        mirrorNode(LOST_C, GONE, 0),
+      ],
+    });
+
+    expect(out.nodes.map((n) => n.id)).toEqual([ROOT, SIB, API, AUTH, DB, LOST_C, LOST_A, LOST_B]);
+  });
+
+  it('renders plan.md in the order plan.json is written in', () => {
+    const markdown = renderPlanMarkdownFromMirror(mirror);
+
+    expect(renderPlanMarkdownFromMirror(reversed)).toBe(markdown);
+    expect(renderPlanMarkdownFromMirror(rotated)).toBe(markdown);
+    expect(renderPlanMarkdownFromMirror(written(mirror))).toBe(markdown);
+    expect(markdown.indexOf(`node:${SIB}`)).toBeLessThan(markdown.indexOf(`node:${API}`));
   });
 });
