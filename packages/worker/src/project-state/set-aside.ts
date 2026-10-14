@@ -269,24 +269,24 @@ async function stateOffender(
     .from(schema.projectStateSync)
     .where(eq(schema.projectStateSync.repositoryId, repositoryId))
     .limit(1);
+  // With no sync row this install never wrote state, so no state change is Haive's.
+  if (!row) return paths[0]!;
   let expected = new Map<string, string>();
-  if (row) {
-    try {
-      const base = { ...emptyProjectState(), ...(row.baseSnapshot as Partial<ProjectStateRecord>) };
-      const render = await loadPendingRenderConflicts(db, repositoryId);
-      const claims = await loadPendingClaimConflicts(db, repositoryId);
-      const settings = await loadPendingSettingConflicts(db, repositoryId);
-      expected = renderProjectState({
-        ...base,
-        render: overlayRender(base.render, render, 'incoming'),
-        claims: overlayClaims(base.claims, claims, 'incoming'),
-        settings: overlaySettings(base.settings, settings, 'incoming'),
-        environment: overlayEnvironment(base.environment, settings, 'incoming'),
-      });
-    } catch (err) {
-      if (!(err instanceof ProjectStateError)) throw err;
-      return paths[0]!;
-    }
+  try {
+    const base = { ...emptyProjectState(), ...(row.baseSnapshot as Partial<ProjectStateRecord>) };
+    const render = await loadPendingRenderConflicts(db, repositoryId);
+    const claims = await loadPendingClaimConflicts(db, repositoryId);
+    const settings = await loadPendingSettingConflicts(db, repositoryId);
+    expected = renderProjectState({
+      ...base,
+      render: overlayRender(base.render, render, 'incoming'),
+      claims: overlayClaims(base.claims, claims, 'incoming'),
+      settings: overlaySettings(base.settings, settings, 'incoming'),
+      environment: overlayEnvironment(base.environment, settings, 'incoming'),
+    });
+  } catch (err) {
+    if (!(err instanceof ProjectStateError)) throw err;
+    return paths[0]!;
   }
   const modes = await modeChanges(repoPath, paths);
   for (const path of paths) {

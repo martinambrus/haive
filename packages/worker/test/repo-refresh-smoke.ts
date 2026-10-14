@@ -1766,6 +1766,25 @@ async function main(): Promise<void> {
         { asideP2, keptP2 },
       );
 
+      // S3. With no sync row this install never wrote state: a tracked state file deleted locally is not
+      // Haive's pending deletion, so the set-aside refuses it instead of bringing HEAD's back.
+      const s3 = await committedRecord();
+      const s3Id = s3.payload.repositoryId;
+      await db
+        .delete(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, s3Id));
+      await rm(path.join(s3.dest, RENDER_REL));
+      const asideS3 = await setAsideHaiveProjections(db, s3Id, s3.dest);
+      const backS3 = await readFile(path.join(s3.dest, RENDER_REL)).then(
+        () => true,
+        () => false,
+      );
+      check(
+        'S3: a state file deleted with no sync row refuses the set-aside and stays deleted',
+        asideS3.outcome === 'refused' && asideS3.file === RENDER_REL && !backS3,
+        { asideS3, backS3 },
+      );
+
       // 11l-2. A mode change is not in the blob id: a staged chmod, or one only in the working tree, on a
       // file holding Haive's bytes is a person's change, and returning the path to HEAD would lose it.
       const indexMode = (dir: string, rel: string) =>
