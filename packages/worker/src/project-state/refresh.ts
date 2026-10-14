@@ -90,6 +90,7 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
       column: read.column,
       expectedColumns: [after!.renderContext],
       keepColumnOnFailure: true,
+      refuseDuringGitOperation: true,
     });
   } catch (err) {
     if (err instanceof ProjectStateMovedError) return false;

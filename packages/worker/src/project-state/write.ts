@@ -39,6 +39,7 @@ import {
   type ProjectStateClaim,
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
+import { gitOperationInProgress } from '../repo/git-operation.js';
 import type { TemplateRenderContext } from '../step-engine/template-manifest.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -444,10 +445,13 @@ export async function writeProjectStateColumn(
     expectedColumns,
     holdingTaskId,
     keepColumnOnFailure,
+    refuseDuringGitOperation,
   }: ProjectStateColumnInput & {
     column: RenderContextColumn;
     /** The column is what it was before the write, so a failure leaves it rather than clearing it. */
     keepColumnOnFailure?: boolean;
+    /** A merge or rebase open in the checkout refuses the write, as the sweep refuses to start one. */
+    refuseDuringGitOperation?: boolean;
   },
 ): Promise<ProjectStateWriteResult> {
   const written: string[] = [];
@@ -558,6 +562,9 @@ export async function writeProjectStateColumn(
     if (!expectedColumns && seen !== null) await writeFiles(seen.baseFiles);
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
+      if (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) {
+        throw new ProjectStateMovedError();
+      }
       if (expectedColumns) {
         await refuseMovedColumn(tx, repositoryId, expectedColumns);
         if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId);
