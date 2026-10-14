@@ -1285,6 +1285,78 @@ async function main(): Promise<void> {
       );
     }
 
+    // 11e12. A regular write landing just before the capture is not adopted as Haive's snapshot: the
+    // judged state is checked again after the capture, so the set-aside refuses and the write survives.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const target = path.join(c.dest, RENDER_REL);
+      const foreign = '{"written":"just before the capture"}\n';
+      let fired = false;
+      restoreFaults.beforeCapture = async () => {
+        if (fired) return;
+        fired = true;
+        await writeFile(target, foreign);
+      };
+      let aside;
+      try {
+        aside = await setAsideHaiveProjections(db, id, c.dest);
+      } finally {
+        delete restoreFaults.beforeCapture;
+      }
+      const now = await readFile(target, 'utf8');
+      check(
+        'a write landing just before the capture is refused, not adopted and overwritten',
+        fired && aside.outcome === 'refused' && now === foreign,
+        { aside, now },
+      );
+    }
+
+    // 11e13. A refresh whose retried set-aside throws puts back the first pass's snapshot, so a
+    // render.json staged with Haive's bytes is staged again.
+    {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const target = path.join(c.dest, RENDER_REL);
+      const rendered = await readFile(target);
+      git(c.dest, 'add', '--', RENDER_REL);
+      const stagedBefore = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b', 'c', 'd', 'e', 'f'] });
+      upstreamCommit('a teammate adds a sixth agent', '.haive-data/state');
+      let restores = 0;
+      let captures = 0;
+      const boom = new Error('the retried set-aside fails');
+      restoreFaults.afterRestore = async () => {
+        restores += 1;
+        if (restores === 2) await writeFile(target, rendered);
+      };
+      restoreFaults.beforeCapture = () => {
+        captures += 1;
+        if (captures === 3) throw boom;
+      };
+      let thrown: unknown = null;
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } catch (err) {
+        thrown = err;
+      } finally {
+        delete restoreFaults.afterRestore;
+        delete restoreFaults.beforeCapture;
+      }
+      const stagedAfter = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      check(
+        'a refresh whose retried set-aside throws stages render.json again as the first pass found it',
+        stagedAfter === stagedBefore,
+        { thrown: String(thrown), restores, captures, stagedBefore, stagedAfter },
+      );
+    }
+
     // 11e4. A re-sync that fails after a clean move raises the domain's mark, so the sweep retries it.
     {
       const c = await withPendingRender();

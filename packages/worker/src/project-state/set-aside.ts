@@ -434,11 +434,17 @@ async function restoreJudged(
   const holding = guard.fence ? await guard.fence(tx) : 0;
   if (holding > 0) return { outcome: 'held', holding };
   await restoreFaults.beforeCapture?.();
+  const captured: KeptFiles = new Map();
   for (const path of mine) {
     const bytes = await keptBytes(repoPath, path);
     const index = await indexEntry(repoPath, path);
-    if (!kept.has(path)) kept.set(path, bytes === undefined ? { index } : { bytes, index });
+    captured.set(path, bytes === undefined ? { index } : { bytes, index });
   }
+  // A write landing during the capture would be taken for Haive's: the judged state must still hold.
+  for (const path of mine) {
+    if (judged.prints.get(path) !== (await fingerprint(repoPath, path))) return { changed: path };
+  }
+  for (const [path, was] of captured) if (!kept.has(path)) kept.set(path, was);
   await restoreFaults.beforeRestore?.();
   const raced = await restoreFromHead(repoPath, mine, kept);
   if (raced !== null) return { changed: raced };

@@ -7,7 +7,7 @@ import {
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
-import { schema, type Database } from '@haive/database';
+import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
 import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
 import {
@@ -156,7 +156,14 @@ async function fastForward(
   let asided = false;
   const kept: KeptFiles = new Map();
   for (let attempt = 1; ; attempt++) {
-    const aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
+    let aside;
+    try {
+      aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
+    } catch (err) {
+      if (asided)
+        await putBackProjections(db, payload.repositoryId, dest, kept).catch(() => undefined);
+      throw err;
+    }
     if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
       await putBackProjections(db, payload.repositoryId, dest, kept);
     }
@@ -170,6 +177,8 @@ async function fastForward(
     }
 
     const { again, merge: merged } = await db.transaction(async (tx) => {
+      // Task creation takes this lock, so no task can start between the fence and the move.
+      await lockRepositoryTasksKey(tx, payload.repositoryId);
       const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
       if (check.outcome !== 'clean') return { again: check, merge: null };
       if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {

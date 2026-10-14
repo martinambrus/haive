@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { lockRepositoryTasksKey, schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
 import { isBranchName } from '@haive/shared/git-args';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -406,7 +406,15 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     const kept: KeptFiles = new Map();
     const setAside = async (): Promise<SetAsideResult> => {
       if (!repositoryId) return { outcome: 'clean' };
-      const aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
+      let aside: SetAsideResult;
+      try {
+        aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
+      } catch (err) {
+        if (asided) {
+          await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept).catch(() => undefined);
+        }
+        throw err;
+      }
       if (aside.outcome === 'set-aside') {
         asided = true;
         for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
@@ -459,6 +467,8 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         for (let attempt = 1; ; attempt++) {
           // Under the dir's lock, so a merge section in this checkout (12, 13) never interleaves with the move.
           const moved = await inMergeDirLock(ctx.db, ctx.repoPath, async (tx) => {
+            // Task creation takes this lock, so no task can start between the fence and the move.
+            await lockRepositoryTasksKey(tx, repositoryId);
             const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
             if (again.outcome !== 'clean') return { again, res: null, holding: 0 };
             const holding = await fence(tx);

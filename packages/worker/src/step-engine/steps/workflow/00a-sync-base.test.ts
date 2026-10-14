@@ -17,6 +17,10 @@ const projections = vi.hoisted(() => ({
   restore: vi.fn(),
   seed: vi.fn(),
 }));
+vi.mock('@haive/database', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/database')>()),
+  lockRepositoryTasksKey: async () => undefined,
+}));
 vi.mock('../../../plan/mirror.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../plan/mirror.js')>()),
   seedPlanBaseFromCheckout: projections.seed,

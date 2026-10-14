@@ -17,10 +17,16 @@ export const LIVE_TASK_STATUSES = [
 
 /** Take the lock every creator and reviver of an onboarding or upgrade of one repository shares,
  *  then the repository row, and return the row (undefined when there is none). */
-export async function lockRepositoryRow(tx: DbTx, repositoryId: string) {
+/** The repository's task-creation lock alone, without the row: a checkout move holds it so no task is
+ *  created between its last check and the move, while plain inserts still go through. */
+export async function lockRepositoryTasksKey(tx: DbTx, repositoryId: string): Promise<void> {
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
   );
+}
+
+export async function lockRepositoryRow(tx: DbTx, repositoryId: string) {
+  await lockRepositoryTasksKey(tx, repositoryId);
   const [repo] = await tx
     .select({
       id: schema.repositories.id,
