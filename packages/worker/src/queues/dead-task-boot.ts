@@ -1,5 +1,5 @@
-import { and, desc, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { and, desc, eq, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
+import { schema, type Database, type DbTx } from '@haive/database';
 import { logger, TASK_DEAD_EVENT, type WorkflowType } from '@haive/shared';
 import { stepRegistry, type StepRegistry } from '../step-engine/registry.js';
 import { TERMINAL_TASK_STATUSES } from '../step-engine/step-ownership.js';
@@ -64,8 +64,10 @@ export function deadTaskResolution(
     id: string;
     type: string;
     currentStepId: string | null;
-    runListSnapshot: string[];
+    runListSnapshot: string[] | null;
     customSteps: unknown;
+    /** The step ids its last task.dead event named. */
+    deathNamed?: readonly string[];
   },
   strategy: ResolvedTaskContext['runListStrategy'],
   registry: StepRegistry = stepRegistry,
@@ -77,7 +79,13 @@ export function deadTaskResolution(
     customSteps: parseCustomSteps(task.customSteps),
   };
   const isStatic = strategy === 'static';
-  const unresolved = isStatic ? resolveRunList(scope, registry).unresolved : [];
+  const unresolved = isStatic ? [...resolveRunList(scope, registry).unresolved] : [];
+  // A task with no snapshot keeps no list to re-check, so the record of its death says what was missing.
+  if (task.runListSnapshot === null) {
+    for (const id of task.deathNamed ?? []) {
+      if (!unresolved.includes(id) && !resolveTaskStep(scope, id, registry)) unresolved.push(id);
+    }
+  }
   const current = task.currentStepId;
   if (current === null) return { unresolved, outsideList: null };
   if (!resolveTaskStep(scope, current, registry)) {
@@ -88,7 +96,10 @@ export function deadTaskResolution(
   }
   return {
     unresolved,
-    outsideList: isStatic && !task.runListSnapshot.includes(current) ? current : null,
+    outsideList:
+      isStatic && task.runListSnapshot !== null && !task.runListSnapshot.includes(current)
+        ? current
+        : null,
   };
 }
 
@@ -158,15 +169,7 @@ export async function reviveDeadTask(
       .returning({ epoch: schema.tasks.orchestrationEpoch, status: schema.tasks.status });
     if (!row) return null;
     const job = await jobAfterRevive(tx, c, row.status);
-    const [lastDead] = await tx
-      .select({ payload: schema.taskEvents.payload })
-      .from(schema.taskEvents)
-      .where(
-        and(eq(schema.taskEvents.taskId, c.id), eq(schema.taskEvents.eventType, TASK_DEAD_EVENT)),
-      )
-      .orderBy(desc(schema.taskEvents.createdAt))
-      .limit(1);
-    const named = (lastDead?.payload as { unresolved?: unknown } | undefined)?.unresolved;
+    const named = await deathNamedSteps(tx, c.id);
     await tx.insert(schema.taskEvents).values({
       taskId: c.id,
       taskStepId: null,
@@ -174,7 +177,7 @@ export async function reviveDeadTask(
       payload: {
         epoch: row.epoch,
         deadAt: c.deadAt?.toISOString() ?? null,
-        unresolved: Array.isArray(named) ? named : [],
+        unresolved: named,
         action: job.kind,
       },
     });
@@ -208,9 +211,23 @@ export async function reviveDeadTask(
   }
   log.info(
     { taskId: c.id, epoch: revived.epoch, action: revived.job.kind },
-    'revived a dead task: every step it names is registered again',
+    'revived a dead task: the steps it was missing are registered again',
   );
   return revived.job.kind;
+}
+
+/** The step ids the task's last task.dead event named as missing. */
+async function deathNamedSteps(db: Database | DbTx, taskId: string): Promise<string[]> {
+  const [lastDead] = await db
+    .select({ payload: schema.taskEvents.payload })
+    .from(schema.taskEvents)
+    .where(
+      and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, TASK_DEAD_EVENT)),
+    )
+    .orderBy(desc(schema.taskEvents.createdAt))
+    .limit(1);
+  const named = (lastDead?.payload as { unresolved?: unknown } | undefined)?.unresolved;
+  return Array.isArray(named) ? named.filter((id): id is string => typeof id === 'string') : [];
 }
 
 export async function reconcileDeadTasks(
@@ -234,19 +251,19 @@ export async function reconcileDeadTasks(
     .where(
       and(
         notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
-        isNotNull(schema.tasks.runListSnapshot),
+        or(isNotNull(schema.tasks.runListSnapshot), isNotNull(schema.tasks.deadAt)),
       ),
     );
   let marked = 0;
   let revived = 0;
   for (const c of candidates) {
-    if (!c.runListSnapshot) continue;
     try {
       const { runListStrategy } = await taskTypeRuntimeFor(db, c.type);
-      const found = deadTaskResolution(
-        { ...c, runListSnapshot: c.runListSnapshot },
-        runListStrategy,
-      );
+      const deathNamed =
+        c.deadAt !== null && c.runListSnapshot === null
+          ? await deathNamedSteps(db, c.id)
+          : undefined;
+      const found = deadTaskResolution({ ...c, deathNamed }, runListStrategy);
       const resolves = found.unresolved.length === 0 && found.outsideList === null;
       if (resolves && c.deadAt !== null) {
         if (await reviveDeadTask(db, c, deps)) revived += 1;
