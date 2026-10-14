@@ -4,8 +4,11 @@ import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
   COMPOSABLE_STEP_GROUPS,
+  checkPromptSteps,
   composableStepEntrySchema,
   customTaskTypeCreateSchema,
+  mergePromptStepCatalog,
+  parsePromptSteps,
   publicTaskTypeSchema,
   resolveTaskTypeAvailability,
   taskTypeUpdateSchema,
@@ -18,9 +21,6 @@ import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
 import {
   acceptsSavedDatabase,
-  checkPromptSteps,
-  mergePromptStepCatalog,
-  parsePromptSteps,
   readModuleStates,
   restoresDatabase,
 } from '../lib/task-type-definition.js';
