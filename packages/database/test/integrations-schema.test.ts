@@ -58,6 +58,64 @@ describe('integration tables', () => {
     expect(pk?.columns.map((c) => c.name)).toEqual(['user_id', 'provider_id']);
   });
 
+  it('keeps the choices of a task per category, and an account gone leaves the provider', () => {
+    const config = getTableConfig(schema.taskIntegrationChoices);
+    expect(config.name).toBe('task_integration_choices');
+    expect(config.columns.map((c) => c.name)).toEqual([
+      'task_id',
+      'category_id',
+      'provider_id',
+      'connection_id',
+      'updated_at',
+    ]);
+    expect(config.primaryKeys[0]?.columns.map((c) => c.name)).toEqual(['task_id', 'category_id']);
+    const references = config.foreignKeys.map((fk) => ({
+      from: fk.reference().columns.map((c) => c.name),
+      to: getTableConfig(fk.reference().foreignTable).name,
+      onDelete: fk.onDelete,
+    }));
+    expect(references).toEqual([
+      { from: ['task_id'], to: 'tasks', onDelete: 'cascade' },
+      { from: ['connection_id'], to: 'integration_connections', onDelete: 'set null' },
+    ]);
+    const providerId = config.columns.find((c) => c.name === 'provider_id');
+    expect(providerId?.notNull).toBe(true);
+  });
+
+  it('declares the preferred account and the allow-list switch last, the order a migration appends them in', () => {
+    const preferences = getTableConfig(schema.integrationCategoryPreferences);
+    expect(preferences.columns.at(-1)?.name).toBe('connection_id');
+    const account = preferences.foreignKeys.find((fk) =>
+      fk.reference().columns.some((c) => c.name === 'connection_id'),
+    );
+    expect(getTableConfig(account!.reference().foreignTable).name).toBe('integration_connections');
+    expect(account?.onDelete).toBe('set null');
+    const repositories = getTableConfig(schema.repositories);
+    const switchColumn = repositories.columns.at(-1);
+    expect(switchColumn?.name).toBe('integrations_restricted');
+    expect(switchColumn?.notNull).toBe(true);
+    expect(switchColumn?.default).toBe(false);
+  });
+
+  it('keys a task grant on task and category and a repository grant on repository and account', () => {
+    const indexes = getTableConfig(schema.integrationGrants).indexes.map((i) => i.config);
+    const named = (name: string) => indexes.find((i) => i.name === name);
+    const task = named('integration_grants_task_category_key_idx');
+    expect(task?.unique).toBe(true);
+    expect(task?.columns.map((c) => (c as { name: string }).name)).toEqual([
+      'task_id',
+      'category_id',
+    ]);
+    expect(task?.where).toBeDefined();
+    const repository = named('integration_grants_repository_connection_key_idx');
+    expect(repository?.unique).toBe(true);
+    expect(repository?.columns.map((c) => (c as { name: string }).name)).toEqual([
+      'repository_id',
+      'connection_id',
+    ]);
+    expect(repository?.where).toBeDefined();
+  });
+
   it('stores no call arguments or results', () => {
     const columns = getTableConfig(schema.integrationCalls).columns.map((c) => c.name);
     expect(columns).toEqual([
