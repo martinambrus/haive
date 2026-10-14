@@ -1290,5 +1290,57 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       };
       expect(again.taskType.editableFields).toContain('promptSteps');
     });
+
+    it('stores no invalidTools a client sends, on a create or on an edit', async () => {
+      const forged = { ...step('review'), invalidTools: ['forged'] };
+      const created = await send(
+        'POST',
+        '/admin/task-types',
+        withStep({ promptSteps: { review: forged } }),
+      );
+      expect(created.status).toBe(201);
+      expect((await row('tt-ps'))?.promptSteps).toEqual({
+        review: { ...step('review'), capabilities: [], tools: [] },
+      });
+      const edited = await send('PATCH', '/admin/task-types/tt-ps', {
+        promptSteps: { review: { ...forged, title: 'Edited' } },
+      });
+      expect(edited.status).toBe(200);
+      expect(JSON.stringify((await row('tt-ps'))?.promptSteps)).not.toContain('invalidTools');
+      expect(
+        ((await row('tt-ps'))?.promptSteps as { review: { title: string } }).review.title,
+      ).toBe('Edited');
+    });
+
+    it('reads a stored step whose tool no longer parses as present, and never writes the read copy back', async () => {
+      const stored = {
+        review: {
+          ...step('review'),
+          capabilities: [],
+          tools: [{ ...httpTool, description: 'd'.repeat(1025) }],
+        },
+      };
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: 'tt-bad-tool',
+        displayName: 'Bad tool',
+        runListStrategy: 'static',
+        stepIds: ['ta-a', 'custom.tt-bad-tool.review'],
+        promptSteps: stored,
+        source: 'admin',
+      });
+      h.flags.set(CUSTOM_KEY, true);
+      const detail = (await (await send('GET', '/admin/task-types/tt-bad-tool')).json()) as {
+        availability: unknown;
+        compositionIssues: unknown[];
+      };
+      expect(detail.availability).toEqual({ available: true });
+      expect(detail.compositionIssues).toEqual([]);
+      const edited = await send('PATCH', '/admin/task-types/tt-bad-tool', {
+        displayName: 'Renamed',
+        stepIds: ['ta-a', 'ta-b', 'custom.tt-bad-tool.review'],
+      });
+      expect(edited.status).toBe(200);
+      expect((await row('tt-bad-tool'))?.promptSteps).toEqual(stored);
+    });
   });
 });
