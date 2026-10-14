@@ -178,3 +178,16 @@ goes through `shellQuote` (`sandbox/shell-quote.ts`), the one helper. That inclu
 `ddevUrlFromConfigText` builds it from the raw `.ddev/config.yaml` before DDEV has read the file, and
 ddev v1.25.2 writes a `project_tld` of `e'; id; '` into its config, refusing it only at a later
 `ddev describe`. `probe-url-quoting.test.ts` pins the 12 `browser-probe-connect` command lines.
+
+## What a sandbox shows the api
+
+An agent's MCP servers reach the api with a bearer token the worker mints per task (`signTaskToken`,
+`@haive/shared/task-token`): `v1.<payload>.<mac>`, the payload `{aud, taskId, exp}` with a 24-hour
+expiry, and the MAC keyed per audience from `CONFIG_ENCRYPTION_KEY`, so a token verifies only for the
+audience it names. `haive-rag` gets a `rag` token for `/rag/search` and `ddev-control` a `ddev` token
+for `/ddev/*`; neither opens the other's routes. `/rag/search` still takes the older two-part token,
+which names no audience, until the ones minted before the change expire (drop `verifyRagToken` and
+`signRagToken` then); `/ddev/*` never takes it. Both refuse a body over 64 KiB with 413 before the
+token is read (`sandboxBodyLimit`), with a handler of its own, since Hono's default answers through
+`errorHandler` as a 500. The git credential helper's token (`shared/src/git/token.ts`) is still the
+two-part form.
