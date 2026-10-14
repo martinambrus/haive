@@ -105,6 +105,7 @@ export const QUEUE_NAMES = {
   USAGE_POLL: 'haive-usage-poll',
   PR_POLL: 'haive-pr-poll',
   PLAN_MIRROR: 'haive-plan-mirror',
+  MODULE_CONTROL: 'haive-module-control',
 } as const;
 
 export const PLAN_MIRROR_JOB_NAMES = {
@@ -302,6 +303,20 @@ export interface DdevControlResult {
   ok: boolean;
   output: string;
   error?: string;
+}
+
+export const MODULE_CONTROL_JOB_NAMES = {
+  TEARDOWN: 'teardown',
+} as const;
+
+export interface ModuleTeardownPayload {
+  moduleId: string;
+}
+
+export interface ModuleTeardownResult {
+  moduleId: string;
+  /** Null when nothing was recorded because the module was activated again while its hook ran. */
+  tornDownAt: string | null;
 }
 
 export const IDE_ENSURE_JOB_NAMES = {
