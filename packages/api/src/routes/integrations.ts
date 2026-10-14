@@ -17,6 +17,7 @@ import {
 } from '@haive/shared/integrations';
 import { requireAuth } from '../middleware/auth.js';
 import { getDb } from '../db.js';
+import { recordAuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { pollDeviceSignIn, startDeviceSignIn } from '../lib/integration-device.js';
@@ -37,6 +38,7 @@ import {
   requireOauth2Method,
   requireProvider,
   viaVendor,
+  writeAccessOf,
 } from '../lib/integration-provider.js';
 import { finishSignIn } from '../lib/integration-sign-in.js';
 import { putOauthAttempt, takeOauthAttempt } from '../lib/integration-state.js';
@@ -82,17 +84,18 @@ integrationsRoutes.get('/github', async (c) => {
 
 integrationsRoutes.put('/github', async (c) => {
   const userId = c.get('userId');
-  const body = putGithubSchema.parse(await c.req.json());
-  if (body.clientId.trim().length === 0) {
+  const clientId = putGithubSchema.parse(await c.req.json()).clientId.trim();
+  if (clientId.length === 0) {
     await userSecretsService.delete(userId, GITHUB_CLIENT_ID_KEY);
   } else {
-    await userSecretsService.set(
-      userId,
-      GITHUB_CLIENT_ID_KEY,
-      body.clientId.trim(),
-      'GitHub OAuth Client ID',
-    );
+    await userSecretsService.set(userId, GITHUB_CLIENT_ID_KEY, clientId, 'GitHub OAuth Client ID');
   }
+  await recordAuditEvent(getDb(), {
+    actorUserId: userId,
+    action: 'integration.github_client.update',
+    targetType: 'integration_provider',
+    metadata: { clientIdSet: clientId.length > 0 },
+  });
   return c.json({ ok: true });
 });
 
@@ -117,6 +120,7 @@ integrationsRoutes.get('/providers', async (c) => {
       selfHosted: spec.selfHosted,
       enabled,
       writeEnabled: switches.get(spec.id) ?? false,
+      ...writeAccessOf(spec),
       connect: enabled ? await connectableMethods(db, userId, spec) : [],
     });
   }

@@ -2,6 +2,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema, isUniqueViolationOf } from '@haive/database';
 import { logger, secretsService } from '@haive/shared';
+import { credentialForgeProvider } from '@haive/shared/forge';
 import {
   OauthUnavailableError,
   OauthVendorError,
@@ -16,12 +17,7 @@ import type { IntegrationProviderSpec } from '@haive/shared/modularity';
 import { HttpError } from '../context.js';
 import type { Database } from '../db.js';
 import { recordAuditEvent } from './audit.js';
-import {
-  forgeHostOf,
-  isForgeProvider,
-  requireEnabled,
-  revokeUrlOf,
-} from './integration-provider.js';
+import { isForgeProvider, requireEnabled, revokeUrlOf } from './integration-provider.js';
 import { toConnectionSummary, type ConnectionRow } from './integration-sign-in.js';
 
 const REPO_CREDENTIAL_KEY_INDEX = 'integration_connections_repo_credential_key_idx';
@@ -162,11 +158,7 @@ export async function linkCredential(
       ),
     );
   if (!credential) throw new HttpError(404, 'Credential not found');
-  const publicHost = forgeHostOf(spec);
-  const belongs = credential.provider
-    ? credential.provider === spec.id
-    : publicHost !== null && credential.host.trim().toLowerCase() === publicHost;
-  if (!belongs) {
+  if (credentialForgeProvider(credential.provider, credential.host) !== spec.id) {
     throw new HttpError(400, `This is not a ${spec.displayName} credential (${credential.host})`);
   }
   try {
