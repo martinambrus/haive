@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withGlobalKb } from '../src/global-kb/client.js';
 import type { GlobalKbSettings } from '../src/global-kb/connection.js';
 
-// Needs a server with pgvector; CI's has none. HAIVE_GKB_TEST_DB_URL is any superuser URL on it,
+// Needs a server with pgvector. HAIVE_GKB_TEST_DB_URL is any superuser URL on it,
 // and the test works in a scratch database it creates and drops.
 const ADMIN_URL = process.env.HAIVE_GKB_TEST_DB_URL ?? '';
 const SCHEMA_LOCK_KEY = 'haive:global-kb-schema';

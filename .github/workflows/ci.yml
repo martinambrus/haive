@@ -115,6 +115,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Only for the gated tests that need the vector extension.
+      pgvector:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: haive
+          POSTGRES_PASSWORD: haive_dev_password
+          POSTGRES_DB: haive
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U haive -d haive"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
       redis:
         image: redis:8.4-alpine
         ports:
@@ -166,21 +180,23 @@ jobs:
       - name: Postgres-gated tests
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
+          PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
         run: |
           set -uo pipefail
           pnpm --filter @haive/web-kit build
           pnpm --filter './modules/*' build
           node scripts/gen-modules.mjs
           failed=0
-          while IFS=' ' read -r pkg file var db; do
+          while IFS=' ' read -r pkg file var db server; do
             [ -n "$pkg" ] || continue
-            echo "::group::$pkg $file ($var, database $db)"
-            url="postgres://haive:haive_dev_password@localhost:5432/$db"
+            echo "::group::$pkg $file ($var, database $db on $server)"
+            if [ "$server" = pgvector ]; then container="$PGVECTOR_CONTAINER"; port=5433; else container="$PG_CONTAINER"; port=5432; fi
+            url="postgres://haive:haive_dev_password@localhost:$port/$db"
             report="$RUNNER_TEMP/$db.json"
             rm -f "$report"
-            exists=$(docker exec "$PG_CONTAINER" psql -U haive -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'")
+            exists=$(docker exec "$container" psql -U haive -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'")
             if [ "$exists" != 1 ]; then
-              docker exec "$PG_CONTAINER" psql -U haive -d postgres -c "CREATE DATABASE $db" \
+              docker exec "$container" psql -U haive -d postgres -c "CREATE DATABASE $db" \
                 || { echo "::error::could not create $db"; failed=1; echo "::endgroup::"; continue; }
             fi
             DATABASE_URL="$url" pnpm --filter @haive/database migrate \
@@ -197,16 +213,20 @@ jobs:
             ' || failed=1
             echo "::endgroup::"
           done <<'GATED'
-          worker test/database-snapshots.test.ts DATABASE_SNAPSHOT_TEST_URL snapshot_test
-          worker test/task-type-seed.test.ts TASK_TYPE_SEED_TEST_URL task_type_seed_test
-          worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test
-          worker test/step-catalog-sync.test.ts STEP_CATALOG_TEST_URL step_catalog_test
-          worker test/module-intent.test.ts MODULE_INTENT_TEST_URL module_intent_test
-          worker test/cancel-sandbox-fence.test.ts CANCEL_FENCE_TEST_URL cancel_fence_test
-          api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test
-          api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test
-          api test/task-custom-steps-db.test.ts TASK_CUSTOM_STEPS_TEST_URL task_custom_steps_test
-          api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test
+          worker test/database-snapshots.test.ts DATABASE_SNAPSHOT_TEST_URL snapshot_test pg
+          worker test/task-type-seed.test.ts TASK_TYPE_SEED_TEST_URL task_type_seed_test pg
+          worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test pg
+          worker test/step-catalog-sync.test.ts STEP_CATALOG_TEST_URL step_catalog_test pg
+          worker test/module-intent.test.ts MODULE_INTENT_TEST_URL module_intent_test pg
+          worker test/cancel-sandbox-fence.test.ts CANCEL_FENCE_TEST_URL cancel_fence_test pg
+          api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
+          api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
+          api test/task-custom-steps-db.test.ts TASK_CUSTOM_STEPS_TEST_URL task_custom_steps_test pg
+          api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test pg
+          shared test/create-database-race.test.ts RACE_PG_URL create_database_race_test pg
+          shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
+          shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
+          worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
           GATED
           exit "$failed"
 
