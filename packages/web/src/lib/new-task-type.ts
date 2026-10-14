@@ -1,5 +1,6 @@
 import type { PlanNodeTaskRole } from '@haive/shared';
-import type { PublicTaskType, TaskTypeUnavailableReason } from '@haive/shared/modularity';
+import type { PublicTaskType } from '@haive/shared/modularity';
+import { moduleNeedText } from './composition-messages';
 import { SUMMARY_CLI_OFF } from './last-cli-choice';
 
 export type NewTaskKind = 'workflow' | 'run_app' | 'custom';
@@ -18,15 +19,32 @@ export interface NewTaskTypeOption {
 
 const FORM_INFERS_THESE = new Set(['onboarding', 'onboarding_upgrade', 'workflow', 'run_app']);
 
-const UNAVAILABLE_REASON_TEXT: Record<TaskTypeUnavailableReason, string> = {
-  disabled: 'this task type is turned off',
-  'not-selectable': 'this task type cannot be started from this form',
-  'custom-types-off': 'custom task types are turned off by an administrator',
-  'module-types-off': 'module task types are turned off by an administrator',
-  'module-deactivated': 'a module it uses is deactivated',
-  'missing-step': 'a step it needs is not installed',
-  'invalid-composition': 'its steps no longer fit together',
-};
+const TURNED_OFF = 'this task type is turned off';
+
+function missingStepText(stepIds: readonly string[]): string {
+  if (stepIds.length === 0) return 'a step it needs is not installed';
+  return stepIds.length === 1
+    ? `a step it needs is not installed: ${stepIds[0]}`
+    : `steps it needs are not installed: ${stepIds.join(', ')}`;
+}
+
+function unavailableText(row: PublicTaskType): string {
+  switch (row.reason) {
+    case undefined:
+      return TURNED_OFF;
+    case 'custom-types-off':
+      return 'custom task types are turned off by an administrator';
+    case 'module-types-off':
+      return 'module task types are turned off by an administrator';
+    case 'module-missing':
+    case 'module-deactivated':
+      return moduleNeedText(row.modules ?? [], row.reason);
+    case 'missing-step':
+      return missingStepText(row.stepIds ?? []);
+    case 'invalid-composition':
+      return 'its steps no longer fit together';
+  }
+}
 
 const FIXED_OPTIONS: NewTaskTypeOption[] = [
   {
@@ -65,7 +83,7 @@ export function buildNewTaskTypeOptions(rows: readonly PublicTaskType[]): NewTas
       label: r.displayName,
       description: r.description,
       disabled: !r.available,
-      reason: r.available ? null : UNAVAILABLE_REASON_TEXT[r.reason ?? 'disabled'],
+      reason: r.available ? null : unavailableText(r),
       requiresRepository: r.requiresRepository,
       restoresDatabase: r.restoresDatabase,
       dispatchesCli: r.dispatchesCli,
@@ -73,9 +91,7 @@ export function buildNewTaskTypeOptions(rows: readonly PublicTaskType[]): NewTas
   // An empty list is one that has not loaded; a loaded one always carries the locked Workflow row.
   const runAppOff = rows.length > 0 && !rows.some((r) => r.slug === 'run_app');
   const fixed = FIXED_OPTIONS.map((o) =>
-    o.kind === 'run_app' && runAppOff
-      ? { ...o, disabled: true, reason: UNAVAILABLE_REASON_TEXT.disabled }
-      : o,
+    o.kind === 'run_app' && runAppOff ? { ...o, disabled: true, reason: TURNED_OFF } : o,
   );
   return [...fixed, ...custom];
 }
