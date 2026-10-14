@@ -25,11 +25,11 @@ async function worktreeGone(worktreePath: string): Promise<boolean> {
 }
 
 /** Whether git was told not to check some tracked file (assume-unchanged, which core.ignoreStat
- *  sets): status never sees an edit there. null when git cannot list them. */
+ *  sets, or skip-worktree): status never sees an edit there. null when git cannot list them. */
 async function hasUncheckedEntries(worktreePath: string): Promise<boolean | null> {
   const listed = await gitRun(worktreePath, ['--no-optional-locks', 'ls-files', '-v', '-z']);
   if (listed.code !== 0) return null;
-  return listed.stdout.split('\0').some((entry) => /^[a-z] /.test(entry));
+  return listed.stdout.split('\0').some((entry) => /^([a-z]|S) /.test(entry));
 }
 
 /** The worktree's changes no commit holds; null when git cannot say, which is not a clean tree.

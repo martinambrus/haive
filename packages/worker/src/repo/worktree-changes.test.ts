@@ -141,6 +141,17 @@ describe('readUncommittedChanges and files git is told not to check', () => {
     }
   });
 
+  it('reads a worktree with a skip-worktree file as unknown, since status hides its edit', async () => {
+    const { root, wt } = await setup();
+    try {
+      await git(wt, ['update-index', '--skip-worktree', 'f.txt']);
+      await writeIn(wt, { 'f.txt': 'edited, hidden from status\n' });
+      expect(await readUncommittedChanges(wt)).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('reads a worktree made from a core.ignoreStat repository as unknown', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'wt-changes-ignorestat-'));
     try {
