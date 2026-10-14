@@ -211,7 +211,8 @@ is dirty, or git cannot read it, its form lists the paths, defaults to Keep, and
 directory already gone counts as clean, since removal reads absence as success. The read passes
 `--ignore-submodules=none`, and a tree whose index marks any file assume-unchanged (one
 `update-index --assume-unchanged`, or a repository's `core.ignoreStat`, which marks every file a
-checkout writes) counts as unreadable, since status never sees an edit to such a file. `13-pr-wait`'s
+checkout writes) or skip-worktree (a sparse checkout among them) counts as unreadable, since status
+never sees an edit to such a file. `13-pr-wait`'s
 finalize, which has no such choice, keeps a dirty or unreadable worktree and still finishes the task,
 and the completion of a custom type without step 12 reaps its worktree only while clean. Ignored
 files are not counted. `run_app`'s Finish and Cancel still remove the worktree: Cancel is the
