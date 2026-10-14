@@ -320,9 +320,17 @@ export async function commitMerge(
 export async function landPlanMerge(repoPath: string, sha: string): Promise<void> {
   const res = await gitRun(repoPath, ['merge', '--ff-only', sha]);
   if (res.code !== 0) {
+    const changed = await gitRun(repoPath, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '-z',
+      '--untracked-files=no',
+    ]);
+    const first = changed.code === 0 ? changed.stdout.split('\0')[0]!.slice(3) : '';
     throw new Error(
-      'the checkout moved while the merge was open, so the result could not be ' +
-        `fast-forwarded in: ${res.stderr || res.stdout}`,
+      `${first ? `the checkout has uncommitted changes (${first})` : 'the checkout moved while the merge was open'}, ` +
+        `so the result could not be fast-forwarded in: ${res.stderr || res.stdout}`,
     );
   }
 }
