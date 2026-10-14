@@ -129,6 +129,38 @@ describe('readUncommittedChanges', () => {
   });
 });
 
+describe('readUncommittedChanges and files git is told not to check', () => {
+  it('reads a worktree with an assume-unchanged file as unknown, since status hides its edit', async () => {
+    const { root, wt } = await setup();
+    try {
+      await git(wt, ['update-index', '--assume-unchanged', 'f.txt']);
+      await writeIn(wt, { 'f.txt': 'edited, hidden from status\n' });
+      expect(await readUncommittedChanges(wt)).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reads a worktree made from a core.ignoreStat repository as unknown', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'wt-changes-ignorestat-'));
+    try {
+      await git(root, ['init', '-b', 'main']);
+      await git(root, ['config', 'gc.auto', '0']);
+      await git(root, ['config', 'core.ignoreStat', 'true']);
+      await writeIn(root, { 'f.txt': 'one\n' });
+      await git(root, ['add', '-A']);
+      await git(root, ['commit', '-m', 'one']);
+      const wt = path.join(root, '.haive', 'worktrees', 'feat');
+      await mkdir(path.dirname(wt), { recursive: true });
+      await git(root, ['worktree', 'add', '-b', 'feat', wt, 'main']);
+      await writeIn(wt, { 'f.txt': 'edited, hidden from status\n' });
+      expect(await readUncommittedChanges(wt)).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('readUncommittedChanges and submodules', () => {
   it('counts an edit inside a submodule even when the repository config ignores it', async () => {
     const sub = await mkdtemp(path.join(tmpdir(), 'wt-changes-sub-'));

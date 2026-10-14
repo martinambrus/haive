@@ -24,6 +24,14 @@ async function worktreeGone(worktreePath: string): Promise<boolean> {
   }
 }
 
+/** Whether git was told not to check some tracked file (assume-unchanged, which core.ignoreStat
+ *  sets): status never sees an edit there. null when git cannot list them. */
+async function hasUncheckedEntries(worktreePath: string): Promise<boolean | null> {
+  const listed = await gitRun(worktreePath, ['--no-optional-locks', 'ls-files', '-v', '-z']);
+  if (listed.code !== 0) return null;
+  return listed.stdout.split('\0').some((entry) => /^[a-z] /.test(entry));
+}
+
 /** The worktree's changes no commit holds; null when git cannot say, which is not a clean tree.
  *  One already gone holds none: removal reads absence as success, and a re-driven apply must too. */
 export async function readUncommittedChanges(
@@ -41,6 +49,7 @@ export async function readUncommittedChanges(
   if (status.code !== 0) {
     return (await worktreeGone(worktreePath)) ? { count: 0, paths: [] } : null;
   }
+  if ((await hasUncheckedEntries(worktreePath)) !== false) return null;
   const entries = parsePorcelainZ(status.stdout);
   return {
     count: entries.length,
