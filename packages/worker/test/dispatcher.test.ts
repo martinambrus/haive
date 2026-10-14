@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { resolveDispatch, resolveTaskDispatch } from '../src/orchestrator/dispatcher.js';
+import {
+  dispatchCandidates,
+  resolveDispatch,
+  resolveTaskDispatch,
+} from '../src/orchestrator/dispatcher.js';
 import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
 import { CliAdapterRegistry, cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
@@ -873,6 +877,78 @@ describe('vision', () => {
       invokeOpts: {},
     });
     expect(plan.providerId).toBe('prov-b');
+  });
+});
+
+describe('dispatchCandidates', () => {
+  const blind = (id: string): CliProviderRecord => ({
+    ...makeProvider({ id, name: 'codex' }),
+    model: 'deepseek-v4-flash:cloud',
+    modelLimits: { model: 'deepseek-v4-flash:cloud', vision: false, learnedAt: '2026-01-01' },
+  });
+  const firstId = (
+    providers: CliProviderRecord[],
+    preferred: string | null,
+    needsVision = false,
+  ): string | null => {
+    const first = dispatchCandidates(providers, preferred, { needsVision }).next();
+    return first.done ? null : first.value.provider.id;
+  };
+  const dispatchedId = (
+    providers: CliProviderRecord[],
+    preferred: string | null,
+    needsVision = false,
+  ): string | null =>
+    resolveDispatch({
+      providers,
+      preferredProviderId: preferred,
+      input: { kind: 'prompt', prompt: 'p', capabilities: needsVision ? ['vision'] : [] },
+      invokeOpts: {},
+    }).providerId ?? null;
+
+  const cases: [string, CliProviderRecord[], string | null, boolean, string][] = [
+    [
+      'the preferred provider',
+      [makeProvider({ id: 'a', name: 'gemini' }), makeProvider({ id: 'b', name: 'claude-code' })],
+      'b',
+      false,
+      'b',
+    ],
+    [
+      'the next enabled provider when the preferred one is disabled',
+      [
+        makeProvider({ id: 'a', name: 'gemini', enabled: false }),
+        makeProvider({ id: 'b', name: 'claude-code' }),
+      ],
+      'a',
+      false,
+      'b',
+    ],
+    [
+      'the first enabled provider when nothing is preferred',
+      [makeProvider({ id: 'a', name: 'gemini' }), makeProvider({ id: 'b', name: 'claude-code' })],
+      null,
+      false,
+      'a',
+    ],
+    [
+      'a sighted provider when the preferred one is blind and the input needs vision',
+      [blind('a'), makeProvider({ id: 'b', name: 'claude-code' })],
+      'a',
+      true,
+      'b',
+    ],
+  ];
+
+  for (const [what, providers, preferred, needsVision, expected] of cases) {
+    it(`starts with ${what}, the provider dispatch selects`, () => {
+      expect(firstId(providers, preferred, needsVision)).toBe(expected);
+      expect(dispatchedId(providers, preferred, needsVision)).toBe(expected);
+    });
+  }
+
+  it('yields nothing when every provider is disabled', () => {
+    expect(firstId([makeProvider({ id: 'a', name: 'gemini', enabled: false })], 'a')).toBeNull();
   });
 });
 

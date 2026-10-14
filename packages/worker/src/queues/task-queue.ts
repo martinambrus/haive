@@ -83,6 +83,7 @@ import {
   AGENT_PERSONA_UNRESOLVED_EVENT,
   checkPinnedStepPersonas,
 } from '../orchestrator/persona-start-check.js';
+import { dispatchCandidates } from '../orchestrator/dispatcher.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import {
@@ -2229,7 +2230,9 @@ async function handleStartTask(
         ctx.taskId,
         ctx.ignoreSavedStepClis,
       );
-      return startProviders.find((p) => p.id === cliProviderId)?.name ?? null;
+      const needsVision = ctx.customSteps?.[stepId]?.capabilities.includes('vision') === true;
+      const first = dispatchCandidates(startProviders, cliProviderId, { needsVision }).next();
+      return first.done ? null : first.value.provider.name;
     },
     record: (unresolved) =>
       appendEvent(db, ctx.taskId, null, AGENT_PERSONA_UNRESOLVED_EVENT, { ...unresolved }),
