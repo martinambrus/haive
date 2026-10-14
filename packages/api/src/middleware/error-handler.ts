@@ -13,6 +13,10 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
     );
   }
   if (err instanceof HTTPException) {
+    // A thrown response keeps its own body and headers (WWW-Authenticate, Retry-After).
+    if (err.res) {
+      return c.newResponse(err.res.body, { status: err.status, headers: err.res.headers });
+    }
     return c.json({ error: err.message, code: null }, err.status);
   }
   if (err instanceof ZodError) {
