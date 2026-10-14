@@ -95,3 +95,26 @@ export function isDuplicateDatabase(err: unknown): boolean {
     hasPgCode(err, DUPLICATE_DATABASE) || isUniqueViolationOf(err, 'pg_database_datname_index')
   );
 }
+
+/** SQLSTATE classes whose statement Postgres refused and rolled back: data, integrity, transaction
+ *  state, syntax and access, check option, resources, program limit, feature not supported. */
+const REFUSED_CLASSES = new Set(['22', '23', '25', '42', '44', '53', '54', '0A']);
+/** Rollbacks and aborts the server reports itself: serialization failure, deadlock, lock timeout,
+ *  query_canceled (statement_timeout or a cancel). 40003 and the shutdown codes of class 57 are not. */
+const REFUSED_CODES = new Set(['40001', '40P01', LOCK_NOT_AVAILABLE, '57014']);
+
+/**
+ * True when Postgres answered the statement with a SQLSTATE meaning it was refused, so nothing it
+ * would have written can exist. A dropped connection, a shutdown, an error with no SQLSTATE or one
+ * whose outcome Postgres cannot know leaves the write possibly committed, and reads as false.
+ */
+export function isRefusedStatement(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e != null && depth < 5; depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) {
+      return REFUSED_CODES.has(code) || REFUSED_CLASSES.has(code.slice(0, 2));
+    }
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}

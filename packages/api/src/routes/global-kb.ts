@@ -1,13 +1,14 @@
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
-import { isLockNotAvailable, schema } from '@haive/database';
+import { isLockNotAvailable, isRefusedStatement, schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
   SECRET_KEYS,
   collapseToLine,
   configService,
+  logger,
   secretsService,
   type GlobalKbSyncJobPayload,
 } from '@haive/shared';
@@ -597,40 +598,60 @@ globalKbRoutes.post('/enrich', async (c) => {
     return presentEntry(row!, await houseRuleContext(settings.namespace));
   });
 
-  const [task] = await db
-    .insert(schema.tasks)
-    .values({
-      userId,
-      type: 'kb_author',
-      title: `Enrich: ${data.title}`.slice(0, 512),
-      description: data.seedText,
-      repositoryId: data.repositoryId ?? null,
-      cliProviderId: data.cliProviderId,
-      metadata: {
-        globalKbEntryId: entry.id,
-        // What the AUTHOR chose, which `repositoryId` stops being able to say the moment a
-        // repository is deleted: the FK is ON DELETE SET NULL, and `cancelOpenTasksForRepo`
-        // leaves terminal tasks alone, so a FAILED anchored task silently becomes
-        // indistinguishable from one created repo-less. Written even when null, because the
-        // KEY's presence is what separates "recorded" from "predates this".
-        anchorRepositoryId: data.repositoryId ?? null,
-        // The author's OWN scope, kept where it cannot be rewritten. `01-enrich`'s apply
-        // overwrites the ENTRY's facets with the merged result, so on a retry the entry reports
-        // the model's inferred scope as though the author had stated it — and forcing those
-        // values back over the new answer makes "retry to correct a wrong scope" impossible.
-        authorFacets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
-        authorDescription: description,
-        ...(data.egress
-          ? { egress: { mode: data.egress.mode, domains: data.egress.domains ?? [], ips: [] } }
-          : {}),
-      },
-      autoContinue: true,
-      runListSnapshot,
-      customSteps,
-      status: 'created',
-    })
-    .returning();
-  if (!task) throw new HttpError(500, 'failed to create enrichment task');
+  let task: typeof schema.tasks.$inferSelect | undefined;
+  try {
+    [task] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        type: 'kb_author',
+        title: `Enrich: ${data.title}`.slice(0, 512),
+        description: data.seedText,
+        repositoryId: data.repositoryId ?? null,
+        cliProviderId: data.cliProviderId,
+        metadata: {
+          globalKbEntryId: entry.id,
+          // What the AUTHOR chose, which `repositoryId` stops being able to say the moment a
+          // repository is deleted: the FK is ON DELETE SET NULL, and `cancelOpenTasksForRepo`
+          // leaves terminal tasks alone, so a FAILED anchored task silently becomes
+          // indistinguishable from one created repo-less. Written even when null, because the
+          // KEY's presence is what separates "recorded" from "predates this".
+          anchorRepositoryId: data.repositoryId ?? null,
+          // The author's OWN scope, kept where it cannot be rewritten. `01-enrich`'s apply
+          // overwrites the ENTRY's facets with the merged result, so on a retry the entry reports
+          // the model's inferred scope as though the author had stated it — and forcing those
+          // values back over the new answer makes "retry to correct a wrong scope" impossible.
+          authorFacets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
+          authorDescription: description,
+          ...(data.egress
+            ? { egress: { mode: data.egress.mode, domains: data.egress.domains ?? [], ips: [] } }
+            : {}),
+        },
+        autoContinue: true,
+        runListSnapshot,
+        customSteps,
+        status: 'created',
+      })
+      .returning();
+    if (!task) throw new HttpError(500, 'failed to create enrichment task');
+  } catch (err) {
+    // The entry lives in the global KB database, so no transaction spans both writes. Only an insert
+    // Postgres refused is known to have written nothing; any other failure may still commit.
+    if (isRefusedStatement(err)) {
+      await withGlobalKb(db, ({ db: gdb }) =>
+        gdb.transaction(async (tx) => {
+          if ((await lockEntry(tx, entry.id))?.status !== 'skeleton') return;
+          await tx.delete(globalKbEntries).where(eq(globalKbEntries.id, entry.id));
+        }),
+      ).catch((cleanupErr) =>
+        logger.warn(
+          { err: cleanupErr, entryId: entry.id },
+          'could not remove the skeleton entry of a failed enrich',
+        ),
+      );
+    }
+    throw err;
+  }
 
   // Link the entry back to its task so the UI can offer a "watch task" link.
   await withGlobalKb(db, async ({ db: gdb }) => {

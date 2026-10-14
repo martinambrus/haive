@@ -87,6 +87,74 @@ describe('POST /enrich pins the kb_author step list', () => {
     });
   });
 
+  const refused = () =>
+    Object.assign(new Error('Failed query'), {
+      cause: Object.assign(new Error('value too long'), { code: '22001' }),
+    });
+
+  it('removes the skeleton entry when Postgres refuses the task insert', async () => {
+    fake.hooks.beforeInsert = (table) => {
+      if (table === schema.tasks) throw refused();
+    };
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(schema.tasks)).toHaveLength(0);
+    expect(fake.rows(globalKbEntries)).toHaveLength(0);
+  });
+
+  it('keeps the skeleton entry when the task insert committed but its reply was lost', async () => {
+    const real = fake.db;
+    h.db = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop !== 'insert') return Reflect.get(target, prop, receiver);
+        return (table: unknown) => {
+          const builder = real.insert(table as typeof schema.tasks);
+          if (table !== schema.tasks) return builder;
+          return {
+            values: (v: unknown) => ({
+              returning: async () => {
+                await builder.values(v as never).returning();
+                throw new Error('connection dropped');
+              },
+            }),
+          };
+        };
+      },
+    });
+    expect((await enrich()).status).toBe(500);
+    const [task] = fake.rows(schema.tasks);
+    expect(task).toBeDefined();
+    const [entry] = fake.rows(globalKbEntries);
+    expect(entry?.id).toBe((task!.metadata as { globalKbEntryId: string }).globalKbEntryId);
+  });
+
+  it('keeps the skeleton entry when the outcome of the insert is unknown', async () => {
+    for (const error of [
+      Object.assign(new Error('connection failure'), { code: '08006' }),
+      Object.assign(new Error('statement completion unknown'), { code: '40003' }),
+      new Error('socket closed'),
+    ]) {
+      fake = makeFake();
+      fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER });
+      h.db = fake.db;
+      h.gdb = fake.db;
+      fake.hooks.beforeInsert = (table) => {
+        if (table === schema.tasks) throw error;
+      };
+      expect((await enrich()).status).toBe(500);
+      expect(fake.rows(globalKbEntries)).toHaveLength(1);
+    }
+  });
+
+  it('keeps an entry that stopped being a skeleton before the cleanup', async () => {
+    fake.hooks.beforeInsert = (table) => {
+      if (table !== schema.tasks) return;
+      fake.patch(globalKbEntries, fake.rows(globalKbEntries)[0]!.id as string, { status: 'draft' });
+      throw refused();
+    };
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(globalKbEntries)).toHaveLength(1);
+  });
+
   it('creates neither the entry nor the task when the type is refused', async () => {
     h.definition.mockRejectedValueOnce(new HttpError(403, 'Task type kb_author is disabled'));
     expect((await enrich()).status).toBe(403);
