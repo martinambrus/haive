@@ -14,6 +14,7 @@ import {
   fetchUserInfo,
   getIntegrationProvider,
   listIntegrationProviders,
+  oauthRedirectUri,
   pollDeviceToken,
   refreshAccessToken,
   revokeToken,
@@ -89,6 +90,21 @@ describe('createPkcePair', () => {
     expect(verifier).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(challenge).toBe(createHash('sha256').update(verifier).digest('base64url'));
     expect(createPkcePair().verifier).not.toBe(verifier);
+  });
+});
+
+describe('oauthRedirectUri', () => {
+  it('is the web origin plus the provider callback page', () => {
+    expect(oauthRedirectUri('https://haive.example', 'acme')).toBe(REDIRECT);
+    expect(oauthRedirectUri('http://localhost:3000', 'module.drive-x.google-docs')).toBe(
+      'http://localhost:3000/settings/integrations/callback/module.drive-x.google-docs',
+    );
+  });
+
+  it('encodes a provider id that is not path-safe', () => {
+    expect(oauthRedirectUri('https://haive.example', 'a/b c')).toBe(
+      'https://haive.example/settings/integrations/callback/a%2Fb%20c',
+    );
   });
 });
 
