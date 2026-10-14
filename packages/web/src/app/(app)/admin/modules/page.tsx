@@ -9,11 +9,13 @@ import {
   patchModuleActive,
   type ApiError,
   type ModuleOpenTask,
+  type ModulePurgeResponse,
   type ModulesLoadedResponse,
   type ModuleTeardownResponse,
 } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
 import { ModuleActiveCell } from '@/components/module-active-cell';
+import { ModulePurgeDialog } from '@/components/module-purge-dialog';
 import { ModuleTasksOpenDialog } from '@/components/module-tasks-open-dialog';
 import { ModuleTeardownDialog } from '@/components/module-teardown-dialog';
 import { Badge, FormError } from '@/components/ui';
@@ -40,6 +42,8 @@ function ago(iso: string): string {
 
 const when = (iso: string | null) => (iso === null ? '—' : new Date(iso).toLocaleString());
 
+const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+
 function Versions({ row }: { row: ModuleDiffRow }) {
   return (
     <span className="font-mono text-neutral-300">
@@ -64,6 +68,7 @@ export default function ModulesPage() {
     null,
   );
   const [tearingDown, setTearingDown] = useState<string | null>(null);
+  const [purging, setPurging] = useState<{ id: string; tornDown: boolean } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -103,6 +108,15 @@ export default function ModulesPage() {
         : null,
     );
     setTearingDown(null);
+    void load();
+  }
+
+  function purged(result: ModulePurgeResponse) {
+    const kept = result.taskTypesKept.length;
+    setNotice(
+      `Purged ${result.moduleId}: deleted its database, ${count(result.configKeysDeleted, 'setting')} and ${count(result.taskTypesDeleted.length, 'task type')}${kept > 0 ? `; kept ${count(kept, 'task type')} that tasks use` : ''}.`,
+    );
+    setPurging(null);
     void load();
   }
 
@@ -181,6 +195,7 @@ export default function ModulesPage() {
                       busy={busy}
                       onToggle={() => void toggle(row)}
                       onTeardown={() => setTearingDown(row.id)}
+                      onPurge={() => setPurging({ id: row.id, tornDown: row.tornDownAt !== null })}
                     />
                   </td>
                   <td className="whitespace-nowrap px-3 py-2 text-neutral-400">
@@ -201,6 +216,7 @@ export default function ModulesPage() {
         onClose={() => setTearingDown(null)}
         onDone={tornDown}
       />
+      <ModulePurgeDialog target={purging} onClose={() => setPurging(null)} onDone={purged} />
     </div>
   );
 }

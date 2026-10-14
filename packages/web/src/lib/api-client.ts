@@ -2535,4 +2535,16 @@ export type ModuleTeardownResponse = ModuleTeardownDone | { status: 'running' };
 export const postModuleTeardown = (moduleId: string) =>
   api.post<ModuleTeardownResponse>(`/modules/${encodeURIComponent(moduleId)}/teardown`);
 
+export interface ModulePurgeResponse {
+  moduleId: string;
+  database: string;
+  configKeysDeleted: number;
+  taskTypesDeleted: string[];
+  taskTypesKept: string[];
+}
+
+/** Throws with `code: 'module_tasks_open'` and a `tasks` list (see `moduleOpenTasks`) while a task still uses the module. */
+export const postModulePurge = (moduleId: string, confirm: string) =>
+  api.post<ModulePurgeResponse>(`/modules/${encodeURIComponent(moduleId)}/purge`, { confirm });
+
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');

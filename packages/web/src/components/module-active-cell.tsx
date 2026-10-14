@@ -8,11 +8,16 @@ export function ModuleActiveCell({
   busy,
   onToggle,
   onTeardown,
+  onPurge,
 }: {
-  row: Pick<ModuleDiffRow, 'id' | 'rowVersion' | 'deactivatedAt' | 'state' | 'tornDownAt'>;
+  row: Pick<
+    ModuleDiffRow,
+    'id' | 'rowVersion' | 'deactivatedAt' | 'state' | 'tornDownAt' | 'missingAt'
+  >;
   busy: boolean;
   onToggle: () => void;
   onTeardown: () => void;
+  onPurge: () => void;
 }) {
   if (row.rowVersion === null) return <span className="text-neutral-500">—</span>;
   const since = row.deactivatedAt;
@@ -47,6 +52,18 @@ export function ModuleActiveCell({
           onClick={onTeardown}
         >
           Tear down
+        </Button>
+      )}
+      {row.state === 'missing' && row.missingAt !== null && (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={busy}
+          aria-label={`Purge data of ${row.id}`}
+          onClick={onPurge}
+        >
+          Purge data…
         </Button>
       )}
     </div>

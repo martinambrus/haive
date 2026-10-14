@@ -26,7 +26,13 @@ import { recordAuditEvent } from '../lib/audit.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { getModuleControlQueue, getModuleControlQueueEvents } from '../queues.js';
 import { getRedis } from '../redis.js';
-import { deactivatedModuleIds, isModuleDeactivated, setModuleActive } from './activation.js';
+import {
+  deactivatedModuleIds,
+  isModuleDeactivated,
+  liveDependents,
+  setModuleActive,
+} from './activation.js';
+import { purgeModule } from './purge.js';
 
 export type ApiModuleEntry = {
   packageName: string;
@@ -42,6 +48,7 @@ export type LoadedApiModule = {
 
 const putBodySchema = z.object({ values: z.record(z.string(), z.unknown()) });
 const patchBodySchema = z.object({ active: z.boolean() }).strict();
+const purgeBodySchema = z.object({ confirm: z.string() });
 const TEARDOWN_WAIT_MS = 120_000;
 
 function settingsOf(manifest: ModuleManifest, kind: ModuleSettingsKind) {
@@ -264,6 +271,78 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       );
     }
     return c.json({ moduleId: id, tornDownAt: result.tornDownAt });
+  });
+
+  routes.post('/:id/purge', requireAdmin, async (c) => {
+    const id = c.req.param('id');
+    const body = purgeBodySchema.safeParse(await c.req.json().catch(() => null));
+    if (!body.success || body.data.confirm !== id) {
+      throw new HttpError(400, 'Type the module id to confirm the purge', 'confirm_mismatch');
+    }
+    const { modules } = await loadedReport();
+    const row = modules.rows.find((r) => r.id === id);
+    if (row === undefined || row.rowVersion === null) throw new HttpError(404, 'Module not found');
+    if (row.missingAt === null) {
+      throw new HttpError(409, 'Only a module that is missing can be purged', 'module_not_missing');
+    }
+    if (modules.workerAt === null) {
+      throw new HttpError(
+        409,
+        'The worker has not reported what it loaded, so the module is not known to be gone',
+        'worker_unreported',
+      );
+    }
+    if (row.apiVersion !== null || row.workerVersion !== null) {
+      throw new HttpError(409, 'The api or the worker still loads this module', 'module_loaded');
+    }
+    const db = getDb();
+    const tasks = await liveDependents(db, id, true);
+    if (tasks.length > 0) {
+      return c.json(
+        {
+          error: 'Live tasks still use this module, dead ones included. Cancel them first.',
+          code: 'module_tasks_open',
+          tasks,
+        },
+        409,
+      );
+    }
+    const result = await purgeModule(db, getRedis(), id);
+    if (result.kind === 'in-use') {
+      throw new HttpError(
+        409,
+        'Another connection still holds the module database. Nothing was removed.',
+        'module_database_in_use',
+      );
+    }
+    if (result.kind === 'gone') throw new HttpError(404, 'Module not found');
+    await recordAuditEvent(db, {
+      actorUserId: c.get('userId'),
+      action: 'module.purge',
+      targetType: 'module',
+      targetId: null,
+      metadata: {
+        moduleId: id,
+        database: result.database,
+        configKeysDeleted: result.configKeysDeleted,
+        taskTypesDeleted: result.taskTypesDeleted,
+        taskTypesKept: result.taskTypesKept,
+      },
+    });
+    if (result.kind === 'came-back') {
+      throw new HttpError(
+        409,
+        'The module loaded again while it was purged. Its database and settings are gone and its row and task types were kept: restart the worker to create the database again.',
+        'module_came_back',
+      );
+    }
+    return c.json({
+      moduleId: id,
+      database: result.database,
+      configKeysDeleted: result.configKeysDeleted,
+      taskTypesDeleted: result.taskTypesDeleted,
+      taskTypesKept: result.taskTypesKept,
+    });
   });
 
   routes.get('/:id/settings/:kind', async (c) => {
