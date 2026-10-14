@@ -399,6 +399,14 @@ function Native-Lines([string]$Exe, [string[]]$Arguments) {
     ForEach-Object { $_.Trim() } | Where-Object { $_ }
 }
 
+# The names docker lists. A listing that fails is not an empty one: it is "unknown" ($unchecked).
+$unchecked = $false
+function Get-Listing([string[]]$Arguments) {
+  $r = Invoke-Native docker $Arguments -Capture
+  if ($r.ExitCode -ne 0) { $script:unchecked = $true; return @() }
+  @($r.Output -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\S+$' })
+}
+
 $env_ = @{}
 Get-Content .env | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object {
   $k, $v = $_ -split '=', 2; $env_[$k.Trim()] = $v.Trim()
@@ -418,6 +426,13 @@ $workVolumes = @('repos', 'bundles', 'wrappers', 'squid_configs', 'ddev_ca', 'np
 # images from underneath them.
 $imageRepos = @("$id-cli-sandbox", "$id-sandbox", "$id-ddev-runner")
 
+# Without a daemon nothing can be removed, and nothing afterwards can be checked.
+if ((-not (Get-Command docker -ErrorAction SilentlyContinue)) -or ((Invoke-Native docker @('info')).ExitCode -ne 0)) {
+  Write-Host "Cannot reach the Docker daemon, so nothing of the Haive install '$id' was removed."
+  Write-Host "Start Docker Desktop, then run this again."
+  exit 1
+}
+
 Write-Host "Removing the Haive install '$id' (compose project $project)."
 if ($Purge) {
   Write-Host "-Purge: cloned repositories, CLI credentials and built images will ALSO be removed."
@@ -431,20 +446,25 @@ if (-not $Yes) {
 
 # `down` first, so compose STOPS its own services rather than having them killed underneath it.
 # The work volumes survive a default uninstall and a worker can be mid-write to one of them.
-Invoke-Native docker @('compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.run.yml', 'down') | Out-Null
+$down = Invoke-Native docker @('compose', '-f', 'docker-compose.yml', '-f', 'docker-compose.run.yml', 'down') -Capture
+if ($down.ExitCode -ne 0) {
+  Write-Host "  docker compose down failed; the check at the end lists what is left:"
+  Write-Host $down.Output.TrimEnd()
+}
 
 # Containers the WORKER creates - per-task sandboxes, terminals, DDEV and app runners, the
 # registry - are plain `docker run` and are NOT part of the compose project, so `down` neither
 # stops them nor removes them. While one is attached the project network is still in use, which
 # is why `down` reports "resource is still in use" and leaves the network behind.
-$stray = @(Native-Lines docker @('ps', '-aq', '--filter', "name=^$id-"))
-foreach ($c in $stray) { Invoke-Native docker @('rm', '-f', $c) | Out-Null }
-if ($stray.Count -gt 0) { Write-Host "  removed $($stray.Count) container(s) outside the compose project" }
+$swept = 0
+foreach ($c in @(Native-Lines docker @('ps', '-aq', '--filter', "name=^$id-"))) {
+  if ((Invoke-Native docker @('rm', '-f', $c)).ExitCode -eq 0) { $swept++ }
+}
+if ($swept -gt 0) { Write-Host "  removed $swept container(s) outside the compose project" }
 
 # Now nothing THIS install owns holds them. A network already gone is a silent no-op, but one that
 # REFUSES is reported: something outside this install is still attached, and the closing
 # "everything is gone" line would otherwise be a lie.
-$networksLeft = $false
 foreach ($n in (Native-Lines docker @('network', 'ls', '-q', '--filter', "name=^$id-"))) {
   $name = (Invoke-Native docker @('network', 'inspect', $n, '--format', '{{.Name}}') -Capture).Output.Trim()
   if (-not $name) { $name = $n }
@@ -453,28 +473,28 @@ foreach ($n in (Native-Lines docker @('network', 'ls', '-q', '--filter', "name=^
   } else {
     $attached = (Invoke-Native docker @('network', 'inspect', $n, '--format', '{{range .Containers}}{{.Name}} {{end}}') -Capture).Output.Trim()
     Write-Host "  COULD NOT remove network $name - still attached: $(if ($attached) { $attached } else { 'unknown' })"
-    $networksLeft = $true
   }
 }
 
-foreach ($v in $runtimeVolumes) {
-  if ((Invoke-Native docker @('volume', 'rm', "${project}_$v")).ExitCode -eq 0) {
-    Write-Host "  removed ${project}_$v"
+# rm fails the same way for an absent volume and a held one, so only a volume that exists is tried.
+function Remove-DockerVolume([string]$Name) {
+  if ((Invoke-Native docker @('volume', 'inspect', $Name)).ExitCode -ne 0) { return }
+  if ((Invoke-Native docker @('volume', 'rm', $Name)).ExitCode -eq 0) {
+    Write-Host "  removed $Name"
+  } else {
+    $holders = @(Native-Lines docker @('ps', '-a', '--filter', "volume=$Name", '--format', '{{.Names}}')) -join ','
+    Write-Host "  COULD NOT remove volume $Name - held by: $(if ($holders) { $holders } else { 'no container listed' })"
   }
 }
+
+foreach ($v in $runtimeVolumes) { Remove-DockerVolume "${project}_$v" }
 
 if ($Purge) {
-  foreach ($v in $workVolumes) {
-    if ((Invoke-Native docker @('volume', 'rm', "${id}_$v")).ExitCode -eq 0) {
-      Write-Host "  removed ${id}_$v"
-    }
-  }
+  foreach ($v in $workVolumes) { Remove-DockerVolume "${id}_$v" }
   # Per-task auth and IDE volumes are created at runtime, so they are found rather than listed.
   $runtime = @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_cli_auth_")) +
              @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_ide_"))
-  foreach ($v in $runtime) {
-    if ((Invoke-Native docker @('volume', 'rm', $v)).ExitCode -eq 0) { Write-Host "  removed $v" }
-  }
+  foreach ($v in $runtime) { Remove-DockerVolume $v }
   foreach ($repo in $imageRepos) {
     foreach ($img in (Native-Lines docker @('images', '-q', $repo) | Select-Object -Unique)) {
       if ((Invoke-Native docker @('rmi', '-f', $img)).ExitCode -eq 0) { Write-Host "  removed image $repo" }
@@ -485,31 +505,69 @@ if ($Purge) {
   foreach ($img in (Native-Lines docker @('images', '--format', '{{.Repository}}:{{.Tag}}') | Where-Object { $_ -like "$id-env-*" })) {
     if ((Invoke-Native docker @('rmi', '-f', $img)).ExitCode -eq 0) { Write-Host "  removed image $img" }
   }
-  Write-Host ""
-  if ($networksLeft) {
-    Write-Host "Everything this install owned is gone EXCEPT the network(s) named above, which"
-    Write-Host "something outside this install is still using. Detach those containers, then:"
-    Write-Host "  docker network ls -q --filter name=^${id}- | ForEach-Object { docker network rm `$_ }"
-  } else {
-    Write-Host "Everything this install owned is gone."
-  }
-  Write-Host "Delete this directory to finish:"
-  Write-Host "  Remove-Item -Recurse -Force '$PSScriptRoot'"
 } else {
   Write-Host ""
   Write-Host "Kept, because it holds your work rather than this install's runtime state:"
-  $kept = 0
-  foreach ($v in $workVolumes) {
-    if ((Invoke-Native docker @('volume', 'inspect', "${id}_$v")).ExitCode -eq 0) {
-      Write-Host "  ${id}_$v"; $kept++
+  if ((Invoke-Native docker @('info')).ExitCode -ne 0) {
+    Write-Host "  (unknown: Docker stopped answering, so the volumes could not be listed)"
+  } else {
+    $kept = 0
+    foreach ($v in $workVolumes) {
+      if ((Invoke-Native docker @('volume', 'inspect', "${id}_$v")).ExitCode -eq 0) {
+        Write-Host "  ${id}_$v"; $kept++
+      }
     }
+    $runtime = @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_cli_auth_")) +
+               @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_ide_"))
+    foreach ($v in $runtime) { Write-Host "  $v"; $kept++ }
+    if ($kept -eq 0) { Write-Host "  (nothing - this install never cloned a repository or logged a CLI in)" }
   }
-  $runtime = @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_cli_auth_")) +
-             @(Native-Lines docker @('volume', 'ls', '-q', '--filter', "name=^${id}_ide_"))
-  foreach ($v in $runtime) { Write-Host "  $v"; $kept++ }
-  if ($kept -eq 0) { Write-Host "  (nothing - this install never cloned a repository or logged a CLI in)" }
   Write-Host ""
   Write-Host "To remove those too, re-run:  .\uninstall.ps1 -Purge"
+}
+
+# One final look decides the closing message and the exit status; a listing that fails is "unknown", not empty.
+$leftContainers = @(@(Get-Listing @('ps', '-a', '--filter', "name=^$id-", '--format', '{{.Names}}')) +
+                    @(Get-Listing @('ps', '-a', '--filter', "label=com.docker.compose.project=$project", '--format', '{{.Names}}')) |
+                    Sort-Object -Unique)
+$leftNetworks = @(Get-Listing @('network', 'ls', '--filter', "name=^$id-", '--format', '{{.Name}}'))
+$owned = @($runtimeVolumes | ForEach-Object { "${project}_$_" })
+if ($Purge) { $owned += @($workVolumes | ForEach-Object { "${id}_$_" }) }
+$leftVolumes = @(Get-Listing @('volume', 'ls', '-q') | Where-Object {
+  ($owned -ccontains $_) -or ($Purge -and (($_ -clike "${id}_cli_auth_*") -or ($_ -clike "${id}_ide_*")))
+})
+$leftImages = @()
+if ($Purge) {
+  $leftImages = @(Get-Listing @('images', '--format', '{{.Repository}}:{{.Tag}}') | Where-Object {
+    $repo = $_ -replace ':[^:]*$', ''
+    ($imageRepos -ccontains $repo) -or ($repo -clike "$id-env-*")
+  })
+}
+
+$shown = $false
+function Show-Left([string]$Heading, [string[]]$Names, [string]$Command) {
+  if (-not $Names) { return }
+  if (-not $script:shown) { Write-Host "Still here, so this is NOT a clean uninstall:" }
+  $script:shown = $true
+  Write-Host "  $Heading"
+  Write-Host "    $Command $($Names -join ' ')"
+}
+Write-Host ""
+Show-Left 'containers' $leftContainers 'docker rm -f'
+Show-Left 'networks' $leftNetworks 'docker network rm'
+Show-Left 'volumes' $leftVolumes 'docker volume rm'
+Show-Left 'images' $leftImages 'docker rmi -f'
+if ($unchecked) { Write-Host "Docker stopped answering while this was checked, so more than the above may be left." }
+if ($shown -or $unchecked) {
+  Write-Host "Once that is dealt with, run this again with the same options to confirm."
+  exit 1
+}
+
+if ($Purge) {
+  Write-Host "Everything this install owned is gone."
+  Write-Host "Delete this directory to finish:"
+  Write-Host "  Remove-Item -Recurse -Force '$PSScriptRoot'"
+} else {
   Write-Host "The stack is gone either way; delete this directory when you are done with it."
 }
 '@

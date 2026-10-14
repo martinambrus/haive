@@ -164,6 +164,38 @@ describe('dev.sh names the node_modules volumes the way compose names the projec
     assert.equal(out.status, 0, out.stdout + out.stderr);
     assert.deepEqual(inspected(lines), NODE_MODULES.map(volume));
   });
+
+  // [case, the checkout's .env, COMPOSE_PROJECT_NAME in the environment, the project dev.sh must use]
+  const RESOLUTION = [
+    ['a name in .env', 'COMPOSE_PROJECT_NAME=Foo_Bar\n', '', 'foo_bar'],
+    [
+      'a name in the environment, which wins over .env',
+      'COMPOSE_PROJECT_NAME=dotenv\n',
+      'Env',
+      'env',
+    ],
+    [
+      'the last name in .env',
+      'COMPOSE_PROJECT_NAME=first\nCOMPOSE_PROJECT_NAME=second\n',
+      '',
+      'second',
+    ],
+    ['an empty name in .env, so the directory', 'COMPOSE_PROJECT_NAME=\n', '', 'my_dir'],
+    ['a .env without the key, so the directory', 'HAIVE_INSTALL_ID=other\n', '', 'my_dir'],
+  ];
+
+  for (const [what, dotEnv, env, project] of RESOLUTION) {
+    it(`${what} targets ${project}_*`, (t) => {
+      const script = scriptIn(t, 'My_Dir');
+      writeFileSync(join(dirname(script), '..', '.env'), dotEnv);
+      const { out, lines } = run(t, ['rebuild'], { script, stub: { COMPOSE_PROJECT_NAME: env } });
+      assert.equal(out.status, 0, out.stdout + out.stderr);
+      assert.deepEqual(
+        inspected(lines),
+        NODE_MODULES.map((name) => `${project}_${name}`),
+      );
+    });
+  }
 });
 
 describe('dev.sh does not report a teardown it could not finish as a success', () => {
