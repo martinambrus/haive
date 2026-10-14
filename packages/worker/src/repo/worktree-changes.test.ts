@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -166,6 +166,29 @@ describe('readUncommittedChanges and files git is told not to check', () => {
       await git(root, ['worktree', 'add', '-b', 'feat', wt, 'main']);
       await writeIn(wt, { 'f.txt': 'edited, hidden from status\n' });
       expect(await readUncommittedChanges(wt)).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('readUncommittedChanges and repository stat settings', () => {
+  it.each([
+    ['core.trustctime', 'false'],
+    ['core.checkStat', 'minimal'],
+  ])('counts a same-size rewrite that kept its mtime when %s is %s', async (key, value) => {
+    const { root, wt } = await setup();
+    try {
+      await git(root, ['config', key, value]);
+      const file = path.join(wt, 'f.txt');
+      const past = new Date(Date.now() - 120_000);
+      await utimes(file, past, past);
+      await git(wt, ['update-index', '--refresh']);
+      // git compares ctime in whole seconds, so the rewrite must land in a later second.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      await writeFile(file, 'two\n', 'utf8');
+      await utimes(file, past, past);
+      expect(await readUncommittedChanges(wt)).toEqual({ count: 1, paths: ['f.txt'] });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

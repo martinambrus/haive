@@ -38,8 +38,13 @@ export async function readUncommittedChanges(
   worktreePath: string,
   listLimit = 20,
 ): Promise<UncommittedChanges | null> {
+  // A repository that trusts less stat data than git's defaults would hide a same-size rewrite.
   const status = await gitRun(worktreePath, [
     '--no-optional-locks',
+    '-c',
+    'core.trustctime=true',
+    '-c',
+    'core.checkStat=default',
     'status',
     '--porcelain=v1',
     '-z',
