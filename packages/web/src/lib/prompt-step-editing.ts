@@ -26,6 +26,7 @@ export function newPromptStep(takenSlugs: Iterable<string>): PromptStepEntry {
     title: n === 1 ? 'Prompt step' : `Prompt step ${n}`,
     template: '',
     capabilities: [],
+    tools: [],
     timeoutMs: DEFAULT_PROMPT_STEP_TIMEOUT_MS,
   };
 }

@@ -16,7 +16,7 @@ const toml = (instructions: string) =>
   `name = "reviewer"\ndescription = "d"\ndeveloper_instructions = """\n${instructions}\n"""\n`;
 
 function entry(slug: string, template: string): PromptStepEntry {
-  return { slug, title: slug, template, capabilities: [], timeoutMs: 60_000 };
+  return { slug, title: slug, template, capabilities: [], tools: [], timeoutMs: 60_000 };
 }
 const stepId = (slug: string) => `custom.t.${slug}`;
 
