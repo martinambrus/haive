@@ -43,6 +43,7 @@ const CLASS_BY_TYPE: Record<string, TaskClass> = {
   onboarding: 'setup',
   onboarding_upgrade: 'setup',
   kb_author: 'setup',
+  type_draft: 'setup',
   // Deprecated as a user-facing type (it runs as a prelude now), but rows still exist.
   env_replicate: 'setup',
 

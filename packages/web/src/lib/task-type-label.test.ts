@@ -14,6 +14,10 @@ describe('taskTypeLabel', () => {
     expect(taskTypeLabel({ type: 'plan_merge' })).toBe('Plan merge');
   });
 
+  it('labels the task type draft conversation', () => {
+    expect(taskTypeLabel({ type: 'type_draft' })).toBe('Task type draft');
+  });
+
   it('shows the slug of a custom type with no label', () => {
     expect(taskTypeLabel({ type: 'acme_audit', typeLabel: null })).toBe('acme_audit');
   });
