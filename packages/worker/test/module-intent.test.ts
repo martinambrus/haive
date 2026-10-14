@@ -147,6 +147,43 @@ describe.skipIf(!url)('module intent sync on Postgres', () => {
     });
   });
 
+  describe('torn_down_at', () => {
+    const OFF = new Date('2026-10-14T08:00:00.000Z');
+    const DOWN = new Date('2026-10-14T09:30:00.000Z');
+    const tearDown = (id: string) =>
+      db
+        .update(schema.modules)
+        .set({ deactivatedAt: OFF, tornDownAt: DOWN })
+        .where(eq(schema.modules.moduleId, id));
+
+    it('is null for a module the first load records', async () => {
+      await syncModuleIntent(db, [mod('alpha')]);
+      expect((await row('alpha'))!.tornDownAt).toBeNull();
+    });
+
+    it('is left alone by a later sync that loads the module again', async () => {
+      await syncModuleIntent(db, [mod('alpha')]);
+      await tearDown('alpha');
+      await syncModuleIntent(db, [mod('alpha', { version: '1.1.0' })]);
+      expect(await row('alpha')).toMatchObject({
+        installedVersion: '1.1.0',
+        deactivatedAt: OFF,
+        tornDownAt: DOWN,
+      });
+    });
+
+    it('survives a missing spell and the load that ends it', async () => {
+      await syncModuleIntent(db, [mod('alpha'), mod('beta')]);
+      await tearDown('alpha');
+      await syncModuleIntent(db, [mod('beta')]);
+      expect(await row('alpha')).toMatchObject({ tornDownAt: DOWN });
+      expect((await row('alpha'))!.missingAt).toBeInstanceOf(Date);
+      await syncModuleIntent(db, [mod('alpha'), mod('beta')]);
+      expect(await row('alpha')).toMatchObject({ tornDownAt: DOWN, missingAt: null });
+      expect((await row('beta'))!.tornDownAt).toBeNull();
+    });
+  });
+
   it('marks every row missing when no module loaded', async () => {
     await syncModuleIntent(db, [mod('alpha'), mod('beta')]);
     await syncModuleIntent(db, []);

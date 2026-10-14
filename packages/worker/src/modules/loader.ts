@@ -11,14 +11,18 @@ import {
   type ModuleManifest,
   type TaskTypeDefaultsIssue,
 } from '@haive/shared/modularity';
-import { openModuleDatabase, type ModuleSchemaContext } from '@haive/shared/module-db';
+import {
+  openModuleDatabase,
+  type ModuleSchemaContext,
+  type ModuleTeardownContext,
+} from '@haive/shared/module-db';
 import { getBullRedis } from '../redis.js';
 import type { StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { emitsLoop } from '../step-engine/steps/index.js';
 import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
 
-export type { ModuleSchemaContext };
+export type { ModuleSchemaContext, ModuleTeardownContext };
 
 export type ModuleJobContext = {
   moduleId: string;
@@ -32,6 +36,7 @@ export type WorkerModuleEntry = {
   steps?: readonly StepDefinition[];
   ensureSchema?: (ctx: ModuleSchemaContext) => Promise<void>;
   jobs?: (ctx: ModuleJobContext) => Promise<() => Promise<void>>;
+  teardown?: (ctx: ModuleTeardownContext) => Promise<void>;
 };
 
 export type LoadedWorkerModule = {
@@ -177,6 +182,10 @@ export async function ensureModuleSchemas(
   return result;
 }
 
+const jobsStarted = new Set<string>();
+
+export const moduleJobsStarted = (moduleId: string): boolean => jobsStarted.has(moduleId);
+
 export async function startModuleJobs(
   loaded: readonly LoadedWorkerModule[],
   entries: readonly WorkerModuleEntry[],
@@ -188,6 +197,8 @@ export async function startModuleJobs(
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
         logger.warn({ err: r.reason, module: stops[i]!.moduleId }, 'module jobs failed to stop');
+      } else {
+        jobsStarted.delete(stops[i]!.moduleId);
       }
     });
   };
@@ -206,6 +217,7 @@ export async function startModuleJobs(
         logger: logger.child({ module: moduleId }),
       });
       stops.push({ moduleId, stop });
+      jobsStarted.add(moduleId);
     } catch (err) {
       await stopAll();
       throw new Error(

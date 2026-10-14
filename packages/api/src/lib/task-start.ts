@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import { TASK_JOB_NAMES, logger, type TaskJobPayload } from '@haive/shared';
 import type { getDb } from '../db.js';
@@ -6,12 +6,18 @@ import { getTaskQueue } from '../queues.js';
 
 /** Moves a `created` task to `queued`, which the stalled re-driver starts when its START is lost.
  *  Called after every write that can fail, since a task left `created` is one nothing starts.
- *  Returns the row, or undefined when the task was no longer `created`. */
+ *  Returns the row, or undefined when the task was no longer `created` or is dead. */
 export async function markQueuedForStart(db: ReturnType<typeof getDb> | DbTx, taskId: string) {
   const [queued] = await db
     .update(schema.tasks)
     .set({ status: 'queued', updatedAt: new Date() })
-    .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'created')))
+    .where(
+      and(
+        eq(schema.tasks.id, taskId),
+        eq(schema.tasks.status, 'created'),
+        isNull(schema.tasks.deadAt),
+      ),
+    )
     .returning();
   return queued;
 }

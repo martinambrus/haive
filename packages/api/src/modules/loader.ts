@@ -1,7 +1,13 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { schema } from '@haive/database';
-import { configService, validateFormValues } from '@haive/shared';
+import {
+  configService,
+  MODULE_CONTROL_JOB_NAMES,
+  validateFormValues,
+  type ModuleTeardownPayload,
+  type ModuleTeardownResult,
+} from '@haive/shared';
 import {
   collectFieldIds,
   diffModuleIntent,
@@ -18,6 +24,7 @@ import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import { getModuleControlQueue, getModuleControlQueueEvents } from '../queues.js';
 import { getRedis } from '../redis.js';
 import { deactivatedModuleIds, isModuleDeactivated, setModuleActive } from './activation.js';
 
@@ -35,6 +42,7 @@ export type LoadedApiModule = {
 
 const putBodySchema = z.object({ values: z.record(z.string(), z.unknown()) });
 const patchBodySchema = z.object({ active: z.boolean() }).strict();
+const TEARDOWN_WAIT_MS = 120_000;
 
 function settingsOf(manifest: ModuleManifest, kind: ModuleSettingsKind) {
   return kind === 'global' ? manifest.globalSettings : manifest.adminSettings;
@@ -143,8 +151,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     });
   });
 
-  routes.get('/loaded', async (c) => {
-    if (c.get('userRole') !== 'admin') throw new HttpError(403, 'Admin access required');
+  const loadedReport = async () => {
     let worker: unknown = null;
     const raw = await getRedis().get(MODULES_LOADED_WORKER_KEY);
     if (raw !== null) {
@@ -161,12 +168,17 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       hasRoutes,
     }));
     const intent = await getDb().select().from(schema.modules);
-    return c.json({
+    return {
       api: { modules: apiModules },
       worker,
       intent,
       modules: diffModuleIntent(intent, apiModules, worker),
-    });
+    };
+  };
+
+  routes.get('/loaded', async (c) => {
+    if (c.get('userRole') !== 'admin') throw new HttpError(403, 'Admin access required');
+    return c.json(await loadedReport());
   });
 
   routes.patch('/:id', requireAdmin, async (c) => {
@@ -197,6 +209,61 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       active,
       deactivatedAt: result.deactivatedAt?.toISOString() ?? null,
     });
+  });
+
+  routes.post('/:id/teardown', requireAdmin, async (c) => {
+    const id = c.req.param('id');
+    const row = (await loadedReport()).modules.rows.find((r) => r.id === id);
+    if (row === undefined || row.rowVersion === null) throw new HttpError(404, 'Module not found');
+    if (row.deactivatedAt === null) {
+      throw new HttpError(409, 'Deactivate the module before tearing it down', 'module_active');
+    }
+    if (row.state !== 'loaded') {
+      throw new HttpError(
+        409,
+        'The api and the worker must both have loaded the module to tear it down',
+        'module_missing',
+      );
+    }
+    const job = await getModuleControlQueue().add(
+      MODULE_CONTROL_JOB_NAMES.TEARDOWN,
+      { moduleId: id } satisfies ModuleTeardownPayload,
+      { deduplication: { id: `module-teardown-${id}` }, removeOnComplete: 100, removeOnFail: 100 },
+    );
+    await recordAuditEvent(getDb(), {
+      actorUserId: c.get('userId'),
+      action: 'module.teardown',
+      targetType: 'module',
+      targetId: null,
+      metadata: { moduleId: id },
+    });
+    let result: ModuleTeardownResult;
+    try {
+      result = (await job.waitUntilFinished(
+        getModuleControlQueueEvents(),
+        TEARDOWN_WAIT_MS,
+      )) as ModuleTeardownResult;
+    } catch (err) {
+      const state = await job.getState().catch(() => 'unknown');
+      if (state !== 'failed') return c.json({ status: 'running' }, 202);
+      return c.json(
+        {
+          error: err instanceof Error ? err.message : String(err),
+          code: 'module_teardown_failed',
+        },
+        502,
+      );
+    }
+    if (result.tornDownAt === null) {
+      return c.json(
+        {
+          error: `Module ${id} was activated again while its teardown ran; nothing was recorded`,
+          code: 'module_active',
+        },
+        409,
+      );
+    }
+    return c.json({ moduleId: id, tornDownAt: result.tornDownAt });
   });
 
   routes.get('/:id/settings/:kind', async (c) => {

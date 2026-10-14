@@ -10,9 +10,9 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  *  returns username/password for that one push. The decrypted secret never
  *  lands in the container filesystem.
  *
- *  Format: `<base64url(payload)>.<base64url(hmac-sha256(payload))>` where
- *  payload is `{ repositoryId, userId, exp }` (exp = unix seconds). Signed with
- *  a server secret (CONFIG_ENCRYPTION_KEY) the container never sees. */
+ *  Format: `v1.<base64url(payload)>.<base64url(mac)>` where payload is
+ *  `{ repositoryId, userId, exp }` (exp = unix seconds). The MAC key is derived for
+ *  this purpose alone from a server secret (CONFIG_ENCRYPTION_KEY) the container never sees. */
 
 interface GitCredTokenPayload {
   repositoryId: string;
@@ -21,6 +21,33 @@ interface GitCredTokenPayload {
 }
 
 export const DEFAULT_GIT_CRED_TOKEN_TTL_SECONDS = 12 * 60 * 60;
+
+const TOKEN_VERSION = 'v1';
+const MAC_KEY_LABEL = 'git-credential-token:v1';
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+
+function macFor(secret: string, payload: string): string {
+  const key = createHmac('sha256', secret).update(MAC_KEY_LABEL).digest();
+  return createHmac('sha256', key).update(`${TOKEN_VERSION}.${payload}`).digest('base64url');
+}
+
+function claimsFrom(payload: string): { repositoryId: string; userId: string } | null {
+  let decoded: Partial<GitCredTokenPayload> | null;
+  try {
+    decoded = JSON.parse(
+      Buffer.from(payload, 'base64url').toString('utf8'),
+    ) as Partial<GitCredTokenPayload> | null;
+  } catch {
+    return null;
+  }
+  if (!decoded) return null;
+  const { repositoryId, userId, exp } = decoded;
+  if (typeof repositoryId !== 'string' || repositoryId === '') return null;
+  if (typeof userId !== 'string' || userId === '') return null;
+  if (typeof exp !== 'number' || !Number.isFinite(exp)) return null;
+  if (Math.floor(Date.now() / 1000) > exp) return null;
+  return { repositoryId, userId };
+}
 
 export function signRepoGitCredToken(
   repositoryId: string,
@@ -32,11 +59,25 @@ export function signRepoGitCredToken(
   const payload = Buffer.from(
     JSON.stringify({ repositoryId, userId, exp } satisfies GitCredTokenPayload),
   ).toString('base64url');
-  const mac = createHmac('sha256', secret).update(payload).digest('base64url');
-  return `${payload}.${mac}`;
+  return `${TOKEN_VERSION}.${payload}.${macFor(secret, payload)}`;
 }
 
 export function verifyRepoGitCredToken(
+  token: string,
+  secret: string,
+): { repositoryId: string; userId: string } | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [version, payload, mac] = parts as [string, string, string];
+  if (version !== TOKEN_VERSION || !BASE64URL.test(payload) || !BASE64URL.test(mac)) return null;
+  const macBuf = Buffer.from(mac);
+  const expBuf = Buffer.from(macFor(secret, payload));
+  if (macBuf.length !== expBuf.length || !timingSafeEqual(macBuf, expBuf)) return null;
+  return claimsFrom(payload);
+}
+
+/** Terminals started before v1 hold the two-part, raw-secret form for up to 12 h; drop it then. */
+export function verifyLegacyRepoGitCredToken(
   token: string,
   secret: string,
 ): { repositoryId: string; userId: string } | null {
@@ -47,15 +88,5 @@ export function verifyRepoGitCredToken(
   const macBuf = Buffer.from(mac);
   const expBuf = Buffer.from(expected);
   if (macBuf.length !== expBuf.length || !timingSafeEqual(macBuf, expBuf)) return null;
-  try {
-    const decoded = JSON.parse(
-      Buffer.from(payload, 'base64url').toString('utf8'),
-    ) as GitCredTokenPayload;
-    if (typeof decoded.repositoryId !== 'string' || typeof decoded.userId !== 'string') return null;
-    if (typeof decoded.exp !== 'number') return null;
-    if (Math.floor(Date.now() / 1000) > decoded.exp) return null;
-    return { repositoryId: decoded.repositoryId, userId: decoded.userId };
-  } catch {
-    return null;
-  }
+  return claimsFrom(payload);
 }
