@@ -22,7 +22,10 @@ the module loads again.
   `module.deactivate`). It is refused with 409 `module_tasks_open`, listing up to 200 tasks, while a
   live task's run list names one of the module's steps. The code stays loaded: its api routes and
   settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget) and the composer
-  palette drops its steps. A task that reaches one of its steps later, after a Retry or a revive,
+  palette drops its steps. A task type that uses the module, as its source or through any step, is
+  listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
+  409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
+  at the same moment waits and then counts the new task. A task that reaches one of its steps later, after a Retry or a revive,
   fails that step's own row with a message naming the module, without asking the step's `shouldRun`
   or taking a runtime slot; Retry runs it once the module is active again. All data is kept.
 - **Uninstalled, data kept (`Missing`).** `pnpm module remove <id>` and a rebuild. Nothing runs: the
