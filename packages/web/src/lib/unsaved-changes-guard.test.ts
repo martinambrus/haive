@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { guardLeaving, leaveDestination, type LeaveClick } from './unsaved-changes-guard';
+import {
+  guardLeaving,
+  leaveDestination,
+  leaveThrough,
+  type LeaveClick,
+} from './unsaved-changes-guard';
 
 const HERE = 'http://localhost:3000/admin/task-types/spec-check';
 
@@ -99,13 +104,14 @@ describe('guardLeaving', () => {
     const { win, doc } = fakeWindow();
     const onLeave = vi.fn();
     guardLeaving(win, onLeave);
-    const inner = { closest: () => anchor('http://localhost:3000/admin/users') };
+    const link = anchor('http://localhost:3000/admin/users');
+    const inner = { closest: () => link };
     const event = clickEvent(inner);
     const stop = vi.spyOn(event, 'stopPropagation');
     doc.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);
     expect(stop).toHaveBeenCalled();
-    expect(onLeave).toHaveBeenCalledExactlyOnceWith('/admin/users');
+    expect(onLeave).toHaveBeenCalledExactlyOnceWith({ path: '/admin/users', link });
   });
 
   it('leaves alone a click that is not on a link, opens a tab, or stays on the page', () => {
@@ -162,6 +168,41 @@ describe('guardLeaving', () => {
     guardLeaving(win, onLeave);
     (win.location as { href: string }).href = 'http://localhost:3000/admin/users';
     doc.dispatchEvent(clickEvent(anchor('http://localhost:3000/admin/users#x')));
+    expect(onLeave).not.toHaveBeenCalled();
+  });
+});
+
+describe('leaveThrough', () => {
+  it('releases the guard, then clicks the link itself so its own handlers run', () => {
+    const order: string[] = [];
+    const link = { isConnected: true, click: () => order.push('click') };
+    const push = vi.fn();
+    leaveThrough({ path: '/tasks/1', link }, () => order.push('release'), push);
+    expect(order).toEqual(['release', 'click']);
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it('leaves by path when the link is gone from the page', () => {
+    const click = vi.fn();
+    const push = vi.fn();
+    const release = vi.fn();
+    leaveThrough({ path: '/tasks/1', link: { isConnected: false, click } }, release, push);
+    expect(release).toHaveBeenCalledOnce();
+    expect(click).not.toHaveBeenCalled();
+    expect(push).toHaveBeenCalledExactlyOnceWith('/tasks/1');
+  });
+
+  it('lets the replayed click through a released guard', () => {
+    const { win, doc } = fakeWindow();
+    const onLeave = vi.fn();
+    const release = guardLeaving(win, onLeave);
+    const replay = clickEvent(anchor('http://localhost:3000/tasks/1'));
+    leaveThrough(
+      { path: '/tasks/1', link: { isConnected: true, click: () => doc.dispatchEvent(replay) } },
+      release,
+      vi.fn(),
+    );
+    expect(replay.defaultPrevented).toBe(false);
     expect(onLeave).not.toHaveBeenCalled();
   });
 });

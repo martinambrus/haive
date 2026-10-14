@@ -23,7 +23,24 @@ export function leaveDestination(click: LeaveClick, currentHref: string): string
   return `${there.pathname}${there.search}${there.hash}`;
 }
 
-export function guardLeaving(win: Window, onLeave: (path: string) => void): () => void {
+export interface Leaving {
+  path: string;
+  link: { isConnected: boolean; click(): void };
+}
+
+/** Leaves the way the intercepted click would have, once the guard is released: the link's own
+ *  handlers run (an origin it records, the router's). A link gone from the page leaves by path. */
+export function leaveThrough(
+  leaving: Leaving,
+  release: () => void,
+  push: (path: string) => void,
+): void {
+  release();
+  if (leaving.link.isConnected) leaving.link.click();
+  else push(leaving.path);
+}
+
+export function guardLeaving(win: Window, onLeave: (leaving: Leaving) => void): () => void {
   const confirmUnload = (event: BeforeUnloadEvent) => {
     event.preventDefault();
     event.returnValue = '';
@@ -48,7 +65,7 @@ export function guardLeaving(win: Window, onLeave: (path: string) => void): () =
     if (path === null) return;
     event.preventDefault();
     event.stopPropagation();
-    onLeave(path);
+    onLeave({ path, link });
   };
   win.addEventListener('beforeunload', confirmUnload);
   // Capture phase, so the router's own link handler never sees the click.
