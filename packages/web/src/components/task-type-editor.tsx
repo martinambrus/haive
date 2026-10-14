@@ -1,10 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { CompositionIssue } from '@haive/shared/modularity';
 import {
+  changedTaskType,
   createTaskType,
   getAdminTaskType,
   getTaskTypeCatalog,
@@ -107,9 +108,12 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [formRevision, setFormRevision] = useState(0);
+  const [changedRow, setChangedRow] = useState<AdminTaskType | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
 
   const applyRow = useCallback((taskType: AdminTaskType) => {
     setRow(taskType);
+    setChangedRow(null);
     setStepIds(taskType.stepIds ?? []);
     setLoopLimits(taskType.stepLoopLimitDefaults);
     setPromptSteps(taskType.promptSteps ?? {});
@@ -214,6 +218,15 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setServerPromptIssues([]);
   }
 
+  async function refreshAvailability(forSlug: string) {
+    try {
+      const fresh = await getAdminTaskType(forSlug);
+      setAvailability(fresh.availability);
+    } catch (err) {
+      setRefreshError((err as ApiError).message ?? 'Failed to refresh availability');
+    }
+  }
+
   async function submit(submitted: FormValues) {
     setSaving(true);
     setSaveError(null);
@@ -241,17 +254,17 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           : null,
         initialValuesOf(row!),
       );
-      const res = await updateTaskType(row!.slug, body);
+      const res = await updateTaskType(row!.slug, { ...body, expectedUpdatedAt: row!.updatedAt });
       applyRow(res.taskType);
       setSaved(true);
-      try {
-        const fresh = await getAdminTaskType(row!.slug);
-        setAvailability(fresh.availability);
-      } catch (err) {
-        setRefreshError((err as ApiError).message ?? 'Failed to refresh availability');
-      }
+      await refreshAvailability(row!.slug);
     } catch (err) {
       const error = err as ApiError;
+      const changed = changedTaskType(error);
+      if (changed) {
+        setChangedRow(changed);
+        return;
+      }
       const issues = splitServerIssues((error.body as { issues?: unknown } | undefined)?.issues);
       const promptIssues = promptStepIssuesOf(
         (error.body as { issues?: unknown } | undefined)?.issues,
@@ -326,7 +339,11 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           ← Task types
         </Link>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <h2 className="text-xl font-semibold text-neutral-50 [overflow-wrap:anywhere]">
+          <h2
+            ref={headingRef}
+            tabIndex={-1}
+            className="text-xl font-semibold text-neutral-50 [overflow-wrap:anywhere]"
+          >
             {creating ? 'New task type' : row!.displayName}
           </h2>
           {row && <Badge>{sourceLabel(row.source)}</Badge>}
@@ -357,7 +374,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           hideTitle
           initialValues={initialValues}
           submitting={saving}
-          submitDisabled={blocked}
+          submitDisabled={blocked || changedRow !== null}
           errorMessage={saveError}
           onSubmit={submit}
           onValuesChange={(next) => {
@@ -379,6 +396,29 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
             ) : null
           }
         />
+        {changedRow && (
+          <div
+            role="alert"
+            className="mt-3 flex flex-wrap items-center gap-3 rounded-md border border-amber-900 bg-amber-950/30 px-3 py-2 text-sm text-amber-200"
+          >
+            <p className="min-w-0 flex-1 [overflow-wrap:anywhere]">
+              This task type was changed elsewhere. Reload to see the current version; your unsaved
+              changes here are discarded.
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                applyRow(changedRow);
+                void refreshAvailability(changedRow.slug);
+                headingRef.current?.focus();
+              }}
+            >
+              Reload
+            </Button>
+          </div>
+        )}
         {saved && <p className="mt-3 text-xs text-emerald-400">Saved.</p>}
         {refreshError && (
           <p className="mt-1 text-xs text-amber-300">

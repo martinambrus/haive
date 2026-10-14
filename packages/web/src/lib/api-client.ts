@@ -2489,8 +2489,17 @@ export const getTaskTypeCatalog = () => api.get<TaskTypeCatalog>('/admin/task-ty
 export const createTaskType = (body: CustomTaskTypeCreate) =>
   api.post<{ taskType: AdminTaskType }>('/admin/task-types', body);
 
-export const updateTaskType = (slug: string, body: TaskTypeUpdate) =>
-  api.patch<{ taskType: AdminTaskType }>(`/admin/task-types/${encodeURIComponent(slug)}`, body);
+/** `expectedUpdatedAt` is the row's `updatedAt` as the editor read it; the api refuses a stale edit. */
+export const updateTaskType = (
+  slug: string,
+  body: TaskTypeUpdate & { expectedUpdatedAt?: string },
+) => api.patch<{ taskType: AdminTaskType }>(`/admin/task-types/${encodeURIComponent(slug)}`, body);
+
+/** The current row carried by the 409 `task_type_changed` that refuses a stale `updateTaskType`. */
+export function changedTaskType(err: ApiError): AdminTaskType | null {
+  const taskType = (err.body as { taskType?: unknown } | undefined)?.taskType;
+  return err.code === 'task_type_changed' && taskType ? (taskType as AdminTaskType) : null;
+}
 
 export const deleteTaskType = (slug: string) =>
   api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);

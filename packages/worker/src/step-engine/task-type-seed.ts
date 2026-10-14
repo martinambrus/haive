@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { and, eq, inArray, notInArray } from 'drizzle-orm';
+import { and, eq, inArray, notInArray, or, sql, type AnyColumn } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { REPO_OPTIONAL_BUILTIN_TASK_TYPES, logger } from '@haive/shared';
 import {
@@ -46,6 +46,10 @@ const DYNAMIC_STRATEGIES: Record<string, RunListStrategy> = {
   run_app: 'run_app_modes',
 };
 const SELECTABLE_SLUGS = ['onboarding', 'workflow', 'onboarding_upgrade', 'run_app'];
+
+// An unchanged row is not rewritten, so updated_at stays the version an editor read.
+const changesAnyOf = (...columns: AnyColumn[]) =>
+  or(...columns.map((c) => sql`${c} is distinct from excluded.${sql.identifier(c.name)}`));
 
 const contentHashOf = (runListStrategy: RunListStrategy, stepIds: string[] | null): string =>
   createHash('sha256')
@@ -145,7 +149,19 @@ async function seedModuleTaskTypes(
           contentHash: row.contentHash,
           updatedAt: now,
         },
-        setWhere: eq(schema.taskTypeDefinitions.source, source),
+        setWhere: and(
+          eq(schema.taskTypeDefinitions.source, source),
+          changesAnyOf(
+            schema.taskTypeDefinitions.runListStrategy,
+            schema.taskTypeDefinitions.stepIds,
+            schema.taskTypeDefinitions.description,
+            schema.taskTypeDefinitions.preAnswerDefaults,
+            schema.taskTypeDefinitions.stepLoopLimitDefaults,
+            schema.taskTypeDefinitions.selectable,
+            schema.taskTypeDefinitions.requiresRepository,
+            schema.taskTypeDefinitions.contentHash,
+          ),
+        ),
       });
   }
 
@@ -216,7 +232,16 @@ export async function syncTaskTypeDefinitions(
             requiresRepository: row.requiresRepository,
             updatedAt: now,
           },
-          setWhere: eq(schema.taskTypeDefinitions.source, 'builtin'),
+          setWhere: and(
+            eq(schema.taskTypeDefinitions.source, 'builtin'),
+            changesAnyOf(
+              schema.taskTypeDefinitions.runListStrategy,
+              schema.taskTypeDefinitions.stepIds,
+              schema.taskTypeDefinitions.contentHash,
+              schema.taskTypeDefinitions.selectable,
+              schema.taskTypeDefinitions.requiresRepository,
+            ),
+          ),
         });
     }
 
