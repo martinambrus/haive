@@ -54,7 +54,7 @@ import {
   loadPlanSkeletons,
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
-import { loadStepFlags } from '../../lib/step-flags.js';
+import { loadStepFlags, withTaskCustomSteps } from '../../lib/step-flags.js';
 import {
   liveOnboardingMessage,
   liveOnboardingTaskId,
@@ -261,6 +261,8 @@ taskRoutes.get('/', async (c) => {
   const effectiveVoteScore = sql`case when ${schema.tasks.status} in ('completed', 'cancelled', 'failed') then 0 else ${schema.tasks.voteScore} end`;
   const rows = await db.query.tasks.findMany({
     where,
+    // A task's pinned prompt steps can run to many KiB; no list reader needs them.
+    columns: { customSteps: false },
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
@@ -657,7 +659,7 @@ taskRoutes.post('/', async (c) => {
         'The task type changed while this task was being created; try again',
       );
     }
-    const { runListSnapshot, preAnswers, stepLoopLimits, simplifyCode } = locked;
+    const { runListSnapshot, customSteps, preAnswers, stepLoopLimits, simplifyCode } = locked;
     return await handle
       .insert(schema.tasks)
       .values({
@@ -696,6 +698,7 @@ taskRoutes.post('/', async (c) => {
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
         estimatedTimeHours: body.estimatedTimeHours ?? null,
         runListSnapshot,
+        customSteps,
         status: 'created',
       })
       .returning();
@@ -993,7 +996,7 @@ taskRoutes.get('/:id', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
-  const flags = await loadStepFlags(db);
+  const flags = withTaskCustomSteps(await loadStepFlags(db), task);
   const enriched = await enrichStepsWithCliPreferences(
     db,
     flags,
@@ -1032,8 +1035,10 @@ taskRoutes.get('/:id', async (c) => {
   });
   const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
   const typeLabels = await loadTaskTypeLabels(db, [task.type]);
+  // The pinned prompt steps fed the step flags above; the page never reads them, so they stay off the poll.
+  const { customSteps: _pinned, ...taskFields } = task;
   const taskWithActive = {
-    ...task,
+    ...taskFields,
     typeLabel: typeLabels.get(task.type) ?? null,
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,

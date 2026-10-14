@@ -569,7 +569,9 @@ globalKbRoutes.post('/enrich', async (c) => {
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
-  const { runListSnapshot } = await definitionForCreate(db, 'kb_author', { generic: false });
+  const { runListSnapshot, customSteps } = await definitionForCreate(db, 'kb_author', {
+    generic: false,
+  });
 
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
     const [row] = await gdb
@@ -624,6 +626,7 @@ globalKbRoutes.post('/enrich', async (c) => {
       },
       autoContinue: true,
       runListSnapshot,
+      customSteps,
       status: 'created',
     })
     .returning();

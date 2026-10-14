@@ -15,7 +15,13 @@ import {
 } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
-import { acceptsSavedDatabase, restoresDatabase } from '../lib/task-type-definition.js';
+import {
+  acceptsSavedDatabase,
+  checkPromptSteps,
+  mergePromptStepCatalog,
+  parsePromptSteps,
+  restoresDatabase,
+} from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -73,10 +79,11 @@ function availabilityOf(
   switches: Awaited<ReturnType<typeof readSwitches>>,
   catalog: Catalog,
 ) {
+  const own = mergePromptStepCatalog(catalog, row);
   return resolveTaskTypeAvailability({
     definition: row,
     switches,
-    catalog: catalog.synced ? { stepIds: catalog.stepIds, composable: catalog.composable } : null,
+    catalog: own.synced ? { stepIds: own.stepIds, composable: own.composable } : null,
     generic: true,
   });
 }
@@ -117,7 +124,8 @@ function editableFieldsOf(row: DefinitionRow): string[] {
 function dispatchesCliOf(row: DefinitionRow, catalog: Catalog): boolean {
   // Unsynced, the catalog cannot rule an agent out, so the form keeps its CLI pickers.
   if (!catalog.synced || row.runListStrategy !== 'static' || row.stepIds === null) return true;
-  return row.stepIds.some((id) => catalog.dispatchesCli.has(id));
+  const { dispatchesCli } = mergePromptStepCatalog(catalog, row);
+  return row.stepIds.some((id) => dispatchesCli.has(id));
 }
 
 export const adminTaskTypeRoutes = new Hono<AppEnv>();
@@ -171,7 +179,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
   const [catalog, switches] = await Promise.all([loadCatalog(db), readSwitches()]);
   const compositionIssues =
     row.source === 'admin' && catalog.synced
-      ? validateComposition(row.stepIds ?? [], catalog.composable, {
+      ? validateComposition(row.stepIds ?? [], mergePromptStepCatalog(catalog, row).composable, {
           requiresRepository: row.requiresRepository,
         })
       : [];
@@ -193,11 +201,22 @@ adminTaskTypeRoutes.post('/', async (c) => {
   if (await findDefinition(db, body.slug)) throw new HttpError(409, 'That slug is already taken');
   const catalog = await loadCatalog(db);
   requireSynced(catalog);
-  const issues = validateComposition(body.stepIds, catalog.composable, {
+  const promptSteps = body.promptSteps ?? {};
+  const promptIssues = checkPromptSteps(body, promptSteps);
+  if (promptIssues.length > 0) {
+    return c.json({ error: 'Invalid prompt steps', issues: promptIssues }, 400);
+  }
+  const { composable } = mergePromptStepCatalog(catalog, {
+    slug: body.slug,
+    source: 'admin',
+    requiresRepository: body.requiresRepository,
+    promptSteps,
+  });
+  const issues = validateComposition(body.stepIds, composable, {
     requiresRepository: body.requiresRepository,
   });
   if (issues.length > 0) return c.json({ error: 'Invalid step composition', issues }, 400);
-  const defaultIssues = validateTaskTypeDefaults(body, catalog.composable);
+  const defaultIssues = validateTaskTypeDefaults(body, composable);
   if (defaultIssues.length > 0) {
     return c.json({ error: 'Invalid defaults', issues: defaultIssues }, 400);
   }
@@ -211,6 +230,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
       stepIds: body.stepIds,
       preAnswerDefaults: body.preAnswerDefaults ?? {},
       stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
+      promptSteps,
       fixLoop: null,
       enabled: body.enabled ?? true,
       selectable: body.selectable ?? true,
@@ -252,16 +272,37 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
     if (
       body.stepIds !== undefined ||
       body.requiresRepository !== undefined ||
+      body.promptSteps !== undefined ||
       body.preAnswerDefaults !== undefined ||
       body.stepLoopLimitDefaults !== undefined
     ) {
       const catalog = await loadCatalog(db);
       requireSynced(catalog);
       const stepIds = body.stepIds ?? row.stepIds ?? [];
-      if (body.stepIds !== undefined || body.requiresRepository !== undefined) {
-        const issues = validateComposition(stepIds, catalog.composable, {
-          requiresRepository: body.requiresRepository ?? row.requiresRepository,
-        });
+      const requiresRepository = body.requiresRepository ?? row.requiresRepository;
+      const promptSteps = body.promptSteps ?? parsePromptSteps(row.promptSteps);
+      if (
+        body.stepIds !== undefined ||
+        body.requiresRepository !== undefined ||
+        body.promptSteps !== undefined
+      ) {
+        const promptIssues = checkPromptSteps({ slug, stepIds, requiresRepository }, promptSteps);
+        if (promptIssues.length > 0) {
+          return { invalid: { error: 'Invalid prompt steps', issues: promptIssues } } as const;
+        }
+      }
+      const { composable } = mergePromptStepCatalog(catalog, {
+        slug,
+        source: row.source,
+        requiresRepository,
+        promptSteps,
+      });
+      if (
+        body.stepIds !== undefined ||
+        body.requiresRepository !== undefined ||
+        body.promptSteps !== undefined
+      ) {
+        const issues = validateComposition(stepIds, composable, { requiresRepository });
         if (issues.length > 0) {
           return { invalid: { error: 'Invalid step composition', issues } } as const;
         }
@@ -272,7 +313,7 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
           preAnswerDefaults: body.preAnswerDefaults ?? row.preAnswerDefaults,
           stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? row.stepLoopLimitDefaults,
         },
-        catalog.composable,
+        composable,
       );
       if (defaultIssues.length > 0) {
         return { invalid: { error: 'Invalid defaults', issues: defaultIssues } } as const;

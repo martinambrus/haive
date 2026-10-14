@@ -10,6 +10,7 @@ import {
 } from './contracts.js';
 
 export const PROMPT_STEP_TEMPLATE_MAX_BYTES = 16 * 1024;
+export const PROMPT_STEP_TITLE_MAX_LENGTH = 512;
 export const PROMPT_STEP_TIMEOUT_MIN_MS = 60_000;
 export const PROMPT_STEP_TIMEOUT_MAX_MS = 30 * 60_000;
 export const PROMPT_STEP_CAPABILITIES = ['tool_use', 'file_write', 'vision'] as const;
@@ -27,7 +28,7 @@ const utf8Bytes = (text: string): number => new TextEncoder().encode(text).lengt
 
 export const promptStepEntrySchema = z.object({
   slug: z.string().refine((slug) => isCustomStepId(`custom.t.${slug}`), 'invalid step slug'),
-  title: z.string().min(1),
+  title: z.string().min(1).max(PROMPT_STEP_TITLE_MAX_LENGTH),
   description: z.string().optional(),
   template: z
     .string()
@@ -210,6 +211,7 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'capability-not-allowed',
   'persona-without-repository',
   'file-write-without-repository',
+  'step-id-too-long',
   'step-token-not-earlier',
   'step-token-not-own-line',
 ] as const;
@@ -222,7 +224,10 @@ export interface PromptStepProblem extends PromptTemplateProblem {
 export type PromptStepValidationInput = Pick<
   PromptStepEntry,
   'template' | 'paramFormSchema' | 'timeoutMs'
-> & { capabilities: readonly string[] };
+> & { capabilities: readonly string[]; slug?: string };
+
+/** The width of every step_id column a custom step id is stored in (task_steps, task_step_cli_choices). */
+export const STEP_ID_MAX_LENGTH = 128;
 
 export interface PromptStepValidationContext {
   typeSlug: string;
@@ -326,6 +331,15 @@ export function validatePromptStep(
         `The capability ${capability} is not allowed on a prompt step.`,
       );
     }
+  }
+  if (
+    entry.slug !== undefined &&
+    promptStepId(ctx.typeSlug, entry.slug).length > STEP_ID_MAX_LENGTH
+  ) {
+    add(
+      'step-id-too-long',
+      `The step id ${promptStepId(ctx.typeSlug, entry.slug)} is longer than ${STEP_ID_MAX_LENGTH} characters; use a shorter slug.`,
+    );
   }
   if (!ctx.requiresRepository && entry.capabilities.includes('file_write')) {
     add(

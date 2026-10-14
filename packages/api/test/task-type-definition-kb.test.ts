@@ -4,7 +4,13 @@ const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   gdb: undefined as unknown,
-  definition: vi.fn(async (..._args: unknown[]) => ({ runListSnapshot: ['01-enrich'] }) as unknown),
+  definition: vi.fn(
+    async (..._args: unknown[]) =>
+      ({
+        runListSnapshot: ['01-enrich'],
+        customSteps: { 'custom.t.s': { slug: 's', title: 'S' } },
+      }) as unknown,
+  ),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -75,7 +81,10 @@ describe('POST /enrich pins the kb_author step list', () => {
   it('writes the helper snapshot into the task row', async () => {
     expect((await enrich()).status).toBe(201);
     expect(h.definition).toHaveBeenCalledWith(fake.db, 'kb_author', { generic: false });
-    expect(fake.rows(schema.tasks)[0]).toMatchObject({ runListSnapshot: ['01-enrich'] });
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({
+      runListSnapshot: ['01-enrich'],
+      customSteps: { 'custom.t.s': { slug: 's', title: 'S' } },
+    });
   });
 
   it('creates neither the entry nor the task when the type is refused', async () => {

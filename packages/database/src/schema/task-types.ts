@@ -42,4 +42,6 @@ export const taskTypeDefinitions = pgTable('task_type_definitions', {
   contentHash: varchar('content_hash', { length: 64 }),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  /** Step slug to prompt step entry. Only an admin row carries any. Migration 0200. */
+  promptSteps: jsonb('prompt_steps').$type<Record<string, unknown>>().notNull().default({}),
 });

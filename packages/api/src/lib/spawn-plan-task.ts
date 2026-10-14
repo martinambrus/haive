@@ -34,7 +34,9 @@ export async function spawnPlanTask(args: {
   enqueue?: boolean;
 }): Promise<string> {
   const db = args.db ?? getDb();
-  const { runListSnapshot } = await definitionForCreate(db, args.type, { generic: false });
+  const { runListSnapshot, customSteps } = await definitionForCreate(db, args.type, {
+    generic: false,
+  });
   const [task] = await db
     .insert(schema.tasks)
     .values({
@@ -48,6 +50,7 @@ export async function spawnPlanTask(args: {
       metadata: args.metadata,
       autoContinue: true,
       runListSnapshot,
+      customSteps,
       status: 'created',
     })
     .returning();

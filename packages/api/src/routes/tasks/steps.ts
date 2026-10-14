@@ -51,7 +51,7 @@ import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
-import { loadStepFlags } from '../../lib/step-flags.js';
+import { loadStepFlags, withTaskCustomSteps } from '../../lib/step-flags.js';
 import {
   appendTaskEvent,
   enrichStepsWithActiveRole,
@@ -421,7 +421,14 @@ stepRoutes.get('/:id/steps', async (c) => {
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, ignoreSavedStepClis: true },
+    columns: {
+      id: true,
+      ignoreSavedStepClis: true,
+      type: true,
+      repositoryId: true,
+      runListSnapshot: true,
+      customSteps: true,
+    },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   const stepRows = await db
@@ -441,7 +448,7 @@ stepRoutes.get('/:id/steps', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
-  const flags = await loadStepFlags(db);
+  const flags = withTaskCustomSteps(await loadStepFlags(db), task);
   const enriched = await enrichStepsWithCliPreferences(
     db,
     flags,
@@ -1369,7 +1376,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // Skip is disabled across the workflow except on the steps that opt in
     // (metadata.allowSkip), plus 01-worktree-setup where the run list allows it (skip = run from
     // the project root instead of an isolated worktree/branch).
-    if (!isStepSkippable(await loadStepFlags(db), stepId, task)) {
+    if (!isStepSkippable(withTaskCustomSteps(await loadStepFlags(db), task), stepId, task)) {
       throw new HttpError(409, 'This step cannot be skipped');
     }
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
@@ -1622,6 +1629,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     columns: {
       id: true,
       status: true,
+      type: true,
+      repositoryId: true,
+      runListSnapshot: true,
+      customSteps: true,
       // stamped on the re-advance below so a later task retry can invalidate it
       orchestrationEpoch: true,
     },
@@ -1680,7 +1691,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   // there is nothing here to reset and no job to re-drive. Gated on the dispatch catalog
   // so an unknown step id still 404s rather than accumulating choices nothing reads.
   if (!step) {
-    if ((await loadStepFlags(db)).get(stepId)?.dispatchesStepCli !== true) {
+    if (
+      withTaskCustomSteps(await loadStepFlags(db), task).get(stepId)?.dispatchesStepCli !== true
+    ) {
       throw new HttpError(404, 'Step not found');
     }
     await writeStepCliChoice(db, choice);

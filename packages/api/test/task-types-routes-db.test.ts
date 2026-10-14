@@ -546,6 +546,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       'displayName',
       'enabled',
       'preAnswerDefaults',
+      'promptSteps',
       'requiresRepository',
       'selectable',
       'sortOrder',
@@ -737,6 +738,238 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         available: false,
         reason: 'missing-step',
       });
+    });
+  });
+
+  describe('prompt steps', () => {
+    const step = (slug: string, over: Record<string, unknown> = {}) => ({
+      slug,
+      title: `Step ${slug}`,
+      template: 'Review {{task.title}}',
+      timeoutMs: 300_000,
+      ...over,
+    });
+    const CUSTOM_ID = 'custom.tt-ps.review';
+    const withStep = (over: Record<string, unknown> = {}) =>
+      valid('tt-ps', {
+        stepIds: ['ta-a', CUSTOM_ID],
+        promptSteps: { review: step('review') },
+        ...over,
+      });
+    const issues = async (res: Response) =>
+      ((await res.json()) as { issues: { kind: string; stepId?: string }[] }).issues;
+
+    it('stores a valid prompt step with its type and reads the type as available', async () => {
+      const res = await send('POST', '/admin/task-types', withStep());
+      expect(res.status).toBe(201);
+      expect((await row('tt-ps'))?.promptSteps).toEqual({
+        review: { ...step('review'), capabilities: [] },
+      });
+      h.flags.set(CUSTOM_KEY, true);
+      const detail = (await (await send('GET', '/admin/task-types/tt-ps')).json()) as {
+        availability: { available: boolean };
+        compositionIssues: unknown[];
+      };
+      expect(detail.availability).toEqual({ available: true });
+      expect(detail.compositionIssues).toEqual([]);
+      const list = (await (await send('GET', '/admin/task-types')).json()) as {
+        taskTypes: { slug: string; availability: { available: boolean } }[];
+      };
+      expect(list.taskTypes.find((t) => t.slug === 'tt-ps')?.availability.available).toBe(true);
+      h.role = 'user';
+      const pub = (await (await send('GET', '/task-types')).json()) as {
+        taskTypes: { slug: string; available: boolean; dispatchesCli: boolean }[];
+      };
+      expect(pub.taskTypes.find((t) => t.slug === 'tt-ps')).toMatchObject({
+        available: true,
+        dispatchesCli: true,
+      });
+    });
+
+    it('lets a step name an earlier step and refuses a later one', async () => {
+      const ok = await send(
+        'POST',
+        '/admin/task-types',
+        withStep({ promptSteps: { review: step('review', { template: 'Use\n{{step:ta-a}}\n' }) } }),
+      );
+      expect(ok.status).toBe(201);
+      const late = await send(
+        'POST',
+        '/admin/task-types',
+        withStep({
+          slug: 'tt-ps2',
+          stepIds: [CUSTOM_ID.replace('tt-ps', 'tt-ps2'), 'ta-a'],
+          promptSteps: { review: step('review', { template: 'Use\n{{step:ta-a}}\n' }) },
+        }),
+      );
+      expect(late.status).toBe(400);
+      expect((await issues(late)).map((i) => i.kind)).toContain('step-token-not-earlier');
+    });
+
+    it.each([
+      ['unknown-token', { template: 'Say {{nope}}' }, {}],
+      ['field-not-declared', { template: 'Say {{field:topic}}' }, {}],
+      ['reserved-marker-in-template', { template: 'Say [[HAIVE_X]]' }, {}],
+      ['integration-token', { template: 'Say {{integration:x}}' }, {}],
+      ['step-token-not-own-line', { template: 'Say {{step:ta-a}} now' }, {}],
+      ['persona-id-invalid', { template: 'Be {{agent:Bad_Id}}' }, {}],
+      ['persona-without-repository', { template: 'Be {{agent:reviewer}}' }, { repo: false }],
+      [
+        'file-write-without-repository',
+        { template: 'Do it', capabilities: ['file_write'] },
+        { repo: false },
+      ],
+    ])('refuses %s with a 400 naming it, storing nothing', async (kind, over, opts) => {
+      const res = await send(
+        'POST',
+        '/admin/task-types',
+        withStep({
+          requiresRepository: (opts as { repo?: boolean }).repo ?? true,
+          promptSteps: { review: step('review', over) },
+        }),
+      );
+      expect(res.status).toBe(400);
+      const found = await issues(res);
+      expect(found.map((i) => i.kind)).toContain(kind);
+      expect(found.find((i) => i.kind === kind)?.stepId).toBe(CUSTOM_ID);
+      expect(await row('tt-ps')).toBeUndefined();
+    });
+
+    it('refuses a step the schema bounds, and an entry keyed by another slug', async () => {
+      for (const promptSteps of [
+        { review: step('review', { timeoutMs: 5 }) },
+        { review: step('review', { template: '' }) },
+        { other: step('review') },
+      ]) {
+        const res = await send('POST', '/admin/task-types', withStep({ promptSteps }));
+        expect(res.status).toBe(400);
+      }
+      expect(await row('tt-ps')).toBeUndefined();
+    });
+
+    it('refuses an entry the step list never uses', async () => {
+      const res = await send(
+        'POST',
+        '/admin/task-types',
+        withStep({
+          stepIds: ['ta-a'],
+          promptSteps: { review: step('review') },
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect(await issues(res)).toEqual([
+        expect.objectContaining({ kind: 'prompt-step-orphan', stepId: CUSTOM_ID }),
+      ]);
+      expect(await row('tt-ps')).toBeUndefined();
+    });
+
+    it('refuses a custom id that has no entry, or belongs to another type', async () => {
+      for (const stepIds of [
+        ['ta-a', CUSTOM_ID],
+        ['ta-a', CUSTOM_ID, 'custom.tt-ps.second'],
+        ['ta-a', 'custom.other.review'],
+      ]) {
+        const res = await send(
+          'POST',
+          '/admin/task-types',
+          withStep({
+            stepIds,
+            promptSteps: stepIds.length === 3 ? { review: step('review') } : {},
+          }),
+        );
+        expect(res.status).toBe(400);
+        expect((await issues(res)).map((i) => i.kind)).toContain('prompt-step-missing');
+      }
+      expect(await row('tt-ps')).toBeUndefined();
+    });
+
+    it('keeps a type with no prompt steps exactly as it was', async () => {
+      expect((await send('POST', '/admin/task-types', valid('tt-plain'))).status).toBe(201);
+      expect((await row('tt-plain'))?.promptSteps).toEqual({});
+    });
+
+    it('edits a template, and revalidates it against the type as edited', async () => {
+      await send('POST', '/admin/task-types', withStep());
+      const ok = await send('PATCH', '/admin/task-types/tt-ps', {
+        promptSteps: { review: step('review', { template: 'New {{task.description}}' }) },
+      });
+      expect(ok.status).toBe(200);
+      expect(
+        ((await row('tt-ps'))?.promptSteps as { review: { template: string } }).review.template,
+      ).toBe('New {{task.description}}');
+
+      const bad = await send('PATCH', '/admin/task-types/tt-ps', {
+        promptSteps: { review: step('review', { template: '{{nope}}' }) },
+      });
+      expect(bad.status).toBe(400);
+      expect((await issues(bad)).map((i) => i.kind)).toContain('unknown-token');
+
+      await send('PATCH', '/admin/task-types/tt-ps', {
+        promptSteps: { review: step('review', { template: 'Be {{agent:reviewer}}' }) },
+      });
+      const norepo = await send('PATCH', '/admin/task-types/tt-ps', { requiresRepository: false });
+      expect(norepo.status).toBe(400);
+      expect((await issues(norepo)).map((i) => i.kind)).toContain('persona-without-repository');
+      expect((await row('tt-ps'))?.requiresRepository).toBe(true);
+    });
+
+    it('refuses a step list edit that orphans an entry or names an entry-less id', async () => {
+      await send('POST', '/admin/task-types', withStep());
+      const orphan = await send('PATCH', '/admin/task-types/tt-ps', { stepIds: ['ta-a'] });
+      expect(orphan.status).toBe(400);
+      expect((await issues(orphan)).map((i) => i.kind)).toEqual(['prompt-step-orphan']);
+      const missing = await send('PATCH', '/admin/task-types/tt-ps', {
+        stepIds: ['ta-a', CUSTOM_ID, 'custom.tt-ps.second'],
+      });
+      expect(missing.status).toBe(400);
+      expect((await issues(missing)).map((i) => i.kind)).toEqual(['prompt-step-missing']);
+      const both = await send('PATCH', '/admin/task-types/tt-ps', {
+        stepIds: ['ta-a', 'custom.tt-ps.second'],
+        promptSteps: { second: step('second') },
+      });
+      expect(both.status).toBe(200);
+      expect((await row('tt-ps'))?.stepIds).toEqual(['ta-a', 'custom.tt-ps.second']);
+    });
+
+    it('lets a step be removed together with its entry', async () => {
+      await send('POST', '/admin/task-types', withStep());
+      const res = await send('PATCH', '/admin/task-types/tt-ps', {
+        stepIds: ['ta-a'],
+        promptSteps: {},
+      });
+      expect(res.status).toBe(200);
+      expect((await row('tt-ps'))?.promptSteps).toEqual({});
+    });
+
+    it('takes prompt steps on a custom row only', async () => {
+      const body = { promptSteps: { review: step('review') } };
+      const builtinRes = await send('PATCH', '/admin/task-types/workflow', body);
+      expect(builtinRes.status).toBe(400);
+      expect(((await builtinRes.json()) as { error: string }).error).toContain(
+        'Cannot change promptSteps',
+      );
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: 'tt-mod',
+        displayName: 'Mod',
+        runListStrategy: 'static',
+        stepIds: ['ta-a'],
+        source: 'module:acme',
+      });
+      expect((await send('PATCH', '/admin/task-types/tt-mod', body)).status).toBe(400);
+      expect((await row('workflow'))?.promptSteps).toEqual({});
+      expect((await row('tt-mod'))?.promptSteps).toEqual({});
+      const list = (await (await send('GET', '/admin/task-types')).json()) as {
+        taskTypes: { slug: string; editableFields: string[] }[];
+      };
+      const editable = (slug: string) =>
+        list.taskTypes.find((t) => t.slug === slug)?.editableFields;
+      expect(editable('workflow')).not.toContain('promptSteps');
+      expect(editable('tt-mod')).not.toContain('promptSteps');
+      await send('POST', '/admin/task-types', valid('tt-adm'));
+      const again = (await (await send('GET', '/admin/task-types/tt-adm')).json()) as {
+        taskType: { editableFields: string[] };
+      };
+      expect(again.taskType.editableFields).toContain('promptSteps');
     });
   });
 });

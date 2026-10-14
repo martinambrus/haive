@@ -8,6 +8,8 @@ import {
 } from '@haive/shared';
 import {
   composableStepEntrySchema,
+  derivePromptStepComposable,
+  promptStepEntrySchema,
   validateComposition,
   type CompositionIssue,
   type ComposableStepEntry,
@@ -98,6 +100,40 @@ export async function loadStepFlags(
   }
   cached = { at: now, flags };
   return flags;
+}
+
+/** The task's flags: the catalog's, plus one entry per prompt step the task pinned at creation.
+ *  A prompt step always dispatches a CLI, cannot be skipped and has no roles. Returns a copy when
+ *  it adds anything, so the cached catalog map is never written to. */
+export function withTaskCustomSteps(
+  flags: StepFlagMap,
+  task: {
+    type: string;
+    repositoryId: string | null;
+    runListSnapshot: readonly string[] | null;
+    customSteps: Record<string, unknown> | null;
+  },
+): StepFlagMap {
+  const entries = Object.entries(task.customSteps ?? {});
+  if (entries.length === 0) return flags;
+  const merged = new Map(flags);
+  for (const [stepId, raw] of entries) {
+    const index = task.runListSnapshot?.indexOf(stepId) ?? -1;
+    const entry = promptStepEntrySchema.safeParse(raw);
+    if (index < 0 || !entry.success) continue;
+    merged.set(stepId, {
+      stepId,
+      title: entry.data.title,
+      workflowType: 'custom',
+      allowSkip: false,
+      dispatchesStepCli: true,
+      providerSensitive: false,
+      cliRoles: null,
+      stepIndex: index,
+      composable: derivePromptStepComposable(entry.data, task.type, task.repositoryId !== null),
+    });
+  }
+  return merged;
 }
 
 function issueKey(issue: CompositionIssue): string {

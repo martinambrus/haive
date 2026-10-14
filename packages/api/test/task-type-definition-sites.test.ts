@@ -5,7 +5,11 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
   definition: vi.fn(
-    async (..._args: unknown[]) => ({ runListSnapshot: ['00-x', '01-y'] }) as unknown,
+    async (..._args: unknown[]) =>
+      ({
+        runListSnapshot: ['00-x', '01-y'],
+        customSteps: { 'custom.t.s': { slug: 's', title: 'S' } },
+      }) as unknown,
   ),
 }));
 
@@ -35,6 +39,7 @@ import type { AppEnv } from '../src/context.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000c1';
 const SNAPSHOT = ['00-x', '01-y'];
+const PINNED = { 'custom.t.s': { slug: 's', title: 'S' } };
 
 const app = new Hono<AppEnv>();
 app.use(async (c, next) => {
@@ -106,7 +111,11 @@ describe('POST /tasks pins the run list', () => {
       expect(res.status).toBe(201);
       expect(h.definition).toHaveBeenCalledWith(expect.anything(), type, { generic: true });
       expect(created()).toHaveLength(1);
-      expect(created()[0]).toMatchObject({ type, runListSnapshot: SNAPSHOT });
+      expect(created()[0]).toMatchObject({
+        type,
+        runListSnapshot: SNAPSHOT,
+        customSteps: PINNED,
+      });
     },
   );
 
@@ -157,7 +166,7 @@ describe('the rollback pins the run list', () => {
     expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'onboarding_upgrade', {
       generic: false,
     });
-    expect(created()[0]).toMatchObject({ runListSnapshot: SNAPSHOT });
+    expect(created()[0]).toMatchObject({ runListSnapshot: SNAPSHOT, customSteps: PINNED });
   });
 });
 
@@ -177,7 +186,11 @@ describe('spawnPlanTask pins the run list', () => {
         enqueue: false,
       });
       expect(h.definition).toHaveBeenCalledWith(fake.db, type, { generic: false });
-      expect(fake.rows(schema.tasks)[0]).toMatchObject({ type, runListSnapshot: SNAPSHOT });
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({
+        type,
+        runListSnapshot: SNAPSHOT,
+        customSteps: PINNED,
+      });
     },
   );
 

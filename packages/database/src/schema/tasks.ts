@@ -445,6 +445,9 @@ export const tasks = pgTable(
     deadAt: timestamp('dead_at'),
     /** Display copy for deadAt, never state. */
     deadReason: text('dead_reason'),
+    /** Step id to the prompt step entry this task was created with: a copy, so a later edit of
+     *  the type never reaches a task already created. Null when the type has none. Migration 0200. */
+    customSteps: jsonb('custom_steps').$type<Record<string, unknown>>(),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),
