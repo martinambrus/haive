@@ -10,7 +10,8 @@ export interface LeaveClick {
   download: boolean;
 }
 
-/** The in-app path the click would load, or null when the browser should handle the click itself. */
+/** The in-app path a click on another page would load, or null when the click stays on this path
+ *  (the editor stays mounted, so nothing is lost) or the browser should handle it. */
 export function leaveDestination(click: LeaveClick, currentHref: string): string | null {
   if (click.defaultPrevented || click.button !== 0) return null;
   if (click.ctrlKey || click.metaKey || click.shiftKey || click.altKey) return null;
@@ -18,7 +19,7 @@ export function leaveDestination(click: LeaveClick, currentHref: string): string
   const here = new URL(currentHref);
   const there = new URL(click.href, here);
   if (there.origin !== here.origin) return null;
-  if (there.pathname === here.pathname && there.search === here.search) return null;
+  if (there.pathname === here.pathname) return null;
   return `${there.pathname}${there.search}${there.hash}`;
 }
 

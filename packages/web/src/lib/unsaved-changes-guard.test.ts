@@ -52,12 +52,14 @@ describe('leaveDestination', () => {
     expect(leaveDestination(click({ href: 'javascript:void(0)' }), HERE)).toBeNull();
   });
 
-  it('does not count a hash on the same page as leaving it', () => {
+  it('does not count a hash or a query on the same page as leaving it', () => {
     expect(leaveDestination(click({ href: `${HERE}#steps` }), HERE)).toBeNull();
     expect(leaveDestination(click({ href: '#steps' }), HERE)).toBeNull();
     expect(leaveDestination(click({ href: HERE }), HERE)).toBeNull();
-    expect(leaveDestination(click({ href: `${HERE}?tab=2` }), HERE)).toBe(
-      '/admin/task-types/spec-check?tab=2',
+    expect(leaveDestination(click({ href: `${HERE}?tab=2` }), HERE)).toBeNull();
+    expect(leaveDestination(click({ href: '?tab=2' }), `${HERE}?tab=1`)).toBeNull();
+    expect(leaveDestination(click({ href: `${HERE}/x?tab=2` }), HERE)).toBe(
+      '/admin/task-types/spec-check/x?tab=2',
     );
   });
 });
@@ -115,6 +117,7 @@ describe('guardLeaving', () => {
       clickEvent(anchor('http://localhost:3000/admin/users'), { ctrlKey: true }),
       clickEvent(anchor('http://localhost:3000/admin/users', { target: '_blank' })),
       clickEvent(anchor(`${HERE}#steps`)),
+      clickEvent(anchor(`${HERE}?tab=2`)),
       clickEvent(anchor('https://example.com/')),
       clickEvent(doc),
     ];
