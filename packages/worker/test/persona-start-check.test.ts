@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Database } from '@haive/database';
-import { CONFIG_KEYS, configService } from '@haive/shared';
+import { CONFIG_KEYS, configService, type CliProviderName } from '@haive/shared';
 import type { PromptStepEntry } from '@haive/shared/modularity';
 import { MAX_PERSONA_BODY_BYTES } from '../src/orchestrator/agent-isolation.js';
 import {
@@ -22,7 +22,8 @@ const stepId = (slug: string) => `custom.t.${slug}`;
 
 interface FakeOpts {
   repositoryId?: string | null;
-  providerName?: string | null;
+  providerName?: CliProviderName | null;
+  providerNames?: Record<string, CliProviderName>;
   repoThrows?: boolean;
 }
 
@@ -41,12 +42,6 @@ function fakeDb(opts: FakeOpts = {}) {
           calls.repositories += 1;
           if (opts.repoThrows) throw new Error('db gone');
           return { secretMaskEnabled: true, secretMaskAllow: null, secretMaskDenyExtend: null };
-        },
-      },
-      cliProviders: {
-        findFirst: async () => {
-          calls.providers += 1;
-          return opts.providerName ? { name: opts.providerName } : undefined;
         },
       },
     },
@@ -73,7 +68,10 @@ async function run(
     taskId: 'task-1',
     repoPath: repo,
     customSteps: steps,
-    cliProviderId: opts.providerName ? 'prov-1' : null,
+    providerNameFor: async (id) => {
+      calls.providers += 1;
+      return opts.providerNames?.[id] ?? opts.providerName ?? null;
+    },
     record: opts.record ?? (async (p) => void events.push(p)),
   });
   return calls;
@@ -168,7 +166,10 @@ describe('start-time check of prompt-step personas', () => {
       taskId: 'task-1',
       repoPath: repo,
       customSteps: undefined,
-      cliProviderId: null,
+      providerNameFor: async () => {
+        calls.providers += 1;
+        return null;
+      },
       record: async (p) => void events.push(p),
     });
     expect(events).toEqual([]);
@@ -235,6 +236,21 @@ describe('start-time check of prompt-step personas', () => {
     events = [];
     await run(one());
     expect(events).toEqual([]);
+  });
+
+  it("looks in each step's own provider directory, not one for the whole task", async () => {
+    await put('.claude/agents/reviewer.md', persona('Claude-held.'));
+    await put('.gemini/agents/reviewer.md', persona('   '));
+    const calls = await run(
+      {
+        [stepId('on-gemini')]: entry('on-gemini', '{{agent:reviewer}}'),
+        [stepId('on-claude')]: entry('on-claude', '{{agent:reviewer}}'),
+      },
+      { providerNames: { [stepId('on-gemini')]: 'gemini', [stepId('on-claude')]: 'claude-code' } },
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]!.stepIds).toEqual([stepId('on-gemini')]);
+    expect(calls.providers).toBe(2);
   });
 
   it('records again when the start runs again (a retry or restart)', async () => {

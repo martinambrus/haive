@@ -67,6 +67,7 @@ import {
   miningTimeoutInfo,
   trailingTimeoutInfo,
   upsertRow,
+  resolvePreferredCli,
   type AdvanceStepResult,
   type WorkerDeps,
 } from '../step-engine/index.js';
@@ -2210,12 +2211,26 @@ async function handleStartTask(
   }
   if (held) held.claimed = true;
   await appendEvent(db, ctx.taskId, null, 'task.running', {});
+  let startProviders: CliProviderRecord[] | undefined;
   await checkPinnedStepPersonas({
     db,
     taskId: ctx.taskId,
     repoPath: ctx.repoPath,
     customSteps: ctx.customSteps,
-    cliProviderId: ctx.cliProviderId,
+    providerNameFor: async (stepId) => {
+      startProviders ??= await loadProviders(db, ctx.userId);
+      const { cliProviderId } = await resolvePreferredCli(
+        db,
+        ctx.userId,
+        stepId,
+        ctx.cliProviderId,
+        startProviders,
+        'default',
+        ctx.taskId,
+        ctx.ignoreSavedStepClis,
+      );
+      return startProviders.find((p) => p.id === cliProviderId)?.name ?? null;
+    },
     record: (unresolved) =>
       appendEvent(db, ctx.taskId, null, AGENT_PERSONA_UNRESOLVED_EVENT, { ...unresolved }),
   });

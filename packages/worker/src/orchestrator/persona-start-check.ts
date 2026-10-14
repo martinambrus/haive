@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { getCliProviderMetadata, logger } from '@haive/shared';
+import { getCliProviderMetadata, logger, type CliProviderName } from '@haive/shared';
 import { isPersonaId, parsePromptTemplate, type PromptStepEntry } from '@haive/shared/modularity';
 import {
   MAX_PERSONA_BODY_BYTES,
@@ -47,7 +47,8 @@ export async function checkPinnedStepPersonas(args: {
   taskId: string;
   repoPath: string;
   customSteps: Record<string, PromptStepEntry> | undefined;
-  cliProviderId: string | null;
+  /** The name of the CLI the step dispatches to, resolved as dispatch resolves it. */
+  providerNameFor: (stepId: string) => Promise<CliProviderName | null>;
   record: (unresolved: UnresolvedPersona) => Promise<void>;
 }): Promise<void> {
   const byStep = personaIdsByStep(args.customSteps);
@@ -64,20 +65,11 @@ export async function checkPinnedStepPersonas(args: {
     const mask = await resolvePersonaMaskPolicy(args.db, args.taskId, args.repoPath);
     if (mask === null) return;
 
-    let providerAgentsDir: string | null = null;
-    if (args.cliProviderId) {
-      const provider = await args.db.query.cliProviders.findFirst({
-        where: eq(schema.cliProviders.id, args.cliProviderId),
-        columns: { name: true },
-      });
-      if (provider) {
-        const metadata = getCliProviderMetadata(provider.name);
-        providerAgentsDir =
-          metadata.agentFileFormat === 'markdown' ? metadata.projectAgentsDir : null;
-      }
-    }
-
     for (const [stepId, ids] of byStep) {
+      const providerName = await args.providerNameFor(stepId);
+      const metadata = providerName ? getCliProviderMetadata(providerName) : null;
+      const providerAgentsDir =
+        metadata?.agentFileFormat === 'markdown' ? metadata.projectAgentsDir : null;
       let remaining = MAX_PERSONA_BODY_BYTES;
       for (const id of ids) {
         const result = await readTemplatePersonas({
