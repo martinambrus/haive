@@ -266,22 +266,23 @@ export async function definitionForCreate(
     }
   }
   const custom = def.source === 'admin';
+  const promptEntries = custom ? Object.values(parsePromptSteps(def.promptSteps)) : [];
+  // Every prompt step dispatches a CLI, which the stored entries prove without a synced catalog.
+  const promptIds = new Set(promptEntries.map((entry) => promptStepId(def.slug, entry.slug)));
   let snapshot = def.runListStrategy === 'static' ? def.stepIds : null;
   if (
     custom &&
     snapshot !== null &&
     !snapshot.includes(MODEL_HEALTH_STEP_ID) &&
-    snapshot.some((id) => catalog?.dispatchesCli.has(id))
+    snapshot.some((id) => promptIds.has(id) || catalog?.dispatchesCli.has(id))
   ) {
     snapshot = [MODEL_HEALTH_STEP_ID, ...snapshot];
   }
   const has = (id: string) => snapshot?.includes(id) === true;
   const customSteps: Record<string, PromptStepEntry> = {};
-  if (custom) {
-    for (const entry of Object.values(parsePromptSteps(def.promptSteps))) {
-      const id = promptStepId(def.slug, entry.slug);
-      if (has(id)) customSteps[id] = entry;
-    }
+  for (const entry of promptEntries) {
+    const id = promptStepId(def.slug, entry.slug);
+    if (has(id)) customSteps[id] = entry;
   }
   return {
     runListSnapshot: snapshot,

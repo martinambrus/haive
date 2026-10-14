@@ -156,6 +156,13 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
     expect(def.customSteps).toEqual({ [CUSTOM_ID]: promptStep('First {{task.title}}') });
   });
 
+  it('puts the model-health step first for a prompt step even before the catalog is synced', async () => {
+    await db.delete(schema.stepCatalog);
+    const { def } = await insertTask();
+    expect(def.runListSnapshot?.[0]).toBe('00-model-health-workflow');
+    expect(def.runListSnapshot).toContain(CUSTOM_ID);
+  });
+
   it('pins nothing for a type without prompt steps', async () => {
     await db.insert(schema.taskTypeDefinitions).values({
       slug: 'tcs-plain',
