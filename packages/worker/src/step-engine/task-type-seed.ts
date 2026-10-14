@@ -4,6 +4,7 @@ import { schema, type Database, type DbTx } from '@haive/database';
 import { REPO_OPTIONAL_BUILTIN_TASK_TYPES, logger } from '@haive/shared';
 import {
   moduleTaskTypeSlug,
+  validateComposition,
   validateTaskTypeDefaults,
   type ComposableStepEntry,
   type ModuleManifest,
@@ -93,22 +94,33 @@ async function seedModuleTaskTypes(
     contentHash: contentHashOf(seed.runListStrategy, seed.stepIds),
   }));
   const invalid = declared
-    .map((row) => ({
-      slug: row.slug,
-      issues: validateTaskTypeDefaults(
-        {
-          stepIds: row.stepIds ?? [],
-          preAnswerDefaults: row.preAnswerDefaults,
-          stepLoopLimitDefaults: row.stepLoopLimitDefaults,
-        },
-        composables,
-      ),
-    }))
+    .map((row) => {
+      const stepIds = row.stepIds ?? [];
+      return {
+        slug: row.slug,
+        issues: [
+          ...validateTaskTypeDefaults(
+            {
+              stepIds,
+              preAnswerDefaults: row.preAnswerDefaults,
+              stepLoopLimitDefaults: row.stepLoopLimitDefaults,
+            },
+            composables,
+          ),
+          // A step with no composable entry is internal: what it requires and provides is unknown.
+          ...(stepIds.every((id) => composables.has(id))
+            ? validateComposition(stepIds, composables, {
+                requiresRepository: row.requiresRepository,
+              })
+            : []),
+        ],
+      };
+    })
     .filter(({ issues }) => issues.length > 0);
   for (const { slug, issues } of invalid) {
     logger.warn(
       { module: manifest.id, slug, issues },
-      'module task type seed skipped: its defaults fail the checks an admin task type gets',
+      'module task type seed skipped: it fails the checks an admin task type gets',
     );
   }
   const rejected = new Set(invalid.map((i) => i.slug));

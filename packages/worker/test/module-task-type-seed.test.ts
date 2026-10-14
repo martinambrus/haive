@@ -33,9 +33,10 @@ const seedOf = (over: Record<string, unknown> = {}) => {
 };
 
 const LOCAL_STEPS = ['report', 'extra', 'plain'];
+const STEP_WITHOUT_ENTRY = 'internal';
 
 function moduleOf(taskTypes: unknown[] | undefined, id = 'fx'): LoadedWorkerModule {
-  const steps = LOCAL_STEPS.map(
+  const steps = [...LOCAL_STEPS, STEP_WITHOUT_ENTRY].map(
     (local) =>
       ({ metadata: { id: local, workflowType: 'x', title: local } }) as unknown as StepDefinition,
   );
@@ -388,17 +389,19 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
     );
 
     it('writes a seed whose loop limit sits on a core step whose loop budget is editable', async () => {
+      const stepIds = ['01-worktree-setup', '07-phase-2-implement', '07b-phase-4-validate'];
       const outcome = await sync(
         moduleOf([
           seedOf({
-            stepIds: ['07b-phase-4-validate'],
+            stepIds,
+            requiresRepository: true,
             stepLoopLimitDefaults: { '07b-phase-4-validate': 2 },
           }),
         ]),
       );
       expect(outcome).toEqual({ fx: { seeded: ['fx__weekly'], conflicts: [] } });
       expect(await one('fx__weekly')).toMatchObject({
-        stepIds: ['07b-phase-4-validate'],
+        stepIds,
         stepLoopLimitDefaults: { '07b-phase-4-validate': 2 },
       });
     });
@@ -423,6 +426,64 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
       expect(await one('fx__weekly')).toEqual(before);
       expect(outcome.fx!.seeded).toEqual([]);
       expect(outcome.fx!.invalid?.map((i) => i.slug)).toEqual(['fx__weekly']);
+    });
+  });
+
+  describe('how the steps of a seed compose', () => {
+    const noDefaults = { preAnswerDefaults: undefined, stepLoopLimitDefaults: undefined };
+    const unmet = (stepId: string, needs: string) =>
+      expect.objectContaining({ kind: 'unmet-need', index: 0, stepId, needs });
+    const broken: [string, Record<string, unknown>, unknown][] = [
+      [
+        'a repository-less run of only the implement step, which needs the worktree',
+        { stepIds: ['07-phase-2-implement'] },
+        unmet('07-phase-2-implement', 'worktree'),
+      ],
+      [
+        'a repository-less run that starts at the worktree step, which needs the repository',
+        { stepIds: ['01-worktree-setup', '07-phase-2-implement'] },
+        unmet('01-worktree-setup', 'repository'),
+      ],
+    ];
+
+    it.each(broken)(
+      'a run list that does not compose is not written but reported and warned about, and a valid seed beside it is written: %s',
+      async (_what, over, issue) => {
+        const warn = vi.spyOn(logger, 'warn');
+
+        const outcome = await sync(
+          moduleOf([seedOf({ slug: 'bad', ...noDefaults, ...over }), seedOf({ slug: 'good' })]),
+        );
+
+        expect(await one('fx__bad')).toBeUndefined();
+        expect(await one('fx__good')).toMatchObject({ source: 'module:fx', selectable: true });
+        expect(outcome).toEqual({
+          fx: {
+            seeded: ['fx__good'],
+            conflicts: [],
+            invalid: [{ slug: 'fx__bad', issues: [issue] }],
+          },
+        });
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ module: 'fx', slug: 'fx__bad', issues: [issue] }),
+          expect.any(String),
+        );
+        warn.mockRestore();
+      },
+    );
+
+    it('a run list that composes is written', async () => {
+      const stepIds = ['04-phase-0b-pre-planning', '05-phase-0b5-spec-quality'];
+      const outcome = await sync(moduleOf([seedOf({ stepIds, ...noDefaults })]));
+      expect(outcome).toEqual({ fx: { seeded: ['fx__weekly'], conflicts: [] } });
+      expect(await one('fx__weekly')).toMatchObject({ stepIds });
+    });
+
+    it('a run list with a step that has no composable entry is not checked', async () => {
+      const stepIds = [`module.fx.${STEP_WITHOUT_ENTRY}`, '07-phase-2-implement'];
+      const outcome = await sync(moduleOf([seedOf({ stepIds, ...noDefaults })]));
+      expect(outcome).toEqual({ fx: { seeded: ['fx__weekly'], conflicts: [] } });
+      expect(await one('fx__weekly')).toMatchObject({ stepIds });
     });
   });
 

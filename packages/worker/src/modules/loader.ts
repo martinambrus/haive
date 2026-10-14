@@ -7,6 +7,7 @@ import {
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   type ComposableStepEntry,
+  type CompositionIssue,
   type ModuleManifest,
   type TaskTypeDefaultsIssue,
 } from '@haive/shared/modularity';
@@ -43,7 +44,7 @@ export type LoadedWorkerModule = {
 export type ModuleTaskTypeOutcome = {
   seeded: string[];
   conflicts: { slug: string; heldBy: string }[];
-  invalid?: { slug: string; issues: TaskTypeDefaultsIssue[] }[];
+  invalid?: { slug: string; issues: (TaskTypeDefaultsIssue | CompositionIssue)[] }[];
 };
 
 const namespaced = (moduleId: string, localId: string) => `module.${moduleId}.${localId}`;
