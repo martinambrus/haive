@@ -593,6 +593,7 @@ export async function syncProjectStateFromCheckout(
           eq(schema.tasks.repositoryId, repositoryId),
           inArray(schema.tasks.type, ['onboarding', 'onboarding_upgrade']),
           inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+          isNull(schema.tasks.deadAt),
         ),
       )
       .limit(1);

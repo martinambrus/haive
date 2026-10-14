@@ -1,5 +1,6 @@
 import type { ErrorHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ZodError } from 'zod';
 import { isUniqueViolationOf, ONE_LIVE_UPGRADE_INDEX } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -9,7 +10,7 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
   if (err instanceof HttpError) {
     return c.json(
       { error: err.message, code: err.code ?? null },
-      err.status as 400 | 401 | 403 | 404 | 409 | 500,
+      err.status as ContentfulStatusCode,
     );
   }
   if (err instanceof HTTPException) {

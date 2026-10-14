@@ -1,7 +1,12 @@
 import Docker from 'dockerode';
-import { TERMINAL_IDLE_GRACE_MS, TERMINAL_SESSION_PREFIX, logger } from '@haive/shared';
+import {
+  DEFAULT_GIT_CRED_TOKEN_TTL_SECONDS,
+  TERMINAL_IDLE_GRACE_MS,
+  TERMINAL_SESSION_PREFIX,
+  logger,
+} from '@haive/shared';
 import type { Redis } from 'ioredis';
-import { removeShellContainer } from '../terminal/terminal-container.js';
+import { refreshGitCredentialToken, removeShellContainer } from '../terminal/terminal-container.js';
 
 const log = logger.child({ module: 'terminal-session-reaper' });
 
@@ -10,6 +15,10 @@ const log = logger.child({ module: 'terminal-session-reaper' });
  *  reaping (so worst-case ~2.5 min). Aggressive enough to keep WSL's
  *  container ceiling clear, lazy enough to avoid burning cycles. */
 const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
+
+const GIT_CRED_REFRESH_AFTER_MS = (DEFAULT_GIT_CRED_TOKEN_TTL_SECONDS * 1000) / 2;
+// A docker exec that never answers must not hold the sweep, which also reaps idle shells.
+const GIT_CRED_REFRESH_TIMEOUT_MS = 30_000;
 
 export interface TerminalSessionReaperOptions {
   redis: Redis;
@@ -103,8 +112,10 @@ export class TerminalSessionReaper {
     const refcount = Number.parseInt(entry.refcount ?? '0', 10);
     const lastSeenAt = Number.parseInt(entry.lastSeenAt ?? '0', 10);
     const containerName = entry.containerName;
-    if (refcount > 0) return false;
-    if (Date.now() - lastSeenAt < this.graceMs) return false;
+    if (refcount > 0 || Date.now() - lastSeenAt < this.graceMs) {
+      await this.refreshGitCredential(key, entry);
+      return false;
+    }
     if (containerName) {
       await removeShellContainer(this.docker, containerName).catch((err) => {
         log.warn({ err, containerName }, 'remove failed during reap');
@@ -113,6 +124,33 @@ export class TerminalSessionReaper {
     await this.redis.del(key);
     log.info({ key, containerName }, 'reaped idle terminal session');
     return true;
+  }
+
+  /** Re-mints a live repo shell's token once half its TTL is gone; a failure retries next sweep. */
+  private async refreshGitCredential(key: string, entry: Record<string, string>): Promise<void> {
+    const { containerName, scope, scopeId, userId } = entry;
+    const mintedAt = Number.parseInt(entry.gitCredMintedAt ?? '', 10);
+    const secret = process.env.CONFIG_ENCRYPTION_KEY;
+    if (scope !== 'repo' || !containerName || !scopeId || !userId || !secret) return;
+    if (!Number.isFinite(mintedAt) || Date.now() - mintedAt < GIT_CRED_REFRESH_AFTER_MS) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const refreshedAt = await Promise.race([
+        refreshGitCredentialToken(this.docker, containerName, scopeId, userId, secret),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('git credential token refresh timed out')),
+            GIT_CRED_REFRESH_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      await this.redis.hset(key, 'gitCredMintedAt', String(refreshedAt));
+      log.info({ key, containerName }, 'refreshed git credential token');
+    } catch (err) {
+      log.warn({ err, key, containerName }, 'git credential token refresh failed');
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
