@@ -3,7 +3,7 @@ import {
   composableStepEntrySchema,
   PERSONA_ID_PATTERN_SOURCE,
 } from '../src/modularity/contracts.js';
-import type { CustomTool } from '../src/modularity/custom-tools.js';
+import { customToolSchema, type CustomTool } from '../src/modularity/custom-tools.js';
 import {
   rewriteStepTokens,
   PROMPT_STEP_PROBLEM_KINDS,
@@ -11,6 +11,7 @@ import {
   PROMPT_STEP_TIMEOUT_MAX_MS,
   PROMPT_STEP_TIMEOUT_MIN_MS,
   derivePromptStepComposable,
+  parsePinnedCustomSteps,
   parsePromptTemplate,
   promptStepEntrySchema,
   promptStepId,
@@ -21,6 +22,7 @@ import {
   type PromptStepValidationInput,
   type PromptTemplateValues,
 } from '../src/modularity/prompt-steps.js';
+import { parsePromptSteps } from '../src/modularity/task-type-draft.js';
 
 const values = (over: Partial<PromptTemplateValues> = {}): PromptTemplateValues => ({
   fields: {},
@@ -804,5 +806,98 @@ describe('tools on a prompt step', () => {
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tool-url-not-https');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('too-many-tools');
     expect(new Set(PROMPT_STEP_PROBLEM_KINDS).size).toBe(PROMPT_STEP_PROBLEM_KINDS.length);
+  });
+});
+
+describe.each([
+  ['parsePromptSteps', (raw: unknown) => parsePromptSteps({ check: raw }).check],
+  [
+    'parsePinnedCustomSteps',
+    (raw: unknown) => parsePinnedCustomSteps({ 'custom.demo.check': raw })['custom.demo.check'],
+  ],
+])('%s: a bad tool never hides its step', (_name, parse) => {
+  const base = {
+    slug: 'check',
+    title: 'Check',
+    template: 'Do {{task.title}}',
+    timeoutMs: 120_000,
+  };
+  const rawTool = (name: string) => ({
+    name,
+    description: 'Fetches the status.',
+    action: 'http-get',
+    url: 'https://api.example.com/v1/status',
+  });
+  const badTool = (name: string) => ({ ...rawTool(name), description: 'd'.repeat(1025) });
+
+  it('keeps the step with its valid tools and names the invalid one', () => {
+    const parsed = parse({ ...base, tools: [rawTool('good'), badTool('too_long')] });
+    expect(parsed?.tools).toEqual([customToolSchema.parse(rawTool('good'))]);
+    expect(parsed?.invalidTools).toEqual(['too_long']);
+  });
+
+  it('names a nameless bad tool by its position', () => {
+    const { name: _name, ...nameless } = badTool('x');
+    expect(parse({ ...base, tools: [rawTool('good'), nameless] })?.invalidTools).toEqual(['#1']);
+  });
+
+  it('names a tool that is no object, or whose name is no string, by its position', () => {
+    const parsed = parse({
+      ...base,
+      tools: [rawTool('good'), { ...badTool('y'), name: 7 }, null, 'repo_status'],
+    });
+    expect(parsed?.tools).toHaveLength(1);
+    expect(parsed?.invalidTools).toEqual(['#1', '#2', '#3']);
+  });
+
+  it('lists every invalid tool, in order and once per tool, and keeps a step left with none', () => {
+    const parsed = parse({ ...base, tools: [badTool('a'), badTool('b'), badTool('a')] });
+    expect(parsed?.tools).toEqual([]);
+    expect(parsed?.invalidTools).toEqual(['a', 'b', 'a']);
+  });
+
+  it('still drops the step when a field other than the tools fails', () => {
+    for (const over of [{ template: '' }, { title: '' }, { timeoutMs: 5 }, { slug: 'Bad Slug' }]) {
+      expect(parse({ ...base, ...over, tools: [rawTool('good')] }), JSON.stringify(over)).toBe(
+        undefined,
+      );
+      expect(parse({ ...base, ...over, tools: [badTool('bad')] }), JSON.stringify(over)).toBe(
+        undefined,
+      );
+    }
+  });
+
+  it('still drops the step when its tools are no list', () => {
+    for (const tools of ['x', null, {}, 3]) {
+      expect(parse({ ...base, tools }), JSON.stringify(tools)).toBe(undefined);
+    }
+  });
+
+  it('adds no invalidTools key when every tool is valid, and returns what the schema returns', () => {
+    for (const input of [
+      base,
+      { ...base, tools: [] },
+      { ...base, tools: [rawTool('a'), rawTool('b')] },
+    ]) {
+      const parsed = parse(input);
+      expect(parsed).toEqual(promptStepEntrySchema.parse(input));
+      expect(parsed).not.toHaveProperty('invalidTools');
+    }
+  });
+
+  it('keeps the first eight tools and lists the ones past them', () => {
+    const names = Array.from({ length: 9 }, (_, i) => `tool_${i}`);
+    const parsed = parse({ ...base, tools: names.map(rawTool) });
+    expect(parsed?.tools.map((tool) => tool.name)).toEqual(names.slice(0, 8));
+    expect(parsed?.invalidTools).toEqual(['tool_8']);
+  });
+
+  it('derives invalidTools from the tools and takes none from the input', () => {
+    expect(
+      parse({ ...base, tools: [rawTool('good')], invalidTools: ['forged'] }),
+    ).not.toHaveProperty('invalidTools');
+    expect(
+      parse({ ...base, tools: [badTool('bad')], invalidTools: ['forged'] })?.invalidTools,
+    ).toEqual(['bad']);
   });
 });

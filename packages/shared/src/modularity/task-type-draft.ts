@@ -2,10 +2,11 @@ import { validateComposition, type CompositionIssue } from './composition.js';
 import { isCustomStepId, type ComposableStepEntry } from './contracts.js';
 import {
   derivePromptStepComposable,
+  parsePromptStepEntry,
   parsePromptTemplate,
-  promptStepEntrySchema,
   promptStepId,
   validatePromptStep,
+  type ParsedPromptStepEntry,
   type PromptStepEntry,
   type PromptStepProblemKind,
 } from './prompt-steps.js';
@@ -15,13 +16,13 @@ import {
   type TaskTypeDefaultsIssue,
 } from './task-types.js';
 
-/** Stored prompt steps by slug; an entry that no longer parses is left out, so its id reads as a missing step. */
-export function parsePromptSteps(raw: unknown): Record<string, PromptStepEntry> {
-  const out: Record<string, PromptStepEntry> = {};
+/** Stored prompt steps by slug; an entry whose fields other than its tools no longer parse is left out, so its id reads as a missing step. */
+export function parsePromptSteps(raw: unknown): Record<string, ParsedPromptStepEntry> {
+  const out: Record<string, ParsedPromptStepEntry> = {};
   if (typeof raw !== 'object' || raw === null) return out;
   for (const [slug, value] of Object.entries(raw)) {
-    const parsed = promptStepEntrySchema.safeParse(value);
-    if (parsed.success) out[slug] = parsed.data;
+    const parsed = parsePromptStepEntry(value);
+    if (parsed !== null) out[slug] = parsed;
   }
   return out;
 }

@@ -50,15 +50,40 @@ export const promptStepEntrySchema = z.object({
 });
 export type PromptStepEntry = z.infer<typeof promptStepEntrySchema>;
 
-/** A task's pinned prompt steps by id; an entry that does not parse or fit its key is dropped. */
-export function parsePinnedCustomSteps(raw: unknown): Record<string, PromptStepEntry> {
-  const out: Record<string, PromptStepEntry> = {};
+/** What a read of a stored entry returns; `invalidTools` is derived on every read and never stored. */
+export type ParsedPromptStepEntry = PromptStepEntry & { invalidTools?: string[] };
+
+const toolLabel = (tool: unknown, index: number): string => {
+  const name = typeof tool === 'object' && tool !== null ? (tool as { name?: unknown }).name : null;
+  return typeof name === 'string' ? name : `#${index}`;
+};
+
+/** Reads the entry with its tools set aside: a tool that fails (or sits past the eighth) is named in `invalidTools`; any other failure is null. */
+export function parsePromptStepEntry(value: unknown): ParsedPromptStepEntry | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const { tools = [] } = value as { tools?: unknown };
+  if (!Array.isArray(tools)) return null;
+  const head = promptStepEntrySchema.safeParse({ ...value, tools: [] });
+  if (!head.success) return null;
+  const kept: CustomTool[] = [];
+  const invalid: string[] = [];
+  tools.forEach((tool: unknown, index) => {
+    const parsed = index < CUSTOM_TOOLS_MAX_PER_STEP ? customToolSchema.safeParse(tool) : null;
+    if (parsed?.success) kept.push(parsed.data);
+    else invalid.push(toolLabel(tool, index));
+  });
+  return { ...head.data, tools: kept, ...(invalid.length > 0 ? { invalidTools: invalid } : {}) };
+}
+
+/** A task's pinned prompt steps by id; an entry that does not fit its key, or whose fields other than its tools do not parse, is dropped. */
+export function parsePinnedCustomSteps(raw: unknown): Record<string, ParsedPromptStepEntry> {
+  const out: Record<string, ParsedPromptStepEntry> = {};
   if (typeof raw !== 'object' || raw === null) return out;
   for (const [id, value] of Object.entries(raw)) {
     const parsedId = parseStepId(id);
-    const parsed = promptStepEntrySchema.safeParse(value);
-    if (parsedId?.kind === 'custom' && parsed.success && parsed.data.slug === parsedId.stepSlug) {
-      out[id] = parsed.data;
+    const parsed = parsePromptStepEntry(value);
+    if (parsedId?.kind === 'custom' && parsed !== null && parsed.slug === parsedId.stepSlug) {
+      out[id] = parsed;
     }
   }
   return out;
