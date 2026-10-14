@@ -514,10 +514,12 @@ async function restoreFromHead(
     const was = captured.bytes;
     const maxBytes = Math.max(head?.length ?? 0, was?.length ?? 0) + 1;
     if (head !== null && was === null) {
+      const headMode = (await headEntry(repoPath, path))?.startsWith('100755') ? 0o755 : 0o644;
       try {
         await writeFileNoFollow(repoPath, path, head, {
           mode: 'create-exclusive',
           createParents: true,
+          fileMode: headMode,
         });
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'EEXIST') return path;
@@ -581,9 +583,9 @@ export async function setAsideHaiveProjections(
 ): Promise<SetAsideResult> {
   const restored = new Set<string>();
   const kept: KeptFiles = new Map();
-  // A stop after one domain was restored puts that domain's files back, since no move follows.
+  // A stop after anything was captured puts it back, since no move follows; the put-back skips what was not restored.
   const stop = async (result: SetAsideResult): Promise<SetAsideResult> => {
-    if (restored.size > 0) await putBackProjections(db, repositoryId, repoPath, kept);
+    if (kept.size > 0) await putBackProjections(db, repositoryId, repoPath, kept);
     return result;
   };
   let busy = '';
