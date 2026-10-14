@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -106,7 +106,14 @@ maintenanceRoutes.get('/blocking', async (c) => {
   const live = await db
     .select({ taskId: schema.cliInvocations.taskId })
     .from(schema.cliInvocations)
-    .where(and(isNull(schema.cliInvocations.endedAt), isNull(schema.cliInvocations.supersededAt)));
+    // A run the pause held back has no started_at: it is queued, not running.
+    .where(
+      and(
+        isNotNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
   const withLiveCli = new Set(live.map((r) => r.taskId));
 
   return c.json({
