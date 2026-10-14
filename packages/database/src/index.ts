@@ -27,6 +27,7 @@ export {
   hasPgCode,
   isDuplicateDatabase,
   isLockNotAvailable,
+  isRefusedStatement,
   isUniqueViolation,
   isUniqueViolationOf,
   isUndefinedTable,
