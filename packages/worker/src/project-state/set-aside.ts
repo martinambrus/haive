@@ -795,7 +795,7 @@ export async function putBackProjections(
     await lockProjectState(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
     // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
-    for (const [path, { bytes, index }] of kept) {
+    for (const [path, { bytes, index, mode }] of kept) {
       await putBackIndex(repoPath, path, index);
       if (bytes === undefined) continue;
       const head = await readBlob(repoPath, `HEAD:${path}`);
@@ -806,6 +806,7 @@ export async function putBackProjections(
           await writeFileNoFollow(repoPath, path, bytes, {
             mode: 'create-exclusive',
             createParents: true,
+            fileMode: mode,
           });
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
@@ -849,6 +850,29 @@ export async function putBackAfterFailure(
     );
   }
   throw err;
+}
+
+/** A throw around the move: while HEAD is still `before` the files go back as the set-aside found them;
+ *  once the move landed, the old bytes would hide the incoming change, so the re-sync brings them over. */
+export async function recoverAfterMoveFailure(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+  kept: KeptFiles,
+  before: string,
+  err: unknown,
+): Promise<never> {
+  const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
+  if (head.code === 0 && head.stdout.trim() !== before) {
+    await resyncHaiveProjections(db, repositoryId, repoPath).catch((resyncErr: unknown) =>
+      logger.error(
+        { err: resyncErr, repositoryId },
+        'projections not re-synced after a failed move',
+      ),
+    );
+    throw err;
+  }
+  return putBackAfterFailure(db, repositoryId, repoPath, kept, err);
 }
 
 /** A path's index entry as `mode sha`, or null when nothing is staged there. */

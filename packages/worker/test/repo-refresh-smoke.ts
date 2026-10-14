@@ -31,6 +31,7 @@ import { initDatabase, getDb } from '../src/db.js';
 import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
 import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
 import {
+  putBackProjections,
   restoreFaults,
   restoreProjectionsInTx,
   resyncHaiveProjections,
@@ -1911,6 +1912,29 @@ async function main(): Promise<void> {
           asideM4.file === PLAN_REL &&
           m4Mode === 0o755,
         { m4Tracked, asideM4, m4Mode: m4Mode.toString(8) },
+      );
+
+      // M5. An untracked plan.json at a non-executable mode other than 0644 is put back at that mode.
+      const m5 = await cloned();
+      const m5Id = m5.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: m5Id, origin: 'user' },
+      );
+      await writePlanMirror(db, m5Id, m5.dest);
+      const m5Plan = path.join(m5.dest, PLAN_REL);
+      await chmod(m5Plan, 0o600);
+      const asideM5 = await setAsideHaiveProjections(db, m5Id, m5.dest);
+      const m5Gone = (await stat(m5Plan).catch(() => null)) === null;
+      if (asideM5.outcome === 'set-aside') {
+        await putBackProjections(db, m5Id, m5.dest, asideM5.kept);
+      }
+      const m5Mode = ((await stat(m5Plan).catch(() => null))?.mode ?? 0) & 0o777;
+      check(
+        'M5: an untracked plan.json put back after a set-aside keeps its 0600 mode',
+        asideM5.outcome === 'set-aside' && m5Gone && m5Mode === 0o600,
+        { outcome: asideM5.outcome, m5Gone, m5Mode: m5Mode.toString(8) },
       );
 
       // P2. A lone plan.md in a repository whose database holds no plan is not Haive's: refused and kept.

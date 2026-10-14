@@ -15,15 +15,16 @@ import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
 import {
   claimMergeDir,
-  inMergeDirLock,
   otherLiveClaim,
   releaseMergeDir,
+  withMergeDirSection,
   type DbHandle,
 } from '../../merge-dir-claim.js';
 import {
   MOVE_ATTEMPTS,
   putBackAfterFailure,
   putBackProjections,
+  recoverAfterMoveFailure,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -433,6 +434,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         };
       }
     }
+    const owner = { mergeDir: ctx.repoPath, stepId: ctx.taskStepId, taskId: ctx.taskId };
     const moveBase = async (): Promise<SyncBaseApply> => {
       const first = await setAside();
       if (first.outcome === 'held') {
@@ -464,8 +466,8 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       }> => {
         if (!repositoryId) return ff();
         for (let attempt = 1; ; attempt++) {
-          // Under the dir's lock, so a merge section in this checkout (12, 13) never interleaves with the move.
-          const moved = await inMergeDirLock(ctx.db, ctx.repoPath, async (tx) => {
+          // A claimed section: no merge in this checkout interleaves, and a cancelled pass is refused.
+          const moved = await withMergeDirSection(ctx.db, owner, async (tx) => {
             // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
             await lockRepositoryTasksKey(tx, repositoryId);
             const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
@@ -510,22 +512,31 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         }
       };
 
-      let res = await ffLocked();
-      if (res.code !== 0 && !res.unmoved) {
-        // The deepen is a network fetch: Haive's files go back first, and the retry sets them aside again.
-        if (repositoryId && asided) {
-          await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
-          kept.clear();
-          asided = false;
-        }
-        await gitRun(ctx.repoPath, [
-          'fetch',
-          '--deepen=50',
-          '--end-of-options',
-          'origin',
-          `refs/heads/${base}`,
-        ]);
+      const before = (await gitRun(ctx.repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+      let res: Awaited<ReturnType<typeof ffLocked>>;
+      try {
         res = await ffLocked();
+        if (res.code !== 0 && !res.unmoved) {
+          // The deepen is a network fetch: Haive's files go back first, and the retry sets them aside again.
+          if (repositoryId && asided) {
+            await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
+            kept.clear();
+            asided = false;
+          }
+          await gitRun(ctx.repoPath, [
+            'fetch',
+            '--deepen=50',
+            '--end-of-options',
+            'origin',
+            `refs/heads/${base}`,
+          ]);
+          res = await ffLocked();
+        }
+      } catch (err) {
+        if (repositoryId && asided) {
+          await recoverAfterMoveFailure(ctx.db, repositoryId, ctx.repoPath, kept, before, err);
+        }
+        throw err;
       }
       if (repositoryId && res.code === 0) {
         await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
@@ -549,7 +560,6 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     };
     if (!repositoryId) return moveBase();
     // The set-aside and the move write the checkout, so they hold its merge-dir claim as a merge does.
-    const owner = { mergeDir: ctx.repoPath, stepId: ctx.taskStepId, taskId: ctx.taskId };
     const claim = await claimMergeDir(ctx.db, owner);
     if (claim.kind === 'held') {
       return {

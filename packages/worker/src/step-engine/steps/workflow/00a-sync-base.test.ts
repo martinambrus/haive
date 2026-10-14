@@ -9,6 +9,7 @@ import { syncBaseStep } from './00a-sync-base.js';
 import { resolveMergePhase } from '../../merge-resolver.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { claimFake } from '../../../../test/merge-dir-claim-fake.js';
+import { StepSupersededError } from '../../step-ownership.js';
 
 const projections = vi.hoisted(() => ({
   setAside: vi.fn(),
@@ -32,6 +33,10 @@ vi.mock('../../../project-state/set-aside.js', () => ({
   putBackAfterFailure: async (...args: unknown[]) => {
     await projections.putBack(...args.slice(0, 4));
     throw args[4];
+  },
+  recoverAfterMoveFailure: async (...args: unknown[]) => {
+    await projections.putBack(...args.slice(0, 4));
+    throw args[5];
   },
   restoreProjectionsInTx: projections.restore,
   MOVE_ATTEMPTS: 3,
@@ -299,6 +304,32 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out).toMatchObject({ synced: false, strategy: 'skipped' });
       expect(out.reason).toContain('is merging in this checkout');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+    } finally {
+      claimFake.reset();
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a task cancelled during the set-aside is refused before the move, and the files go back', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockImplementation(async () => {
+        claimFake.fenced = true;
+        return { outcome: 'set-aside', paths: [], kept: new Map([['p', { index: null }]]) };
+      });
+      projections.restore.mockResolvedValue({ outcome: 'clean' });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      await expect(syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }))).rejects.toThrow(
+        StepSupersededError,
+      );
+      expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+      expect(projections.putBack).toHaveBeenCalledTimes(1);
     } finally {
       claimFake.reset();
       await rm(bare, { recursive: true, force: true });

@@ -14,6 +14,7 @@ import {
   MOVE_ATTEMPTS,
   putBackAfterFailure,
   putBackProjections,
+  recoverAfterMoveFailure,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -156,6 +157,7 @@ async function fastForward(
   // file it finds rewritten ends the transaction unmoved and goes back to the set-aside.
   let asided = false;
   const kept: KeptFiles = new Map();
+  const before = (await gitRun(dest, ['rev-parse', 'HEAD'])).stdout.trim();
   for (let attempt = 1; ; attempt++) {
     let aside;
     try {
@@ -176,16 +178,23 @@ async function fastForward(
       for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
     }
 
-    const { again, merge: merged } = await db.transaction(async (tx) => {
-      // Task creation takes this lock, so no task can start between the fence and the move.
-      await lockRepositoryTasksKey(tx, payload.repositoryId);
-      const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
-      if (check.outcome !== 'clean') return { again: check, merge: null };
-      if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
-        return { again: check, merge: null };
-      }
-      return { again: check, merge: await gitRun(dest, ['merge', '--ff-only', target]) };
-    });
+    let moved;
+    try {
+      moved = await db.transaction(async (tx) => {
+        // Task creation takes this lock, so no task can start between the fence and the move.
+        await lockRepositoryTasksKey(tx, payload.repositoryId);
+        const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
+        if (check.outcome !== 'clean') return { again: check, merge: null };
+        if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
+          return { again: check, merge: null };
+        }
+        return { again: check, merge: await gitRun(dest, ['merge', '--ff-only', target]) };
+      });
+    } catch (err) {
+      if (asided) await recoverAfterMoveFailure(db, payload.repositoryId, dest, kept, before, err);
+      throw err;
+    }
+    const { again, merge: merged } = moved;
     if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
     if (merged?.code === 0) await resyncHaiveProjections(db, payload.repositoryId, dest);
     else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
