@@ -358,6 +358,10 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [Cutting a release](docs/architecture/release.md): the tag is the release, images,
   `release.json`. `release.yml`.
 
+### Modularity
+
+- [Modules](docs/architecture/modules.md): the four states, `pnpm module add|remove`. `gen-modules.mjs`, `module.mjs`.
+
 ## Review guidelines
 
 The rules a change is reviewed against live in the topic files indexed above as well as in this
