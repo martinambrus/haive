@@ -137,6 +137,8 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
               ),
         hasGlobalSettings: manifest.globalSettings !== undefined,
         hasAdminSettings: isAdmin && manifest.adminSettings !== undefined,
+        // Compiled pages and widgets call the module's api, and an admin-only one refuses a user.
+        compiledWeb: isAdmin || manifest.apiRequiresAdmin !== true,
       })),
     });
   });

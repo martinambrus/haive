@@ -13,10 +13,10 @@ export function ModuleDashboardWidgets({
   modules,
 }: {
   widgets: readonly ModuleDashboardWidgetEntry[];
-  modules: readonly { id: string }[] | null;
+  modules: readonly { id: string; compiledWeb: boolean }[] | null;
 }) {
   if (modules === null) return null;
-  const listed = new Set(modules.map((m) => m.id));
+  const listed = new Set(modules.filter((m) => m.compiledWeb).map((m) => m.id));
   return widgets
     .filter(({ moduleId }) => listed.has(moduleId))
     .map(({ moduleId, id, Component }) => (
