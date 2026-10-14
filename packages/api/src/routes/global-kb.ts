@@ -648,7 +648,10 @@ globalKbRoutes.post('/enrich', async (c) => {
       );
     if (!taskExists) {
       await withGlobalKb(db, ({ db: gdb }) =>
-        gdb.delete(globalKbEntries).where(eq(globalKbEntries.id, entry.id)),
+        gdb.transaction(async (tx) => {
+          if ((await lockEntry(tx, entry.id))?.status !== 'skeleton') return;
+          await tx.delete(globalKbEntries).where(eq(globalKbEntries.id, entry.id));
+        }),
       ).catch((cleanupErr) =>
         logger.warn(
           { err: cleanupErr, entryId: entry.id },

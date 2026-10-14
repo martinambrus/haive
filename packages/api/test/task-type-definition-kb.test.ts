@@ -145,6 +145,16 @@ describe('POST /enrich pins the kb_author step list', () => {
     expect(fake.rows(globalKbEntries)).toHaveLength(1);
   });
 
+  it('keeps an entry that stopped being a skeleton before the cleanup', async () => {
+    fake.hooks.beforeInsert = (table) => {
+      if (table !== schema.tasks) return;
+      fake.patch(globalKbEntries, fake.rows(globalKbEntries)[0]!.id as string, { status: 'draft' });
+      throw new Error('insert refused');
+    };
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(globalKbEntries)).toHaveLength(1);
+  });
+
   it('creates neither the entry nor the task when the type is refused', async () => {
     h.definition.mockRejectedValueOnce(new HttpError(403, 'Task type kb_author is disabled'));
     expect((await enrich()).status).toBe(403);
