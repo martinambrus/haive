@@ -10,7 +10,7 @@ import {
 import { hasLeadingHaiveBlock } from '../repo/ddev-generated-boundary.js';
 import { isSingleLine, survivesFence } from '../step-engine/steps/_untrusted-repo.js';
 import { emittedDefaultServerNames } from './mcp-config.js';
-import { signRagToken } from '@haive/shared/rag';
+import { signTaskToken } from '@haive/shared/task-token';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 
 const log = logger.child({ module: 'mcp-surface' });
@@ -105,7 +105,7 @@ export async function resolveMcpSurface(
       enabled: ddevEnabled,
       apiUrl:
         process.env.DDEV_API_INTERNAL_URL || process.env.RAG_API_INTERNAL_URL || 'http://api:3001',
-      token: ddevEnabled ? signRagToken(taskId, secret as string) : '',
+      token: ddevEnabled ? signTaskToken({ aud: 'ddev', taskId }, secret as string) : '',
     },
     userServers: ragOnly ? {} : await loadUserMcpServers(db, taskId),
   };
@@ -183,7 +183,7 @@ async function resolveRagMcpConfig(
   // be allowlisted; under 'none' the proxy cannot reach the API and rag_search
   // will report a request failure (agents then fall through to KB/LSP/GREP).
   const apiUrl = process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
-  return { enabled: true, apiUrl, token: signRagToken(taskId, secret) };
+  return { enabled: true, apiUrl, token: signTaskToken({ aud: 'rag', taskId }, secret) };
 }
 
 /** Load the user's custom MCP servers (the `mcpServers` object from the repo's

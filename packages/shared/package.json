@@ -47,6 +47,10 @@
       "types": "./dist/rag/index.d.ts",
       "import": "./dist/rag/index.js"
     },
+    "./task-token": {
+      "types": "./dist/task-token.d.ts",
+      "import": "./dist/task-token.js"
+    },
     "./review": {
       "types": "./dist/review/index.d.ts",
       "import": "./dist/review/index.js"

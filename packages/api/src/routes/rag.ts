@@ -17,6 +17,7 @@ import {
   type RagSearchHit,
   type RagToolingPrefs,
 } from '@haive/shared/rag';
+import { verifyTaskToken } from '@haive/shared/task-token';
 import {
   extractProjectFacets,
   resolveGlobalKbEnabled,
@@ -28,6 +29,7 @@ import {
 } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { sandboxBodyLimit } from '../middleware/sandbox-body-limit.js';
 
 const log = logger.child({ module: 'rag-routes' });
 
@@ -293,13 +295,16 @@ async function withinDeadline<T>(
  *  no DB credentials and can only query its own task's project + the global KB. */
 export const ragRoutes = new Hono<AppEnv>();
 
-ragRoutes.post('/search', async (c) => {
+ragRoutes.post('/search', sandboxBodyLimit, async (c) => {
   const secret = process.env.CONFIG_ENCRYPTION_KEY;
   if (!secret) throw new HttpError(500, 'server misconfigured: CONFIG_ENCRYPTION_KEY unset');
 
   const authHeader = c.req.header('Authorization') ?? '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  const verified = token ? verifyRagToken(token, secret) : null;
+  // The audience-less 2-part token is RAG-only: /ddev never takes it.
+  const verified = token
+    ? (verifyTaskToken(token, 'rag', secret) ?? verifyRagToken(token, secret))
+    : null;
   if (!verified) throw new HttpError(401, 'invalid or missing rag token');
   const { taskId } = verified;
 
