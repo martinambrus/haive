@@ -209,7 +209,8 @@ only what was committed, and removal deletes the rest, so `12-worktree-cleanup` 
 is dirty, or git cannot read it, its form lists the paths, defaults to Keep, and removes only when
 "Delete the N uncommitted changes" is ticked; apply reads the status again right before removing. A
 directory already gone counts as clean, since removal reads absence as success. The read passes
-`--ignore-submodules=none`, and a tree whose index marks any file assume-unchanged (one
+`--ignore-submodules=none` and sets `core.trustctime` and `core.checkStat` back to git's defaults, so
+a repository's config cannot hide a same-size rewrite that kept its mtime, and a tree whose index marks any file assume-unchanged (one
 `update-index --assume-unchanged`, or a repository's `core.ignoreStat`, which marks every file a
 checkout writes) or skip-worktree (a sparse checkout among them) counts as unreadable, since status
 never sees an edit to such a file. `13-pr-wait`'s
