@@ -2540,8 +2540,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       errorMessage: deactivated,
       endedAt: new Date(),
     } as const;
-    // An open runtime-slot park stops counting as idle once ended_at is set, so fold it first.
-    if (row.status === 'pending') await foldCliParkOnResume(db, row.id);
+    // An open wait stops counting as idle once ended_at is set, so fold it first.
+    await foldCliParkOnResume(db, row.id);
     // updateRow refuses a pending row; openPendingStep opens it, under the job's epoch.
     const failed =
       row.status === 'pending'
@@ -2614,7 +2614,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     let current = row;
     if (current.status === 'pending') {
       // Work resumes: close any open runtime-slot park FIRST (fold `now - waiting_started_at`
-      // into idle_ms and clear the marker) so the queue wait stays booked as idle. Without the
+      // into carried_idle_ms and clear the marker) so the wait stays booked as idle. Without the
       // fold the marker would be dropped by the run and the recorded wait would vanish from
       // the totals the moment the step started; without clearing it, `pending` + marker (the
       // park's signature) would keep reading as queued. No-op when nothing was parked.

@@ -59,7 +59,7 @@ export function computeStepContribution(
     // — the runtime-slot admission park (task-queue.ts), which resets the row to `pending` and
     // stamps waiting_started_at. Count that wait as idle so a task queued behind a full runtime
     // pool reconciles (wall ~ work + idle) instead of the wait vanishing from both. Bounded by
-    // ended_at like every other open wait, and the worker folds it into idle_ms + clears the
+    // ended_at like every other open wait; the worker folds it into carried_idle_ms + clears the
     // marker when the step finally runs (foldCliParkOnResume), so there is no double count.
     const openPark = ended === null && waitStart !== null ? Math.max(0, nowMs - waitStart) : 0;
     return { workMs: 0, idleMs: stepIdle + openPark, userActiveMs };
@@ -130,7 +130,7 @@ export function computeFoldContribution(step: TaskTimingStep, nowMs: number): Ta
  *  round 0 parked together, billing 12s of idle per 6s of wall). Only the NEWEST such park —
  *  the live one — contributes here; the others are summed as if unmarked. Their own step cards
  *  still show their wait, and nothing is lost: whatever a park accrued before the task moved on
- *  was already folded into idle_ms. */
+ *  was already folded into carried_idle_ms. */
 export function computeTaskTiming(steps: TaskTimingStep[], nowMs: number): TaskTiming {
   // A task with a live step is not queued for a slot, so NO pre-run park counts: whatever the
   // orchestrator is doing now is the task's real state. This matters because a park's poll chain
