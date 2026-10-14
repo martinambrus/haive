@@ -25,6 +25,7 @@ import {
 import {
   promptStepIssues,
   renamePromptStepIds,
+  renamePromptStepTokens,
   withPromptStepEntries,
   type PromptSteps,
 } from '@/lib/prompt-step-editing';
@@ -353,7 +354,9 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           onSubmit={submit}
           onValuesChange={(next) => {
             if (creating && typeof next.slug === 'string' && next.slug.trim() !== typeSlug) {
-              setStepIds((prev) => renamePromptStepIds(prev, typeSlug, String(next.slug).trim()));
+              const toSlug = next.slug.trim();
+              setStepIds((prev) => renamePromptStepIds(prev, typeSlug, toSlug));
+              setPromptSteps((prev) => renamePromptStepTokens(prev, typeSlug, toSlug));
             }
             setValues((prev) => ({ ...prev, ...next }));
             const current = row ? initialValuesOf(row) : {};

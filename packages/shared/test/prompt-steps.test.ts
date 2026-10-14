@@ -4,6 +4,7 @@ import {
   PERSONA_ID_PATTERN_SOURCE,
 } from '../src/modularity/contracts.js';
 import {
+  rewriteStepTokens,
   PROMPT_STEP_TEMPLATE_MAX_BYTES,
   PROMPT_STEP_TIMEOUT_MAX_MS,
   PROMPT_STEP_TIMEOUT_MIN_MS,
@@ -207,6 +208,32 @@ describe('renderPromptTemplate: the step token', () => {
   it('refuses a persona token whose id is outside the grammar', () => {
     expect(() => renderPromptTemplate('{{agent:A b}}', values())).toThrow(/persona-id-invalid/);
     expect(() => renderPromptTemplate('{{agent:}}', values())).toThrow(/persona-id-invalid/);
+  });
+});
+
+describe('rewriteStepTokens', () => {
+  const rename = (id: string) => (id.startsWith('custom.a.') ? `custom.b.${id.slice(9)}` : null);
+
+  it('rewrites the step tokens it maps and nothing else', () => {
+    expect(
+      rewriteStepTokens(
+        'Use\n{{step:custom.a.one}}\nand {{agent:custom.a.one}} {{field:x}}\n{{step:custom.z.two}}',
+        rename,
+      ),
+    ).toBe(
+      'Use\n{{step:custom.b.one}}\nand {{agent:custom.a.one}} {{field:x}}\n{{step:custom.z.two}}',
+    );
+  });
+
+  it('rewrites a template that also holds an unknown token, and keeps that token', () => {
+    expect(rewriteStepTokens('{{bogus}}\n{{step:custom.a.x}}', rename)).toBe(
+      '{{bogus}}\n{{step:custom.b.x}}',
+    );
+  });
+
+  it('returns the template itself when nothing maps', () => {
+    const template = 'Plain {{task.title}}';
+    expect(rewriteStepTokens(template, rename)).toBe(template);
   });
 });
 

@@ -9,6 +9,7 @@ import {
   promptStepIssues,
   promptStepSlugOf,
   renamePromptStepIds,
+  renamePromptStepTokens,
   samePromptSteps,
   takenPromptSlugs,
   withPromptStepEntries,
@@ -172,6 +173,34 @@ describe('promptStepIssues', () => {
   it('ignores a custom id with no entry and an entry that is not listed', () => {
     expect(issues(['custom.t.gone'], {})).toEqual([]);
     expect(issues(['04-phase-0b-pre-planning'], { a: entry('a', { template: '' }) })).toEqual([]);
+  });
+});
+
+describe('renamePromptStepTokens', () => {
+  const step = (slug: string, template: string) => ({
+    slug,
+    title: slug,
+    template,
+    capabilities: [],
+    timeoutMs: 300_000,
+  });
+
+  it("follows the type slug in another step's quote of an earlier prompt step", () => {
+    const steps = {
+      first: step('first', 'Draft it.'),
+      second: step('second', 'Review:\n{{step:custom.ab.first}}\n{{step:01-worktree-setup}}'),
+    };
+    const next = renamePromptStepTokens(steps, 'ab', 'abc');
+    expect(next.second!.template).toBe(
+      'Review:\n{{step:custom.abc.first}}\n{{step:01-worktree-setup}}',
+    );
+    expect(next.first).toBe(steps.first);
+  });
+
+  it('returns the same record when no template quotes this type', () => {
+    const steps = { a: step('a', 'Plain {{task.title}}') };
+    expect(renamePromptStepTokens(steps, 'ab', 'abc')).toBe(steps);
+    expect(renamePromptStepTokens(steps, 'ab', 'ab')).toBe(steps);
   });
 });
 

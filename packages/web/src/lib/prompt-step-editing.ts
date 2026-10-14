@@ -4,6 +4,7 @@ import {
   derivePromptStepComposable,
   isCustomStepId,
   promptStepId,
+  rewriteStepTokens,
   validatePromptStep,
   type ComposableStepEntry,
   type PromptStepEntry,
@@ -106,6 +107,27 @@ export function renamePromptStepIds(stepIds: string[], fromSlug: string, toSlug:
   return stepIds.map((id) =>
     id.startsWith(prefix) ? `custom.${toSlug}.${id.slice(prefix.length)}` : id,
   );
+}
+
+export function renamePromptStepTokens(
+  promptSteps: PromptSteps,
+  fromSlug: string,
+  toSlug: string,
+): PromptSteps {
+  if (fromSlug === toSlug) return promptSteps;
+  const prefix = `custom.${fromSlug}.`;
+  const rename = (id: string) =>
+    id.startsWith(prefix) ? `custom.${toSlug}.${id.slice(prefix.length)}` : null;
+  let changed = false;
+  const next = Object.fromEntries(
+    Object.entries(promptSteps).map(([slug, entry]) => {
+      const template = rewriteStepTokens(entry.template, rename);
+      if (template === entry.template) return [slug, entry];
+      changed = true;
+      return [slug, { ...entry, template }];
+    }),
+  );
+  return changed ? next : promptSteps;
 }
 
 export function listedPromptSteps(
