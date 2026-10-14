@@ -95,7 +95,8 @@ gpu_guard() {
 # (postgres/redis/repos/…), the user's own ddev-* projects, the pull-through
 # registry, and per-task runtimes are deliberately never named here, so rebuild
 # and reset physically cannot touch them.
-PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$PWD")}"
+# Compose's rule for a directory name: lower-case, [a-z0-9_-] only, no leading _ or -.
+PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')}"
 NM_VOLUMES=(
   "${PROJECT}_haive_node_modules_root"
   "${PROJECT}_haive_node_modules_shared"
@@ -146,6 +147,13 @@ teardown_verdict() {
   say "The stack was brought up, but these teardown steps failed:"
   for f in "${TEARDOWN_FAILURES[@]}"; do say "  - $f"; done
   exit 1
+}
+
+restart_stack() {
+  dc rm -fs dev-libs || teardown_failed "removing dev-libs (dc rm -fs dev-libs) failed"
+  gpu_note
+  dc up -d --force-recreate "$@"
+  teardown_verdict
 }
 
 rebuild_services() {
@@ -237,7 +245,7 @@ case "$cmd" in
   logs)          dc logs -f "$@" ;;
   status|ps)     dc ps ;;
   libs)          build_libs ;;
-  restart)       gpu_guard "$cmd"; dc rm -fs dev-libs >/dev/null 2>&1 || true; gpu_note; dc up -d --force-recreate "$@" ;;
+  restart)       gpu_guard "$cmd"; restart_stack "$@" ;;
   rebuild)       gpu_guard "$cmd"; if [ "$#" -eq 0 ]; then rebuild_all; else rebuild_services "$@"; fi ;;
   reset)         gpu_guard "$cmd"; reset_stack ;;
   sandbox-build) dc --profile sandbox build cli-sandbox ;;

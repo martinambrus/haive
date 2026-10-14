@@ -33,7 +33,18 @@ afterEach(() => {
 
 describe('task token audiences', () => {
   it('are a closed list', () => {
-    expect([...TASK_TOKEN_AUDIENCES]).toEqual(['rag', 'ddev']);
+    expect([...TASK_TOKEN_AUDIENCES]).toEqual(['rag', 'ddev', 'custom-mcp']);
+  });
+
+  it('keep every token to its own audience', () => {
+    for (const minted of AUDIENCES) {
+      const token = signTaskToken({ aud: minted, taskId: 'task-abc' }, SECRET);
+      for (const checked of AUDIENCES) {
+        expect(verifyTaskToken(token, checked, SECRET) !== null, `${minted} under ${checked}`).toBe(
+          minted === checked,
+        );
+      }
+    }
   });
 
   it('refuse to sign for an audience outside the list', () => {

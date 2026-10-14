@@ -1,0 +1,161 @@
+import { Worker } from 'bullmq';
+import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
+import {
+  MODULE_CONTROL_JOB_NAMES,
+  QUEUE_NAMES,
+  logger,
+  type ModuleTeardownPayload,
+  type ModuleTeardownResult,
+} from '@haive/shared';
+import { openModuleDatabase, type ModuleDatabase } from '@haive/shared/module-db';
+import { getDb } from '../db.js';
+import { getBullRedis } from '../redis.js';
+import {
+  moduleJobsStarted,
+  type LoadedWorkerModule,
+  type WorkerModuleEntry,
+} from '../modules/loader.js';
+
+const log = logger.child({ module: 'module-control' });
+
+export class ModuleTeardownRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModuleTeardownRefusedError';
+  }
+}
+
+export const TEARDOWN_HOOK_TIMEOUT_MS = 10 * 60_000;
+
+export type ModuleControlDeps = {
+  db: Database;
+  loaded: readonly LoadedWorkerModule[];
+  entries: readonly WorkerModuleEntry[];
+  jobsStarted: (moduleId: string) => boolean;
+  hookTimeoutMs?: number;
+};
+
+async function runHook(
+  db: Database,
+  moduleId: string,
+  teardown: NonNullable<WorkerModuleEntry['teardown']>,
+  timeoutMs: number,
+): Promise<void> {
+  const opened: ModuleDatabase[] = [];
+  let timer: NodeJS.Timeout | undefined;
+  // A hook that never settles would hold the job, so every later Tear down would wait on it.
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `Module ${moduleId}'s teardown did not finish within ${Math.round(timeoutMs / 1000)} s`,
+          ),
+        ),
+      timeoutMs,
+    );
+  });
+  try {
+    await Promise.race([
+      teardown({
+        moduleId,
+        logger: logger.child({ module: moduleId }),
+        openDatabase: async () => {
+          const moduleDb = await openModuleDatabase(db, moduleId);
+          opened.push(moduleDb);
+          return moduleDb;
+        },
+      }),
+      timedOut,
+    ]);
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err));
+  } finally {
+    clearTimeout(timer);
+    await Promise.allSettled(opened.map((moduleDb) => moduleDb.close()));
+  }
+}
+
+export async function runModuleTeardown(
+  deps: ModuleControlDeps,
+  moduleId: string,
+): Promise<ModuleTeardownResult> {
+  const { db } = deps;
+  const index = deps.loaded.findIndex((m) => m.manifest.id === moduleId);
+  if (index === -1) {
+    throw new ModuleTeardownRefusedError(`Module ${moduleId} is not loaded by this worker`);
+  }
+  const [row] = await db
+    .select({ deactivatedAt: schema.modules.deactivatedAt, missingAt: schema.modules.missingAt })
+    .from(schema.modules)
+    .where(eq(schema.modules.moduleId, moduleId))
+    .limit(1);
+  if (!row) {
+    throw new ModuleTeardownRefusedError(`Module ${moduleId} has no recorded row`);
+  }
+  if (row.deactivatedAt === null) {
+    throw new ModuleTeardownRefusedError(
+      `Module ${moduleId} is active; deactivate it before tearing it down`,
+    );
+  }
+  if (row.missingAt !== null) {
+    throw new ModuleTeardownRefusedError(
+      `Module ${moduleId} is missing: this install no longer carries its code`,
+    );
+  }
+  if (deps.jobsStarted(moduleId)) {
+    throw new ModuleTeardownRefusedError(
+      `Module ${moduleId} had its jobs started by this worker; restart the worker (a deactivated module's jobs do not start at boot) and try again`,
+    );
+  }
+
+  const teardown = deps.entries[index]?.teardown;
+  if (teardown) {
+    await runHook(db, moduleId, teardown, deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS);
+  }
+
+  // Conditional: a module activated again while the hook ran must not read as torn down.
+  const [stamped] = await db
+    .update(schema.modules)
+    .set({ tornDownAt: sql`now()` })
+    .where(
+      and(
+        eq(schema.modules.moduleId, moduleId),
+        isNotNull(schema.modules.deactivatedAt),
+        isNull(schema.modules.missingAt),
+      ),
+    )
+    .returning({ tornDownAt: schema.modules.tornDownAt });
+  log.info(
+    { moduleId, hook: teardown !== undefined, recorded: stamped !== undefined },
+    'module teardown finished',
+  );
+  return { moduleId, tornDownAt: stamped?.tornDownAt?.toISOString() ?? null };
+}
+
+export async function processModuleControlJob(
+  deps: ModuleControlDeps,
+  job: { name: string; data: ModuleTeardownPayload },
+): Promise<ModuleTeardownResult> {
+  if (job.name !== MODULE_CONTROL_JOB_NAMES.TEARDOWN) {
+    throw new Error(`Unknown module-control job: ${job.name}`);
+  }
+  return runModuleTeardown(deps, job.data.moduleId);
+}
+
+export function startModuleControlWorker(
+  modules: Pick<ModuleControlDeps, 'loaded' | 'entries'>,
+): Worker<ModuleTeardownPayload, ModuleTeardownResult> {
+  const worker = new Worker<ModuleTeardownPayload, ModuleTeardownResult>(
+    QUEUE_NAMES.MODULE_CONTROL,
+    (job) =>
+      processModuleControlJob({ ...modules, db: getDb(), jobsStarted: moduleJobsStarted }, job),
+    // A worker that dies mid-hook fails the job instead of running the hook again unasked.
+    { connection: getBullRedis(), concurrency: 1, maxStalledCount: 0 },
+  );
+  worker.on('failed', (job, err) => {
+    log.warn({ jobId: job?.id, moduleId: job?.data?.moduleId, err }, 'module-control job failed');
+  });
+  return worker;
+}

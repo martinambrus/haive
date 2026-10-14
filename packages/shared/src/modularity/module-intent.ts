@@ -17,6 +17,7 @@ export interface ModuleIntentRow {
   lastLoadedAt: Date | string;
   missingAt: Date | string | null;
   deactivatedAt: Date | string | null;
+  tornDownAt: Date | string | null;
 }
 
 export interface ModuleDiffRow {
@@ -32,6 +33,7 @@ export interface ModuleDiffRow {
   lastLoadedAt: string | null;
   missingAt: string | null;
   deactivatedAt: string | null;
+  tornDownAt: string | null;
 }
 
 export interface ModuleDiff {
@@ -101,6 +103,7 @@ export function diffModuleIntent(
       lastLoadedAt: row ? iso(row.lastLoadedAt) : null,
       missingAt: row ? iso(row.missingAt) : null,
       deactivatedAt: row ? iso(row.deactivatedAt) : null,
+      tornDownAt: row ? iso(row.tornDownAt) : null,
     };
   });
   return { workerAt: worker.at, rows: out };

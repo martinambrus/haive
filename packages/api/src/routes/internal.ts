@@ -1,7 +1,14 @@
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { decrypt, decryptDek, secretsService, verifyRepoGitCredToken, logger } from '@haive/shared';
+import {
+  decrypt,
+  decryptDek,
+  secretsService,
+  verifyLegacyRepoGitCredToken,
+  verifyRepoGitCredToken,
+  logger,
+} from '@haive/shared';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -21,7 +28,9 @@ internalRoutes.post('/git-credential', async (c) => {
 
   const authHeader = c.req.header('Authorization') ?? '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  const verified = token ? verifyRepoGitCredToken(token, secret) : null;
+  const verified = token
+    ? (verifyRepoGitCredToken(token, secret) ?? verifyLegacyRepoGitCredToken(token, secret))
+    : null;
   if (!verified) throw new HttpError(401, 'invalid or missing git credential token');
   const { repositoryId, userId } = verified;
 

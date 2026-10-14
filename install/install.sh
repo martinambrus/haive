@@ -455,6 +455,7 @@ cd "$(dirname "$0")"
 PURGE=0
 ASSUME_YES=0
 NETWORKS_LEFT=0
+VOLUMES_LEFT=""
 for arg in "$@"; do
   case "$arg" in
     --purge) PURGE=1 ;;
@@ -525,18 +526,36 @@ for n in $(docker network ls -q --filter "name=^${ID}-" 2>/dev/null); do
   fi
 done
 
+# rm fails the same way for an absent volume and a held one, so only a volume that exists is tried.
+remove_volume() {
+  docker volume inspect "$1" >/dev/null 2>&1 || return 0
+  if docker volume rm "$1" >/dev/null 2>&1; then
+    echo "  removed $1"
+  else
+    holders=$(docker ps -a --filter "volume=$1" --format '{{.Names}}' 2>/dev/null | paste -sd, -)
+    echo "  COULD NOT remove volume $1 — held by: ${holders:-no container listed}"
+    VOLUMES_LEFT="${VOLUMES_LEFT:+$VOLUMES_LEFT }$1"
+  fi
+}
+
+left_volumes() {
+  echo "$1 EXCEPT the volume(s) named above, which could"
+  echo "not be removed. Stop or remove the containers holding them, then:"
+  echo "  docker volume rm ${VOLUMES_LEFT}"
+}
+
 for v in $RUNTIME_VOLUMES; do
-  docker volume rm "${PROJECT}_${v}" >/dev/null 2>&1 && echo "  removed ${PROJECT}_${v}" || true
+  remove_volume "${PROJECT}_${v}"
 done
 
 if [ "$PURGE" -eq 1 ]; then
   for v in $WORK_VOLUMES; do
-    docker volume rm "${ID}_${v}" >/dev/null 2>&1 && echo "  removed ${ID}_${v}" || true
+    remove_volume "${ID}_${v}"
   done
   # Per-task auth and IDE volumes are created at runtime, so they are found rather than listed.
   for v in $(docker volume ls -q --filter "name=^${ID}_cli_auth_" 2>/dev/null) \
            $(docker volume ls -q --filter "name=^${ID}_ide_" 2>/dev/null); do
-    docker volume rm "$v" >/dev/null 2>&1 && echo "  removed $v" || true
+    remove_volume "$v"
   done
   for repo in $IMAGE_REPOS; do
     for img in $(docker images -q "$repo" 2>/dev/null | sort -u); do
@@ -553,8 +572,11 @@ if [ "$PURGE" -eq 1 ]; then
     echo "Everything this install owned is gone EXCEPT the network(s) named above, which something"
     echo "outside this install is still using. Detach or remove those containers, then:"
     echo "  docker network ls -q --filter name=^${ID}- | xargs -r docker network rm"
-  else
+  elif [ -z "$VOLUMES_LEFT" ]; then
     echo "Everything this install owned is gone."
+  fi
+  if [ -n "$VOLUMES_LEFT" ]; then
+    left_volumes "Everything this install owned is gone"
   fi
   echo "Delete this directory to finish:"
   echo "  rm -rf $(pwd)"
@@ -572,7 +594,11 @@ else
   [ "$kept" -eq 0 ] && echo "  (nothing — this install never cloned a repository or logged a CLI in)"
   echo ""
   echo "To remove those too, re-run:  ./uninstall.sh --purge"
-  echo "The stack is gone either way; delete this directory when you are done with it."
+  if [ -n "$VOLUMES_LEFT" ]; then
+    left_volumes "The stack is gone"
+  else
+    echo "The stack is gone either way; delete this directory when you are done with it."
+  fi
 fi
 EOF
 chmod +x uninstall.sh

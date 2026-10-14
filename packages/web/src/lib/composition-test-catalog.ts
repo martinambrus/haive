@@ -78,4 +78,6 @@ export const TEST_CATALOG: TaskTypeCatalog = {
     { id: 'finish', label: 'Finish' },
   ],
   synced: true,
+  modules: [],
+  registeredStepIds: TEST_ENTRIES.map((e) => e.stepId),
 };
