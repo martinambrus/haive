@@ -3,11 +3,14 @@ import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { schema, type MergeResolveState } from '@haive/database';
 import {
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   MERGE_CLARIFICATION_ASKED_EVENT,
+  configService,
+  extractFormDefaults,
+  validateFormValues,
   type PlanMirror,
 } from '@haive/shared';
 import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared/plan';
@@ -127,6 +130,11 @@ async function setupWorktree(
   return { parent, wt };
 }
 
+/** Two changes no commit holds: an edited tracked file and an untracked one, its name with a space. */
+async function leaveUncommitted(wt: string): Promise<void> {
+  await writeIn(wt, { 'feature.txt': 'feature, edited\n', 'learning notes.md': 'not committed\n' });
+}
+
 /** Diverge base.txt on both branches so a feature->main merge conflicts. */
 async function divergeBase(parent: string, wt: string): Promise<void> {
   await writeFile(path.join(wt, 'base.txt'), 'feature-edit\n', 'utf8');
@@ -169,6 +177,7 @@ function det(wt: string, over: Partial<Det> = {}): Det {
     branchName: 'feature/x',
     baseBranch: 'main',
     parentBranch: 'main',
+    uncommitted: { count: 0, paths: [] },
     repositoryId: 'r1',
     hasOrigin: false,
     originUrl: null,
@@ -355,6 +364,30 @@ function mkCtx(parent: string, db: unknown): StepContext {
     taskId: 't1',
     taskStepId: 'step1',
     db,
+    logger,
+  } as unknown as StepContext;
+}
+/** A ctx whose db answers detect's reads: 01-worktree-setup put a task with no repository in `wt`. */
+function detectCtx(parent: string, wt: string): StepContext {
+  const setup = {
+    detectOutput: null,
+    output: { mode: 'worktree', worktreePath: wt, branchName: 'feature/x', baseBranch: 'main' },
+    iterations: [],
+  };
+  return {
+    repoPath: parent,
+    userId: 'u1',
+    taskId: 't1',
+    taskStepId: 'step1',
+    db: {
+      select: () => ({
+        from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [setup] }) }) }),
+      }),
+      query: {
+        tasks: { findFirst: async () => ({ repositoryId: null, title: 'Task', description: '' }) },
+        repoCredentials: { findMany: async () => [] },
+      },
+    },
     logger,
   } as unknown as StepContext;
 }
@@ -1968,6 +2001,193 @@ describe('12 worktree cleanup apply (non-merge actions)', () => {
   });
 });
 
+describe('12 worktree cleanup with uncommitted changes (real git)', () => {
+  let spy: { mockRestore: () => void };
+  beforeEach(() => {
+    spy = vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+  });
+  afterEach(() => spy.mockRestore());
+
+  const exists = (p: string) =>
+    lstat(p).then(
+      () => true,
+      () => false,
+    );
+  // A gitfile that names nothing: git refuses the tree, so nothing can be said about it.
+  const breakGitfile = (wt: string) =>
+    writeFile(path.join(wt, '.git'), 'gitdir: /nonexistent/haive-gitdir\n', 'utf8');
+
+  it('keeps the worktree under the defaults an auto-submit sends', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await leaveUncommitted(wt);
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      const schema = formOf(detectCtx(parent, wt), detected);
+      const validated = validateFormValues(schema, extractFormDefaults(schema));
+      if (!validated.success) throw new Error(validated.issues.join('; '));
+      const { applyOut } = await mergeThenApply(parent, detected, validated.data);
+      expect(applyOut?.removed).toBe(false);
+      expect(applyOut?.message).toContain('kept');
+      expect(applyOut?.message).toContain('2 uncommitted changes');
+      expect(await readFile(path.join(wt, 'feature.txt'), 'utf8')).toBe('feature, edited\n');
+      expect(await readFile(path.join(wt, 'learning notes.md'), 'utf8')).toBe('not committed\n');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('remove_only keeps a dirty worktree unless the box is ticked', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await leaveUncommitted(wt);
+      const { applyOut } = await mergeThenApply(parent, det(wt), { action: 'remove_only' });
+      expect(applyOut?.removed).toBe(false);
+      expect(applyOut?.message).toContain('kept');
+      expect(applyOut?.message).toContain('2 uncommitted changes');
+      expect(await readFile(path.join(wt, 'feature.txt'), 'utf8')).toBe('feature, edited\n');
+      expect(await readFile(path.join(wt, 'learning notes.md'), 'utf8')).toBe('not committed\n');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('remove_only removes a dirty worktree once the box is ticked', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await leaveUncommitted(wt);
+      const { applyOut } = await mergeThenApply(parent, det(wt), {
+        action: 'remove_only',
+        discardUncommitted: true,
+      });
+      expect(applyOut?.removed).toBe(true);
+      expect(await exists(wt)).toBe(false);
+      expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x'])).toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('merge_remove merges a dirty worktree and keeps it unless the box is ticked', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await leaveUncommitted(wt);
+      const { applyOut, state } = await mergeThenApply(parent, det(wt), {
+        action: 'merge_remove',
+        deleteBranch: true,
+      });
+      expect(state?.merged).toBe(true);
+      expect(applyOut).toMatchObject({ merged: true, removed: false, branchDeleted: false });
+      expect(applyOut?.message).toContain('2 uncommitted changes');
+      expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
+      expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x'])).toBe(0);
+      expect(await readFile(path.join(wt, 'feature.txt'), 'utf8')).toBe('feature, edited\n');
+      expect(await readFile(path.join(wt, 'learning notes.md'), 'utf8')).toBe('not committed\n');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('merge_remove removes a dirty worktree and deletes the branch once the box is ticked', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await leaveUncommitted(wt);
+      const { applyOut } = await mergeThenApply(parent, det(wt), {
+        action: 'merge_remove',
+        deleteBranch: true,
+        discardUncommitted: true,
+      });
+      expect(applyOut).toMatchObject({ merged: true, removed: true, branchDeleted: true });
+      expect(await exists(wt)).toBe(false);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a worktree git cannot read unless the box is ticked', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await breakGitfile(wt);
+      const kept = await mergeThenApply(parent, det(wt), { action: 'remove_only' });
+      expect(kept.applyOut?.removed).toBe(false);
+      expect(kept.applyOut?.message).toContain('kept');
+      expect(await exists(wt)).toBe(true);
+      const discarded = await mergeThenApply(parent, det(wt), {
+        action: 'remove_only',
+        discardUncommitted: true,
+      });
+      expect(discarded.applyOut?.removed).toBe(true);
+      expect(await exists(wt)).toBe(false);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a worktree that is already gone holds nothing to lose', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await git(parent, ['worktree', 'remove', '--force', wt]);
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(detected.uncommitted).toEqual({ count: 0, paths: [] });
+      const { applyOut } = await mergeThenApply(parent, detected, { action: 'remove_only' });
+      expect(applyOut?.removed).toBe(true);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('detect lists what git reports, an untracked file and a name with a space included', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await leaveUncommitted(wt);
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(detected.uncommitted).toEqual({
+        count: 2,
+        paths: ['feature.txt', 'learning notes.md'],
+      });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('detect lists 20 paths at most and still reports the total', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      const many = Object.fromEntries(
+        Array.from({ length: 25 }, (_, i) => [`file ${String(i).padStart(2, '0')}.txt`, 'x\n']),
+      );
+      await writeIn(wt, { 'feature.txt': 'feature, edited\n', ...many });
+      const { uncommitted } = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(uncommitted?.count).toBe(26);
+      expect(uncommitted?.paths).toHaveLength(20);
+      expect(uncommitted?.paths[0]).toBe('feature.txt');
+      expect(uncommitted?.paths.at(-1)).toBe('file 18.txt');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('detect records a clean worktree as zero', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(detected.uncommitted).toEqual({ count: 0, paths: [] });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('detect records a worktree git cannot read as unknown, never as clean', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await breakGitfile(wt);
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(detected.uncommitted).toBeNull();
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('12 worktree cleanup form', () => {
   const stubCtx = (parent: string) =>
     ({ repoPath: parent, userId: 'u1', db: {}, logger }) as unknown as StepContext;
@@ -1996,6 +2216,258 @@ describe('12 worktree cleanup form', () => {
     const schema = formOf(stubCtx(''), det('', { mode: 'inplace', worktreePath: null }));
     expect(schema.autoSubmit).toBe(true);
     expect(schema.fields).toHaveLength(0);
+  });
+
+  it('defaults to keep and offers to delete the uncommitted changes with the worktree', () => {
+    const paths = Array.from({ length: 20 }, (_, i) => `dir/file ${i}.txt`);
+    const schema = formOf(
+      stubCtx(''),
+      det('/ws/.haive/worktrees/feature-x', { uncommitted: { count: 23, paths } }),
+    );
+    expect((schema.fields.find((f) => f.id === 'action') as { default?: string }).default).toBe(
+      'keep',
+    );
+    const note = schema.fields.find((f) => f.id === 'uncommittedNote') as {
+      body?: string;
+      variant?: string;
+    };
+    expect(note.variant).toBe('warning');
+    expect(note.body).toContain('`dir/file 0.txt`');
+    expect(note.body).toContain('`dir/file 19.txt`');
+    expect(note.body).toContain('and 3 more');
+    expect(schema.fields.find((f) => f.id === 'discardUncommitted')).toMatchObject({
+      type: 'checkbox',
+      label: 'Delete the 23 uncommitted changes with the worktree',
+      default: false,
+      visibleWhen: { field: 'action', in: ['merge_remove', 'remove_only'] },
+    });
+    expect(extractFormDefaults(schema)).toMatchObject({
+      action: 'keep',
+      discardUncommitted: false,
+    });
+  });
+
+  it('defaults to keep as well when the worktree could not be checked', () => {
+    const schema = formOf(
+      stubCtx(''),
+      det('/ws/.haive/worktrees/feature-x', { uncommitted: null }),
+    );
+    expect((schema.fields.find((f) => f.id === 'action') as { default?: string }).default).toBe(
+      'keep',
+    );
+    expect(schema.fields.find((f) => f.id === 'uncommittedNote')).toMatchObject({
+      variant: 'warning',
+    });
+    expect(schema.fields.find((f) => f.id === 'discardUncommitted')).toMatchObject({
+      type: 'checkbox',
+      default: false,
+    });
+  });
+
+  it('puts a path holding backticks in a code span they cannot close', () => {
+    const schema = formOf(
+      stubCtx(''),
+      det('/ws/.haive/worktrees/feature-x', { uncommitted: { count: 1, paths: ['a`b.txt'] } }),
+    );
+    const note = schema.fields.find((f) => f.id === 'uncommittedNote') as { body?: string };
+    expect(note.body).toContain('`` a`b.txt ``');
+  });
+
+  it('is the form it always was when the worktree is clean', () => {
+    const schema = formOf(
+      stubCtx(''),
+      det('/ws/.haive/worktrees/feature-x', {
+        parentBranch: 'develop',
+        hasOrigin: true,
+        originUrl: 'https://github.com/o/r.git',
+        boundCredentialId: 'c1',
+        credentials: [{ id: 'c1', label: 'gh', host: 'github.com', provider: 'github' }],
+        prWorkflowAvailable: true,
+        taskTitle: 'Add thing',
+        taskDescription: 'Does the thing',
+      }),
+    );
+    expect(schema.fields).toEqual([
+      {
+        type: 'note',
+        id: 'branchMismatchNote',
+        label: 'Cross-branch merge',
+        body: 'The parent checkout is on **develop**, not the base **main**. Haive will merge **feature/x** into **main** via a temporary worktree (your current checkout stays untouched), then optionally push **main** to origin.',
+        variant: 'info',
+      },
+      {
+        type: 'radio',
+        id: 'action',
+        label: 'What should happen to the worktree?',
+        options: [
+          {
+            value: 'merge_remove',
+            label: 'Merge feature/x into main, then remove the worktree',
+          },
+          {
+            value: 'create_pr',
+            label:
+              'Open a pull request from feature/x into main (keep the worktree until it merges)',
+          },
+          {
+            value: 'remove_only',
+            label: 'Remove the worktree, keep the branch',
+          },
+          {
+            value: 'keep',
+            label: 'Keep the worktree',
+          },
+        ],
+        default: 'merge_remove',
+        required: true,
+      },
+      {
+        type: 'checkbox',
+        id: 'squashMerge',
+        label: 'Squash feature/x into a single commit on main',
+        description:
+          'main gets ONE commit for this task instead of every commit the task made along the way (one per DAG issue, plus a merge commit each, plus a commit per fix round). The changes are identical either way; only the history differs. Untick to keep the full history on main.',
+        default: true,
+        visibleWhen: {
+          field: 'action',
+          equals: 'merge_remove',
+        },
+      },
+      {
+        type: 'checkbox',
+        id: 'deleteBranch',
+        label: 'Delete the feature/x branch after merging (safe — only if fully merged)',
+        default: true,
+        visibleWhen: {
+          field: 'action',
+          equals: 'merge_remove',
+        },
+      },
+      {
+        type: 'note',
+        id: 'removeOnlyNote',
+        label: 'Deleting the branch manually',
+        body: 'The **feature/x** branch is kept. To delete it manually (it may have unmerged commits), open the [repository terminal](/repos/r1/terminal) and run `git branch -D feature/x`.',
+        variant: 'info',
+        visibleWhen: {
+          field: 'action',
+          equals: 'remove_only',
+        },
+      },
+      {
+        type: 'text',
+        id: 'prTitle',
+        label: 'Pull request title',
+        default: 'Add thing',
+        required: true,
+        visibleWhen: {
+          field: 'action',
+          equals: 'create_pr',
+        },
+      },
+      {
+        type: 'textarea',
+        id: 'prBody',
+        label: 'Pull request description',
+        default: 'Does the thing',
+        rows: 6,
+        visibleWhen: {
+          field: 'action',
+          equals: 'create_pr',
+        },
+      },
+      {
+        type: 'text',
+        id: 'prBaseBranch',
+        label: 'Base branch (the PR merges into this)',
+        default: 'main',
+        required: true,
+        visibleWhen: {
+          field: 'action',
+          equals: 'create_pr',
+        },
+      },
+      {
+        type: 'select',
+        id: 'prCredentialId',
+        label: 'Forge credential to open the PR with',
+        description:
+          'Only credentials matching this forge are listed (by provider, or auto-detected from the host). The token must be able to push the branch and open pull/merge requests.',
+        options: [
+          {
+            value: 'c1',
+            label: 'gh (github.com — github)',
+          },
+        ],
+        default: 'c1',
+        visibleWhen: {
+          field: 'action',
+          equals: 'create_pr',
+        },
+      },
+      {
+        type: 'radio',
+        id: 'finalizeMode',
+        label: 'When the PR merges',
+        options: [
+          {
+            value: 'auto',
+            label: 'Automatically finish this task (reap the worktree)',
+          },
+          {
+            value: 'manual',
+            label: 'Wait for me to click Finalize',
+          },
+        ],
+        default: 'auto',
+        visibleWhen: {
+          field: 'action',
+          equals: 'create_pr',
+        },
+      },
+      {
+        type: 'checkbox',
+        id: 'pushBase',
+        label: 'Push main to origin (https://github.com/o/r.git) after merging',
+        default: false,
+        visibleWhen: {
+          field: 'action',
+          equals: 'merge_remove',
+        },
+      },
+      {
+        type: 'select',
+        id: 'credentialId',
+        label: 'Credential to push with',
+        description:
+          'Used only for this push; the token is never written to git config. Choose "manually" for SSH or public remotes.',
+        options: [
+          {
+            value: 'c1',
+            label: 'gh (github.com)',
+          },
+          {
+            value: '',
+            label: 'Authenticate manually (no stored credential)',
+          },
+        ],
+        default: 'c1',
+        visibleWhen: {
+          field: 'action',
+          equals: 'merge_remove',
+        },
+      },
+      {
+        type: 'checkbox',
+        id: 'setUpstream',
+        label: 'Set upstream (-u) so future pushes default to origin',
+        default: true,
+        visibleWhen: {
+          field: 'action',
+          equals: 'merge_remove',
+        },
+      },
+    ]);
   });
 });
 
