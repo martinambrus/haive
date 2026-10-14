@@ -1035,8 +1035,10 @@ taskRoutes.get('/:id', async (c) => {
   });
   const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
   const typeLabels = await loadTaskTypeLabels(db, [task.type]);
+  // The pinned prompt steps fed the step flags above; the page never reads them, so they stay off the poll.
+  const { customSteps: _pinned, ...taskFields } = task;
   const taskWithActive = {
-    ...task,
+    ...taskFields,
     typeLabel: typeLabels.get(task.type) ?? null,
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,

@@ -210,6 +210,9 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
       upcomingCliSteps: { stepId: string; title: string }[];
     };
     expect(body.upcomingCliSteps.map((s) => s.stepId)).toEqual([CUSTOM_ID]);
+    expect((body as unknown as { task: Record<string, unknown> }).task).not.toHaveProperty(
+      'customSteps',
+    );
     expect(body.upcomingCliSteps[0]!.title).toBe('Review step');
 
     await db.insert(schema.taskSteps).values({
