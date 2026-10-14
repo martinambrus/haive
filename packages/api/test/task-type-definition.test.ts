@@ -273,7 +273,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
     it('keeps them on an admin type, whose steps ask for the model-health step', async () => {
       const id = promptStepId('ttd-t-ps-adm', PROMPT.slug);
       const def = await definitionForCreate(db, 'ttd-t-ps-adm', { generic: true });
-      expect(def.customSteps).toEqual({ [id]: PROMPT });
+      expect(def.customSteps).toEqual({ [id]: { ...PROMPT, tools: [] } });
       expect(def.runListSnapshot).toEqual([CANARY, QUIET, id]);
     });
 
