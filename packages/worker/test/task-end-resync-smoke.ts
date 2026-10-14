@@ -37,6 +37,7 @@ import {
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { reconcileDeadTasks } from '../src/queues/dead-task-boot.js';
+import { pull } from '../src/queues/plan-mirror-queue.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import { handleClone } from '../src/repo/clone.js';
 import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
@@ -414,6 +415,28 @@ async function main(): Promise<void> {
       );
       const outcome = await syncOutcome(s);
       check('T5 the sync is not deferred by a dead task', outcome !== 'deferred', { outcome });
+    });
+    await section('T5 pull', async () => {
+      const s = await scenario();
+      const id = await task(s.repositoryId);
+      const pulled = () =>
+        pull({ repositoryId: s.repositoryId, userId }).then(
+          () => null,
+          (err: unknown) => (err instanceof Error ? err.message : String(err)),
+        );
+      const live = await pulled();
+      check(
+        'T5 control: a live root task makes a Pull busy',
+        live?.includes('task in flight') === true,
+        {
+          live,
+        },
+      );
+      await markDead(id);
+      const dead = await pulled();
+      check('T5 a dead task does not make a Pull busy', dead?.includes('task in flight') !== true, {
+        dead,
+      });
     });
     await section('T5 conflict answer', async () => {
       const s = await scenario();
