@@ -494,6 +494,12 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
 
     let res = await ffLocked();
     if (res.code !== 0 && !res.unmoved) {
+      // The deepen is a network fetch: Haive's files go back first, and the retry sets them aside again.
+      if (repositoryId && asided) {
+        await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
+        kept.clear();
+        asided = false;
+      }
       await gitRun(ctx.repoPath, [
         'fetch',
         '--deepen=50',
