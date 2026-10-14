@@ -15,6 +15,7 @@ import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
 import {
   claimMergeDir,
+  inMergeDirUnlessClaimed,
   otherLiveClaim,
   releaseMergeDir,
   withMergeDirSection,
@@ -29,6 +30,7 @@ import {
   resyncHaiveProjections,
   setAsideHaiveProjections,
   type KeptFiles,
+  type RestoreSection,
   type SetAsideResult,
 } from '../../../project-state/set-aside.js';
 
@@ -417,15 +419,18 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       taskId: ctx.taskId,
       epoch: ctx.epoch,
     };
+    const putBackSection: RestoreSection = (fn) => inMergeDirUnlessClaimed(ctx.db, owner, fn);
     const setAside = async (): Promise<SetAsideResult> => {
       if (!repositoryId) return { outcome: 'clean' };
       let aside: SetAsideResult;
       try {
-        aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence, (fn) =>
-          withMergeDirSection(ctx.db, owner, fn),
-        );
+        aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence, {
+          restore: (fn) => withMergeDirSection(ctx.db, owner, fn),
+          putBack: putBackSection,
+        });
       } catch (err) {
-        if (asided) await putBackAfterFailure(ctx.db, repositoryId, ctx.repoPath, kept, err);
+        if (asided)
+          await putBackAfterFailure(ctx.db, repositoryId, ctx.repoPath, kept, err, putBackSection);
         throw err;
       }
       if (aside.outcome === 'set-aside') {
@@ -531,7 +536,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         if (res.code !== 0 && !res.unmoved) {
           // The deepen is a network fetch: Haive's files go back first, and the retry sets them aside again.
           if (repositoryId && asided) {
-            await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
+            await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept, putBackSection);
             kept.clear();
             asided = false;
           }
@@ -546,14 +551,22 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         }
       } catch (err) {
         if (repositoryId && asided) {
-          await recoverAfterMoveFailure(ctx.db, repositoryId, ctx.repoPath, kept, before, err);
+          await recoverAfterMoveFailure(
+            ctx.db,
+            repositoryId,
+            ctx.repoPath,
+            kept,
+            before,
+            err,
+            putBackSection,
+          );
         }
         throw err;
       }
       if (repositoryId && res.code === 0) {
         await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
       } else if (repositoryId && asided) {
-        await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept);
+        await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept, putBackSection);
       }
       if (res.code !== 0) {
         ctx.logger.warn(

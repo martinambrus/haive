@@ -611,22 +611,31 @@ export async function setAsideHaiveProjections(
   repositoryId: string,
   repoPath: string,
   fence?: CheckoutFence,
-  section?: RestoreSection,
+  sections?: { restore: RestoreSection; putBack: RestoreSection },
 ): Promise<SetAsideResult> {
   const restored = new Set<string>();
   const kept: KeptFiles = new Map();
   // A stop after anything was captured puts it back, since no move follows; the put-back skips what was not restored.
   const stop = async (result: SetAsideResult): Promise<SetAsideResult> => {
-    if (kept.size > 0) await putBackProjections(db, repositoryId, repoPath, kept);
+    if (kept.size > 0)
+      await putBackProjections(db, repositoryId, repoPath, kept, sections?.putBack);
     return result;
   };
   let busy = '';
   for (let attempt = 1; attempt <= MOVE_ATTEMPTS; attempt++) {
     let result: Awaited<ReturnType<typeof setAsideOnce>>;
     try {
-      result = await setAsideOnce(db, repositoryId, repoPath, restored, kept, fence, section);
+      result = await setAsideOnce(
+        db,
+        repositoryId,
+        repoPath,
+        restored,
+        kept,
+        fence,
+        sections?.restore,
+      );
     } catch (err) {
-      return putBackAfterFailure(db, repositoryId, repoPath, kept, err);
+      return putBackAfterFailure(db, repositoryId, repoPath, kept, err, sections?.putBack);
     }
     if (!('changed' in result)) {
       if (result.outcome === 'clean' && restored.size > 0) {
@@ -801,10 +810,11 @@ export async function putBackProjections(
   repositoryId: string,
   repoPath: string,
   kept: KeptFiles,
+  section?: RestoreSection,
 ): Promise<void> {
   if (kept.size === 0) return;
   await restoreFaults.beforePutBack?.();
-  await db.transaction(async (tx) => {
+  await (section ?? ((fn) => db.transaction(fn)))(async (tx) => {
     await lockProjectState(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
     // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
@@ -849,9 +859,10 @@ export async function putBackAfterFailure(
   repoPath: string,
   kept: KeptFiles,
   err: unknown,
+  section?: RestoreSection,
 ): Promise<never> {
   try {
-    await putBackProjections(db, repositoryId, repoPath, kept);
+    await putBackProjections(db, repositoryId, repoPath, kept, section);
   } catch (putErr) {
     const paths = [...kept.keys()].sort();
     logger.error(
@@ -880,6 +891,7 @@ export async function recoverAfterMoveFailure(
   kept: KeptFiles,
   before: string,
   err: unknown,
+  section?: RestoreSection,
 ): Promise<never> {
   const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
   if (head.code === 0 && head.stdout.trim() !== before) {
@@ -891,7 +903,7 @@ export async function recoverAfterMoveFailure(
     );
     throw err;
   }
-  return putBackAfterFailure(db, repositoryId, repoPath, kept, err);
+  return putBackAfterFailure(db, repositoryId, repoPath, kept, err, section);
 }
 
 /** The mode the restore gives a file it recreates from HEAD. */

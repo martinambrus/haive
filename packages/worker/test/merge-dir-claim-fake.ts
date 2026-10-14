@@ -60,6 +60,17 @@ export function mergeDirClaimOverrides(fake: MergeDirClaimFake = claimFake) {
         open = false;
       }
     },
+    inMergeDirUnlessClaimed: async <T>(
+      db: unknown,
+      owner: { mergeDir: string; taskId: string },
+      fn: (tx: unknown) => Promise<T>,
+    ) => {
+      const held = fake.claims.get(owner.mergeDir);
+      if (held && held.taskId !== owner.taskId) {
+        throw new Error(`task "${held.title}" (${held.taskId}) holds this checkout`);
+      }
+      return fn(db);
+    },
     otherLiveClaim: async (_tx: unknown, mergeDir: string, taskId: string) => {
       const held = fake.claims.get(mergeDir);
       return held && held.taskId !== taskId ? { id: held.taskId, title: held.title } : null;

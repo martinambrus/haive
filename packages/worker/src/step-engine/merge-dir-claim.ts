@@ -157,6 +157,20 @@ export async function withMergeDirSection<T>(
   });
 }
 
+/** A write to the merge dir that must still run after the pass's own claim is gone (a cancel releases it),
+ *  refused only while another task's live claim holds the dir. */
+export async function inMergeDirUnlessClaimed<T>(
+  db: Database,
+  owner: Pick<MergeDirOwner, 'mergeDir' | 'taskId'>,
+  fn: (tx: Parameters<Parameters<Database['transaction']>[0]>[0]) => Promise<T>,
+): Promise<T> {
+  return inMergeDirLock(db, owner.mergeDir, async (tx) => {
+    const holder = await otherLiveClaim(tx, owner.mergeDir, owner.taskId);
+    if (holder) throw new Error(`task "${holder.title}" (${holder.id}) holds this checkout`);
+    return fn(tx);
+  });
+}
+
 /** Release the dir in the section that records the merge done. */
 export async function releaseMergeDir(
   tx: DbHandle,

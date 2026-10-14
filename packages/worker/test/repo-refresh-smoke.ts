@@ -1116,6 +1116,88 @@ async function main(): Promise<void> {
         e2.thrown instanceof StepSupersededError && !e2.restored && !e2.moved && e2.back,
         { ...e2, thrown: String(e2.thrown) },
       );
+
+      // E3. A cancel releases the claim and another task takes the checkout before the put-back: the put-back
+      // is refused, so Haive's files are not rewritten under that task's merge. The claim rows are swapped
+      // in beforePutBack, since the restore's section still holds the own claim row when afterRestore runs.
+      const c3 = await withPendingRender();
+      const id3 = c3.payload.repositoryId;
+      await writeRecord(seed, { acceptedAgentIds: ['a', 'b', 'e3'] });
+      upstreamCommit('a teammate adds agent e3', '.haive-data/state');
+      const renderBefore3 = await readFile(path.join(c3.dest, RENDER_REL));
+      const headBefore3 = git(c3.dest, 'rev-parse', 'HEAD');
+      const [own3] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: id3,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id, epoch: schema.tasks.orchestrationEpoch });
+      restoreFaults.afterRestore = async () => {
+        delete restoreFaults.afterRestore;
+        await db
+          .update(schema.tasks)
+          .set({ status: 'cancelled' })
+          .where(eq(schema.tasks.id, own3!.id));
+      };
+      restoreFaults.beforePutBack = async () => {
+        delete restoreFaults.beforePutBack;
+        await db.delete(schema.mergeDirClaims).where(eq(schema.mergeDirClaims.mergeDir, c3.dest));
+        const [other] = await db
+          .insert(schema.tasks)
+          .values({
+            userId,
+            repositoryId: id3,
+            type: 'workflow',
+            title: 'repo-refresh-smoke-other',
+            status: 'running',
+          })
+          .returning({ id: schema.tasks.id });
+        const [otherStep] = await db
+          .insert(schema.taskSteps)
+          .values({
+            taskId: other!.id,
+            stepId: '12-worktree-cleanup',
+            stepIndex: 0,
+            title: 'merge',
+            status: 'running',
+          })
+          .returning({ id: schema.taskSteps.id });
+        await db.insert(schema.mergeDirClaims).values({
+          mergeDir: c3.dest,
+          taskId: other!.id,
+          taskStepId: otherStep!.id,
+        });
+      };
+      let thrown3: unknown = null;
+      try {
+        const ctx = { ...(await taskCtx(c3.dest, own3!.id)), epoch: own3!.epoch };
+        const detected = await syncBaseStep.detect!(ctx);
+        await syncBaseStep.apply(ctx, {
+          detected,
+          formValues: { base: 'main' },
+          iteration: 0,
+          previousIterations: [],
+        });
+      } catch (err) {
+        thrown3 = err;
+      } finally {
+        delete restoreFaults.afterRestore;
+        delete restoreFaults.beforePutBack;
+        await db.delete(schema.tasks).where(eq(schema.tasks.repositoryId, id3));
+      }
+      const renderAfter3 = await readFile(path.join(c3.dest, RENDER_REL));
+      check(
+        'E3: a put-back refused while another task holds the checkout writes nothing and names the files',
+        thrown3 !== null &&
+          !renderAfter3.equals(renderBefore3) &&
+          git(c3.dest, 'rev-parse', 'HEAD') === headBefore3 &&
+          String(thrown3).includes(RENDER_REL),
+        { thrown: String(thrown3), back: renderAfter3.equals(renderBefore3) },
+      );
     }
 
     // 11e6. A person who edits a restored file before the put-back keeps their bytes: the put-back swaps
