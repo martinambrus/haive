@@ -312,6 +312,8 @@ export interface AdvanceStepParams {
   /** The task epoch this pass runs under. A pass whose task moves past it (a Retry) stops at its
    *  next cancellation check and writes no outcome. Undefined never stops on it. */
   epoch?: number | null;
+  /** The caller's module decision: a message is off, null is on. Undefined reads it here. */
+  moduleDeactivation?: string | null;
 }
 
 export type AdvanceStepResult =
@@ -2525,7 +2527,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     return { status: 'failed', row, error: row.errorMessage ?? 'the step failed' };
   }
 
-  const deactivated = await moduleDeactivationMessage(db, meta.id);
+  const deactivated =
+    params.moduleDeactivation === undefined
+      ? await moduleDeactivationMessage(db, meta.id)
+      : params.moduleDeactivation;
   if (deactivated !== null) {
     const patch = {
       status: 'failed',

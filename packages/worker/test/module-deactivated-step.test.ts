@@ -11,6 +11,7 @@ if (url && !new URL(url).pathname.startsWith('/module_deactivated_step_test'))
   throw new Error('Use a dedicated module_deactivated_step_test database for module step tests');
 
 const OFF = new Date('2026-10-14T08:00:00.000Z');
+const HANDED_OFF = 'the advance that called read this module as deactivated';
 
 function stepDef(id: string, extra: Partial<StepDefinition> = {}): StepDefinition {
   return {
@@ -119,6 +120,7 @@ describe('advanceStep on a module step', () => {
     status: string,
     extra: Partial<StepDefinition> = {},
     owned = true,
+    moduleDeactivation?: string | null,
   ) => {
     const state: MockState = {
       modules,
@@ -130,7 +132,10 @@ describe('advanceStep on a module step', () => {
     };
     return {
       state,
-      result: advanceStep(paramsFor(mockDb(state), stepDef(id, extra), 'task-1')),
+      result: advanceStep({
+        ...paramsFor(mockDb(state), stepDef(id, extra), 'task-1'),
+        moduleDeactivation,
+      }),
     };
   };
 
@@ -195,6 +200,45 @@ describe('advanceStep on a module step', () => {
     expect(shouldRun).toHaveBeenCalledTimes(1);
     expect(state.reads).toEqual(['task_steps', 'modules']);
     expect(state.patches.some((p) => p.status === 'skipped')).toBe(true);
+    expect(state.patches.some((p) => p.status === 'failed')).toBe(false);
+  });
+
+  it.each(['pending', 'running', 'waiting_form', 'waiting_cli'])(
+    'fails the %s row with the message its caller read, reading no module again',
+    async (status) => {
+      const shouldRun = vi.fn(async () => true);
+      const { state, result } = run(
+        'module.alpha.x',
+        [{ deactivatedAt: null }],
+        status,
+        { shouldRun },
+        true,
+        HANDED_OFF,
+      );
+      await expect(result).resolves.toMatchObject({
+        status: 'failed',
+        error: HANDED_OFF,
+        row: { status: 'failed', errorMessage: HANDED_OFF },
+      });
+      expect(state.reads).toEqual(['task_steps']);
+      expect(state.writes).toEqual(['update task_steps']);
+      expect(shouldRun).not.toHaveBeenCalled();
+    },
+  );
+
+  it('runs the step on the on decision its caller made, reading no module again', async () => {
+    const shouldRun = vi.fn(async () => false);
+    const { state, result } = run(
+      'module.alpha.x',
+      [{ deactivatedAt: OFF }],
+      'pending',
+      { shouldRun },
+      true,
+      null,
+    );
+    await expect(result).resolves.toMatchObject({ status: 'skipped' });
+    expect(shouldRun).toHaveBeenCalledTimes(1);
+    expect(state.reads).toEqual(['task_steps']);
     expect(state.patches.some((p) => p.status === 'failed')).toBe(false);
   });
 
@@ -341,6 +385,37 @@ describe.skipIf(!url)('module activation guard on Postgres', () => {
     ).resolves.toMatchObject({ status: 'failed' });
     expect(await stepRows()).toMatchObject([{ status: 'failed', startedAt: null }]);
     expect(shouldRun).not.toHaveBeenCalled();
+  });
+
+  it('fails the step row with the message its caller read, though the module is back since', async () => {
+    const shouldRun = vi.fn(async () => true);
+    await setModule('alpha', OFF);
+    const read = await moduleDeactivationMessage(db, 'module.alpha.x');
+    await reactivate('alpha');
+    await expect(
+      advanceStep({
+        ...paramsFor(db, stepDef('module.alpha.x', { shouldRun }), taskId),
+        epoch: await taskEpoch(),
+        moduleDeactivation: read,
+      }),
+    ).resolves.toMatchObject({ status: 'failed', error: read });
+    expect(await stepRows()).toMatchObject([{ status: 'failed', errorMessage: read }]);
+    expect(shouldRun).not.toHaveBeenCalled();
+  });
+
+  it('runs the step on the on decision its caller made, though the module is off since', async () => {
+    const shouldRun = vi.fn(async () => false);
+    await setModule('alpha', OFF);
+    await expect(
+      advanceStep({
+        ...paramsFor(db, stepDef('module.alpha.x', { shouldRun }), taskId),
+        moduleDeactivation: null,
+      }),
+    ).resolves.toMatchObject({ status: 'skipped' });
+    expect(shouldRun).toHaveBeenCalledTimes(1);
+    expect(await stepRows()).toMatchObject([
+      { stepId: 'module.alpha.x', status: 'skipped', errorMessage: null },
+    ]);
   });
 
   it('writes no failure for a pass a Retry has already moved past', async () => {

@@ -137,6 +137,10 @@ const h = vi.hoisted(() => {
     runtimeMode: 'none' as string,
     /** What a read of a module's row answers. */
     moduleRows: [] as { deactivatedAt: Date | null }[],
+    /** What the reads after the first answer, when an admin switches the module in between. */
+    laterModuleRows: null as { deactivatedAt: Date | null }[] | null,
+    /** How many reads of a module's row were made. */
+    moduleReads: 0,
   };
   return { state };
 });
@@ -205,7 +209,12 @@ const db = {
               if (name === 'usage_window_snapshots' && h.state.snapshotReadFails) {
                 throw new Error('the usage snapshot read failed');
               }
-              if (name === 'modules') return h.state.moduleRows;
+              if (name === 'modules') {
+                h.state.moduleReads += 1;
+                return h.state.moduleReads > 1 && h.state.laterModuleRows
+                  ? h.state.laterModuleRows
+                  : h.state.moduleRows;
+              }
               if (fields && 'pausedAt' in fields) {
                 return h.state.pausedAt ? [{ pausedAt: h.state.pausedAt }] : [];
               }
@@ -414,6 +423,23 @@ stepRegistry.register({
   },
 } as unknown as StepDefinition);
 
+stepRegistry.register({
+  metadata: {
+    id: 'module.epoch-plain.step',
+    workflowType: 'module.epoch-plain',
+    index: 0,
+    title: 'module.epoch-plain.step',
+    description: 'a step of a module that needs no runtime',
+    requiresCli: false,
+  },
+  async detect() {
+    return {};
+  },
+  async apply() {
+    return {};
+  },
+} as StepDefinition);
+
 afterEach(() => {
   h.state.taskEpoch = 5;
   h.state.readsAnswer = false;
@@ -445,6 +471,8 @@ afterEach(() => {
   h.state.shouldRun = async () => true;
   h.state.runtimeMode = 'none';
   h.state.moduleRows = [];
+  h.state.laterModuleRows = null;
+  h.state.moduleReads = 0;
   vi.restoreAllMocks();
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
@@ -1567,6 +1595,72 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
       parkQueued(15_000);
+    });
+  });
+
+  describe('on the module decision an advance hands to advanceStep', () => {
+    const full = {
+      decision: 'park',
+      position: 1,
+      waiting: 1,
+      busyMb: 1,
+      budgetMb: 1,
+      myWeightMb: 1,
+    };
+    afterEach(() => {
+      vi.mocked(runtimeAdmission).mockClear();
+    });
+    const off = [{ deactivatedAt: new Date() }];
+    const on = [{ deactivatedAt: null }];
+    const handedOn = () => vi.mocked(advanceStep).mock.calls[0]?.[0]?.moduleDeactivation;
+
+    it('reads off once, so a runtime step asks no shouldRun, takes no slot and hands the message on', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = off;
+      h.state.laterModuleRows = on;
+      const shouldRun = vi.fn(async () => true);
+      h.state.shouldRun = shouldRun;
+      await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+      expect(h.state.moduleReads).toBe(1);
+      expect(shouldRun).not.toHaveBeenCalled();
+      expect(vi.mocked(runtimeAdmission)).not.toHaveBeenCalled();
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toEqual(expect.stringContaining('module.epoch-skip.runtime'));
+    });
+
+    it('reads on once, and hands that on though a later read would say off', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = on;
+      h.state.laterModuleRows = off;
+      await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+      expect(h.state.moduleReads).toBe(1);
+      expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toBeNull();
+    });
+
+    it('reads a step that needs no runtime once too, and hands what it read on', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = off;
+      h.state.laterModuleRows = on;
+      await processTaskJob(job('module.epoch-plain.step'), 'tok');
+      expect(h.state.moduleReads).toBe(1);
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toEqual(expect.stringContaining('module.epoch-plain.step'));
+    });
+
+    it('queries no module for a core step, and hands an on decision on', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = off;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(h.state.moduleReads).toBe(0);
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toBeNull();
     });
   });
 

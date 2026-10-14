@@ -2717,9 +2717,8 @@ async function handleAdvanceStep(
   // reservation — see resolveAdmissionRuntimeKind.
   // A step of a deactivated module asks its shouldRun nothing and takes no slot here;
   // advanceStep fails its row.
-  const moduleOff = stepDef.needsRuntime
-    ? (await moduleDeactivationMessage(db, payload.stepId)) !== null
-    : false;
+  const moduleDeactivation = await moduleDeactivationMessage(db, payload.stepId);
+  const moduleOff = moduleDeactivation !== null;
   // A fresh step whose own shouldRun says skip takes no slot, ticket or preemption first.
   const skipsBeforeAdmission =
     !moduleOff &&
@@ -2927,6 +2926,7 @@ async function handleAdvanceStep(
       providers,
       deps: workerDeps,
       epoch: ctx.orchestrationEpoch,
+      moduleDeactivation,
     });
     await handleResult(db, ctx, payload.stepId, result);
   } finally {
