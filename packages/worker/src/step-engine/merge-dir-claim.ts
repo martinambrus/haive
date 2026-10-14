@@ -28,7 +28,7 @@ const LOCK_RETRY_MAX_MS = 1000;
 export async function inMergeDirLock<T>(
   db: Database,
   mergeDir: string,
-  fn: (tx: DbHandle) => Promise<T>,
+  fn: (tx: Parameters<Parameters<Database['transaction']>[0]>[0]) => Promise<T>,
 ): Promise<T> {
   let delay = LOCK_RETRY_FIRST_MS;
   for (;;) {
@@ -91,6 +91,21 @@ export async function liveClaimHolder(
   return null;
 }
 
+/** Another task's live claim on `mergeDir`, or null. Read under the dir's lock, so it holds until the
+ *  section ends. */
+export async function otherLiveClaim(
+  tx: DbHandle,
+  mergeDir: string,
+  taskId: string,
+): Promise<MergeDirHolder | null> {
+  const [claim] = await tx
+    .select()
+    .from(schema.mergeDirClaims)
+    .where(eq(schema.mergeDirClaims.mergeDir, mergeDir));
+  if (!claim || claim.taskId === taskId) return null;
+  return liveClaimHolder(tx, claim);
+}
+
 /** Take `mergeDir` for the pass's step before its first git write, committed ahead of it. Another
  *  task's claim holds unless that task is completed, that step skipped (a stale merge), or the task
  *  is cancelled with its teardown recorded (`task.cancel_finished`, written after the release). */
@@ -128,7 +143,7 @@ export async function claimMergeDir(db: Database, owner: MergeDirOwner): Promise
 export async function withMergeDirSection<T>(
   db: Database,
   owner: MergeDirOwner,
-  fn: (tx: DbHandle) => Promise<T>,
+  fn: (tx: Parameters<Parameters<Database['transaction']>[0]>[0]) => Promise<T>,
 ): Promise<T> {
   return inMergeDirLock(db, owner.mergeDir, async (tx) => {
     const [claim] = await tx
@@ -138,6 +153,20 @@ export async function withMergeDirSection<T>(
       .for('update');
     if (claim?.stepId !== owner.stepId) throw new StepSupersededError(owner.stepId);
     await requireLiveOwner(tx, owner);
+    return fn(tx);
+  });
+}
+
+/** A write to the merge dir that must still run after the pass's own claim is gone (a cancel releases it),
+ *  refused only while another task's live claim holds the dir. */
+export async function inMergeDirUnlessClaimed<T>(
+  db: Database,
+  owner: Pick<MergeDirOwner, 'mergeDir' | 'taskId'>,
+  fn: (tx: Parameters<Parameters<Database['transaction']>[0]>[0]) => Promise<T>,
+): Promise<T> {
+  return inMergeDirLock(db, owner.mergeDir, async (tx) => {
+    const holder = await otherLiveClaim(tx, owner.mergeDir, owner.taskId);
+    if (holder) throw new Error(`task "${holder.title}" (${holder.id}) holds this checkout`);
     return fn(tx);
   });
 }

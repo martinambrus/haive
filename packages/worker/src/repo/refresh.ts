@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import {
   ensureDirNoFollow,
   lstatNoFollow,
@@ -7,30 +7,47 @@ import {
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
-import { schema, type Database } from '@haive/database';
+import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
 import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
-import { lockProjectState } from '../project-state/write.js';
+import {
+  MOVE_ATTEMPTS,
+  putBackAfterFailure,
+  putBackProjections,
+  recoverAfterMoveFailure,
+  restoreKeptMetadata,
+  restoreProjectionsInTx,
+  resyncHaiveProjections,
+  setAsideHaiveProjections,
+  type KeptFiles,
+} from '../project-state/set-aside.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-push.js';
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 const firstLine = (text: string): string => text.trim().split('\n')[0] ?? '';
 
-/** Tasks holding this repository's checkout right now. */
+/** Tasks holding this repository's checkout right now. `rootOnly` counts only tasks with no worktree of
+ *  their own, which work in the checkout itself; `excludeTaskId` leaves out the caller's task. */
 export async function checkoutHoldingTasks(
   db: Pick<Database, 'query'>,
   repositoryId: string,
+  opts: { excludeTaskId?: string; rootOnly?: boolean } = {},
 ): Promise<number> {
   const rows = await db.query.tasks.findMany({
     where: and(
       eq(schema.tasks.repositoryId, repositoryId),
       inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+      opts.excludeTaskId ? ne(schema.tasks.id, opts.excludeTaskId) : undefined,
+      opts.rootOnly ? isNull(schema.tasks.worktreePath) : undefined,
     ),
     columns: { id: true },
   });
   return rows.length;
 }
+
+const holdingRefusal = (holding: number): string =>
+  `Not refreshed: ${plural(holding, 'task')} ${holding === 1 ? 'is' : 'are'} using this repository. Refresh once ${holding === 1 ? 'it finishes' : 'they finish'}.`;
 
 /** A git work tree whose top level is `dest` itself and that has a commit to stand on. */
 async function usableCheckout(dest: string): Promise<boolean> {
@@ -133,16 +150,68 @@ async function fastForward(
   }
   if (behind === 0) return null;
 
-  // Under the project-state lock, and only while no task holds the checkout: an upgrade that is
-  // still writing its record takes that lock, and refuses once its task is no longer holding.
-  const merged = await db.transaction(async (tx) => {
-    await lockProjectState(tx, payload.repositoryId);
-    if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) return null;
-    return gitRun(dest, ['merge', '--ff-only', target]);
-  });
-  if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
-  if (merged.code !== 0) {
-    return `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`;
+  const fence = (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
+    checkoutHoldingTasks(conn, payload.repositoryId);
+  // Under both projection locks, and only while no task holds the checkout: an upgrade that is
+  // still writing its record takes the project-state lock, and refuses once its task is no longer
+  // holding. The check runs again here so no sweep can rewrite a file between it and the move; a
+  // file it finds rewritten ends the transaction unmoved and goes back to the set-aside.
+  let asided = false;
+  const kept: KeptFiles = new Map();
+  const before = (await gitRun(dest, ['rev-parse', 'HEAD'])).stdout.trim();
+  for (let attempt = 1; ; attempt++) {
+    let aside;
+    try {
+      aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
+    } catch (err) {
+      if (asided) await putBackAfterFailure(db, payload.repositoryId, dest, kept, err);
+      throw err;
+    }
+    if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
+      await putBackProjections(db, payload.repositoryId, dest, kept);
+    }
+    if (aside.outcome === 'refused') {
+      return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
+    }
+    if (aside.outcome === 'held') return holdingRefusal(aside.holding);
+    if (aside.outcome === 'set-aside') {
+      asided = true;
+      for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
+    }
+
+    let moved;
+    try {
+      moved = await db.transaction(async (tx) => {
+        // Task creation takes this lock, so no task can start between the fence and the move.
+        await lockRepositoryTasksKey(tx, payload.repositoryId);
+        const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
+        if (check.outcome !== 'clean') return { again: check, merge: null };
+        if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
+          return { again: check, merge: null };
+        }
+        return { again: check, merge: await gitRun(dest, ['merge', '--ff-only', target]) };
+      });
+    } catch (err) {
+      if (asided) await recoverAfterMoveFailure(db, payload.repositoryId, dest, kept, before, err);
+      throw err;
+    }
+    const { again, merge: merged } = moved;
+    if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
+    if (merged?.code === 0) {
+      await resyncHaiveProjections(db, payload.repositoryId, dest);
+      await restoreKeptMetadata(dest, kept);
+    } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
+    if (again.outcome === 'refused') {
+      return `Not refreshed: ${again.reason}. The checkout was not moved.`;
+    }
+    if (again.outcome === 'retry') {
+      return "Not refreshed: Haive's project files kept changing under the move. The checkout was not moved; refresh again.";
+    }
+    if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
+    if (merged.code !== 0) {
+      return `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`;
+    }
+    break;
   }
   logger.info(
     { repositoryId: payload.repositoryId, branch, commits: behind },
@@ -211,7 +280,7 @@ export async function handleRefresh(
       const usable = await usableCheckout(dest);
       const holding = await checkoutHoldingTasks(db, payload.repositoryId);
       if (holding > 0) {
-        const refusal = `Not refreshed: ${plural(holding, 'task')} ${holding === 1 ? 'is' : 'are'} using this repository. Refresh once ${holding === 1 ? 'it finishes' : 'they finish'}.`;
+        const refusal = holdingRefusal(holding);
         if (!usable) throw new Error(refusal);
         await persistDetection(db, payload.repositoryId, dest, refusal);
         return;

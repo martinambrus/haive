@@ -29,7 +29,7 @@ type Stage = 1 | 2 | 3;
 
 const BYTES = { encoding: 'latin1' as const };
 
-async function readBlob(worktreePath: string, sha: string): Promise<Buffer | null> {
+export async function readBlob(worktreePath: string, sha: string): Promise<Buffer | null> {
   const res = await gitRun(worktreePath, ['cat-file', 'blob', sha], undefined, BYTES);
   return res.code === 0 ? Buffer.from(res.stdout, 'latin1') : null;
 }
@@ -120,7 +120,10 @@ const utf8Path = (raw: string): string => Buffer.from(raw, 'latin1').toString('u
 
 /** The record's files in `rev`'s tree, relative to the state directory; empty where it has none.
  *  Bounded as the checkout reader is, by the sizes git lists, before any blob is read. */
-async function readStateTree(worktreePath: string, rev: string): Promise<Map<string, string>> {
+export async function readStateTree(
+  worktreePath: string,
+  rev: string,
+): Promise<Map<string, string>> {
   const listing = await gitRun(
     worktreePath,
     ['ls-tree', '-r', '-l', '-z', rev, '--', PROJECT_STATE_DIR],

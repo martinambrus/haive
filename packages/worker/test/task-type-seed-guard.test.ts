@@ -36,7 +36,7 @@ describe.skipIf(!url)('task type seed against an admin row on Postgres', () => {
       requiresRepository: false,
     });
 
-    await expect(syncTaskTypeDefinitions(db, stepRegistry)).rejects.toThrow(
+    await expect(syncTaskTypeDefinitions(db, stepRegistry, [])).rejects.toThrow(
       /slug plan_merge is held by a admin row/,
     );
 
@@ -55,24 +55,24 @@ describe.skipIf(!url)('task type seed against an admin row on Postgres', () => {
 
   it('fails the boot even when the foreign row has the same step list', async () => {
     await db.delete(schema.taskTypeDefinitions);
-    await syncTaskTypeDefinitions(db, stepRegistry);
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
     await db
       .update(schema.taskTypeDefinitions)
       .set({ source: 'admin' })
       .where(eq(schema.taskTypeDefinitions.slug, 'workflow'));
-    await expect(syncTaskTypeDefinitions(db, stepRegistry)).rejects.toThrow(
+    await expect(syncTaskTypeDefinitions(db, stepRegistry, [])).rejects.toThrow(
       /slug workflow is held by a admin row/,
     );
   });
 
   it('still refreshes a built-in row', async () => {
     await db.delete(schema.taskTypeDefinitions);
-    await syncTaskTypeDefinitions(db, stepRegistry);
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
     await db
       .update(schema.taskTypeDefinitions)
       .set({ stepIds: ['stale'], contentHash: 'stale' })
       .where(eq(schema.taskTypeDefinitions.slug, slug));
-    await syncTaskTypeDefinitions(db, stepRegistry);
+    await syncTaskTypeDefinitions(db, stepRegistry, []);
     const [stored] = await db
       .select()
       .from(schema.taskTypeDefinitions)

@@ -7,6 +7,7 @@ const entry = {
   title: 'Check <b>it</b>',
   template: 'Review {{task.title}}',
   capabilities: ['file_write' as const],
+  tools: [],
   timeoutMs: 600_000,
 };
 const noop = () => {};

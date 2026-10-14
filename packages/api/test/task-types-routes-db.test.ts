@@ -642,7 +642,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect(traits('tt-restore-t')).toEqual({ restoresDatabase: true, dispatchesCli: false });
       expect(traits('tt-agent-t')).toEqual({ restoresDatabase: false, dispatchesCli: true });
       expect(traits('tt-both-t')).toEqual({ restoresDatabase: true, dispatchesCli: true });
-      expect(traits('tt-mod-restore')).toEqual({ restoresDatabase: false, dispatchesCli: false });
+      expect(traits('tt-mod-restore')).toEqual({ restoresDatabase: true, dispatchesCli: false });
       expect(traits('workflow')).toEqual({ restoresDatabase: true, dispatchesCli: true });
     });
 
@@ -749,6 +749,18 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       timeoutMs: 300_000,
       ...over,
     });
+    const httpTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of the repository.',
+      action: 'http-get',
+      url: 'https://api.example.com/v1/status',
+    };
+    const ragTool = {
+      name: 'house_rules',
+      description: 'Searches the house rules.',
+      action: 'rag-query',
+      scope: 'global',
+    };
     const CUSTOM_ID = 'custom.tt-ps.review';
     const withStep = (over: Record<string, unknown> = {}) =>
       valid('tt-ps', {
@@ -764,7 +776,7 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       const res = await send('POST', '/admin/task-types', withStep());
       expect(res.status).toBe(201);
       expect((await row('tt-ps'))?.promptSteps).toEqual({
-        review: { ...step('review'), capabilities: [] },
+        review: { ...step('review'), capabilities: [], tools: [] },
       });
       h.flags.set(CUSTOM_KEY, true);
       const detail = (await (await send('GET', '/admin/task-types/tt-ps')).json()) as {
@@ -859,6 +871,13 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         { template: 'Do it', capabilities: ['file_write'] },
         { repo: false },
       ],
+      ['tools-not-supported-yet', { tools: [httpTool] }, {}],
+      ['tool-url-not-https', { tools: [{ ...httpTool, url: 'http://api.example.com/v1' }] }, {}],
+      [
+        'tool-scope-needs-repository',
+        { tools: [{ ...ragTool, scope: 'project' }] },
+        { repo: false },
+      ],
     ])('refuses %s with a 400 naming it, storing nothing', async (kind, over, opts) => {
       const res = await send(
         'POST',
@@ -875,10 +894,25 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect(await row('tt-ps')).toBeUndefined();
     });
 
+    it('refuses a tool on a PATCH too, and leaves the stored step as it was', async () => {
+      await send('POST', '/admin/task-types', withStep());
+      const res = await send('PATCH', '/admin/task-types/tt-ps', {
+        promptSteps: { review: step('review', { tools: [httpTool] }) },
+      });
+      expect(res.status).toBe(400);
+      expect(await issues(res)).toEqual([
+        expect.objectContaining({ kind: 'tools-not-supported-yet', stepId: CUSTOM_ID }),
+      ]);
+      expect((await row('tt-ps'))?.promptSteps).toEqual({
+        review: { ...step('review'), capabilities: [], tools: [] },
+      });
+    });
+
     it('refuses a step the schema bounds, and an entry keyed by another slug', async () => {
       for (const promptSteps of [
         { review: step('review', { timeoutMs: 5 }) },
         { review: step('review', { template: '' }) },
+        { review: step('review', { tools: Array.from({ length: 9 }, () => httpTool) }) },
         { other: step('review') },
       ]) {
         const res = await send('POST', '/admin/task-types', withStep({ promptSteps }));

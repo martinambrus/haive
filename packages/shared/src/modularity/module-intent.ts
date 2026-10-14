@@ -16,6 +16,7 @@ export interface ModuleIntentRow {
   entitlementId: string | null;
   lastLoadedAt: Date | string;
   missingAt: Date | string | null;
+  deactivatedAt: Date | string | null;
 }
 
 export interface ModuleDiffRow {
@@ -30,6 +31,7 @@ export interface ModuleDiffRow {
   versionDrift: boolean;
   lastLoadedAt: string | null;
   missingAt: string | null;
+  deactivatedAt: string | null;
 }
 
 export interface ModuleDiff {
@@ -98,6 +100,7 @@ export function diffModuleIntent(
       versionDrift: new Set(seen).size > 1,
       lastLoadedAt: row ? iso(row.lastLoadedAt) : null,
       missingAt: row ? iso(row.missingAt) : null,
+      deactivatedAt: row ? iso(row.deactivatedAt) : null,
     };
   });
   return { workerAt: worker.at, rows: out };

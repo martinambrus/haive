@@ -3,8 +3,10 @@ import {
   composableStepEntrySchema,
   PERSONA_ID_PATTERN_SOURCE,
 } from '../src/modularity/contracts.js';
+import type { CustomTool } from '../src/modularity/custom-tools.js';
 import {
   rewriteStepTokens,
+  PROMPT_STEP_PROBLEM_KINDS,
   PROMPT_STEP_TEMPLATE_MAX_BYTES,
   PROMPT_STEP_TIMEOUT_MAX_MS,
   PROMPT_STEP_TIMEOUT_MIN_MS,
@@ -643,5 +645,164 @@ describe('step id length', () => {
     expect(kinds({ ...entry(), slug } as PromptStepValidationInput, fits)).toContain(
       'step-id-too-long',
     );
+  });
+});
+
+describe('tools on a prompt step', () => {
+  const valid = {
+    slug: 'check-a',
+    title: 'Check A',
+    template: 'Do {{task.title}}',
+    timeoutMs: 120_000,
+  };
+  const httpTool: CustomTool = {
+    name: 'repo_status',
+    description: 'Fetches the status of one repository.',
+    action: 'http-get',
+    url: 'https://api.example.com/v1/repos/{repo}/status',
+    query: [],
+    params: [
+      {
+        name: 'repo',
+        type: 'string',
+        description: 'Repository slug.',
+        required: true,
+        maxLength: 64,
+      },
+    ],
+    timeoutMs: 10_000,
+    maxResponseBytes: 32_768,
+  };
+  const ragTool: CustomTool = {
+    name: 'house_rules',
+    description: 'Searches the house rules.',
+    action: 'rag-query',
+    scope: 'global',
+    topK: 8,
+    maxResponseBytes: 32_768,
+  };
+  const named = (name: string): CustomTool => ({ ...httpTool, name });
+
+  it('parses an entry that has no tools to an empty list', () => {
+    expect(promptStepEntrySchema.parse(valid).tools).toEqual([]);
+    expect(promptStepEntrySchema.parse({ ...valid, tools: undefined }).tools).toEqual([]);
+    expect(promptStepEntrySchema.parse({ ...valid, tools: [] }).tools).toEqual([]);
+  });
+
+  it('keeps the tools of an entry, up to 8', () => {
+    const parsed = promptStepEntrySchema.parse({ ...valid, tools: [httpTool, ragTool] });
+    expect(parsed.tools).toEqual([httpTool, ragTool]);
+    const eight = Array.from({ length: 8 }, (_, i) => named(`tool_${i}`));
+    expect(promptStepEntrySchema.safeParse({ ...valid, tools: eight }).success).toBe(true);
+    expect(
+      promptStepEntrySchema.safeParse({ ...valid, tools: [...eight, named('tool_8')] }).success,
+    ).toBe(false);
+  });
+
+  it('refuses an entry whose tool breaks a bound of the tool schema', () => {
+    const bad = (tool: unknown) =>
+      promptStepEntrySchema.safeParse({ ...valid, tools: [tool] }).success;
+    expect(bad(httpTool)).toBe(true);
+    expect(bad({ ...httpTool, name: 'Bad Name' })).toBe(false);
+    expect(bad({ ...httpTool, timeoutMs: 31_000 })).toBe(false);
+    expect(bad({ ...httpTool, action: 'http-post' })).toBe(false);
+    expect(bad('repo_status')).toBe(false);
+  });
+
+  it('refuses a step that carries a valid tool, once, until the worker wires tools', () => {
+    expect(kinds(entry({ tools: [httpTool] }))).toEqual(['tools-not-supported-yet']);
+    expect(kinds(entry({ tools: [ragTool] }))).toEqual(['tools-not-supported-yet']);
+    expect(kinds(entry({ tools: [httpTool, ragTool, named('a'), named('b')] }))).toEqual([
+      'tools-not-supported-yet',
+    ]);
+    expect(kinds(entry({ tools: [] }))).toEqual([]);
+    expect(kinds(entry())).toEqual([]);
+  });
+
+  it('words the refusal in the problem it returns', () => {
+    const [problem] = validatePromptStep(entry({ tools: [httpTool] }), ctx);
+    expect(problem).toMatchObject({ kind: 'tools-not-supported-yet', raw: '', start: 0 });
+    expect(problem!.message).toMatch(/not supported yet/);
+  });
+
+  it('adds the problems of each tool, with the tool name as the raw text', () => {
+    const found = validatePromptStep(
+      entry({
+        tools: [
+          named('good'),
+          { ...httpTool, name: 'bad', url: 'http://api.example.com/v1/repos/{repo}/status' },
+          { ...ragTool, name: 'rag_search' },
+        ],
+      }),
+      ctx,
+    );
+    expect(found.map((p) => [p.kind, p.raw])).toEqual([
+      ['tool-url-not-https', 'bad'],
+      ['tool-name-reserved', 'rag_search'],
+      ['tools-not-supported-yet', ''],
+    ]);
+    expect(found.every((p) => p.start === 0 && p.message.length > 0)).toBe(true);
+  });
+
+  it('puts the list-level problems on the step', () => {
+    const nine = Array.from({ length: 9 }, (_, i) => named(`tool_${i}`));
+    expect(kinds(entry({ tools: nine }))).toEqual(['too-many-tools', 'tools-not-supported-yet']);
+    expect(kinds(entry({ tools: [named('a'), named('a')] }))).toEqual([
+      'tool-name-duplicate',
+      'tools-not-supported-yet',
+    ]);
+  });
+
+  it('checks a rag-query tool against the type the step sits on', () => {
+    const project: CustomTool = { ...ragTool, scope: 'project' };
+    expect(kinds(entry({ tools: [project] }))).toEqual(['tools-not-supported-yet']);
+    expect(kinds(entry({ tools: [project] }), { ...ctx, requiresRepository: false })).toEqual([
+      'tool-scope-needs-repository',
+      'tools-not-supported-yet',
+    ]);
+    expect(kinds(entry({ tools: [ragTool] }), { ...ctx, requiresRepository: false })).toEqual([
+      'tools-not-supported-yet',
+    ]);
+  });
+
+  it('reports tool problems next to the problems of the template and leaves those alone', () => {
+    const found = kinds(
+      entry({
+        template: '{{nope}}',
+        timeoutMs: 1,
+        tools: [{ ...httpTool, url: 'https://localhost/v1/repos/{repo}/status' }],
+      }),
+    );
+    expect(new Set(found)).toEqual(
+      new Set([
+        'unknown-token',
+        'timeout-out-of-range',
+        'tool-host-not-public',
+        'tools-not-supported-yet',
+      ]),
+    );
+  });
+
+  it('lists the new problem kinds with the old ones, without a repeat', () => {
+    expect(PROMPT_STEP_PROBLEM_KINDS.slice(0, 14)).toEqual([
+      'unknown-token',
+      'field-not-declared',
+      'persona-id-invalid',
+      'reserved-marker-in-template',
+      'integration-token',
+      'template-too-large',
+      'timeout-out-of-range',
+      'capability-not-allowed',
+      'persona-without-repository',
+      'file-write-without-repository',
+      'step-id-too-long',
+      'step-token-not-earlier',
+      'step-token-not-quotable',
+      'step-token-not-own-line',
+    ]);
+    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tools-not-supported-yet');
+    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tool-url-not-https');
+    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('too-many-tools');
+    expect(new Set(PROMPT_STEP_PROBLEM_KINDS).size).toBe(PROMPT_STEP_PROBLEM_KINDS.length);
   });
 });

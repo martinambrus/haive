@@ -169,6 +169,7 @@ describe('TaskTypeComposer', () => {
       title: 'Ask the agent',
       template: 'Summarise {{task.title}}',
       capabilities: [] as [],
+      tools: [],
       timeoutMs: 300_000,
     };
     const editing = {

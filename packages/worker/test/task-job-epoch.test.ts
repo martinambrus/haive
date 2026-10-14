@@ -135,6 +135,12 @@ const h = vi.hoisted(() => {
     shouldRun: (async () => true) as () => Promise<boolean>,
     /** What classifyRuntime reports for an if-serving step. */
     runtimeMode: 'none' as string,
+    /** What a read of a module's row answers. */
+    moduleRows: [] as { deactivatedAt: Date | null }[],
+    /** What the reads after the first answer, when an admin switches the module in between. */
+    laterModuleRows: null as { deactivatedAt: Date | null }[] | null,
+    /** How many reads of a module's row were made. */
+    moduleReads: 0,
   };
   return { state };
 });
@@ -203,6 +209,12 @@ const db = {
               if (name === 'usage_window_snapshots' && h.state.snapshotReadFails) {
                 throw new Error('the usage snapshot read failed');
               }
+              if (name === 'modules') {
+                h.state.moduleReads += 1;
+                return h.state.moduleReads > 1 && h.state.laterModuleRows
+                  ? h.state.laterModuleRows
+                  : h.state.moduleRows;
+              }
               if (fields && 'pausedAt' in fields) {
                 return h.state.pausedAt ? [{ pausedAt: h.state.pausedAt }] : [];
               }
@@ -212,6 +224,12 @@ const db = {
               return [];
             },
             for: async () => {
+              if (name === 'modules') {
+                h.state.moduleReads += 1;
+                return h.state.moduleReads > 1 && h.state.laterModuleRows
+                  ? h.state.laterModuleRows
+                  : h.state.moduleRows;
+              }
               if (name === 'tasks') {
                 const held = taskMatches(cond);
                 h.state.taskHolds.push(held);
@@ -392,6 +410,42 @@ stepRegistry.register({
   },
 } as unknown as StepDefinition);
 
+stepRegistry.register({
+  metadata: {
+    id: 'module.epoch-skip.runtime',
+    workflowType: 'module.epoch-skip',
+    index: 0,
+    title: 'module.epoch-skip.runtime',
+    description: 'a runtime step of a module that may skip itself',
+    requiresCli: false,
+  },
+  needsRuntime: 'ddev',
+  shouldRun: () => h.state.shouldRun(),
+  async detect() {
+    return {};
+  },
+  async apply() {
+    return {};
+  },
+} as unknown as StepDefinition);
+
+stepRegistry.register({
+  metadata: {
+    id: 'module.epoch-plain.step',
+    workflowType: 'module.epoch-plain',
+    index: 0,
+    title: 'module.epoch-plain.step',
+    description: 'a step of a module that needs no runtime',
+    requiresCli: false,
+  },
+  async detect() {
+    return {};
+  },
+  async apply() {
+    return {};
+  },
+} as StepDefinition);
+
 afterEach(() => {
   h.state.taskEpoch = 5;
   h.state.readsAnswer = false;
@@ -422,6 +476,9 @@ afterEach(() => {
   h.state.snapshotReadFails = false;
   h.state.shouldRun = async () => true;
   h.state.runtimeMode = 'none';
+  h.state.moduleRows = [];
+  h.state.laterModuleRows = null;
+  h.state.moduleReads = 0;
   vi.restoreAllMocks();
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
@@ -1462,6 +1519,163 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       };
       await processTaskJob(job('epoch-skip-runtime', { formValues: { answer: 'yes' } }), 'tok');
       expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('on the runtime pool, for a step of a module', () => {
+    const full = {
+      decision: 'park',
+      position: 1,
+      waiting: 1,
+      busyMb: 1,
+      budgetMb: 1,
+      myWeightMb: 1,
+    };
+    afterEach(() => {
+      vi.mocked(runtimeAdmission).mockClear();
+    });
+    const off = [{ deactivatedAt: new Date() }];
+
+    it.each([false, true])(
+      'asks no shouldRun (it would say %s) and takes no slot while the module is deactivated',
+      async (answer) => {
+        h.state.readsAnswer = true;
+        h.state.admission = full;
+        h.state.parkRow = unparked;
+        h.state.moduleRows = off;
+        const shouldRun = vi.fn(async () => answer);
+        h.state.shouldRun = shouldRun;
+        await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+        expect(shouldRun).not.toHaveBeenCalled();
+        expect(vi.mocked(runtimeAdmission)).not.toHaveBeenCalled();
+        expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+        expect(h.state.add).not.toHaveBeenCalled();
+      },
+    );
+
+    it('takes no slot for the continuation of a deactivated module either', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = off;
+      h.state.existingRow = {
+        ...unparked,
+        stepId: 'module.epoch-skip.runtime',
+        round: 0,
+        status: 'waiting_form',
+        formValues: null,
+      };
+      await processTaskJob(
+        job('module.epoch-skip.runtime', { formValues: { answer: 'yes' } }),
+        'tok',
+      );
+      expect(vi.mocked(runtimeAdmission)).not.toHaveBeenCalled();
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['is active', [{ deactivatedAt: null }]],
+      ['has no row', []],
+    ])(
+      'still lets shouldRun skip the step, with no slot, while the module %s',
+      async (_l, rows) => {
+        h.state.readsAnswer = true;
+        h.state.admission = full;
+        h.state.parkRow = unparked;
+        h.state.moduleRows = rows;
+        const shouldRun = vi.fn(async () => false);
+        h.state.shouldRun = shouldRun;
+        await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+        expect(shouldRun).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(runtimeAdmission)).not.toHaveBeenCalled();
+        expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('still parks the step while the module is active and its shouldRun says run', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = [{ deactivatedAt: null }];
+      await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+      expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      parkQueued(15_000);
+    });
+  });
+
+  describe('on the module decision an advance hands to advanceStep', () => {
+    const full = {
+      decision: 'park',
+      position: 1,
+      waiting: 1,
+      busyMb: 1,
+      budgetMb: 1,
+      myWeightMb: 1,
+    };
+    afterEach(() => {
+      vi.mocked(runtimeAdmission).mockClear();
+    });
+    const off = [{ deactivatedAt: new Date() }];
+    const on = [{ deactivatedAt: null }];
+    const handedOn = () => vi.mocked(advanceStep).mock.calls[0]?.[0]?.moduleDeactivation;
+
+    it('reads off once, so a runtime step asks no shouldRun, takes no slot and hands the message on', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = full;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = off;
+      h.state.laterModuleRows = on;
+      const shouldRun = vi.fn(async () => true);
+      h.state.shouldRun = shouldRun;
+      await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+      expect(h.state.moduleReads).toBe(1);
+      expect(shouldRun).not.toHaveBeenCalled();
+      expect(vi.mocked(runtimeAdmission)).not.toHaveBeenCalled();
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toEqual(expect.stringContaining('module.epoch-skip.runtime'));
+    });
+
+    it('reads on, then again once the task is live, and hands on a deactivation that landed between', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = on;
+      h.state.laterModuleRows = off;
+      await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+      expect(h.state.moduleReads).toBe(2);
+      expect(vi.mocked(runtimeAdmission)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toEqual(expect.stringContaining('module.epoch-skip.runtime'));
+    });
+
+    it('reads on twice and hands on when the module stays active', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = on;
+      await processTaskJob(job('module.epoch-skip.runtime'), 'tok');
+      expect(h.state.moduleReads).toBe(2);
+      expect(handedOn()).toBeNull();
+    });
+
+    it('reads a step that needs no runtime once too, and hands what it read on', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = off;
+      h.state.laterModuleRows = on;
+      await processTaskJob(job('module.epoch-plain.step'), 'tok');
+      expect(h.state.moduleReads).toBe(1);
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toEqual(expect.stringContaining('module.epoch-plain.step'));
+    });
+
+    it('queries no module for a core step, and hands an on decision on', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = off;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(h.state.moduleReads).toBe(0);
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(handedOn()).toBeNull();
     });
   });
 

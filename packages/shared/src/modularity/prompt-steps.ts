@@ -8,6 +8,13 @@ import {
   REPOSITORY_TOKEN,
   type ComposableStepEntry,
 } from './contracts.js';
+import {
+  CUSTOM_TOOL_PROBLEM_KINDS,
+  CUSTOM_TOOLS_MAX_PER_STEP,
+  customToolSchema,
+  validateCustomTools,
+  type CustomTool,
+} from './custom-tools.js';
 
 export const PROMPT_STEP_TEMPLATE_MAX_BYTES = 16 * 1024;
 export const PROMPT_STEP_TITLE_MAX_LENGTH = 512;
@@ -36,6 +43,7 @@ export const promptStepEntrySchema = z.object({
     .refine((t) => utf8Bytes(t) <= PROMPT_STEP_TEMPLATE_MAX_BYTES, 'template is too large'),
   paramFormSchema: formSchemaSchema.optional(),
   capabilities: z.array(z.enum(PROMPT_STEP_CAPABILITIES)).default([]),
+  tools: z.array(customToolSchema).max(CUSTOM_TOOLS_MAX_PER_STEP).default([]),
   timeoutMs: z.number().int().min(PROMPT_STEP_TIMEOUT_MIN_MS).max(PROMPT_STEP_TIMEOUT_MAX_MS),
   agentPool: z.literal('*').optional(),
 });
@@ -229,6 +237,8 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'step-token-not-earlier',
   'step-token-not-quotable',
   'step-token-not-own-line',
+  ...CUSTOM_TOOL_PROBLEM_KINDS,
+  'tools-not-supported-yet',
 ] as const;
 export type PromptStepProblemKind = (typeof PROMPT_STEP_PROBLEM_KINDS)[number];
 
@@ -239,7 +249,7 @@ export interface PromptStepProblem extends PromptTemplateProblem {
 export type PromptStepValidationInput = Pick<
   PromptStepEntry,
   'template' | 'paramFormSchema' | 'timeoutMs'
-> & { capabilities: readonly string[]; slug?: string };
+> & { capabilities: readonly string[]; slug?: string; tools?: readonly CustomTool[] };
 
 /** The width of every step_id column a custom step id is stored in (task_steps, task_step_cli_choices). */
 export const STEP_ID_MAX_LENGTH = 128;
@@ -370,6 +380,12 @@ export function validatePromptStep(
       'A prompt step can write files only in a task type that requires a repository.',
     );
   }
+  const tools = entry.tools ?? [];
+  for (const problem of validateCustomTools(tools, ctx)) {
+    add(problem.kind, problem.message, { raw: problem.tool, start: 0 });
+  }
+  if (tools.length > 0)
+    add('tools-not-supported-yet', 'Tools on a prompt step are not supported yet.');
   return problems;
 }
 

@@ -153,7 +153,9 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
   it('copies the type prompt steps whose id is in the snapshot', async () => {
     const { def } = await insertTask();
     expect(def.runListSnapshot).toEqual(['00-model-health-workflow', 'tcs-a', CUSTOM_ID]);
-    expect(def.customSteps).toEqual({ [CUSTOM_ID]: promptStep('First {{task.title}}') });
+    expect(def.customSteps).toEqual({
+      [CUSTOM_ID]: { ...promptStep('First {{task.title}}'), tools: [] },
+    });
   });
 
   it('puts the model-health step first for a prompt step even before the catalog is synced', async () => {

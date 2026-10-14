@@ -1,8 +1,14 @@
-import { eq, inArray } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { eq, inArray, like } from 'drizzle-orm';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { promptStepId } from '@haive/shared/modularity';
 import { HttpError } from '../src/context.js';
-import { definitionForCreate } from '../src/lib/task-type-definition.js';
+import { definitionForCreate, restoresDatabase } from '../src/lib/task-type-definition.js';
+
+vi.mock('@haive/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared')>()),
+  configService: { getBoolean: async () => true },
+}));
 
 const url = process.env.TASK_TYPE_DEF_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/task_type_def_test'))
@@ -19,6 +25,50 @@ const row = (slug: string, over: Partial<typeof schema.taskTypeDefinitions.$infe
   source: 'test',
   ...over,
 });
+
+const CANARY = '00-model-health-workflow';
+const QUIET = 'ttd-quiet';
+const AGENT = 'ttd-agent';
+const SIMPLIFY = '07a-code-simplify';
+const RESTORE = '01c1-restore-database';
+const SAVE = '11g-save-database';
+const PRE_ANSWERS = { [QUIET]: { answer: 'yes' } };
+const LOOP_LIMITS = { [QUIET]: 2 };
+
+const catalogRow = (
+  stepId: string,
+  dispatchesCli = false,
+): typeof schema.stepCatalog.$inferInsert => ({
+  stepId,
+  source: 'core',
+  title: stepId,
+  workflowType: 'workflow',
+  dispatchesCli,
+  allowSkip: false,
+  providerSensitive: false,
+  composable: true,
+  entry: { stepId, label: stepId, group: 'build', dispatchesCli, requires: [], provides: [] },
+});
+
+const TRAIT_ROWS: Record<string, Partial<typeof schema.taskTypeDefinitions.$inferInsert>> = {
+  quiet: { stepIds: [QUIET] },
+  agent: { stepIds: [QUIET, AGENT] },
+  canary: { stepIds: [CANARY, AGENT] },
+  defaults: {
+    stepIds: [QUIET],
+    preAnswerDefaults: PRE_ANSWERS,
+    stepLoopLimitDefaults: LOOP_LIMITS,
+  },
+  simplify: { stepIds: [QUIET, SIMPLIFY] },
+  restore: { stepIds: [RESTORE, QUIET] },
+  save: { stepIds: [QUIET, SAVE] },
+};
+const SOURCES = [
+  { tag: 'adm', source: 'admin', traits: true },
+  { tag: 'mod', source: 'module:fx', traits: true },
+  { tag: 'bi', source: 'builtin', traits: false },
+];
+const traitSlug = (tag: string, name: string) => `ttd-t-${tag}-${name}`;
 
 async function refusal(promise: Promise<unknown>): Promise<HttpError> {
   const err = await promise.then(
@@ -117,5 +167,143 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
     ).rejects.toThrow('rollback');
     const err = await refusal(definitionForCreate(db, 'ttd-in-tx', { generic: true }));
     expect(err.status).toBe(404);
+  });
+
+  describe('create-time traits by source', () => {
+    const clean = () =>
+      db.delete(schema.taskTypeDefinitions).where(like(schema.taskTypeDefinitions.slug, 'ttd-t-%'));
+
+    beforeAll(async () => {
+      await clean();
+      await db.delete(schema.stepCatalog);
+      await db
+        .insert(schema.stepCatalog)
+        .values([
+          catalogRow(CANARY, true),
+          catalogRow(QUIET),
+          catalogRow(AGENT, true),
+          catalogRow(SIMPLIFY),
+          catalogRow(RESTORE),
+          catalogRow(SAVE),
+        ]);
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values(
+          SOURCES.flatMap(({ tag, source }) =>
+            Object.entries(TRAIT_ROWS).map(([name, over]) =>
+              row(traitSlug(tag, name), { ...over, source }),
+            ),
+          ),
+        );
+    });
+
+    afterAll(async () => {
+      await clean();
+      await db.delete(schema.stepCatalog);
+    });
+
+    describe.each(SOURCES)('$source row', ({ tag, traits }) => {
+      const create = (name: string) =>
+        definitionForCreate(db, traitSlug(tag, name), { generic: true });
+
+      it('puts the model-health step first only when a step dispatches a CLI', async () => {
+        expect((await create('agent')).runListSnapshot).toEqual(
+          traits ? [CANARY, QUIET, AGENT] : [QUIET, AGENT],
+        );
+        expect((await create('quiet')).runListSnapshot).toEqual([QUIET]);
+        expect((await create('canary')).runListSnapshot).toEqual([CANARY, AGENT]);
+      });
+
+      it('takes the pre-answers and loop limits of its row', async () => {
+        const def = await create('defaults');
+        expect([def.preAnswers, def.stepLoopLimits]).toEqual(
+          traits ? [PRE_ANSWERS, LOOP_LIMITS] : [null, {}],
+        );
+        const quiet = await create('quiet');
+        expect([quiet.preAnswers, quiet.stepLoopLimits]).toEqual([null, {}]);
+      });
+
+      it('forces simplifyCode on with the simplify step', async () => {
+        expect((await create('simplify')).simplifyCode).toBe(traits);
+        expect((await create('quiet')).simplifyCode).toBe(false);
+      });
+
+      it('pins the database by step presence and restores it only with the restore step', async () => {
+        const database = async (name: string) => {
+          const { pinsDatabase, restoresDatabase } = await create(name);
+          return { pinsDatabase, restoresDatabase };
+        };
+        expect(await database('restore')).toEqual({
+          pinsDatabase: traits,
+          restoresDatabase: traits,
+        });
+        expect(await database('save')).toEqual({ pinsDatabase: traits, restoresDatabase: false });
+        expect(await database('quiet')).toEqual({ pinsDatabase: false, restoresDatabase: false });
+      });
+    });
+  });
+
+  describe('prompt steps by source', () => {
+    const PROMPT = {
+      slug: 'review',
+      title: 'Review step',
+      template: 'Review {{task.title}}',
+      capabilities: [] as string[],
+      timeoutMs: 300_000,
+    };
+    const withPrompt = (slug: string, source: string) =>
+      row(slug, {
+        source,
+        stepIds: [QUIET, promptStepId(slug, PROMPT.slug)],
+        promptSteps: { [PROMPT.slug]: PROMPT },
+      });
+    const clean = () =>
+      db.delete(schema.taskTypeDefinitions).where(like(schema.taskTypeDefinitions.slug, 'ttd-t-%'));
+
+    beforeAll(async () => {
+      await clean();
+      await db.delete(schema.stepCatalog);
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values([withPrompt('ttd-t-ps-adm', 'admin'), withPrompt('ttd-t-ps-mod', 'module:fx')]);
+    });
+
+    afterAll(clean);
+
+    it('keeps them on an admin type, whose steps ask for the model-health step', async () => {
+      const id = promptStepId('ttd-t-ps-adm', PROMPT.slug);
+      const def = await definitionForCreate(db, 'ttd-t-ps-adm', { generic: true });
+      expect(def.customSteps).toEqual({ [id]: { ...PROMPT, tools: [] } });
+      expect(def.runListSnapshot).toEqual([CANARY, QUIET, id]);
+    });
+
+    it('gives a module type none, whatever its row stores', async () => {
+      const id = promptStepId('ttd-t-ps-mod', PROMPT.slug);
+      const def = await definitionForCreate(db, 'ttd-t-ps-mod', { generic: true });
+      expect(def.customSteps).toBeNull();
+      expect(def.runListSnapshot).toEqual([QUIET, id]);
+    });
+  });
+});
+
+describe('restoresDatabase', () => {
+  const listing = (source: string, over: Partial<Parameters<typeof restoresDatabase>[0]> = {}) => ({
+    source,
+    runListStrategy: 'static',
+    stepIds: [RESTORE],
+    ...over,
+  });
+
+  it('holds for an admin or module type that lists the restore step', () => {
+    expect(restoresDatabase(listing('admin'))).toBe(true);
+    expect(restoresDatabase(listing('module:fx'))).toBe(true);
+  });
+
+  it('is false for a built-in, a dynamic run list, or a list without the step', () => {
+    expect(restoresDatabase(listing('builtin'))).toBe(false);
+    expect(
+      restoresDatabase(listing('module:fx', { runListStrategy: 'workflow_paths', stepIds: null })),
+    ).toBe(false);
+    expect(restoresDatabase(listing('module:fx', { stepIds: [QUIET] }))).toBe(false);
   });
 });
