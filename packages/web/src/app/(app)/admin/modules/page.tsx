@@ -16,6 +16,7 @@ import {
 import { usePageTitle } from '@/lib/use-page-title';
 import { ModuleActiveCell } from '@/components/module-active-cell';
 import { ModulePurgeDialog } from '@/components/module-purge-dialog';
+import { ModuleSkippedSeeds } from '@/components/module-skipped-seeds';
 import { ModuleTasksOpenDialog } from '@/components/module-tasks-open-dialog';
 import { ModuleTeardownDialog } from '@/components/module-teardown-dialog';
 import { Badge, FormError } from '@/components/ui';
@@ -210,6 +211,7 @@ export default function ModulesPage() {
           </table>
         </div>
       )}
+      {data && <ModuleSkippedSeeds rows={data.modules.rows} />}
       <ModuleTasksOpenDialog blocked={blocked} onClose={() => setBlocked(null)} />
       <ModuleTeardownDialog
         moduleId={tearingDown}
