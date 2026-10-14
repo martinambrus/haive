@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -195,6 +195,35 @@ describe('readUncommittedChanges and repository stat settings', () => {
   });
 });
 
+describe('readUncommittedChanges and settings that hide a change', () => {
+  it('counts an executable bit set on a tracked file when the repository ignores file modes', async () => {
+    const { root, wt } = await setup();
+    try {
+      await git(root, ['config', 'core.fileMode', 'false']);
+      await chmod(path.join(wt, 'f.txt'), 0o755);
+      expect(await readUncommittedChanges(wt)).toEqual({ count: 1, paths: ['f.txt'] });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('counts an edit a stale fsmonitor hook would hide', async () => {
+    const { root, wt } = await setup();
+    try {
+      const hook = path.join(root, 'fsmonitor-hook.sh');
+      await writeFile(hook, '#!/bin/sh\nprintf "token-1\\0"\n', { mode: 0o755 });
+      await git(root, ['config', 'core.fsmonitor', hook]);
+      await git(wt, ['status', '--porcelain']);
+      await git(wt, ['status', '--porcelain']);
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      await writeIn(wt, { 'f.txt': 'edited, unseen by the hook\n' });
+      expect(await readUncommittedChanges(wt)).toEqual({ count: 1, paths: ['f.txt'] });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('readUncommittedChanges and submodules', () => {
   it('counts an edit inside a submodule even when the repository config ignores it', async () => {
     const sub = await mkdtemp(path.join(tmpdir(), 'wt-changes-sub-'));
@@ -214,6 +243,28 @@ describe('readUncommittedChanges and submodules', () => {
       const held = await readUncommittedChanges(root);
       expect(held?.count).toBeGreaterThan(0);
       expect(held?.paths).toContain('mod');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(sub, { recursive: true, force: true });
+    }
+  });
+
+  it('reads a superproject as unknown when a submodule file is marked assume-unchanged', async () => {
+    const sub = await mkdtemp(path.join(tmpdir(), 'wt-changes-sub-'));
+    const root = await mkdtemp(path.join(tmpdir(), 'wt-changes-super-'));
+    try {
+      await git(sub, ['init', '-b', 'main']);
+      await git(sub, ['config', 'gc.auto', '0']);
+      await writeIn(sub, { 'inner.txt': 'one\n' });
+      await git(sub, ['add', '-A']);
+      await git(sub, ['commit', '-m', 'inner']);
+      await git(root, ['init', '-b', 'main']);
+      await git(root, ['config', 'gc.auto', '0']);
+      await git(root, ['-c', 'protocol.file.allow=always', 'submodule', 'add', sub, 'mod']);
+      await git(root, ['commit', '-m', 'add submodule']);
+      await git(path.join(root, 'mod'), ['update-index', '--assume-unchanged', 'inner.txt']);
+      await writeIn(root, { 'mod/inner.txt': 'edited, hidden from status\n' });
+      expect(await readUncommittedChanges(root)).toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(sub, { recursive: true, force: true });

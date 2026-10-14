@@ -28,8 +28,19 @@ async function worktreeGone(worktreePath: string): Promise<boolean> {
  *  sets, or skip-worktree): status never sees an edit there. null when git cannot list them. */
 async function hasUncheckedEntries(worktreePath: string): Promise<boolean | null> {
   const listed = await gitRun(worktreePath, ['--no-optional-locks', 'ls-files', '-v', '-z']);
-  if (listed.code !== 0) return null;
-  return listed.stdout.split('\0').some((entry) => /^([a-z]|S) /.test(entry));
+  // A checked-out submodule keeps an index of its own, which the superproject's listing does not show.
+  const nested = await gitRun(worktreePath, [
+    '--no-optional-locks',
+    'submodule',
+    'foreach',
+    '--quiet',
+    '--recursive',
+    'git ls-files -v -z',
+  ]);
+  if (listed.code !== 0 || nested.code !== 0) return null;
+  return `${listed.stdout}\0${nested.stdout}`
+    .split('\0')
+    .some((entry) => /^([a-z]|S) /.test(entry));
 }
 
 /** The worktree's changes no commit holds; null when git cannot say, which is not a clean tree.
@@ -45,6 +56,8 @@ export async function readUncommittedChanges(
     'core.trustctime=true',
     '-c',
     'core.checkStat=default',
+    '-c',
+    'core.fileMode=true',
     'status',
     '--porcelain=v1',
     '-z',
