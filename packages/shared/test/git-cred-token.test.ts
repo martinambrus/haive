@@ -20,7 +20,7 @@ const b64 = (value: unknown): string =>
 const inAMinute = (): number => Math.floor(Date.now() / 1000) + 60;
 
 const gitKey = (secret: string): Buffer =>
-  createHmac('sha256', secret).update('haive-git-credential').digest();
+  createHmac('sha256', secret).update('git-credential-token:v1').digest();
 
 /** A v1 token built from the documented format alone, so a MAC key or payload the signer would never use can be tested. */
 function handSigned(payload: string, key: Buffer | string = gitKey(SECRET)): string {

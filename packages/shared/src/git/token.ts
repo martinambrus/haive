@@ -23,7 +23,7 @@ interface GitCredTokenPayload {
 export const DEFAULT_GIT_CRED_TOKEN_TTL_SECONDS = 12 * 60 * 60;
 
 const TOKEN_VERSION = 'v1';
-const MAC_KEY_LABEL = 'haive-git-credential';
+const MAC_KEY_LABEL = 'git-credential-token:v1';
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
 function macFor(secret: string, payload: string): string {
