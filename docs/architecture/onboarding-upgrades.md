@@ -571,7 +571,8 @@ moving after `MOVE_ATTEMPTS` refuses it. Any directory the removals leave empty 
 `.haive-data/state` goes too, since an empty one reads as a record with no format file. A removed
 file and each directory its removal empties keep the owner and mode captured with them, which
 whatever re-creates them, the put-back or the writer during the re-sync after a move, gets back while
-the writer still owns it (`restoreKeptMetadata`, best-effort, as fs-safe's inherited owner is). The
+the writer still owns it (`restoreKeptMetadata`, best-effort, as fs-safe's inherited owner is); a group
+someone set meanwhile is kept, and so is a file mode other than the 0644 the writer gives a new file. The
 put-back is the same steps in reverse under the same rules (the stored patch applied with `-R`), and
 every put-back 00a triggers runs under its checkout's merge-dir lock (`inMergeDirUnlessClaimed`) and
 is refused while another task's claim holds it. Each restore runs under the domain's lock, after the
