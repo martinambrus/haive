@@ -7,7 +7,7 @@ import ModulePage from './page';
 const received: ModulePageProps[] = [];
 const route = vi.hoisted(() => ({ moduleId: 'stats', page: ['detail'] as string[] }));
 const listing = vi.hoisted(() => ({
-  modules: null as { id: string; pages: Record<string, never> }[] | null,
+  modules: null as { id: string; compiledWeb: boolean; pages: Record<string, never> }[] | null,
   error: null as string | null,
 }));
 
@@ -36,7 +36,7 @@ describe('module route page', () => {
     received.length = 0;
     route.moduleId = 'stats';
     route.page = ['detail'];
-    listing.modules = [{ id: 'stats', pages: {} }];
+    listing.modules = [{ id: 'stats', compiledWeb: true, pages: {} }];
     listing.error = null;
   });
 
@@ -64,7 +64,13 @@ describe('module route page', () => {
   });
 
   it('answers not-found for a compiled page of a module the list leaves out', () => {
-    listing.modules = [{ id: 'other', pages: {} }];
+    listing.modules = [{ id: 'other', compiledWeb: true, pages: {} }];
+    expect(() => renderToStaticMarkup(<ModulePage />)).toThrow('not found');
+    expect(received).toHaveLength(0);
+  });
+
+  it('answers not-found for a compiled page of a module whose compiled web parts the list withholds', () => {
+    listing.modules = [{ id: 'stats', compiledWeb: false, pages: {} }];
     expect(() => renderToStaticMarkup(<ModulePage />)).toThrow('not found');
     expect(received).toHaveLength(0);
   });

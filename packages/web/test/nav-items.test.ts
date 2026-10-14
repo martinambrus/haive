@@ -15,6 +15,7 @@ const mod = (id: string, nav: ModuleSummary['nav']): ModuleSummary => ({
   pages: {},
   hasGlobalSettings: false,
   hasAdminSettings: false,
+  compiledWeb: true,
 });
 
 const hrefs = (items: { href: string }[]) => items.map((i) => i.href);
