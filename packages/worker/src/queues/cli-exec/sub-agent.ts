@@ -79,6 +79,7 @@ export async function executeSubAgentNative(
     hasWorktree,
     hasRepo,
     provider.networkPolicy,
+    payload,
   );
   // Resolved here as well: the sub-agent kinds do NOT share exec-core's per-invocation
   // composition block, so anything added there (this, the uploads mount) reaches them only
@@ -158,6 +159,7 @@ export async function executeSubAgentSequential(
     hasWorktree,
     hasRepo,
     provider.networkPolicy,
+    payload,
   );
   const appReach = payload.taskId ? await resolveAppReach(db, payload.taskId) : null;
   const spawner = createSandboxSpawner(

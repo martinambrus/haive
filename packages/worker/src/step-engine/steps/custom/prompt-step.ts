@@ -5,6 +5,7 @@ import {
   isCustomStepId,
   parsePromptTemplate,
   renderPromptTemplate,
+  type ParsedPromptStepEntry,
   type PromptStepEntry,
 } from '@haive/shared/modularity';
 import type { StepDefinition } from '../../step-definition.js';
@@ -122,7 +123,16 @@ function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formVal
   );
 }
 
-const entries = new WeakMap<object, PromptStepEntry>();
+const entries = new WeakMap<object, ParsedPromptStepEntry>();
+
+/** A prompt step's tool names, and those stored tools that no longer parse; undefined for another step. */
+export function promptStepTools(
+  stepDef: object,
+): { names: string[]; invalid: string[] } | undefined {
+  const entry = entries.get(stepDef);
+  if (!entry) return undefined;
+  return { names: entry.tools.map((tool) => tool.name), invalid: entry.invalidTools ?? [] };
+}
 
 /** The text a file-writing prompt step's house rules read paths from: its template with the task's
  *  and the form's values, without any quoted step output. Undefined for any other step. */
@@ -143,7 +153,7 @@ export function promptStepNamedText(
 /** The step a task runs for a prompt step it pinned; see resolveTaskStep. */
 export function buildPromptStep(
   stepId: string,
-  entry: PromptStepEntry,
+  entry: ParsedPromptStepEntry,
   index: number,
 ): StepDefinition<PromptStepDetect, PromptStepOutput> {
   const def: StepDefinition<PromptStepDetect, PromptStepOutput> = {

@@ -369,6 +369,10 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
       return `${token} must be alone on its line.`;
     case 'tools-not-supported-yet':
       return "Tools on a prompt step are not supported yet. Remove this step's tools to save it.";
+    case 'tool-no-longer-valid':
+      return issue.raw
+        ? `${tool} no longer passes its checks; fix it or remove it.`
+        : 'More tools on this step no longer pass their checks; fix or remove them.';
     case 'too-many-tools':
       return `A step can have at most ${CUSTOM_TOOLS_MAX_PER_STEP} tools; remove some.`;
     case 'tool-name-invalid':

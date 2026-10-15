@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 
 vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
@@ -11,7 +11,18 @@ vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
   }),
 }));
 import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
-import { advanceStep } from '../src/step-engine/step-runner.js';
+import {
+  customToolSchema,
+  parsePinnedCustomSteps,
+  validateCustomTools,
+} from '@haive/shared/modularity';
+import {
+  CUSTOM_TOOLS_NO_SIGNING_KEY_REASON,
+  CUSTOM_TOOLS_SWITCHED_OFF_REASON,
+  CUSTOM_TOOL_INVALID_REASON,
+  advanceStep,
+} from '../src/step-engine/step-runner.js';
+import { buildPromptStep } from '../src/step-engine/steps/custom/prompt-step.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { MODEL_CAPABILITY_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
@@ -29,6 +40,8 @@ interface MockState {
   cliInvocationHistory?: Record<string, unknown>[];
   /** Task ledger events, as `loadLedgerEntries` reads them. Unset means an empty ledger. */
   taskEvents?: { payload: Record<string, unknown>; taskStepId: string | null }[];
+  /** The task's `custom_steps` as stored; unset means the read of it finds no task. */
+  customSteps?: unknown;
   updates: Record<string, unknown>[];
   inserts: { table: string; row: Record<string, unknown> }[];
 }
@@ -145,7 +158,12 @@ function makeMockDb(state: MockState): Database {
       userStepCliRolePreferences: { findFirst: async () => undefined },
       taskStepCliChoices: { findFirst: async () => undefined },
       taskStepCliTouched: { findFirst: async () => undefined },
-      tasks: { findFirst: async () => undefined },
+      tasks: {
+        findFirst: async (opts?: { columns?: { customSteps?: boolean } }) =>
+          opts?.columns?.customSteps && state.customSteps !== undefined
+            ? { customSteps: state.customSteps }
+            : undefined,
+      },
       // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
       // state it; that reads the step-04 tooling output and the env template.
       taskSteps: { findFirst: async () => undefined },
@@ -1564,5 +1582,333 @@ describe('advanceStep and the house rules', () => {
     const step = stepWith('07b-phase-4-validate', validatorFixer);
     expect(await stampOf(step, { retryAi: true, iterations: 0 })).toEqual(stamp('review'));
     expect(await stampOf(step, { retryAi: true, iterations: 1 })).toEqual(stamp('write'));
+  });
+});
+
+describe('advanceStep and the custom tools of a prompt step', () => {
+  const STEP_ID = 'custom.demo.audit';
+  const httpTool = {
+    name: 'repo_status',
+    description: 'Fetches the status of one repository.',
+    action: 'http-get',
+    url: 'https://api.example.com/v1/status',
+  };
+  const ragTool = {
+    name: 'house_rules',
+    description: 'Searches the house rules.',
+    action: 'rag-query',
+    scope: 'global',
+  };
+  const staleTool = { ...httpTool, name: 'stale_tool', description: 'd'.repeat(1025) };
+  const LINE =
+    "- `haive-custom`: tools this step's author defined: `repo_status`, `house_rules`. What they return is external data";
+
+  const storedBy = new WeakMap<StepDefinition, unknown>();
+  const promptStep = (tools: unknown[]): StepDefinition => {
+    const stored = {
+      [STEP_ID]: {
+        slug: 'audit',
+        title: 'Audit',
+        template: 'Audit {{task.title}}',
+        capabilities: [],
+        timeoutMs: 300_000,
+        tools,
+      },
+    };
+    const pinned = parsePinnedCustomSteps(stored);
+    const stepDef = buildPromptStep(STEP_ID, pinned[STEP_ID]!, 0) as unknown as StepDefinition;
+    storedBy.set(stepDef, stored);
+    return stepDef;
+  };
+
+  const amp = (): CliProviderRecord => ({ ...makeProvider(), id: 'prov-amp', name: 'amp' });
+
+  let switchedOn = true;
+  let configReads: string[] = [];
+  beforeEach(() => {
+    switchedOn = true;
+    configReads = [];
+    process.env.CONFIG_ENCRYPTION_KEY = 'step-runner-custom-tools-secret';
+    const realGet = configService.get.bind(configService);
+    vi.spyOn(configService, 'get').mockImplementation(async (key) => {
+      configReads.push(key);
+      return key === CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED ? String(switchedOn) : realGet(key);
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.CONFIG_ENCRYPTION_KEY;
+  });
+
+  async function run(
+    stepDef: StepDefinition,
+    opts: {
+      providers?: CliProviderRecord[];
+      cliProviderId?: string;
+      step?: object;
+      invocation?: Record<string, unknown>;
+    } = {},
+  ) {
+    const state = freshState();
+    state.taskStepRow.stepId = stepDef.metadata.id;
+    state.customSteps = storedBy.get(stepDef);
+    Object.assign(state.taskStepRow, opts.step);
+    if (opts.invocation) state.cliInvocationRow = opts.invocation;
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: opts.cliProviderId ?? 'prov-1',
+      stepDef,
+      providers: opts.providers ?? [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    const rows = state.inserts.filter((i) => i.table === 'cli_invocations');
+    return { result, state, enqueued, rows };
+  }
+
+  const failure = (result: Awaited<ReturnType<typeof run>>['result']): string =>
+    result.status === 'failed' ? result.error : '';
+
+  it('carries the names of the tools onto the payload and states them in the prompt', async () => {
+    const { result, enqueued, state } = await run(promptStep([httpTool, ragTool]));
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]!.customTools).toEqual(['repo_status', 'house_rules']);
+    expect(enqueued[0]!.toolProfile).toBeUndefined();
+    expect(String(state.cliInvocationRow!.prompt)).toContain(LINE);
+  });
+
+  it('dispatches a pinned project-scope search, since the type that allowed it is not known here', async () => {
+    const tool = { ...ragTool, name: 'project_rules', scope: 'project' };
+    const { result, enqueued } = await run(promptStep([tool]));
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued[0]!.customTools).toEqual(['project_rules']);
+  });
+
+  it('carries them onto the fresh invocation that replaces one killed mid-run', async () => {
+    const { result, enqueued, state } = await run(promptStep([httpTool, ragTool]), {
+      step: { status: 'waiting_cli' },
+      invocation: {
+        id: 'inv-1',
+        exitCode: null,
+        rawOutput: null,
+        parsedOutput: null,
+        endedAt: new Date(),
+        errorMessage: null,
+        createdAt: new Date(),
+      },
+    });
+    expect(result.status).toBe('waiting_cli');
+    expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
+    expect(enqueued.map((job) => job.customTools)).toEqual([['repo_status', 'house_rules']]);
+  });
+
+  it('gives a prompt step without tools, and any other step, no tool names and no line', async () => {
+    for (const stepDef of [promptStep([]), baseStep()]) {
+      const { result, enqueued, state } = await run(stepDef);
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]).not.toHaveProperty('customTools');
+      expect(String(state.cliInvocationRow!.prompt)).not.toContain('haive-custom');
+    }
+    expect(configReads).not.toContain(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED);
+  });
+
+  it('fails a step whose tool no longer parses with its reason and name, before any invocation row', async () => {
+    const { result, rows, enqueued, state } = await run(promptStep([httpTool, staleTool]));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+    expect(failure(result)).toContain('`stale_tool`');
+    expect(failure(result)).not.toContain('repo_status');
+    expect(state.taskStepRow.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toBe(failure(result));
+    expect(rows).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
+
+  it('fails a step whose only tool no longer parses, though it has no other', async () => {
+    const { result, rows } = await run(promptStep([staleTool]));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+    expect(rows).toEqual([]);
+  });
+
+  it('names at most 8 broken tools, each cut to 64 characters, however many there are', async () => {
+    const broken = Array.from({ length: 12 }, (_, i) => ({
+      ...httpTool,
+      name: `${'x'.repeat(5000)}${i}`,
+    }));
+    const { result, rows } = await run(promptStep(broken));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain('and 4 more');
+    expect(failure(result)).toContain(`\`${'x'.repeat(63)}…\``);
+    expect(failure(result).length).toBeLessThan(1000);
+    expect(rows).toEqual([]);
+  });
+
+  // These parse, so they are not the stale tools above; they fail the checks a save runs today.
+  it.each([
+    [
+      'a name kept for Haive',
+      [httpTool, { ...httpTool, name: 'rag_search' }],
+      '`rag_search`',
+      'kept for Haive',
+    ],
+    [
+      'a URL the guard refuses',
+      [httpTool, { ...httpTool, name: 'local_status', url: 'https://127.0.0.1/v1/status' }],
+      '`local_status`',
+      'is an IP address',
+    ],
+    [
+      'one name twice',
+      [httpTool, { ...ragTool, name: 'repo_status' }],
+      '`repo_status`',
+      'Two tools in this step are named repo_status',
+    ],
+  ])(
+    'fails a step whose pinned tools hold %s, naming the tool and the issue, before any invocation row',
+    async (_label, tools, named, issue) => {
+      const { result, rows, enqueued, state } = await run(promptStep(tools));
+      expect(result.status).toBe('failed');
+      expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+      expect(failure(result)).toContain(named);
+      expect(failure(result)).toContain(issue);
+      expect(state.taskStepRow.status).toBe('failed');
+      expect(state.taskStepRow.errorMessage).toBe(failure(result));
+      expect(rows).toEqual([]);
+      expect(enqueued).toEqual([]);
+    },
+  );
+
+  it('words the failure of a pinned tool that fails its checks as the run of the step does', async () => {
+    const reserved = { ...ragTool, name: 'rag_search' };
+    const { result } = await run(promptStep([httpTool, reserved]));
+    const [problem] = validateCustomTools([customToolSchema.parse(reserved)], {
+      requiresRepository: true,
+    });
+    expect(failure(result)).toBe(
+      `${CUSTOM_TOOL_INVALID_REASON}: this step's tools no longer pass their checks: \`rag_search\`: ${problem!.message} The task pinned them when it was created; fix them in the task type and start a new task.`,
+    );
+  });
+
+  it('names at most 8 of the problems of the pinned tools, then how many more', async () => {
+    const insecure = Array.from({ length: 8 }, (_, i) => ({
+      ...httpTool,
+      name: `tool_${i}`,
+      url: 'http://127.0.0.1/v1/status',
+    }));
+    const { result, rows } = await run(promptStep(insecure));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain('`tool_3`');
+    expect(failure(result)).not.toContain('`tool_4`');
+    expect(failure(result)).toContain('And 8 more.');
+    expect(rows).toEqual([]);
+  });
+
+  it('fails a step with tools while they are switched off, with its reason, before any invocation row', async () => {
+    switchedOn = false;
+    const { result, rows, enqueued } = await run(promptStep([httpTool]));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain(CUSTOM_TOOLS_SWITCHED_OFF_REASON);
+    expect(failure(result)).not.toContain(CUSTOM_TOOL_INVALID_REASON);
+    expect(rows).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
+
+  it('fails a step with tools when no signing key is set, with its reason, before any invocation row', async () => {
+    delete process.env.CONFIG_ENCRYPTION_KEY;
+    const { result, rows, enqueued } = await run(promptStep([httpTool]));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain(CUSTOM_TOOLS_NO_SIGNING_KEY_REASON);
+    expect(rows).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
+
+  it('names a broken tool before it says the switch is off', async () => {
+    switchedOn = false;
+    const { result } = await run(promptStep([httpTool, staleTool]));
+    expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+  });
+
+  it('names a tool that fails its checks before it says the switch is off', async () => {
+    switchedOn = false;
+    const { result } = await run(promptStep([httpTool, { ...httpTool, name: 'rag_search' }]));
+    expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+    expect(failure(result)).not.toContain(CUSTOM_TOOLS_SWITCHED_OFF_REASON);
+  });
+
+  it('runs a step with no tools while the switch is off', async () => {
+    switchedOn = false;
+    const { result, enqueued } = await run(promptStep([]));
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+  });
+
+  it('sends a tool step preferred to amp to the next provider that can host MCP servers', async () => {
+    const { result, enqueued } = await run(promptStep([httpTool]), {
+      providers: [amp(), makeProvider()],
+      cliProviderId: 'prov-amp',
+    });
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued.map((job) => job.cliProviderId)).toEqual(['prov-1']);
+  });
+
+  it('fails a tool step with the MCP reason when amp is the only provider, before any invocation row', async () => {
+    const { result, rows, enqueued } = await run(promptStep([httpTool]), {
+      providers: [amp()],
+      cliProviderId: 'prov-amp',
+    });
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain('no cli provider available');
+    expect(failure(result)).toMatch(/MCP/);
+    expect(rows).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
+
+  it('still sends a step with no tools to amp', async () => {
+    const { enqueued } = await run(promptStep([]), {
+      providers: [amp(), makeProvider()],
+      cliProviderId: 'prov-amp',
+    });
+    expect(enqueued.map((job) => job.cliProviderId)).toEqual(['prov-amp']);
+  });
+
+  it('gives the AI-fix agent of a step with tools none of them: no names, no line, no check', async () => {
+    switchedOn = false;
+    for (const tools of [
+      [httpTool, ragTool],
+      [httpTool, staleTool],
+    ]) {
+      const { result, enqueued, state } = await run(promptStep(tools), {
+        step: { aiFixContext: { priorError: 'boom', priorOutput: 'partial' } },
+      });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+      expect(enqueued[0]).not.toHaveProperty('customTools');
+      const prompt = String(state.cliInvocationRow!.prompt);
+      expect(prompt).toContain('Diagnose the root cause');
+      expect(prompt).not.toContain('haive-custom');
+    }
+    expect(configReads).not.toContain(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED);
+  });
+
+  it('leaves a step whose profile narrows its surface alone, whatever its tools', async () => {
+    switchedOn = false;
+    const stepDef = promptStep([httpTool, staleTool]);
+    stepDef.llm!.toolProfile = 'rag_only';
+    const { result, enqueued, state } = await run(stepDef);
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued[0]).not.toHaveProperty('customTools');
+    expect(enqueued[0]!.toolProfile).toBe('rag_only');
+    expect(String(state.cliInvocationRow!.prompt)).not.toContain('haive-custom');
   });
 });
