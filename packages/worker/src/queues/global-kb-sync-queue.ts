@@ -393,15 +393,19 @@ export async function purgeArchivedGlobalKbEntries(): Promise<void> {
  *  legacy repeatable left on this queue (job-scheduler-prune.ts). */
 export async function scheduleGlobalKbPurge(): Promise<void> {
   const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
-  await queue.upsertJobScheduler(
-    PURGE_JOB_ID,
-    { every: PURGE_INTERVAL_MS },
-    {
-      name: GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED,
-      data: {},
-      opts: { removeOnComplete: true, removeOnFail: 5 },
-    },
-  );
+  try {
+    await queue.upsertJobScheduler(
+      PURGE_JOB_ID,
+      { every: PURGE_INTERVAL_MS },
+      {
+        name: GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED,
+        data: {},
+        opts: { removeOnComplete: true, removeOnFail: 5 },
+      },
+    );
+  } finally {
+    await queue.close().catch(() => {});
+  }
 }
 
 const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
@@ -577,16 +581,20 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
  *  the code that registered it: rolling this back also takes `removeJobScheduler(RECONCILE_JOB_ID)`. */
 export async function scheduleGlobalKbReconcile(): Promise<void> {
   const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
-  await queue.upsertJobScheduler(
-    RECONCILE_JOB_ID,
-    { every: RECONCILE_INTERVAL_MS },
-    {
-      name: GLOBAL_KB_JOB_NAMES.RECONCILE_PENDING,
-      data: {},
-      opts: { removeOnComplete: true, removeOnFail: 5 },
-    },
-  );
-  await pruneJobSchedulers(queue, GLOBAL_KB_SCHEDULER_IDS);
+  try {
+    await queue.upsertJobScheduler(
+      RECONCILE_JOB_ID,
+      { every: RECONCILE_INTERVAL_MS },
+      {
+        name: GLOBAL_KB_JOB_NAMES.RECONCILE_PENDING,
+        data: {},
+        opts: { removeOnComplete: true, removeOnFail: 5 },
+      },
+    );
+    await pruneJobSchedulers(queue, GLOBAL_KB_SCHEDULER_IDS);
+  } finally {
+    await queue.close().catch(() => {});
+  }
 }
 
 export function startGlobalKbSyncWorker(): Worker {
