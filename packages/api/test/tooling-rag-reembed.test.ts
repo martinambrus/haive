@@ -381,7 +381,7 @@ describe('retrying the embedding of a degraded repository', () => {
     expect(await res.json()).toMatchObject({ degradationKept: true });
   });
 
-  it('restores nothing when the lock is lost during the second probe, and answers 200 for the save that landed', async () => {
+  it('restores the degradation when the lock is lost during the second probe, and answers 200 for the save that landed', async () => {
     const fake = setup(STORE, true, true);
     h.awaitingSeq = [false, true];
     let selects = 0;
@@ -393,8 +393,10 @@ describe('retrying the embedding of a degraded repository', () => {
 
     expect(res.status).toBe(200);
     expect(selects).toBe(2);
-    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt).toBeNull();
-    expect(await res.json()).toMatchObject({ ok: true, degradationKept: false });
+    const [row] = fake.rows(schema.repositories);
+    expect(row!.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(row!.ragEmbedDegradedReason).toBe('Ollama is unreachable');
+    expect(await res.json()).toMatchObject({ ok: true, degradationKept: true });
   });
 
   it('keeps the degradation when the probe fails', async () => {
