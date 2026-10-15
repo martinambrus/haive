@@ -47,7 +47,10 @@ the module loads again.
   still running after `MODULE_JOB_STOP_WAIT_MS` (10 s) is logged once and left running: the pass goes
   on with the other modules, a later pass or the shutdown waits on that same stop instead of calling it
   again, and the module counts as running until it ends. Once the module is active again, the next
-  pass ensures its schema and then starts its jobs, once; a failed
+  pass ensures its schema and then starts its jobs, once. A reactivation still running after
+  `MODULE_JOB_START_WAIT_MS` (10 s) is logged once and left running: the pass goes on, no later pass
+  starts the module again meanwhile, and a late success counts as started, so a pass that sees the
+  module deactivated by then stops it. A failed
   ensure or start is logged and waits for the next deactivation and activation. A task type that uses the module, as its source or through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
