@@ -98,6 +98,12 @@ const REFUSED: [string, string][] = [
   ['no scheme', 'git.example.com/api/v1'],
   ['a scheme-relative url', '//git.example.com/api/v1'],
   ['https with no host', 'https://'],
+  ['a user and password on the credential host', 'https://user:pass@git.example.com/api/v1'],
+  ['a user alone on the credential host', 'https://user@git.example.com/api/v1'],
+  ['a query', 'https://git.example.com/api/v1?x=1'],
+  ['an empty query', 'https://git.example.com/api/v1?'],
+  ['a fragment', 'https://git.example.com/api/v1#frag'],
+  ['an empty fragment', 'https://git.example.com/api/v1#'],
 ];
 
 const ACCEPTED: [string, string, string][] = [

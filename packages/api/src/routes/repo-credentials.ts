@@ -57,7 +57,7 @@ const hostField = z
   .refine(isHostName, { message: 'host must be a host name, optionally followed by :port' });
 
 const API_BASE_ON_HOST =
-  "apiBaseUrl must be an https URL on the credential's host or its forge's API host";
+  "apiBaseUrl must be an https URL on the credential's host or its forge's API host, with no user, query or fragment";
 
 type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };
 
@@ -72,7 +72,8 @@ function forgeApiHost(provider: string | null | undefined, host: string): string
   }
 }
 
-/** A blank API base falls back to the provider's own; a set one must be https on the credential's or the forge's host. */
+/** A blank API base falls back to the provider's own; a set one must be https on the credential's or the forge's host.
+ *  Endpoint paths are appended to the stored text, so a `?` or `#` in it would swallow them. */
 const apiBaseOnHost = (b: ApiBaseTarget) => {
   const base = b.apiBaseUrl?.trim();
   if (!base) return true;
@@ -81,6 +82,9 @@ const apiBaseOnHost = (b: ApiBaseTarget) => {
     const host = b.host.trim().toLowerCase();
     return (
       url.protocol === 'https:' &&
+      url.username === '' &&
+      url.password === '' &&
+      !/[?#]/.test(base) &&
       (url.host === host || url.host === forgeApiHost(b.provider, host))
     );
   } catch {
