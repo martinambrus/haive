@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { refusesNewWork } from '@haive/shared';
 import {
   TYPE_DRAFT_MESSAGE_EVENT,
   TYPE_DRAFT_MESSAGE_MAX_CHARS,
@@ -15,6 +14,7 @@ import { loadUsableProvider } from '../lib/step-cli-choice.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import { assertNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { appendTaskEvent } from './tasks/_helpers.js';
 
@@ -70,13 +70,7 @@ taskTypeDraftRoutes.use('*', requireAdmin);
 
 taskTypeDraftRoutes.post('/', async (c) => {
   const userId = c.get('userId');
-  if (refusesNewWork(c.get('maintenanceState'))) {
-    throw new HttpError(
-      503,
-      'Haive is preparing for maintenance, so new tasks are not being started. Work already ' +
-        'running will finish.',
-    );
-  }
+  assertNewWorkAllowed(c.get('maintenanceState'));
   const body = startSchema.parse(await c.req.json());
   const db = getDb();
   if (body.cliProviderId) await loadUsableProvider(db, userId, body.cliProviderId);
