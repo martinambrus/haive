@@ -2403,6 +2403,8 @@ export interface BlockingResponse {
   /** The listing is capped server-side. Rendered, because reading a truncated list as the whole
    *  picture is how a drain gets forced with work still behind it. */
   capped: boolean;
+  /** Who is looking: a task links only for its owner, since GET /tasks/:id answers no one else. */
+  viewerId: string;
 }
 
 export interface UpgradeRun {

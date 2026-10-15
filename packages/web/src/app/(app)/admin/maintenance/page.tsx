@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import {
   maintenanceApi,
@@ -10,6 +9,7 @@ import {
   type UpgradeRun,
   type UpgradeStatusResponse,
 } from '@/lib/api-client';
+import { BlockingTaskTitle } from '@/components/blocking-task-title';
 import { Badge, Button, Card, FormError, Input, Label } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -191,12 +191,7 @@ export default function MaintenancePage() {
             >
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Link
-                    href={`/tasks/${t.id}`}
-                    className="truncate text-sm font-medium text-neutral-100 hover:underline"
-                  >
-                    {t.title || t.id}
-                  </Link>
+                  <BlockingTaskTitle task={t} viewerId={blocking.viewerId} />
                   <Badge>{t.status}</Badge>
                   {/* The distinction that decides whether to wait or to act. */}
                   {t.hasLiveCli ? <Badge variant="info">CLI running</Badge> : null}

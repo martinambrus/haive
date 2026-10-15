@@ -127,6 +127,8 @@ maintenanceRoutes.get('/blocking', async (c) => {
     // The listing is capped; say so rather than letting an operator read a truncated list as the
     // whole picture and force a drain that still had work behind it.
     capped: rows.length === 200,
+    // GET /tasks/:id answers only a task's owner, so the page links just the viewer's own tasks.
+    viewerId: c.get('userId'),
   });
 });
 

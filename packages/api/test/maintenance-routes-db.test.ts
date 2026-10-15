@@ -40,7 +40,8 @@ app.onError(errorHandler);
 app.route('/admin/maintenance', maintenanceRoutes);
 
 interface Blocking {
-  tasks: { id: string; hasLiveCli: boolean; ownerEmail: string | null }[];
+  tasks: { id: string; hasLiveCli: boolean; ownerId: string | null; ownerEmail: string | null }[];
+  viewerId: string;
   total: number;
   capped: boolean;
 }
@@ -192,6 +193,19 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
       const listed = (await blocking()).tasks.find((t) => t.id === alive.id);
       expect(listed?.ownerEmail).toBe('owner@maintenance.test');
+    });
+  });
+
+  describe('GET /blocking, the viewer and the owners', () => {
+    it("names the viewer and each task's owner", async () => {
+      const mine = await task({ userId: ADMIN });
+      const theirs = await task();
+
+      const body = await blocking();
+      expect(body.viewerId).toBe(ADMIN);
+      const ownerOf = new Map(body.tasks.map((t) => [t.id, t.ownerId]));
+      expect(ownerOf.get(mine.id)).toBe(ADMIN);
+      expect(ownerOf.get(theirs.id)).toBe(OWNER);
     });
   });
 
