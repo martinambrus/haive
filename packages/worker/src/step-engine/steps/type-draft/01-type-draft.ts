@@ -4,10 +4,10 @@ import type { FormSchema } from '@haive/shared';
 import {
   TYPE_DRAFT_MESSAGE_EVENT,
   TYPE_DRAFT_MESSAGE_MAX_CHARS,
-  composableStepEntrySchema,
   type TypeDraftAssistantTurn,
   type TypeDraftUserTurn,
 } from '@haive/shared/modularity';
+import { readStepCatalog } from '@haive/shared/modularity-server';
 import { stepRegistry, type StepRegistry } from '../../registry.js';
 import {
   RetryableParseError,
@@ -40,29 +40,20 @@ export async function loadDraftCatalog(
   db: Database,
   registry: StepRegistry = stepRegistry,
 ): Promise<DraftCatalogStep[]> {
-  const [rows, off] = await Promise.all([
-    db
-      .select({
-        stepId: schema.stepCatalog.stepId,
-        source: schema.stepCatalog.source,
-        entry: schema.stepCatalog.entry,
-      })
-      .from(schema.stepCatalog)
-      .where(eq(schema.stepCatalog.composable, true))
-      .orderBy(asc(schema.stepCatalog.stepId)),
+  const [catalog, off] = await Promise.all([
+    readStepCatalog(db, { ordered: true }),
     db
       .select({ moduleId: schema.modules.moduleId })
       .from(schema.modules)
       .where(isNotNull(schema.modules.deactivatedAt)),
   ]);
   const deactivated = new Set(off.map((m) => `module:${m.moduleId}`));
-  return rows.flatMap((row) => {
-    const parsed = composableStepEntrySchema.safeParse(row.entry);
-    if (!parsed.success || deactivated.has(row.source)) return [];
-    return [
-      { entry: parsed.data, description: registry.get(row.stepId)?.metadata.description ?? '' },
-    ];
-  });
+  return catalog.steps
+    .filter((step) => !deactivated.has(step.source))
+    .map((step) => ({
+      entry: step.entry,
+      description: registry.get(step.stepId)?.metadata.description ?? '',
+    }));
 }
 
 export function collectPersonas(): DraftPersona[] {
