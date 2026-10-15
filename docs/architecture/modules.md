@@ -112,7 +112,11 @@ ones that export `./web` or `./dashboard`, so the api and the worker always load
 other combination is a half-installed state: `gen-modules` exits 1, naming the side and the
 `package.json` to change. It also exits 1 when a registry module's version is a range, or differs
 between the `package.json` files that depend on it: pnpm would install a copy per version while the
-generated imports follow the api's.
+generated imports follow the api's. And it exits 1 when the installed copy
+(`packages/api/node_modules/<name>`) is another version than the declared one, build metadata aside,
+since the generated lists would come from that old copy: run `pnpm install` (`pnpm docker rebuild` on
+the dev stack). `pnpm module add|remove` skip that one check (`HAIVE_INSTALL_MAY_LAG=1`), because their
+lockfile-only install leaves `node_modules` behind on purpose.
 
 A folder under `modules/` that exports `./manifest` and that nobody depends on is **present, not
 installed**. `gen-modules` prints `present, not installed: pnpm module add <id>`, leaves it out of
@@ -144,8 +148,21 @@ message names the fix.
 
 The registry form reads the package's exports with `pnpm view` (the lockfile-only step installs
 nothing, so the package is not on disk yet), adds the exact version to the same hosts, and moves a
-held dependency of another version in place. It resolves only once the `@haive-module` scope has a
-registry line in `.npmrc`.
+held dependency of another version in place. The root `.npmrc` points the `@haive-module` scope at
+GitHub Packages (`https://npm.pkg.github.com`) and holds no token: the token never lives in the
+repository, not even as a `${NPM_TOKEN}` placeholder (an unset one makes pnpm skip the whole file).
+On the host, put the auth line in your user `.npmrc` (`~/.npmrc`).
+
+**The image builds read the token from a BuildKit secret.** The api, worker and web deps stages run
+`pnpm install` with `--mount=type=secret,id=npmrc,target=/root/.npmrc`, so the token is in no layer,
+history entry, image config or build log, and a build with no secret behaves as before. In dev,
+`HAIVE_NPMRC` (unset by default) names an `.npmrc` holding the auth line: `docker-compose.dev.yml`
+passes it as the `npmrc` build secret to the dev-libs, api, worker and web builds and mounts it
+read-only at `/root/.npmrc` in db-migrate, whose install runs at start. It must name an existing
+file: Docker creates a missing bind source as a root-owned directory. BuildKit reuses a cached
+install layer after the token is revoked or changed, so only an uncached install notices a
+revocation. `.dockerignore` keeps every nested `.npmrc`, `.env` and `.git` out of the build
+contexts (the root `.npmrc`, which the Dockerfiles copy, stays).
 
 A dependency change reaches the dev stack only through `pnpm docker rebuild` with no service name
 (see Build commands in `AGENTS.md`); a restart or a per-service rebuild is not enough. Recreating

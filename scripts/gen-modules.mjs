@@ -134,6 +134,8 @@ for (const name of new Set([...registryNames(workerPackage), ...registryNames(we
 
 // Copy of the exact-version pattern in scripts/module.mjs; scripts/test/gen-modules.test.mjs pins the two equal.
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+// Set by scripts/module.mjs, whose lockfile-only install leaves node_modules behind: skips the installed-version check below.
+const INSTALL_MAY_LAG = 'HAIVE_INSTALL_MAY_LAG';
 for (const name of apiRegistryNames) {
   const apiSpec = apiPackage.dependencies[name];
   if (workerPackage.dependencies?.[name] === undefined) {
@@ -143,13 +145,27 @@ for (const name of apiRegistryNames) {
     process.exit(1);
   }
   const holders = hostsHolding(name);
+  const installed = registry.find((pkg) => pkg.name === name)?.version;
   if (
     !EXACT_VERSION.test(apiSpec) ||
     holders.some(({ pkg }) => pkg.dependencies[name] !== apiSpec)
   ) {
     const specs = holders.map(({ host, pkg }) => `${host}: "${pkg.dependencies[name]}"`);
+    const found = installed === undefined ? 'not installed' : `installed "${installed}"`;
     console.error(
-      `gen-modules: ${name} must be one exact version, the same in every package that depends on it (${specs.join(', ')}); change it in ${holders.map(({ file }) => file).join(', ')}`,
+      `gen-modules: ${name} must be one exact version, the same in every package that depends on it (${specs.join(', ')}; ${found}); change it in ${holders.map(({ file }) => file).join(', ')}`,
+    );
+    process.exit(1);
+  }
+  // npm drops build metadata (+...) when it stores a version, and semver ignores it in comparisons.
+  const core = (version) => version.split('+')[0];
+  if (
+    process.env[INSTALL_MAY_LAG] !== '1' &&
+    installed !== undefined &&
+    core(installed) !== core(apiSpec)
+  ) {
+    console.error(
+      `gen-modules: ${name} is declared as "${apiSpec}" but packages/api/node_modules/${name} is "${installed}", and the generated module lists would come from that old copy; run pnpm install (pnpm docker rebuild on the dev stack)`,
     );
     process.exit(1);
   }
