@@ -140,7 +140,10 @@ like any other. While the system drains or is in maintenance (`refusesNewWork`, 
 cache early in the job and again in the transaction that reopens the task, under the shared new-work
 fence a drain's write waits for) that exception closes, as does the fix-loop gate one below: the answer
 stays stored on its row and the advance is dropped, so an answer accepted while the task was live
-cannot reopen it during a drain. Both answer routes read the task's status inside their own
+cannot reopen it during a drain. The early read fails open, since it only decides whether to try; the
+read under the fence fails closed: a state it cannot read writes nothing and throws
+`MaintenanceStateUnreadable`, so the job fails and is retried with the answer still on its row. Both
+answer routes read the task's status inside their own
 transaction, with no row lock (one taken before the step write would cross a Retry's order: step rows
 first, the task row last), and admit a failed task through the same fence, 503 while new work is
 held. Each route also sets the task `running` itself, in the transaction that writes the answer and
@@ -180,7 +183,9 @@ when that stamp equals the task's `completedAt` (`loadTaskStop`), since the even
 the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
 loses takes back every write before it. While new work is refused it does nothing at all — no write,
-no job, no attempt spent — and the next poll resumes the task once the state is normal again. A pass a Stop cut off
+no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
+under the fence, or the resume throws anything else, that task stays failed with its watch armed and
+the poll goes on to the next armed task (`checkProviderRecovery`). A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
