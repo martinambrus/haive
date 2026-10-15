@@ -33,11 +33,11 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   resolveGlobalKbEnabled: async () => false,
 }));
 
+import { createHmac } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { configService } from '@haive/shared';
-import { signRagToken } from '@haive/shared/rag';
 import { signTaskToken, type TaskTokenAudience } from '@haive/shared/task-token';
 import { ragRoutes } from '../src/routes/rag.js';
 import { ddevControlRoutes } from '../src/routes/ddev-control.js';
@@ -54,6 +54,13 @@ const DDEV_ACTIONS = ['status', 'logs', 'restart'] as const;
 
 const taskToken = (aud: TaskTokenAudience, taskId = 'task-1', ttlSeconds?: number): string =>
   signTaskToken({ aud, taskId, ttlSeconds }, SECRET);
+
+/** The audience-less two-part form from before v1, `<payload>.<hmac(raw secret, payload)>`. */
+function legacyRagToken(taskId = 'task-1'): string {
+  const exp = Math.floor(Date.now() / 1000) + 60;
+  const payload = Buffer.from(JSON.stringify({ taskId, exp })).toString('base64url');
+  return `${payload}.${createHmac('sha256', SECRET).update(payload).digest('base64url')}`;
+}
 
 async function post(
   path: string,
@@ -113,7 +120,7 @@ describe('harness: the routes answer a plain request', () => {
   });
 
   it('POST /rag/search with a RAG task token and a small body answers 200', async () => {
-    const res = await post('/rag/search', signRagToken('task-1', SECRET), '{"query":"q"}');
+    const res = await post('/rag/search', taskToken('rag'), '{"query":"q"}');
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ hits: [] });
@@ -122,7 +129,7 @@ describe('harness: the routes answer a plain request', () => {
 
 describe('controls: a RAG task token does not open /ddev', () => {
   it.each(DDEV_ACTIONS)('POST /ddev/%s answers 401 and enqueues nothing', async (action) => {
-    const res = await post(`/ddev/${action}`, signRagToken('task-1', SECRET), '{}');
+    const res = await post(`/ddev/${action}`, taskToken('rag'), '{}');
 
     expect(res.status).toBe(401);
     expect(h.jobs).toEqual([]);
@@ -133,13 +140,13 @@ describe('controls: an oversize body is refused', () => {
   const oversize = (field: string) => JSON.stringify({ [field]: 'x'.repeat(70 * 1024) });
 
   it('POST /rag/search answers 413', async () => {
-    const res = await post('/rag/search', signRagToken('task-1', SECRET), oversize('query'));
+    const res = await post('/rag/search', taskToken('rag'), oversize('query'));
 
     expect(res.status).toBe(413);
   });
 
   it.each(DDEV_ACTIONS)('POST /ddev/%s answers 413 and enqueues nothing', async (action) => {
-    const res = await post(`/ddev/${action}`, signRagToken('task-1', SECRET), oversize('service'));
+    const res = await post(`/ddev/${action}`, taskToken('rag'), oversize('service'));
 
     expect(res.status).toBe(413);
     expect(h.jobs).toEqual([]);
@@ -154,13 +161,6 @@ describe('/rag/search', () => {
     expect(h.logged).toEqual([expect.objectContaining({ taskId: 'task-xyz', query: 'q' })]);
   });
 
-  it('serves the legacy 2-part RAG token, and acts for the task it names', async () => {
-    const res = await post('/rag/search', signRagToken('task-xyz', SECRET), '{"query":"q"}');
-
-    expect(res.status).toBe(200);
-    expect(h.logged).toEqual([expect.objectContaining({ taskId: 'task-xyz' })]);
-  });
-
   it('refuses a ddev task token', async () => {
     const res = await post('/rag/search', taskToken('ddev'), '{"query":"q"}');
 
@@ -170,12 +170,11 @@ describe('/rag/search', () => {
 
   it.each([
     ['an expired rag token', () => taskToken('rag', 'task-1', -1)],
-    ['an expired legacy token', () => signRagToken('task-1', SECRET, -1)],
+    ['the legacy two-part rag token', () => legacyRagToken()],
     [
       'a rag token signed with another secret',
       () => signTaskToken({ aud: 'rag', taskId: 't' }, 'x'),
     ],
-    ['a legacy token signed with another secret', () => signRagToken('task-1', 'other-secret')],
     ['a rag token with another task swapped in', () => tamperedPayload(taskToken('rag'), 'task-2')],
     ['a rag token with its version dropped', () => withoutVersion(taskToken('rag'))],
     ['a ddev token with its version dropped', () => withoutVersion(taskToken('ddev'))],
@@ -219,7 +218,7 @@ describe('/ddev', () => {
   });
 
   it.each(DDEV_ACTIONS)('POST /ddev/%s refuses the legacy 2-part RAG token', async (action) => {
-    const res = await post(`/ddev/${action}`, signRagToken('task-1', SECRET), '{}');
+    const res = await post(`/ddev/${action}`, legacyRagToken(), '{}');
 
     expect(res.status).toBe(401);
     expect(h.jobs).toEqual([]);

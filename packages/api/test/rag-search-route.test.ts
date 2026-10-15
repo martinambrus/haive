@@ -79,7 +79,7 @@ import net from 'node:net';
 import { Hono } from 'hono';
 import { CONFIG_KEYS, configService, secretsService } from '@haive/shared';
 import type { GlobalKbContext } from '@haive/shared/global-kb';
-import { signRagToken } from '@haive/shared/rag';
+import { signTaskToken } from '@haive/shared/task-token';
 import { ragRoutes, executeRagSearch } from '../src/routes/rag.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -115,7 +115,7 @@ async function search(): Promise<{ status: number; paths: string[] }> {
   const res = await app.request('/rag/search', {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${signRagToken('task-1', SECRET)}`,
+      authorization: `Bearer ${signTaskToken({ aud: 'rag', taskId: 'task-1' }, SECRET)}`,
       'content-type': 'application/json',
     },
     body: JSON.stringify({ query: 'where is the session cookie set' }),
@@ -641,7 +641,7 @@ describe('executeRagSearch: the scope', () => {
     const res = await app.request('/rag/search', {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${signRagToken('task-1', SECRET)}`,
+        authorization: `Bearer ${signTaskToken({ aud: 'rag', taskId: 'task-1' }, SECRET)}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify({ query: 'q', scope: 'global' }),

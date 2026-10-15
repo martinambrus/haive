@@ -42,7 +42,6 @@ import {
   secretsService,
   signRepoGitCredToken,
 } from '@haive/shared';
-import { signRagToken } from '@haive/shared/rag';
 import { TASK_TOKEN_AUDIENCES, signTaskToken } from '@haive/shared/task-token';
 import { internalRoutes } from '../src/routes/internal.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -73,7 +72,7 @@ async function post(token: string | null, headers: Record<string, string> = {}):
 const v1Token = (repositoryId = REPO_ID, userId = USER_ID, ttlSeconds?: number): string =>
   signRepoGitCredToken(repositoryId, userId, SECRET, ttlSeconds);
 
-/** The two-part form from before v1, which terminals started before it still hold in their env. */
+/** The two-part form from before v1, `<payload>.<hmac(raw secret, payload)>`, which nothing signs now. */
 function legacyToken(repositoryId = REPO_ID, userId = USER_ID, ttlSeconds = 60): string {
   const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
   const payload = Buffer.from(JSON.stringify({ repositoryId, userId, exp })).toString('base64url');
@@ -129,21 +128,18 @@ describe('POST /internal/git-credential', () => {
     expect(await res.json()).toEqual({ username: USERNAME, password: PASSWORD });
   });
 
-  it('serves the legacy two-part token the same credential', async () => {
+  it('refuses the legacy two-part token, however fresh and well signed', async () => {
     const token = legacyToken();
 
     const res = await post(token);
 
     expect(token.split('.')).toHaveLength(2);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ username: USERNAME, password: PASSWORD });
+    expect(res.status).toBe(401);
+    expect(h.lookups).toBe(0);
   });
 
-  it.each([
-    ['a v1 token', () => v1Token(REPO_ID, 'user-2')],
-    ['a legacy token', () => legacyToken(REPO_ID, 'user-2')],
-  ])('answers 404 when %s names a user who does not own the repository', async (_name, mint) => {
-    const res = await post(mint());
+  it('answers 404 when a v1 token names a user who does not own the repository', async () => {
+    const res = await post(v1Token(REPO_ID, 'user-2'));
 
     expect(res.status).toBe(404);
   });
@@ -167,13 +163,11 @@ describe('POST /internal/git-credential', () => {
 
   it.each([
     ['an expired v1 token', () => v1Token(REPO_ID, USER_ID, -1)],
-    ['an expired legacy token', () => legacyToken(REPO_ID, USER_ID, -1)],
     [
       'a v1 token signed with another secret',
       () => signRepoGitCredToken(REPO_ID, USER_ID, 'other-secret'),
     ],
     ['a v1 token keyed with the raw secret', v1WithRawKey],
-    ['the legacy RAG token', () => signRagToken(REPO_ID, SECRET)],
     ['a malformed token', () => 'v1.not.a-token'],
   ])('refuses %s', async (_name, mint) => {
     const res = await post(mint());
