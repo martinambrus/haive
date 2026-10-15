@@ -670,7 +670,9 @@ a JSON object with `schemaVersion` 1, a string `templateSetHash` and a `template
 anything else at that name is the person's, kept and reported in the step's warnings. It returns
 `removed`, `absent` or `kept`, and never throws. 12 lists the path in `ownRemoved` unless it was
 kept, `absent` included, so a Retry after a failed commit still stages a deletion an earlier attempt
-made; 02 lists it in `deletedPaths` only when it removed it, and 03 stages it like any removal.
+made; 02 lists it in `deletedPaths` only when this task removed it, now or in an earlier attempt
+that recorded the removal as an `upgrade.haive_file_retired` task event, so a Retry after a later
+failure still stages it while a person's own deletion is never claimed; 03 stages it like any removal.
 04 writes no commit, so a tracked copy is left as an unstaged deletion. A reset still removes the
 file, for installs that hold one.
 
@@ -685,7 +687,8 @@ is retired only by a successful record write. After a successful `writeProjectSt
 repository whose column holds nothing keeps its legacy file, which stays the only copy. The shape
 check is the mirror's own (`schemaVersion` 1, the environment's two objects, a list of strings for
 the globs, a `tooling` object); anything else at the name is the person's, kept and reported in the warnings. 12 lists the
-path in `ownRemoved` unless it was kept, 02 lists it in `deletedPaths` only when it removed it, 04
+path in `ownRemoved` unless it was kept, 02 lists it in `deletedPaths` only when this task removed it
+(the same task event), 04
 does not touch them. The clone import (`importHaiveDataMirror`) decides per unit too: a column is
 left to the sync when the record's unit file exists in the checkout (`lstatNoFollow`, a stale legacy
 file never outranks it); a column the sync then left empty (it threw, or refused, deferred,
