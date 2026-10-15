@@ -268,8 +268,9 @@ export async function startModuleJobs(
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
       const jobs = entries[index]?.jobs;
+      const ensureSchema = entries[index]?.ensureSchema;
       const moduleId = module.manifest.id;
-      if (!jobs || stops.has(moduleId)) continue;
+      if ((!jobs && !ensureSchema) || stops.has(moduleId)) continue;
       if (nowDeactivated.has(moduleId)) {
         pending.add(moduleId);
         continue;
@@ -278,14 +279,15 @@ export async function startModuleJobs(
       if (!pending.has(moduleId) || teardownsRunning.has(moduleId)) continue;
       pending.delete(moduleId);
       try {
-        const ensureSchema = entries[index]?.ensureSchema;
         if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
-        await start(moduleId, jobs);
-        logger.info({ module: moduleId }, 'module jobs started: the module is active again');
+        if (jobs) {
+          await start(moduleId, jobs);
+          logger.info({ module: moduleId }, 'module jobs started: the module is active again');
+        }
       } catch (err) {
         logger.error(
           { err, module: moduleId },
-          'module jobs failed to start; deactivate and reactivate the module to try again',
+          'module schema or jobs failed to start; deactivate and reactivate the module to try again',
         );
       }
     }

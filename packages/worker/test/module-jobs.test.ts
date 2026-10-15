@@ -40,6 +40,15 @@ function moduleWithSchema(id: string) {
   return { ...base, ensure, entry: { ...base.entry, ensureSchema: ensure } as Entry };
 }
 
+function moduleWithSchemaOnly(id: string) {
+  const ensure = vi.fn(async () => {});
+  return {
+    loaded: { manifest: { id } } as unknown as Loaded,
+    entry: { ensureSchema: ensure } as unknown as Entry,
+    ensure,
+  };
+}
+
 describe('startModuleJobs', () => {
   it('starts no job of a deactivated module and every job of an active one', async () => {
     const off = moduleWithJobs('alpha');
@@ -350,5 +359,36 @@ describe('the jobs reconcile', () => {
     await stopAll();
     expect(warn).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
+  });
+
+  it('ensures the schema of a reactivated module that has no jobs once, and not while its teardown runs', async () => {
+    const m = moduleWithSchemaOnly('schema-only');
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['schema-only']),
+    );
+
+    await reconcile(new Set(['schema-only']));
+    expect(m.ensure).not.toHaveBeenCalled();
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('schema-only')).toBe(false);
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+
+    await reconcile(new Set(['schema-only']));
+    const endTeardown = beginModuleTeardown('schema-only');
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+
+    endTeardown();
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('schema-only')).toBe(false);
+
+    await stopAll();
   });
 });
