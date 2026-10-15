@@ -137,9 +137,9 @@ dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-r
 task `running` first. An answer submitted to a form still parked is the one exception, since
 answering it is what reopens the task; an advance onto that form that carries no answer is dropped
 like any other. While the system drains or is in maintenance (`refusesNewWork`, read past the config
-cache, once per job and only for a failed task) that exception closes too: the answer stays stored on
-its row and the advance is dropped, so an answer accepted while the task was live cannot reopen it
-during a drain. A clarification answer is one of those, since it rides `task_events` rather than the
+cache, once per job and only for a failed task) that exception closes, as does the fix-loop gate one
+below: the answer stays stored on its row and the advance is dropped, so an answer accepted while the
+task was live cannot reopen it during a drain. A clarification answer is one of those, since it rides `task_events` rather than the
 job, so its route sets a failed task `running` itself before it queues the advance.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry

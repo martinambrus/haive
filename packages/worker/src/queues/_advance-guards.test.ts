@@ -100,6 +100,10 @@ describe('failedTaskRefusesAdvance', () => {
     expect(failedTaskRefusesAdvance('failed', 'done', false, true)).toBe(false);
   });
 
+  it('keeps out a gate answer sent after the failure while new work is held', () => {
+    expect(failedTaskRefusesAdvance('failed', 'done', false, true, true)).toBe(true);
+  });
+
   it('keeps out a done row with no gate answer sent after the failure', () => {
     expect(failedTaskRefusesAdvance('failed', 'done', false, false)).toBe(true);
   });
