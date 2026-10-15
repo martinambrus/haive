@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { locksOutNonAdmins, parseMaintenanceState, refusesNewWork } from './maintenance.js';
+import {
+  locksOutNonAdmins,
+  NEW_WORK_FENCE_KEY,
+  parseMaintenanceState,
+  refusesNewWork,
+} from './maintenance.js';
 
 describe('parseMaintenanceState', () => {
   it('accepts every real state', () => {
@@ -38,5 +43,12 @@ describe('locksOutNonAdmins', () => {
     // can still watch it.
     expect(locksOutNonAdmins('draining')).toBe(false);
     expect(locksOutNonAdmins('maintenance')).toBe(true);
+  });
+});
+
+describe('NEW_WORK_FENCE_KEY', () => {
+  // Admission and a state transition meet only by hashing this same string for their advisory lock.
+  it('is the string both sides hash', () => {
+    expect(NEW_WORK_FENCE_KEY).toBe('haive-new-work-fence');
   });
 });

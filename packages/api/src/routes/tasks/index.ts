@@ -65,7 +65,11 @@ import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
 import { requireAuth } from '../../middleware/auth.js';
-import { assertNewWorkAllowed, requireNewWorkAllowed } from '../../middleware/maintenance.js';
+import {
+  admitNewWork,
+  assertNewWorkAllowed,
+  requireNewWorkAllowed,
+} from '../../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import {
@@ -762,6 +766,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
     // upgrade's lock. A workflow or run_app task on a repo mid-onboarding stays the caller's call.
     const repositoryId = body.repositoryId;
     ({ task, queued } = await withRepositoryTaskLock(db, repositoryId, async (tx) => {
+      await admitNewWork(tx);
       const liveId = await liveOnboardingTaskId(tx, userId, repositoryId);
       if (liveId) {
         throw new HttpError(409, liveOnboardingMessage(liveId));
@@ -772,6 +777,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
     }));
   } else {
     const create = async (tx: DbTx) => {
+      await admitNewWork(tx);
       const row = firstRow(await insertTask(tx));
       await pinDatabase(tx, row);
       return { task: row, queued: await settle(tx, row) };
@@ -1178,7 +1184,11 @@ taskRoutes.post('/:id/action', async (c) => {
       // atomically, so a second click matches no row and enqueues nothing —
       // guarding with a read-then-write instead would let two clicks both pass
       // the read and put the same task on the queue twice.
-      if (!(await markQueuedForStart(db, id))) {
+      const started = await db.transaction(async (tx) => {
+        await admitNewWork(tx);
+        return markQueuedForStart(tx, id);
+      });
+      if (!started) {
         return c.json({ ok: true, started: false, status: task.status });
       }
       await appendTaskEvent(db, id, null, 'task.started', { by: userId });
@@ -1277,6 +1287,7 @@ taskRoutes.post('/:id/action', async (c) => {
       // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
       // dropped by the worker's epoch guard instead of running against the restarted task.
       await db.transaction(async (tx) => {
+        await admitNewWork(tx);
         await refuseReviveBesideLive(tx, id);
         await supersedeLiveRuns(tx, id, { failTask: false });
         await settleActiveStepsIn(tx, id);

@@ -56,7 +56,7 @@ import {
 } from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { requireNewWorkAllowed } from '../middleware/maintenance.js';
+import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
   ledgerImportedSince,
@@ -945,6 +945,7 @@ export async function insertUpgradeTask<T>(
   insert: (tx: DbTx) => Promise<T>,
 ): Promise<T> {
   return withRepositoryTaskLock(db, repositoryId, async (tx, repo) => {
+    await admitNewWork(tx);
     await refuseBesideLiveUpgrade(tx, repositoryId);
     const admission = await upgradeAdmission(tx, userId, repo);
     if (!admission.admitted) {

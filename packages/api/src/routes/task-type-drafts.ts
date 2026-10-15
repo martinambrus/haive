@@ -14,7 +14,7 @@ import { loadUsableProvider } from '../lib/step-cli-choice.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
-import { assertNewWorkAllowed } from '../middleware/maintenance.js';
+import { admitNewWork, assertNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { appendTaskEvent } from './tasks/_helpers.js';
 
@@ -85,6 +85,7 @@ taskTypeDraftRoutes.post('/', async (c) => {
 
   // The opening message is written before the start is queued: the step reads it on its first detect.
   const { taskId, queued } = await db.transaction(async (tx) => {
+    await admitNewWork(tx);
     const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'type_draft', {
       generic: false,
     });

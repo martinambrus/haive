@@ -1,6 +1,7 @@
 import { schema, type DbTx } from '@haive/database';
 import { getDb } from '../db.js';
 import { HttpError } from '../context.js';
+import { admitNewWork } from '../middleware/maintenance.js';
 import { definitionForCreate } from './task-type-definition.js';
 import { enqueueStart, markQueuedForStart } from './task-start.js';
 
@@ -35,6 +36,7 @@ export async function spawnPlanTask(args: {
   enqueue?: boolean;
 }): Promise<string> {
   const create = async (tx: DbTx): Promise<string> => {
+    await admitNewWork(tx);
     const { runListSnapshot, customSteps } = await definitionForCreate(tx, args.type, {
       generic: false,
     });
@@ -71,5 +73,9 @@ export async function spawnPlanTask(args: {
 /** Called after a caller-owned transaction commits; never expose a queued job
  * whose task row is still invisible to the worker. The START claim is idempotent. */
 export async function enqueuePlanTask(taskId: string, userId: string): Promise<void> {
-  if (await markQueuedForStart(getDb(), taskId)) await enqueueStart(taskId, userId);
+  const queued = await getDb().transaction(async (tx) => {
+    await admitNewWork(tx);
+    return markQueuedForStart(tx, taskId);
+  });
+  if (queued) await enqueueStart(taskId, userId);
 }

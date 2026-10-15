@@ -1,10 +1,11 @@
 import type { MiddlewareHandler } from 'hono';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { eq, sql } from 'drizzle-orm';
+import { schema, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
   locksOutNonAdmins,
+  NEW_WORK_FENCE_KEY,
   parseMaintenanceState,
   refusesNewWork,
   type MaintenanceState,
@@ -78,17 +79,29 @@ export const maintenanceGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   );
 };
 
-/** Throws the 503 a route that starts work answers once the system drains or is in maintenance. */
-export async function assertNewWorkAllowed(): Promise<void> {
-  // Past the cache: the updater sets the drain from another process and counts live tasks at once.
-  const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
-  if (refusesNewWork(state)) {
-    throw new HttpError(
+export class NewWorkRefused extends HttpError {
+  constructor() {
+    super(
       503,
       'Haive is preparing for maintenance, so new work is not being started. Work already ' +
         'running will finish.',
     );
   }
+}
+
+/** Throws the 503 a route that starts work answers once the system drains or is in maintenance. */
+export async function assertNewWorkAllowed(): Promise<void> {
+  // Past the cache: the updater sets the drain from another process and counts live tasks at once.
+  const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
+  if (refusesNewWork(state)) throw new NewWorkRefused();
+}
+
+/** Call first in the transaction that writes the task: a state write waits for its commit. */
+export async function admitNewWork(tx: DbTx): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock_shared(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`,
+  );
+  await assertNewWorkAllowed();
 }
 
 /** A route that creates a task answers 503 once the system drains or is in maintenance. */

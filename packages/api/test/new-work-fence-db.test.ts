@@ -1,0 +1,300 @@
+import { eq, sql } from 'drizzle-orm';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDatabase, schema, type Database } from '@haive/database';
+
+const url = process.env.NEW_WORK_FENCE_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/new_work_fence_test'))
+  throw new Error('Use a dedicated new_work_fence_test database for the new-work fence tests');
+
+const USER = '00000000-0000-4000-8000-0000000000f6';
+const BLIND_INDEX = 'new-work-fence-test-user';
+const FENCE = 'haive-new-work-fence';
+
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  state: 'normal',
+  reads: [] as string[],
+  queued: [] as string[],
+}));
+
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/queues.js', () => ({
+  getTaskQueue: () => ({
+    add: async (name: string) => {
+      h.queued.push(name);
+    },
+  }),
+}));
+vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
+  requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
+    c.set('userId', USER);
+    await next();
+  },
+}));
+vi.mock('@haive/shared', async (importOriginal) => {
+  const shared = await importOriginal<typeof import('@haive/shared')>();
+  return {
+    ...shared,
+    configService: {
+      get: async () => null,
+      getBoolean: async () => false,
+      getFresh: async (key: string) => {
+        if (key !== shared.CONFIG_KEYS.MAINTENANCE_STATE) return null;
+        h.reads.push(h.state);
+        return h.state;
+      },
+    },
+  };
+});
+
+import { Hono } from 'hono';
+import { TASK_JOB_NAMES } from '@haive/shared';
+import { taskRoutes } from '../src/routes/tasks/index.js';
+import { errorHandler } from '../src/middleware/error-handler.js';
+import type { AppEnv } from '../src/context.js';
+
+const REFUSAL =
+  'Haive is preparing for maintenance, so new work is not being started. Work already running will finish.';
+
+const app = new Hono<AppEnv>();
+app.route('/tasks', taskRoutes);
+app.onError(errorHandler);
+
+describe.skipIf(!url)('the new-work fence on Postgres', () => {
+  let db: Database;
+  let updater: Database;
+  let session: Awaited<ReturnType<Database['$client']['reserve']>> | undefined;
+  let repositoryId: string;
+  let requests: Promise<Response>[] = [];
+
+  const post = (path: string, body: unknown) => {
+    const request = Promise.resolve(
+      app.request(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    );
+    requests.push(request);
+    return request;
+  };
+  const answered = async (request: Promise<Response>) => {
+    const res = await request;
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  };
+  const tasks = () => db.select().from(schema.tasks).where(eq(schema.tasks.userId, USER));
+
+  /** The updater's side of a transition: its session holds the fence exclusively. */
+  const holdFence = async () => {
+    session = await updater.$client.reserve();
+    await session`select pg_advisory_lock(hashtextextended(${FENCE}, 0))`;
+  };
+  const holdFenceShared = async () => {
+    session = await updater.$client.reserve();
+    await session`select pg_advisory_lock_shared(hashtextextended(${FENCE}, 0))`;
+  };
+  const releaseFence = async () => {
+    if (!session) return;
+    await session`select pg_advisory_unlock_all()`;
+    session.release();
+    session = undefined;
+  };
+  /** The fence is taken in the request's own transaction, so a held one shows as a waiting share lock. */
+  const untilBlocked = async () => {
+    const deadline = Date.now() + 3_000;
+    for (;;) {
+      const [row] = await db.execute<{ n: number }>(
+        sql`select count(*)::int as n from pg_locks
+             where locktype = 'advisory' and not granted and mode = 'ShareLock'`,
+      );
+      if (row && row.n > 0) return;
+      if (Date.now() > deadline) throw new Error('the request never waited for the new-work fence');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  };
+  /** The updater writes the new state while it holds the fence, then lets go. */
+  const drain = async () => {
+    h.state = 'draining';
+    await releaseFence();
+  };
+
+  const failedTask = async () => {
+    const [row] = await db
+      .insert(schema.tasks)
+      .values({
+        userId: USER,
+        type: 'workflow',
+        title: 'fence-failed',
+        status: 'failed',
+        errorMessage: 'boom',
+        completedAt: new Date(),
+      })
+      .returning();
+    return row!;
+  };
+  const createdTask = async () => {
+    const [row] = await db
+      .insert(schema.tasks)
+      .values({ userId: USER, type: 'workflow', title: 'fence-created', status: 'created' })
+      .returning();
+    return row!;
+  };
+  const statusOf = async (id: string) =>
+    (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, id) }))?.status;
+
+  beforeAll(async () => {
+    db = createDatabase(url as string);
+    updater = createDatabase(url as string);
+    h.db = db;
+    await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, BLIND_INDEX));
+    await db.insert(schema.users).values({
+      id: USER,
+      emailEncrypted: 'new-work-fence-test@test.local',
+      emailBlindIndex: BLIND_INDEX,
+      passwordHash: 'not-real',
+      role: 'user',
+    });
+    const [repository] = await db
+      .insert(schema.repositories)
+      .values({ userId: USER, name: 'fence repo', source: 'local_path' })
+      .returning({ id: schema.repositories.id });
+    repositoryId = repository!.id;
+  });
+
+  beforeEach(async () => {
+    h.state = 'normal';
+    h.reads = [];
+    h.queued = [];
+    requests = [];
+    await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
+  });
+
+  afterEach(async () => {
+    await releaseFence();
+    await Promise.allSettled(requests);
+  });
+
+  afterAll(async () => {
+    await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, BLIND_INDEX));
+    await db.$client.end({ timeout: 5 });
+    await updater.$client.end({ timeout: 5 });
+  });
+
+  describe.each([
+    { type: 'run_app', extra: {} },
+    { type: 'workflow', extra: { description: 'do it' } },
+    { type: 'onboarding', extra: {} },
+  ])('POST /tasks of a $type task', ({ type, extra }) => {
+    const create = () => post('/tasks', { type, title: `fence-${type}`, repositoryId, ...extra });
+
+    it('creates the task while the state is normal and nothing holds the fence', async () => {
+      expect(await answered(create())).toMatchObject({ status: 201 });
+
+      expect(await tasks()).toHaveLength(1);
+      expect(h.queued).toEqual([TASK_JOB_NAMES.START]);
+    });
+
+    it('does not wait for another admission, which holds the fence shared', async () => {
+      await holdFenceShared();
+
+      expect(await answered(create())).toMatchObject({ status: 201 });
+      expect(await tasks()).toHaveLength(1);
+    });
+
+    it('waits for the fence, and creates the task when the state is still normal after it', async () => {
+      await holdFence();
+      const request = create();
+      await untilBlocked();
+      expect(await tasks()).toHaveLength(0);
+
+      await releaseFence();
+
+      expect(await answered(request)).toMatchObject({ status: 201 });
+      expect(await tasks()).toHaveLength(1);
+    });
+
+    it('answers 503 and creates no task when the state turned draining while it waited for the fence', async () => {
+      await holdFence();
+      const request = create();
+      await untilBlocked();
+
+      await drain();
+
+      expect(await answered(request)).toEqual({
+        status: 503,
+        body: { error: REFUSAL, code: null },
+      });
+      expect(await tasks()).toHaveLength(0);
+      expect(h.queued).toEqual([]);
+      expect(h.reads).toEqual(['normal', 'draining']);
+    });
+  });
+
+  it('still refuses at once, without waiting for the fence, when it is draining at the early check', async () => {
+    h.state = 'draining';
+    await holdFence();
+
+    const res = await answered(
+      post('/tasks', { type: 'run_app', title: 'fence-early', repositoryId }),
+    );
+
+    expect(res).toEqual({ status: 503, body: { error: REFUSAL, code: null } });
+    expect(h.reads).toEqual(['draining']);
+  });
+
+  describe('POST /tasks/:id/action retry of a failed task', () => {
+    const retry = (id: string) => post(`/tasks/${id}/action`, { action: 'retry' });
+
+    it('queues the task while the state is normal', async () => {
+      const task = await failedTask();
+
+      expect(await answered(retry(task.id))).toMatchObject({ status: 200 });
+      expect(await statusOf(task.id)).toBe('queued');
+    });
+
+    it('answers 503 and leaves the task failed when the state turned draining while it waited', async () => {
+      const task = await failedTask();
+      await holdFence();
+      const request = retry(task.id);
+      await untilBlocked();
+
+      await drain();
+
+      expect(await answered(request)).toEqual({
+        status: 503,
+        body: { error: REFUSAL, code: null },
+      });
+      expect(await statusOf(task.id)).toBe('failed');
+      expect(h.queued).toEqual([]);
+    });
+  });
+
+  describe('POST /tasks/:id/action start of a created task', () => {
+    const start = (id: string) => post(`/tasks/${id}/action`, { action: 'start' });
+
+    it('queues the task while the state is normal', async () => {
+      const task = await createdTask();
+
+      expect(await answered(start(task.id))).toMatchObject({ status: 200 });
+      expect(await statusOf(task.id)).toBe('queued');
+    });
+
+    it('answers 503 and leaves the task created when the state turned draining while it waited', async () => {
+      const task = await createdTask();
+      await holdFence();
+      const request = start(task.id);
+      await untilBlocked();
+
+      await drain();
+
+      expect(await answered(request)).toEqual({
+        status: 503,
+        body: { error: REFUSAL, code: null },
+      });
+      expect(await statusOf(task.id)).toBe('created');
+      expect(h.queued).toEqual([]);
+    });
+  });
+});

@@ -21,6 +21,7 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * hooks rather than rely on visibility. The attachments lock (`pg_advisory_xact_lock`) is a real
  * per-key mutex, re-entrant within one transaction chain and released when the outermost
  * transaction settles, which is what lets a test race two writers.
+ * `pg_advisory_xact_lock_shared` is accepted and takes nothing: no exclusive holder is modelled.
  */
 
 export type FakeRow = Record<string, unknown>;
@@ -28,6 +29,7 @@ type Pred = (row: FakeRow) => boolean;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOCK_SQL = /^select pg_advisory_xact_lock\(hashtextextended\($/;
+const SHARED_LOCK_SQL = /^select pg_advisory_xact_lock_shared\(hashtextextended\($/;
 
 /** A json value the way Postgres compares jsonb: object keys in any order, arrays in order. */
 function canonicalJson(value: unknown): string {
@@ -566,7 +568,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
             (rows, fields) => rows.map((row) => project(table, fields, row)),
           ),
       }),
-      /** Only the attachments lock's statements and a read's statement timeout, inside a transaction. */
+      /** Only the lock statements and a read's statement timeout, inside a transaction. */
       execute: async (query: unknown): Promise<void> => {
         undoLog(ctx);
         const chunks = is(query, SQL) ? query.queryChunks : [];
@@ -587,6 +589,14 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           await acquire(ctx, chunks[1]);
           return;
         }
+        if (
+          ctx !== null &&
+          chunks.length === 3 &&
+          SHARED_LOCK_SQL.test(first) &&
+          typeof chunks[1] === 'string' &&
+          text(chunks[2]) === ', 0))'
+        )
+          return;
         throw new Error('fake db: unsupported execute');
       },
       transaction: async (fn) => {

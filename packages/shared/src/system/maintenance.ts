@@ -35,6 +35,9 @@ export function parseMaintenanceState(value: string | null | undefined): Mainten
   return parsed.success ? parsed.data : 'normal';
 }
 
+/** The advisory lock admission and a state write both take: `hashtextextended(<key>, 0)`. */
+export const NEW_WORK_FENCE_KEY = 'haive-new-work-fence';
+
 /** True when new work must be refused: both of the non-normal states hold task creation. */
 export function refusesNewWork(state: MaintenanceState): boolean {
   return state !== 'normal';

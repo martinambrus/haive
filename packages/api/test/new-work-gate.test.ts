@@ -7,7 +7,6 @@ const h = vi.hoisted(() => ({
   state: 'normal',
   dbCalls: 0,
   queued: [] as string[],
-  insertTask: (_args: Record<string, unknown>): string => '',
 }));
 
 vi.mock('../src/db.js', () => ({
@@ -30,26 +29,6 @@ vi.mock('../src/lib/plan-mirror.js', () => ({
   pullPlanMirror: vi.fn(),
   savePlanMirror: vi.fn(),
 }));
-vi.mock('../src/lib/spawn-plan-task.js', () => ({
-  spawnPlanTask: async (args: {
-    userId: string;
-    repositoryId: string;
-    type: string;
-    title: string;
-    seed?: (id: string, tx: unknown) => Promise<void>;
-  }) => {
-    const id = h.insertTask({
-      userId: args.userId,
-      repositoryId: args.repositoryId,
-      type: args.type,
-      title: args.title,
-      status: 'created',
-    });
-    await args.seed?.(id, h.db);
-    return id;
-  },
-  enqueuePlanTask: async () => undefined,
-}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
@@ -70,6 +49,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -112,6 +92,12 @@ gated.onError(errorHandler);
 const states = (cached: string, stored: string) => {
   vi.spyOn(configService, 'get').mockResolvedValue(cached);
   return vi.spyOn(configService, 'getFresh').mockClear().mockResolvedValue(stored);
+};
+
+/** The state is normal at the early check and draining by the time the transaction admits the work. */
+const turnsDrainingAfterTheEarlyCheck = () => {
+  h.state = 'draining';
+  return vi.spyOn(configService, 'getFresh').mockClear().mockResolvedValueOnce('normal');
 };
 
 const ROUTES: { name: string; path: string; body: unknown }[] = [
@@ -202,7 +188,6 @@ function setup() {
   }
   h.db = fake.db;
   h.gdb = fake.db;
-  h.insertTask = (args) => fake.insert(schema.tasks, args).id as string;
   h.dbCalls = 0;
   return { fake, seeded: fake.rows(schema.tasks).length };
 }
@@ -244,6 +229,19 @@ describe.each(ROUTES)('$name', (route) => {
       expect(h.dbCalls).toBe(0);
     },
   );
+
+  it('answers 503 and creates no task when the state turns draining after the early check', async () => {
+    const { fake, seeded } = setup();
+    const stored = turnsDrainingAfterTheEarlyCheck();
+
+    const res = await post(route);
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+    expect(fake.rows(schema.tasks).length).toBe(seeded);
+    expect(fake.rows(globalKbEntries)).toEqual([]);
+    expect(stored).toHaveBeenCalledTimes(2);
+  });
 
   describe('behind the real maintenance gate', () => {
     it('creates a task when the cached copy and the stored state both say normal', async () => {
@@ -349,6 +347,20 @@ describe('POST /tasks/:id/action', () => {
         expect(written(fake)).toEqual(before);
       },
     );
+
+    it('answers 503 and queues and writes nothing when the state turns draining after the early check', async () => {
+      const fake = withTask(row);
+      const before = written(fake);
+      const stored = turnsDrainingAfterTheEarlyCheck();
+
+      const res = await act(action);
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(h.queued).toEqual([]);
+      expect(written(fake)).toEqual(before);
+      expect(stored).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('while the system drains', () => {
@@ -463,6 +475,80 @@ describe('POST /tasks/:id/steps/:stepId/action', () => {
         expect(written(fake)).toEqual(before);
       },
     );
+
+    it('answers 503 and queues and writes nothing when the state turns draining after the early check', async () => {
+      const fake = withFailedStep();
+      const before = written(fake);
+      const stored = turnsDrainingAfterTheEarlyCheck();
+
+      const res = await act(action);
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(h.queued).toEqual([]);
+      expect(written(fake)).toEqual(before);
+      expect(stored).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('resume of a step that failed in the middle of a loop', () => {
+    const withFailedLoopStep = async () => {
+      const fake = withFailedStep();
+      await fake.db
+        .delete(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, STEP_ROW));
+      fake.patch(schema.taskSteps, STEP_ROW, { iterationCount: 1 });
+      return fake;
+    };
+
+    it('moves the task back to the step while the system is normal', async () => {
+      const fake = await withFailedLoopStep();
+
+      expect((await act('resume')).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+    });
+
+    it('answers 503 and queues and writes nothing when the state turns draining after the early check', async () => {
+      const fake = await withFailedLoopStep();
+      const before = written(fake);
+      const stored = turnsDrainingAfterTheEarlyCheck();
+
+      const res = await act('resume');
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(h.queued).toEqual([]);
+      expect(written(fake)).toEqual(before);
+      expect(stored).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('the task retry, which moves a task back to its failed step', () => {
+    const retryTask = () =>
+      app.request(`/tasks/${TASK}/action`, request({ body: { action: 'retry' } }));
+
+    it('moves the task back to the step while the system is normal', async () => {
+      const fake = withFailedStep();
+
+      expect((await retryTask()).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+    });
+
+    it('answers 503 and queues and writes nothing when the state turns draining after the early check', async () => {
+      const fake = withFailedStep();
+      const before = written(fake);
+      const stored = turnsDrainingAfterTheEarlyCheck();
+
+      const res = await retryTask();
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(h.queued).toEqual([]);
+      expect(written(fake)).toEqual(before);
+      expect(stored).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('abort', () => {
@@ -498,6 +584,22 @@ describe('the code that creates a task', () => {
       'routes/tasks/index.ts',
       'routes/upgrades.ts',
     ]);
+  });
+
+  it('takes the new-work fence in every file that inserts a task itself', () => {
+    const src = join(import.meta.dirname, '../src');
+    const unfenced = readdirSync(src, { recursive: true, encoding: 'utf8' })
+      .filter((file) => file.endsWith('.ts'))
+      .filter((file) => {
+        const text = readFileSync(join(src, file), 'utf8');
+        return /\.insert\(schema\.tasks\)/.test(text) && !/\badmitNewWork\(/.test(text);
+      })
+      .sort();
+
+    expect(
+      unfenced,
+      'a file that inserts a task must call admitNewWork in the transaction that writes it',
+    ).toEqual([]);
   });
 });
 
@@ -590,6 +692,24 @@ describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
         expect(written(fake)).toEqual(before);
       },
     );
+
+    it('answers 503 and re-runs and queues nothing when the state turns draining after the early check', async () => {
+      const fake = withStep({ status }, task);
+      const rerun = () =>
+        [schema.tasks, schema.taskSteps, schema.taskEvents, schema.cliInvocations].map((table) =>
+          fake.rows(table),
+        );
+      const before = rerun();
+      const stored = turnsDrainingAfterTheEarlyCheck();
+
+      const res = await pick();
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(h.queued).toEqual([]);
+      expect(rerun()).toEqual(before);
+      expect(stored).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('while the system drains, a pick that re-runs nothing', () => {
@@ -695,6 +815,20 @@ describe.each([
       expect(written(fake)).toEqual(before);
     },
   );
+
+  it('answers 503 and queues and writes nothing for a failed task when the state turns draining after the early check', async () => {
+    const fake = withParkedForm('failed');
+    const before = written(fake);
+    const stored = turnsDrainingAfterTheEarlyCheck();
+
+    const res = await answer();
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+    expect(h.queued).toEqual([]);
+    expect(written(fake)).toEqual(before);
+    expect(stored).toHaveBeenCalledTimes(2);
+  });
 
   it.each(['waiting_user', 'running'])(
     'still takes the answer to a %s task while the system drains',
