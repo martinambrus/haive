@@ -65,6 +65,15 @@ export function emptyMcpSurface(): McpSurface {
   };
 }
 
+/** Sandbox -> API base URL. Defaults to the compose service name; override via
+ *  RAG_API_INTERNAL_URL when the sandbox reaches the API by another route
+ *  (e.g. host.docker.internal). Under networkPolicy 'allowlist' this host must
+ *  be allowlisted; under 'none' the proxy cannot reach the API and rag_search
+ *  will report a request failure (agents then fall through to KB/LSP/GREP). */
+export function internalApiUrl(): string {
+  return process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
+}
+
 export async function resolveMcpSurface(
   db: Database,
   taskId: string,
@@ -110,19 +119,12 @@ export async function resolveMcpSurface(
     chromeDevtools: { enabled: chromeDevtools, version: chromeVersion },
     ddevControl: {
       enabled: ddevEnabled,
-      apiUrl:
-        process.env.DDEV_API_INTERNAL_URL || process.env.RAG_API_INTERNAL_URL || 'http://api:3001',
+      apiUrl: process.env.DDEV_API_INTERNAL_URL || internalApiUrl(),
       token: ddevEnabled ? signTaskToken({ aud: 'ddev', taskId }, secret as string) : '',
     },
     userServers: ragOnly ? {} : await loadUserMcpServers(db, taskId),
     ...(customTools.length > 0
-      ? {
-          custom: {
-            enabled: !!secret,
-            apiUrl: process.env.RAG_API_INTERNAL_URL || 'http://api:3001',
-            tools: [...customTools],
-          },
-        }
+      ? { custom: { enabled: !!secret, apiUrl: internalApiUrl(), tools: [...customTools] } }
       : {}),
   };
 }
@@ -193,12 +195,7 @@ async function resolveRagMcpConfig(
     log.warn({ taskId }, 'CONFIG_ENCRYPTION_KEY unset; haive-rag MCP disabled');
     return disabled;
   }
-  // Sandbox -> API base URL. Defaults to the compose service name; override via
-  // RAG_API_INTERNAL_URL when the sandbox reaches the API by another route
-  // (e.g. host.docker.internal). Under networkPolicy 'allowlist' this host must
-  // be allowlisted; under 'none' the proxy cannot reach the API and rag_search
-  // will report a request failure (agents then fall through to KB/LSP/GREP).
-  const apiUrl = process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
+  const apiUrl = internalApiUrl();
   return { enabled: true, apiUrl, token: signTaskToken({ aud: 'rag', taskId }, secret) };
 }
 
