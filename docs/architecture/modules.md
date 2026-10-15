@@ -42,7 +42,9 @@ the module loads again.
   task it could not stop or whose kill or record failed. The code stays loaded: its api routes and
   settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
-  The worker starts no job of a module that is deactivated when it boots, and a reconcile every 15 s
+  The worker neither ensures the schema of nor starts any job of a module that is deactivated when it
+  boots (so a restart after Tear down leaves the dropped schema dropped; it reads the deactivated set
+  once for both), and a reconcile every 15 s
   (`MODULE_JOBS_RECONCILE_MS`, `modules/loader.ts`) stops the jobs of one deactivated since. A stop
   still running after `MODULE_JOB_STOP_WAIT_MS` (10 s) is logged once and left running: the pass goes
   on with the other modules, a later pass or the shutdown waits on that same stop instead of calling it
@@ -51,7 +53,9 @@ the module loads again.
   `MODULE_JOB_START_WAIT_MS` (10 s) is logged once and left running: the pass goes on, no later pass
   starts the module again meanwhile, and a late success counts as started, so a pass that sees the
   module deactivated by then stops it. A failed
-  ensure or start is logged and waits for the next deactivation and activation. A task type that uses the module, as its source or through any step, is
+  ensure or start is tried again on the next passes, at most `MODULE_REACTIVATION_ATTEMPTS` (3) per
+  reactivation; after the last one only a worker error log says so, until the next deactivation and
+  activation. A task type that uses the module, as its source or through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
   at the same moment waits and then counts the new task. A task that reaches one of its steps later, after a Retry or a revive,
