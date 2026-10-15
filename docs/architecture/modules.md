@@ -70,7 +70,9 @@ one), and a registry dependency whose package is not on disk yet is left out wit
 `@haive/worker` must depend on exactly the same modules, and `@haive/web` on exactly the installed
 ones that export `./web` or `./dashboard`, so the api and the worker always load the same set. Any
 other combination is a half-installed state: `gen-modules` exits 1, naming the side and the
-`package.json` to change.
+`package.json` to change. It also exits 1 when a registry module's version is a range, or differs
+between the `package.json` files that depend on it: pnpm would install a copy per version while the
+generated imports follow the api's.
 
 A folder under `modules/` that exports `./manifest` and that nobody depends on is **present, not
 installed**. `gen-modules` prints `present, not installed: pnpm module add <id>`, leaves it out of
