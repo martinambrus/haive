@@ -196,6 +196,7 @@ export async function ensureModuleSchemas(
 }
 
 export const MODULE_JOBS_RECONCILE_MS = 15_000;
+export const MODULE_JOB_STOP_WAIT_MS = 10_000;
 
 const jobsStarted = new Set<string>();
 const teardownsRunning = new Set<string>();
@@ -225,6 +226,9 @@ export async function startModuleJobs(
   deactivated: ReadonlySet<string> = new Set(),
 ): Promise<ModuleJobsHandle> {
   const stops = new Map<string, () => Promise<void>>();
+  // A stop need not be idempotent: later callers wait on one still running, never call it again.
+  const stopping = new Map<string, Promise<void>>();
+  const pending = new Set(deactivated);
   const start = async (
     moduleId: string,
     jobs: NonNullable<WorkerModuleEntry['jobs']>,
@@ -237,18 +241,42 @@ export async function startModuleJobs(
     stops.set(moduleId, stop);
     jobsStarted.add(moduleId);
   };
-  const stopModules = async (moduleIds: readonly string[]): Promise<void> => {
-    const results = await Promise.allSettled(moduleIds.map(async (id) => stops.get(id)!()));
-    results.forEach((r, i) => {
-      const moduleId = moduleIds[i]!;
-      if (r.status === 'rejected') {
-        logger.warn({ err: r.reason, module: moduleId }, 'module jobs failed to stop');
-      } else {
-        stops.delete(moduleId);
-        jobsStarted.delete(moduleId);
-        logger.info({ module: moduleId }, 'module jobs stopped');
-      }
+  const stopJobs = (moduleId: string): Promise<void> => {
+    const running = stopping.get(moduleId);
+    if (running) return running;
+    const bounded = new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        logger.warn(
+          { module: moduleId, waitMs: MODULE_JOB_STOP_WAIT_MS },
+          `module jobs still stopping after ${MODULE_JOB_STOP_WAIT_MS / 1000} s; going on without them`,
+        );
+        resolve();
+      }, MODULE_JOB_STOP_WAIT_MS);
+      const ended = (): void => {
+        clearTimeout(timer);
+        stopping.delete(moduleId);
+        resolve();
+      };
+      void (async () => stops.get(moduleId)!())().then(
+        () => {
+          stops.delete(moduleId);
+          jobsStarted.delete(moduleId);
+          // The pass that began this stop may have gone on without it.
+          pending.add(moduleId);
+          logger.info({ module: moduleId }, 'module jobs stopped');
+          ended();
+        },
+        (err: unknown) => {
+          logger.warn({ err, module: moduleId }, 'module jobs failed to stop');
+          ended();
+        },
+      );
     });
+    stopping.set(moduleId, bounded);
+    return bounded;
+  };
+  const stopModules = async (moduleIds: readonly string[]): Promise<void> => {
+    await Promise.all(moduleIds.map((moduleId) => stopJobs(moduleId)));
   };
   const stopAll = (): Promise<void> => stopModules([...stops.keys()]);
   for (const [index, module] of loaded.entries()) {
@@ -270,7 +298,6 @@ export async function startModuleJobs(
     }
   }
 
-  const pending = new Set(deactivated);
   const held = new Set<string>();
   const reconcile = async (nowDeactivated: ReadonlySet<string>): Promise<void> => {
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));

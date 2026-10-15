@@ -25,6 +25,7 @@ vi.mock('@haive/shared/module-db', async (importOriginal) => ({
 
 const {
   MODULE_JOBS_RECONCILE_MS,
+  MODULE_JOB_STOP_WAIT_MS,
   beginModuleTeardown,
   moduleJobsStarted,
   moduleTeardownRunning,
@@ -70,6 +71,15 @@ function moduleWithJobs(id: string) {
     jobs,
     stop,
   };
+}
+
+function moduleWithHungStop(id: string) {
+  const m = moduleWithJobs(id);
+  let end!: { resolve: () => void; reject: (err: Error) => void };
+  m.stop.mockImplementationOnce(
+    () => new Promise<void>((resolve, reject) => (end = { resolve, reject })),
+  );
+  return { ...m, end: () => end };
 }
 
 function moduleWithSchema(id: string) {
@@ -692,5 +702,190 @@ describe('the jobs reconcile', () => {
     expect((settled as Error).name).toBe('ModuleTeardownEndedError');
     expect(moduleDb.closed).toHaveBeenCalledOnce();
     endHook();
+  });
+});
+
+describe('the jobs reconcile with a stop that does not end', () => {
+  const track = (promise: Promise<unknown>) => {
+    const state = { settled: false };
+    const settle = () => {
+      state.settled = true;
+    };
+    void promise.then(settle, settle);
+    return state;
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('goes on after the wait without a module whose jobs never stop, having handled the other modules of that pass', async () => {
+    const hung = moduleWithHungStop('hung');
+    const prompt = moduleWithJobs('prompt');
+    const back = moduleWithJobs('back');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs(
+      [hung.loaded, prompt.loaded, back.loaded],
+      [hung.entry, prompt.entry, back.entry],
+      new Set(['back']),
+    );
+
+    const pass = track(reconcile(new Set(['hung', 'prompt'])));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS - 1);
+    expect(pass.settled).toBe(false);
+    expect(moduleJobsStarted('prompt')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pass.settled).toBe(true);
+    expect(back.jobs).toHaveBeenCalledOnce();
+    expect(hung.stop).toHaveBeenCalledOnce();
+  });
+
+  it('lets stopAll go on after the same wait, so a shutdown does not hang on a module whose jobs never stop', async () => {
+    const hung = moduleWithHungStop('hung-at-exit');
+    const prompt = moduleWithJobs('prompt-at-exit');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { stopAll } = await startModuleJobs(
+      [hung.loaded, prompt.loaded],
+      [hung.entry, prompt.entry],
+    );
+
+    const all = track(stopAll());
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS - 1);
+    expect(all.settled).toBe(false);
+    expect(moduleJobsStarted('prompt-at-exit')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(all.settled).toBe(true);
+    expect(moduleJobsStarted('hung-at-exit')).toBe(true);
+  });
+
+  it('calls the stop of a module once while it still runs, whether a later pass or stopAll comes', async () => {
+    const m = moduleWithHungStop('once-only');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+
+    void reconcile(new Set(['once-only']));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS);
+    const later = track(reconcile(new Set(['once-only'])));
+    const all = track(stopAll());
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS);
+
+    expect(m.stop).toHaveBeenCalledOnce();
+    expect(later.settled).toBe(true);
+    expect(all.settled).toBe(true);
+  });
+
+  it('keeps a module whose jobs are still stopping marked as started, so its teardown is refused', async () => {
+    const m = moduleWithHungStop('pinned');
+    const hook = vi.fn<Hook>(async () => {});
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs([m.loaded], [m.entry]);
+
+    const pass = track(reconcile(new Set(['pinned'])));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS);
+    expect(pass.settled).toBe(true);
+    expect(moduleJobsStarted('pinned')).toBe(true);
+
+    const refusal = (await runModuleTeardown(teardownDeps(m, hook), 'pinned').catch(
+      (err: unknown) => err,
+    )) as Error;
+    expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
+    expect(refusal.message).toMatch(/pinned.*still running/);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('warns once for a stop that outlives the wait, naming the module and the wait, and not again for later passes', async () => {
+    const m = moduleWithHungStop('slow-stop');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+
+    void reconcile(new Set(['slow-stop']));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'slow-stop', waitMs: MODULE_JOB_STOP_WAIT_MS }),
+      expect.any(String),
+    );
+
+    void reconcile(new Set(['slow-stop']));
+    void stopAll();
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS * 2);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it('logs no warning for a stop that ends within the wait, however long the clock then runs', async () => {
+    const quick = moduleWithJobs('quick');
+    const nearly = moduleWithJobs('nearly');
+    nearly.stop.mockImplementationOnce(
+      () => new Promise<void>((resolve) => setTimeout(resolve, MODULE_JOB_STOP_WAIT_MS - 1)),
+    );
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs(
+      [quick.loaded, nearly.loaded],
+      [quick.entry, nearly.entry],
+    );
+
+    const pass = track(reconcile(new Set(['quick', 'nearly'])));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS - 1);
+    expect(pass.settled).toBe(true);
+    expect(moduleJobsStarted('quick')).toBe(false);
+    expect(moduleJobsStarted('nearly')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS * 2);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('forgets a module whose stop ends after the wait, and starts its jobs again once the module is active', async () => {
+    const m = moduleWithHungStop('stopped-late');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs([m.loaded], [m.entry]);
+
+    const pass = track(reconcile(new Set(['stopped-late'])));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS);
+    expect(pass.settled).toBe(true);
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('stopped-late')).toBe(true);
+
+    m.end().resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(moduleJobsStarted('stopped-late')).toBe(false);
+    expect(info).toHaveBeenCalledWith({ module: 'stopped-late' }, 'module jobs stopped');
+
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('stopped-late')).toBe(true);
+  });
+
+  it('keeps a module whose stop fails after the wait marked as started, and stops its jobs again on the next pass', async () => {
+    const m = moduleWithHungStop('failing-late');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs([m.loaded], [m.entry]);
+
+    const pass = track(reconcile(new Set(['failing-late'])));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_STOP_WAIT_MS);
+    expect(pass.settled).toBe(true);
+    warn.mockClear();
+
+    m.end().reject(new Error('queue gone'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(moduleJobsStarted('failing-late')).toBe(true);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'failing-late', err: expect.any(Error) }),
+      'module jobs failed to stop',
+    );
+    expect(m.stop).toHaveBeenCalledOnce();
+
+    await reconcile(new Set(['failing-late']));
+    expect(m.stop).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('failing-late')).toBe(false);
   });
 });
