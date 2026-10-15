@@ -430,7 +430,7 @@ export async function resolveMcpExtraFiles(
     ddevToken: surface.ddevControl.token,
     includeCustomTools: customFiles !== null,
     customServerPath: CUSTOM_MCP_SERVER_PATH,
-    customApiUrl: process.env.RAG_API_INTERNAL_URL || 'http://api:3001',
+    customApiUrl: surface.custom?.apiUrl,
   });
 
   // User's custom MCP servers (.claude/mcp_settings.json) merged additively so

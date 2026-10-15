@@ -182,7 +182,7 @@ describe('requiresMcp: a candidate whose CLI cannot host MCP servers is ineligib
 });
 
 describe('the custom tools line of a dispatch', () => {
-  const custom = { enabled: true, tools: ['repo_status'] };
+  const custom = { enabled: true, apiUrl: 'http://api:3001', tools: ['repo_status'] };
 
   it('reaches the prompt of an MCP-capable provider and no other', () => {
     const base = {

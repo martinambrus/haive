@@ -13,6 +13,19 @@ import { api, content, runCleanups, start } from './support/custom-mcp-process.j
 
 vi.mock('../src/lsp/configured-lsp.js', () => ({ hasReadyLspBridge: async () => false }));
 
+const afterSurface = vi.hoisted(() => ({ run: undefined as (() => void) | undefined }));
+vi.mock('../src/sandbox/mcp-surface.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/sandbox/mcp-surface.js')>();
+  return {
+    ...actual,
+    resolveMcpSurface: async (...args: Parameters<typeof actual.resolveMcpSurface>) => {
+      const surface = await actual.resolveMcpSurface(...args);
+      afterSurface.run?.();
+      return surface;
+    },
+  };
+});
+
 const merged = vi.hoisted(() => ({
   cli: [] as unknown[][],
   gemini: [] as unknown[][],
@@ -149,6 +162,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await runCleanups();
+  afterSurface.run = undefined;
   vi.restoreAllMocks();
   delete process.env.CONFIG_ENCRYPTION_KEY;
   delete process.env.RAG_API_INTERNAL_URL;
@@ -357,6 +371,15 @@ describe('the API address', () => {
     process.env.RAG_API_INTERNAL_URL = 'http://host.docker.internal:3001';
     const { entry } = await entryOf('claude-code', dbFor(pinned([repoStatus])), run());
     expect(entry?.env).toEqual({ CUSTOM_MCP_API_URL: 'http://host.docker.internal:3001' });
+  });
+
+  it('is the one the shared surface carries, whatever the environment says afterwards', async () => {
+    process.env.RAG_API_INTERNAL_URL = 'http://surface-a.invalid:3001';
+    afterSurface.run = () => {
+      process.env.RAG_API_INTERNAL_URL = 'http://env-b.invalid:3001';
+    };
+    const { entry } = await entryOf('claude-code', dbFor(pinned([repoStatus])), run());
+    expect(entry?.env).toEqual({ CUSTOM_MCP_API_URL: 'http://surface-a.invalid:3001' });
   });
 });
 

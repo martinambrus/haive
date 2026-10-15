@@ -35,7 +35,7 @@ export interface McpSurface {
   /** The user's own servers from `.claude/mcp_settings.json`, verbatim. */
   userServers: Record<string, unknown>;
   /** The tools a prompt step's author defined; present only on that step's own dispatch. */
-  custom?: { enabled: boolean; tools: string[] };
+  custom?: { enabled: boolean; apiUrl: string; tools: string[] };
 }
 
 /** Resolve the MCP surface for one invocation.
@@ -115,7 +115,15 @@ export async function resolveMcpSurface(
       token: ddevEnabled ? signTaskToken({ aud: 'ddev', taskId }, secret as string) : '',
     },
     userServers: ragOnly ? {} : await loadUserMcpServers(db, taskId),
-    ...(customTools.length > 0 ? { custom: { enabled: !!secret, tools: [...customTools] } } : {}),
+    ...(customTools.length > 0
+      ? {
+          custom: {
+            enabled: !!secret,
+            apiUrl: process.env.RAG_API_INTERNAL_URL || 'http://api:3001',
+            tools: [...customTools],
+          },
+        }
+      : {}),
   };
 }
 
