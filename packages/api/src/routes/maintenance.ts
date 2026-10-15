@@ -179,17 +179,28 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
       // that stamp anchors the runtime reaper's paused-grace.
       if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
       const pausedAt = new Date();
-      await db.transaction(async (tx) => {
-        await tx
+      const paused = await db.transaction(async (tx) => {
+        // Only the pause that changes the row is recorded.
+        const rows = await tx
           .update(schema.tasks)
           .set({ pausedAt, updatedAt: pausedAt })
-          .where(eq(schema.tasks.id, taskId));
+          .where(and(eq(schema.tasks.id, taskId), isNull(schema.tasks.pausedAt)))
+          .returning({ id: schema.tasks.id });
+        if (rows.length === 0) return false;
         await appendTaskEvent(tx, taskId, null, 'task.paused', {
           by: actorUserId,
           byAdmin: true,
           reason: 'maintenance',
         });
+        return true;
       });
+      if (!paused) {
+        const standing = await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, taskId),
+          columns: { pausedAt: true },
+        });
+        return c.json({ ok: true, pausedAt: standing?.pausedAt?.toISOString() ?? null });
+      }
       await audit({ pausedAt: pausedAt.toISOString() });
       return c.json({ ok: true, pausedAt: pausedAt.toISOString() });
     }

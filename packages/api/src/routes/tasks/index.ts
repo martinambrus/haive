@@ -1304,13 +1304,24 @@ taskRoutes.post('/:id/action', async (c) => {
       // deadline out indefinitely.
       if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
       const pausedAt = new Date();
-      await db.transaction(async (tx) => {
-        await tx
+      const paused = await db.transaction(async (tx) => {
+        // Only the pause that changes the row is recorded.
+        const rows = await tx
           .update(schema.tasks)
           .set({ pausedAt, updatedAt: pausedAt })
-          .where(eq(schema.tasks.id, id));
+          .where(and(eq(schema.tasks.id, id), isNull(schema.tasks.pausedAt)))
+          .returning({ id: schema.tasks.id });
+        if (rows.length === 0) return false;
         await appendTaskEvent(tx, id, null, 'task.paused', { by: userId });
+        return true;
       });
+      if (!paused) {
+        const standing = await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, id),
+          columns: { pausedAt: true },
+        });
+        return c.json({ ok: true, pausedAt: standing?.pausedAt?.toISOString() ?? null });
+      }
       // Nothing is killed and nothing is superseded: the CLI in flight runs to completion
       // and the worker's gates hold the task at the NEXT step / the next queued invocation.
       logger.info({ taskId: id }, 'task paused');
