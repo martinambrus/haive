@@ -88,7 +88,7 @@ const REPO = '00000000-0000-4000-8000-0000000000b1';
 const PROVIDER = '00000000-0000-4000-8000-0000000000c1';
 const NODE = '00000000-0000-4000-8000-0000000000d1';
 const REFUSAL =
-  'Haive is preparing for maintenance, so new tasks are not being started. Work already running will finish.';
+  'Haive is preparing for maintenance, so new work is not being started. Work already running will finish.';
 
 const app = new Hono<AppEnv>();
 app.use(async (c, next) => {

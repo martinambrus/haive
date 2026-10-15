@@ -84,7 +84,7 @@ export function assertNewWorkAllowed(state: MaintenanceState): void {
   if (refusesNewWork(state)) {
     throw new HttpError(
       503,
-      'Haive is preparing for maintenance, so new tasks are not being started. Work already ' +
+      'Haive is preparing for maintenance, so new work is not being started. Work already ' +
         'running will finish.',
     );
   }
