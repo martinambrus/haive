@@ -9,7 +9,7 @@ import { ProjectStateMovedError, writeProjectStateColumn } from './write.js';
 const SWEEP_BATCH = 25;
 
 const NOT_WRITTEN = {
-  deferred: 'an onboarding task holds the checkout',
+  deferred: 'an onboarding, an upgrade or a reset holds the checkout',
   superseded: 'the repository changed while its record was being read',
 } as const;
 
@@ -58,7 +58,12 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
   const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
   if (!repoPath || (await gitOperationInProgress(repoPath))) return false;
 
-  const synced = await syncProjectStateFromCheckout(db, { repositoryId, repoPath });
+  const synced = await syncProjectStateFromCheckout(db, {
+    repositoryId,
+    repoPath,
+    refuseDuringGitOperation: true,
+  });
+  if (synced.outcome === 'held') return false;
   if (synced.outcome === 'refused') {
     await setOutboxError(db, repositoryId, synced.reason ?? 'the checkout record was refused');
     return false;

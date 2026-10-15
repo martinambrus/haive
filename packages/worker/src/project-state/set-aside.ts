@@ -712,7 +712,11 @@ async function setAsideOnce(
   const plan = dirty.paths.filter((p) => !p.startsWith(STATE_PREFIX));
 
   if (state.length > 0) {
-    await syncProjectStateFromCheckout(db, { repositoryId, repoPath }).catch((err: unknown) =>
+    await syncProjectStateFromCheckout(db, {
+      repositoryId,
+      repoPath,
+      refuseDuringGitOperation: true,
+    }).catch((err: unknown) =>
       logger.warn({ err, repositoryId }, 'project state not synced before a checkout move'),
     );
   }
@@ -817,7 +821,11 @@ export async function resyncHaiveProjections(
   if (await gitOperationInProgress(repoPath)) return;
   try {
     restoreFaults.beforeResync?.('state');
-    await syncProjectStateFromCheckout(db, { repositoryId, repoPath });
+    await syncProjectStateFromCheckout(db, {
+      repositoryId,
+      repoPath,
+      refuseDuringGitOperation: true,
+    });
     if (await isDirty(db, schema.projectStateOutbox, repositoryId)) {
       await refreshProjectState(db, repositoryId);
     }

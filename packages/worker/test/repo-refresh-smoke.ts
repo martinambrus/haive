@@ -3165,6 +3165,79 @@ async function main(): Promise<void> {
       );
     });
 
+    for (const via of ['sweep', 'resync'] as const) {
+      await attempt(`C10: ${via}`, async () => {
+        const c = await committedRecord();
+        const id = c.payload.repositoryId;
+        const versionFile = path.join(
+          c.dest,
+          '.haive-data/state/settings/chrome-devtools-mcp-version.json',
+        );
+        const versionOf = async () =>
+          (
+            await db.query.repositories.findFirst({
+              where: eq(schema.repositories.id, id),
+              columns: { chromeDevtoolsMcpVersion: true },
+            })
+          )?.chromeDevtoolsMcpVersion;
+        await db
+          .delete(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, id));
+        await db
+          .update(schema.repositories)
+          .set({ chromeDevtoolsMcpVersion: '1.0.0' })
+          .where(eq(schema.repositories.id, id));
+        await markProjectStateDirty(db, id);
+        await writeRecord(c.dest, {}, { 'chrome-devtools-mcp-version': '2.0.0' });
+        let release!: () => void;
+        let held!: () => void;
+        const locked = new Promise<void>((r) => (held = r));
+        const holder = db.transaction(async (tx) => {
+          await lockProjectState(tx, id);
+          held();
+          await new Promise<void>((r) => (release = r));
+        });
+        await locked;
+        const syncing =
+          via === 'sweep' ? refreshProjectState(db, id) : resyncHaiveProjections(db, id, c.dest);
+        let queued = false;
+        for (let i = 0; i < 300 && !queued; i++) {
+          const rows = (await db.execute(
+            sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`,
+          )) as unknown as { n: number }[];
+          queued = Number(rows[0]?.n) > 0;
+          if (!queued) await new Promise((r) => setTimeout(r, 100));
+        }
+        const mergeHead = path.join(c.dest, '.git', 'MERGE_HEAD');
+        await writeFile(mergeHead, `${git(c.dest, 'rev-parse', 'HEAD')}\n`);
+        release();
+        await holder;
+        try {
+          await syncing;
+        } finally {
+          await rm(mergeHead, { force: true });
+        }
+        const during = await versionOf();
+        const outbox = await db.query.projectStateOutbox.findFirst({
+          where: eq(schema.projectStateOutbox.repositoryId, id),
+        });
+        check(
+          `C10: ${via}: a sync whose read waited for the lock imports nothing from a merge that opened meanwhile`,
+          queued && during === '1.0.0' && outbox?.lastError === null,
+          { queued, version: during, lastError: outbox?.lastError },
+        );
+        await rm(versionFile, { force: true });
+        await refreshProjectState(db, id);
+        const after = await versionOf();
+        check(
+          `C10: ${via}: and once the merge is given up, the pending change survives`,
+          after === '1.0.0' &&
+            (await readFile(versionFile, 'utf8').catch(() => '')).includes('1.0.0'),
+          { version: after },
+        );
+      });
+    }
+
     // C7. Run as root the file is seen to change hands; run as anyone, only a name that is not UTF-8 is reported.
     for (const via of ['refresh', '00a'] as const) {
       await attempt(`C7: ${via}`, async () => {
