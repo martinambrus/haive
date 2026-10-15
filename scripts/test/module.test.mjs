@@ -86,6 +86,17 @@ describe('module add', () => {
     assert.ok(dependencies(tree, HOSTS[0]).includes('@haive/module-foo'));
   });
 
+  it('adds a folder that already carries its registry name as a workspace dependency', (t) => {
+    const tree = makeTree(t, { modules: { foo: { name: '@haive-module/foo', exports: APP } } });
+    const out = tree.run('module.mjs', ['add', 'foo']);
+    assert.equal(out.status, 0, out.stderr);
+    for (const rel of HOSTS) {
+      const pkg = JSON.parse(tree.read(rel));
+      assert.equal(pkg.dependencies['@haive-module/foo'], 'workspace:*', rel);
+      assert.equal(pkg.dependencies['@haive/module-foo'], undefined, rel);
+    }
+  });
+
   it('refuses a module that has no folder, naming it, and writes nothing', (t) => {
     const tree = makeTree(t);
     const before = tree.snapshot();

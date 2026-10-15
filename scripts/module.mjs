@@ -34,7 +34,7 @@ if (registry !== null && command === 'remove' && version !== undefined) {
   fail(`remove takes the package name without a version: pnpm module remove @haive-module/${id}`);
 }
 
-const name = registry === null ? `@haive/module-${id}` : `@haive-module/${id}`;
+let name = registry === null ? `@haive/module-${id}` : `@haive-module/${id}`;
 const spec = registry === null ? 'workspace:*' : version;
 let modulePackage = null;
 if (registry === null) {
@@ -43,6 +43,8 @@ if (registry === null) {
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
   }
+  // A folder may already carry its registry name; it is linked through workspace:* all the same.
+  if (modulePackage?.name === `@haive-module/${id}`) name = modulePackage.name;
 } else if (command === 'add') {
   // --lockfile-only installs nothing and pnpm's resolution metadata omits exports, so ask the registry for the full document.
   const view = spawnSync('pnpm', ['view', `${name}@${version}`, 'exports', '--json'], {
@@ -62,7 +64,9 @@ if (registry === null) {
 if (command === 'add') {
   if (modulePackage === null) fail(`modules/${id}/package.json not found`);
   if (modulePackage.name !== name) {
-    fail(`modules/${id}/package.json is named ${modulePackage.name}, not ${name}`);
+    fail(
+      `modules/${id}/package.json is named ${modulePackage.name}, not @haive/module-${id} or @haive-module/${id}`,
+    );
   }
   if (modulePackage.exports?.['./manifest'] === undefined) {
     fail(`${name} does not export ./manifest; a module needs a manifest`);
