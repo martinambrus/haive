@@ -32,6 +32,7 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
     c.set('userId', USER);
     await next();
   },
+  requireAdmin: async (_c: unknown, next: () => unknown) => next(),
 }));
 vi.mock('@haive/shared', async (importOriginal) => {
   const shared = await importOriginal<typeof import('@haive/shared')>();
@@ -45,12 +46,16 @@ vi.mock('@haive/shared', async (importOriginal) => {
         h.reads.push(h.state);
         return h.state;
       },
+      set: async (key: string, value: string) => {
+        if (key === shared.CONFIG_KEYS.MAINTENANCE_STATE) h.state = value;
+      },
     },
   };
 });
 
 import { Hono } from 'hono';
 import { TASK_JOB_NAMES } from '@haive/shared';
+import { maintenanceRoutes } from '../src/routes/maintenance.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -60,6 +65,7 @@ const REFUSAL =
 
 const app = new Hono<AppEnv>();
 app.route('/tasks', taskRoutes);
+app.route('/admin/maintenance', maintenanceRoutes);
 app.onError(errorHandler);
 
 describe.skipIf(!url)('the new-work fence on Postgres', () => {
@@ -73,6 +79,17 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
     const request = Promise.resolve(
       app.request(path, {
         method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    );
+    requests.push(request);
+    return request;
+  };
+  const put = (path: string, body: unknown) => {
+    const request = Promise.resolve(
+      app.request(path, {
+        method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       }),
@@ -101,13 +118,13 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
     session.release();
     session = undefined;
   };
-  /** The fence is taken in the request's own transaction, so a held one shows as a waiting share lock. */
-  const untilBlocked = async () => {
+  /** The fence is taken in the request's own transaction, so a held one shows as a waiting lock. */
+  const untilBlocked = async (mode: 'ShareLock' | 'ExclusiveLock' = 'ShareLock') => {
     const deadline = Date.now() + 3_000;
     for (;;) {
       const [row] = await db.execute<{ n: number }>(
         sql`select count(*)::int as n from pg_locks
-             where locktype = 'advisory' and not granted and mode = 'ShareLock'`,
+             where locktype = 'advisory' and not granted and mode = ${mode}`,
       );
       if (row && row.n > 0) return;
       if (Date.now() > deadline) throw new Error('the request never waited for the new-work fence');
@@ -295,6 +312,48 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       });
       expect(await statusOf(task.id)).toBe('created');
       expect(h.queued).toEqual([]);
+    });
+  });
+
+  describe('PUT /admin/maintenance', () => {
+    const setState = (state: string) => put('/admin/maintenance', { state });
+
+    it('writes the state at once while no admission holds the fence', async () => {
+      expect(await answered(setState('draining'))).toMatchObject({ status: 200 });
+      expect(h.state).toBe('draining');
+    });
+
+    it('waits for an admission already holding the fence, and writes the state once it lets go', async () => {
+      await holdFenceShared();
+      const request = setState('draining');
+      await untilBlocked('ExclusiveLock');
+      expect(h.state).toBe('normal');
+
+      await releaseFence();
+
+      expect(await answered(request)).toMatchObject({ status: 200 });
+      expect(h.state).toBe('draining');
+    });
+
+    it('refuses an admission that asks for the fence after it, though that admission read normal first', async () => {
+      await holdFenceShared();
+      const write = setState('draining');
+      await untilBlocked('ExclusiveLock');
+      const create = post('/tasks', { type: 'run_app', title: 'fence-late', repositoryId });
+      await untilBlocked('ShareLock');
+      expect(h.state).toBe('normal');
+      expect(await tasks()).toHaveLength(0);
+
+      await releaseFence();
+
+      expect(await answered(write)).toMatchObject({ status: 200 });
+      expect(await answered(create)).toEqual({
+        status: 503,
+        body: { error: REFUSAL, code: null },
+      });
+      expect(await tasks()).toHaveLength(0);
+      expect(h.queued).toEqual([]);
+      expect(h.reads).toEqual(['normal', 'draining']);
     });
   });
 });

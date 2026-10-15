@@ -12,6 +12,7 @@ import {
   getHaiveVersion,
   installId,
   isDevVersion,
+  lockNewWorkFenceExclusive,
   logger,
   maintenanceStateSchema,
   networkName,
@@ -54,7 +55,10 @@ maintenanceRoutes.get('/', async (c) => {
 maintenanceRoutes.put('/', async (c) => {
   const { state } = setStateSchema.parse(await c.req.json());
   const previous = parseMaintenanceState(await configService.get(CONFIG_KEYS.MAINTENANCE_STATE));
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+  await getDb().transaction(async (tx) => {
+    await lockNewWorkFenceExclusive(tx);
+    await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+  });
   await recordAuditEvent(getDb(), {
     actorUserId: c.get('userId'),
     action: 'maintenance.set_state',
