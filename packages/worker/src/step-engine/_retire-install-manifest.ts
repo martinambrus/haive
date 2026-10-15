@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { lstatNoFollow, removeFileIfNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, readFileNoFollow, removeFileIfNoFollow } from '@haive/shared/fs-safe';
 import {
   HAIVE_DATA_FILES,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
@@ -22,7 +22,7 @@ const RETIRE_READ_CAP = 8 * 1024 * 1024;
 
 type Outcome = 'removed' | 'absent' | 'kept';
 type RetireContext = Pick<StepContext, 'repoPath' | 'logger'>;
-/** Awaited with the path of a Haive file just before it is unlinked; a throw keeps the file. */
+/** Awaited with a Haive file's path before it is parked for removal; a throw keeps the file. */
 type OnRetire = (path: string) => Promise<void>;
 
 function jsonObject(data: Buffer): Record<string, unknown> | null {
@@ -98,22 +98,22 @@ async function retireHaiveFile(
     if (target.requires && (await lstatNoFollow(ctx.repoPath, target.requires)) === null) {
       return 'kept';
     }
-    outcome = await removeFileIfNoFollow(
-      ctx.repoPath,
-      target.path,
-      async (data) => {
-        if (!target.accept(data)) return false;
+    const held = await readFileNoFollow(ctx.repoPath, target.path, { maxBytes: RETIRE_READ_CAP });
+    if (held !== null && (held.truncated || !target.accept(held.data))) {
+      outcome = 'kept';
+    } else {
+      if (held !== null) {
         try {
           await onRetire?.(target.path);
         } catch (err) {
           const cause = err instanceof Error ? err.message : String(err);
-          reason = `its removal could not be recorded: ${cause}`;
-          return false;
+          throw new Error(`its removal could not be recorded: ${cause}`);
         }
-        return true;
-      },
-      { maxBytes: RETIRE_READ_CAP },
-    );
+      }
+      outcome = await removeFileIfNoFollow(ctx.repoPath, target.path, target.accept, {
+        maxBytes: RETIRE_READ_CAP,
+      });
+    }
   } catch (err) {
     outcome = 'kept';
     reason = err instanceof Error ? err.message : String(err);

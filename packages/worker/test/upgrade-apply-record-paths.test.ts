@@ -205,18 +205,16 @@ describe('02 and .haive/install.json', () => {
     expect(s.retired()).toEqual([{ taskId: TASK, taskStepId: STEP, payload: { path: INSTALL } }]);
   });
 
-  it('records the removal while the file is still on disk', async () => {
+  it('records the removal while the file is still at its own name', async () => {
     const s = await setup(HAIVE_SHAPED);
-    const onDisk: boolean[] = [];
-    s.fake.hooks.beforeInsert = async (table) => {
-      if (table === schema.taskEvents) {
-        onDisk.push(await bytesInDir(join(s.root, '.haive'), HAIVE_SHAPED));
-      }
+    const atOwnName: boolean[] = [];
+    s.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.taskEvents) atOwnName.push(existsSync(join(s.root, INSTALL)));
     };
 
     await s.apply();
 
-    expect(onDisk).toEqual([true]);
+    expect(atOwnName).toEqual([true]);
     expect(await bytesInDir(join(s.root, '.haive'), HAIVE_SHAPED)).toBe(false);
   });
 
@@ -393,22 +391,22 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
     );
   });
 
-  it('records each removal while its file is still on disk', async () => {
+  it('records each removal while its file is still at its own name', async () => {
     const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
     const dir = join(s.root, '.haive-data');
-    const onDisk: Array<{ env: boolean; globs: boolean }> = [];
-    s.fake.hooks.beforeInsert = async (table) => {
+    const atOwnName: Array<{ env: boolean; globs: boolean }> = [];
+    s.fake.hooks.beforeInsert = (table) => {
       if (table === schema.taskEvents) {
-        onDisk.push({
-          env: await bytesInDir(dir, HAIVE_ENV),
-          globs: await bytesInDir(dir, HAIVE_GLOBS),
+        atOwnName.push({
+          env: existsSync(join(s.root, ENV_LEGACY)),
+          globs: existsSync(join(s.root, GLOBS_LEGACY)),
         });
       }
     };
 
     await s.apply();
 
-    expect(onDisk).toEqual([
+    expect(atOwnName).toEqual([
       { env: true, globs: true },
       { env: false, globs: true },
     ]);
