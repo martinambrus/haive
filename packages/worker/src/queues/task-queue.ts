@@ -691,8 +691,8 @@ export async function supersedeDeadTaskRuns(tx: DbHandle, runs: SQL | undefined)
 
 /** Mark the task dead: it is neither failed nor completed, keeps its status and epoch, and tears
  *  nothing down, so a revive finds it as it was. Only while the task is not cancelled or completed,
- *  still at the epoch, and not already dead; false when nothing was written. Its runs that have not
- *  started are superseded. */
+ *  still at the epoch, and not already dead; false when nothing was written. Every open run of it is
+ *  superseded; whoever owns the outermost transaction kills its CLI sandboxes once that commits. */
 export async function markTaskDead(
   db: Database | DbHandle,
   taskId: string,
@@ -718,10 +718,7 @@ export async function markTaskDead(
       )
       .returning({ id: schema.tasks.id });
     if (!dead) return false;
-    await supersedeDeadTaskRuns(
-      tx,
-      and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.startedAt)),
-    );
+    await supersedeDeadTaskRuns(tx, eq(schema.cliInvocations.taskId, taskId));
     await appendEvent(tx, taskId, null, TASK_DEAD_EVENT, {
       reason,
       unresolved: fence.unresolved ?? [],
@@ -755,6 +752,7 @@ async function markTaskDeadOnStep(
       round,
     });
   });
+  if (marked) await killCliSandboxesForTask(ctx.taskId);
   if (marked) await resyncAfterTaskEnd(db, ctx.taskId);
 }
 
@@ -781,7 +779,9 @@ export async function markTaskDeadFromJob(
         .limit(1)
     : [];
   if (!row) {
-    if (await markTaskDead(db, taskId, reason, opts)) await resyncAfterTaskEnd(db, taskId);
+    const marked = await markTaskDead(db, taskId, reason, opts);
+    if (marked) await killCliSandboxesForTask(taskId);
+    if (marked) await resyncAfterTaskEnd(db, taskId);
     return;
   }
   const marked = await db.transaction(async (tx) => {
@@ -798,6 +798,7 @@ export async function markTaskDeadFromJob(
     if (!locked) return false;
     return markTaskDead(tx, taskId, reason, opts);
   });
+  if (marked) await killCliSandboxesForTask(taskId);
   if (marked) await resyncAfterTaskEnd(db, taskId);
 }
 
@@ -2270,6 +2271,7 @@ async function handleStartTask(
       unresolved: err.ids,
       statuses: STARTABLE_TASK_STATUSES,
     });
+    if (marked) await killCliSandboxesForTask(ctx.taskId);
     if (marked) await resyncAfterTaskEnd(db, ctx.taskId);
     return;
   }

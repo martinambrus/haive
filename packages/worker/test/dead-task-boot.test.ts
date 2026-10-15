@@ -1,12 +1,16 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import path from 'node:path';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
-import { TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
+import { createDatabase, schema, type Database, type MergeResolveState } from '@haive/database';
+import { MERGE_LEFT_OPEN_EVENT, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import {
   handleResult,
   markTaskDead,
+  markTaskDeadFromJob,
   processTaskJob,
   reconcileOrphanedSteps,
   resolveFixLoopGate,
@@ -28,6 +32,9 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   /** What the task queue was asked to enqueue. */
   adds: [] as { name: string; data: unknown }[],
+  /** Each sandbox kill, with what `atKill` read from another connection at that moment. */
+  kills: [] as { taskId: string; seen: unknown }[],
+  atKill: undefined as ((taskId: string) => Promise<unknown>) | undefined,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -42,6 +49,13 @@ vi.mock('bullmq', async (importOriginal) => ({
     async add(name: string, data: unknown) {
       h.adds.push({ name, data });
     }
+  },
+}));
+vi.mock('../src/sandbox/sandbox-kill.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/sandbox-kill.js')>()),
+  killCliSandboxesForTask: async (taskId: string) => {
+    h.kills.push({ taskId, seen: await h.atKill?.(taskId) });
+    return 0;
   },
 }));
 
@@ -231,10 +245,87 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       timestamp: Date.now(),
       moveToDelayed: async () => undefined,
     }) as unknown as Parameters<typeof processTaskJob>[0];
+  const mergeDirs: string[] = [];
+  /** A directory whose merge is left open, claimed by the task and recorded on a step row of it. */
+  const openMerge = async (taskId: string) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'haive-fnf137-merge-'));
+    mergeDirs.push(dir);
+    const git = (...args: string[]) =>
+      execFileSync(
+        'git',
+        ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'gc.auto=0', ...args],
+        { stdio: 'pipe' },
+      );
+    const commitFile = async (branch: string, text: string) => {
+      await writeFile(path.join(dir, 'f.txt'), text);
+      git('add', 'f.txt');
+      git('commit', '-q', '-m', branch);
+    };
+    git('init', '-q', '-b', 'main');
+    await commitFile('main', 'base\n');
+    git('checkout', '-q', '-b', 'feature');
+    await commitFile('feature', 'feature\n');
+    git('checkout', '-q', 'main');
+    await commitFile('main again', 'main\n');
+    expect(() => git('merge', 'feature')).toThrow();
+    const state: MergeResolveState = {
+      mode: 'same-branch',
+      phase: 'resolving',
+      baseBranch: 'main',
+      featureBranch: 'feature',
+      mergeDir: dir,
+      sandboxMergeDir: dir,
+      fixInvocationId: null,
+      conflictRetries: 0,
+      pendingQuestion: null,
+      pushAfterMerge: false,
+      merged: false,
+      skipReason: null,
+      pushed: false,
+    };
+    const step = await row(taskId, B, 'waiting_cli', { mergeResolveState: state });
+    const [claim] = await db
+      .insert(schema.mergeDirClaims)
+      .values({ mergeDir: dir, taskId, taskStepId: step.id })
+      .returning();
+    return { dir, step, claim: claim! };
+  };
+  const expectMergeLeftOpen = async (
+    taskId: string,
+    merge: Awaited<ReturnType<typeof openMerge>>,
+  ) => {
+    await expect(access(path.join(merge.dir, '.git', 'MERGE_HEAD'))).resolves.toBeUndefined();
+    expect(
+      await db
+        .select()
+        .from(schema.mergeDirClaims)
+        .where(eq(schema.mergeDirClaims.mergeDir, merge.dir)),
+    ).toEqual([merge.claim]);
+    expect((await stepRow(merge.step.id)).mergeResolveState).toEqual(merge.step.mergeResolveState);
+    expect(await events(taskId, MERGE_LEFT_OPEN_EVENT)).toHaveLength(0);
+    expect(h.adds.map((add) => add.name)).not.toContain(TASK_JOB_NAMES.ABORT_LEFT_MERGE);
+  };
+  const expectEndedAsDead = async (id: string) => {
+    const after = await runOf(id);
+    expect(after).toMatchObject({ exitCode: 137, errorMessage: 'cancelled: the task is dead' });
+    expect(after.endedAt).toBeInstanceOf(Date);
+    expect(after.supersededAt).toBeInstanceOf(Date);
+  };
 
   beforeAll(async () => {
     db = createDatabase(url as string);
     h.db = db;
+    h.atKill = async (taskId) => ({
+      deadAt: (await task(taskId)).deadAt,
+      openRuns: (
+        await db
+          .select({ id: schema.cliInvocations.id })
+          .from(schema.cliInvocations)
+          .where(
+            and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.endedAt)),
+          )
+      ).length,
+    });
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     const [user] = await db
       .insert(schema.users)
@@ -286,10 +377,12 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
 
   beforeEach(async () => {
     h.adds.length = 0;
+    h.kills.length = 0;
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
 
   afterAll(async () => {
+    await Promise.all(mergeDirs.map((dir) => rm(dir, { recursive: true, force: true })));
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     await db
       .delete(schema.taskTypeDefinitions)
@@ -871,7 +964,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
   });
 
   describe('markTaskDead', () => {
-    it('supersedes the runs that have not started and leaves a started one alone', async () => {
+    it('supersedes every open run, started or not, and leaves the others alone', async () => {
       const id = await make();
       const step = await row(id, A, 'waiting_cli');
       const queued = await run(id, step.id);
@@ -882,7 +975,6 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       const otherTask = await make();
       const elsewhere = await run(otherTask, null);
       const before = {
-        started: await runOf(started.id),
         ended: await runOf(ended.id),
         superseded: await runOf(superseded.id),
         elsewhere: await runOf(elsewhere.id),
@@ -892,14 +984,10 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         true,
       );
 
-      for (const r of [queued, recap]) {
-        const after = await runOf(r.id);
-        expect(after.exitCode).toBe(137);
-        expect(after.endedAt).toBeInstanceOf(Date);
-        expect(after.supersededAt).toBeInstanceOf(Date);
-        expect(after.startedAt).toBeNull();
-      }
-      expect(await runOf(started.id)).toEqual(before.started);
+      for (const r of [queued, recap, started]) await expectEndedAsDead(r.id);
+      expect((await runOf(queued.id)).startedAt).toBeNull();
+      expect((await runOf(recap.id)).startedAt).toBeNull();
+      expect((await runOf(started.id)).startedAt).toEqual(DEAD_AT);
       expect(await runOf(ended.id)).toEqual(before.ended);
       expect(await runOf(superseded.id)).toEqual(before.superseded);
       expect(await runOf(elsewhere.id)).toEqual(before.elsewhere);
@@ -946,6 +1034,136 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
 
       expect((await runOf(free.id)).supersededAt).toBeInstanceOf(Date);
       expect((await runOf(held.id)).supersededAt).toBeNull();
+    });
+  });
+
+  describe('the sandboxes of a task marked dead', () => {
+    type Over = Partial<typeof schema.tasks.$inferInsert>;
+    const WAYS: Record<
+      string,
+      (over?: Over) => Promise<{ id: string; fire: () => Promise<unknown> }>
+    > = {
+      'a job that meets an unresolved step, on its step row': async (over) => {
+        const id = await make(over);
+        await row(id, A, 'waiting_cli');
+        const opts = { epoch: 3, unresolved: [GONE], stepId: A, round: 0 };
+        return { id, fire: () => markTaskDeadFromJob(db, id, 'gone', opts) };
+      },
+      'a job that meets an unresolved step, with no step row': async (over) => {
+        const id = await make(over);
+        const opts = { epoch: 3, unresolved: [GONE] };
+        return { id, fire: () => markTaskDeadFromJob(db, id, 'gone', opts) };
+      },
+      'a hand-off from a step outside the run list': async (over) => {
+        const id = await make({ runListSnapshot: [B], currentStepId: A, ...over });
+        const finished = await row(id, A, 'done');
+        const result = { status: 'done', row: finished, output: {} } as const;
+        return { id, fire: () => handleResult(db, ctxFor(id, [B]), A, result) };
+      },
+      'a START whose run list names a missing step': async (over) => {
+        const id = await make({
+          status: 'queued',
+          currentStepId: null,
+          runListSnapshot: [A, GONE],
+          repositoryId,
+          ...over,
+        });
+        const start = job(TASK_JOB_NAMES.START, { taskId: id, userId });
+        return { id, fire: () => processTaskJob(start) };
+      },
+    };
+
+    it.each(Object.entries(WAYS))(
+      'ends every open run, started or not: %s',
+      async (_name, build) => {
+        const { id, fire } = await build();
+        const queued = await run(id, null);
+        const started = await run(id, null, { startedAt: DEAD_AT });
+        const elsewhere = await run(await make(), null);
+        const before = await runOf(elsewhere.id);
+
+        await fire();
+
+        expect((await task(id)).deadAt).toBeInstanceOf(Date);
+        for (const r of [queued, started]) await expectEndedAsDead(r.id);
+        expect(await runOf(elsewhere.id)).toEqual(before);
+      },
+    );
+
+    it.each(Object.entries(WAYS))(
+      'kills the sandboxes once, after the mark committed, and leaves a merge open: %s',
+      async (_name, build) => {
+        const { id, fire } = await build();
+        await run(id, null);
+        await run(id, null, { startedAt: DEAD_AT });
+        const merge = await openMerge(id);
+
+        await fire();
+
+        expect(h.kills).toEqual([{ taskId: id, seen: { deadAt: expect.any(Date), openRuns: 0 } }]);
+        await expectMergeLeftOpen(id, merge);
+      },
+    );
+
+    it.each(
+      Object.entries(WAYS).flatMap(([name, build]) => [
+        [`a cancelled task: ${name}`, build, { status: 'cancelled' }] as const,
+        [
+          `a task already dead: ${name}`,
+          build,
+          { deadAt: DEAD_AT, deadReason: DEAD_REASON },
+        ] as const,
+      ]),
+    )('kills nothing for %s', async (_name, build, over) => {
+      const { id, fire } = await build(over);
+      const started = await run(id, null, { startedAt: DEAD_AT });
+      const before = await runOf(started.id);
+
+      await fire();
+
+      expect(h.kills).toEqual([]);
+      expect(await runOf(started.id)).toEqual(before);
+    });
+
+    it('kills nothing and ends nothing when the transaction the mark ran in rolls back', async () => {
+      const id = await make();
+      const step = await row(id, A, 'waiting_cli');
+      const queued = await run(id, step.id);
+      const started = await run(id, null, { startedAt: DEAD_AT });
+      const before = [await runOf(queued.id), await runOf(started.id)];
+
+      await expect(
+        db.transaction(async (tx) => {
+          await expect(markTaskDead(tx, id, 'gone', { epoch: 3 })).resolves.toBe(true);
+          throw new Error('rolled back');
+        }),
+      ).rejects.toThrow('rolled back');
+
+      expect(h.kills).toEqual([]);
+      expect([await runOf(queued.id), await runOf(started.id)]).toEqual(before);
+      expect((await task(id)).deadAt).toBeNull();
+    });
+
+    it('kills nothing when the job that marks it fails before the mark commits', async () => {
+      const id = await make();
+      const step = await row(id, A, 'waiting_cli');
+      const started = await run(id, step.id, { startedAt: DEAD_AT });
+      const before = await runOf(started.id);
+      // A BigInt cannot be written to the task.dead event's JSON, so the append in the mark throws.
+      const unserializable = [1n] as unknown as string[];
+
+      await expect(
+        markTaskDeadFromJob(db, id, 'gone', {
+          epoch: 3,
+          unresolved: unserializable,
+          stepId: A,
+          round: 0,
+        }),
+      ).rejects.toThrow();
+
+      expect(h.kills).toEqual([]);
+      expect(await runOf(started.id)).toEqual(before);
+      expect((await task(id)).deadAt).toBeNull();
     });
   });
 
