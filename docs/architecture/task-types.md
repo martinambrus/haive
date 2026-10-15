@@ -144,8 +144,11 @@ except prompt steps.
 
 `POST /tasks` reads the definition twice on purpose: the preflight decides the lock, pin and repository
 rules before the transaction (400 when a type that requires a repository gets none, built-ins included);
-inside the insert transaction the locked read admits, and if a trait moved in between the answer is 409
-"The task type changed while this task was being created; try again" rather than a silent retry. A
+inside the insert transaction the locked read admits, and if a trait the preflight decided on moved in
+between (`takesRootLock`, `pinsDatabase`, `restoresDatabase`, `requiresRepository`, `repoOptional`) the
+answer is 409 "The task type changed while this task was being created; try again" rather than a silent
+retry. Any other edit in that window (run list, prompt steps, defaults, `simplifyCode`) is not refused: the
+task takes the values of the locked read. A
 repo-optional type records `metadata.anchorRepositoryId`, which is how the worker decides a task is
 repo-less.
 
