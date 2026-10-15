@@ -463,6 +463,8 @@ export interface CliExecJobPayload {
    *  to rag_search; unset = the full surface. Honored identically by every kind —
    *  no kind narrows itself. */
   toolProfile?: 'rag_only' | 'none';
+  /** The custom tools a prompt step's author defined, by name; set by that step's own dispatch only. */
+  customTools?: string[];
   spec: unknown;
   /** The worktree this invocation is isolated to, as a path RELATIVE to the repo root
    *  (e.g. `.haive/worktrees/<dirName>`), or `''` for the repo root itself (a merge that

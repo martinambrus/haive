@@ -4,7 +4,8 @@ import { TEST_CATALOG } from '@/lib/composition-test-catalog';
 import type { AdminTaskType } from '@/lib/api-client';
 import { FormRenderer } from '@/components/form-renderer';
 import { TaskTypeComposer } from '@/components/task-type-composer';
-import { Button } from '@/components/ui';
+import { Button, FormError } from '@/components/ui';
+import { draftStorageKey, TaskTypeCreatorPanel } from './task-type-creator-panel';
 import { TaskTypeEditor } from './task-type-editor';
 
 // No DOM environment in this package, and the editor's save path has to change state: its hooks
@@ -147,7 +148,7 @@ const refusal = (taskType: AdminTaskType) =>
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-async function mount() {
+async function mount(slug: string | null = 'tt-x') {
   hooks.slots = [];
   hooks.mounting = true;
   guard.dirty = [];
@@ -156,7 +157,7 @@ async function mount() {
     for (let pass = 0; pass < 10; pass++) {
       hooks.next = 0;
       hooks.dirty = false;
-      tree = TaskTypeEditor({ slug: 'tt-x' });
+      tree = TaskTypeEditor({ slug });
       hooks.mounting = false;
       if (!hooks.dirty) return;
     }
@@ -190,6 +191,17 @@ async function mount() {
     }>;
   };
   const notice = () => flatten(tree).find((e) => e.props.role === 'alert');
+  const panel = () =>
+    flatten(tree).find((e) => e.type === TaskTypeCreatorPanel) as unknown as
+      | ReactElement<{
+          slug: string | null;
+          editorState: Record<string, unknown>;
+          onLoad: (draft: Record<string, unknown>) => void;
+        }>
+      | undefined;
+  const failure = () =>
+    flatten(tree).find((e) => e.type === FormError)?.props as unknown as
+      { message: string } | undefined;
   const reload = () => flatten(tree).find((e) => e.type === Button && textOf(e) === 'Reload');
   const heading = () => flatten(tree).find((e) => e.type === 'h2');
   return {
@@ -198,8 +210,16 @@ async function mount() {
     notice,
     reload,
     heading,
+    panel,
+    failure,
     text: () => textOf(tree),
     draw,
+    load: (draft: Record<string, unknown>) => {
+      const el = panel();
+      if (!el) throw new Error('no creator panel rendered');
+      el.props.onLoad(draft);
+      draw();
+    },
     save: async (values: Record<string, unknown> = FLAT) => {
       await form().props.onSubmit(values);
       draw();
@@ -343,5 +363,279 @@ describe('TaskTypeEditor when the type was changed elsewhere', () => {
     await view.save();
     expect(view.notice()).toBeUndefined();
     expect(view.form().props.errorMessage).toBe('Cannot change slug on this task type');
+  });
+});
+
+const tool = {
+  name: 'repo_status',
+  description: 'Fetches the status.',
+  action: 'http-get' as const,
+  url: 'https://example.com/status',
+  query: [],
+  params: [],
+  timeoutMs: 10_000,
+  maxResponseBytes: 20_000,
+};
+const LISTED = 'custom.tt-x.list';
+const WITH_TOOLS: AdminTaskType = {
+  ...ROW,
+  stepIds: [LISTED],
+  preAnswerDefaults: {},
+  stepLoopLimitDefaults: {},
+  promptSteps: {
+    list: {
+      slug: 'list',
+      title: 'List',
+      template: 'List TODOs.',
+      capabilities: [],
+      tools: [tool],
+      timeoutMs: 600_000,
+      description: 'Kept note',
+    },
+  },
+};
+const promptDraft = (slug: string, over: Record<string, unknown> = {}) => ({
+  slug,
+  displayName: 'Drafted name',
+  description: 'Drafted description',
+  requiresRepository: true,
+  stepIds: [`custom.${slug}.list`],
+  promptSteps: {
+    list: {
+      slug: 'list',
+      title: 'Drafted step',
+      template: 'List every TODO for {{task.title}}.',
+      capabilities: ['tool_use'],
+      timeoutMs: 300_000,
+    },
+  },
+  ...over,
+});
+
+describe('TaskTypeEditor creator panel', () => {
+  it('is offered on the create page, with the editor as the agent should read it', async () => {
+    const view = await mount(null);
+    const panel = view.panel();
+    expect(panel?.props.slug).toBeNull();
+    expect(panel?.props.editorState).toEqual({
+      slug: '',
+      displayName: '',
+      description: '',
+      requiresRepository: true,
+      stepIds: [],
+      stepLoopLimitDefaults: {},
+      promptSteps: {},
+    });
+  });
+
+  it('is offered on a custom type, which sends the slug of the type although the form holds none', async () => {
+    const view = await mount();
+    const panel = view.panel();
+    expect(panel?.props.slug).toBe('tt-x');
+    expect(panel?.props.editorState).toMatchObject({
+      slug: 'tt-x',
+      displayName: 'Type X',
+      stepIds: ROW.stepIds,
+      stepLoopLimitDefaults: { [VALIDATE]: 3 },
+    });
+  });
+
+  it('keeps all but the draftable parts of a prompt step out of what the agent reads', async () => {
+    api.getAdminTaskType.mockResolvedValue({
+      taskType: WITH_TOOLS,
+      availability: AVAILABLE,
+      compositionIssues: [],
+    });
+    const view = await mount();
+    const state = JSON.stringify(view.panel()?.props.editorState);
+    expect(state).toContain('List TODOs.');
+    expect(state).not.toContain('Kept note');
+    expect(state).not.toContain('repo_status');
+  });
+
+  it('is not offered on a built-in type, a module type, or to someone the api refuses', async () => {
+    for (const source of ['builtin', 'module:statistics']) {
+      api.getAdminTaskType.mockResolvedValue({
+        taskType: { ...ROW, source, editableFields: ['displayName', 'sortOrder'] },
+        availability: AVAILABLE,
+        compositionIssues: [],
+      });
+      expect((await mount()).panel()).toBeUndefined();
+    }
+    api.getTaskTypeCatalog.mockRejectedValue(
+      Object.assign(new Error('Admin access required'), { status: 403 }),
+    );
+    const refused = await mount(null);
+    expect(refused.panel()).toBeUndefined();
+    expect(refused.failure()?.message).toBe('Admin access required');
+  });
+});
+
+describe('TaskTypeEditor loading a draft', () => {
+  it('shows it on the create page as unsaved changes, and writes nothing', async () => {
+    const view = await mount(null);
+    const before = view.form().key;
+    view.load(promptDraft('todo-audit'));
+    expect(view.form().key).not.toBe(before);
+    expect(view.form().props.initialValues).toMatchObject({
+      slug: 'todo-audit',
+      displayName: 'Drafted name',
+      description: 'Drafted description',
+      requiresRepository: true,
+    });
+    expect(view.composer().props.stepIds).toEqual(['custom.todo-audit.list']);
+    expect(view.form().props.submitDisabled).toBe(false);
+    expect(guard.dirty.at(-1)).toBe(true);
+    expect(api.createTaskType).not.toHaveBeenCalled();
+    expect(api.updateTaskType).not.toHaveBeenCalled();
+    expect(api.getAdminTaskType).not.toHaveBeenCalled();
+  });
+
+  it('hands the agent what is loaded on its next message', async () => {
+    const view = await mount(null);
+    view.load(promptDraft('todo-audit'));
+    expect(view.panel()?.props.editorState).toMatchObject({
+      slug: 'todo-audit',
+      displayName: 'Drafted name',
+      stepIds: ['custom.todo-audit.list'],
+    });
+  });
+
+  it('saves a loaded draft, after an edit by hand, with the Save of the create page', async () => {
+    api.createTaskType.mockResolvedValue({ taskType: ROW });
+    const view = await mount(null);
+    view.load(promptDraft('todo-audit'));
+    view.edit({ displayName: 'Edited by hand' });
+    await view.save({
+      slug: 'todo-audit',
+      displayName: 'Edited by hand',
+      description: 'Drafted description',
+      requiresRepository: true,
+      enabled: true,
+      selectable: true,
+      sortOrder: 0,
+    });
+    expect(api.createTaskType).toHaveBeenCalledTimes(1);
+    expect(api.createTaskType).toHaveBeenCalledWith({
+      slug: 'todo-audit',
+      displayName: 'Edited by hand',
+      description: 'Drafted description',
+      stepIds: ['custom.todo-audit.list'],
+      promptSteps: {
+        list: {
+          slug: 'list',
+          title: 'Drafted step',
+          template: 'List every TODO for {{task.title}}.',
+          capabilities: ['tool_use'],
+          tools: [],
+          timeoutMs: 300_000,
+        },
+      },
+      requiresRepository: true,
+      selectable: true,
+      enabled: true,
+      sortOrder: 0,
+    });
+  });
+
+  it('stops the create page resuming its conversation once the type is created, and only then', async () => {
+    const store = new Map([
+      [draftStorageKey(null), 'task-new'],
+      [draftStorageKey('other'), 'task-other'],
+    ]);
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      },
+    });
+    const values = {
+      slug: 'todo-audit',
+      displayName: 'Drafted name',
+      description: 'Drafted description',
+      requiresRepository: true,
+      enabled: true,
+      selectable: true,
+      sortOrder: 0,
+    };
+    try {
+      api.createTaskType.mockRejectedValueOnce(new Error('Slug taken'));
+      const failed = await mount(null);
+      failed.load(promptDraft('todo-audit'));
+      await failed.save(values);
+      expect(store.get(draftStorageKey(null))).toBe('task-new');
+
+      api.createTaskType.mockResolvedValueOnce({ taskType: ROW });
+      const view = await mount(null);
+      view.load(promptDraft('todo-audit'));
+      await view.save(values);
+      expect(api.createTaskType).toHaveBeenCalledTimes(2);
+      expect(store.has(draftStorageKey(null))).toBe(false);
+      expect(store.get(draftStorageKey('other'))).toBe('task-other');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shows it on a saved type as unsaved changes against the saved row, under the saved slug', async () => {
+    const view = await mount();
+    const before = view.form().key;
+    view.load(promptDraft('somebody-else'));
+    expect(view.form().key).not.toBe(before);
+    expect(view.form().props.initialValues).toMatchObject({ displayName: 'Drafted name' });
+    expect(view.form().props.initialValues).not.toHaveProperty('slug');
+    expect(view.panel()?.props.editorState).toMatchObject({ slug: 'tt-x' });
+    expect(view.composer().props.stepIds).toEqual(['custom.tt-x.list']);
+    expect(guard.dirty.at(-1)).toBe(true);
+    expect(api.updateTaskType).not.toHaveBeenCalled();
+  });
+
+  it('saves a loaded draft to a saved type as the difference from the row, keeping the tools it had', async () => {
+    api.getAdminTaskType.mockResolvedValue({
+      taskType: WITH_TOOLS,
+      availability: AVAILABLE,
+      compositionIssues: [],
+    });
+    api.updateTaskType.mockResolvedValue({ taskType: WITH_TOOLS });
+    const view = await mount();
+    view.load(promptDraft('tt-x', { description: '' }));
+    await view.save({ ...FLAT, displayName: 'Drafted name' });
+    expect(api.updateTaskType).toHaveBeenCalledTimes(1);
+    const [slug, body] = api.updateTaskType.mock.calls[0]!;
+    expect(slug).toBe('tt-x');
+    expect(body).toMatchObject({ displayName: 'Drafted name', expectedUpdatedAt: ROW.updatedAt });
+    expect(body.stepIds).toBeUndefined();
+    expect(body.promptSteps.list).toMatchObject({
+      title: 'Drafted step',
+      template: 'List every TODO for {{task.title}}.',
+      tools: [tool],
+      description: 'Kept note',
+      timeoutMs: 300_000,
+    });
+  });
+
+  it('is replaced by the row a Reload brings in', async () => {
+    api.updateTaskType.mockRejectedValue(refusal(THEIRS));
+    const view = await mount();
+    view.load(promptDraft('tt-x'));
+    await view.save({ ...FLAT, displayName: 'Drafted name' });
+    await view.clickReload();
+    expect(view.form().props.initialValues).toMatchObject({ displayName: 'Theirs' });
+    expect(view.composer().props.stepIds).toEqual(THEIRS.stepIds);
+    expect(guard.dirty.at(-1)).toBe(false);
+  });
+
+  it('is replaced by what the next load brings', async () => {
+    const view = await mount(null);
+    view.load(promptDraft('first-draft'));
+    const key = view.form().key;
+    view.load(promptDraft('second-draft', { displayName: 'Second' }));
+    expect(view.form().key).not.toBe(key);
+    expect(view.form().props.initialValues).toMatchObject({
+      slug: 'second-draft',
+      displayName: 'Second',
+    });
+    expect(view.composer().props.stepIds).toEqual(['custom.second-draft.list']);
   });
 });

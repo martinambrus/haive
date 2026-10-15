@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { CORE_INTEGRATION_CATEGORY_SPECS } from '@haive/shared/modularity';
 import {
   authMethodLabel,
   canClearGithubClient,
+  categoryLabel,
   completionBody,
   connectChoices,
   describeGithubClientSource,
   disconnectNotice,
+  enabledServing,
   isHttpsUrl,
   linkableCredentials,
   needsWriteReconnect,
@@ -354,5 +357,38 @@ describe('authMethodLabel', () => {
     expect(authMethodLabel('device')).toBe('Device code');
     expect(authMethodLabel('token')).toBe('Git credential');
     expect(authMethodLabel('something-new')).toBe('something-new');
+  });
+});
+
+describe('categoryLabel', () => {
+  it('names every core category by its label', () => {
+    for (const spec of CORE_INTEGRATION_CATEGORY_SPECS) {
+      expect(categoryLabel(spec.id)).toBe(spec.label);
+    }
+    expect(categoryLabel('rich-documents')).toBe('Documents');
+  });
+
+  it('keeps the id of a category the core list does not name', () => {
+    expect(categoryLabel('module.acme.crm')).toBe('module.acme.crm');
+  });
+});
+
+describe('enabledServing', () => {
+  const providers = [
+    provider({ id: 'github', categories: ['forge'] }),
+    provider({ id: 'gitea', categories: ['forge'], enabled: false }),
+    provider({ id: 'module.stub.vendor', categories: ['file-storage', 'rich-documents'] }),
+    provider({ id: 'gitlab', categories: ['forge'] }),
+  ];
+
+  it('keeps the enabled providers that serve the category, in the order given', () => {
+    expect(enabledServing('forge', providers).map((p) => p.id)).toEqual(['github', 'gitlab']);
+    expect(enabledServing('rich-documents', providers).map((p) => p.id)).toEqual([
+      'module.stub.vendor',
+    ]);
+  });
+
+  it('is empty for a category nothing enabled serves', () => {
+    expect(enabledServing('mail', providers)).toEqual([]);
   });
 });

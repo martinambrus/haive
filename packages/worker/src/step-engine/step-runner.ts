@@ -45,9 +45,15 @@ import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
-import { TEMPLATE_PERSONA_MARKER_PATTERN, parseStepId } from '@haive/shared/modularity';
+import {
+  TEMPLATE_PERSONA_MARKER_PATTERN,
+  describeInvalidTools,
+  parsePinnedCustomSteps,
+  parseStepId,
+} from '@haive/shared/modularity';
 import { moduleDeactivationMessage } from '../modules/activation.js';
-import { promptStepNamedText } from './steps/custom/prompt-step.js';
+import { invalidToolsFailure, pinnedToolsFailure } from './steps/custom/pinned-tools.js';
+import { promptStepNamedText, promptStepTools } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
 import { closeAppRunnerExtraTabs, restoreAppRunnerBrowserWindow } from '../sandbox/app-runner.js';
@@ -548,6 +554,43 @@ async function insertInvocationOrNull<T>(insert: () => Promise<T>): Promise<T | 
   }
 }
 
+export { CUSTOM_TOOL_INVALID_REASON } from './steps/custom/pinned-tools.js';
+export const CUSTOM_TOOLS_SWITCHED_OFF_REASON = 'custom-tools-switched-off';
+export const CUSTOM_TOOLS_NO_SIGNING_KEY_REASON = 'custom-tools-no-signing-key';
+
+/** The tool names a prompt step's dispatch carries, or the failure that stops it; null for a step with none. */
+async function resolveCustomTools(
+  db: Database,
+  taskId: string,
+  stepDef: StepDefinition,
+): Promise<{ names: string[] } | { failure: string } | null> {
+  const tools = promptStepTools(stepDef);
+  if (!tools) return null;
+  if (tools.invalid.length > 0) {
+    return { failure: invalidToolsFailure(`${describeInvalidTools(tools.invalid)}.`) };
+  }
+  if (tools.names.length === 0) return null;
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { customSteps: true },
+  });
+  const invalid = pinnedToolsFailure(
+    parsePinnedCustomSteps(task?.customSteps)[stepDef.metadata.id]?.tools ?? [],
+  );
+  if (invalid !== null) return { failure: invalid };
+  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+    return {
+      failure: `${CUSTOM_TOOLS_SWITCHED_OFF_REASON}: custom tools are switched off on this install, so this step cannot run. Switch them on, then retry the step.`,
+    };
+  }
+  if (!process.env.CONFIG_ENCRYPTION_KEY) {
+    return {
+      failure: `${CUSTOM_TOOLS_NO_SIGNING_KEY_REASON}: CONFIG_ENCRYPTION_KEY is not set, so this step's custom tools cannot be given their token. Set it for the api and the worker, then retry the step.`,
+    };
+  }
+  return { names: tools.names };
+}
+
 async function resolveLlmPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -768,6 +811,20 @@ async function resolveLlmPhase(
     };
   }
 
+  const custom =
+    llmSpec.toolProfile === undefined ? await resolveCustomTools(db, params.taskId, stepDef) : null;
+  if (custom && 'failure' in custom) {
+    const failed = await updateRow(db, current.id, {
+      status: 'failed',
+      errorMessage: custom.failure,
+      endedAt: new Date(),
+    });
+    return {
+      resolved: false,
+      result: { status: 'failed', row: failed, error: failed.errorMessage ?? custom.failure },
+    };
+  }
+
   // Optional async setup the invocation depends on (e.g. 08a starting the
   // runner's headed browser so chrome-devtools MCP can connect). Idempotent;
   // a throw here fails the step like any dispatch error.
@@ -879,6 +936,7 @@ async function resolveLlmPhase(
       capabilities: llmSpec.requiredCapabilities,
     },
     toolProfile: llmSpec.toolProfile,
+    ...(custom ? { customTools: custom.names, requiresMcp: true } : {}),
     agentPool: llmSpec.agentPool,
     ...(promptStepPersonaIds ? { promptStepPersonaIds } : {}),
     skipAgentRules: llmSpec.skipAgentRules,
@@ -1014,6 +1072,7 @@ async function resolveLlmPhase(
     effortLevel: preferredEffort ?? undefined,
     kind: payloadKind,
     toolProfile: llmSpec.toolProfile,
+    ...(custom ? { customTools: custom.names } : {}),
     worktreeRel,
     spec: plan.invocation.spec,
     timeoutMs: budget.timeoutMs,

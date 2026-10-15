@@ -75,18 +75,3 @@ export function verifyRepoGitCredToken(
   if (macBuf.length !== expBuf.length || !timingSafeEqual(macBuf, expBuf)) return null;
   return claimsFrom(payload);
 }
-
-/** Terminals started before v1 hold the two-part, raw-secret form for up to 12 h; drop it then. */
-export function verifyLegacyRepoGitCredToken(
-  token: string,
-  secret: string,
-): { repositoryId: string; userId: string } | null {
-  const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [payload, mac] = parts as [string, string];
-  const expected = createHmac('sha256', secret).update(payload).digest('base64url');
-  const macBuf = Buffer.from(mac);
-  const expBuf = Buffer.from(expected);
-  if (macBuf.length !== expBuf.length || !timingSafeEqual(macBuf, expBuf)) return null;
-  return claimsFrom(payload);
-}

@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   stored: new Map<string, string>(),
   flags: new Map<string, boolean>(),
   kills: [] as string[],
+  bestEffortKills: [] as string[],
   killable: '',
   onKill: undefined as ((taskId: string) => Promise<void>) | undefined,
   eventFails: false,
@@ -31,6 +32,10 @@ vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => {
 });
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: async (taskId: string) => {
+    h.bestEffortKills.push(taskId);
+    return 0;
+  },
+  killTaskSandboxesOrThrow: async (taskId: string) => {
     h.kills.push(taskId);
     await h.onKill?.(taskId);
     return taskId === h.killable ? 1 : 0;
@@ -57,6 +62,7 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => {
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
   configService: {
+    get: async (key: string) => h.stored.get(key) ?? null,
     getFresh: async (key: string) => h.stored.get(key) ?? null,
     set: async (key: string, value: string) => {
       h.stored.set(key, value);
@@ -68,7 +74,11 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { CONFIG_KEYS } from '@haive/shared';
-import { moduleManifestSchema, type ComposableStepEntry } from '@haive/shared/modularity';
+import {
+  MODULE_DEPENDENTS_CAP,
+  moduleManifestSchema,
+  type ComposableStepEntry,
+} from '@haive/shared/modularity';
 import { definitionForCreate } from '../src/lib/task-type-definition.js';
 import { mountModules, moduleRoutes } from '../src/modules/loader.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -255,6 +265,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     h.stored = new Map();
     h.flags = new Map();
     h.kills = [];
+    h.bestEffortKills = [];
     h.killable = '';
     h.onKill = undefined;
     h.eventFails = false;
@@ -569,9 +580,9 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect((await patchModule('alpha', false)).status).toBe(200);
     });
 
-    it('lists at most 200 tasks', async () => {
+    it('lists at most MODULE_DEPENDENTS_CAP tasks', async () => {
       await db.insert(schema.tasks).values(
-        Array.from({ length: 201 }, (_, i) => ({
+        Array.from({ length: MODULE_DEPENDENTS_CAP + 1 }, (_, i) => ({
           userId,
           type: TYPE,
           title: `Task ${i}`,
@@ -582,15 +593,15 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       const res = await patchModule('alpha', false);
       expect(res.status).toBe(409);
       const body = (await res.json()) as { tasks: unknown[]; capped: boolean };
-      expect(body.tasks).toHaveLength(200);
+      expect(body.tasks).toHaveLength(MODULE_DEPENDENTS_CAP);
       expect(body.capped).toBe(true);
 
-      await db.delete(schema.tasks).where(eq(schema.tasks.title, 'Task 200'));
+      await db.delete(schema.tasks).where(eq(schema.tasks.title, `Task ${MODULE_DEPENDENTS_CAP}`));
       const exact = (await (await patchModule('alpha', false)).json()) as {
         tasks: unknown[];
         capped: boolean;
       };
-      expect(exact.tasks).toHaveLength(200);
+      expect(exact.tasks).toHaveLength(MODULE_DEPENDENTS_CAP);
       expect(exact.capped).toBe(false);
     });
 
@@ -724,10 +735,12 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         killed: number;
         cancelled: number;
         stopped: number;
+        failedAt: string | null;
         eventError?: string;
+        killError?: string;
       }[];
       left: { id: string; title: string; status: string; currentStepId: string | null }[];
-      failed: { id: string; error: string }[];
+      failed: { id: string; title: string; error: string }[];
       capped: boolean;
     };
     const step = async (taskId: string, stepId: string, status: 'waiting_cli' | 'waiting_form') => {
@@ -762,6 +775,8 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       );
     const stoppedEvents = () =>
       db.select().from(schema.taskEvents).where(eq(schema.taskEvents.eventType, 'task.stopped'));
+    const completedAtOf = async (id: string) =>
+      (await observe([id]))[0]!.task!.completedAt!.toISOString();
     const idsOf = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
     const sorted = (ids: string[]) => [...ids].sort();
 
@@ -812,7 +827,16 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         failed: [],
         capped: false,
       });
-      expect(body.stopped).toEqual([{ id: a.id, title: 'A', killed: 1, cancelled: 1, stopped: 1 }]);
+      expect(body.stopped).toEqual([
+        {
+          id: a.id,
+          title: 'A',
+          killed: 1,
+          cancelled: 1,
+          stopped: 1,
+          failedAt: await completedAtOf(a.id),
+        },
+      ]);
       expect(body.left).toHaveLength(3);
       expect(body.left).toEqual(
         expect.arrayContaining([
@@ -854,6 +878,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
             killed: 1,
             cancelled: 1,
             stopped: 1,
+            failedAt: after!.task!.completedAt!.toISOString(),
           },
         ],
       ]);
@@ -861,6 +886,112 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         (await taskAudits()).map((r) => [r.action, r.targetId, r.actorUserId, r.metadata]),
       ).toEqual([['task.admin_stop', a.id, ACTOR, { ownerUserId: userId, moduleId: 'alpha' }]]);
       expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
+    });
+
+    it('records on the entry and in the event of a stopped task the instant it failed the task: the stamp the task carries', async () => {
+      const body = (await (await patchUrgent('alpha')).json()) as Body;
+      const [after] = await observe([a.id]);
+      const failedAt = after!.task!.completedAt!.toISOString();
+      expect(body.stopped.map((s) => s.failedAt)).toEqual([failedAt]);
+      expect(after!.events.map((ev) => (ev.payload as { failedAt?: unknown }).failedAt)).toEqual([
+        failedAt,
+      ]);
+    });
+
+    it('records no instant for a task that failed on its own before its stop reached it', async () => {
+      const own = await working(
+        {
+          title: 'Failed itself',
+          runListSnapshot: ['module.alpha.x'],
+          updatedAt: new Date('2020-01-01T00:00:00.000Z'),
+        },
+        'module.alpha.x',
+      );
+      const failedOn = new Date('2026-10-15T09:00:00.000Z');
+      h.onKill = async (taskId) => {
+        if (taskId !== a.id) return;
+        await db
+          .update(schema.tasks)
+          .set({ status: 'failed', errorMessage: 'It broke', completedAt: failedOn })
+          .where(eq(schema.tasks.id, own.id));
+      };
+      const body = (await (await patchUrgent('alpha')).json()) as Body;
+      expect(body.stopped.filter((s) => s.id === own.id)).toEqual([
+        { id: own.id, title: 'Failed itself', killed: 0, cancelled: 1, stopped: 1, failedAt: null },
+      ]);
+      const [after] = await observe([own.id]);
+      expect(after!.task).toMatchObject({
+        status: 'failed',
+        errorMessage: 'It broke',
+        completedAt: failedOn,
+      });
+      expect(after!.events.map((ev) => ev.payload)).toMatchObject([
+        { reason: 'module_deactivated', failedAt: null },
+      ]);
+    });
+
+    describe('on the task page payload', () => {
+      const stopOf = async (id: string) => {
+        const res = await app.request(`/tasks/${id}`);
+        expect(res.status).toBe(200);
+        return ((await res.json()) as { stop: unknown }).stop;
+      };
+      const failedAgain = (id: string) =>
+        db
+          .update(schema.tasks)
+          .set({
+            status: 'failed',
+            errorMessage: 'It broke',
+            completedAt: new Date(Date.now() + 1000),
+          })
+          .where(eq(schema.tasks.id, id));
+
+      it('names the module that was turned off on the task it stopped, and on no other', async () => {
+        expect(await stopOf(a.id)).toBeNull();
+        await patchUrgent('alpha');
+        expect(await stopOf(a.id)).toEqual({ reason: 'module_deactivated', moduleId: 'alpha' });
+        for (const other of [b, c, d, e, f, g]) expect(await stopOf(other.id)).toBeNull();
+      });
+
+      it('names it no longer once the task is retried, nor when it fails again for another reason', async () => {
+        await patchUrgent('alpha');
+        await db
+          .update(schema.tasks)
+          .set({ status: 'running', errorMessage: null, completedAt: null })
+          .where(eq(schema.tasks.id, a.id));
+        expect(await stopOf(a.id)).toBeNull();
+        await failedAgain(a.id);
+        expect(await stopOf(a.id)).toBeNull();
+      });
+
+      it('names it no longer when the owner retried while its sandboxes were being killed and the retry failed at once', async () => {
+        const wait = () => new Promise((resolve) => setTimeout(resolve, 20));
+        h.onKill = async (taskId) => {
+          if (taskId !== a.id) return;
+          await db
+            .update(schema.tasks)
+            .set({ status: 'running', errorMessage: null, completedAt: null })
+            .where(eq(schema.tasks.id, a.id));
+          await wait();
+          await db
+            .update(schema.tasks)
+            .set({ status: 'failed', errorMessage: 'It broke', completedAt: new Date() })
+            .where(eq(schema.tasks.id, a.id));
+          await wait();
+        };
+        await patchUrgent('alpha');
+        expect(await stopOf(a.id)).toBeNull();
+      });
+
+      it('reports the latest stop, whatever its reason', async () => {
+        await patchUrgent('alpha');
+        await db.insert(schema.taskEvents).values({
+          taskId: a.id,
+          eventType: 'task.stopped',
+          payload: { by: ACTOR, byAdmin: true, reason: 'maintenance' },
+        });
+        expect(await stopOf(a.id)).toEqual({ reason: 'maintenance', moduleId: null });
+      });
     });
 
     it('audits the deactivation with its mode and how many tasks it stopped', async () => {
@@ -922,7 +1053,14 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       h.killable = late.id;
       const again = (await (await patchUrgent('alpha')).json()) as Body;
       expect(again.stopped).toEqual([
-        { id: late.id, title: 'Late', killed: 1, cancelled: 1, stopped: 1 },
+        {
+          id: late.id,
+          title: 'Late',
+          killed: 1,
+          cancelled: 1,
+          stopped: 1,
+          failedAt: await completedAtOf(late.id),
+        },
       ]);
       expect(await stoppedEvents()).toHaveLength(2);
     });
@@ -941,20 +1079,101 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       },
     );
 
-    it('collects the tasks it could not stop, and still tries each one', async () => {
+    it('collects the tasks whose stop transaction throws, leaves each as it was, kills nothing for them and still tries each one', async () => {
+      const refusing = () =>
+        working({ title: 'Refused stop', runListSnapshot: ['module.alpha.x'] }, 'module.alpha.x');
+      const refused = [await refusing(), await refusing()];
+      const ids = refused.map((t) => t.id);
+      const before = await observe(ids);
+      try {
+        await db.execute(
+          sql`CREATE OR REPLACE FUNCTION module_deactivation_test_refuse() RETURNS trigger LANGUAGE plpgsql AS $body$ BEGIN RAISE EXCEPTION 'refused by the test'; END $body$`,
+        );
+        await db.execute(
+          sql`CREATE TRIGGER module_deactivation_test_refuse BEFORE UPDATE ON tasks FOR EACH ROW WHEN (NEW.title = 'Refused stop' AND NEW.status = 'failed') EXECUTE FUNCTION module_deactivation_test_refuse()`,
+        );
+        const res = await patchUrgent('alpha');
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as Body;
+        expect(idsOf(body.failed)).toEqual(sorted(ids));
+        expect(
+          body.failed.every(({ title, error }) => title === 'Refused stop' && error !== ''),
+        ).toBe(true);
+        expect(body.stopped).toEqual([
+          {
+            id: a.id,
+            title: 'A',
+            killed: 1,
+            cancelled: 1,
+            stopped: 1,
+            failedAt: await completedAtOf(a.id),
+          },
+        ]);
+        expect(idsOf(body.left)).toEqual(sorted([b.id, c.id, d.id]));
+        expect(await observe(ids)).toEqual(before);
+        expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
+        expect(await stampOf('alpha')).toBeInstanceOf(Date);
+        expect(await stoppedEvents()).toHaveLength(1);
+      } finally {
+        await db.execute(sql`DROP TRIGGER IF EXISTS module_deactivation_test_refuse ON tasks`);
+        await db.execute(sql`DROP FUNCTION IF EXISTS module_deactivation_test_refuse()`);
+      }
+    });
+
+    it('kills through the strict variant and never the best-effort one', async () => {
+      expect((await patchUrgent('alpha')).status).toBe(200);
+      expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
+      expect(h.bestEffortKills).toEqual([]);
+    });
+
+    it('keeps a task whose stop committed under stopped when its sandbox kill throws, and says why', async () => {
       h.onKill = async (taskId) => {
         throw new Error(`refused ${taskId}`);
       };
       const res = await patchUrgent('alpha');
       expect(res.status).toBe(200);
       const body = (await res.json()) as Body;
-      expect(body.failed.sort((x, y) => x.id.localeCompare(y.id))).toEqual(
-        [a.id, c.id].sort().map((id) => ({ id, error: `refused ${id}` })),
-      );
-      expect(body.stopped).toEqual([]);
-      expect(idsOf(body.left)).toEqual(sorted([b.id, d.id]));
+      expect(body.failed).toEqual([]);
+      expect(body.stopped).toEqual([
+        {
+          id: a.id,
+          title: 'A',
+          killed: 0,
+          cancelled: 1,
+          stopped: 1,
+          failedAt: await completedAtOf(a.id),
+          killError: `refused ${a.id}`,
+        },
+      ]);
+      expect(idsOf(body.left)).toEqual(sorted([b.id, c.id, d.id]));
+      expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
       expect(await stampOf('alpha')).toBeInstanceOf(Date);
-      expect(await stoppedEvents()).toHaveLength(0);
+      const [after] = await observe([a.id]);
+      expect(after!.task).toMatchObject({
+        status: 'failed',
+        errorMessage: 'Stopped by an administrator',
+      });
+      expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toEqual([
+        [
+          'task.stopped',
+          {
+            by: ACTOR,
+            byAdmin: true,
+            reason: 'module_deactivated',
+            moduleId: 'alpha',
+            killed: 0,
+            cancelled: 1,
+            stopped: 1,
+            failedAt: after!.task!.completedAt!.toISOString(),
+          },
+        ],
+      ]);
+      expect((await audits()).map((r) => r.metadata)).toEqual([
+        { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+      ]);
+      expect((await taskAudits()).map((r) => [r.action, r.targetId])).toEqual([
+        ['task.admin_stop', a.id],
+      ]);
     });
 
     it('keeps a task whose stop committed under stopped when the write of its event throws, and says why', async () => {
@@ -964,7 +1183,15 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       const body = (await res.json()) as Body;
       expect(body.failed).toEqual([]);
       expect(body.stopped).toEqual([
-        { id: a.id, title: 'A', killed: 1, cancelled: 1, stopped: 1, eventError: 'event refused' },
+        {
+          id: a.id,
+          title: 'A',
+          killed: 1,
+          cancelled: 1,
+          stopped: 1,
+          failedAt: await completedAtOf(a.id),
+          eventError: 'event refused',
+        },
       ]);
       const [after] = await observe([a.id]);
       expect(after!.task).toMatchObject({

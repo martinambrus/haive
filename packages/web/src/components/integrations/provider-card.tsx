@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { Badge, Button, Card } from '@/components/ui';
 import {
+  categoryLabel,
   connectChoices,
   type ConnectMethod,
   type GitCredentialRow,
@@ -69,7 +70,7 @@ export function ProviderCard({
           <h4 className="text-base font-semibold text-neutral-50">{provider.displayName}</h4>
           {provider.categories.map((category) => (
             <Badge key={category} variant="info">
-              {category}
+              {categoryLabel(category)}
             </Badge>
           ))}
         </div>
