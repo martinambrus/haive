@@ -223,12 +223,12 @@ describe('ModuleTasksOpenDialog copy', () => {
 
   const LEAD = 'Turns `Alpha Search` off now. ';
   const RULE =
-    'A task whose agent is running in one of its steps is stopped (Retry it once the module is on again); every other task fails when it next runs one of its steps. ';
+    'A task in one of its steps is stopped unless that step is waiting on a form (Retry it once the module is on again); a task waiting on a form there, and every other task, fails when it next runs one of its steps. ';
   const NONE =
     'No listed task is in one of its steps now, so none is stopped; each fails when it next runs one of its steps. ';
   const TWO = LEAD + RULE + '2 listed tasks are in one of its steps now. ' + COPY_TAIL;
 
-  it('says that only a task with an agent running is stopped, and counts the listed tasks in a step: 2', () => {
+  it('says that a task in a step is stopped unless the step waits on a form, and counts the listed tasks in a step: 2', () => {
     expect(copyOf({ tasks: [inStep('a'), inStep('b'), elsewhere('c')] })).toBe(TWO);
   });
 
@@ -245,7 +245,7 @@ describe('ModuleTasksOpenDialog copy', () => {
 
   const MORE = 'More tasks use it than are listed; the same applies to them. ';
   const NONE_CUT =
-    'No listed task is in one of its steps now, but more tasks use it than are listed: any of those whose agent is running in one of its steps is stopped, and every other task fails when it next runs one of its steps. ';
+    'No listed task is in one of its steps now, but more tasks use it than are listed: any of those in one of its steps is stopped unless that step is waiting on a form, and every other task fails when it next runs one of its steps. ';
 
   it('adds that the tasks not listed are treated the same, after the count of listed ones: 2', () => {
     expect(copyOf({ tasks: [inStep('a'), inStep('b')], capped: true })).toBe(
