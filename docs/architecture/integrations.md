@@ -178,9 +178,10 @@ text. `expires_in: 0` means already expired. Over HTTP: vendor error 400, unavai
 One switch per user per provider (`integration_user_settings`, default off), covering every account of
 that provider and never set per task or per step. `PUT /integrations/providers/:id/write` writes it and
 audits `integration.write_switch`. It is in Postgres, with no ConfigService cache, so a flip is
-visible to the next read. A binding lists its provider's read operations always and its write
-operations only when the requirement asked for write access AND the switch is on
-(`integrationTools`); anything that is not `read` counts as write. Tool names are computed from what
+visible to the next read. `integrationTools` lists a binding's read operations always and its write
+operations only when the binding asked for write access and the caller's `writeAllowed` says yes —
+the broker, not wired yet, is to answer it from the owner's switch and, for a shared connection, the
+admin's too; anything that is not `read` counts as write. Tool names are computed from what
 the bindings declare before the switch filters them, so a flip never renames a listed tool.
 `integration_connections.write_enabled` is the admin's switch for a shared connection (a write through
 one needs both); it is read nowhere yet.
@@ -266,7 +267,7 @@ change.
   `PRIVATE-TOKEN`: fetch drops `Authorization` on a cross-origin redirect but keeps a custom header.
 - **Errors**: 401/403 `ForgeAuthError`, 404 `ForgeNotFoundError`, 409/422 `ForgeConflictError`, 429
   `ForgeRateLimitError` with `Retry-After`. On a 409/422 from a create, the adapter looks up the open
-  pull request for the branch pair and returns it.
+  pull request for the branch pair and returns it when one exists; otherwise the conflict stands.
 - **Deadline**: `FORGE_REQUEST_TIMEOUT_MS` (30 s) per request, headers and body, injectable through
   the constructor. `openPullRequest` can make two requests, so one call can take up to twice that.
   An error response whose body stalls is still reported as its HTTP status, not as a timeout: the
@@ -313,9 +314,9 @@ whatever base it had, and `resolveForgeContext` uses the stored value as is.
   whose bindings it may use; `verifyTaskToken` treats both as optional, so requiring them is the
   broker's job. The broker must not live under `/integrations`, whose `requireAuth` would answer a
   sandbox token 401.
-- **`integration_calls`**: connection, provider, task, step and invocation (all `SET NULL` on delete,
-  so rows outlive a deleted task), tool, access, surface (`mcp` or `rest`), outcome (`ok`, `refused`,
-  `error`, `running`), reason, duration, time. Never arguments or results — those are someone's mail
+- **`integration_calls`**: the provider id (text, not null, no foreign key), the connection, task,
+  step and invocation (each `SET NULL` on delete, so rows outlive a deleted task), tool, access,
+  surface (`mcp` or `rest`), outcome (`ok`, `refused`, `error`, `running`), reason, duration, time. Never arguments or results — those are someone's mail
   and documents (pinned by `database/test/integrations-schema.test.ts`). `running` lets the broker write
   the row before the vendor answers, so a crash leaves an honest "attempted, outcome unknown".
 - **The stamp**: `cli_invocations.integrations`, the bindings resolved at dispatch
