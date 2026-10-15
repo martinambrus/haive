@@ -98,7 +98,8 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
   ] = await Promise.all([
     resolveGlobalKbEnabled(configService),
     configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, true),
-    configService.get(CONFIG_KEYS.GLOBAL_KB_MODE),
+    // Mode and connection string skip the 30 s caches: another process may switch or clear them.
+    configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_NAMESPACE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL),
     configService.get(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL),
@@ -108,11 +109,14 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
       DEFAULT_ARCHIVE_RETENTION_DAYS,
     ),
   ]);
-  const connectionString = await secretsService.get(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
+  const connectionString = await secretsService.getFresh(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
+  // Leaving external writes the mode before it removes or replaces the string, so external is read again.
+  const settledMode =
+    mode === 'external' ? await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE) : mode;
   return {
     enabled,
     digestEnabled,
-    mode: mode === 'external' ? 'external' : 'internal',
+    mode: settledMode === 'external' ? 'external' : 'internal',
     namespace: namespace || 'default',
     connectionString: connectionString || null,
     ollamaUrl: ollamaUrl || IN_STACK_OLLAMA_URL,
