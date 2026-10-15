@@ -675,8 +675,8 @@ that recorded the removal as an `upgrade.haive_file_retired` task event, so a Re
 failure still stages it, even one whose own record write fails and so retires nothing new (it lists
 each such path that is gone, and says so when it cannot look them up), while a person's own
 deletion of a file this task never judged is never claimed. An earlier record stops counting once
-a retry sees anything at that path again: if it then vanishes during that retry, the deletion is
-the person's and is not listed. The event is written after a read of the file at its own name passes the shape check and
+a retry sees anything at that path again, and that retry deletes it, so a later retry after a crash
+does not count it: if the file then vanishes, the deletion is the person's and is not listed. The event is written after a read of the file at its own name passes the shape check and
 before fs-safe parks it for removal, so no database wait happens while the file is parked; a file whose event cannot be written is kept and
 reported, and an event whose file is not removed after all (replaced or deleted during that wait, or
 a removal that failed) is taken back by its id, a failed take-back reported as a warning. A worker
