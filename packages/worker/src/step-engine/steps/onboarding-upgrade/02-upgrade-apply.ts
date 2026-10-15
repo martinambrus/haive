@@ -1819,6 +1819,8 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
     ctx.throwIfCancelled();
     let recordWritten = false;
+    // Seen present by this attempt, so an earlier record no longer proves this task removed it.
+    const seenPresent = new Set<string>();
     try {
       const state = await writeProjectStateRecord(ctx.db, {
         repositoryId: plan.repositoryId,
@@ -1834,6 +1836,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       deletedPaths.push(...state.removed);
       const retiredEarlier = await retiredByThisTask(ctx.db, ctx.taskId);
       const recordRetired = async (path: string) => {
+        seenPresent.add(path);
         const [event] = await ctx.db
           .insert(schema.taskEvents)
           .values({
@@ -1849,7 +1852,10 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       };
       const listRetired = (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
         for (const { path, outcome } of retired) {
-          if (outcome === 'removed' || (outcome === 'absent' && retiredEarlier.has(path))) {
+          if (
+            outcome === 'removed' ||
+            (outcome === 'absent' && retiredEarlier.has(path) && !seenPresent.has(path))
+          ) {
             deletedPaths.push(path);
           }
         }
@@ -1881,7 +1887,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       // What this task removed, now or in an earlier attempt, is still listed.
       try {
         for (const path of await retiredByThisTask(ctx.db, ctx.taskId)) {
-          if (deletedPaths.includes(path)) continue;
+          if (deletedPaths.includes(path) || seenPresent.has(path)) continue;
           // Strict: only a path proven missing is listed, never one that could not be read.
           const gone = await lstatNoFollow(ctx.repoPath, path, { strict: true }).then(
             (entry) => entry === null,

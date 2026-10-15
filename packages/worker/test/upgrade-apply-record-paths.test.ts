@@ -272,6 +272,45 @@ describe('02 and .haive/install.json', () => {
     expect(again.warnings).toEqual([]);
   });
 
+  it('does not list one a retry saw restored and then lost, though an earlier attempt removed it', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    await writeFile(join(s.root, INSTALL), HAIVE_SHAPED);
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.taskEvents) await rm(join(s.root, INSTALL));
+    };
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+  });
+
+  it('does not list it on the failure path either, when a later step throws', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    await writeFile(join(s.root, INSTALL), HAIVE_SHAPED);
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.taskEvents) await rm(join(s.root, INSTALL));
+    };
+    const select = s.fake.db.select;
+    s.fake.db.select = (fields) => ({
+      from: (table) => {
+        if (Object.keys(fields ?? {}).join() === 'onboardingTooling') {
+          throw new Error('database refused');
+        }
+        return select(fields).from(table);
+      },
+    });
+
+    const out = await s.apply();
+
+    expect(out.warnings).toContain(
+      'the record was written, but retiring the files it replaces failed: database refused',
+    );
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+  });
+
   it('keeps one replaced during the wait, and takes its record back', async () => {
     const s = await setup(HAIVE_SHAPED);
     s.fake.hooks.beforeInsert = async (table) => {
