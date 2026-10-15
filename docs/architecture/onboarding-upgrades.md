@@ -672,8 +672,9 @@ anything else at that name is the person's, kept and reported in the step's warn
 kept, `absent` included, so a Retry after a failed commit still stages a deletion an earlier attempt
 made; 02 lists it in `deletedPaths` only when this task removed it, now or in an earlier attempt
 that recorded the removal as an `upgrade.haive_file_retired` task event, so a Retry after a later
-failure still stages it while a person's own deletion of a file this task never judged is never
-claimed. The event is written after a read of the file at its own name passes the shape check and
+failure still stages it, even one whose own record write fails and so retires nothing new (it lists
+each such path that is gone, and says so when it cannot look them up), while a person's own
+deletion of a file this task never judged is never claimed. The event is written after a read of the file at its own name passes the shape check and
 before fs-safe parks it for removal, so no database wait happens while the file is parked; a file whose event cannot be written is kept and
 reported, and an event whose file is not removed after all (replaced or deleted during that wait, or
 a removal that failed) is taken back by its id, a failed take-back reported as a warning. A worker
