@@ -1116,7 +1116,6 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
         { template: 'Do it', capabilities: ['file_write'] },
         { repo: false },
       ],
-      ['tools-not-supported-yet', { tools: [httpTool] }, {}],
       ['tool-url-not-https', { tools: [{ ...httpTool, url: 'http://api.example.com/v1' }] }, {}],
       [
         'tool-scope-needs-repository',
@@ -1139,14 +1138,38 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       expect(await row('tt-ps')).toBeUndefined();
     });
 
-    it('refuses a tool on a PATCH too, and leaves the stored step as it was', async () => {
+    it('stores a step with valid tools on a create and on an edit', async () => {
+      const created = await send(
+        'POST',
+        '/admin/task-types',
+        withStep({ promptSteps: { review: step('review', { tools: [httpTool, ragTool] }) } }),
+      );
+      expect(created.status).toBe(201);
+      const stored = (await row('tt-ps'))?.promptSteps as {
+        review: { tools: { name: string; action: string }[] };
+      };
+      expect(stored.review.tools.map((t) => [t.name, t.action])).toEqual([
+        ['repo_status', 'http-get'],
+        ['house_rules', 'rag-query'],
+      ]);
+      const edited = await send('PATCH', '/admin/task-types/tt-ps', {
+        promptSteps: { review: step('review', { tools: [ragTool] }) },
+      });
+      expect(edited.status).toBe(200);
+      const after = (await row('tt-ps'))?.promptSteps as { review: { tools: { name: string }[] } };
+      expect(after.review.tools.map((t) => t.name)).toEqual(['house_rules']);
+    });
+
+    it('refuses a tool that fails its checks on a PATCH too, and leaves the stored step as it was', async () => {
       await send('POST', '/admin/task-types', withStep());
       const res = await send('PATCH', '/admin/task-types/tt-ps', {
-        promptSteps: { review: step('review', { tools: [httpTool] }) },
+        promptSteps: {
+          review: step('review', { tools: [{ ...httpTool, url: 'http://api.example.com/v1' }] }),
+        },
       });
       expect(res.status).toBe(400);
       expect(await issues(res)).toEqual([
-        expect.objectContaining({ kind: 'tools-not-supported-yet', stepId: CUSTOM_ID }),
+        expect.objectContaining({ kind: 'tool-url-not-https', stepId: CUSTOM_ID }),
       ]);
       expect((await row('tt-ps'))?.promptSteps).toEqual({
         review: { ...step('review'), capabilities: [], tools: [] },
@@ -1335,12 +1358,43 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
       };
       expect(detail.availability).toEqual({ available: true });
       expect(detail.compositionIssues).toEqual([]);
-      const edited = await send('PATCH', '/admin/task-types/tt-bad-tool', {
+      const renamed = await send('PATCH', '/admin/task-types/tt-bad-tool', {
         displayName: 'Renamed',
+      });
+      expect(renamed.status).toBe(200);
+      expect((await row('tt-bad-tool'))?.promptSteps).toEqual(stored);
+    });
+
+    it('refuses an edit of the step list while a stored tool no longer passes its checks, and names the tool', async () => {
+      const stored = {
+        review: {
+          ...step('review'),
+          capabilities: [],
+          tools: [{ ...httpTool, description: 'd'.repeat(1025) }],
+        },
+      };
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: 'tt-bad-tool',
+        displayName: 'Bad tool',
+        runListStrategy: 'static',
+        stepIds: ['ta-a', 'custom.tt-bad-tool.review'],
+        promptSteps: stored,
+        source: 'admin',
+      });
+      h.flags.set(CUSTOM_KEY, true);
+      const edited = await send('PATCH', '/admin/task-types/tt-bad-tool', {
         stepIds: ['ta-a', 'ta-b', 'custom.tt-bad-tool.review'],
       });
-      expect(edited.status).toBe(200);
+      expect(edited.status).toBe(400);
+      expect(await issues(edited)).toEqual([
+        expect.objectContaining({
+          kind: 'tool-no-longer-valid',
+          stepId: 'custom.tt-bad-tool.review',
+          raw: 'repo_status',
+        }),
+      ]);
       expect((await row('tt-bad-tool'))?.promptSteps).toEqual(stored);
+      expect((await row('tt-bad-tool'))?.stepIds).toEqual(['ta-a', 'custom.tt-bad-tool.review']);
     });
   });
 });

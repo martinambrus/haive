@@ -501,6 +501,7 @@ export async function executeByKind(
               hasWorktree,
               hasRepo,
               networkPolicy,
+              payload,
             )
           : { files: [], extraArgs: [] };
       // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.

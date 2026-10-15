@@ -9,7 +9,6 @@ import {
   lt,
   isNotNull,
   isNull,
-  ne,
   not,
   notInArray,
   or,
@@ -111,6 +110,7 @@ import {
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 import { mergeRoutes } from './merges.js';
+import { taskIntegrationRoutes } from './integrations.js';
 
 export const taskRoutes = new Hono<AppEnv>();
 
@@ -251,8 +251,6 @@ taskRoutes.get('/', async (c) => {
   // the plan page, and its attention signal is the banner there, not a toast that
   // would open the task page instead.
   if (!includeChats) conds.push(notInArray(schema.tasks.type, ['plan_chat', 'plan_merge']));
-  // A type-draft conversation lives in the task type editor, so no list shows it, chats or not.
-  conds.push(ne(schema.tasks.type, 'type_draft'));
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
   const where = and(...conds);
 
@@ -1774,3 +1772,6 @@ taskRoutes.route('/', mergeRoutes);
 // Task file attachments (/:id/attachments...): user-uploaded reference files the
 // AI CLI agent reads from the task workspace.
 taskRoutes.route('/', attachmentRoutes);
+
+// Integration choices (/:id/integrations...): which connection serves each category for this task.
+taskRoutes.route('/', taskIntegrationRoutes);

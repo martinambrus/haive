@@ -39,6 +39,17 @@ describe('ProviderCard', () => {
     expect(render(provider({ writeEnabled: true }))).toMatch(/checked=""/);
   });
 
+  it('names each category by its label, and keeps the id of one the core list does not name', () => {
+    const html = render(
+      provider({ categories: ['rich-documents', 'file-storage', 'module.acme.crm'] }),
+    );
+    expect(html).toContain('>Documents<');
+    expect(html).toContain('>File storage<');
+    expect(html).toContain('>module.acme.crm<');
+    expect(html).not.toContain('rich-documents');
+    expect(html).not.toContain('file-storage');
+  });
+
   it('shows no write switch for a provider with nothing to write', () => {
     expect(render(provider({ canWrite: false }))).not.toContain('type="checkbox"');
   });

@@ -1,4 +1,5 @@
 import { credentialForgeProvider } from '@haive/shared/forge';
+import { CORE_INTEGRATION_CATEGORY_SPECS } from '@haive/shared/modularity';
 
 export type ConnectMethod = 'oauth2' | 'device';
 export type GithubClientSource = 'env' | 'user' | 'admin' | null;
@@ -192,4 +193,20 @@ export function isHttpsUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** A core category's label, else its id: no core spec names a module's category. */
+export function categoryLabel(categoryId: string): string {
+  return (
+    CORE_INTEGRATION_CATEGORY_SPECS.find((spec) => spec.id === categoryId)?.label ?? categoryId
+  );
+}
+
+export function enabledServing<T extends Pick<IntegrationProvider, 'categories' | 'enabled'>>(
+  categoryId: string,
+  providers: readonly T[],
+): T[] {
+  return providers.filter(
+    (provider) => provider.enabled && provider.categories.includes(categoryId),
+  );
 }
