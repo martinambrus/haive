@@ -376,10 +376,13 @@ token is read.
   request's own timeout. Expiry finishes the row `error`/`timeout` and answers 504; a typed forge error
   answers 502 with `vendor-auth`, `vendor-not-found`, `vendor-conflict`, `vendor-rate-limited` or
   `vendor-error`; anything else is logged and answers 500 `internal-error`.
-- **The token stays in the api.** Error text is cut to 400 characters with the access token replaced
-  by `[redacted]`, also in the `Basic base64(username:token)` form Bitbucket Cloud sends, since a vendor
-  may echo its Authorization header. The gated harness (`api/test/integration-mcp-db.test.ts`) scans
-  every response, row and log line for both.
+- **The token stays in the api.** A vendor may echo its Authorization header, so `BaseForgeProvider`
+  removes the credential from an error body while it is still whole, before the 500-character cut: the
+  token and each auth header value after its scheme (Bitbucket Cloud's `Basic base64(username:token)`
+  included), and when the 4 KiB read stopped early also a trailing start of one. The broker then cuts
+  its error text to 400 characters and removes the token again. The gated harness
+  (`api/test/integration-mcp-db.test.ts`) scans every response, row and log line for the token, its
+  Basic form and any 12-character piece of a long token cut by the limit.
 - **Bounded vendor answers**: a success body is read up to `FORGE_RESPONSE_MAX_BYTES` (8 MiB; an
   open-PR lookup on Gitea or Bitbucket Server lists a whole page of pull requests with their bodies),
   an error body up to 4 KiB, and the stream is cancelled past either. This is in the shared
