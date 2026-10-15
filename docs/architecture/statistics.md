@@ -248,7 +248,9 @@ included (`api/src/routes/tasks/_call-log.ts`, merged by `sumCustomToolCalls` /
 `sumIntegrationCalls`). They count EVERY row, runs since replaced included, because the call
 happened (and for an integration the vendor saw it); so they need not match the MCP column, which
 counts the CLI's own events on runs not replaced, and the panel says so. A step with calls but no
-attributed run still gets a row. A `running` count that never settles is a call a crash left
+attributed run still gets a row, and every step carries `loggedCallCount` (its rows in both logs),
+so the panel opens for a task whose only runs were replaced (`showsToolUsage`,
+`web/src/lib/call-log-cells.ts`). A `running` count that never settles is a call a crash left
 unfinished.
 
 **The unused report compares what is installed with what the runs used, and it reads the
