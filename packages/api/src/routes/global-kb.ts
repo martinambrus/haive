@@ -411,6 +411,20 @@ async function putConfig(c: Context<AppEnv>) {
     );
   }
   const write = async () => {
+    // Before the mode, so no reader finds the external store without its string.
+    if (isAdmin && d.connectionString !== undefined && d.connectionString.trim().length > 0) {
+      await secretsService.set(
+        SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
+        d.connectionString.trim(),
+        'Global KB external connection string',
+      );
+      await recordAuditEvent(getDb(), {
+        actorUserId: c.get('userId'),
+        action: 'global_kb.connection_string.update',
+        targetType: 'global_kb',
+        metadata: { connectionStringSet: true },
+      });
+    }
     if (isAdmin && d.enabled !== undefined)
       await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
     if (d.digestEnabled !== undefined)
@@ -433,19 +447,6 @@ async function putConfig(c: Context<AppEnv>) {
   };
   if (dimsChange) await withVectorWidthLock(saved, d.embedDimensions!, write);
   else await write();
-  if (isAdmin && d.connectionString !== undefined && d.connectionString.trim().length > 0) {
-    await secretsService.set(
-      SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
-      d.connectionString.trim(),
-      'Global KB external connection string',
-    );
-    await recordAuditEvent(getDb(), {
-      actorUserId: c.get('userId'),
-      action: 'global_kb.connection_string.update',
-      targetType: 'global_kb',
-      metadata: { connectionStringSet: true },
-    });
-  }
   if (isAdmin && clearing) {
     await secretsService.delete(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
     await recordAuditEvent(getDb(), {

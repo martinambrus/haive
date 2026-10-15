@@ -13,7 +13,9 @@ const h = vi.hoisted(() => ({
   set: vi.fn(async (key: string, _value: string) => {
     h.events.push(`set:${key}`);
   }),
-  setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
+  setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {
+    h.events.push('set-secret');
+  }),
   deleteSecret: vi.fn(async (_key: string) => {
     h.events.push('delete-secret');
     h.settings = { ...h.settings, connectionString: null };
@@ -465,6 +467,90 @@ describe('PUT /global-kb/config audit trail', () => {
       expect(h.setSecret).not.toHaveBeenCalled();
       expect(h.audits).toEqual([]);
       expect(h.auditLog.info).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('PUT /global-kb/config storing the connection string before the settings', () => {
+  const NEW_STRING = 'postgres://kb:pw@new.example:5432/kb';
+  const MODE = `set:${CONFIG_KEYS.GLOBAL_KB_MODE}`;
+
+  beforeEach(() => {
+    h.db = {
+      insert: () => ({
+        values: async () => {
+          h.events.push('audit');
+        },
+      }),
+    };
+  });
+
+  it('stores the string and records its one audit row before it writes the mode that switches to it', async () => {
+    const res = await put({ mode: 'external', connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual(['set-secret', 'audit', MODE]);
+    expect(h.setSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it('stores them ahead of every setting of a full page save too', async () => {
+    const res = await put({ ...PAGE, mode: 'external', connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.events.slice(0, 2)).toEqual(['set-secret', 'audit']);
+    expect(h.events).toContain(MODE);
+    expect(h.events.filter((event) => event === 'audit')).toHaveLength(1);
+  });
+
+  it('keeps the single write of a save that sends only the mode', async () => {
+    h.settings = { ...SAVED, connectionString: STORED_STRING };
+    const res = await put({ mode: 'external' });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual([MODE]);
+  });
+
+  it('keeps the single write of a save that sends only the string', async () => {
+    const res = await put({ connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual(['set-secret', 'audit']);
+  });
+
+  describe('when the same save changes the embedding width and re-sends the stored string', () => {
+    const RESEND = { ...PAGE, embedDimensions: 1024, connectionString: STORED_STRING };
+
+    beforeEach(() => {
+      h.settings = { ...SAVED, connectionString: STORED_STRING };
+    });
+
+    it('stores nothing and records nothing when the width lock refuses the new width', async () => {
+      h.vectorType = 'vector(2560)';
+      const res = await put(RESEND);
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { code: string }).code).toBe('embed_dimensions_locked');
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.events).toEqual(['begin', 'lock', 'read', 'rollback', 'close']);
+    });
+
+    it('stores nothing and records nothing when the store cannot be reached', async () => {
+      h.connect.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+      const res = await put(RESEND);
+
+      expect(res.status).toBe(500);
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.events).toEqual([]);
+    });
+
+    it('stores it once, with its one audit row, inside the lock after the width is read and before the mode', async () => {
+      const res = await put(RESEND);
+
+      expect(res.status).toBe(200);
+      expect(h.events.slice(0, 5)).toEqual(['begin', 'lock', 'read', 'set-secret', 'audit']);
+      expect(h.events).toContain(MODE);
+      expect(h.events.filter((event) => event === 'audit')).toHaveLength(1);
+      expect(h.setSecret).toHaveBeenCalledTimes(1);
     });
   });
 });
