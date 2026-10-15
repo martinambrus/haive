@@ -179,14 +179,16 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
       // that stamp anchors the runtime reaper's paused-grace.
       if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
       const pausedAt = new Date();
-      await db
-        .update(schema.tasks)
-        .set({ pausedAt, updatedAt: pausedAt })
-        .where(eq(schema.tasks.id, taskId));
-      await appendTaskEvent(db, taskId, null, 'task.paused', {
-        by: actorUserId,
-        byAdmin: true,
-        reason: 'maintenance',
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.tasks)
+          .set({ pausedAt, updatedAt: pausedAt })
+          .where(eq(schema.tasks.id, taskId));
+        await appendTaskEvent(tx, taskId, null, 'task.paused', {
+          by: actorUserId,
+          byAdmin: true,
+          reason: 'maintenance',
+        });
       });
       await audit({ pausedAt: pausedAt.toISOString() });
       return c.json({ ok: true, pausedAt: pausedAt.toISOString() });

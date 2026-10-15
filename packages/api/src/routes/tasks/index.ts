@@ -1290,11 +1290,13 @@ taskRoutes.post('/:id/action', async (c) => {
       // deadline out indefinitely.
       if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
       const pausedAt = new Date();
-      await db
-        .update(schema.tasks)
-        .set({ pausedAt, updatedAt: pausedAt })
-        .where(eq(schema.tasks.id, id));
-      await appendTaskEvent(db, id, null, 'task.paused', { by: userId });
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.tasks)
+          .set({ pausedAt, updatedAt: pausedAt })
+          .where(eq(schema.tasks.id, id));
+        await appendTaskEvent(tx, id, null, 'task.paused', { by: userId });
+      });
       // Nothing is killed and nothing is superseded: the CLI in flight runs to completion
       // and the worker's gates hold the task at the NEXT step / the next queued invocation.
       logger.info({ taskId: id }, 'task paused');
