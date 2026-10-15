@@ -83,6 +83,8 @@ The CANCEL teardown releases the task's `merge_dir_claims` rows once `cleanupTas
 
 A repository delete records its two cleanup jobs (per-project RAG databases, then runners, env images and `haive_repos` files) as `repo_cleanups` rows inside the delete's own transaction, with no foreign key to the repository that is going. The api queues the jobs after commit, passing each row's id as `cleanupId`, and a queue that refuses them no longer fails the request; the handlers delete their row when they succeed. The same sweep (`redriveRepoCleanups`) queues again any row stamped `last_enqueued_at` ten minutes ago, or never stamped ten minutes after it was written (so it does not race the api's own enqueue), claiming the row on its stamp, counting the attempt only once a queue has taken the job (a refused enqueue puts the stamp back and spends nothing), and carrying it in the job id (`repo-cleanup-<id>-<attempt>`, hyphens, since BullMQ only tolerates a colon in a custom id as a compatibility carve-out for three-part repeat ids), and drops with a warning a row whose job a queue has taken five times (`REPO_CLEANUP_MAX_ATTEMPTS`) so a cleanup that never succeeds is not looped on.
 
+A custom bundle left at `syncing` five minutes after its last update, with no waiting, active, delayed, prioritized or waiting-children job naming it, is marked `failed` with a reason by the same sweep (`reconcileStrandedSyncingBundles`), never re-driven: failed is what re-enables Resync and Replace ZIP. The update is guarded on the status and on that age, since a resync or a replace puts a bundle back at `syncing` with a fresh `updated_at`. The routes need it less often than before: a zip complete keys the bundle and its job (`ingest-zip-<uploadId>`) on the upload, so a repeated or resumed complete finds both instead of making a second bundle, and a job that cannot be queued marks its bundle failed at once (`addBundleJobOrMarkFailed`).
+
 **START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
 `running`, pointed at its first step, in one statement fenced on the epoch START read. A START that
 finds the task anywhere else — redelivered after the task ran on, a second START a task Retry
@@ -185,7 +187,11 @@ the kill and a Retry that failed in between would otherwise read as the stop's. 
 loses takes back every write before it. While new work is refused it does nothing at all — no write,
 no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
 under the fence, or the resume throws anything else, that task stays failed with its watch armed and
-the poll goes on to the next armed task (`checkProviderRecovery`). A pass a Stop cut off
+the poll goes on to the next armed task (`checkProviderRecovery`). A repository delete cancels its open tasks the same way:
+it locks their open step rows (by id) before it writes any task row (`cancelOpenTasksForRepo`), since
+taking the task rows first deadlocked it with a step Retry or a worker's step claim; the wait for those
+rows can let a Stop or a completion end a task, so it then re-reads and locks the task rows and cancels
+only those still open. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and

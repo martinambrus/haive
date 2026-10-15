@@ -686,6 +686,88 @@ describe('validateCustomTool: the params', () => {
   });
 });
 
+describe('validateCustomTool: which parameter a problem is about', () => {
+  const STATUS = 'https://api.example.com/v1/status';
+  const paramsOf = (tool: HttpGetTool, kind: string): Array<string | undefined> =>
+    validateCustomTool(tool, withRepo)
+      .filter((problem) => problem.kind === kind)
+      .map((problem) => problem.param);
+
+  it('names each of two unused parameters', () => {
+    const tool = http({ url: STATUS, query: [], params: [boolParam('a'), boolParam('b')] });
+    expect(paramsOf(tool, 'tool-param-unused')).toEqual(['a', 'b']);
+  });
+
+  it('names each of two invalid parameters', () => {
+    const params = [boolParam('a', { description: '' }), boolParam('b', { description: '' })];
+    expect(
+      paramsOf(http({ url: STATUS, query: ['a', 'b'], params }), 'tool-param-invalid'),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('names each of two undeclared names, whether the path or the query list uses it', () => {
+    const tool = http({ url: 'https://api.example.com/v1/{a}', query: ['b'], params: [] });
+    expect(paramsOf(tool, 'tool-param-undeclared')).toEqual(['a', 'b']);
+  });
+
+  it('names each of two parameters used more than once', () => {
+    const tool = http({
+      url: 'https://api.example.com/v1/{a}/{b}',
+      query: ['a', 'b'],
+      params: [stringParam('a'), stringParam('b')],
+    });
+    expect(paramsOf(tool, 'tool-param-reused')).toEqual(['a', 'b']);
+  });
+
+  it('names each of two names that parameters share', () => {
+    const params = [boolParam('a'), boolParam('a'), boolParam('b'), boolParam('b')];
+    expect(
+      paramsOf(http({ url: STATUS, query: ['a', 'b'], params }), 'tool-param-duplicate'),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('leaves the words of the problem as they were', () => {
+    const tool = http({ url: STATUS, query: [], params: [boolParam('a')] });
+    expect(validateCustomTool(tool, withRepo)).toEqual([
+      {
+        kind: 'tool-param-unused',
+        tool: 'repo_status',
+        param: 'a',
+        message: 'The parameter a is not used in the URL path or the query list.',
+      },
+    ]);
+  });
+
+  it('puts no param on a problem that is not about one parameter', () => {
+    const about = new Set<string>([
+      'tool-param-undeclared',
+      'tool-param-unused',
+      'tool-param-reused',
+      'tool-param-duplicate',
+      'tool-param-invalid',
+    ]);
+    const found = [
+      ...validateCustomTool(
+        http({ name: 'Bad', url: 'http://localhost/v1', timeoutMs: 1 }),
+        withRepo,
+      ),
+      ...validateCustomTool(rag({ scope: 'project', topK: 99 }), repoless),
+      ...validateCustomTools([http({ ...noParams }), http({ ...noParams })], withRepo),
+    ].filter((problem) => !about.has(problem.kind));
+    expect(found.map((problem) => problem.kind)).toEqual(
+      expect.arrayContaining([
+        'tool-name-invalid',
+        'tool-url-not-https',
+        'tool-timeout-out-of-range',
+        'tool-scope-needs-repository',
+        'tool-top-k-out-of-range',
+        'tool-name-duplicate',
+      ]),
+    );
+    for (const problem of found) expect(problem, problem.kind).not.toHaveProperty('param');
+  });
+});
+
 describe('validateCustomTool: the name, the description and the limits', () => {
   it.each([
     ['an uppercase letter', 'Repo'],

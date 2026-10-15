@@ -282,12 +282,12 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'step-token-not-own-line',
   ...CUSTOM_TOOL_PROBLEM_KINDS,
   'tool-no-longer-valid',
-  'tools-not-supported-yet',
 ] as const;
 export type PromptStepProblemKind = (typeof PROMPT_STEP_PROBLEM_KINDS)[number];
 
 export interface PromptStepProblem extends PromptTemplateProblem {
   kind: PromptStepProblemKind;
+  param?: string;
 }
 
 export type PromptStepValidationInput = Pick<
@@ -321,8 +321,15 @@ export function validatePromptStep(
   const add = (
     kind: PromptStepProblemKind,
     message: string,
-    at: { raw: string; start: number } = NO_TOKEN,
-  ) => problems.push({ kind, message, raw: at.raw, start: at.start });
+    at: { raw: string; start: number; param?: string } = NO_TOKEN,
+  ) =>
+    problems.push({
+      kind,
+      message,
+      raw: at.raw,
+      start: at.start,
+      ...(at.param === undefined ? {} : { param: at.param }),
+    });
 
   const { tokens, unknown } = scanTemplate(entry.template);
   for (const u of unknown) add('unknown-token', u.message, u);
@@ -430,7 +437,7 @@ export function validatePromptStep(
     );
   }
   for (const problem of validateCustomTools(entry.tools ?? [], ctx)) {
-    add(problem.kind, problem.message, { raw: problem.tool, start: 0 });
+    add(problem.kind, problem.message, { raw: problem.tool, start: 0, param: problem.param });
   }
   const invalid = entry.invalidTools ?? [];
   for (const name of invalid.slice(0, INVALID_TOOLS_SHOWN)) {

@@ -7,7 +7,12 @@ import {
 } from '@haive/shared/modularity';
 import type { FormValues } from '@/components/form-validation';
 import { pruneLoopLimits } from './composition-order';
-import { listedPromptSteps, samePromptSteps, type PromptSteps } from './prompt-step-editing';
+import {
+  listedPromptSteps,
+  samePromptSteps,
+  type PromptSteps,
+  type StoredPromptSteps,
+} from './prompt-step-editing';
 
 const FLAT_FIELDS = [
   'displayName',
@@ -149,7 +154,7 @@ export function compositionChanged(
   saved: {
     stepIds: readonly string[] | null;
     stepLoopLimitDefaults: Record<string, number>;
-    promptSteps?: PromptSteps;
+    promptSteps?: StoredPromptSteps;
   },
 ): boolean {
   return (
@@ -171,7 +176,7 @@ export function buildUpdateBody(
     saved: {
       stepIds: readonly string[] | null;
       stepLoopLimitDefaults: Record<string, number>;
-      promptSteps?: PromptSteps;
+      promptSteps?: StoredPromptSteps;
     };
   } | null,
   saved: Partial<Record<(typeof FLAT_FIELDS)[number], unknown>>,

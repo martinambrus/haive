@@ -13,6 +13,7 @@ import type {
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { buildRtkAwarenessBlock } from '../src/step-engine/steps/onboarding/_rtk-templates.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -43,6 +44,7 @@ async function setup(rtkFollowsLive: boolean | undefined) {
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
+    ...RECORD_WRITE_TABLES,
   });
   const agentRow = fake.insert(schema.onboardingArtifacts, {
     userId: USER,
@@ -111,12 +113,14 @@ async function setup(rtkFollowsLive: boolean | undefined) {
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
   const apply = () =>
-    upgradeApplyStep.apply(ctx, {
-      detected: plan,
-      formValues: {},
-      iteration: 0,
-      previousIterations: [],
-    });
+    recordWritten(
+      upgradeApplyStep.apply(ctx, {
+        detected: plan,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      }),
+    );
   const written = () => fake.rows(schema.onboardingArtifacts).filter((r) => r.taskId === TASK);
   return { root, apply, written };
 }

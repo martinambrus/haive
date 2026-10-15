@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { ComposableStepEntry, CustomTool, PromptStepEntry } from '@haive/shared/modularity';
+import type {
+  ComposableStepEntry,
+  CustomTool,
+  CustomToolParam,
+  PromptStepEntry,
+} from '@haive/shared/modularity';
 import { catalogEntries } from './composition-messages';
 import { TEST_CATALOG } from './composition-test-catalog';
 import {
@@ -195,6 +200,32 @@ describe('promptStepIssues', () => {
     const passing = { ...tool, url: 'https://api.example.com/v1/status' };
     expect(issues(['custom.t.a'], { a: entry('a', { tools: [passing] }) })).toEqual([]);
   });
+
+  it('names the parameter of each parameter problem, and of no other', () => {
+    const flag = (name: string): CustomToolParam => ({
+      name,
+      type: 'boolean',
+      description: 'A flag.',
+      required: false,
+    });
+    const tool: CustomTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of one repository.',
+      action: 'http-get',
+      url: 'http://api.example.com/v1/status',
+      query: [],
+      params: [flag('a'), flag('b')],
+      timeoutMs: 10_000,
+      maxResponseBytes: 32_768,
+    };
+    const out = issues(['custom.t.a'], { a: entry('a', { tools: [tool] }) });
+    expect(out.map((i) => [i.kind, i.raw, i.param])).toEqual([
+      ['tool-url-not-https', 'repo_status', undefined],
+      ['tool-param-unused', 'repo_status', 'a'],
+      ['tool-param-unused', 'repo_status', 'b'],
+    ]);
+    expect(out[0]).not.toHaveProperty('param');
+  });
 });
 
 describe('renamePromptStepTokens', () => {
@@ -256,5 +287,33 @@ describe('listedPromptSteps and samePromptSteps', () => {
     expect(samePromptSteps({ a: entry('a') }, { a: entry('a', { title: 'x' }) })).toBe(false);
     expect(samePromptSteps({ a: entry('a') }, {})).toBe(false);
     expect(samePromptSteps({}, {})).toBe(true);
+  });
+
+  it('W6 reports a change when only the tools differ, and none when they read the same', () => {
+    const tool: CustomTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of one repository.',
+      action: 'http-get',
+      url: 'https://api.example.com/v1/status',
+      query: [],
+      params: [],
+      timeoutMs: 10_000,
+      maxResponseBytes: 32_768,
+    };
+    const other: CustomTool = { ...tool, name: 'repo_list' };
+    const param: CustomToolParam = {
+      name: 'repo',
+      description: 'The repository.',
+      type: 'string',
+      required: true,
+      maxLength: 64,
+    };
+    const steps = (...tools: CustomTool[]) => ({ a: entry('a', { tools }) });
+    expect(samePromptSteps(steps(), steps(tool))).toBe(false);
+    expect(samePromptSteps(steps(tool), steps({ ...tool }))).toBe(true);
+    expect(samePromptSteps(steps(tool), steps({ ...tool, description: 'Another.' }))).toBe(false);
+    expect(samePromptSteps(steps(tool), steps({ ...tool, params: [param] }))).toBe(false);
+    expect(samePromptSteps(steps(tool, other), steps(other, tool))).toBe(false);
+    expect(samePromptSteps({ a: entry('a', { tools: undefined }) }, steps())).toBe(true);
   });
 });

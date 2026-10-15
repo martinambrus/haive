@@ -195,10 +195,23 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
           requiresRepository: row.requiresRepository,
         })
       : [];
+  const promptStepIssues =
+    row.source === 'admin' && catalog.synced
+      ? checkPromptSteps(
+          {
+            slug: row.slug,
+            stepIds: row.stepIds ?? [],
+            requiresRepository: row.requiresRepository,
+          },
+          parsePromptSteps(row.promptSteps),
+          catalog,
+        )
+      : [];
   return c.json({
     taskType: { ...row, editableFields: editableFieldsOf(row) },
     availability: availabilityOf(row, switches, catalog, modules),
     compositionIssues,
+    promptStepIssues,
   });
 });
 

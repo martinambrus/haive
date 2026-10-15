@@ -124,9 +124,11 @@ if (lock.status !== 0) {
     `pnpm install --lockfile-only failed${lock.error ? `: ${lock.error.message}` : ''}; the package.json edits were reverted`,
   );
 }
+const INSTALL_MAY_LAG = 'HAIVE_INSTALL_MAY_LAG';
 const gen = spawnSync(process.execPath, [join(root, 'scripts', 'gen-modules.mjs')], {
   cwd: root,
   stdio: 'inherit',
+  env: { ...process.env, [INSTALL_MAY_LAG]: '1' },
 });
 if (gen.status !== 0) {
   fail('gen-modules rejected the result above; the dependency lists and pnpm-lock.yaml are edited');

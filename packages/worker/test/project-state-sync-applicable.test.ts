@@ -30,6 +30,7 @@ import {
   type UpgradePlanDetect,
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 
 // A sync that changes the render context of a repository holding a claim writes, in the same
 // transaction, exactly the applicable template ids its context renders (design-d.md as amended by
@@ -437,12 +438,14 @@ async function setup(seed: Seed = {}) {
 
   /** 02's apply of a plan 01 detected, with the form left at its defaults. */
   const applyPlan = async (detected: UpgradePlanDetect) => {
-    await upgradeApplyStep.apply(upgradeCtx(), {
-      detected: { ...detected, backfilledRows: 0 },
-      formValues: {},
-      iteration: 0,
-      previousIterations: [],
-    });
+    await recordWritten(
+      upgradeApplyStep.apply(upgradeCtx(), {
+        detected: { ...detected, backfilledRows: 0 },
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      }),
+    );
   };
 
   /** 01's detect and apply for the upgrade task of this repository, run as its owner. */
