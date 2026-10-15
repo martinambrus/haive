@@ -843,6 +843,86 @@ describe.each([
     },
   );
 
+  describe('when the task changes after the route read it', () => {
+    /** The route's own read answers as the task stood, and the task changes right after it. */
+    const changesAfterTheRead = (
+      fake: ReturnType<typeof withParkedForm>,
+      row: Record<string, unknown>,
+    ) => {
+      const read = fake.db.query.tasks.findFirst;
+      fake.db.query.tasks.findFirst = async (opts) => {
+        const seen = await read(opts);
+        fake.patch(schema.tasks, TASK, row);
+        return seen;
+      };
+    };
+    const failsAfterTheRead = (fake: ReturnType<typeof withParkedForm>) =>
+      changesAfterTheRead(fake, { status: 'failed', errorMessage: 'boom' });
+
+    it('answers 503 and queues and writes nothing for a task that failed meanwhile while the system drains', async () => {
+      const fake = withParkedForm('waiting_user');
+      failsAfterTheRead(fake);
+      h.state = 'draining';
+
+      const res = await answer();
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(h.queued).toEqual([]);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'failed' });
+      expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ waitingStartedAt: new Date(0) });
+      expect(fake.rows(schema.taskEvents)).toEqual([]);
+    });
+
+    it('reads the stored state under the fence for a task that failed meanwhile', async () => {
+      const fake = withParkedForm('waiting_user');
+      failsAfterTheRead(fake);
+      const stored = vi.spyOn(configService, 'getFresh').mockClear().mockResolvedValue('normal');
+
+      expect((await answer()).status).toBe(200);
+
+      expect(stored).toHaveBeenCalledTimes(1);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: statusAfter });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+    });
+
+    it('reads no state for a task that stays live, the answer reopening nothing', async () => {
+      const fake = withParkedForm('waiting_user');
+      const stored = vi.spyOn(configService, 'getFresh').mockClear().mockResolvedValue('draining');
+
+      expect((await answer()).status).toBe(200);
+
+      expect(stored).not.toHaveBeenCalled();
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'waiting_user' });
+    });
+
+    it('takes the answer to a task that was reopened meanwhile, though the system drains by then', async () => {
+      const fake = withParkedForm('failed');
+      changesAfterTheRead(fake, { status: 'waiting_user', errorMessage: null });
+      const stored = turnsDrainingAfterTheEarlyCheck();
+
+      expect((await answer()).status).toBe(200);
+
+      expect(stored).toHaveBeenCalledTimes(1);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'waiting_user' });
+      expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ waitingStartedAt: null });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+    });
+
+    it('does not reopen a task that failed after the answer read its status, though the system drains', async () => {
+      const fake = withParkedForm('waiting_user');
+      h.state = 'draining';
+      fake.hooks.beforeUpdate = (table) => {
+        if (table !== schema.taskSteps) return;
+        fake.patch(schema.tasks, TASK, { status: 'failed', errorMessage: 'boom' });
+      };
+
+      expect((await answer()).status).toBe(200);
+
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'failed', errorMessage: 'boom' });
+    });
+  });
+
   describe('behind the real maintenance gate', () => {
     const answerThroughGate = () =>
       gated.request(`/tasks/${TASK}/steps/${STEP}/${route}`, request({ body }));

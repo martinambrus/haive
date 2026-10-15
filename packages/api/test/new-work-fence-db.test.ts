@@ -57,6 +57,7 @@ import { Hono } from 'hono';
 import { TASK_JOB_NAMES } from '@haive/shared';
 import { maintenanceRoutes } from '../src/routes/maintenance.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
+import { retryTaskAtStep } from '../src/routes/tasks/steps.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -354,6 +355,152 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       expect(await tasks()).toHaveLength(0);
       expect(h.queued).toEqual([]);
       expect(h.reads).toEqual(['normal', 'draining']);
+    });
+  });
+
+  describe('a Retry racing an answer to the same failed task', () => {
+    const STEP = '11d-skill-sync';
+    const ROW_LOCK =
+      /^(update "(tasks|task_steps)" |select [\s\S]* from "(tasks|task_steps)" [\s\S]* for (no key )?update)/;
+    type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+    type Session = {
+      prepareQuery: (
+        query: { sql: string },
+        ...rest: unknown[]
+      ) => { execute: (...args: unknown[]) => Promise<unknown> };
+    };
+    interface Side {
+      pid: number | undefined;
+      reached: boolean;
+      aborted: string | undefined;
+      release: () => void;
+      released: Promise<void>;
+    }
+
+    const side = (): Side => {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { pid: undefined, reached: false, aborted: undefined, release, released };
+    };
+    const errorCode = (err: unknown) => {
+      const { code, cause } = err as { code?: string; cause?: { code?: string } };
+      return cause?.code ?? code ?? String(err);
+    };
+    /** Its transactions hold the first task or step row they lock until the side is released. */
+    const holdingItsFirstRowLock = (who: Side): Database =>
+      new Proxy(db, {
+        get(target, prop) {
+          const value: unknown = Reflect.get(target, prop, target);
+          if (prop !== 'transaction') {
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+          return (fn: (tx: Tx) => Promise<unknown>) =>
+            target
+              .transaction(async (tx) => {
+                const [backend] = await tx.execute<{ pid: number }>(
+                  sql`select pg_backend_pid() as pid`,
+                );
+                who.pid = backend?.pid;
+                const session = (tx as unknown as { session: Session }).session;
+                const prepare = session.prepareQuery.bind(session);
+                session.prepareQuery = (query, ...rest) => {
+                  const prepared = prepare(query, ...rest);
+                  const execute = prepared.execute.bind(prepared);
+                  prepared.execute = async (...args) => {
+                    const result = await execute(...args);
+                    if (!who.reached && ROW_LOCK.test(query.sql)) {
+                      who.reached = true;
+                      await who.released;
+                    }
+                    return result;
+                  };
+                  return prepared;
+                };
+                return fn(tx);
+              })
+              .catch((err: unknown) => {
+                who.aborted = errorCode(err);
+                throw err;
+              });
+        },
+      });
+    const waitsForALock = async (who: Side) => {
+      if (who.pid === undefined) return false;
+      const [row] = await db.execute<{ waits: boolean }>(
+        sql`select cardinality(pg_blocking_pids(${who.pid}::int)) > 0 as waits`,
+      );
+      return row?.waits === true;
+    };
+    const until = (done: () => boolean | Promise<boolean>) =>
+      vi.waitFor(async () => expect(await done()).toBe(true), { timeout: 5_000, interval: 20 });
+
+    const parkedFailedTask = async () => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId: USER,
+          type: 'workflow',
+          title: 'fence-parked',
+          status: 'failed',
+          errorMessage: 'boom',
+          completedAt: new Date(),
+          currentStepId: STEP,
+        })
+        .returning();
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: STEP,
+          stepIndex: 1,
+          runSeq: 1,
+          round: 0,
+          title: 'a step',
+          status: 'waiting_form',
+          waitingStartedAt: new Date(Date.now() - 60_000),
+        })
+        .returning();
+      return { task: task!, step: step! };
+    };
+    /** The Retry holds its first lock; the answer holds one or waits for it; then both go on. */
+    const race = async (route: 'submit' | 'clarify', body: unknown) => {
+      const { task, step } = await parkedFailedTask();
+      const retrier = side();
+      const answerer = side();
+      const retry = retryTaskAtStep(holdingItsFirstRowLock(retrier), task.id, USER, step).then(
+        () => 'committed',
+        (err: unknown) => errorCode(err),
+      );
+      try {
+        await until(() => retrier.reached);
+        h.db = holdingItsFirstRowLock(answerer);
+        const answer = post(`/tasks/${task.id}/steps/${STEP}/${route}`, body);
+        await until(async () => answerer.reached || (await waitsForALock(answerer)));
+        retrier.release();
+        answerer.release();
+        const status = (await answer).status;
+        return { task, retry: await retry, answer: answerer.aborted ?? status };
+      } finally {
+        retrier.release();
+        answerer.release();
+        await retry;
+        await Promise.allSettled(requests);
+        h.db = db;
+      }
+    };
+
+    describe.each([
+      { route: 'submit' as const, body: { values: { choice: 'yes' } } },
+      { route: 'clarify' as const, body: { answer: 'Keep the incoming change.' } },
+    ])('$route', ({ route, body }) => {
+      it('commits both, whichever of them waits for the other', async () => {
+        const { task, retry, answer } = await race(route, body);
+
+        expect({ retry, answer }).toEqual({ retry: 'committed', answer: 200 });
+        expect(await statusOf(task.id)).toBe('running');
+      }, 20_000);
     });
   });
 });

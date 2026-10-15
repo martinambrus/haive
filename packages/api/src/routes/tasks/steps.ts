@@ -69,6 +69,17 @@ import {
  *  assignable, so callers may pass either. Mirrors the same alias in @haive/database. */
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
+/** Admits the answer that reopens a failed task; no row lock, which would cross a Retry's. */
+async function admitAnswer(tx: DbHandle, taskId: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId));
+  if (row?.status !== 'failed') return false;
+  await admitNewWork(tx);
+  return true;
+}
+
 /** Blank a set of step rows so the worker re-runs them from detect: supersede their live
  *  invocations, drop their agent minings, clear the wedged DAG level, and zero each row's
  *  live state after folding its finishing run into carried_*.
@@ -710,7 +721,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
     : 0;
   await db.transaction(async (tx) => {
-    if (task.status === 'failed') await admitNewWork(tx);
+    await admitAnswer(tx, id);
     await tx
       .update(schema.taskSteps)
       .set({
@@ -784,7 +795,7 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
     : 0;
   await db.transaction(async (tx) => {
-    if (task.status === 'failed') await admitNewWork(tx);
+    const reopens = await admitAnswer(tx, id);
     await refuseReviveBesideLive(tx, id);
     // Persist the answer to task_events (NOT form_values) and close the idle period.
     await tx.insert(schema.taskEvents).values({
@@ -799,6 +810,7 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
       .where(eq(schema.taskSteps.id, step.id));
 
     await appendTaskEvent(tx, id, step.id, 'step.clarified', { stepId });
+    if (!reopens) return;
     // Answering reopens a task that failed while this form waited. The answer rides task_events
     // rather than the job, so the worker cannot tell this advance from one queued before the failure.
     await tx
