@@ -247,9 +247,14 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
 
   async function createCredential(
     userId: string,
-    over: { host?: string; provider?: string | null; apiBaseUrl?: string | null } = {},
+    over: {
+      host?: string;
+      provider?: string | null;
+      apiBaseUrl?: string | null;
+      secret?: string;
+    } = {},
   ): Promise<{ id: string; secret: string }> {
-    const secret = `stub${randomUUID()}`;
+    const secret = over.secret ?? `stub${randomUUID()}`;
     secrets.push(secret);
     const dek = generateDek();
     const [credential] = await db
@@ -1665,6 +1670,33 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
         'the log capture must see the request log',
       ).toBe(true);
       expect(await leakSites(w.secret)).toEqual([]);
+    });
+
+    it('keeps every part of a long token out of an echo the error cut would split', async () => {
+      const long = `stub${randomUUID()}${'q'.repeat(560)}`;
+      const credential = await createCredential(ownerId, { secret: long });
+      const connectionId = await createConnection(ownerId, credential.id);
+      const repositoryId = await createRepository(ownerId, GITHUB_REMOTE);
+      const taskId = await createTask(ownerId, repositoryId);
+      const stepId = await createStep(taskId);
+      const invocationId = await createInvocation(taskId, stepId, [binding(connectionId, 'read')]);
+      const w: World = {
+        repositoryId,
+        credentialId: credential.id,
+        connectionId,
+        taskId,
+        stepId,
+        invocationId,
+        secret: long,
+      };
+      vendor.respond = (made) =>
+        vendorJson(401, { pad: 'p'.repeat(60), received: made.headers.authorization });
+
+      expectError(await call(w, GET, { prNumber: '42' }), 502, 'vendor-auth');
+
+      const windows = Array.from({ length: long.length - 11 }, (_, i) => long.slice(i, i + 12));
+      const seen = [...bodies, JSON.stringify(await rows()), ...logs];
+      expect(windows.filter((window) => seen.some((text) => text.includes(window)))).toEqual([]);
     });
 
     it('keeps the Basic form a Bitbucket Cloud token travels in out of everything the vendor echoes', async () => {

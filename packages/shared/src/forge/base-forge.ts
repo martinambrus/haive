@@ -18,6 +18,7 @@ export const FORGE_REQUEST_TIMEOUT_MS = 30_000;
 // An open-PR lookup on Gitea or Bitbucket Server reads a whole page of pull requests, bodies included.
 export const FORGE_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
 const ERROR_BODY_MAX_BYTES = 4096;
+const REDACTED = '[redacted]';
 
 /** Shared base for the forge adapters. Provides one authenticated JSON request
  *  helper that maps HTTP failures to typed ForgeErrors; subclasses supply their
@@ -40,10 +41,11 @@ export abstract class BaseForgeProvider implements ForgeProvider {
     body?: unknown,
   ): Promise<T> {
     const url = `${ctx.apiBase}${path}`;
+    const auth = this.authHeaders(ctx);
     const headers: Record<string, string> = {
       Accept: 'application/json',
       'User-Agent': 'haive',
-      ...this.authHeaders(ctx),
+      ...auth,
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -76,7 +78,8 @@ export abstract class BaseForgeProvider implements ForgeProvider {
     }
 
     if (!res.ok) {
-      throw mapHttpError(this.name, res.status, res.headers, await readBodyText(res), method, path);
+      const detail = await readBodyText(res, wireSecrets(ctx.token, auth));
+      throw mapHttpError(this.name, res.status, res.headers, detail, method, path);
     }
 
     if (res.status === 204) return undefined as T;
@@ -123,9 +126,34 @@ async function readBounded(
   }
 }
 
-async function readBodyText(res: Response): Promise<string> {
+/** The credential text a request sends: the token and each auth header's value after its scheme, longest first. */
+function wireSecrets(token: string, auth: Record<string, string>): string[] {
+  const values = Object.values(auth).map((value) => value.slice(value.indexOf(' ') + 1));
+  return [...new Set([token, ...values])]
+    .filter((secret) => secret.length > 0)
+    .sort((a, b) => b.length - a.length);
+}
+
+/** A vendor may echo the Authorization header, so its body loses every secret before any cut, and a read that
+ *  stopped early also loses a trailing start of one. */
+function redactSecrets(text: string, secrets: readonly string[], cut: boolean): string {
+  let out = secrets.reduce((acc, secret) => acc.split(secret).join(REDACTED), text);
+  if (!cut) return out;
+  for (const secret of secrets) {
+    for (let k = Math.min(secret.length - 1, out.length); k > 0; k -= 1) {
+      if (out.endsWith(secret.slice(0, k))) {
+        out = `${out.slice(0, -k)}${REDACTED}`;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+async function readBodyText(res: Response, secrets: readonly string[]): Promise<string> {
   try {
-    const t = (await readBounded(res, ERROR_BODY_MAX_BYTES)).text.trim();
+    const { text, truncated } = await readBounded(res, ERROR_BODY_MAX_BYTES);
+    const t = redactSecrets(text, secrets, truncated).trim();
     return t.length > 500 ? `${t.slice(0, 500)}…` : t;
   } catch {
     return '';
