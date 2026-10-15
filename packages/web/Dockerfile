@@ -52,5 +52,7 @@ ENV PORT=3000
 COPY --from=builder /app/packages/web/public ./packages/web/public
 COPY --from=builder /app/packages/web/.next/standalone ./
 COPY --from=builder /app/packages/web/.next/static ./packages/web/.next/static
+# The module web parts this image compiled in; a channel build reads it back before it pushes.
+COPY --from=builder /app/packages/web/src/generated/modules.json ./packages/web/modules.generated.json
 EXPOSE 3000
 CMD ["node", "packages/web/server.js"]
