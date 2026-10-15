@@ -304,7 +304,7 @@ with it.
   proxy, no credential, `Accept-Encoding: identity`, a media-type allow-list (a missing Content-Type is
   refused), a byte cap and one deadline for the whole call. Only a test may swap the resolver.
 
-## Creator mode (server side)
+## Creator mode
 
 `type_draft` is a hidden built-in: static `["01-type-draft"]`, not selectable, no repository, not gated
 by the custom switch (its source is builtin), created only by `POST /admin/task-type-drafts`. Draft
@@ -325,6 +325,19 @@ tasks are listed in the task list like any other task (a product decision).
   queued in one transaction, then enqueues the start (a crash in between used to leave it `created`
   forever); `GET /admin/task-type-drafts/:taskId` answers its owner only, with `awaitingMessage` true
   only while the newest step row is `waiting_form` with `waiting_started_at` set.
+
+- **The panel** (`task-type-creator-panel.tsx`) sits in the editor on the create page and on an
+  admin-made type, never on a built-in or module type. It remembers the conversation per viewer and
+  slug in localStorage (`haive:task-type-draft:<slug|new>`; the page works without storage), resumes it
+  unless the GET answers 404 or a finished status, and polls every 2 s while the agent works. "Load
+  into editor" puts the latest draft into the form as unsaved changes and sends nothing; Save stays
+  the only write. On a saved type the draft's custom step ids and `{{step:}}` quotes are renamed onto
+  the saved slug, since an agent may rename the type against its instruction. The state sent to the
+  agent carries only the draftable keys; a start whose state is over 64 KiB goes without it and says
+  so. A successful create forgets the create page's conversation (its task stays in the task list);
+  it is not carried to the new type's page, whose slug the task would read as taken.
+- **The task page** shows only the message box: the step's `draft` field is `hidden`, which the form
+  renderer never draws and validation never requires, while its submitted value is still accepted.
 
 ## Do not change
 
