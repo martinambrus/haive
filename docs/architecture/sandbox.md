@@ -185,18 +185,16 @@ An agent's MCP servers reach the api with a bearer token the worker mints per ta
 `@haive/shared/task-token`): `v1.<payload>.<mac>`, the payload `{aud, taskId, exp}` with a 24-hour
 expiry, and the MAC keyed per audience from `CONFIG_ENCRYPTION_KEY`, so a token verifies only for the
 audience it names. `haive-rag` gets a `rag` token for `/rag/search` and `ddev-control` a `ddev` token
-for `/ddev/*`; neither opens the other's routes. `/rag/search` still takes the older two-part token,
-which names no audience, until the ones minted before the change expire (drop `verifyRagToken` and
-`signRagToken` then); `/ddev/*` never takes it. Both refuse a body over 64 KiB with 413 before the
-token is read (`sandboxBodyLimit`), with a handler of its own so the 413 is a JSON error naming the
-limit; Hono's default throws an `HTTPException` that `errorHandler` answers with its own status, as
-plain text. The git credential helper's token (`signRepoGitCredToken`, `shared/src/git/token.ts`)
+for `/ddev/*`; neither opens the other's routes, and neither takes the older audience-less two-part
+token any more (its last ones expired a day after the change). Both refuse a body over 64 KiB with
+413 before the token is read (`sandboxBodyLimit`), with a handler of its own so the 413 is a JSON
+error naming the limit; Hono's default throws an `HTTPException` that `errorHandler` answers with its
+own status, as plain text. The git credential helper's token (`signRepoGitCredToken`, `shared/src/git/token.ts`)
 has the same `v1.<payload>.<mac>` shape, the payload `{repositoryId, userId, exp}` with a 12-hour
 expiry and a MAC key derived for that one purpose, so no task token opens `/internal/git-credential`
 and this token opens nothing else. The worker writes it into the repo shell as a file,
 `~/.haive-git-credential-token` (mode 0600, replaced by a rename so a push never reads half of it),
 not into the env, and writes a fresh one each time the shell is opened again and, from the terminal
-reaper, once half its expiry has passed, so a shell kept open for days still pushes. The helper falls
-back to `HAIVE_GIT_CRED_TOKEN` for a shell started before the file existed. That route still takes the older two-part token, keyed with the
-raw secret, until the ones minted before the change expire (drop `verifyLegacyRepoGitCredToken`
-then).
+reaper, once half its expiry has passed, so a shell kept open for days still pushes. The helper
+reads only that file, and the route takes only this token: the env fallback and the older two-part
+token keyed with the raw secret went once the last of them had expired.
