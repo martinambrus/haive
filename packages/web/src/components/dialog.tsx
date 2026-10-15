@@ -14,7 +14,7 @@ interface DialogProps {
 }
 
 const TABBABLE = 'a[href], button, input, select, textarea, [tabindex]';
-const openPanels: { panel: HTMLElement; opener: HTMLElement | null | undefined }[] = [];
+const openPanels: { panel: HTMLElement; opener: HTMLElement | null }[] = [];
 
 const isRadio = (el: Element): el is HTMLInputElement => (el as HTMLInputElement).type === 'radio';
 const inGroup = (a: HTMLInputElement, b: HTMLInputElement) =>
@@ -44,9 +44,10 @@ function leavesPanel(panel: HTMLElement, edge: HTMLElement | undefined, backward
 
 export function Dialog({ open, onOpenChange, children, className }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const openerRef = useRef<HTMLElement | null | undefined>(undefined);
-  // Read while rendering: a child with autoFocus takes focus before any effect runs.
-  if (open && openerRef.current === undefined) {
+  const openerRef = useRef<HTMLElement | null>(null);
+  const committedRef = useRef(false);
+  // Read on each render until the opening commits: autoFocus takes focus before any effect runs.
+  if (open && !committedRef.current) {
     openerRef.current = document.activeElement as HTMLElement | null;
   }
 
@@ -73,6 +74,7 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
     const panel = panelRef.current;
     if (!open || !panel) return;
     const entry = { panel, opener: openerRef.current };
+    committedRef.current = true;
     if (!panel.contains(document.activeElement)) panel.focus();
     openPanels.push(entry);
     const onTab = (e: KeyboardEvent) => {
@@ -91,7 +93,8 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
       openPanels.splice(at, 1);
       // Still attached means Strict Mode's rehearsal, not a close.
       if (panel.isConnected) return;
-      openerRef.current = undefined;
+      committedRef.current = false;
+      openerRef.current = null;
       // A dialog opened from inside this one gives focus back where this one would have.
       for (const above of openPanels.slice(at)) {
         if (above.opener && panel.contains(above.opener)) above.opener = entry.opener;

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { act, StrictMode, type ReactNode } from 'react';
+import { act, startTransition, StrictMode, use, type ReactNode } from 'react';
 import type { Root } from 'react-dom/client';
 
 // This package has no DOM library, so this is the smallest DOM that react-dom/client and focus need.
@@ -545,6 +545,15 @@ const onlyRadios = (
   </>
 );
 
+const forever = new Promise<void>(() => {});
+let reached = false;
+
+function Suspends() {
+  reached = true;
+  use(forever);
+  return null;
+}
+
 function Stack({ top }: { top: boolean }) {
   return (
     <Scene open>
@@ -960,5 +969,26 @@ describe('Dialog focus', () => {
     byId('r1').focus();
     press('Tab');
     expect(where()).toBe('input#r2');
+  });
+
+  it('C14 a render that opens the dialog and is abandoned does not choose the opener', async () => {
+    reached = false;
+    show(<Scene />);
+    byId('before').focus();
+    await act(async () => {
+      startTransition(() => {
+        root.render(
+          <Scene open>
+            <Suspends />
+          </Scene>,
+        );
+      });
+    });
+    expect(reached).toBe(true);
+    expect(panels()).toHaveLength(0);
+    byId('opener').focus();
+    show(<Scene open>{buttons}</Scene>);
+    show(<Scene>{buttons}</Scene>);
+    expect(where()).toBe('button#opener');
   });
 });
