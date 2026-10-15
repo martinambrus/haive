@@ -17,6 +17,7 @@ import {
 } from '../../../queues/cli-exec-queue.js';
 import { resolveSecretMasks } from '../../../queues/cli-exec/secret-mask.js';
 import { repoGitDataBoundary } from '../../../queues/cli-exec/gitfile-mask.js';
+import { haiveDataBoundary } from '../../../queues/cli-exec/haive-data-boundary.js';
 
 /** Per-CLI project-scope plugin directory for drupal-php-lsp. Must match the
  *  DRUPAL_LSP_TARGET_BASES in onboarding step 07. */
@@ -237,7 +238,11 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     const sandboxWorkdir = SANDBOX_WORKDIR;
     const authMounts = await resolveAuthMounts(ctx.db, provider, ctx.taskId);
     const gitData = await repoGitDataBoundary(repoMount, { hasWorktree, hasRepo });
-    const mounts: DockerVolumeMount[] = [...authMounts, ...gitData.mounts];
+    const mounts: DockerVolumeMount[] = [
+      ...authMounts,
+      ...gitData.mounts,
+      ...(await haiveDataBoundary(repoMount, { hasRepo })),
+    ];
     if (repoMount) mounts.push(repoMount);
 
     // This step runs third-party plugin code against the mounted repo with network

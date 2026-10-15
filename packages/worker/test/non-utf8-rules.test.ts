@@ -32,6 +32,7 @@ import { applyKbWrites } from '../src/step-engine/steps/onboarding/_kb-write.js'
 import { restoreRulesImportStubs } from '../src/step-engine/steps/onboarding/_rules-files.js';
 import { ensureGitExcludeEntry } from '../src/repo/git-init.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -123,8 +124,7 @@ describe('02 and a rules file that is not UTF-8', () => {
       customBundles: schema.customBundles,
       customBundleItems: schema.customBundleItems,
       cliProviders: schema.cliProviders,
-      projectStateSync: schema.projectStateSync,
-      projectStateConflicts: schema.projectStateConflicts,
+      ...RECORD_WRITE_TABLES,
     });
     fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
     const plan = {
@@ -154,12 +154,14 @@ describe('02 and a rules file that is not UTF-8', () => {
       throwIfCancelled: () => {},
       logger: quietLogger,
     } as unknown as StepContext;
-    return upgradeApplyStep.apply(ctx, {
-      detected: plan,
-      formValues,
-      iteration: 0,
-      previousIterations: [],
-    });
+    return recordWritten(
+      upgradeApplyStep.apply(ctx, {
+        detected: plan,
+        formValues,
+        iteration: 0,
+        previousIterations: [],
+      }),
+    );
   }
 
   it('keeps every byte of an AGENTS.md it would write the rules region into, and says why', async () => {

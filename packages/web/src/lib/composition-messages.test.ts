@@ -451,9 +451,19 @@ describe('describePromptStepIssue', () => {
     const text = (kind: Parameters<typeof describePromptStepIssue>[0]['kind'], raw?: string) =>
       describePromptStepIssue({ kind, stepId: 's', ...(raw === undefined ? {} : { raw }) });
 
-    it('says tools are not supported yet and what to do', () => {
-      expect(text('tools-not-supported-yet')).toContain('not supported yet');
-      expect(text('tools-not-supported-yet')).toContain('Remove');
+    it('has no tool message that calls tools unsupported', () => {
+      for (const kind of [...CUSTOM_TOOL_PROBLEM_KINDS, 'tool-no-longer-valid' as const]) {
+        expect(text(kind, 'repo_status'), kind).not.toMatch(/not supported/i);
+      }
+    });
+
+    it('W10 no longer knows tools-not-supported-yet, as a problem kind or as a message', () => {
+      expect(PROMPT_STEP_PROBLEM_KINDS).not.toContain('tools-not-supported-yet');
+      const retired = describePromptStepIssue({
+        kind: 'tools-not-supported-yet' as never,
+        stepId: 's',
+      });
+      expect(retired ?? '').not.toContain('not supported yet');
     });
 
     it('names a stored tool that no longer passes its checks, and counts the ones left unnamed', () => {
@@ -478,6 +488,43 @@ describe('describePromptStepIssue', () => {
 
     it('keeps a backtick in the tool name from closing the code span', () => {
       expect(text('tool-url-not-https', 'a`b')).toContain('`` a`b ``');
+    });
+
+    describe('a problem about one parameter', () => {
+      const ABOUT_ONE_PARAM = [
+        'tool-param-undeclared',
+        'tool-param-unused',
+        'tool-param-reused',
+        'tool-param-duplicate',
+        'tool-param-invalid',
+      ] as const;
+      const about = (kind: (typeof ABOUT_ONE_PARAM)[number], param?: string) =>
+        describePromptStepIssue({
+          kind,
+          stepId: 's',
+          raw: 'repo_status',
+          ...(param === undefined ? {} : { param }),
+        });
+
+      it('names the tool and the parameter, each in a code span', () => {
+        for (const kind of ABOUT_ONE_PARAM) {
+          expect(about(kind, 'page_size'), kind).toContain('`repo_status`');
+          expect(about(kind, 'page_size'), kind).toContain('`page_size`');
+        }
+      });
+
+      it('words two parameters of one tool apart', () => {
+        for (const kind of ABOUT_ONE_PARAM)
+          expect(about(kind, 'a'), kind).not.toBe(about(kind, 'b'));
+      });
+
+      it('keeps a backtick in the parameter name from closing the code span', () => {
+        expect(about('tool-param-unused', 'a`b')).toContain('`` a`b ``');
+      });
+
+      it('reads the same for no parameter name and for an empty one', () => {
+        for (const kind of ABOUT_ONE_PARAM) expect(about(kind, ''), kind).toBe(about(kind));
+      });
     });
 
     it('puts the limits of a tool in the words of its refusals', () => {
@@ -543,7 +590,20 @@ describe('promptStepIssuesOf', () => {
     expect(promptStepIssuesOf(undefined)).toEqual([]);
   });
 
-  it('keeps the tool kinds an api save answers with', () => {
+  it('passes the parameter a tool issue names through, with the rest of the issue', () => {
+    const issue = {
+      kind: 'tool-param-unused',
+      stepId: 'custom.t.a',
+      index: 0,
+      raw: 'repo_status',
+      start: 0,
+      param: 'page_size',
+      message: 'The parameter page_size is not used in the URL path or the query list.',
+    };
+    expect(promptStepIssuesOf([issue])).toEqual([issue]);
+  });
+
+  it('keeps the tool kinds an api save answers with, and drops the retired tools-not-supported-yet', () => {
     const out = promptStepIssuesOf([
       { kind: 'tools-not-supported-yet', stepId: 'custom.t.a', index: 0, raw: '', start: 0 },
       { kind: 'tool-url-not-https', stepId: 'custom.t.a', index: 0, raw: 'repo_status', start: 0 },
@@ -551,7 +611,6 @@ describe('promptStepIssuesOf', () => {
       { kind: 'too-many-tools', stepId: 'custom.t.a', index: 0, raw: '', start: 0 },
     ]);
     expect(out.map((i) => [i.kind, i.raw])).toEqual([
-      ['tools-not-supported-yet', ''],
       ['tool-url-not-https', 'repo_status'],
       ['tool-no-longer-valid', 'stale'],
       ['too-many-tools', ''],

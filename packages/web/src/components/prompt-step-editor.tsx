@@ -7,12 +7,15 @@ import {
   type PromptStepCapability,
   type PromptStepEntry,
 } from '@haive/shared/modularity';
+import type { StoredPromptStep } from '@/lib/api-client';
+import type { PromptStepIssue } from '@/lib/composition-messages';
 import {
   PROMPT_STEP_TIMEOUT_MAX_MINUTES,
   PROMPT_STEP_TIMEOUT_MIN_MINUTES,
 } from '@/lib/prompt-step-editing';
 import { Button, Input } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { PromptStepTools } from '@/components/prompt-step-tools';
 
 const CAPABILITY_LABELS: Record<PromptStepCapability, string> = {
   tool_use: 'Can use tools',
@@ -23,19 +26,25 @@ const CAPABILITY_LABELS: Record<PromptStepCapability, string> = {
 const tokenHelp = (withFields: boolean) =>
   `Tokens: \`{{task.title}}\` \`{{task.description}}\`${withFields ? ' `{{field:<id>}}`' : ''} \`{{step:<id>}}\` \`{{agent:<id>}}\`. A \`{{step:<id>}}\` token must be alone on its line.`;
 
+const NO_ISSUES: readonly PromptStepIssue[] = [];
+
 interface PromptStepEditorProps {
-  entry: PromptStepEntry;
+  entry: StoredPromptStep;
+  /** The step's problems that name one of its tools, shown on that tool's row. */
+  issues?: readonly PromptStepIssue[];
   disabled?: boolean;
   onChange: (entry: PromptStepEntry) => void;
   onRemove: () => void;
 }
 
 export function PromptStepEditor({
-  entry,
+  entry: stored,
+  issues = NO_ISSUES,
   disabled = false,
   onChange,
   onRemove,
 }: PromptStepEditorProps) {
+  const entry: PromptStepEntry = { ...stored, tools: stored.tools ?? [] };
   const id = `prompt-step-${entry.slug}`;
   const [minutes, setMinutes] = useState(String(entry.timeoutMs / 60_000));
 
@@ -102,6 +111,12 @@ export function PromptStepEditor({
           </label>
         ))}
       </fieldset>
+      <PromptStepTools
+        tools={entry.tools}
+        issues={issues}
+        disabled={disabled}
+        onChange={(tools) => onChange({ ...entry, tools })}
+      />
       <label htmlFor={`${id}-timeout`} className="flex items-center gap-2 text-xs text-neutral-400">
         Timeout (minutes)
         <Input
