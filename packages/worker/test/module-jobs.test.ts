@@ -1129,6 +1129,27 @@ describe('the jobs reconcile with a start that does not end', () => {
     },
   );
 
+  it('does not count a start that fails after a pass saw its module deactivated against the activation after it', async () => {
+    const id = 'toggled-late';
+    const m = moduleWithHungStart(id, 'ensureSchema');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+    const pass = track(reconcile(new Set()));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(pass.settled).toBe(true);
+    await reconcile(new Set([id]));
+
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    m.end().reject(new Error('ddl refused'));
+    await vi.advanceTimersByTimeAsync(0);
+    for (let next = 0; next < 5; next++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(1 + 3);
+
+    await stopAll();
+  });
+
   it.each(hooks)(
     'starts the jobs of a module once when it is deactivated and activated again while its %s hook still runs',
     async (which) => {

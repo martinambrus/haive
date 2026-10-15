@@ -265,7 +265,12 @@ async function main(): Promise<void> {
   const cliStreamLogReaper = new CliStreamLogReaper({ db: getDb() });
   cliStreamLogReaper.start();
 
-  const moduleJobs = await startModuleJobs(loadedModules, moduleEntries, deactivatedAtBoot);
+  // Held back if deactivated at the schema read or now; the first pass starts one active by then.
+  const moduleJobs = await startModuleJobs(
+    loadedModules,
+    moduleEntries,
+    new Set([...deactivatedAtBoot, ...(await deactivatedModuleIds(getDb()))]),
+  );
   // After the module jobs: a teardown refuses a module whose jobs this worker started.
   const moduleControlWorker = startModuleControlWorker({
     loaded: loadedModules,

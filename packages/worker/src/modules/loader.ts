@@ -311,6 +311,8 @@ export async function startModuleJobs(
   const held = new Set<string>();
   // Attempts made so far by a reactivation the next pass is to try again; that try takes them.
   const attemptsMade = new Map<string, number>();
+  // A pass saw these deactivated while their start still ran: that start's outcome is not an attempt.
+  const endedWhileStarting = new Set<string>();
   const reactivate = (
     moduleId: string,
     ensureSchema: WorkerModuleEntry['ensureSchema'],
@@ -335,7 +337,12 @@ export async function startModuleJobs(
             logger.info({ module: moduleId }, 'module jobs started: the module is active again');
           }
         } catch (err) {
-          if (attempt < MODULE_REACTIVATION_ATTEMPTS) {
+          if (endedWhileStarting.has(moduleId)) {
+            logger.warn(
+              { err, module: moduleId },
+              'module schema or jobs failed to start after the module was deactivated; its next activation starts afresh',
+            );
+          } else if (attempt < MODULE_REACTIVATION_ATTEMPTS) {
             attemptsMade.set(moduleId, attempt);
             pending.add(moduleId);
             logger.warn(
@@ -351,6 +358,7 @@ export async function startModuleJobs(
         } finally {
           if (!stops.has(moduleId)) jobsStarted.delete(moduleId);
           starting.delete(moduleId);
+          endedWhileStarting.delete(moduleId);
           clearTimeout(timer);
           resolve();
         }
@@ -362,7 +370,15 @@ export async function startModuleJobs(
       const jobs = entries[index]?.jobs;
       const ensureSchema = entries[index]?.ensureSchema;
       const moduleId = module.manifest.id;
-      if ((!jobs && !ensureSchema) || stops.has(moduleId) || starting.has(moduleId)) continue;
+      if (!jobs && !ensureSchema) continue;
+      if (starting.has(moduleId) && nowDeactivated.has(moduleId)) {
+        endedWhileStarting.add(moduleId);
+        pending.add(moduleId);
+        attemptsMade.delete(moduleId);
+        held.delete(moduleId);
+        continue;
+      }
+      if (stops.has(moduleId) || starting.has(moduleId)) continue;
       if (nowDeactivated.has(moduleId)) {
         pending.add(moduleId);
         attemptsMade.delete(moduleId);
