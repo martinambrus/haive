@@ -13,7 +13,11 @@ export async function haiveDataBoundary(
   if (!opts.hasRepo || !repoMount?.subpath) return [];
   const { source, target, subpath } = repoMount;
   const root = await lookupInRepoMount(subpath, '');
-  if (root.entry?.kind !== 'directory') return [];
+  if (root.entry?.kind !== 'directory') {
+    throw new Error(
+      `${subpath} is not a directory, so ${HAIVE_DATA_DIR} cannot be kept read-only in it`,
+    );
+  }
   const owner = { uid: root.entry.stats.uid, gid: root.entry.stats.gid };
 
   const isDirectory = async (rel: string, create: boolean): Promise<boolean> => {
@@ -31,7 +35,11 @@ export async function haiveDataBoundary(
     ...(readOnly ? { readOnly } : {}),
   });
 
-  if (!(await isDirectory(HAIVE_DATA_DIR, true))) return [];
+  if (!(await isDirectory(HAIVE_DATA_DIR, true))) {
+    throw new Error(
+      `${HAIVE_DATA_DIR} in ${subpath} is a file or a link, so an agent could replace it with a directory of its own; move it aside, then retry`,
+    );
+  }
   const mounts = [mountOf(HAIVE_DATA_DIR, true)];
   if (await isDirectory(KB_DIR, false)) mounts.push(mountOf(KB_DIR, false));
   if (await isDirectory(LEARNINGS_DIR, true)) mounts.push(mountOf(LEARNINGS_DIR, false));

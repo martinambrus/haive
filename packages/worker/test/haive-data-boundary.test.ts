@@ -185,23 +185,45 @@ describe('haiveDataBoundary: what it creates', () => {
   });
 });
 
-describe('haiveDataBoundary: what it leaves alone', () => {
-  it('gives nothing, and creates nothing, for a .haive-data that is a link', async () => {
+describe('haiveDataBoundary: what it refuses', () => {
+  it('refuses a .haive-data that is a link an agent could replace, and creates nothing', async () => {
     await mkdir(path.join(repoDir, 'elsewhere'));
     await symlink(path.join(repoDir, 'elsewhere'), path.join(repoDir, '.haive-data'));
 
-    expect(await haiveDataBoundary(rootMount, { hasRepo: true })).toEqual([]);
+    await expect(haiveDataBoundary(rootMount, { hasRepo: true })).rejects.toThrow(
+      /\.haive-data in .* is a file or a link/,
+    );
     expect(await readdir(path.join(repoDir, 'elsewhere'))).toEqual([]);
     expect(ensureDir).not.toHaveBeenCalled();
   });
 
-  it('gives nothing, and creates nothing, for a .haive-data that is a file', async () => {
+  it('refuses a .haive-data that is a file, and creates nothing', async () => {
     await writeFile(path.join(repoDir, '.haive-data'), 'not a directory');
 
-    expect(await haiveDataBoundary(rootMount, { hasRepo: true })).toEqual([]);
+    await expect(haiveDataBoundary(rootMount, { hasRepo: true })).rejects.toThrow(
+      /is a file or a link/,
+    );
     expect(ensureDir).not.toHaveBeenCalled();
   });
 
+  it('refuses a worktree root that is missing or is a link, and creates nothing', async () => {
+    await rm(treeDir, { recursive: true, force: true });
+    await expect(haiveDataBoundary(worktreeMount, { hasRepo: true })).rejects.toThrow(
+      /is not a directory/,
+    );
+    await expect(lstat(treeDir)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await mkdir(path.join(repoDir, 'elsewhere'));
+    await symlink(path.join(repoDir, 'elsewhere'), treeDir);
+    await expect(haiveDataBoundary(worktreeMount, { hasRepo: true })).rejects.toThrow(
+      /is not a directory/,
+    );
+    expect(await readdir(path.join(repoDir, 'elsewhere'))).toEqual([]);
+    expect(ensureDir).not.toHaveBeenCalled();
+  });
+});
+
+describe('haiveDataBoundary: what it leaves alone', () => {
   it('gives no mount for a knowledge dir that is a link or a file, and creates neither', async () => {
     await dirs(path.join(repoDir, '.haive-data'), path.join(repoDir, 'elsewhere'));
     await symlink(
@@ -213,18 +235,6 @@ describe('haiveDataBoundary: what it leaves alone', () => {
     expect(await haiveDataBoundary(rootMount, { hasRepo: true })).toEqual(rootMounts([]));
     expect(ensureDir).not.toHaveBeenCalled();
     expect(await readdir(path.join(repoDir, 'elsewhere'))).toEqual([]);
-  });
-
-  it('gives nothing below a worktree root that is missing or is a link', async () => {
-    await rm(treeDir, { recursive: true, force: true });
-    expect(await haiveDataBoundary(worktreeMount, { hasRepo: true })).toEqual([]);
-    await expect(lstat(treeDir)).rejects.toMatchObject({ code: 'ENOENT' });
-
-    await mkdir(path.join(repoDir, 'elsewhere'));
-    await symlink(path.join(repoDir, 'elsewhere'), treeDir);
-    expect(await haiveDataBoundary(worktreeMount, { hasRepo: true })).toEqual([]);
-    expect(await readdir(path.join(repoDir, 'elsewhere'))).toEqual([]);
-    expect(ensureDir).not.toHaveBeenCalled();
   });
 
   it('claims nothing for a repo-less task, a bound local-path repository or no mount', async () => {
