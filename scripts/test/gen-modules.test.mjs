@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { makeTree, names } from './tree.mjs';
+import { makeTree, names, registry } from './tree.mjs';
 
 const REGISTRIES = [
   'packages/api/src/modules.generated.ts',
@@ -21,8 +21,14 @@ describe('gen-modules: installed = depended on by api', () => {
     });
     const out = tree.run('gen-modules.mjs');
     assert.equal(out.status, 0, out.stderr);
-    assert.match(tree.read(REGISTRIES[0]), /packageName: '@haive\/module-foo'.*routes: r0/);
-    assert.match(tree.read(REGISTRIES[1]), /packageName: '@haive\/module-foo'/);
+    assert.match(
+      tree.read(REGISTRIES[0]),
+      /\{ packageName: '@haive\/module-foo', source: 'local', manifest: m0, routes: r0 \},/,
+    );
+    assert.match(
+      tree.read(REGISTRIES[1]),
+      /\{ packageName: '@haive\/module-foo', source: 'local', manifest: m0 \},/,
+    );
     assert.match(tree.read(REGISTRIES[2]), /moduleWebPages = \{\} as const/);
     assert.doesNotMatch(out.stdout, /not installed/);
   });
@@ -57,9 +63,9 @@ describe('gen-modules: installed = depended on by api', () => {
     assert.match(worker, /^import t1 from '@haive\/module-foo\/teardown';$/m);
     assert.match(
       worker,
-      /packageName: '@haive\/module-foo', manifest: m1, steps: s1, ensureSchema: e1, jobs: j1, teardown: t1 \},/,
+      /packageName: '@haive\/module-foo', source: 'local', manifest: m1, steps: s1, ensureSchema: e1, jobs: j1, teardown: t1 \},/,
     );
-    assert.match(worker, /packageName: '@haive\/module-bar', manifest: m0 \},/);
+    assert.match(worker, /packageName: '@haive\/module-bar', source: 'local', manifest: m0 \},/);
     assert.doesNotMatch(tree.read(REGISTRIES[0]), /teardown/);
     assert.doesNotMatch(tree.read(REGISTRIES[2]), /teardown/);
     assert.doesNotMatch(tree.read(REGISTRIES[3]), /teardown/);
@@ -74,7 +80,7 @@ describe('gen-modules: installed = depended on by api', () => {
     assert.equal(tree.run('gen-modules.mjs').status, 0);
     assert.match(
       tree.read(REGISTRIES[1]),
-      /\{ packageName: '@haive\/module-foo', manifest: m0, teardown: t0 \},/,
+      /\{ packageName: '@haive\/module-foo', source: 'local', manifest: m0, teardown: t0 \},/,
     );
   });
 
@@ -144,6 +150,15 @@ describe('gen-modules: a half-installed state fails loudly', () => {
     for (const needle of needles) assert.ok(out.stderr.includes(needle), out.stderr);
   };
 
+  it('an installed module whose package name is neither form: names both forms', (t) => {
+    const tree = makeTree(t, {
+      modules: { foo: { name: '@haive/foo', exports: ['./manifest'] } },
+      api: ['@haive/foo'],
+      worker: ['@haive/foo'],
+    });
+    fails(tree, '@haive/foo', '@haive/module-<id>', '@haive-module/<id>');
+  });
+
   it('api only: names the worker', (t) => {
     const tree = makeTree(t, {
       modules: { foo: { exports: ['./manifest'] } },
@@ -210,6 +225,72 @@ describe('gen-modules: a half-installed state fails loudly', () => {
     fails(tree, '@haive/module-foo', './manifest');
   });
 
+  it('registry module with a web part missing from web: names the web and the registry package', (t) => {
+    const tree = makeTree(t, {
+      installed: { foo: { exports: WEB } },
+      api: registry('foo'),
+      worker: registry('foo'),
+    });
+    fails(tree, '@haive/web', 'packages/web/package.json', '@haive-module/foo');
+  });
+
+  it('registry module held by api without the worker: names the worker', (t) => {
+    const tree = makeTree(t, {
+      installed: { foo: { exports: ['./manifest'] } },
+      api: registry('foo'),
+    });
+    fails(tree, '@haive/worker', 'packages/worker/package.json', '@haive-module/foo');
+  });
+
+  it('registry module held by the worker only: names the api', (t) => {
+    const tree = makeTree(t, { worker: registry('foo') });
+    fails(tree, '@haive/api', 'packages/api/package.json', '@haive-module/foo');
+  });
+
+  it('registry module held by web only: names the api', (t) => {
+    const tree = makeTree(t, { web: registry('foo') });
+    fails(tree, '@haive/api', 'packages/api/package.json', '@haive-module/foo');
+  });
+
+  it('web holding an installed registry module that has no web part: names the web', (t) => {
+    const tree = makeTree(t, {
+      installed: { foo: { exports: ['./manifest'] } },
+      api: registry('foo'),
+      worker: registry('foo'),
+      web: registry('foo'),
+    });
+    fails(tree, '@haive/web', 'packages/web/package.json', '@haive-module/foo');
+  });
+
+  it('the same id as an installed folder and an installed registry module: names both', (t) => {
+    const tree = makeTree(t, {
+      modules: { foo: { exports: ['./manifest'] } },
+      installed: { foo: { exports: ['./manifest'] } },
+      api: [...names('foo'), ...registry('foo')],
+      worker: [...names('foo'), ...registry('foo')],
+    });
+    fails(tree, 'module id "foo"', '@haive/module-foo', '@haive-module/foo');
+  });
+
+  it('the same id as a folder nobody depends on and a registry dependency: names both', (t) => {
+    const tree = makeTree(t, {
+      modules: { foo: { exports: ['./manifest'] } },
+      installed: { foo: { exports: ['./manifest'] } },
+      api: registry('foo'),
+      worker: registry('foo'),
+    });
+    fails(tree, 'module id "foo"', '@haive/module-foo', '@haive-module/foo');
+  });
+
+  it('the same id as a folder and a registry dependency that is not on disk yet: names both', (t) => {
+    const tree = makeTree(t, {
+      modules: { foo: { exports: ['./manifest'] } },
+      api: registry('foo'),
+      worker: registry('foo'),
+    });
+    fails(tree, 'module id "foo"', '@haive/module-foo', '@haive-module/foo');
+  });
+
   it('an installed web-part module not named @haive/module-<id> still fails', (t) => {
     const tree = makeTree(t, {
       modules: { foo: { name: '@haive/foo', exports: WEB } },
@@ -217,6 +298,125 @@ describe('gen-modules: a half-installed state fails loudly', () => {
       worker: ['@haive/foo'],
       web: ['@haive/foo'],
     });
-    fails(tree, '@haive/foo', '@haive/module-<id>');
+    fails(tree, '@haive/foo', '@haive/module-<id>', '@haive-module/<id>');
+  });
+});
+
+describe('gen-modules: registry modules (@haive-module/<id>)', () => {
+  it('includes a registry dependency of api and worker, with the source registry', (t) => {
+    const tree = makeTree(t, {
+      installed: { foo: { exports: ['./manifest', './routes'] } },
+      api: registry('foo'),
+      worker: registry('foo'),
+    });
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    const api = tree.read(REGISTRIES[0]);
+    assert.match(api, /^import m0 from '@haive-module\/foo\/manifest';$/m);
+    assert.match(api, /^import r0 from '@haive-module\/foo\/routes';$/m);
+    assert.match(
+      api,
+      /\{ packageName: '@haive-module\/foo', source: 'registry', manifest: m0, routes: r0 \},/,
+    );
+    assert.match(
+      tree.read(REGISTRIES[1]),
+      /\{ packageName: '@haive-module\/foo', source: 'registry', manifest: m0 \},/,
+    );
+    assert.match(tree.read(REGISTRIES[2]), /moduleWebPages = \{\} as const/);
+    assert.doesNotMatch(out.stdout, /not installed/);
+  });
+
+  it('includes the web parts of a registry module that web depends on, under its id', (t) => {
+    const tree = makeTree(t, {
+      installed: { foo: { exports: WEB } },
+      api: registry('foo'),
+      worker: registry('foo'),
+      web: registry('foo'),
+    });
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(tree.read(REGISTRIES[2]), /import w0 from '@haive-module\/foo\/web';/);
+    assert.match(tree.read(REGISTRIES[2]), /'foo': w0,/);
+    assert.match(tree.read(REGISTRIES[3]), /import d0 from '@haive-module\/foo\/dashboard';/);
+    assert.match(tree.read(REGISTRIES[3]), /moduleId: 'foo'/);
+  });
+
+  it('puts a folder module and a registry module of different ids in one registry, each with its source', (t) => {
+    const tree = makeTree(t, {
+      modules: { bar: { exports: ['./manifest'] } },
+      installed: { foo: { exports: ['./manifest'] } },
+      api: [...names('bar'), ...registry('foo')],
+      worker: [...names('bar'), ...registry('foo')],
+    });
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    for (const rel of REGISTRIES.slice(0, 2)) {
+      assert.match(tree.read(rel), /packageName: '@haive\/module-bar', source: 'local'/);
+      assert.match(tree.read(rel), /packageName: '@haive-module\/foo', source: 'registry'/);
+    }
+  });
+
+  it('leaves a second run byte-identical', (t) => {
+    const tree = makeTree(t, {
+      installed: { foo: { exports: WEB } },
+      api: registry('foo'),
+      worker: registry('foo'),
+      web: registry('foo'),
+    });
+    assert.equal(tree.run('gen-modules.mjs').status, 0);
+    assert.match(generated(tree), /@haive-module\/foo/);
+    const first = tree.snapshot();
+    assert.equal(tree.run('gen-modules.mjs').status, 0);
+    assert.deepEqual(tree.snapshot(), first);
+  });
+
+  it('leaves out a registry dependency that is not on disk, says so, and exits 0', (t) => {
+    const tree = makeTree(t, { api: registry('foo'), worker: registry('foo') });
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout, /@haive-module\/foo/);
+    assert.match(out.stdout, /packages\/api\/node_modules\/@haive-module\/foo\/package\.json/);
+    assert.doesNotMatch(generated(tree), /haive-module/);
+  });
+
+  it('ignores a registry package that exports no manifest and no web part', (t) => {
+    const tree = makeTree(t, {
+      installed: { foo: { exports: ['./util'] } },
+      api: registry('foo'),
+      worker: registry('foo'),
+    });
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    assert.doesNotMatch(generated(tree), /haive-module/);
+  });
+
+  it('treats a workspace folder named in the registry scope as a local module, once', (t) => {
+    const tree = makeTree(t, {
+      modules: { foo: { name: '@haive-module/foo', exports: ['./manifest'] } },
+      api: registry('foo'),
+      worker: registry('foo'),
+    });
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    const api = tree.read(REGISTRIES[0]);
+    assert.equal(api.match(/packageName: '@haive-module\/foo'/g)?.length, 1);
+    assert.match(api, /packageName: '@haive-module\/foo', source: 'local'/);
+  });
+});
+
+describe('gen-modules: a tree with no module', () => {
+  const EMPTY = [
+    '// Generated by scripts/gen-modules.mjs. Do not edit.\nexport const moduleRegistry = [] as const;\n',
+    '// Generated by scripts/gen-modules.mjs. Do not edit.\nexport const moduleRegistry = [] as const;\n',
+    '// Generated by scripts/gen-modules.mjs. Do not edit.\nexport const moduleWebPages = {} as const;\n',
+    '// Generated by scripts/gen-modules.mjs. Do not edit.\nexport const moduleDashboardWidgets = [] as const;\n',
+  ];
+
+  it('writes the four registries byte for byte as it did before the registry source', (t) => {
+    const tree = makeTree(t);
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    REGISTRIES.forEach((rel, i) => assert.equal(tree.read(rel), EMPTY[i], rel));
+    assert.equal(out.stdout, '');
   });
 });

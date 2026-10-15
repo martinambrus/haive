@@ -13,6 +13,7 @@ export async function syncModuleIntent(
     for (const m of loaded) {
       const row = {
         packageName: m.packageName,
+        source: m.source,
         name: m.manifest.name,
         installedVersion: m.manifest.version,
         entitlementId: m.manifest.entitlementId ?? null,
