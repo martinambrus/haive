@@ -56,13 +56,27 @@ describe('pruneJobSchedulers', () => {
     expect(queue.removed).not.toContain('two');
   });
 
-  it('clears the 343 legacy ids of the dev install through bounded pages', async () => {
+  it('clears the 343 legacy ids of the dev install from one snapshot', async () => {
     const legacy = Array.from({ length: 343 }, (_, i) => `legacy-${i}`);
     const queue = fakeQueue(['owned', ...legacy]);
     expect(await pruneJobSchedulers(queue, ['owned'])).toBe(343);
     expect([...queue.live]).toEqual(['owned']);
-    expect(queue.ranges.length).toBeGreaterThan(1);
-    expect(queue.ranges.every(([start, end]) => end >= start)).toBe(true);
+    expect(queue.ranges).toEqual([[0, -1]]);
+  });
+
+  it('misses no stale id while firing schedulers re-arm and shift the order', async () => {
+    const legacy = Array.from({ length: 343 }, (_, i) => `legacy-${i}`);
+    const queue = fakeQueue(['owned', ...legacy]);
+    const read = queue.getJobSchedulers;
+    queue.getJobSchedulers = async (start = 0, end = -1) => {
+      const page = await read(start, end);
+      const ids = [...queue.live];
+      queue.live.clear();
+      for (const id of [...ids.slice(50), ...ids.slice(0, 50)]) queue.live.add(id);
+      return page;
+    };
+    await pruneJobSchedulers(queue, ['owned']);
+    expect([...queue.live]).toEqual(['owned']);
   });
 
   it('counts only the schedulers it actually removed', async () => {
