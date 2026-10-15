@@ -136,7 +136,10 @@ then run after the pass it waited behind failed the step, so an advance on a `fa
 dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-resume each set the
 task `running` first. An answer submitted to a form still parked is the one exception, since
 answering it is what reopens the task; an advance onto that form that carries no answer is dropped
-like any other. A clarification answer is one of those, since it rides `task_events` rather than the
+like any other. While the system drains or is in maintenance (`refusesNewWork`, read past the config
+cache, once per job and only for a failed task) that exception closes too: the answer stays stored on
+its row and the advance is dropped, so an answer accepted while the task was live cannot reopen it
+during a drain. A clarification answer is one of those, since it rides `task_events` rather than the
 job, so its route sets a failed task `running` itself before it queues the advance.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
@@ -165,7 +168,8 @@ sandbox or loses the one it has. A Stop takes the Retry's steps in one transacti
 are killed only once it commits. No reader sees a run cancelled beside a step still running, and a
 Stop that fails leaves every run as it was and kills nothing. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
-loses takes back every write before it. A pass a Stop cut off
+loses takes back every write before it. While new work is refused it does nothing at all — no write,
+no job, no attempt spent — and the next poll resumes the task once the state is normal again. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and

@@ -29,3 +29,14 @@ still build) and adds the `db-migrate` one-shot that `docker-compose.yml` lacks 
 it from the dev override, so a published-image install would otherwise boot against an unmigrated
 database. `HAIVE_VERSION` has no default so the command fails rather than silently resolving
 `latest`; which version an install runs is the question every upgrade and rollback turns on.
+
+## The drain an upgrade runs first
+
+`haive upgrade` (the updater) sets `MAINTENANCE_STATE` to `draining`, waits until no task is live,
+then sets `maintenance` and takes the snapshot. Every api route that starts work refuses with 503
+while the state is `draining` or `maintenance` (`assertNewWorkAllowed`), and it reads the state past
+ConfigService's 30 s cache: the updater writes it from another process and counts live tasks at
+once, so a cached `normal` would admit work on an idle install after the drain began. The gate that
+locks non-admins out during `maintenance` keeps its cached read, so that lockout can lag by up to
+30 s. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
+failed task while new work is refused (see [Worker restarts](worker-restarts.md)).
