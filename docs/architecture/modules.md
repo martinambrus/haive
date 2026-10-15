@@ -35,9 +35,10 @@ the module loads again.
   administrator), then the task's sandboxes are killed, then a `task.stopped` event (reason
   `module_deactivated`) and a `task.admin_stop` audit row are written. A step waiting on a form has
   nothing to stop, so that task is left, as is every task elsewhere in its run list: those fail when
-  they next run one of the module's steps. The answer reports `stopped` (with `killError` when the
-  kill threw after the stop committed, and `eventError` when the event or audit write failed),
-  `left` and `failed` (only a stop transaction that threw); the page shows the counts and names each
+  they next run one of the module's steps. The answer reports `stopped` (with `killError` when,
+  after the stop committed, the task's sandboxes could not be listed or one was still listed 3 s after
+  a failed removal, and `eventError` when the event or audit write failed), `left` and `failed` (only
+  a stop transaction that threw); the page shows the counts and names each
   task it could not stop or whose kill or record failed. The code stays loaded: its api routes and
   settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
