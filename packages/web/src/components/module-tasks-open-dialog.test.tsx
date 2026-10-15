@@ -343,4 +343,19 @@ describe('moduleOffNotice', () => {
   it('says nothing of more tasks when the list was not cut', () => {
     expect(moduleOffNotice('Alpha', result({ capped: false }), titles)).not.toContain('More tasks');
   });
+
+  it('notes a stopped task whose sandbox kill or whose history record failed, after the ones it could not stop', () => {
+    const failed = [{ id: 't9', title: 'Nine', error: 'connection reset' }];
+    const stoppedWith = [
+      { ...stopped('t1', 'One as answered'), killed: 0, killError: 'docker is not answering' },
+      { ...stopped('t2', 'Two'), eventError: 'audit write refused' },
+      stopped('t7', 'Seven'),
+    ];
+    expect(moduleOffNotice('Alpha', result({ stopped: stoppedWith, failed }), titles)).toBe(
+      'Turned off Alpha: 3 tasks stopped, 3 left (they fail when they reach one of its steps), 1 could not be stopped.\n' +
+        '- Nine: connection reset\n' +
+        '- One: stopped, but its sandboxes may still be running (docker is not answering)\n' +
+        '- Two: stopped, but the stop is missing from its history (audit write refused)',
+    );
+  });
 });

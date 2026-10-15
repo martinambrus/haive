@@ -50,6 +50,17 @@ export function moduleOffNotice(
   return [
     `Turned off ${name}: ${stopped}, ${result.left.length} left (they fail when they reach one of its steps), ${result.failed.length} could not be stopped.${more}`,
     ...result.failed.map((f) => `- ${titles.get(f.id) ?? f.title}: ${f.error}`),
+    ...result.stopped.flatMap((s) => {
+      const title = titles.get(s.id) ?? s.title;
+      return [
+        ...(s.killError === undefined
+          ? []
+          : [`- ${title}: stopped, but its sandboxes may still be running (${s.killError})`]),
+        ...(s.eventError === undefined
+          ? []
+          : [`- ${title}: stopped, but the stop is missing from its history (${s.eventError})`]),
+      ];
+    }),
   ].join('\n');
 }
 
