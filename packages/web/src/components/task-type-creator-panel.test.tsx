@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TYPE_DRAFT_STATE_MAX_BYTES } from '@haive/shared/modularity';
 import { API_BASE_URL } from '@/lib/api-client';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { TaskTypeCreatorPanel, draftStorageKey } from './task-type-creator-panel';
@@ -265,6 +266,21 @@ describe('TaskTypeCreatorPanel starting a conversation', () => {
         body: { message: 'A read-only TODO audit', current: EDITOR },
       },
     ]);
+  });
+
+  it('starts without the editor state when the api would refuse its size, and says so', async () => {
+    const big = { ...EDITOR, description: 'x'.repeat(TYPE_DRAFT_STATE_MAX_BYTES) };
+    open({ editorState: big });
+    await type('A read-only TODO audit');
+    await press('Send');
+    expect(posts()).toEqual([
+      {
+        method: 'POST',
+        path: '/admin/task-type-drafts',
+        body: { message: 'A read-only TODO audit' },
+      },
+    ]);
+    expect(text()).toContain('Your editor state was not sent: it was too large.');
   });
 
   it('names the saved type when it is editing one', async () => {

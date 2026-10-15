@@ -1,7 +1,11 @@
 'use client';
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { TYPE_DRAFT_MESSAGE_MAX_CHARS, type TypeDraftTurn } from '@haive/shared/modularity';
+import {
+  TYPE_DRAFT_MESSAGE_MAX_CHARS,
+  TYPE_DRAFT_STATE_MAX_BYTES,
+  type TypeDraftTurn,
+} from '@haive/shared/modularity';
 import {
   endTypeDraft,
   getTypeDraft,
@@ -145,6 +149,7 @@ export function TaskTypeCreatorPanel({
   const [error, setError] = useState<string | null>(null);
   const [pollRestart, setPollRestart] = useState(0);
   const [loadedTurn, setLoadedTurn] = useState<number | null>(null);
+  const [stateLeftOut, setStateLeftOut] = useState(false);
   const transcript = useRef<HTMLDivElement | null>(null);
   // A conversation already over when this visit finds it starts afresh; one that ends in view stays readable.
   const seen = useRef(false);
@@ -197,12 +202,15 @@ export function TaskTypeCreatorPanel({
   async function start(): Promise<void> {
     const text = message.trim();
     if (!text) return;
+    // The api refuses a start whose state is over its limit; a follow-up's is dropped with a note instead.
+    const fits =
+      new TextEncoder().encode(JSON.stringify(editorState)).length <= TYPE_DRAFT_STATE_MAX_BYTES;
     setBusy(true);
     setError(null);
     try {
       const started = await startTypeDraft({
         message: text,
-        current: editorState,
+        ...(fits ? { current: editorState } : {}),
         ...(slug === null ? {} : { editingSlug: slug }),
       });
       remember(key, started.taskId);
@@ -210,6 +218,7 @@ export function TaskTypeCreatorPanel({
       setConversation(null);
       setLoadedTurn(null);
       setEnded(null);
+      setStateLeftOut(!fits);
       setMessage('');
       setTaskId(started.taskId);
     } catch (err) {
@@ -286,6 +295,7 @@ export function TaskTypeCreatorPanel({
           })}
         </div>
       )}
+      {stateLeftOut && <p className="text-xs text-amber-300">{IGNORED['too-large']}</p>}
       {live && !awaiting && (
         <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />

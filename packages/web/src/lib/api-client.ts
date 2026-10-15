@@ -2519,7 +2519,7 @@ export interface TypeDraftConversation {
 
 export const startTypeDraft = (body: {
   message: string;
-  current: Record<string, unknown>;
+  current?: Record<string, unknown>;
   editingSlug?: string;
 }) => api.post<{ taskId: string }>('/admin/task-type-drafts', body);
 
