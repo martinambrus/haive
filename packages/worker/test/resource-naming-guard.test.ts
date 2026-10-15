@@ -107,6 +107,19 @@ describe('resource names are never typed at a call site', () => {
   });
 });
 
+describe('the MCP server names Haive wires', () => {
+  const flagged = (names: string[]) =>
+    names.filter((name) => !NOT_A_RESOURCE.some((re) => re.test(name)));
+
+  it('[W6] are on the allow-list, haive-integrations and the files beside its script among them', () => {
+    expect(flagged(['haive-custom', 'haive-integrations', 'haive-integrations-mcp'])).toEqual([]);
+  });
+
+  it('[W6] are not a blanket pass: a name on no list is flagged', () => {
+    expect(flagged(['haive-not-on-any-list'])).toEqual(['haive-not-on-any-list']);
+  });
+});
+
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const COMPOSE_FILES = [
   'docker-compose.yml',
