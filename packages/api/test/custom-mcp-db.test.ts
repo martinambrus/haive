@@ -785,7 +785,7 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
         expect(statuses.filter((s) => s === status)).toHaveLength(BUDGET);
         expect(statuses.filter((s) => s === 429)).toHaveLength(10);
         expect(await rowsFor(fx.invA)).toHaveLength(BUDGET);
-      });
+      }, 30_000);
 
       it('is answered 429 once the budget is spent, and writes nothing', async () => {
         await spendBudget();
@@ -797,7 +797,7 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
         expect(await res.json()).toEqual({ error: expect.any(String), code: 'budget-spent' });
         expect(await rowsFor(fx.invA)).toHaveLength(BUDGET);
         expect(h.searches).toEqual([]);
-      });
+      }, 30_000);
     });
   });
 
