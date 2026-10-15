@@ -3,8 +3,10 @@ import { schema, type Database } from '@haive/database';
 import { getDecryptedCredentials } from '../repo/credentials.js';
 import {
   ForgeError,
+  apiBaseFits,
   credentialApiHost,
   credentialForgeProvider,
+  credentialUsableForPr,
   hostFromRemote,
   parseRemote,
   resolveForgeProvider,
@@ -14,7 +16,8 @@ import {
 /** Build a ForgeContext for a repo's PR/MR call: resolve the credential's forge
  *  provider + optional API-base override, parse the remote URL, and decrypt the
  *  token. Throws a ForgeError (surfaced to the user) when the credential has no
- *  provider set — a hostname alone can't reveal the forge software. */
+ *  provider set — a hostname alone can't reveal the forge software — or does not fit the
+ *  remote or its own API base, before the token is decrypted. */
 export async function resolveForgeContext(args: {
   db: Database;
   userId: string;
@@ -38,6 +41,17 @@ export async function resolveForgeContext(args: {
   if (!provider) {
     throw new ForgeError(
       'This credential has no forge provider set, and the host is not a known public forge. Choose a provider (GitHub, Gitea/Forgejo, GitLab, Bitbucket) on the credential to open pull requests.',
+    );
+  }
+
+  if (!credentialUsableForPr(row, remoteUrl)) {
+    throw new ForgeError(
+      "This credential is not for the repository's remote: its host and forge must match the remote's. Choose another credential, or edit this one's host and provider.",
+    );
+  }
+  if (!apiBaseFits(row)) {
+    throw new ForgeError(
+      "Edit the credential's API base: it must be https on the credential's host or its forge's API host.",
     );
   }
 
