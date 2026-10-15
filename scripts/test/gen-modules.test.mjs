@@ -319,6 +319,11 @@ describe('gen-modules: a half-installed state fails loudly', () => {
     fails(tree, '@haive/foo', '@haive/module-<id>', '@haive-module/<id>');
   });
 
+  it('registry module only the api depends on, before it is installed: names the worker', (t) => {
+    const tree = makeTree(t, { api: registry('foo') });
+    fails(tree, '@haive-module/foo', 'packages/worker/package.json');
+  });
+
   it('registry module declared as a range: names the package, the spec and the api', (t) => {
     const tree = specTree(t, { api: '^1.0.0', worker: '^1.0.0', web: '^1.0.0' });
     fails(tree, '@haive-module/foo', '"^1.0.0"', 'packages/api/package.json');

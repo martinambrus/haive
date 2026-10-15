@@ -116,6 +116,12 @@ for (const name of new Set([...registryNames(workerPackage), ...registryNames(we
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 for (const name of apiRegistryNames) {
   const apiSpec = apiPackage.dependencies[name];
+  if (workerPackage.dependencies?.[name] === undefined) {
+    console.error(
+      `gen-modules: ${name} is a dependency of @haive/api but not of @haive/worker; add "${name}": "${apiSpec}" to packages/worker/package.json`,
+    );
+    process.exit(1);
+  }
   const holders = hostsHolding(name);
   if (
     !EXACT_VERSION.test(apiSpec) ||
