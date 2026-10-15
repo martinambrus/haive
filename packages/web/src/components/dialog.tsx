@@ -106,7 +106,13 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
         if (above.opener && panel.contains(above.opener)) above.opener = entry.opener;
       }
       // A dialog still open above this one keeps the focus.
-      if (wasTop && entry.opener?.isConnected) entry.opener.focus();
+      if (!wasTop) return;
+      if (entry.opener?.isConnected) entry.opener.focus();
+      const below = openPanels.at(-1);
+      const focused = document.activeElement;
+      const onOpener = focused === entry.opener && focused !== document.body;
+      // Focus that is on neither the opener nor the dialog below goes to that dialog.
+      if (below && !onOpener && !below.panel.contains(focused)) below.panel.focus();
     };
   }, [open]);
 

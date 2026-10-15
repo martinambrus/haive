@@ -728,6 +728,51 @@ async function openByResumedTransition(children: ReactNode) {
   expect(panels()).toHaveLength(1);
 }
 
+type OpenerState = 'enabled' | 'disabled' | 'removed';
+
+function Cascade({
+  top,
+  x,
+  onTop,
+}: {
+  top: boolean;
+  x: OpenerState;
+  onTop: (open: boolean) => void;
+}) {
+  return (
+    <Scene open>
+      <button id="y">y</button>
+      {x !== 'removed' && (
+        <button id="x" disabled={x === 'disabled'}>
+          x
+        </button>
+      )}
+      <Dialog open={top} onOpenChange={onTop}>
+        <button id="t1">t1</button>
+      </Dialog>
+    </Scene>
+  );
+}
+
+// A dialog open with a control x that opens a second one; the app closes it on request after `beforeClose`.
+function cascade(beforeClose?: () => void) {
+  let x: OpenerState = 'enabled';
+  const render = (top: boolean, next: OpenerState = x) => {
+    x = next;
+    show(
+      <Cascade
+        top={top}
+        x={x}
+        onTop={(open) => {
+          beforeClose?.();
+          render(open);
+        }}
+      />,
+    );
+  };
+  return render;
+}
+
 describe('Dialog focus', () => {
   it('C1 opening focuses the panel, not the first control', () => {
     openDialog(buttons);
@@ -1217,5 +1262,67 @@ describe('Dialog focus', () => {
     expect(where()).toBe('button#one');
     expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
     expect(where()).toBe('button#two');
+  });
+
+  it('C19 (a) closing the top dialog whose opener was removed leaves the focus in the dialog below', () => {
+    const render = cascade();
+    render(false);
+    byId('x').focus();
+    render(true);
+    render(true, 'removed');
+    press('Escape');
+    expect(where()).toBe('panel 1');
+  });
+
+  it('C19 (b) closing the top dialog whose opener was disabled leaves the focus in the dialog below', () => {
+    const render = cascade();
+    render(false);
+    byId('x').focus();
+    render(true);
+    render(true, 'disabled');
+    press('Escape');
+    expect(where()).toBe('panel 1');
+  });
+
+  it('C19 (c) a control the app focused in the dialog below keeps the focus when the top one closes', () => {
+    const render = cascade(() => byId('y').focus());
+    render(false);
+    byId('x').focus();
+    render(true);
+    render(true, 'removed');
+    press('Escape');
+    expect(where()).toBe('button#y');
+  });
+
+  it('C19 (d) with no dialog below, closing after the opener was removed focuses nothing', () => {
+    const close = () => show(<Scene opener={false}>{buttons}</Scene>);
+    openDialog(buttons, { onOpenChange: close });
+    show(
+      <Scene open opener={false} onOpenChange={close}>
+        {buttons}
+      </Scene>,
+    );
+    focusLog.length = 0;
+    press('Escape');
+    expect(where()).toBe('body');
+    expect(focusLog).toEqual([]);
+  });
+
+  it('C19 (e) a dialog opened with nothing focused hands the focus to the dialog below when it closes', () => {
+    const render = cascade();
+    render(false);
+    doc.focused = null;
+    render(true);
+    press('Escape');
+    expect(where()).toBe('panel 1');
+  });
+
+  it('C19 (f) an opener outside the dialog below that takes the focus keeps it', () => {
+    const render = cascade();
+    render(false);
+    byId('after').focus();
+    render(true);
+    press('Escape');
+    expect(where()).toBe('button#after');
   });
 });
