@@ -75,11 +75,13 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
     document.addEventListener('keydown', onTab);
     return () => {
       document.removeEventListener('keydown', onTab);
+      const wasTop = openPanels.at(-1) === panel;
       openPanels.splice(openPanels.indexOf(panel), 1);
       // Still attached means Strict Mode's rehearsal, not a close.
       if (panel.isConnected) return;
       openerRef.current = undefined;
-      if (opener?.isConnected) opener.focus();
+      // A dialog still open above this one keeps the focus.
+      if (wasTop && opener?.isConnected) opener.focus();
     };
   }, [open]);
 

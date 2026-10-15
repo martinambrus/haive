@@ -618,6 +618,16 @@ describe('Dialog focus', () => {
     expect(where()).toBe('button#b2');
   });
 
+  it('C11 closing the dialog below keeps focus inside the top one', () => {
+    show(<Pair below={false} above={false} />);
+    byId('before').focus();
+    show(<Pair below above={false} />);
+    show(<Pair below above />);
+    byId('b1').focus();
+    show(<Pair below={false} above />);
+    expect(where()).toBe('button#b1');
+  });
+
   it('C5 closing restores focus to the opener', () => {
     openDialog(buttons);
     byId('cancel').focus();
