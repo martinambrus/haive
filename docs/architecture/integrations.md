@@ -153,7 +153,9 @@ DELETE.
 The refresh goes out under the client that issued the connection (`oauth_client_id`): if that client
 is gone but another is configured, the connection becomes `needs_reauth` ("was replaced"); if no client
 is configured at all, nothing is written, because a cleared row or an unset variable during a deploy
-can come back. `invalid_grant` (and GitHub's `bad_refresh_token`) means `needs_reauth`, written inside
+can come back. A connection with no recorded client (`oauth_client_id` NULL, e.g. rows from before
+0202) refreshes with whichever client currently ranks first, so replacing a client does not move such a
+row to `needs_reauth`. `invalid_grant` (and GitHub's `bad_refresh_token`) means `needs_reauth`, written inside
 the transaction and thrown after it commits; `invalid_client` keeps the status and the tokens and
 records `last_error`, since fixing the client heals every connection; a network error, a 5xx or a
 timeout writes nothing. A successful refresh writes both tokens under a new DEK, keeps the old refresh
@@ -344,8 +346,8 @@ constraint.
 2. A blocked choice or grant stops; soft tiers skip and say why; an absent account (gone, foreign or
    no longer fitting) makes a grant fall through and a choice ask again.
 3. The allow-list fails closed on `integrations_restricted`, never on entry existence.
-4. Refresh: row lock, re-check, single flight, under the issuing client; a client refusal keeps the
-   status; a missing client writes nothing.
+4. Refresh: row lock, re-check, single flight, under the issuing client (the current top client for a
+   row that recorded none); a client refusal keeps the status; a missing client writes nothing.
 5. Branch on the OAuth `error` code, never on text; known codes pass whole.
 6. Forge connections point at a credential and never copy its token; no expiring forge tokens; a
    disconnect removes only the pointer.
