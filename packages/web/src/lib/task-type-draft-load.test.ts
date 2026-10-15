@@ -266,6 +266,23 @@ describe('loadDraftIntoEditor on a saved type', () => {
     ]);
   });
 
+  it('names the steps its templates quote under the saved slug too', () => {
+    const renamed = draft({
+      slug: 'renamed',
+      stepIds: ['custom.renamed.a', 'custom.renamed.b'],
+      promptSteps: {
+        a: draftStep(),
+        b: draftStep({ slug: 'b', template: 'Rate {{step:custom.renamed.a}} and {{task.title}}.' }),
+      },
+    });
+    const next = loadDraftIntoEditor(editor(), renamed, { creating: false, slug: 't' });
+    expect(next.promptSteps.b?.template).toBe('Rate {{step:custom.t.a}} and {{task.title}}.');
+    const created = loadDraftIntoEditor(editor(), renamed, { creating: true, slug: 't' });
+    expect(created.promptSteps.b?.template).toBe(
+      'Rate {{step:custom.renamed.a}} and {{task.title}}.',
+    );
+  });
+
   it('keeps the drafted names on the create page, where the slug is the draft own', () => {
     const renamed = draft({ slug: 'renamed', stepIds: ['custom.renamed.a'] });
     expect(loadDraftIntoEditor(editor(), renamed, { creating: true, slug: 't' }).stepIds).toEqual([
