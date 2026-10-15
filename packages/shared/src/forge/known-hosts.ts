@@ -26,10 +26,11 @@ export function credentialForgeProvider(
 
 /** Only an http(s) port is the forge's own; an ssh or git remote's port belongs to that transport. */
 function hostOf(url: URL): string {
-  return url.protocol === 'https:' || url.protocol === 'http:' ? url.host : url.hostname;
+  const host = url.protocol === 'https:' || url.protocol === 'http:' ? url.host : url.hostname;
+  return host.toLowerCase();
 }
 
-/** Host portion of a git remote (https, ssh:// or scp-style), provider-independent —
+/** Lower-case host portion of a git remote (https, ssh:// or scp-style), provider-independent —
  *  used to infer the forge for a well-known public host before the provider is known. */
 export function hostFromRemote(remoteUrl: string): string {
   const trimmed = remoteUrl.trim();
@@ -40,12 +41,12 @@ export function hostFromRemote(remoteUrl: string): string {
       return '';
     }
   }
-  return trimmed.match(/^(?:[^@]+@)?([^:/]+):/)?.[1] ?? '';
+  return (trimmed.match(/^(?:[^@]+@)?([^:/]+):/)?.[1] ?? '').toLowerCase();
 }
 
 /** Parse a git remote URL (https, ssh:// or scp-style git@host:owner/repo) into
- *  { host, owner, repo }. owner is everything between the host and the final path
- *  segment, so a GitLab subgroup path (group/subgroup/project) resolves to
+ *  { host, owner, repo }, the host in lower case. owner is everything between the host and the
+ *  final path segment, so a GitLab subgroup path (group/subgroup/project) resolves to
  *  owner=group/subgroup, repo=project. Bitbucket Server clone URLs put the repo under
  *  /scm/{projectKey}/{slug}.git — the /scm prefix is stripped so owner=projectKey. */
 export function parseRemote(
@@ -69,7 +70,7 @@ export function parseRemote(
     // scp-like: [user@]host:owner/repo(.git)
     const m = trimmed.match(/^(?:[^@]+@)?([^:/]+):(.+)$/);
     if (!m || !m[1] || !m[2]) throw new ForgeError(`Cannot parse remote URL: ${remoteUrl}`);
-    host = m[1];
+    host = m[1].toLowerCase();
     rawPath = `/${m[2]}`;
   }
 

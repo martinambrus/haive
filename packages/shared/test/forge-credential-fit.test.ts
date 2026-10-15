@@ -34,6 +34,10 @@ const REMOTES = [
   'git@git.example.com:acme/app.git',
   'ssh://git@git.example.com:2222/acme/app.git',
   'https://GIT.EXAMPLE.COM/acme/app.git',
+  'git@GitHub.com:acme/app.git',
+  'ssh://git@GitHub.com/acme/app.git',
+  'git@GIT.EXAMPLE.COM:acme/app.git',
+  'ssh://git@GIT.EXAMPLE.COM:2222/acme/app.git',
   'file:///srv/git/app.git',
   '/srv/git/app.git',
   '',
@@ -55,6 +59,10 @@ describe('hostFromRemote', () => {
     ['ssh://git@git.example.com:2222/acme/app.git', 'git.example.com'],
     ['https://git.example.com:8443/acme/app.git', 'git.example.com:8443'],
     ['https://GIT.EXAMPLE.COM/acme/app.git', 'git.example.com'],
+    ['git@GitHub.com:acme/app.git', 'github.com'],
+    ['ssh://git@GitHub.com/acme/app.git', 'github.com'],
+    ['git@GIT.EXAMPLE.COM:acme/app.git', 'git.example.com'],
+    ['ssh://git@GIT.EXAMPLE.COM:2222/acme/app.git', 'git.example.com'],
     ['  git@bitbucket.org:acme/app.git ', 'bitbucket.org'],
     ['file:///srv/git/app.git', ''],
     ['/srv/git/app.git', ''],
@@ -64,11 +72,11 @@ describe('hostFromRemote', () => {
     expect(hostFromRemote(remote)).toBe(host);
   });
 
-  it('answers as the worker did for every remote of the grid, but for an ssh port', () => {
+  it('answers as the worker did for every remote of the grid, but for an ssh port and an upper-case scp or ssh host', () => {
     const text = REMOTES.filter((remote) => remote !== null)
       .map((remote) => `${JSON.stringify(remote)}=>${JSON.stringify(hostFromRemote(remote))}\n`)
       .join('');
-    expect(sha(text)).toBe('838c533e77a866c15cf4dab31a1c8a379be4ad7091d5327e106feff43ad093d1');
+    expect(sha(text)).toBe('813eef3f732484346b6d4417315174c560673ebd678d964dc708025e573213eb');
   });
 });
 
@@ -166,8 +174,8 @@ describe('credentialUsableForPr', () => {
         for (const remote of REMOTES) bits += fits(provider, host, remote) ? '1' : '0';
       }
     }
-    expect(bits).toHaveLength(1088);
-    expect([...bits].filter((bit) => bit === '1')).toHaveLength(126);
-    expect(sha(bits)).toBe('f9f6093a22bb4080edce5ea0556b741cc479106b1a90b09d83b8eae094ce230d');
+    expect(bits).toHaveLength(1344);
+    expect([...bits].filter((bit) => bit === '1')).toHaveLength(174);
+    expect(sha(bits)).toBe('9af5b30df78a1f6e0d556af6dc65216cd9a5e2a7c79fb45c174c544bb4807bd9');
   });
 });

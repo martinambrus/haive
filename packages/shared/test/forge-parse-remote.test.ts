@@ -84,4 +84,27 @@ describe('parseRemote', () => {
       'https://git.example.com:8443/api/v1',
     );
   });
+
+  it.each([
+    ['git@GitHub.com:acme/app.git'],
+    ['ssh://git@GitHub.com/acme/app.git'],
+    ['ssh://git@GitHub.com:22/acme/app.git'],
+    ['git+ssh://git@GitHub.com/acme/app.git'],
+    ['git://GitHub.com/acme/app.git'],
+    ['https://GitHub.com/acme/app.git'],
+  ])('reads the host of %s in lower case', (remote) => {
+    expect(parseRemote(remote, 'github').host).toBe('github.com');
+    expect(hostFromRemote(remote)).toBe('github.com');
+  });
+
+  it('builds the default API base from the lower-case host of a remote spelled in capitals', () => {
+    const github = parseRemote('git@GitHub.com:a/b.git', 'github');
+    expect(resolveForgeProvider('github').defaultApiBase(github.host)).toBe(
+      'https://api.github.com',
+    );
+    const gitea = parseRemote('ssh://git@GIT.EXAMPLE.COM:2222/a/b.git', 'gitea');
+    expect(resolveForgeProvider('gitea').defaultApiBase(gitea.host)).toBe(
+      'https://git.example.com/api/v1',
+    );
+  });
 });
