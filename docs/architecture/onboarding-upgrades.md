@@ -537,8 +537,11 @@ signal. The writer reads the row's `revision` under `lockProjectState`, before i
 database, and stamps `written_revision` to what it read when it finishes, so 12, 02 and 04 leave the
 row clean and a mutation that lands during a write stays dirty. The 10 s plan-mirror sweep calls
 `sweepDirtyProjectStates` (`project-state/refresh.ts`, at most 25 rows with a render context, each
-sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, runs the sync first,
-writes nothing and keeps the row dirty with `last_error` when the sync was refused (a record in a
+sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, and looks again once it
+holds the project-state lock, for the sync and for the write (`refuseDuringGitOperation`), since a
+merge can open while it waits there: the sync then answers `held`, imports nothing it read and leaves
+`last_error` alone, as the first check does, and the write refuses. It runs the sync first, writes
+nothing and keeps the row dirty with `last_error` when the sync was refused (a record in a
 newer format included), deferred (a live onboarding task) or superseded, and otherwise writes with
 `expectedColumns` set to the column it read, a column that moved waiting for the next tick. It
 writes and never commits; 12, 03 or the person carries the files. `writeProjectStateRecord` keeps
@@ -578,7 +581,7 @@ every put-back 00a triggers runs under its checkout's merge-dir lock (`inMergeDi
 is refused while another task's claim holds it. Each restore runs under the domain's lock, after the
 caller's fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there,
 and a task that started meanwhile answers `held` with the files untouched; 00a runs that restore and its move in its claim's merge-dir section (`withMergeDirSection`, fenced on the pass's epoch), so a Stop or a cancel refuses both; and the sync base is pointed at
-the record now in the checkout (`rebaseProjectStateOnCheckout`; a checkout with no record gets an
+the record HEAD commits (`rebaseProjectStateOnHeadLocked`, under the restore's lock; a checkout with no record gets an
 EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
 a clash is asked about, never imported over it, and one whose record cannot be read keeps the old
 base and answers in `last_error`), because the writer's base already holds the pending change and
@@ -586,7 +589,8 @@ a sync against it would read the incoming head as the other side's revert. The p
 step: its base (`synced_snapshot`) is only ever the plan.json last read in. A valid hand edit is
 not refused: the sync that runs first imports it, so the database holds it and the set-aside loses
 nothing. After the move, `resyncHaiveProjections` runs the sync, writes the record if the outbox is
-dirty, reconciles the plan and flushes it, each in its own try. The revision is bumped again after
+dirty, reconciles the plan and flushes it, each in its own try; it reads nothing in while a merge or
+rebase is open, and looks again under the lock as the sweep does. The revision is bumped again after
 the restore, since a sweep that ran between the two would have stamped it written. 00a calls it
 only when the base is the checked-out branch (a ref-only update moves no file), and again after a
 merge it drove; `persistDetection` keeps its two importers, because the legacy mirror files
@@ -596,8 +600,14 @@ Save & push and the `01-plan-merge` confirm set aside the same way around their 
 (`integrateOrigin`): their fence is the checkout-holding task count (the confirm leaves out its own task
 and counts only tasks working in the checkout itself), a Save sets aside only once the remote is ahead,
 so a Save with nothing to land is never stopped by a waiting task, and a Pull refuses, by name, an
-untracked file under `.haive-data/state/` that Haive did not write. The merge resolver on the checkout
-and step 13 do not call it yet. An onboarding or upgrade that ends re-syncs at once
+untracked file under `.haive-data/state/` that Haive did not write. A merge the resolver drives on the
+checkout itself (00a's merge, 12 when the parent checkout is on the base branch, 13) sets aside after
+it seeds the plan base and checks again under the projection locks right before `openMerge`, where a
+file Haive rewrote since the set-aside sends it round again, up to `MOVE_ATTEMPTS`. Every outcome that
+did not merge puts the files back, a throw from the merge section recovers them before it reaches
+the caller, and reaching done re-syncs. It reads no checkout-holding count, and a state file edited by
+hand halts it by name even when the incoming commit leaves that file alone, as it halts a refresh or
+a Pull. An onboarding or upgrade that ends re-syncs at once
 (`resyncAfterTaskEnd`): the sync defers while such a task holds the checkout, so a change pending in
 the database, or an incoming record a move landed meanwhile, waited for the sweep. It runs once the
 ending has committed: on completion after the bookkeeping, on failure after the containers are

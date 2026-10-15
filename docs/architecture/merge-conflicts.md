@@ -131,7 +131,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   identity (whoever owns the tree, since a tree the sandbox reaches through its mode bits is accepted
   as it stands), one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
   `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
-  logged. `.haive/`,
+  logged. A fast-forward of the checkout is handed back the same way from the commit before it
+  (`handBackAfterMove`): 00a's on the checked-out branch, a repository refresh's, and `landPlanMerge`'s
+  for a plan Pull, Save or confirm. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
   not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
   removed later takes the link with it. A name is judged by its bytes (the plan merge's
