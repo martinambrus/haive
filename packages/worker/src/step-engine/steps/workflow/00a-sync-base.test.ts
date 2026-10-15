@@ -69,6 +69,7 @@ beforeEach(() => {
   claimFake.reset();
   projections.setAside.mockReset();
   projections.resync.mockReset();
+  projections.resync.mockResolvedValue(true);
   projections.putBack.mockReset();
   projections.restore.mockReset();
   projections.seed.mockReset();
@@ -621,7 +622,59 @@ function makeMergeDb(repositoryId: string | null = null) {
       }),
     }),
   };
-  return { db, getState: () => mergeState as { merged?: boolean; phase?: string } | null };
+  return {
+    db,
+    getState: () =>
+      mergeState as { merged?: boolean; phase?: string; keptMetadata?: unknown } | null,
+  };
+}
+
+const KEPT_FILE = '.haive-data/state/project/render.json';
+
+/** A clean divergence merge over a set-aside that kept `KEPT_FILE`'s owner and mode, with a re-sync answering `synced`: the state it ends in. */
+async function mergeOverKeptFile(synced: boolean) {
+  const { bare, seed } = await seedOrigin();
+  const local = await cloneLocal(bare);
+  await writeFile(path.join(local, 'local.txt'), 'L\n', 'utf8');
+  await git(local, ['add', '-A']);
+  await git(local, ['commit', '-m', 'local work']);
+  await advanceOrigin(seed, 'origin.txt');
+  try {
+    const kept = { bytes: Buffer.from('{}\n'), index: null, mode: 0o600, untracked: true };
+    projections.setAside.mockResolvedValue({
+      outcome: 'set-aside',
+      paths: [KEPT_FILE],
+      kept: new Map([[KEPT_FILE, { ...kept, owner: { uid: 0, gid: 0 } }]]),
+    });
+    projections.resync.mockResolvedValue(synced);
+    const d = await syncBaseStep.detect!(mkCtx(local));
+    const h = makeMergeDb('repo-1');
+    const step = syncBaseStep as unknown as StepDefinition;
+    const current = {
+      id: 'step1',
+      detectOutput: d,
+      formValues: { base: 'main', syncAction: 'merge' },
+      mergeResolveState: null,
+      status: 'running',
+    } as never;
+    const params = {
+      db: h.db,
+      taskId: 't1',
+      userId: 'u1',
+      repoPath: '',
+      workspacePath: '',
+      cliProviderId: null,
+      ignoreSavedStepClis: false,
+      stepDef: step,
+    } as never;
+    const merge = await resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
+    expect(merge.resolved).toBe(true);
+    return h.getState();
+  } finally {
+    await rm(bare, { recursive: true, force: true });
+    await rm(seed, { recursive: true, force: true });
+    await rm(local, { recursive: true, force: true });
+  }
 }
 
 describe('00a-sync-base divergence (real git + merge phase)', () => {
@@ -720,6 +773,20 @@ describe('00a-sync-base divergence (real git + merge phase)', () => {
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
+  });
+
+  it('a merge that lands past a re-sync restores the owner and mode its set-aside kept, and drops the record', async () => {
+    const state = await mergeOverKeptFile(true);
+    expect(state).toMatchObject({ phase: 'done', merged: true });
+    expect(state?.keptMetadata).toBeUndefined();
+  });
+
+  it('a merge that lands past a re-sync that did not succeed keeps the record for a later settle', async () => {
+    const state = await mergeOverKeptFile(false);
+    expect(state).toMatchObject({ phase: 'done', merged: true });
+    expect(state?.keptMetadata).toEqual({
+      [KEPT_FILE]: { owner: { uid: 0, gid: 0 }, mode: 0o600 },
+    });
   });
 });
 

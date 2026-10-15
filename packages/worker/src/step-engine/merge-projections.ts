@@ -45,7 +45,8 @@ export function adoptKept(from: MergeResolveState, adopted: KeptMetadata): Merge
     : from;
 }
 
-/** Once a same-branch merge is over: re-syncs, restores `keptMetadata`, saves the state cleared. */
+/** Once a same-branch merge is over: re-syncs, restores `keptMetadata`, saves the state cleared. A re-sync
+ *  that did not complete returns false and saves nothing, so a later settle still has the metadata. */
 export async function settleProjections(
   db: Database,
   repositoryId: string,
@@ -53,7 +54,7 @@ export async function settleProjections(
   save: (cleared: MergeResolveState) => Promise<unknown>,
 ): Promise<boolean> {
   if (await gitOperationInProgress(given.mergeDir)) return false;
-  await resyncHaiveProjections(db, repositoryId, given.mergeDir);
+  if (!(await resyncHaiveProjections(db, repositoryId, given.mergeDir))) return false;
   if (given.keptMetadata) await save(await restoreKeptMetadataOf(given));
   return true;
 }

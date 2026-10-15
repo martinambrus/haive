@@ -362,8 +362,7 @@ async function reachDone(
   // The push may fail, so the record and plan the merge brought in are re-synced first.
   const repositoryId =
     state.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
-  if (repositoryId) {
-    await resyncHaiveProjections(db, repositoryId, state.mergeDir);
+  if (repositoryId && (await resyncHaiveProjections(db, repositoryId, state.mergeDir))) {
     state = await restoreKeptMetadataOf(state);
   }
   // Pushes the commit a section read, so a pass that lost the dir cannot send another task's work.

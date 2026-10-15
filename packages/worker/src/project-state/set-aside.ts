@@ -811,14 +811,16 @@ async function isDirty(
 }
 
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install
- *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it. */
+ *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
+ *  Whether both halves re-synced: false while a merge or rebase is open, or when either threw. */
 export async function resyncHaiveProjections(
   db: Database,
   repositoryId: string,
   repoPath: string,
-): Promise<void> {
+): Promise<boolean> {
   // A merge or rebase still open holds an intermediate record: nothing is read in until it ends.
-  if (await gitOperationInProgress(repoPath)) return;
+  if (await gitOperationInProgress(repoPath)) return false;
+  let synced = true;
   try {
     restoreFaults.beforeResync?.('state');
     await syncProjectStateFromCheckout(db, {
@@ -830,6 +832,7 @@ export async function resyncHaiveProjections(
       await refreshProjectState(db, repositoryId);
     }
   } catch (err) {
+    synced = false;
     logger.warn({ err, repositoryId }, 'project state not re-synced after a checkout move');
     await raiseMarkAfterFailure(db, schema.projectStateOutbox, repositoryId, markProjectStateDirty);
   }
@@ -840,9 +843,11 @@ export async function resyncHaiveProjections(
       await flushPlanMirrorForRepository(db, repositoryId);
     }
   } catch (err) {
+    synced = false;
     logger.warn({ err, repositoryId }, 'plan not re-synced after a checkout move');
     await raiseMarkAfterFailure(db, schema.planMirrorState, repositoryId, markPlanMirrorDirty);
   }
+  return synced;
 }
 
 /** The re-sync an onboarding or upgrade owes when it ends, since the sync deferred while it held the

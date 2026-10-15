@@ -1542,8 +1542,9 @@ async function main(): Promise<void> {
       const before = await baseOf();
       const mergeHead = path.join(c.dest, '.git', 'MERGE_HEAD');
       await writeFile(mergeHead, `${git(c.dest, 'rev-parse', 'HEAD')}\n`);
+      let synced: boolean | undefined;
       try {
-        await resyncHaiveProjections(db, id, c.dest);
+        synced = await resyncHaiveProjections(db, id, c.dest);
       } finally {
         await rm(mergeHead, { force: true });
       }
@@ -1551,6 +1552,7 @@ async function main(): Promise<void> {
       check('a re-sync while a merge is open reads nothing in', after === before, {
         changed: after !== before,
       });
+      check('and answers false, since it re-synced nothing', synced === false, { synced });
     }
 
     // 11e15. A mode change landing between the capture and the restore of an untracked projection keeps
@@ -1605,8 +1607,9 @@ async function main(): Promise<void> {
       restoreFaults.beforeResync = (domain) => {
         if (domain === 'state') throw new Error('transient sync failure');
       };
+      let failed: boolean | undefined;
       try {
-        await resyncHaiveProjections(db, id, c.dest);
+        failed = await resyncHaiveProjections(db, id, c.dest);
       } finally {
         delete restoreFaults.beforeResync;
       }
@@ -1618,6 +1621,12 @@ async function main(): Promise<void> {
           after !== null &&
           after.written < after.revision,
         { clean, after },
+      );
+      const retried = await resyncHaiveProjections(db, id, c.dest);
+      check(
+        'and answers false, where the next one that completes answers true',
+        failed === false && retried === true,
+        { failed, retried },
       );
     }
 
@@ -3537,6 +3546,7 @@ async function main(): Promise<void> {
       'cancel-abort',
       'cancel-by-hand',
       'cancel-gone',
+      'cancel-gone-resync',
       'cancel-retried',
       'next-aborts',
       'next-retries',
@@ -3587,9 +3597,18 @@ async function main(): Promise<void> {
               { kept: parked.keptMetadata },
             );
           }
-          if (ending === 'cancel-gone') {
+          if (ending === 'cancel-gone' || ending === 'cancel-gone-resync') {
             git(c.dest, 'merge', '--abort');
-            await cancelTask(task!.id);
+            if (ending === 'cancel-gone-resync') {
+              restoreFaults.beforeResync = (domain) => {
+                if (domain === 'state') throw new Error('smoke: the state re-sync fails');
+              };
+            }
+            try {
+              await cancelTask(task!.id);
+            } finally {
+              delete restoreFaults.beforeResync;
+            }
             const reported = await db
               .select({ id: schema.taskEvents.id })
               .from(schema.taskEvents)
@@ -3604,6 +3623,29 @@ async function main(): Promise<void> {
               file: await modeIn(path.join(c.dest, RENDER_REL)),
               dir: await modeIn(recordDir),
             };
+            if (ending === 'cancel-gone-resync') {
+              check(
+                `C12: ${ending}: a settle whose re-sync fails keeps the record of the owner and mode`,
+                reported.length === 0 && !mergeOpen(c.dest) && kept?.[RENDER_REL]?.mode === 0o600,
+                { reported: reported.length, kept },
+              );
+              await recordLeftOpenMerges(db, task!.id);
+              const later = {
+                kept: (await stepRow())!.mergeResolveState!.keptMetadata,
+                file: await modeIn(path.join(c.dest, RENDER_REL)),
+                dir: await modeIn(recordDir),
+              };
+              check(
+                `C12: ${ending}: the next settle, with the fault gone, gives the file back at the mode it had, in the directory it had, before any sweep, and keeps no record of them`,
+                later.kept === undefined && later.file === 0o600 && later.dir === 0o700,
+                {
+                  file: later.file?.toString(8) ?? null,
+                  dir: later.dir?.toString(8) ?? null,
+                  kept: later.kept,
+                },
+              );
+              return;
+            }
             check(
               `C12: ${ending}: a cancel that finds the merge already aborted gives the file back at the mode it had, in the directory it had, before any sweep, reports nothing, and keeps no record of them`,
               reported.length === 0 &&
