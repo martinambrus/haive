@@ -66,6 +66,7 @@ const textOf = (node: ReactNode): string =>
         : '';
 
 const TOOLING_PATH = '/repositories/repo-1/tooling';
+const CONFIG_PATH = '/repositories/repo-1/tooling-config';
 const CLEAR = 'Clear stored credentials';
 const CONFIRM = 'Clear credentials';
 const STORED_NOTE = 'Credentials are stored. Leave both blank to keep them; type to replace.';
@@ -636,5 +637,218 @@ describe('Clear stored credentials and Save tooling never run together', () => {
     await view.press('Save tooling');
     expect(api.patch).toHaveBeenCalledTimes(2);
     expect(lastBody()).toHaveProperty('appAuth');
+  });
+});
+
+describe('after a failed clear or save, the page re-reads which credentials are stored', () => {
+  type View = Awaited<ReturnType<typeof mount>>;
+  type Flags = [username: boolean, password: boolean];
+
+  const SAVE = 'Save tooling';
+  const REFUSED = 'The server said no';
+  const SERVER_SIDE = {
+    rtkEnabled: false,
+    appAuth: { ...APP_AUTH, loginUrl: 'https://server.test/login' },
+    pendingRepoMcpServers: ['server-side-mcp'],
+  };
+  const GONE: [string, Flags, Flags][] = [
+    ['the username has gone', [true, true], [false, true]],
+    ['the password has gone', [true, true], [true, false]],
+  ];
+  const BACK: [string, Flags, Flags][] = [
+    ['only the username is stored', [false, false], [true, false]],
+    ['only the password is stored', [false, false], [false, true]],
+  ];
+
+  const refuse = () => api.patch.mockRejectedValueOnce(new Error(REFUSED));
+  const reread = (flags: Flags, rest: Record<string, unknown> = {}) =>
+    api.get.mockResolvedValueOnce({ ...CONFIG, ...stored(...flags), ...rest });
+  const holdRead = (flags: Flags) => {
+    let land!: () => void;
+    api.get.mockReturnValueOnce(
+      new Promise((resolve) => {
+        land = () => resolve({ ...CONFIG, ...stored(...flags) });
+      }),
+    );
+    return async () => {
+      land();
+      await flush();
+    };
+  };
+  const failClear = async (view: View) => {
+    await view.press(CLEAR);
+    await view.press(CONFIRM);
+  };
+  const failSave = (view: View) => view.press(SAVE);
+  const paths: [string, (view: View) => Promise<void>][] = [
+    ['clear', failClear],
+    ['save', failSave],
+  ];
+  const showsStored = (view: View, [username, password]: Flags) => {
+    const both = username && password;
+    expect(view.field('appAuthUsername').props.placeholder).toBe(
+      username ? STORED_HINT : 'test user',
+    );
+    expect(view.field('appAuthPassword').props.placeholder).toBe(password ? STORED_HINT : '');
+    expect(view.text()).toContain(both ? STORED_NOTE : UNSTORED_NOTE);
+    expect(view.text()).not.toContain(both ? UNSTORED_NOTE : STORED_NOTE);
+    expect(view.button(CLEAR) !== undefined).toBe(username || password);
+  };
+
+  it.each(GONE)(
+    'shows what the re-read found when %s after a failed clear',
+    async (_what, from, to) => {
+      const view = await mount(stored(...from));
+      refuse();
+      reread(to);
+      await failClear(view);
+      expect(api.get).toHaveBeenCalledTimes(2);
+      expect(api.get).toHaveBeenLastCalledWith(CONFIG_PATH);
+      showsStored(view, to);
+      expect(view.dialog()?.props.open).toBe(true);
+      expect(view.dialogError()).toBe(REFUSED);
+    },
+  );
+
+  it('keeps that after Cancel on the clear error', async () => {
+    const view = await mount();
+    refuse();
+    reread([false, true]);
+    await failClear(view);
+    await view.press('Cancel');
+    expect(view.dialog()?.props.open).toBe(false);
+    showsStored(view, [false, true]);
+  });
+
+  it('closes the dialog when nothing is left to clear, and it stays closed when credentials are stored again', async () => {
+    const view = await mount();
+    refuse();
+    reread([false, false]);
+    await failClear(view);
+    expect(view.button(CLEAR)).toBeUndefined();
+    expect(view.dialog()).toBeUndefined();
+    showsStored(view, [false, false]);
+    view.enter('appAuthUsername', 'new-user');
+    await view.press(SAVE);
+    expect(view.button(CLEAR)).toBeDefined();
+    expect(view.dialog()?.props.open).toBe(false);
+  });
+
+  it.each([...GONE, ...BACK])(
+    'shows what the re-read found when %s after a failed save',
+    async (_what, from, to) => {
+      const view = await mount(stored(...from));
+      view.enter('appAuthUsername', 'ci-user');
+      view.enter('appAuthPassword', TYPED_PASSWORD);
+      refuse();
+      reread(to);
+      await failSave(view);
+      expect(api.get).toHaveBeenCalledTimes(2);
+      expect(api.get).toHaveBeenLastCalledWith(CONFIG_PATH);
+      expect(view.error()).toBe(REFUSED);
+      showsStored(view, to);
+    },
+  );
+
+  it('closes a dialog left open behind a failed save when nothing is left to clear', async () => {
+    const view = await mount();
+    await view.press(CLEAR);
+    refuse();
+    reread([false, false]);
+    await failSave(view);
+    expect(view.dialog()).toBeUndefined();
+    view.enter('appAuthUsername', 'new-user');
+    await view.press(SAVE);
+    expect(view.button(CLEAR)).toBeDefined();
+    expect(view.dialog()?.props.open).toBe(false);
+  });
+
+  it.each(paths)('keeps the unsaved edits when a failed %s is re-read', async (_what, fail) => {
+    const view = await mount();
+    view.tick('rtkEnabled', true);
+    view.enter('appAuthLoginUrl', 'https://app.test/other');
+    view.enter('appAuthUsername', 'typed-user');
+    refuse();
+    reread([false, true], SERVER_SIDE);
+    await fail(view);
+    showsStored(view, [false, true]);
+    expect(view.field('rtkEnabled').props.checked).toBe(true);
+    expect(view.field('appAuthLoginUrl').props.value).toBe('https://app.test/other');
+    expect(view.field('appAuthUsername').props.value).toBe('typed-user');
+    expect(view.text()).not.toContain('MCP servers waiting for your decision');
+  });
+
+  it.each(paths)(
+    'keeps the flags and the error when the re-read of a failed %s fails too',
+    async (_what, fail) => {
+      const unhandled: unknown[] = [];
+      const collect = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', collect);
+      try {
+        const view = await mount();
+        refuse();
+        api.get.mockRejectedValueOnce(new Error('Network down'));
+        await fail(view);
+        await flush();
+        expect(api.get).toHaveBeenCalledTimes(2);
+        showsStored(view, [true, true]);
+        expect(view.error() ?? view.dialogError()).toBe(REFUSED);
+        expect([view.error(), view.dialogError()]).not.toContain('Network down');
+      } finally {
+        process.off('unhandledRejection', collect);
+      }
+      expect(unhandled).toEqual([]);
+    },
+  );
+
+  it('keeps Save disabled until the re-read of a failed clear has landed', async () => {
+    const view = await mount();
+    refuse();
+    const land = holdRead([false, true]);
+    await view.press(CLEAR);
+    view.button(CONFIRM)!.props.onClick!();
+    await flush();
+    view.draw();
+    expect(view.dialogError()).toBe(REFUSED);
+    expect(view.button('Clearing...')!.props.disabled).toBe(true);
+    expect(view.button(SAVE)!.props.disabled).toBe(true);
+    await land();
+    view.draw();
+    expect(view.button(CONFIRM)!.props.disabled).toBeFalsy();
+    expect(view.button(SAVE)!.props.disabled).toBeFalsy();
+    showsStored(view, [false, true]);
+  });
+
+  it('keeps Clear disabled until the re-read of a failed save has landed', async () => {
+    const view = await mount();
+    refuse();
+    const land = holdRead([false, true]);
+    view.button(SAVE)!.props.onClick!();
+    await flush();
+    view.draw();
+    expect(view.error()).toBe(REFUSED);
+    expect(view.button('Saving...')!.props.disabled).toBe(true);
+    expect(view.button(CLEAR)!.props.disabled).toBe(true);
+    await land();
+    view.draw();
+    expect(view.button(SAVE)!.props.disabled).toBeFalsy();
+    expect(view.button(CLEAR)!.props.disabled).toBeFalsy();
+    showsStored(view, [false, true]);
+  });
+
+  it('makes no extra read after a clear that succeeds', async () => {
+    const view = await mount();
+    await view.press(CLEAR);
+    await view.press(CONFIRM);
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    expect(api.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('makes no extra read after a save that succeeds', async () => {
+    const view = await mount();
+    view.enter('appAuthUsername', 'new-user');
+    await view.press(SAVE);
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    expect(api.get).toHaveBeenCalledTimes(1);
   });
 });

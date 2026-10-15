@@ -281,6 +281,19 @@ export default function RepoToolingPage() {
     setVerifySaved(false);
   }
 
+  // The api writes the two secrets with no rollback, so a failed request can leave one changed.
+  async function refreshCredentialFlags() {
+    try {
+      const cfg = await api.get<ToolingConfig>(`/repositories/${repositoryId}/tooling-config`);
+      setAppAuthUsernameSet(cfg.appAuthUsernameSet);
+      setAppAuthPasswordSet(cfg.appAuthPasswordSet);
+      // The dialog unmounts with nothing stored; an open flag left behind would reopen it later.
+      if (!cfg.appAuthUsernameSet && !cfg.appAuthPasswordSet) setClearCredsOpen(false);
+    } catch {
+      // Best effort: the flags stay as they were.
+    }
+  }
+
   async function handleSave() {
     if (saving || clearCredsBusy) return;
     // Mirrors the API's own guard. Checked here too so unticking the last dimension
@@ -336,6 +349,7 @@ export default function RepoToolingPage() {
       setSaved(true);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to save tooling');
+      await refreshCredentialFlags();
     } finally {
       setSaving(false);
     }
@@ -359,6 +373,7 @@ export default function RepoToolingPage() {
       setClearCredsOpen(false);
     } catch (err) {
       setClearCredsError((err as Error).message ?? 'Failed to clear the stored credentials');
+      await refreshCredentialFlags();
     } finally {
       setClearCredsBusy(false);
     }
