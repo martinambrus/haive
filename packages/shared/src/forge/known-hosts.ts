@@ -107,5 +107,5 @@ export function credentialUsableForPr(
   const repoForge = inferForgeProviderFromHost(originHost);
   const credForge = credentialForgeProvider(c.provider, c.host);
   if (repoForge) return credForge === repoForge;
-  return c.host === originHost && isForgeProviderName(c.provider);
+  return c.host.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);
 }

@@ -20,6 +20,7 @@ const HOSTS = [
   'git.example.com',
   'GitHub.com',
   'git.other.example',
+  'Git.Example.com',
 ];
 const REMOTES = [
   'https://github.com/acme/app.git',
@@ -136,15 +137,37 @@ describe('credentialUsableForPr', () => {
     expect(fits('gitea', 'git.example.com', remote)).toBe(false);
   });
 
-  it('answers as the worker did for every credential and remote of the grid, but for an ssh port', () => {
+  it.each([
+    ['gitea', 'Git.Example.com', 'https://git.example.com/acme/app.git'],
+    ['gitea', 'GIT.EXAMPLE.COM', 'git@git.example.com:acme/app.git'],
+    ['gitea', 'git.example.com', 'ssh://git@GIT.EXAMPLE.COM/acme/app.git'],
+    ['gitea', 'git.example.com', 'git@GIT.EXAMPLE.COM:acme/app.git'],
+    ['gitlab', 'Git.Example.com', 'ssh://git@GIT.EXAMPLE.COM:2222/acme/app.git'],
+  ])(
+    'takes a %s credential on %s for the remote %s whatever the letter case',
+    (provider, host, remote) => {
+      expect(fits(provider, host, remote)).toBe(true);
+    },
+  );
+
+  it('still needs the same host and an explicit provider once the letter case is ignored', () => {
+    expect(fits('gitea', 'Git.Other.example', 'https://git.example.com/acme/app.git')).toBe(false);
+    expect(fits('gitea', 'Git.Example.com:8443', 'https://git.example.com/acme/app.git')).toBe(
+      false,
+    );
+    expect(fits(null, 'Git.Example.com', 'https://git.example.com/acme/app.git')).toBe(false);
+    expect(fits('nonsense', 'Git.Example.com', 'git@GIT.EXAMPLE.COM:acme/app.git')).toBe(false);
+  });
+
+  it('answers as the worker did for every credential and remote of the grid, but for an ssh port and a host in other letter case', () => {
     let bits = '';
     for (const provider of PROVIDERS) {
       for (const host of HOSTS) {
         for (const remote of REMOTES) bits += fits(provider, host, remote) ? '1' : '0';
       }
     }
-    expect(bits).toHaveLength(952);
-    expect([...bits].filter((bit) => bit === '1')).toHaveLength(99);
-    expect(sha(bits)).toBe('ebdab5c8c4cfd63b04bea91dfe612504f7fa21eac1661092a070b8980bb6c801');
+    expect(bits).toHaveLength(1088);
+    expect([...bits].filter((bit) => bit === '1')).toHaveLength(126);
+    expect(sha(bits)).toBe('f9f6093a22bb4080edce5ea0556b741cc479106b1a90b09d83b8eae094ce230d');
   });
 });
