@@ -88,6 +88,7 @@ describe('resolveGlobalKbSettings', () => {
     vi.spyOn(configService, 'get').mockImplementation(async (key) =>
       key === CONFIG_KEYS.GLOBAL_KB_ENABLED ? stored : null,
     );
+    vi.spyOn(configService, 'getFresh').mockResolvedValue(null);
     vi.spyOn(secretsService, 'get').mockResolvedValue(null);
 
     expect((await resolveGlobalKbSettings()).enabled).toBe(expected);

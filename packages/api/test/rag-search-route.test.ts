@@ -217,6 +217,7 @@ beforeEach(() => {
     [CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, 'global-model'],
   ]);
   vi.spyOn(configService, 'get').mockImplementation(async (key) => config.get(key) ?? null);
+  vi.spyOn(configService, 'getFresh').mockImplementation(async (key) => config.get(key) ?? null);
   vi.spyOn(configService, 'getBoolean').mockImplementation(
     async (_key, fallback = false) => fallback,
   );
