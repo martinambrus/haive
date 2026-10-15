@@ -129,7 +129,12 @@ export function dnsResolver(servers?: readonly string[]): NameResolverFactory {
           ...(v6.status === 'fulfilled' ? v6.value.map((address) => ({ address, family: 6 })) : []),
         ];
         if (addresses.length > 0) return addresses;
-        const failed = [v4, v6].find((result) => result.status === 'rejected');
+        const rejected = [v4, v6].filter((result) => result.status === 'rejected');
+        // A timeout wins over a quick no-data answer from the other family, so the code never races.
+        const failed =
+          rejected.find(
+            (result) => (result.reason as NodeJS.ErrnoException)?.code === dns.TIMEOUT,
+          ) ?? rejected[0];
         throw Object.assign(new Error(`no address for ${hostname}`, { cause: failed?.reason }), {
           code: 'ENOTFOUND',
         });

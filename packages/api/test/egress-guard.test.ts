@@ -1442,6 +1442,19 @@ describe('the production entry point', () => {
     expect((error.cause as Error).cause).toBe(first);
   });
 
+  it.each([
+    ['A answers at once, AAAA times out', 'ENODATA', dns.TIMEOUT],
+    ['AAAA answers at once, A times out', dns.TIMEOUT, 'ENODATA'],
+  ])('reports request-timeout when %s', async (_name, a, aaaa) => {
+    mockCares({ a: caresError(a), aaaa: caresError(aaaa) });
+
+    const error = await refusal(
+      guardedGet(new URL('https://prod.test/'), { timeoutMs: 1500, maxBytes: 4096 }),
+    );
+
+    expect(error.reason).toBe('request-timeout');
+  });
+
   it('ignores a classifier, a resolver or a CA slipped in through its options', async () => {
     mockCares({ a: ['127.0.0.1'] });
     const slipped = {
