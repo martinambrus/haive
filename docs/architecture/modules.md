@@ -43,8 +43,11 @@ the module loads again.
   settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
   The worker starts no job of a module that is deactivated when it boots, and a reconcile every 15 s
-  (`MODULE_JOBS_RECONCILE_MS`, `modules/loader.ts`) stops the jobs of one deactivated since. Once the
-  module is active again, the next pass ensures its schema and then starts its jobs, once; a failed
+  (`MODULE_JOBS_RECONCILE_MS`, `modules/loader.ts`) stops the jobs of one deactivated since. A stop
+  still running after `MODULE_JOB_STOP_WAIT_MS` (10 s) is logged once and left running: the pass goes
+  on with the other modules, a later pass or the shutdown waits on that same stop instead of calling it
+  again, and the module counts as running until it ends. Once the module is active again, the next
+  pass ensures its schema and then starts its jobs, once; a failed
   ensure or start is logged and waits for the next deactivation and activation. A task type that uses the module, as its source or through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
@@ -71,8 +74,9 @@ the module loads again.
 `module.teardown`) runs a deactivated module's `./teardown` hook in the worker, which drops the module's
 own data; it answers 409 `module_active` or `module_missing` for a module in any other state. The
 worker refuses it by name while this worker does not load the module, while the module's jobs or its
-schema setup still run (they end within one reconcile pass of the deactivation), and while an earlier
-teardown hook of the module still runs. The hook has 10 minutes (`TEARDOWN_HOOK_TIMEOUT_MS`); past
+schema setup still run (normally within one reconcile pass of the deactivation; a stop that outlives
+its wait keeps the refusal until it ends), and while an earlier teardown hook of the module still runs.
+The hook has 10 minutes (`TEARDOWN_HOOK_TIMEOUT_MS`); past
 that the job fails, the hook may go on, and until it ends the module is held: no schema ensure, no job
 start and no second teardown, with one warning per hold in the worker log, and the hook can no longer
 open the module database. Only a worker restart frees a hook that never ends. A finished teardown
