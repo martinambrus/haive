@@ -367,8 +367,6 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
       return `${token} names a step whose output can carry a person's words; only a step whose output an agent wrote can be quoted.`;
     case 'step-token-not-own-line':
       return `${token} must be alone on its line.`;
-    case 'tools-not-supported-yet':
-      return "Tools on a prompt step are not supported yet. Remove this step's tools to save it.";
     case 'tool-no-longer-valid':
       return issue.raw
         ? `${tool} no longer passes its checks; fix it or remove it.`

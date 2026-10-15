@@ -2514,6 +2514,12 @@ export function changedTaskType(err: ApiError): AdminTaskType | null {
 export const deleteTaskType = (slug: string) =>
   api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);
 
+export const getCustomToolsSwitch = () =>
+  api.get<{ enabled: boolean }>('/admin/config/custom-tools');
+
+export const setCustomToolsSwitch = (enabled: boolean) =>
+  api.put<{ enabled: boolean }>('/admin/config/custom-tools', { enabled });
+
 /** The step every type_draft task cycles on; its revise loop re-targets itself, so submitting by step id is unambiguous. */
 export const TYPE_DRAFT_STEP_ID = '01-type-draft';
 

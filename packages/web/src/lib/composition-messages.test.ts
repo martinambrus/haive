@@ -451,9 +451,10 @@ describe('describePromptStepIssue', () => {
     const text = (kind: Parameters<typeof describePromptStepIssue>[0]['kind'], raw?: string) =>
       describePromptStepIssue({ kind, stepId: 's', ...(raw === undefined ? {} : { raw }) });
 
-    it('says tools are not supported yet and what to do', () => {
-      expect(text('tools-not-supported-yet')).toContain('not supported yet');
-      expect(text('tools-not-supported-yet')).toContain('Remove');
+    it('has no tool message that calls tools unsupported', () => {
+      for (const kind of [...CUSTOM_TOOL_PROBLEM_KINDS, 'tool-no-longer-valid' as const]) {
+        expect(text(kind, 'repo_status'), kind).not.toMatch(/not supported/i);
+      }
     });
 
     it('W10 no longer knows tools-not-supported-yet, as a problem kind or as a message', () => {
@@ -552,7 +553,7 @@ describe('promptStepIssuesOf', () => {
     expect(promptStepIssuesOf(undefined)).toEqual([]);
   });
 
-  it('keeps the tool kinds an api save answers with', () => {
+  it('keeps the tool kinds an api save answers with, and drops the retired tools-not-supported-yet', () => {
     const out = promptStepIssuesOf([
       { kind: 'tools-not-supported-yet', stepId: 'custom.t.a', index: 0, raw: '', start: 0 },
       { kind: 'tool-url-not-https', stepId: 'custom.t.a', index: 0, raw: 'repo_status', start: 0 },
@@ -560,7 +561,6 @@ describe('promptStepIssuesOf', () => {
       { kind: 'too-many-tools', stepId: 'custom.t.a', index: 0, raw: '', start: 0 },
     ]);
     expect(out.map((i) => [i.kind, i.raw])).toEqual([
-      ['tools-not-supported-yet', ''],
       ['tool-url-not-https', 'repo_status'],
       ['tool-no-longer-valid', 'stale'],
       ['too-many-tools', ''],
