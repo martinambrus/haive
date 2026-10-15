@@ -31,6 +31,8 @@ export const CLEAR_ALLOWANCE_WATCH = {
   allowanceReplenishedAt: null,
 };
 
+const OPEN_STEP_STATUSES = ['pending', 'running', 'waiting_form', 'waiting_cli'] as const;
+
 /** Mark a single task row as cancelled and append the activity event.
  *  Caller is responsible for enqueueing the BullMQ CANCEL job (via
  *  enqueueCancelJob) AFTER any surrounding transaction commits — enqueueing
@@ -84,7 +86,7 @@ export async function cancelTaskRow(
     .where(
       and(
         eq(schema.taskSteps.taskId, taskId),
-        inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
+        inArray(schema.taskSteps.status, [...OPEN_STEP_STATUSES]),
       ),
     );
   await tx.insert(schema.taskEvents).values({
@@ -131,6 +133,22 @@ export async function cancelOpenTasksForRepo(
         notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
       ),
     );
+  if (open.length === 0) return open;
+  // Step rows before task rows: the order every other transaction that writes both takes.
+  await tx
+    .select({ id: schema.taskSteps.id })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        inArray(
+          schema.taskSteps.taskId,
+          open.map((t) => t.id),
+        ),
+        inArray(schema.taskSteps.status, [...OPEN_STEP_STATUSES]),
+      ),
+    )
+    .orderBy(schema.taskSteps.id)
+    .for('no key update');
   for (const t of open) {
     await cancelTaskRow(tx, t.id, { by: userId, reason: 'repository_deleted' });
   }

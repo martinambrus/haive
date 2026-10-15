@@ -29,11 +29,12 @@ function makeFakeTx(selectReturn: Array<{ id: string }> = []): {
   const tx: any = {
     select: (cols: unknown) => ({
       from: (table: unknown) => ({
-        where: async (clause: unknown) => {
+        where: (clause: unknown) => {
+          if (table === schema.taskSteps) return { orderBy: () => ({ for: async () => [] }) };
           recorded.selectArgs = cols;
           recorded.fromArg = table;
           recorded.whereArg = clause;
-          return selectReturn;
+          return Promise.resolve(selectReturn);
         },
       }),
     }),
