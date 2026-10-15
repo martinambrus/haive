@@ -116,10 +116,12 @@ async function awaitDatabase(sql: Sql, timeoutMs = 120_000): Promise<void> {
   }
 }
 
-async function liveTaskCount(sql: Sql): Promise<number> {
+export async function liveTaskCount(sql: Sql): Promise<number> {
+  // A dead task runs nothing, and /admin/maintenance leaves it out of its list and count too.
   const rows = await sql<{ n: string }[]>`
     SELECT count(*)::text AS n FROM tasks
-     WHERE status IN ('created','queued','running','paused','waiting_user','waiting_pr')`;
+     WHERE status IN ('created','queued','running','paused','waiting_user','waiting_pr')
+       AND dead_at IS NULL`;
   return Number(rows[0]?.n ?? 0);
 }
 
