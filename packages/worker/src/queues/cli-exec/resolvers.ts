@@ -42,7 +42,7 @@ import {
 } from '../../sandbox/custom-mcp-server.js';
 import { CHROME_MCP_PROXY_JS, CHROME_MCP_PROXY_PATH } from '../../sandbox/chrome-mcp-proxy.js';
 import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
-import { resolveMcpSurface, type McpProfile } from '../../sandbox/mcp-surface.js';
+import { resolveMcpSurface, type McpProfile, type McpSurface } from '../../sandbox/mcp-surface.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
 import { appRunnerBrowserCdpUrl } from '../../sandbox/app-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
@@ -242,19 +242,33 @@ type CustomRun = Pick<
   'customTools' | 'invocationId' | 'taskStepId' | 'timeoutMs'
 >;
 
-/** The haive-custom script, tool list and this run's token as sandbox files; null when no named tool is pinned. */
+export const CUSTOM_TOOLS_UNWIRED_REASON = 'custom-tools-unwired';
+
+const unwired = (cause: string, names: readonly string[]): Error =>
+  new Error(
+    `${CUSTOM_TOOLS_UNWIRED_REASON}: the tools of this run (${names.join(', ')}) cannot be wired because ${cause}. The CLI was not started; fix that, then retry the step.`,
+  );
+
+/** The haive-custom script, tool list and this run's token as sandbox files; throws when the tools the prompt advertises cannot be wired. */
 async function resolveCustomFiles(
   db: Database,
   taskId: string,
   run: CustomRun,
-  names: readonly string[],
-): Promise<SandboxExtraFile[] | null> {
-  if (run.taskStepId === null) return null;
+  custom: NonNullable<McpSurface['custom']>,
+): Promise<SandboxExtraFile[]> {
+  const names = custom.tools;
+  if (!custom.enabled) {
+    throw unwired(
+      'CONFIG_ENCRYPTION_KEY is not set on the worker, so their token cannot be signed',
+      names,
+    );
+  }
+  if (run.taskStepId === null) throw unwired('the run is not tied to a step', names);
   const step = await db.query.taskSteps.findFirst({
     where: and(eq(schema.taskSteps.id, run.taskStepId), eq(schema.taskSteps.taskId, taskId)),
     columns: { stepId: true },
   });
-  if (!step) return null;
+  if (!step) throw unwired('the step of the run no longer exists', names);
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { customSteps: true },
@@ -262,7 +276,7 @@ async function resolveCustomFiles(
   const tools = (parsePinnedCustomSteps(task?.customSteps)[step.stepId]?.tools ?? []).filter(
     (tool) => names.includes(tool.name),
   );
-  if (tools.length === 0) return null;
+  if (tools.length === 0) throw unwired('the step has none of them pinned', names);
   const token = signTaskToken(
     {
       aud: 'custom-mcp',
@@ -338,9 +352,7 @@ export async function resolveMcpExtraFiles(
   // prompt can advertise a server this mount does not wire.
   const surface = await resolveMcpSurface(db, taskId, ragOnly, run?.customTools);
   const customFiles =
-    run && surface.custom?.enabled
-      ? await resolveCustomFiles(db, taskId, run, surface.custom.tools)
-      : null;
+    run && surface.custom ? await resolveCustomFiles(db, taskId, run, surface.custom) : null;
 
   const ragLspAvailable =
     cliAdapterRegistry.has(providerName) &&

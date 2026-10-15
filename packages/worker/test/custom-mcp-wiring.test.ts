@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { configService, type CliExecJobPayload } from '@haive/shared';
 import { verifyTaskToken } from '@haive/shared/task-token';
-import { resolveMcpExtraFiles } from '../src/queues/cli-exec/resolvers.js';
+import {
+  CUSTOM_TOOLS_UNWIRED_REASON,
+  resolveMcpExtraFiles,
+} from '../src/queues/cli-exec/resolvers.js';
+import { isTransientCliFailure } from '../src/queues/cli-exec/failure-class.js';
 import {
   CUSTOM_MCP_SERVER_JS,
   CUSTOM_MCP_SERVER_PATH,
@@ -69,14 +73,14 @@ const pinned = (tools: unknown[]) => ({
   },
 });
 
-function dbFor(customSteps: unknown, stepId = STEP_ID): Database {
+function dbFor(customSteps: unknown, stepId = STEP_ID, stepRow = true): Database {
   return {
     query: {
       tasks: {
         findFirst: async () => ({ envTemplateId: null, repositoryId: null, customSteps }),
       },
       envTemplates: { findFirst: async () => undefined },
-      taskSteps: { findFirst: async () => ({ output: null, stepId }) },
+      taskSteps: { findFirst: async () => (stepRow ? { output: null, stepId } : undefined) },
       repositories: { findFirst: async () => undefined },
     },
   } as unknown as Database;
@@ -142,6 +146,19 @@ async function entryOf(
   const servers = merged.cli[0]![3] as Array<{ name: string } & Entry>;
   const spec = servers.find((s) => s.name === 'haive-custom');
   return { entry: spec && { command: spec.command, args: spec.args, env: spec.env }, files };
+}
+
+/** The message a run fails with when it names tools it cannot wire; nothing of it reaches the task volume. */
+async function unwired(provider: Provider, db: Database, forRun: Run): Promise<string> {
+  merged.cli.length = 0;
+  merged.gemini.length = 0;
+  const failure = await extra(provider, db, forRun).catch((err: unknown) => err);
+  expect(failure).toBeInstanceOf(Error);
+  expect(merged).toEqual({ cli: [], gemini: [] });
+  const message = (failure as Error).message;
+  expect(message.startsWith(`${CUSTOM_TOOLS_UNWIRED_REASON}: `)).toBe(true);
+  expect(isTransientCliFailure({ exitCode: -1, errorMessage: message })).toBe(false);
+  return message;
 }
 
 const fileAt = (files: Files, path: string) => files.find((f) => f.containerPath === path)?.content;
@@ -261,23 +278,30 @@ describe.each<Provider>(['claude-code', 'codex', 'gemini'])(
       expect(toolsIn(files).map((t) => t.name)).toEqual(['house_rules']);
     });
 
-    it('wires nothing for names the pinned step does not define', async () => {
-      const { entry, files } = await entryOf(provider, db(), run({ customTools: ['gone'] }));
-      expect(entry).toBeUndefined();
-      for (const path of CUSTOM_PATHS) expect(fileAt(files, path), path).toBeUndefined();
+    it('fails a run whose tools the pinned step does not define, naming them', async () => {
+      const message = await unwired(provider, db(), run({ customTools: ['gone', 'lost'] }));
+      expect(message).toContain('none of them pinned');
+      expect(message).toContain('gone, lost');
     });
 
-    it('wires nothing when the run is not tied to a step', async () => {
-      const { entry, files } = await entryOf(provider, db(), run({ taskStepId: null }));
-      expect(entry).toBeUndefined();
-      for (const path of CUSTOM_PATHS) expect(fileAt(files, path), path).toBeUndefined();
+    it('fails a run that is not tied to a step, naming the tools', async () => {
+      const message = await unwired(provider, db(), run({ taskStepId: null }));
+      expect(message).toContain('not tied to a step');
+      expect(message).toContain('repo_status, house_rules');
     });
 
-    it('wires nothing without the secret that signs the token', async () => {
+    it('fails a run whose step row is gone, naming the tools', async () => {
+      const gone = dbFor(pinned([repoStatus, houseRules]), STEP_ID, false);
+      const message = await unwired(provider, gone, run());
+      expect(message).toContain('no longer exists');
+      expect(message).toContain('repo_status, house_rules');
+    });
+
+    it('fails a run, naming the secret and the tools, when nothing can sign the token', async () => {
       delete process.env.CONFIG_ENCRYPTION_KEY;
-      const { entry, files } = await entryOf(provider, db(), run());
-      expect(entry).toBeUndefined();
-      for (const path of CUSTOM_PATHS) expect(fileAt(files, path), path).toBeUndefined();
+      const message = await unwired(provider, db(), run());
+      expect(message).toContain('CONFIG_ENCRYPTION_KEY');
+      expect(message).toContain('repo_status, house_rules');
     });
   },
 );
@@ -331,8 +355,7 @@ describe('the token lifetime', () => {
 describe('the pinned step', () => {
   it('is read for the step of the invocation, not for any other', async () => {
     const other = dbFor(pinned([repoStatus]), 'custom.demo.other');
-    const { files } = await extra('claude-code', other, run());
-    expect(fileAt(files, CUSTOM_MCP_TOOLS_PATH)).toBeUndefined();
+    expect(await unwired('claude-code', other, run())).toContain('none of them pinned');
   });
 
   it('keeps the tools that parse when another no longer does', async () => {
