@@ -57,6 +57,7 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => {
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
   configService: {
+    get: async (key: string) => h.stored.get(key) ?? null,
     getFresh: async (key: string) => h.stored.get(key) ?? null,
     set: async (key: string, value: string) => {
       h.stored.set(key, value);
@@ -861,6 +862,51 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         (await taskAudits()).map((r) => [r.action, r.targetId, r.actorUserId, r.metadata]),
       ).toEqual([['task.admin_stop', a.id, ACTOR, { ownerUserId: userId, moduleId: 'alpha' }]]);
       expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
+    });
+
+    describe('on the task page payload', () => {
+      const stopOf = async (id: string) => {
+        const res = await app.request(`/tasks/${id}`);
+        expect(res.status).toBe(200);
+        return ((await res.json()) as { stop: unknown }).stop;
+      };
+      const failedAgain = (id: string) =>
+        db
+          .update(schema.tasks)
+          .set({
+            status: 'failed',
+            errorMessage: 'It broke',
+            completedAt: new Date(Date.now() + 1000),
+          })
+          .where(eq(schema.tasks.id, id));
+
+      it('names the module that was turned off on the task it stopped, and on no other', async () => {
+        expect(await stopOf(a.id)).toBeNull();
+        await patchUrgent('alpha');
+        expect(await stopOf(a.id)).toEqual({ reason: 'module_deactivated', moduleId: 'alpha' });
+        for (const other of [b, c, d, e, f, g]) expect(await stopOf(other.id)).toBeNull();
+      });
+
+      it('names it no longer once the task is retried, nor when it fails again for another reason', async () => {
+        await patchUrgent('alpha');
+        await db
+          .update(schema.tasks)
+          .set({ status: 'running', errorMessage: null, completedAt: null })
+          .where(eq(schema.tasks.id, a.id));
+        expect(await stopOf(a.id)).toBeNull();
+        await failedAgain(a.id);
+        expect(await stopOf(a.id)).toBeNull();
+      });
+
+      it('reports the latest stop, whatever its reason', async () => {
+        await patchUrgent('alpha');
+        await db.insert(schema.taskEvents).values({
+          taskId: a.id,
+          eventType: 'task.stopped',
+          payload: { by: ACTOR, byAdmin: true, reason: 'maintenance' },
+        });
+        expect(await stopOf(a.id)).toEqual({ reason: 'maintenance', moduleId: null });
+      });
     });
 
     it('audits the deactivation with its mode and how many tasks it stopped', async () => {
