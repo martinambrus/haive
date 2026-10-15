@@ -255,7 +255,9 @@ export function BundleComposer({
     };
 
     void fetchOnce();
-    handle = setInterval(() => void fetchOnce(), 2500);
+    handle = setInterval(() => {
+      if (valueRef.current.some((v) => v.status === 'syncing')) void fetchOnce();
+    }, 2500);
     return () => {
       cancelled = true;
       if (handle) clearInterval(handle);
