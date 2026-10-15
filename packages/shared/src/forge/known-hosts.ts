@@ -108,5 +108,7 @@ export function credentialUsableForPr(
   const repoForge = inferForgeProviderFromHost(originHost);
   const credForge = credentialForgeProvider(c.provider, c.host);
   if (repoForge) return credForge === repoForge;
-  return c.host.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);
+  // An ssh or git remote names no forge port, so a credential's :port (its API's) is not compared.
+  const credHost = /^https?:\/\//i.test(originUrl.trim()) ? c.host : c.host.replace(/:\d+$/, '');
+  return credHost.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);
 }

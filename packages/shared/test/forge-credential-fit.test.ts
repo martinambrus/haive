@@ -134,6 +134,21 @@ describe('credentialUsableForPr', () => {
   });
 
   it.each([
+    ['ssh://git@git.example.com:2222/a/b.git'],
+    ['git@git.example.com:a/b.git'],
+    ['git://git.example.com:9418/a/b.git'],
+  ])(
+    'takes a self-hosted credential with a forge port in its host for the non-http(s) remote %s',
+    (remote) => {
+      expect(fits('gitea', 'git.example.com:8443', remote)).toBe(true);
+      expect(fits('gitea', 'Git.Example.com:8443', remote)).toBe(true);
+      expect(fits('gitea', 'other.example.com:8443', remote)).toBe(false);
+      expect(fits(null, 'git.example.com:8443', remote)).toBe(false);
+      expect(fits('nonsense', 'git.example.com:8443', remote)).toBe(false);
+    },
+  );
+
+  it.each([
     [null],
     [''],
     ['   '],
