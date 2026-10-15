@@ -12,9 +12,30 @@ const h = vi.hoisted(() => ({
   anonymous: false,
   stored: new Map<string, string>(),
   flags: new Map<string, boolean>(),
+  kills: [] as string[],
+  killable: '',
+  onKill: undefined as ((taskId: string) => Promise<void>) | undefined,
+  eventFails: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/routes/tasks/_helpers.js')>();
+  return {
+    ...original,
+    appendTaskEvent: async (...args: Parameters<typeof original.appendTaskEvent>) => {
+      if (h.eventFails) throw new Error('event refused');
+      return original.appendTaskEvent(...args);
+    },
+  };
+});
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async (taskId: string) => {
+    h.kills.push(taskId);
+    await h.onKill?.(taskId);
+    return taskId === h.killable ? 1 : 0;
+  },
+}));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => {
@@ -58,6 +79,7 @@ import type { AppEnv } from '../src/context.js';
 const ACTOR = '00000000-0000-4000-8000-0000000000a1';
 const USER_EMAIL_INDEX = 'module-deactivation-api-test-user';
 const TYPE = 'mod-deact-test';
+const MODULE_TYPE = 'alpha__t';
 const LIVE = ['created', 'queued', 'running', 'paused', 'waiting_user', 'waiting_pr'] as const;
 const ENDED = ['completed', 'failed', 'cancelled'] as const;
 
@@ -116,6 +138,8 @@ const send = (method: string, path: string, body?: unknown) =>
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 const patchModule = (id: string, active: boolean) => send('PATCH', `/modules/${id}`, { active });
+const patchUrgent = (id: string) =>
+  send('PATCH', `/modules/${id}`, { active: false, mode: 'urgent' });
 const read = async (path: string) => {
   const res = await app.request(path);
   return { status: res.status, headers: Object.fromEntries(res.headers), body: await res.text() };
@@ -158,6 +182,8 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     db.execute(sql`UPDATE tasks SET run_list_snapshot = ${json}::jsonb WHERE id = ${id}`);
   const audits = () =>
     db.select().from(schema.auditEvents).where(eq(schema.auditEvents.targetType, 'module'));
+  const taskAudits = () =>
+    db.select().from(schema.auditEvents).where(eq(schema.auditEvents.targetType, 'task'));
 
   beforeAll(async () => {
     db = createDatabase(url as string);
@@ -212,11 +238,15 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
   });
 
   const clean = async () => {
-    await db.delete(schema.tasks).where(eq(schema.tasks.type, TYPE));
+    await db.delete(schema.tasks).where(inArray(schema.tasks.type, [TYPE, MODULE_TYPE]));
     await db.delete(schema.modules);
     await db.delete(schema.stepCatalog);
-    await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
-    await db.delete(schema.auditEvents).where(eq(schema.auditEvents.targetType, 'module'));
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(inArray(schema.taskTypeDefinitions.slug, [TYPE, MODULE_TYPE]));
+    await db
+      .delete(schema.auditEvents)
+      .where(inArray(schema.auditEvents.targetType, ['module', 'task']));
   };
 
   beforeEach(async () => {
@@ -224,6 +254,10 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     h.anonymous = false;
     h.stored = new Map();
     h.flags = new Map();
+    h.kills = [];
+    h.killable = '';
+    h.onKill = undefined;
+    h.eventFails = false;
     selects = 0;
     await clean();
     for (const id of ['alpha', 'alpha-two', 'beta', 'gamma']) await setModule(id);
@@ -431,13 +465,18 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(await audits()).toHaveLength(0);
     });
 
-    it.each([{}, { active: 'false' }, { active: false, extra: true }])(
-      'refuses the body %j',
-      async (body) => {
-        expect((await send('PATCH', '/modules/alpha', body)).status).toBe(400);
-        expect(await stampOf('alpha')).toBeNull();
-      },
-    );
+    it.each([
+      {},
+      { active: 'false' },
+      { active: false, extra: true },
+      { active: true, mode: 'urgent' },
+      { active: false, mode: 'graceful' },
+      { active: false, mode: 'urgent', extra: true },
+    ])('refuses the body %j', async (body) => {
+      expect((await send('PATCH', '/modules/alpha', body)).status).toBe(400);
+      expect(await stampOf('alpha')).toBeNull();
+      expect(h.kills).toEqual([]);
+    });
 
     it('answers 404 for a module with no recorded row', async () => {
       const res = await patchModule('ghost', false);
@@ -452,11 +491,21 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(await res.json()).toEqual({
         error: expect.any(String),
         code: 'module_tasks_open',
-        tasks: [{ id: t.id, title: 'Uses alpha', status, ownerId: userId }],
+        tasks: [{ id: t.id, title: 'Uses alpha', status, ownerId: userId, currentStepId: null }],
+        capped: false,
       });
       expect(await stampOf('alpha')).toBeNull();
       expect(await audits()).toHaveLength(0);
       expect((await read('/m/alpha/x')).status).toBe(200);
+    });
+
+    it('names the step each listed task is on', async () => {
+      await task({ currentStepId: 'module.alpha.x' });
+      const res = await patchModule('alpha', false);
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { tasks: unknown[] }).tasks).toEqual([
+        expect.objectContaining({ currentStepId: 'module.alpha.x' }),
+      ]);
     });
 
     it('stops refusing once the task that held it has ended', async () => {
@@ -532,7 +581,17 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       );
       const res = await patchModule('alpha', false);
       expect(res.status).toBe(409);
-      expect(((await res.json()) as { tasks: unknown[] }).tasks).toHaveLength(200);
+      const body = (await res.json()) as { tasks: unknown[]; capped: boolean };
+      expect(body.tasks).toHaveLength(200);
+      expect(body.capped).toBe(true);
+
+      await db.delete(schema.tasks).where(eq(schema.tasks.title, 'Task 200'));
+      const exact = (await (await patchModule('alpha', false)).json()) as {
+        tasks: unknown[];
+        capped: boolean;
+      };
+      expect(exact.tasks).toHaveLength(200);
+      expect(exact.capped).toBe(false);
     });
 
     it('keeps the first stamp on a repeated deactivate, and clears it on activate', async () => {
@@ -650,6 +709,367 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       });
       expect(raced).toBe('blocked');
       expect((await pending).status).toBe(200);
+    });
+  });
+
+  describe('PATCH /modules/:id with mode urgent', () => {
+    type Row = Awaited<ReturnType<typeof task>>;
+    type Body = {
+      moduleId: string;
+      active: boolean;
+      deactivatedAt: string;
+      stopped: {
+        id: string;
+        title: string;
+        killed: number;
+        cancelled: number;
+        stopped: number;
+        eventError?: string;
+      }[];
+      left: { id: string; title: string; status: string; currentStepId: string | null }[];
+      failed: { id: string; error: string }[];
+      capped: boolean;
+    };
+    const step = async (taskId: string, stepId: string, status: 'waiting_cli' | 'waiting_form') => {
+      const [row] = await db
+        .insert(schema.taskSteps)
+        .values({ taskId, stepId, stepIndex: 1, round: 0, title: stepId, status })
+        .returning();
+      return row!;
+    };
+    const working = async (over: Partial<typeof schema.tasks.$inferInsert>, stepId: string) => {
+      const made = await task({ ...over, currentStepId: stepId });
+      await db.insert(schema.cliInvocations).values({
+        taskId: made.id,
+        taskStepId: (await step(made.id, stepId, 'waiting_cli')).id,
+        mode: 'cli',
+        prompt: 'p',
+        startedAt: new Date(),
+      });
+      return made;
+    };
+    const observe = (ids: string[]) =>
+      Promise.all(
+        ids.map(async (id) => ({
+          task: (await db.select().from(schema.tasks).where(eq(schema.tasks.id, id)))[0],
+          steps: await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+          runs: await db
+            .select()
+            .from(schema.cliInvocations)
+            .where(eq(schema.cliInvocations.taskId, id)),
+          events: await db.select().from(schema.taskEvents).where(eq(schema.taskEvents.taskId, id)),
+        })),
+      );
+    const stoppedEvents = () =>
+      db.select().from(schema.taskEvents).where(eq(schema.taskEvents.eventType, 'task.stopped'));
+    const idsOf = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
+    const sorted = (ids: string[]) => [...ids].sort();
+
+    let a: Row, b: Row, c: Row, d: Row, e: Row, f: Row, g: Row;
+
+    beforeEach(async () => {
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: MODULE_TYPE,
+        displayName: 'Alpha type',
+        runListStrategy: 'static',
+        stepIds: ['07-x'],
+        source: 'module:alpha',
+      });
+      a = await working({ title: 'A', runListSnapshot: ['module.alpha.x'] }, 'module.alpha.x');
+      b = await working({ title: 'B', runListSnapshot: ['07-x', 'module.alpha.y'] }, '07-x');
+      c = await task({
+        title: 'C',
+        status: 'waiting_user',
+        currentStepId: 'module.alpha.x',
+        runListSnapshot: ['module.alpha.x'],
+      });
+      await step(c.id, 'module.alpha.x', 'waiting_form');
+      d = await working({ title: 'D', type: MODULE_TYPE, runListSnapshot: ['07-x'] }, '07-x');
+      e = await task({
+        title: 'E',
+        status: 'completed',
+        currentStepId: 'module.alpha.x',
+        runListSnapshot: ['module.alpha.x'],
+      });
+      f = await working(
+        { title: 'F', deadAt: new Date(), deadReason: 'gone', runListSnapshot: ['module.alpha.x'] },
+        'module.alpha.x',
+      );
+      g = await working({ title: 'G', runListSnapshot: ['module.beta.x'] }, 'module.beta.x');
+      h.killable = a.id;
+    });
+
+    it('stops the task that is in a step of the module and lists the others it left', async () => {
+      const res = await patchUrgent('alpha');
+      expect(res.status).toBe(200);
+      const stamp = (await stampOf('alpha'))!;
+      expect(stamp).toBeInstanceOf(Date);
+      const body = (await res.json()) as Body;
+      expect(body).toMatchObject({
+        moduleId: 'alpha',
+        active: false,
+        deactivatedAt: stamp.toISOString(),
+        failed: [],
+        capped: false,
+      });
+      expect(body.stopped).toEqual([{ id: a.id, title: 'A', killed: 1, cancelled: 1, stopped: 1 }]);
+      expect(body.left).toHaveLength(3);
+      expect(body.left).toEqual(
+        expect.arrayContaining([
+          { id: b.id, title: 'B', status: 'running', currentStepId: '07-x' },
+          { id: c.id, title: 'C', status: 'waiting_user', currentStepId: 'module.alpha.x' },
+          { id: d.id, title: 'D', status: 'running', currentStepId: '07-x' },
+        ]),
+      );
+    });
+
+    it('ends the run and the step of the task it stopped, tells its owner, and touches no other task', async () => {
+      const others = [b, c, d, e, f, g].map((t) => t.id);
+      const before = await observe(others);
+      expect((await patchUrgent('alpha')).status).toBe(200);
+      expect(await observe(others)).toEqual(before);
+
+      const [after] = await observe([a.id]);
+      expect(after!.task).toMatchObject({
+        status: 'failed',
+        errorMessage: 'Stopped by an administrator',
+      });
+      expect(after!.task!.completedAt).toBeInstanceOf(Date);
+      expect(after!.runs).toMatchObject([
+        { exitCode: 137, errorMessage: 'CLI cancelled by an administrator' },
+      ]);
+      expect(after!.runs[0]!.endedAt).toBeInstanceOf(Date);
+      expect(after!.runs[0]!.supersededAt).toBeInstanceOf(Date);
+      expect(after!.steps).toMatchObject([
+        { status: 'failed', errorMessage: 'Stopped by an administrator' },
+      ]);
+      expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toEqual([
+        [
+          'task.stopped',
+          {
+            by: ACTOR,
+            byAdmin: true,
+            reason: 'module_deactivated',
+            moduleId: 'alpha',
+            killed: 1,
+            cancelled: 1,
+            stopped: 1,
+          },
+        ],
+      ]);
+      expect(
+        (await taskAudits()).map((r) => [r.action, r.targetId, r.actorUserId, r.metadata]),
+      ).toEqual([['task.admin_stop', a.id, ACTOR, { ownerUserId: userId, moduleId: 'alpha' }]]);
+      expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
+    });
+
+    it('audits the deactivation with its mode and how many tasks it stopped', async () => {
+      await patchUrgent('alpha');
+      expect(
+        (await audits()).map((r) => [
+          r.action,
+          r.targetType,
+          r.targetId,
+          r.actorUserId,
+          r.metadata,
+        ]),
+      ).toEqual([
+        [
+          'module.deactivate',
+          'module',
+          null,
+          ACTOR,
+          { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+        ],
+      ]);
+    });
+
+    it('commits the stamp before it stops the first task', async () => {
+      const seen: (Date | null | undefined)[] = [];
+      h.onKill = async () => {
+        seen.push(await stampOf('alpha'));
+      };
+      await patchUrgent('alpha');
+      expect(seen).toHaveLength(2);
+      expect(seen.every((at) => at instanceof Date)).toBe(true);
+    });
+
+    it('repeated: keeps the first stamp, stops nothing and writes no event where nothing stopped', async () => {
+      const first = (await (await patchUrgent('alpha')).json()) as Body;
+      const stamp = await stampOf('alpha');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(await stoppedEvents()).toHaveLength(1);
+
+      const again = (await (await patchUrgent('alpha')).json()) as Body;
+      expect(again.deactivatedAt).toBe(first.deactivatedAt);
+      expect(await stampOf('alpha')).toEqual(stamp);
+      expect(again.stopped).toEqual([]);
+      expect(idsOf(again.left)).toEqual(sorted([b.id, c.id, d.id]));
+      expect(await stoppedEvents()).toHaveLength(1);
+      expect(await taskAudits()).toHaveLength(1);
+      expect((await audits()).map((r) => r.metadata)).toEqual([
+        { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+        { moduleId: 'alpha', mode: 'urgent', stopped: 0 },
+      ]);
+    });
+
+    it('repeated: stops a task that has since started a step of the module', async () => {
+      await patchUrgent('alpha');
+      const late = await working(
+        { title: 'Late', runListSnapshot: ['module.alpha.x'] },
+        'module.alpha.x',
+      );
+      h.killable = late.id;
+      const again = (await (await patchUrgent('alpha')).json()) as Body;
+      expect(again.stopped).toEqual([
+        { id: late.id, title: 'Late', killed: 1, cancelled: 1, stopped: 1 },
+      ]);
+      expect(await stoppedEvents()).toHaveLength(2);
+    });
+
+    it.each(['module.beta.x', 'module.alpha-two.x'])(
+      'leaves a task that is in a step of %s, though its next step is a step of alpha',
+      async (current) => {
+        const other = await working(
+          { title: 'Other', runListSnapshot: [current, 'module.alpha.y'] },
+          current,
+        );
+        const body = (await (await patchUrgent('alpha')).json()) as Body;
+        expect(idsOf(body.left)).toContain(other.id);
+        expect(idsOf(body.stopped)).not.toContain(other.id);
+        expect(h.kills).not.toContain(other.id);
+      },
+    );
+
+    it('collects the tasks it could not stop, and still tries each one', async () => {
+      h.onKill = async (taskId) => {
+        throw new Error(`refused ${taskId}`);
+      };
+      const res = await patchUrgent('alpha');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Body;
+      expect(body.failed.sort((x, y) => x.id.localeCompare(y.id))).toEqual(
+        [a.id, c.id].sort().map((id) => ({ id, error: `refused ${id}` })),
+      );
+      expect(body.stopped).toEqual([]);
+      expect(idsOf(body.left)).toEqual(sorted([b.id, d.id]));
+      expect(await stampOf('alpha')).toBeInstanceOf(Date);
+      expect(await stoppedEvents()).toHaveLength(0);
+    });
+
+    it('keeps a task whose stop committed under stopped when the write of its event throws, and says why', async () => {
+      h.eventFails = true;
+      const res = await patchUrgent('alpha');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Body;
+      expect(body.failed).toEqual([]);
+      expect(body.stopped).toEqual([
+        { id: a.id, title: 'A', killed: 1, cancelled: 1, stopped: 1, eventError: 'event refused' },
+      ]);
+      const [after] = await observe([a.id]);
+      expect(after!.task).toMatchObject({
+        status: 'failed',
+        errorMessage: 'Stopped by an administrator',
+      });
+      expect(after!.events).toEqual([]);
+      expect((await audits()).map((r) => r.metadata)).toEqual([
+        { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+      ]);
+      expect((await taskAudits()).map((r) => [r.action, r.targetId])).toEqual([
+        ['task.admin_stop', a.id],
+      ]);
+    });
+
+    it('deactivates a module nothing depends on and reports nothing', async () => {
+      const res = await patchUrgent('gamma');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Body;
+      expect(body).toMatchObject({
+        moduleId: 'gamma',
+        active: false,
+        stopped: [],
+        failed: [],
+        capped: false,
+      });
+      expect(body.left).toEqual([]);
+      expect(await stampOf('gamma')).toBeInstanceOf(Date);
+      expect(h.kills).toEqual([]);
+      expect((await audits()).map((r) => r.metadata)).toEqual([
+        { moduleId: 'gamma', mode: 'urgent', stopped: 0 },
+      ]);
+    });
+
+    it('answers 404 for a module with no recorded row, and stops nothing', async () => {
+      expect((await patchUrgent('ghost')).status).toBe(404);
+      expect(await audits()).toHaveLength(0);
+      expect(h.kills).toEqual([]);
+    });
+
+    it('refuses a user and changes nothing', async () => {
+      h.role = 'user';
+      expect((await patchUrgent('alpha')).status).toBe(403);
+      expect(await stampOf('alpha')).toBeNull();
+      expect(await audits()).toHaveLength(0);
+      expect(h.kills).toEqual([]);
+    });
+
+    describe('past the 200 tasks it lists', () => {
+      beforeEach(async () => {
+        await db
+          .update(schema.tasks)
+          .set({ status: 'completed' })
+          .where(eq(schema.tasks.userId, userId));
+      });
+
+      it.each([
+        { elsewhere: 200, older: 3, capped: true },
+        { elsewhere: 200, older: 1, capped: true },
+        { elsewhere: 199, older: 1, capped: false },
+      ])(
+        'with $elsewhere other tasks and $older older ones in a step of the module: stops every older one, capped is $capped',
+        async ({ elsewhere, older, capped }) => {
+          await db.insert(schema.tasks).values(
+            Array.from({ length: elsewhere }, (_, i) => ({
+              userId,
+              type: TYPE,
+              title: `Elsewhere ${i}`,
+              status: 'running' as const,
+              currentStepId: '07-x',
+              runListSnapshot: ['module.alpha.x'],
+            })),
+          );
+          const inStep: Row[] = [];
+          for (let i = 0; i < older; i += 1) {
+            inStep.push(
+              await working(
+                {
+                  title: `In step ${i}`,
+                  updatedAt: new Date(Date.UTC(2025, 0, 1, 0, 0, i)),
+                  runListSnapshot: ['module.alpha.x'],
+                },
+                'module.alpha.x',
+              ),
+            );
+          }
+          const ids = inStep.map((t) => t.id);
+
+          const body = (await (await patchUrgent('alpha')).json()) as Body;
+          expect(idsOf(body.stopped)).toEqual(sorted(ids));
+          expect(body.failed).toEqual([]);
+          expect(body.capped).toBe(capped);
+          expect(body.left).toHaveLength(elsewhere);
+          expect(idsOf(body.left).filter((id) => ids.includes(id))).toEqual([]);
+          expect(sorted(h.kills)).toEqual(sorted(ids));
+          expect(await stoppedEvents()).toHaveLength(older);
+
+          const rows = await db
+            .select({ id: schema.tasks.id, status: schema.tasks.status })
+            .from(schema.tasks)
+            .where(inArray(schema.tasks.status, ['running', 'failed']));
+          expect(rows.filter((r) => r.status === 'running')).toHaveLength(elsewhere);
+          expect(idsOf(rows.filter((r) => r.status === 'failed'))).toEqual(sorted(ids));
+        },
+      );
     });
   });
 
@@ -794,6 +1214,32 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         tasks: [{ id: madeId, title: 'Mid-create' }],
       });
       expect(await stampOf('alpha')).toBeNull();
+    });
+
+    it('holds an urgent deactivate until the create commits, then lists the new task as left', async () => {
+      await insertType();
+      let pending!: Promise<Response>;
+      let raced: string | undefined;
+      let madeId = '';
+      await db.transaction(async (tx) => {
+        const { runListSnapshot } = await definitionForCreate(tx, TYPE, { generic: true });
+        const [made] = await tx
+          .insert(schema.tasks)
+          .values({ userId, type: TYPE, title: 'Mid-create', status: 'created', runListSnapshot })
+          .returning();
+        madeId = made!.id;
+        pending = Promise.resolve(patchUrgent('alpha'));
+        raced = await settled(pending);
+      });
+      expect(raced).toBe('blocked');
+      const res = await pending;
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        stopped: [],
+        left: [{ id: madeId, title: 'Mid-create', status: 'created', currentStepId: null }],
+        failed: [],
+      });
+      expect(await stampOf('alpha')).toBeInstanceOf(Date);
     });
 
     it("lets the boot's own update of the module row through while a create holds it", async () => {

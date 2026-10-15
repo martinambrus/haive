@@ -9,6 +9,8 @@ const h = vi.hoisted(() => ({
   stored: new Map<string, string>(),
   toggle: { kind: 'missing' } as unknown,
   toggles: [] as unknown[],
+  urgent: { kind: 'missing' } as unknown,
+  urgents: [] as unknown[],
   audits: [] as unknown[],
 }));
 
@@ -57,6 +59,10 @@ vi.mock('../src/modules/activation.js', () => ({
   setModuleActive: async (_db: unknown, id: string, active: boolean) => {
     h.toggles.push([id, active]);
     return h.toggle;
+  },
+  deactivateUrgently: async (_db: unknown, id: string, actor: string) => {
+    h.urgents.push([id, actor]);
+    return h.urgent;
   },
 }));
 
@@ -126,6 +132,8 @@ beforeEach(() => {
   h.stored = new Map();
   h.toggle = { kind: 'missing' };
   h.toggles = [];
+  h.urgent = { kind: 'missing' };
+  h.urgents = [];
   h.audits = [];
 });
 
@@ -263,14 +271,20 @@ describe('PATCH /modules/:id', () => {
     expect(h.audits).toEqual([]);
   });
 
-  it.each([{}, { active: 'no' }, { active: null }, { active: false, extra: 1 }, { Active: false }])(
-    'refuses the body %j',
-    async (body) => {
-      const res = await patch('alpha', body);
-      expect(res.status).toBe(400);
-      expect(h.toggles).toEqual([]);
-    },
-  );
+  it.each([
+    {},
+    { active: 'no' },
+    { active: null },
+    { active: false, extra: 1 },
+    { Active: false },
+    { active: true, mode: 'urgent' },
+    { active: false, mode: 'graceful' },
+    { active: false, mode: 'urgent', extra: 1 },
+  ])('refuses the body %j', async (body) => {
+    const res = await patch('alpha', body);
+    expect(res.status).toBe(400);
+    expect(h.toggles).toEqual([]);
+  });
 
   it('answers 404 for a module with no recorded row, and audits nothing', async () => {
     h.toggle = { kind: 'missing' };
@@ -281,16 +295,64 @@ describe('PATCH /modules/:id', () => {
   });
 
   it('answers 409 with the live tasks that use the module, and audits nothing', async () => {
-    const tasks = [{ id: 't1', title: 'T', status: 'running', ownerId: 'u1' }];
-    h.toggle = { kind: 'open', tasks };
+    const tasks = [
+      { id: 't1', title: 'T', status: 'running', ownerId: 'u1', currentStepId: 'module.alpha.x' },
+    ];
+    h.toggle = { kind: 'open', tasks, capped: true };
     const res = await patch('alpha', { active: false });
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({
       error: expect.any(String),
       code: 'module_tasks_open',
       tasks,
+      capped: true,
     });
     expect(h.audits).toEqual([]);
+  });
+
+  it('answers 404 for an urgent request on a module with no recorded row, and audits nothing', async () => {
+    const res = await patch('ghost', { active: false, mode: 'urgent' });
+    expect(res.status).toBe(404);
+    expect(h.urgents).toEqual([['ghost', '00000000-0000-4000-8000-0000000000a1']]);
+    expect(h.toggles).toEqual([]);
+    expect(h.audits).toEqual([]);
+  });
+
+  it('answers an urgent request with what it stopped and left, and audits its mode', async () => {
+    const stopped = [
+      { id: 't1', title: 'A', killed: 1, cancelled: 1, stopped: 1, eventError: 'event refused' },
+    ];
+    const left = [{ id: 't2', title: 'B', status: 'running', currentStepId: '07-x' }];
+    const failed = [{ id: 't3', error: 'refused' }];
+    h.urgent = {
+      kind: 'ok',
+      deactivatedAt: new Date('2026-10-14T08:00:00.000Z'),
+      stopped,
+      left,
+      failed,
+      capped: true,
+    };
+    const res = await patch('alpha', { active: false, mode: 'urgent' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      moduleId: 'alpha',
+      active: false,
+      deactivatedAt: '2026-10-14T08:00:00.000Z',
+      stopped,
+      left,
+      failed,
+      capped: true,
+    });
+    expect(h.toggles).toEqual([]);
+    expect(h.audits).toEqual([
+      {
+        actorUserId: '00000000-0000-4000-8000-0000000000a1',
+        action: 'module.deactivate',
+        targetType: 'module',
+        targetId: null,
+        metadata: { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+      },
+    ]);
   });
 
   it.each<[boolean, string, string | null]>([

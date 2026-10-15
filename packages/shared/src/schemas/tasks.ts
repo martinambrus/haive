@@ -426,9 +426,9 @@ const ALL_TASK_STATUSES = [
  *  still user-scoped) list rather than an empty-IN edge case. WAITING_SLOT_FILTER_TOKEN and
  *  PAUSED_FILTER_TOKEN also yield null by design: both are derived, so their caller must
  *  handle them BEFORE calling this. The 'running' token expands to the raw status here, but
- *  the api NARROWS it further (running minus the slot-parked and paused halves, both of which
- *  are also stored as `running`) so the dropdown's "Running", "Waiting for slot" and "Paused"
- *  name disjoint sets. */
+ *  the api NARROWS it further (running minus the slot-parked, paused and dead halves, all of
+ *  which are also stored as `running`; "Waiting for slot" likewise leaves out a dead parked
+ *  task) so the dropdown's "Running", "Waiting for slot" and "Paused" name disjoint sets. */
 export function expandTaskStatusFilter(token: string | undefined | null): string[] | null {
   if (!token) return null;
   if (token === 'open') return [...OPEN_TASK_STATUSES];

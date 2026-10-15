@@ -1,11 +1,36 @@
+import type { Job } from 'bullmq';
 import { eq, getTableName, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { computeStepContribution, computeTaskTiming } from '@haive/shared/timing';
 import { moduleDeactivationMessage } from '../src/modules/activation.js';
+import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { stepRegistry } from '../src/step-engine/registry.js';
 import { advanceStep, type AdvanceStepParams } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+
+const h = vi.hoisted(() => ({ db: undefined as unknown }));
+
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/redis.js', () => ({
+  getBullRedis: () => ({}),
+  getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
+}));
+vi.mock('bullmq', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('bullmq')>()),
+  Queue: class {
+    async add() {
+      return undefined;
+    }
+  },
+}));
+vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/task-auth-volume.js')>()),
+  cleanupTaskAuthVolumes: vi.fn(async () => ({ removed: [], failed: [] })),
+  syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
+}));
 
 const url = process.env.MODULE_DEACTIVATED_STEP_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/module_deactivated_step_test'))
@@ -33,6 +58,27 @@ function stepDef(id: string, extra: Partial<StepDefinition> = {}): StepDefinitio
     ...extra,
   };
 }
+
+const phases = {
+  shouldRun: vi.fn(async () => true),
+  detect: vi.fn(async (): Promise<never> => {
+    throw new Error('detect must not run');
+  }),
+  apply: vi.fn(async (): Promise<never> => {
+    throw new Error('apply must not run');
+  }),
+};
+stepRegistry.register({
+  metadata: {
+    id: 'module.alpha.x',
+    workflowType: 'module.alpha' as WorkflowType,
+    index: 0,
+    title: 'module.alpha.x',
+    description: 'the first step of a module run list',
+    requiresCli: false,
+  },
+  ...phases,
+});
 
 function paramsFor(db: Database, step: StepDefinition, taskId: string): AdvanceStepParams {
   return {
@@ -259,6 +305,7 @@ describe('advanceStep on a module step', () => {
 
 describe.skipIf(!url)('module activation guard on Postgres', () => {
   const EMAIL_INDEX = 'module-deactivated-step-test-user';
+  const START_TYPE = 'module-start-guard';
   let db: Database;
   let userId: string;
   let taskId: string;
@@ -323,6 +370,7 @@ describe.skipIf(!url)('module activation guard on Postgres', () => {
 
   beforeAll(async () => {
     db = createDatabase(url as string);
+    h.db = db;
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     const [user] = await db
       .insert(schema.users)
@@ -349,8 +397,13 @@ describe.skipIf(!url)('module activation guard on Postgres', () => {
   });
 
   afterAll(async () => {
+    vi.restoreAllMocks();
+    setContainerCleanupRunner(null);
     await db.delete(schema.modules);
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
+    await db
+      .delete(schema.taskTypeDefinitions)
+      .where(eq(schema.taskTypeDefinitions.slug, START_TYPE));
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     await db.$client.end({ timeout: 5 });
   });
@@ -552,5 +605,89 @@ describe.skipIf(!url)('module activation guard on Postgres', () => {
       status: 'skipped',
     });
     expect(await stepRows()).toMatchObject([{ stepId: 'module.alpha.x', status: 'skipped' }]);
+  });
+
+  it('waits, on START, for a stamp still being committed, then fails the first step by name and runs no phase', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    setContainerCleanupRunner(async () => 0);
+    Object.values(phases).forEach((phase) => phase.mockClear());
+    await setModule('alpha', null);
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values({
+        slug: START_TYPE,
+        displayName: 'Start guard',
+        runListStrategy: 'static',
+        stepIds: ['module.alpha.x'],
+        source: 'admin',
+      })
+      .onConflictDoNothing();
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'start-guard', source: 'blank', storagePath: '/tmp/start-guard' })
+      .returning();
+    const [made] = await db
+      .insert(schema.tasks)
+      .values({
+        userId,
+        repositoryId: repo!.id,
+        type: START_TYPE,
+        title: 'start',
+        status: 'queued',
+        runListSnapshot: ['module.alpha.x'],
+      })
+      .returning();
+    const start = {
+      id: 'job-start',
+      name: TASK_JOB_NAMES.START,
+      data: { taskId: made!.id, userId },
+      timestamp: Date.now(),
+      moveToDelayed: async () => undefined,
+    } as unknown as Job;
+
+    const claimed = async () =>
+      (
+        await db
+          .select({ status: schema.tasks.status })
+          .from(schema.tasks)
+          .where(eq(schema.tasks.id, made!.id))
+      )[0]?.status === 'running';
+    const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    let started!: Promise<void>;
+    let raced: string | undefined;
+    let during: { status: string; currentStepId: string | null } | undefined;
+    await db.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(schema.modules)
+        .where(eq(schema.modules.moduleId, 'alpha'))
+        .for('update');
+      await tx
+        .update(schema.modules)
+        .set({ deactivatedAt: OFF })
+        .where(eq(schema.modules.moduleId, 'alpha'));
+      started = processTaskJob(start, 'tok');
+      for (let i = 0; i < 400 && !(await claimed()); i += 1) await pause(25);
+      raced = await Promise.race([started.then(() => 'done'), pause(500).then(() => 'blocked')]);
+      [during] = await db
+        .select({ status: schema.tasks.status, currentStepId: schema.tasks.currentStepId })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, made!.id));
+    });
+    expect(raced).toBe('blocked');
+    expect(during).toEqual({ status: 'running', currentStepId: 'module.alpha.x' });
+    await started;
+
+    expect(phases.shouldRun).not.toHaveBeenCalled();
+    expect(phases.detect).not.toHaveBeenCalled();
+    expect(phases.apply).not.toHaveBeenCalled();
+    const rows = await db
+      .select()
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.taskId, made!.id));
+    expect(rows).toMatchObject([{ stepId: 'module.alpha.x', status: 'failed' }]);
+    expectNamedReason(rows[0]?.errorMessage ?? '');
+    const [after] = await db.select().from(schema.tasks).where(eq(schema.tasks.id, made!.id));
+    expect(after).toMatchObject({ status: 'failed', errorMessage: rows[0]?.errorMessage });
   });
 });

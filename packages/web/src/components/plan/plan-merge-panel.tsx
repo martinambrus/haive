@@ -16,8 +16,10 @@ import { Button, FormError } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { isAwaitingFormInput } from '@/lib/submit-state';
+import { isTaskDead } from '@/lib/step-banners';
 
 const POLL_MS = 2000;
+const DEAD_POLL_MS = 30_000;
 
 /**
  * The merge conversation, answered here rather than on the task page.
@@ -65,12 +67,14 @@ export function PlanMergePanel({
   const [pollRestart, setPollRestart] = useState(0);
   // Discard only queues the cancel, so the step still reads as parked until it lands.
   const [discardedTaskId, setDiscardedTaskId] = useState<string | null>(null);
+  const [deadTaskId, setDeadTaskId] = useState<string | null>(null);
 
   // Poll the task only while it is working, and stop the moment it parks or reaches
   // a terminal status — the same self-terminating shape the plan chat uses, so an
   // idle conversation costs nothing.
   const taskId = merge?.taskId ?? null;
   const discarding = taskId !== null && discardedTaskId === taskId;
+  const dead = taskId !== null && deadTaskId === taskId;
   useEffect(() => {
     if (!taskId) {
       setLiveStep(null);
@@ -78,25 +82,27 @@ export function PlanMergePanel({
     }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let polledDead = false;
     const poll = async (): Promise<void> => {
       try {
         const res = await api.get<{ task: Task; steps: TaskStep[] }>(`/tasks/${taskId}`);
         if (cancelled) return;
         const step = res.steps.find((s) => s.stepId === PLAN_MERGE_STEP_ID) ?? null;
+        const taskDead = isTaskDead(res.task);
         setLiveStep(step);
-        const settled =
-          (!discarding && isAwaitingFormInput(step)) ||
-          ['completed', 'cancelled', 'failed'].includes(res.task.status);
+        setDeadTaskId(taskDead ? taskId : null);
+        const ended = ['completed', 'cancelled', 'failed'].includes(res.task.status);
+        const settled = !taskDead && ((!discarding && isAwaitingFormInput(step)) || ended);
+        if (settled || (taskDead && !polledDead)) onChangedRef.current();
         if (settled) {
-          onChangedRef.current();
-          if (['completed', 'cancelled', 'failed'].includes(res.task.status))
-            onSettledRef.current();
+          if (ended) onSettledRef.current();
           return;
         }
+        polledDead = taskDead;
       } catch {
         return;
       }
-      if (!cancelled) timer = setTimeout(() => void poll(), POLL_MS);
+      if (!cancelled) timer = setTimeout(() => void poll(), polledDead ? DEAD_POLL_MS : POLL_MS);
     };
     void poll();
     return () => {
@@ -109,8 +115,8 @@ export function PlanMergePanel({
     endRef.current?.scrollIntoView({ block: 'end' });
   }, [merge?.messages.length]);
 
-  const parked = !discarding && isAwaitingFormInput(liveStep);
-  const working = merge !== null && !parked;
+  const parked = !discarding && !dead && isAwaitingFormInput(liveStep);
+  const working = merge !== null && !parked && !dead;
 
   async function answer(decision: 'confirm' | 'revise'): Promise<void> {
     if (!merge) return;

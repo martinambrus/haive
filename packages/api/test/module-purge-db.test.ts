@@ -430,6 +430,25 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
       const body = await json(res);
       expect([res.status, body.code]).toEqual([409, 'module_tasks_open']);
       expect((body.tasks as { id: string }[]).map((t) => t.id)).toEqual([live.id]);
+      expect(body.capped).toBe(false);
+      expect(await snapshot()).toEqual(before);
+    });
+
+    it('more than 200 live tasks, listing 200 and saying the list is cut: 409', async () => {
+      await db.insert(schema.tasks).values(
+        Array.from({ length: 201 }, (_, i) => ({
+          userId: ACTOR,
+          type: USED,
+          title: `Task ${i}`,
+          status: 'running' as const,
+        })),
+      );
+      before = await snapshot();
+      const res = await purge();
+      const body = await json(res);
+      expect([res.status, body.code]).toEqual([409, 'module_tasks_open']);
+      expect(body.tasks as unknown[]).toHaveLength(200);
+      expect(body.capped).toBe(true);
       expect(await snapshot()).toEqual(before);
     });
 
