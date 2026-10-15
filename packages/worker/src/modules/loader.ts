@@ -18,6 +18,7 @@ import {
   type ModuleSchemaContext,
   type ModuleTeardownContext,
 } from '@haive/shared/module-db';
+import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import type { StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
@@ -151,6 +152,30 @@ export function registerModuleSteps(
   });
 }
 
+async function bootstrapModuleSchema(
+  db: Database,
+  moduleId: string,
+  ensureSchema: NonNullable<WorkerModuleEntry['ensureSchema']>,
+): Promise<void> {
+  try {
+    const moduleDb = await openModuleDatabase(db, moduleId);
+    try {
+      await ensureSchema({
+        moduleId,
+        sql: moduleDb.sql,
+        withSchemaLock: moduleDb.withSchemaLock,
+      });
+    } finally {
+      await moduleDb.close();
+    }
+  } catch (err) {
+    throw new Error(
+      `Module ${moduleId} schema bootstrap failed: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
+}
+
 export async function ensureModuleSchemas(
   db: Database,
   loaded: readonly LoadedWorkerModule[],
@@ -164,48 +189,99 @@ export async function ensureModuleSchemas(
       result[moduleId] = 'none';
       continue;
     }
-    try {
-      const moduleDb = await openModuleDatabase(db, moduleId);
-      try {
-        await ensureSchema({
-          moduleId,
-          sql: moduleDb.sql,
-          withSchemaLock: moduleDb.withSchemaLock,
-        });
-      } finally {
-        await moduleDb.close();
-      }
-    } catch (err) {
-      throw new Error(
-        `Module ${moduleId} schema bootstrap failed: ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
-      );
-    }
+    await bootstrapModuleSchema(db, moduleId, ensureSchema);
     result[moduleId] = 'ok';
   }
   return result;
 }
 
+export const MODULE_JOBS_RECONCILE_MS = 15_000;
+export const MODULE_JOB_START_WAIT_MS = 10_000;
+export const MODULE_JOB_STOP_WAIT_MS = 10_000;
+
 const jobsStarted = new Set<string>();
+const teardownsRunning = new Set<string>();
+// A teardown can begin and end between two passes, so no pass need have seen the deactivation.
+const tornDown = new Set<string>();
 
 export const moduleJobsStarted = (moduleId: string): boolean => jobsStarted.has(moduleId);
+
+export const moduleTeardownRunning = (moduleId: string): boolean => teardownsRunning.has(moduleId);
+
+export function beginModuleTeardown(moduleId: string): () => void {
+  teardownsRunning.add(moduleId);
+  tornDown.add(moduleId);
+  return () => {
+    teardownsRunning.delete(moduleId);
+  };
+}
+
+export type ModuleJobsHandle = {
+  reconcile: (deactivated: ReadonlySet<string>) => Promise<void>;
+  stopAll: () => Promise<void>;
+};
 
 export async function startModuleJobs(
   loaded: readonly LoadedWorkerModule[],
   entries: readonly WorkerModuleEntry[],
   deactivated: ReadonlySet<string> = new Set(),
-): Promise<() => Promise<void>> {
-  const stops: Array<{ moduleId: string; stop: () => Promise<void> }> = [];
-  const stopAll = async (): Promise<void> => {
-    const results = await Promise.allSettled(stops.map((s) => s.stop()));
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') {
-        logger.warn({ err: r.reason, module: stops[i]!.moduleId }, 'module jobs failed to stop');
-      } else {
-        jobsStarted.delete(stops[i]!.moduleId);
-      }
+): Promise<ModuleJobsHandle> {
+  const stops = new Map<string, () => Promise<void>>();
+  // A stop need not be idempotent: later callers wait on one still running, never call it again.
+  const stopping = new Map<string, Promise<void>>();
+  // A start the pass went on without still runs; no pass begins another for that module.
+  const starting = new Set<string>();
+  const pending = new Set(deactivated);
+  const start = async (
+    moduleId: string,
+    jobs: NonNullable<WorkerModuleEntry['jobs']>,
+  ): Promise<void> => {
+    const stop = await jobs({
+      moduleId,
+      connection: getBullRedis(),
+      logger: logger.child({ module: moduleId }),
     });
+    stops.set(moduleId, stop);
+    jobsStarted.add(moduleId);
   };
+  const stopJobs = (moduleId: string): Promise<void> => {
+    const running = stopping.get(moduleId);
+    if (running) return running;
+    const bounded = new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        logger.warn(
+          { module: moduleId, waitMs: MODULE_JOB_STOP_WAIT_MS },
+          `module jobs still stopping after ${MODULE_JOB_STOP_WAIT_MS / 1000} s; going on without them`,
+        );
+        resolve();
+      }, MODULE_JOB_STOP_WAIT_MS);
+      const ended = (): void => {
+        clearTimeout(timer);
+        stopping.delete(moduleId);
+        resolve();
+      };
+      void (async () => stops.get(moduleId)!())().then(
+        () => {
+          stops.delete(moduleId);
+          jobsStarted.delete(moduleId);
+          // The pass that began this stop may have gone on without it.
+          pending.add(moduleId);
+          logger.info({ module: moduleId }, 'module jobs stopped');
+          ended();
+        },
+        (err: unknown) => {
+          logger.warn({ err, module: moduleId }, 'module jobs failed to stop');
+          ended();
+        },
+      );
+    });
+    stopping.set(moduleId, bounded);
+    return bounded;
+  };
+  const stopModules = async (moduleIds: readonly string[]): Promise<void> => {
+    await Promise.all(moduleIds.map((moduleId) => stopJobs(moduleId)));
+  };
+  const stopAll = (): Promise<void> => stopModules([...stops.keys()]);
   for (const [index, module] of loaded.entries()) {
     const jobs = entries[index]?.jobs;
     if (!jobs) continue;
@@ -215,13 +291,7 @@ export async function startModuleJobs(
       continue;
     }
     try {
-      const stop = await jobs({
-        moduleId,
-        connection: getBullRedis(),
-        logger: logger.child({ module: moduleId }),
-      });
-      stops.push({ moduleId, stop });
-      jobsStarted.add(moduleId);
+      await start(moduleId, jobs);
     } catch (err) {
       await stopAll();
       throw new Error(
@@ -230,7 +300,76 @@ export async function startModuleJobs(
       );
     }
   }
-  return stopAll;
+
+  const held = new Set<string>();
+  const reactivate = (
+    moduleId: string,
+    ensureSchema: WorkerModuleEntry['ensureSchema'],
+    jobs: WorkerModuleEntry['jobs'],
+  ): Promise<void> =>
+    new Promise<void>((resolve) => {
+      starting.add(moduleId);
+      const timer = setTimeout(() => {
+        logger.warn(
+          { module: moduleId, waitMs: MODULE_JOB_START_WAIT_MS },
+          `module schema or jobs still starting after ${MODULE_JOB_START_WAIT_MS / 1000} s; going on without them`,
+        );
+        resolve();
+      }, MODULE_JOB_START_WAIT_MS);
+      void (async () => {
+        try {
+          if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
+          if (jobs) {
+            await start(moduleId, jobs);
+            logger.info({ module: moduleId }, 'module jobs started: the module is active again');
+          }
+        } catch (err) {
+          logger.error(
+            { err, module: moduleId },
+            'module schema or jobs failed to start; deactivate and reactivate the module to try again',
+          );
+        } finally {
+          if (!stops.has(moduleId)) jobsStarted.delete(moduleId);
+          starting.delete(moduleId);
+          clearTimeout(timer);
+          resolve();
+        }
+      })();
+    });
+  const reconcile = async (nowDeactivated: ReadonlySet<string>): Promise<void> => {
+    await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
+    for (const [index, module] of loaded.entries()) {
+      const jobs = entries[index]?.jobs;
+      const ensureSchema = entries[index]?.ensureSchema;
+      const moduleId = module.manifest.id;
+      if ((!jobs && !ensureSchema) || stops.has(moduleId) || starting.has(moduleId)) continue;
+      if (nowDeactivated.has(moduleId)) {
+        pending.add(moduleId);
+        held.delete(moduleId);
+        continue;
+      }
+      // A module starts once per reactivation, and not while its teardown runs.
+      if (!pending.has(moduleId) && !tornDown.has(moduleId)) continue;
+      if (moduleTeardownRunning(moduleId)) {
+        if (!held.has(moduleId)) {
+          held.add(moduleId);
+          logger.warn(
+            { module: moduleId },
+            'module start held back: its teardown hook is still running',
+          );
+        }
+        continue;
+      }
+      held.delete(moduleId);
+      pending.delete(moduleId);
+      tornDown.delete(moduleId);
+      // Claimed before the first await, so a teardown that checks now is refused.
+      jobsStarted.add(moduleId);
+      await reactivate(moduleId, ensureSchema, jobs);
+    }
+  };
+
+  return { reconcile, stopAll };
 }
 
 export async function publishWorkerBootReport(
