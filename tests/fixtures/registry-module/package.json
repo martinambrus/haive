@@ -1,0 +1,16 @@
+{
+  "name": "@haive-module/smokefix",
+  "version": "0.1.0",
+  "description": "A registry module with a manifest and nothing else: the fixture of scripts/module-dist-smoke.sh.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./manifest": {
+      "types": "./dist/manifest.d.ts",
+      "import": "./dist/manifest.js"
+    }
+  },
+  "files": [
+    "dist"
+  ]
+}

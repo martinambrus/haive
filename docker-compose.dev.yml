@@ -36,6 +36,7 @@ services:
     working_dir: /app
     volumes:
       - .:/app
+      - ${HAIVE_NPMRC:-/dev/null}:/root/.npmrc:ro
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
       # This container is non-interactive by construction — it runs under `up -d` and
@@ -73,6 +74,8 @@ services:
       context: .
       dockerfile: packages/api/Dockerfile
       target: deps
+      secrets:
+        - npmrc
     container_name: ${HAIVE_INSTALL_ID:-haive}-dev-libs
     # web-kit and modules/* resolve their dependencies through the tree db-migrate installs.
     depends_on:
@@ -95,6 +98,8 @@ services:
   api:
     build:
       target: deps
+      secrets:
+        - npmrc
     depends_on:
       dev-libs:
         condition: service_completed_successfully
@@ -127,6 +132,8 @@ services:
   worker:
     build:
       target: deps
+      secrets:
+        - npmrc
     depends_on:
       dev-libs:
         condition: service_completed_successfully
@@ -160,6 +167,8 @@ services:
   web:
     build:
       target: deps
+      secrets:
+        - npmrc
     depends_on:
       api:
         condition: service_started
@@ -178,6 +187,12 @@ services:
     command: sh -c "pnpm --filter @haive/web dev"
     environment:
       NODE_ENV: development
+
+# Opt-in: HAIVE_NPMRC is an .npmrc holding the @haive-module registry token, given to the four builds
+# and to db-migrate's pnpm install; unset, /dev/null stands in and nothing changes.
+secrets:
+  npmrc:
+    file: ${HAIVE_NPMRC:-/dev/null}
 
 volumes:
   haive_node_modules_root:
