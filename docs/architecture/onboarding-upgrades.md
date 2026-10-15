@@ -675,7 +675,9 @@ that recorded the removal as an `upgrade.haive_file_retired` task event, so a Re
 failure still stages it while a person's own deletion is never claimed. The event is written after
 a read of the file at its own name passes the shape check and before fs-safe parks it for removal, so
 no database wait happens while the file is parked; a file whose event cannot be written is kept and
-reported; 03 stages it like any removal.
+reported, and an event whose file is not removed after all (replaced or deleted during that wait, or
+a removal that failed) is taken back by its id, a failed take-back reported as a warning; 03 stages
+it like any removal.
 04 writes no commit, so a tracked copy is left as an unstaged deletion. A reset still removes the
 file, for installs that hold one.
 
