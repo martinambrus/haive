@@ -14,6 +14,7 @@ import {
 import { BitbucketCloudForgeProvider, type ForgeContext } from '../src/forge/index.js';
 import {
   ConnectionNotFoundError,
+  CredentialProviderMismatchError,
   NeedsReauthError,
   OauthUnavailableError,
   OauthVendorError,
@@ -815,6 +816,92 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
         username: 'octocat',
         provider: 'gitlab',
         apiBaseUrl: null,
+      });
+    });
+
+    describe('a credential edited after it was linked', () => {
+      const editCredentialOf = async (
+        connectionId: string,
+        change: { host: string; provider?: string },
+      ) => {
+        const { repoCredentialId } = await readRow(connectionId);
+        await dbA
+          .update(schema.repoCredentials)
+          .set(change)
+          .where(eq(schema.repoCredentials.id, repoCredentialId!));
+      };
+
+      async function bothReadersRefuse(id: string): Promise<CredentialProviderMismatchError[]> {
+        const readers = [getConnectionAccessToken, getConnectionCredential];
+        const outcomes = await Promise.all(
+          readers.map((read) => rejection(read(dbA, id, { fetchFn: createVendor().fetchFn }))),
+        );
+        expect(
+          readers.filter((_read, i) => outcomes[i] === null).map((read) => read.name),
+          'readers that returned a value instead of refusing',
+        ).toEqual([]);
+        for (const err of outcomes) expect(err).toBeInstanceOf(CredentialProviderMismatchError);
+        return outcomes as CredentialProviderMismatchError[];
+      }
+
+      it.each([
+        ['its host moved to another public forge', { host: 'gitlab.com' }, 'gitlab'],
+        [
+          'its provider pinned to another forge on a self-hosted host',
+          { host: 'git.example.com', provider: 'gitea' },
+          'gitea',
+        ],
+      ] as const)('refuses both readers once %s', async (_edit, change, credentialProvider) => {
+        const id = await createCredentialConnection();
+        await editCredentialOf(id, change);
+
+        for (const err of await bothReadersRefuse(id)) {
+          expect(err).toMatchObject({
+            connectionId: id,
+            connectionProvider: 'github',
+            credentialProvider,
+          });
+          expect(err.message).toContain(id);
+          expect(err.message).toContain('github');
+          expect(err.message).toContain(credentialProvider);
+          expect(err.message).not.toContain('stub-git-secret');
+        }
+      });
+
+      it('refuses both readers once its host is self-hosted with no provider, so no forge is known', async () => {
+        const id = await createCredentialConnection();
+        await editCredentialOf(id, { host: 'git.example.com' });
+
+        for (const err of await bothReadersRefuse(id)) {
+          expect(err).toMatchObject({
+            connectionId: id,
+            connectionProvider: 'github',
+            credentialProvider: null,
+          });
+          expect(err.message).toContain(id);
+          expect(err.message).toContain('github');
+          expect(err.message).not.toContain('null');
+          expect(err.message).not.toContain('stub-git-secret');
+        }
+      });
+
+      it('keeps serving a credential edited to another host of the same forge', async () => {
+        const id = await createCredentialConnection({
+          apiBaseUrl: 'https://ghe.example.com/api/v3',
+        });
+        await editCredentialOf(id, { host: 'ghe.example.com', provider: 'github' });
+        const vendor = createVendor();
+
+        expect(await getConnectionCredential(dbA, id, { fetchFn: vendor.fetchFn })).toEqual({
+          accessToken: 'stub-git-secret',
+          username: 'octocat',
+          provider: 'github',
+          apiBaseUrl: 'https://ghe.example.com/api/v3',
+        });
+        expect(await getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn })).toBe(
+          'stub-git-secret',
+        );
+        expect(vendor.calls()).toBe(0);
       });
     });
 
