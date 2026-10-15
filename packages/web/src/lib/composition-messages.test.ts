@@ -456,6 +456,16 @@ describe('describePromptStepIssue', () => {
       expect(text('tools-not-supported-yet')).toContain('Remove');
     });
 
+    it('names a stored tool that no longer passes its checks, and counts the ones left unnamed', () => {
+      expect(text('tool-no-longer-valid', 'repo_status')).toBe(
+        'The tool `repo_status` no longer passes its checks; fix it or remove it.',
+      );
+      expect(text('tool-no-longer-valid', 'a`b')).toContain('`` a`b ``');
+      expect(text('tool-no-longer-valid')).toBe(
+        'More tools on this step no longer pass their checks; fix or remove them.',
+      );
+    });
+
     it('names the tool in a code span for every problem that is about one tool', () => {
       const aboutOneTool = CUSTOM_TOOL_PROBLEM_KINDS.filter((kind) => kind !== 'too-many-tools');
       expect(aboutOneTool.length).toBe(CUSTOM_TOOL_PROBLEM_KINDS.length - 1);
@@ -537,11 +547,13 @@ describe('promptStepIssuesOf', () => {
     const out = promptStepIssuesOf([
       { kind: 'tools-not-supported-yet', stepId: 'custom.t.a', index: 0, raw: '', start: 0 },
       { kind: 'tool-url-not-https', stepId: 'custom.t.a', index: 0, raw: 'repo_status', start: 0 },
+      { kind: 'tool-no-longer-valid', stepId: 'custom.t.a', index: 0, raw: 'stale', start: 0 },
       { kind: 'too-many-tools', stepId: 'custom.t.a', index: 0, raw: '', start: 0 },
     ]);
     expect(out.map((i) => [i.kind, i.raw])).toEqual([
       ['tools-not-supported-yet', ''],
       ['tool-url-not-https', 'repo_status'],
+      ['tool-no-longer-valid', 'stale'],
       ['too-many-tools', ''],
     ]);
   });

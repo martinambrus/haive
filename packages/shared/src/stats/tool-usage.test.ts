@@ -150,6 +150,7 @@ describe('buildUnusedReport', () => {
 describe('isHaiveMcpServer', () => {
   it('knows the servers Haive wires and nothing else', () => {
     for (const name of HAIVE_MCP_SERVER_NAMES) expect(isHaiveMcpServer(name)).toBe(true);
+    expect(isHaiveMcpServer('haive-custom')).toBe(true);
     // A server from the repository's own .claude/mcp_settings.json.
     expect(isHaiveMcpServer('context7')).toBe(false);
     expect(isHaiveMcpServer('')).toBe(false);
