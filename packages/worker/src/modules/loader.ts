@@ -383,7 +383,8 @@ export async function startModuleJobs(
       }
       held.delete(moduleId);
       pending.delete(moduleId);
-      tornDown.delete(moduleId);
+      // A teardown no pass saw ended the earlier activation, so this one starts its own count.
+      if (tornDown.delete(moduleId)) attemptsMade.delete(moduleId);
       // Claimed before the first await, so a teardown that checks now is refused.
       jobsStarted.add(moduleId);
       await reactivate(moduleId, ensureSchema, jobs);

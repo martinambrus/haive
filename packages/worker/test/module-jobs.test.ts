@@ -472,6 +472,27 @@ describe('the jobs reconcile', () => {
     await stopAll();
   });
 
+  it('gives a module torn down and activated again mid-retry, between two passes, three attempts of its own', async () => {
+    const m = moduleWithSchema('torn-mid-retry');
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['torn-mid-retry']),
+    );
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(1);
+
+    beginModuleTeardown('torn-mid-retry')();
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(4);
+
+    await stopAll();
+  });
+
   it('starts no jobs, and ensures no schema, of a module while its teardown runs, and starts them on the first pass after it ends', async () => {
     const m = moduleWithSchema('torn');
     const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set(['torn']));
