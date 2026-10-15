@@ -34,6 +34,22 @@ const BOTH_OR_NEITHER = 'gitName and gitEmail must be set together, or both left
 const identityIsWhole = (b: { gitName?: string; gitEmail?: string }) =>
   Boolean(b.gitName?.length) === Boolean(b.gitEmail?.length);
 
+const HOST_LABEL = '[a-z0-9]+(?:-+[a-z0-9]+)*';
+const HOST_NAME = new RegExp(`^${HOST_LABEL}(?:\\.${HOST_LABEL})*(?::([1-9][0-9]{0,4}))?$`);
+
+const isHostName = (v: string) => {
+  const m = HOST_NAME.exec(v);
+  return m !== null && (m[1] === undefined || Number(m[1]) <= 65535);
+};
+
+/** A host name with an optional port, stored trimmed and lower case, so no userinfo or path can ride into a URL built from it. */
+const hostField = z
+  .string()
+  .max(255)
+  .trim()
+  .toLowerCase()
+  .refine(isHostName, { message: 'host must be a host name, optionally followed by :port' });
+
 const API_BASE_ON_HOST =
   "apiBaseUrl must be an https URL on the credential's host or its forge's API host";
 
@@ -74,7 +90,7 @@ const apiBaseTargetSchema = z
 const createCredentialSchema = z
   .object({
     label: z.string().min(1).max(255),
-    host: z.string().min(1).max(255),
+    host: hostField,
     username: z.string().min(1).max(255),
     secret: z.string().min(1).max(4096),
     // Which forge to call for PR creation/polling. '' = auto-detect from host (only
@@ -100,7 +116,7 @@ const createCredentialSchema = z
 const updateCredentialSchema = z
   .object({
     label: z.string().min(1).max(255),
-    host: z.string().min(1).max(255),
+    host: hostField,
     username: z.string().max(255).optional(),
     secret: z.string().max(4096).optional(),
     provider: z.union([z.literal(''), forgeProviderSchema]).optional(),

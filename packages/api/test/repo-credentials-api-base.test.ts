@@ -432,3 +432,89 @@ describe('updating a credential with an API base URL', () => {
     expect(rowOf(fake)).toMatchObject({ label: 'renamed', apiBaseUrl: 'https://api.github.com' });
   });
 });
+
+const HOST_REFUSED: [string, string][] = [
+  ['the forge host as userinfo', 'github.com@evil.example'],
+  ['a path', 'github.com/evil'],
+  ['a space inside', 'a b'],
+  ['a label that starts with a hyphen', '-x.com'],
+  ['a label that ends with a hyphen', 'x-.com'],
+  ['an empty label', 'x..com'],
+  ['a trailing dot', 'git.example.com.'],
+  ['port 0', 'host:0'],
+  ['a port above 65535', 'host:65536'],
+  ['a port that is not a number', 'host:http'],
+  ['a colon with no port', 'host:'],
+  ['a scheme', 'https://git.example.com'],
+  ['a query', 'git.example.com?x=1'],
+  ['an underscore', 'git_host.example.com'],
+  ['an empty host', ''],
+  ['a blank host', '   '],
+];
+
+const HOST_ACCEPTED: [name: string, sent: string, stored: string][] = [
+  ['a host name', 'git.example.com', 'git.example.com'],
+  ['a host in capitals with surrounding space', ' GitHub.com ', 'github.com'],
+  ['a host with a port', 'git.example.com:8443', 'git.example.com:8443'],
+  ['a host with a port, in capitals', 'GIT.Example.com:8443', 'git.example.com:8443'],
+  ['the lowest port', 'git.example.com:1', 'git.example.com:1'],
+  ['the highest port', 'git.example.com:65535', 'git.example.com:65535'],
+  ['a name with no dot', 'localhost:3000', 'localhost:3000'],
+  ['an address', '192.168.1.10:3000', '192.168.1.10:3000'],
+  ['hyphens inside a label', 'my-git.example.com', 'my-git.example.com'],
+  ['a punycode label', 'xn--bcher-kva.example', 'xn--bcher-kva.example'],
+];
+
+describe('the host of a credential', () => {
+  it.each(HOST_REFUSED)('refuses %s on create with a 400 on host', async (_name, host) => {
+    const fake = setup(null);
+    const before = fake.rows(schema.repoCredentials).length;
+
+    const res = await create({ host });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { issues: { path: string }[] };
+    expect(body.issues.map((i) => i.path)).toContain('host');
+    expect(fake.rows(schema.repoCredentials)).toHaveLength(before);
+  });
+
+  it.each(HOST_REFUSED)('refuses %s on edit with a 400 on host', async (_name, host) => {
+    const fake = setup(null);
+
+    const res = await update({ host });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { issues: { path: string }[] };
+    expect(body.issues.map((i) => i.path)).toContain('host');
+    expect(rowOf(fake)).toMatchObject({ label: 'work', host: HOST });
+  });
+
+  it.each(HOST_ACCEPTED)(
+    'takes %s on create and stores it trimmed and lower case',
+    async (_name, host, stored) => {
+      const fake = setup(null);
+
+      const res = await create({ host });
+
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { credential: { host: string } };
+      expect(body.credential.host).toBe(stored);
+      expect(fake.rows(schema.repoCredentials).find((r) => r.label === 'new')?.host).toBe(stored);
+      expect(new URL(`https://${stored}/`).host).toBe(stored);
+    },
+  );
+
+  it.each(HOST_ACCEPTED)(
+    'takes %s on edit and stores it trimmed and lower case',
+    async (_name, host, stored) => {
+      const fake = setup(null);
+
+      const res = await update({ host });
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { credential: { host: string } };
+      expect(body.credential.host).toBe(stored);
+      expect(rowOf(fake).host).toBe(stored);
+    },
+  );
+});
