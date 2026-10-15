@@ -39,7 +39,13 @@ const HOST_NAME = new RegExp(`^${HOST_LABEL}(?:\\.${HOST_LABEL})*(?::([1-9][0-9]
 
 const isHostName = (v: string) => {
   const m = HOST_NAME.exec(v);
-  return m !== null && (m[1] === undefined || Number(m[1]) <= 65535);
+  if (m === null || (m[1] !== undefined && Number(m[1]) > 65535)) return false;
+  // The URL parser rewrites numeric hosts and drops a default port; refuse what would not survive it.
+  try {
+    return new URL(`https://${v}/`).host === v;
+  } catch {
+    return false;
+  }
 };
 
 /** A host name with an optional port, stored trimmed and lower case, so no userinfo or path can ride into a URL built from it. */
