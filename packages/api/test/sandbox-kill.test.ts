@@ -18,6 +18,7 @@ interface Run {
   error?: Error;
   throws?: Error;
   hang?: boolean;
+  delay?: number;
 }
 
 class FakeChild extends EventEmitter {
@@ -77,7 +78,7 @@ let runs: Run[];
 let children: FakeChild[];
 const argvs = () => h.spawn.mock.calls.map(([cmd, args]) => [cmd, ...args]);
 const failing = (step: 'listing' | 'removal', run: Run): Run[] =>
-  step === 'listing' ? [run] : [{ stdout: IDS }, run, { stdout: IDS }];
+  step === 'listing' ? [run] : [{ stdout: IDS }, run, { code: 1 }];
 const spawned = (step: 'listing' | 'removal') =>
   step === 'listing' ? [listing] : [listing, removal, listing];
 const rejection = async (call: Promise<unknown>) => {
@@ -100,7 +101,8 @@ beforeEach(() => {
     if (run.throws) throw run.throws;
     const child = new FakeChild();
     children.push(child);
-    queueMicrotask(() => play(child, run));
+    if (run.delay === undefined) queueMicrotask(() => play(child, run));
+    else setTimeout(() => play(child, run), run.delay);
     return child;
   });
 });
@@ -154,9 +156,17 @@ describe('killTaskSandboxesOrThrow', () => {
     expect(argvs()).toEqual(spawned(step));
   });
 
-  describe('when the removal fails, it lists the task once more', () => {
+  describe('when the removal fails, it lists the task again until the ids are gone', () => {
     const failed: Run = { code: 1, stderr: 'removal of container aaa is already in progress\n' };
     const cause = 'sandbox removal failed: exit 1: removal of container aaa is already in progress';
+    const relistings = 1 + 3_000 / 250;
+    const listingsOf = (stdout: string): Run[] =>
+      Array.from({ length: relistings }, () => ({ stdout }));
+    const everyListing = Array.from({ length: relistings }, () => listing);
+    const noMoreListings = async (spawned: number) => {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.spawn).toHaveBeenCalledTimes(spawned);
+    };
 
     it('resolves the count when none of the ids is listed any more', async () => {
       runs.push({ stdout: IDS }, failed, { stdout: '' });
@@ -173,14 +183,64 @@ describe('killTaskSandboxesOrThrow', () => {
       },
     );
 
+    it('lists every 250 ms and resolves the count as soon as none of the ids is listed', async () => {
+      runs.push({ stdout: IDS }, failed, { stdout: 'aaa\n' }, { stdout: 'aaa\n' }, { stdout: '' });
+      let outcome: string | undefined;
+      const pending = killTaskSandboxesOrThrow(TASK).then(
+        (count) => {
+          outcome = `resolved ${count}`;
+        },
+        (err: Error) => {
+          outcome = `rejected ${err.message}`;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(249);
+      expect(outcome).toBeUndefined();
+      expect(argvs()).toEqual([listing, removal, listing]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(argvs()).toEqual([listing, removal, listing, listing]);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+      expect(outcome).toBe('resolved 2');
+      expect(argvs()).toEqual([listing, removal, listing, listing, listing]);
+      await noMoreListings(5);
+    });
+
     it.each([
       ['the first of them', 'aaa\n'],
       ['the second of them', 'bbb\n'],
       ['one of them among others', 'ccc\nbbb\n'],
-    ])('rejects with the removal cause when %s is still listed', async (_which, relisted) => {
-      runs.push({ stdout: IDS }, failed, { stdout: relisted });
-      expect(await rejection(killTaskSandboxesOrThrow(TASK))).toBe(cause);
-      expect(argvs()).toEqual([listing, removal, listing]);
+    ])(
+      'rejects with the removal cause once 3000 ms have passed with %s still listed',
+      async (_which, relisted) => {
+        runs.push({ stdout: IDS }, failed, ...listingsOf(relisted));
+        let settled = false;
+        const pending = rejection(killTaskSandboxesOrThrow(TASK)).finally(() => {
+          settled = true;
+        });
+        await vi.advanceTimersByTimeAsync(2_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await pending).toBe(cause);
+        expect(argvs()).toEqual([listing, removal, ...everyListing]);
+        await noMoreListings(2 + relistings);
+      },
+    );
+
+    it('counts the 3000 ms from the failure, a slow listing included', async () => {
+      runs.push({ stdout: IDS }, failed, { stdout: 'aaa\n', delay: 2_900 }, { stdout: 'aaa\n' });
+      let settled = false;
+      const pending = rejection(killTaskSandboxesOrThrow(TASK)).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toBe(cause);
+      expect(argvs()).toEqual([listing, removal, listing, listing]);
+      await noMoreListings(4);
     });
 
     it.each(causes)('rejects with the removal cause when the re-listing $name', async ({ run }) => {
@@ -188,6 +248,18 @@ describe('killTaskSandboxesOrThrow', () => {
       expect(await rejection(killTaskSandboxesOrThrow(TASK))).toBe(cause);
       expect(argvs()).toEqual([listing, removal, listing]);
     });
+
+    it.each(causes)(
+      'rejects with the removal cause when a later re-listing $name',
+      async ({ run }) => {
+        runs.push({ stdout: IDS }, failed, { stdout: 'aaa\n' }, run);
+        const pending = rejection(killTaskSandboxesOrThrow(TASK));
+        await vi.advanceTimersByTimeAsync(250);
+        expect(await pending).toBe(cause);
+        expect(argvs()).toEqual([listing, removal, listing, listing]);
+        await noMoreListings(4);
+      },
+    );
 
     it('rejects with the removal cause when the re-listing outlasts 10000 ms', async () => {
       runs.push({ stdout: IDS }, failed, { hang: true });

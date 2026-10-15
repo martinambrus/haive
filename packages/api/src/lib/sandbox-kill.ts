@@ -24,12 +24,9 @@ export async function killTaskSandboxesOrThrow(taskId: string): Promise<number> 
   if (listed.failure !== null) throw new Error(`sandbox listing failed: ${listed.failure}`);
   if (listed.ids.length === 0) return 0;
   const removal = await rmForce(listed.ids);
-  if (removal !== null) {
-    // A `--rm` sandbox that exits by itself fails the removal, so what is still listed decides.
-    const after = await listIds(taskId);
-    if (after.failure !== null || after.ids.some((id) => listed.ids.includes(id))) {
-      throw new Error(`sandbox removal failed: ${removal}`);
-    }
+  // A sandbox that is already being removed fails this removal too, so what stays listed decides.
+  if (removal !== null && !(await waitUntilGone(taskId, listed.ids))) {
+    throw new Error(`sandbox removal failed: ${removal}`);
   }
   return listed.ids.length;
 }
@@ -37,6 +34,21 @@ export async function killTaskSandboxesOrThrow(taskId: string): Promise<number> 
 interface DockerRun {
   stdout: string;
   failure: string | null;
+}
+
+const RELIST_INTERVAL_MS = 250;
+const RELIST_WINDOW_MS = 3_000;
+
+async function waitUntilGone(taskId: string, ids: string[]): Promise<boolean> {
+  const until = Date.now() + RELIST_WINDOW_MS;
+  for (;;) {
+    const after = await listIds(taskId);
+    if (after.failure !== null) return false;
+    if (!after.ids.some((id) => ids.includes(id))) return true;
+    const left = until - Date.now();
+    if (left <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(left, RELIST_INTERVAL_MS)));
+  }
 }
 
 async function listIds(taskId: string): Promise<{ ids: string[]; failure: string | null }> {
