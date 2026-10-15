@@ -1367,6 +1367,58 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     });
   });
 
+  describe('a duplicate delivery of the advance of a skipped step', () => {
+    const deliver = (taskId: string) =>
+      processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId: A, round: 0, epoch: 3 }),
+      );
+    const loseHandOff = async (id: string) => {
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: A, currentRound: 0 })
+        .where(eq(schema.tasks.id, id));
+      h.adds.length = 0;
+    };
+    const skippedEvents = async (id: string, skippedId: string) =>
+      (await events(id, 'step.skipped')).filter((e) => e.taskStepId === skippedId);
+
+    it('records step.skipped once for a step the api skipped, however often its advance is delivered', async () => {
+      const id = await make({ repositoryId });
+      const skipped = await row(id, A, 'skipped', { endedAt: DEAD_AT, updatedAt: DEAD_AT });
+
+      await deliver(id);
+      await loseHandOff(id);
+      await deliver(id);
+
+      expect((await skippedEvents(id, skipped.id)).map((e) => e.payload)).toMatchObject([
+        { stepId: A, endedAt: DEAD_AT.toISOString() },
+      ]);
+      expect((await task(id)).currentStepId).toBe(B);
+      expect(h.adds).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId: id, userId, stepId: B, round: 0, epoch: 3 },
+        },
+      ]);
+    });
+
+    it('records it again for a skip that ended at another time', async () => {
+      const id = await make({ repositoryId });
+      const skipped = await row(id, A, 'skipped', { endedAt: DEAD_AT, updatedAt: DEAD_AT });
+      await deliver(id);
+      await loseHandOff(id);
+      const later = new Date(DEAD_AT.getTime() + 60_000);
+      await db
+        .update(schema.taskSteps)
+        .set({ endedAt: later, updatedAt: later })
+        .where(eq(schema.taskSteps.id, skipped.id));
+
+      await deliver(id);
+
+      expect(await skippedEvents(id, skipped.id)).toHaveLength(2);
+    });
+  });
+
   describe('a walk that finds the task on a step outside its run list', () => {
     it('names no unresolved id when the finished step is registered', async () => {
       const id = await make({ runListSnapshot: [B], currentStepId: A });

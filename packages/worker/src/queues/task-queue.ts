@@ -2673,7 +2673,14 @@ async function handleAdvanceStep(
   // Don't re-run it; advance to the next step from the registry run list (the api
   // can't see unmaterialized future steps to compute the next step itself).
   if (existing?.status === 'skipped') {
-    await handleResult(db, ctx, payload.stepId, { status: 'skipped', row: existing });
+    // The row is terminal before any delivery hands it off, so every delivery may repeat the event.
+    await handleResult(
+      db,
+      ctx,
+      payload.stepId,
+      { status: 'skipped', row: existing },
+      { redrive: true },
+    );
     return;
   }
 
