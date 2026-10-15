@@ -1,5 +1,5 @@
 import { eq, and } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import {
   envelopeEncrypt,
   envelopeDecrypt,
@@ -46,11 +46,19 @@ export class UserSecretsService {
     }
   }
 
-  async set(userId: string, keyName: string, value: string, description?: string): Promise<void> {
+  async set(
+    userId: string,
+    keyName: string,
+    value: string,
+    description?: string,
+    executor?: DbTx,
+  ): Promise<void> {
     this.ensureInitialized();
+    const db = executor ?? this.db!;
     const envelope: EnvelopeEncrypted = envelopeEncrypt(value, this.masterKek!);
     const fingerprint = computeKeyFingerprint(value);
-    await this.db!.insert(schema.userSecrets)
+    await db
+      .insert(schema.userSecrets)
       .values({
         userId,
         keyName,
@@ -72,11 +80,12 @@ export class UserSecretsService {
       });
   }
 
-  async delete(userId: string, keyName: string): Promise<void> {
+  async delete(userId: string, keyName: string, executor?: DbTx): Promise<void> {
     this.ensureInitialized();
-    await this.db!.delete(schema.userSecrets).where(
-      and(eq(schema.userSecrets.userId, userId), eq(schema.userSecrets.keyName, keyName)),
-    );
+    const db = executor ?? this.db!;
+    await db
+      .delete(schema.userSecrets)
+      .where(and(eq(schema.userSecrets.userId, userId), eq(schema.userSecrets.keyName, keyName)));
   }
 
   async listForUser(userId: string): Promise<{ keyName: string; fingerprint: string | null }[]> {
