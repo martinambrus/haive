@@ -1,6 +1,6 @@
 import type { Job } from 'bullmq';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { TASK_JOB_NAMES } from '@haive/shared';
+import { CONFIG_KEYS, TASK_JOB_NAMES, configService } from '@haive/shared';
 import { processTaskJob } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
@@ -10,6 +10,7 @@ import type { StepDefinition } from '../src/step-engine/step-definition.js';
  *  advance's own row. */
 const h = vi.hoisted(() => {
   const state = {
+    taskStatus: 'failed',
     rowStatus: 'failed',
     reads: 0,
     writes: [] as string[],
@@ -22,7 +23,7 @@ const h = vi.hoisted(() => {
           userId: 'user-1',
           type: 'workflow',
           repositoryId: 'repo-1',
-          status: 'failed',
+          status: state.taskStatus,
           orchestrationEpoch: 5,
           metadata: null,
           cliProviderId: null,
@@ -93,6 +94,7 @@ function advanceJob(extra: Record<string, unknown> = {}): Job {
 
 describe('an advance queued before its task failed', () => {
   beforeEach(() => {
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     h.state.reads = 0;
     h.state.writes = [];
   });
@@ -122,4 +124,51 @@ describe('an advance queued before its task failed', () => {
     await processTaskJob(advanceJob({ formValues: { answer: 'yes' } }), 'tok').catch(() => {});
     expect(h.state.writes).not.toEqual([]);
   });
+});
+
+describe('an answer to a form still parked, while the system is held', () => {
+  const answer = () => advanceJob({ formValues: { answer: 'yes' } });
+  /** The cached copy says `normal`: only the stored state, read past the cache, can hold. */
+  const stored = (state: string) => {
+    vi.spyOn(configService, 'get').mockResolvedValue('normal');
+    return vi.spyOn(configService, 'getFresh').mockClear().mockResolvedValue(state);
+  };
+
+  beforeEach(() => {
+    h.state.taskStatus = 'failed';
+    h.state.rowStatus = 'waiting_form';
+    h.state.reads = 0;
+    h.state.writes = [];
+  });
+
+  it('is let through to a failed task while the system is normal', async () => {
+    stored('normal');
+    await processTaskJob(answer(), 'tok').catch(() => {});
+    expect(h.state.writes).not.toEqual([]);
+  });
+
+  it.each(['draining', 'maintenance'])(
+    'is dropped by a failed task, which keeps it unwritten, while the system is %s',
+    async (state) => {
+      const read = stored(state);
+      const outcome = await processTaskJob(answer(), 'tok').then(
+        () => 'dropped',
+        () => 'ran',
+      );
+      expect(outcome).toBe('dropped');
+      expect(h.state.writes).toEqual([]);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledWith(CONFIG_KEYS.MAINTENANCE_STATE);
+    },
+  );
+
+  it.each(['waiting_user', 'running'])(
+    'is still let through to a %s task while the system drains',
+    async (taskStatus) => {
+      stored('draining');
+      h.state.taskStatus = taskStatus;
+      await processTaskJob(answer(), 'tok').catch(() => {});
+      expect(h.state.writes).not.toEqual([]);
+    },
+  );
 });

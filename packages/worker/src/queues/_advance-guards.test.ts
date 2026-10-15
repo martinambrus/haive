@@ -79,6 +79,17 @@ describe('failedTaskRefusesAdvance', () => {
     expect(failedTaskRefusesAdvance('failed', 'waiting_form', false)).toBe(true);
   });
 
+  it('keeps out that answer too while new work is held, and lets it through while it is not', () => {
+    expect(failedTaskRefusesAdvance('failed', 'waiting_form', true, false, true)).toBe(true);
+    expect(failedTaskRefusesAdvance('failed', 'waiting_form', true, false, false)).toBe(false);
+  });
+
+  it('leaves an advance on a task something has reopened alone while new work is held', () => {
+    for (const task of ['running', 'waiting_user', 'paused', 'queued']) {
+      expect(failedTaskRefusesAdvance(task, 'waiting_form', true, false, true)).toBe(false);
+    }
+  });
+
   it('lets any advance through on a task something has reopened', () => {
     for (const task of ['running', 'waiting_user', 'paused', 'queued']) {
       expect(failedTaskRefusesAdvance(task, 'failed', false)).toBe(false);

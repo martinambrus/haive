@@ -32,6 +32,8 @@ import {
   repoIdeSessionId,
   logger,
   parseAllowanceWatchMode,
+  parseMaintenanceState,
+  refusesNewWork,
   type CliExecJobPayload,
   type AbortLeftMergePayload,
   type RepoRagCleanupPayload,
@@ -2581,16 +2583,34 @@ async function handleAdvanceStep(
     ctx.completedAt,
     jobTimestamp,
   );
+  // Past the config cache: the api that sets the state is another process.
+  const newWorkHeld =
+    ctx.status === 'failed' &&
+    refusesNewWork(
+      parseMaintenanceState(
+        await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
+          logger.warn({ err, taskId: ctx.taskId }, 'maintenance state unreadable; not held');
+          return null;
+        }),
+      ),
+    );
   if (
     failedTaskRefusesAdvance(
       ctx.status,
       existing?.status,
       payload.formValues != null,
       gateAnswerAfterFailure,
+      newWorkHeld,
     )
   ) {
     logger.info(
-      { taskId: ctx.taskId, stepId: payload.stepId, round, rowStatus: existing?.status ?? null },
+      {
+        taskId: ctx.taskId,
+        stepId: payload.stepId,
+        round,
+        rowStatus: existing?.status ?? null,
+        newWorkHeld,
+      },
       'advance-step skipped: the task failed and nothing has reopened it',
     );
     return;
