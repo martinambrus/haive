@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 
@@ -286,6 +286,36 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
       expect(seen).toEqual([
         { name: TASK_JOB_NAMES.START, taskId, userId: adminId, events: 1, status: 'queued' },
       ]);
+    });
+
+    it('queues the conversation in the transaction that creates it, so a failed queueing leaves nothing', async () => {
+      try {
+        await db.execute(sql`
+          create or replace function refuse_queued_draft() returns trigger language plpgsql as $$
+          begin
+            if new.type = 'type_draft' and new.status = 'queued' then
+              raise exception 'queueing refused';
+            end if;
+            return new;
+          end $$`);
+        await db.execute(sql`
+          create or replace trigger refuse_queued_draft before update on tasks
+          for each row execute function refuse_queued_draft()`);
+        expect((await start({ message: OPENING })).status).toBe(500);
+        await nothingCreated();
+        expect(
+          await db
+            .select()
+            .from(schema.taskEvents)
+            .where(eq(schema.taskEvents.eventType, TYPE_DRAFT_MESSAGE_EVENT)),
+        ).toEqual([]);
+        expect(await auditRows()).toEqual([]);
+      } finally {
+        await db.execute(sql`drop function if exists refuse_queued_draft() cascade`);
+      }
+      const taskId = await started();
+      expect((await drafts()).map((task) => [task.id, task.status])).toEqual([[taskId, 'queued']]);
+      expect(seen.map((job) => job.taskId)).toEqual([taskId]);
     });
 
     it('keeps the message as the administrator wrote it, minus the outer blanks', async () => {

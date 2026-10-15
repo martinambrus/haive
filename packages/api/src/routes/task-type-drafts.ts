@@ -90,7 +90,7 @@ taskTypeDraftRoutes.post('/', async (c) => {
   const { draft } = pickTaskTypeDraft(body.current ?? {});
 
   // The opening message is written before the start is queued: the step reads it on its first detect.
-  const taskId = await db.transaction(async (tx) => {
+  const { taskId, queued } = await db.transaction(async (tx) => {
     const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'type_draft', {
       generic: false,
     });
@@ -121,10 +121,10 @@ taskTypeDraftRoutes.post('/', async (c) => {
       body: body.message,
       ...(Object.keys(draft).length > 0 ? { draft } : {}),
     });
-    return task.id;
+    return { taskId: task.id, queued: await markQueuedForStart(tx, task.id) };
   });
 
-  if (await markQueuedForStart(db, taskId)) await enqueueStart(taskId, userId);
+  if (queued) await enqueueStart(taskId, userId);
   await recordAuditEvent(db, {
     actorUserId: userId,
     action: 'task_type_draft.start',
