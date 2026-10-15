@@ -9,7 +9,7 @@ if (url && !new URL(url).pathname.startsWith('/updater_live_count_test'))
 const OWNER = '00000000-0000-4000-8000-0000000000f1';
 const BLIND_INDEX = 'updater-live-count-test-owner';
 const TYPE = 'updater-live-count-test';
-const LIVE = ['created', 'queued', 'running', 'paused', 'waiting_user', 'waiting_pr'];
+const LIVE = ['queued', 'running', 'paused', 'waiting_user', 'waiting_pr'];
 const FINISHED = ['completed', 'failed', 'cancelled'];
 
 describe.skipIf(!url)('liveTaskCount on Postgres', () => {
@@ -39,6 +39,13 @@ describe.skipIf(!url)('liveTaskCount on Postgres', () => {
     for (const status of LIVE) await task(status);
 
     expect(await liveTaskCount(sql)).toBe(LIVE.length);
+  });
+
+  it('counts a queued task and not a created one, a draft that never ran, beside it', async () => {
+    await task('queued');
+    await task('created');
+
+    expect(await liveTaskCount(sql)).toBe(1);
   });
 
   it('counts a running task and not a dead running one beside it', async () => {

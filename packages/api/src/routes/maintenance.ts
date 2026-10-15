@@ -39,14 +39,10 @@ maintenanceRoutes.use('*', requireAdmin);
 
 /** Task states that still hold a maintenance window open. `waiting_user` counts: a task parked on
  *  a form is live work whose owner will come back to it, and stopping it loses their place. */
-export const LIVE_TASK_STATES = [
-  'created',
-  'queued',
-  'running',
-  'paused',
-  'waiting_user',
-  'waiting_pr',
-] as const;
+const BLOCKING_TASK_STATES = ['queued', 'running', 'paused', 'waiting_user', 'waiting_pr'] as const;
+
+/** Also `created`: a draft runs nothing but would find its module deactivated once started. */
+export const LIVE_TASK_STATES = ['created', ...BLOCKING_TASK_STATES] as const;
 
 const setStateSchema = z.object({ state: maintenanceStateSchema });
 
@@ -97,7 +93,9 @@ maintenanceRoutes.get('/blocking', async (c) => {
     .from(schema.tasks)
     .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
     // A dead task runs nothing, and none of this page's actions reach it; its owner cancels it.
-    .where(and(inArray(schema.tasks.status, [...LIVE_TASK_STATES]), isNull(schema.tasks.deadAt)))
+    .where(
+      and(inArray(schema.tasks.status, [...BLOCKING_TASK_STATES]), isNull(schema.tasks.deadAt)),
+    )
     .orderBy(desc(schema.tasks.updatedAt))
     .limit(200);
   const fieldKey = await configService.getEncryptionKey();

@@ -196,6 +196,17 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
     });
   });
 
+  describe('GET /blocking, a draft that never started', () => {
+    it('leaves a created task out of the list and the count, and keeps a queued one', async () => {
+      await task({ status: 'created' });
+      const queued = await task({ status: 'queued' });
+
+      const body = await blocking();
+      expect(body.tasks.map((t) => t.id)).toEqual([queued.id]);
+      expect(body.total).toBe(1);
+    });
+  });
+
   describe('GET /blocking, the viewer and the owners', () => {
     it("names the viewer and each task's owner", async () => {
       const mine = await task({ userId: ADMIN });
