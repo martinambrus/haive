@@ -764,6 +764,71 @@ describe('validateCustomTool: the name, the description and the limits', () => {
   });
 });
 
+describe('validateCustomTool: invisible characters in the text a model reads', () => {
+  const INVISIBLE: ReadonlyArray<readonly [label: string, char: string]> = [
+    ['a zero width space (U+200B)', ch(0x200b)],
+    ['a right-to-left override (U+202E)', ch(0x202e)],
+    ['a left-to-right isolate (U+2066)', ch(0x2066)],
+    ['a soft hyphen (U+00AD)', ch(0xad)],
+    ['a byte order mark (U+FEFF)', ch(0xfeff)],
+    ['a line separator (U+2028)', ch(0x2028)],
+  ];
+  const EMOJI = String.fromCodePoint(0x1f680);
+  const inQuery = (param: CustomToolParam): HttpGetTool =>
+    http({ url: 'https://api.example.com/v1/status', query: [param.name], params: [param] });
+  const messages = (tool: CustomTool): string[] =>
+    validateCustomTool(tool, withRepo).map((problem) => problem.message);
+
+  it.each(INVISIBLE)('refuses %s in a tool description as tool-description-invalid', (_l, c) => {
+    expect(kindsOf(http({ description: `a${c}b` }))).toEqual(['tool-description-invalid']);
+    expect(kindsOf(rag({ description: `a${c}b` }))).toEqual(['tool-description-invalid']);
+    expect(kindsOf(http({ description: c }))).toEqual(['tool-description-invalid']);
+  });
+
+  it.each(INVISIBLE)('refuses %s in a param description as tool-param-invalid', (_l, c) => {
+    expect(kindsOf(inQuery(boolParam('a', { description: `a${c}b` })))).toEqual([
+      'tool-param-invalid',
+    ]);
+  });
+
+  it.each(INVISIBLE)('refuses %s in an enum value as tool-param-invalid', (_l, c) => {
+    expect(kindsOf(inQuery(enumParam('a', ['ok', `a${c}b`])))).toEqual(['tool-param-invalid']);
+  });
+
+  it('accepts text with accents, emoji and other scripts in all three places', () => {
+    const text = `caf${ch(0xe9)} na${ch(0xef)}ve ${EMOJI} \u65e5\u672c\u8a9e`;
+    expect(kindsOf(http({ description: text }))).toEqual([]);
+    expect(kindsOf(inQuery(boolParam('a', { description: text })))).toEqual([]);
+    expect(kindsOf(inQuery(enumParam('a', [text, `b${NBSP}c`])))).toEqual([]);
+  });
+
+  it('says invisible characters in the wording of both kinds', () => {
+    const c = ch(0x200b);
+    expect(messages(http({ description: `a${c}b` }))).toEqual([
+      expect.stringMatching(/no control or invisible characters/),
+    ]);
+    expect(messages(inQuery(boolParam('a', { description: `a${c}b` })))).toEqual([
+      expect.stringMatching(/no control or invisible characters/),
+    ]);
+    expect(messages(inQuery(enumParam('a', [`a${c}b`])))).toEqual([
+      expect.stringMatching(/no control or invisible characters/),
+    ]);
+  });
+
+  it('is a save-time rule only: the parse schema still reads a stored tool that has one', () => {
+    const c = ch(0x200b);
+    const stored = {
+      ...httpInput,
+      description: `a${c}b`,
+      params: [
+        { name: 'repo', type: 'string', description: `a${c}b`, required: true, maxLength: 64 },
+        { name: 'verbose', type: 'enum', description: 'Detail.', values: [`a${c}b`] },
+      ],
+    };
+    expect(customToolSchema.safeParse(stored).success).toBe(true);
+  });
+});
+
 describe('validateCustomTool: rag-query', () => {
   it.each(['project', 'all'] as const)(
     'refuses scope %s on a type with no repository, and only that',

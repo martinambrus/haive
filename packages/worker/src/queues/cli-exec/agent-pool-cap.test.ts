@@ -20,14 +20,11 @@ vi.mock('../../sandbox/runtime-admission.js', async (importOriginal) => ({
   resolveAgentConcurrency: async () => resolved,
 }));
 
-type Handlers = typeof import('./handlers.js');
-let handlers: Handlers;
+const handlers = await import('./handlers.js');
 
-beforeEach(async () => {
+beforeEach(() => {
   vi.useFakeTimers();
-  vi.resetModules();
   resolved = 2;
-  handlers = await import('./handlers.js');
 });
 
 afterEach(() => {
@@ -35,13 +32,30 @@ afterEach(() => {
 });
 
 describe('agentPoolCap', () => {
-  it('reads the pool fresh while nothing has been published', async () => {
-    resolved = 5;
-    expect(await handlers.agentPoolCap()).toBe(5);
-    resolved = 6;
-    expect(await handlers.agentPoolCap()).toBe(6);
+  let cap: typeof import('./agent-pool-cap.js');
+
+  beforeEach(async () => {
+    vi.resetModules();
+    cap = await import('./agent-pool-cap.js');
   });
 
+  it('reads the pool fresh while nothing has been published', async () => {
+    resolved = 5;
+    expect(await cap.agentPoolCap()).toBe(5);
+    resolved = 6;
+    expect(await cap.agentPoolCap()).toBe(6);
+  });
+
+  it('returns the published cap until the next publish, then the new one', async () => {
+    cap.publishAgentCap(2);
+    resolved = 9;
+    expect(await cap.agentPoolCap()).toBe(2);
+    cap.publishAgentCap(9);
+    expect(await cap.agentPoolCap()).toBe(9);
+  });
+});
+
+describe('startCliExecWorker', () => {
   it('returns the cap the worker published until the next retune, then the new one', async () => {
     await handlers.startCliExecWorker();
     resolved = 9;
