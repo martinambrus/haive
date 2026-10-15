@@ -53,6 +53,16 @@ describe('UserSecretsService.getMany', () => {
     expect(statements()).toBe(1);
   });
 
+  it('reads through the transaction it is given, so the caller can join it to other reads', async () => {
+    const { fake, service, statements } = await setup();
+    const tx = createFakeDb({ userSecrets: schema.userSecrets });
+    const inTx = vi.spyOn(tx.db.query.userSecrets, 'findMany');
+    await service.getMany(USER, [USERNAME, PASSWORD], tx.db as never);
+    expect(inTx).toHaveBeenCalledTimes(1);
+    expect(statements()).toBe(0);
+    expect(fake.rows(schema.userSecrets)).toHaveLength(3);
+  });
+
   it('reads only the given user rows', async () => {
     const { service } = await setup();
     const got = await service.getMany(OTHER, [USERNAME, PASSWORD]);

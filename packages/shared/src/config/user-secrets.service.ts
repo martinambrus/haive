@@ -47,9 +47,14 @@ export class UserSecretsService {
   }
 
   /** One SELECT, so the values come from one snapshot; a name with no row maps to null. */
-  async getMany(userId: string, keyNames: readonly string[]): Promise<Map<string, string | null>> {
+  async getMany(
+    userId: string,
+    keyNames: readonly string[],
+    executor?: DbTx,
+  ): Promise<Map<string, string | null>> {
     this.ensureInitialized();
-    const rows = await this.db!.query.userSecrets.findMany({
+    const db = executor ?? this.db!;
+    const rows = await db.query.userSecrets.findMany({
       where: and(
         eq(schema.userSecrets.userId, userId),
         inArray(schema.userSecrets.keyName, [...keyNames]),

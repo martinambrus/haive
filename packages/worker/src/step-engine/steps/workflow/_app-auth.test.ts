@@ -141,13 +141,16 @@ describe('loginAppBrowser reads the credential pair', () => {
   // Generated: a literal username and password pair reads as a leaked credential to secret scanners.
   const username = `user-${randomUUID()}`;
   const password = `pass-${randomUUID()}`;
+  const txOptions: unknown[] = [];
+  const tx = { query: { repositories: { findFirst: async () => ({ appAuth: VALID }) } } };
   const ctx = {
     userId: 'user-1',
     taskId: 'task-1',
     db: {
-      query: {
-        tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) },
-        repositories: { findFirst: async () => ({ appAuth: VALID }) },
+      query: { tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) } },
+      transaction: async (fn: (t: typeof tx) => Promise<unknown>, options: unknown) => {
+        txOptions.push(options);
+        return fn(tx);
       },
     },
   } as unknown as StepContext;
@@ -155,6 +158,7 @@ describe('loginAppBrowser reads the credential pair', () => {
 
   beforeEach(() => {
     store.clear();
+    txOptions.length = 0;
     m.get
       .mockReset()
       .mockImplementation(async (_userId: string, key: string) => store.get(key) ?? null);
@@ -171,7 +175,7 @@ describe('loginAppBrowser reads the credential pair', () => {
     store.set(names.username, username).set(names.password, password);
     expect(await loginAppBrowser(ctx, runtime)).toEqual({ attempted: true, ok: true, reason: '' });
     expect(m.getMany).toHaveBeenCalledTimes(1);
-    expect(m.getMany).toHaveBeenCalledWith('user-1', [names.username, names.password]);
+    expect(m.getMany).toHaveBeenCalledWith('user-1', [names.username, names.password], tx);
     expect(m.get).not.toHaveBeenCalled();
     expect(m.runnerExec).toHaveBeenCalledWith(
       runtime.handle,
@@ -180,6 +184,13 @@ describe('loginAppBrowser reads the credential pair', () => {
         env: { HAIVE_APP_USERNAME: username, HAIVE_APP_PASSWORD: password },
       }),
     );
+  });
+
+  it('reads the login config and the pair in one read-only repeatable-read snapshot', async () => {
+    store.set(names.username, username).set(names.password, password);
+    await loginAppBrowser(ctx, runtime);
+    expect(txOptions).toEqual([{ isolationLevel: 'repeatable read', accessMode: 'read only' }]);
+    expect(m.getMany.mock.calls[0]?.[2]).toBe(tx);
   });
 
   it.each<[string, string[]]>([
