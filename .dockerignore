@@ -3,11 +3,14 @@ node_modules
 .next
 dist
 build
-.git
+**/.git
 .gitignore
-.env
-.env.local
-.env.*.local
+# A nested .npmrc or .env can hold a token. The root .npmrc stays: the Dockerfiles COPY it, and it
+# carries the registry scope line only.
+**/.env
+**/.env.*
+**/.npmrc
+!.npmrc
 *.log
 .turbo
 *.tsbuildinfo
