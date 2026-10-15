@@ -277,6 +277,8 @@ async function resolveCustomFiles(
     (tool) => names.includes(tool.name),
   );
   if (tools.length === 0) throw unwired('the step has none of them pinned', names);
+  const missing = names.filter((name) => !tools.some((tool) => tool.name === name));
+  if (missing.length > 0) throw unwired(`the step does not pin ${missing.join(', ')}`, names);
   const token = signTaskToken(
     {
       aud: 'custom-mcp',

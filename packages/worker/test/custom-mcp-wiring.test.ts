@@ -284,6 +284,12 @@ describe.each<Provider>(['claude-code', 'codex', 'gemini'])(
       expect(message).toContain('gone, lost');
     });
 
+    it('fails a run that names a tool the pinned step does not define beside one it does', async () => {
+      const message = await unwired(provider, db(), run({ customTools: ['house_rules', 'gone'] }));
+      expect(message).toContain('the step does not pin gone');
+      expect(message).toContain('house_rules, gone');
+    });
+
     it('fails a run that is not tied to a step, naming the tools', async () => {
       const message = await unwired(provider, db(), run({ taskStepId: null }));
       expect(message).toContain('not tied to a step');
@@ -339,7 +345,7 @@ describe('the files of a step with tools, served as the sandbox serves them', ()
 
 describe('the token lifetime', () => {
   const lifetime = async (forRun: Run) => {
-    const { files } = await extra('claude-code', dbFor(pinned([repoStatus])), forRun);
+    const { files } = await extra('claude-code', dbFor(pinned([repoStatus, houseRules])), forRun);
     return claimsIn(files)!.exp - NOW_MS / 1000;
   };
 
@@ -370,7 +376,10 @@ describe('the pinned step', () => {
     const db = {
       query: {
         tasks: {
-          findFirst: async () => ({ envTemplateId: null, customSteps: pinned([repoStatus]) }),
+          findFirst: async () => ({
+            envTemplateId: null,
+            customSteps: pinned([repoStatus, houseRules]),
+          }),
         },
         envTemplates: { findFirst: async () => undefined },
         taskSteps: {
@@ -392,7 +401,7 @@ describe('the pinned step', () => {
 describe('the API address', () => {
   it('follows RAG_API_INTERNAL_URL, as the haive-rag server does', async () => {
     process.env.RAG_API_INTERNAL_URL = 'http://host.docker.internal:3001';
-    const { entry } = await entryOf('claude-code', dbFor(pinned([repoStatus])), run());
+    const { entry } = await entryOf('claude-code', dbFor(pinned([repoStatus, houseRules])), run());
     expect(entry?.env).toEqual({ CUSTOM_MCP_API_URL: 'http://host.docker.internal:3001' });
   });
 
@@ -401,7 +410,7 @@ describe('the API address', () => {
     afterSurface.run = () => {
       process.env.RAG_API_INTERNAL_URL = 'http://env-b.invalid:3001';
     };
-    const { entry } = await entryOf('claude-code', dbFor(pinned([repoStatus])), run());
+    const { entry } = await entryOf('claude-code', dbFor(pinned([repoStatus, houseRules])), run());
     expect(entry?.env).toEqual({ CUSTOM_MCP_API_URL: 'http://surface-a.invalid:3001' });
   });
 });
