@@ -4,8 +4,8 @@ A module is a package named `@haive/module-<id>` (a workspace folder under `modu
 `@haive-module/<id>` (published to the registry; `modulePackageId` in `@haive/shared/modularity` is
 the one rule: `gen-modules` refuses a package that exports `./manifest` under any other name, and both
 loaders refuse at boot a manifest whose id does not match its name), whose
-`package.json` exports `./manifest` and any of `./routes` (api), `./steps`, `./ensure-schema` and
-`./jobs` (worker), `./web` and `./dashboard` (web). `scripts/gen-modules.mjs` turns the installed
+`package.json` exports `./manifest` and any of `./routes` (api), `./steps`, `./ensure-schema`,
+`./jobs` and `./teardown` (worker), `./web` and `./dashboard` (web). `scripts/gen-modules.mjs` turns the installed
 ones into four gitignored registries (`packages/api/src/modules.generated.ts`,
 `packages/worker/src/modules.generated.ts`, `packages/web/src/generated/module-pages.ts` and
 `module-dashboard.ts`), and the `dev`, `build` and `typecheck` scripts of the api, worker and web run
@@ -30,8 +30,10 @@ the module loads again.
   names one of the module's steps or its type is one the module seeded. The code stays loaded: its api routes and
   settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
-  The worker starts no job of a module that is deactivated when it boots; a job already running stops
-  at the next worker start. A task type that uses the module, as its source or through any step, is
+  The worker starts no job of a module that is deactivated when it boots, and a reconcile every 15 s
+  (`MODULE_JOBS_RECONCILE_MS`, `modules/loader.ts`) stops the jobs of one deactivated since. Once the
+  module is active again, the next pass ensures its schema and then starts its jobs, once; a failed
+  ensure or start is logged and waits for the next deactivation and activation. A task type that uses the module, as its source or through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
   at the same moment waits and then counts the new task. A task that reaches one of its steps later, after a Retry or a revive,
@@ -52,6 +54,20 @@ the module loads again.
   and listed) and deletes the `modules` row. Every step is safe to repeat: a purge that failed after
   the drop answers 502 `module_purge_incomplete`, and the next one finishes it. The dialog warns
   when the module's teardown hook never ran.
+
+**Teardown.** "Tear down" on `/admin/modules` (`POST /modules/:id/teardown`, admin, audited as
+`module.teardown`) runs a deactivated module's `./teardown` hook in the worker, which drops the module's
+own data; it answers 409 `module_active` or `module_missing` for a module in any other state. The
+worker refuses it by name while this worker does not load the module, while the module's jobs or its
+schema setup still run (they end within one reconcile pass of the deactivation), and while an earlier
+teardown hook of the module still runs. The hook has 10 minutes (`TEARDOWN_HOOK_TIMEOUT_MS`); past
+that the job fails, the hook may go on, and until it ends the module is held: no schema ensure, no job
+start and no second teardown, with one warning per hold in the worker log, and the hook can no longer
+open the module database. Only a worker restart frees a hook that never ends. A finished teardown
+stamps `torn_down_at`, unless the module was activated again meanwhile (409 `module_active`, nothing
+recorded). Activating clears the stamp, and the next active pass ensures the schema again even when
+no pass saw the module deactivated. The route waits up to 2 minutes and answers 202 while the hook
+still runs.
 
 Purge is an action of the admin page only. `pnpm module` never deactivates or purges anything and never touches
 the database or Redis: it moves a module between the first and third states, and nothing it does
