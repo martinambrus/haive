@@ -672,7 +672,9 @@ anything else at that name is the person's, kept and reported in the step's warn
 kept, `absent` included, so a Retry after a failed commit still stages a deletion an earlier attempt
 made; 02 lists it in `deletedPaths` only when this task removed it, now or in an earlier attempt
 that recorded the removal as an `upgrade.haive_file_retired` task event, so a Retry after a later
-failure still stages it while a person's own deletion is never claimed; 03 stages it like any removal.
+failure still stages it while a person's own deletion is never claimed. The event is written inside
+the delete's judge, after the shape check and before the unlink, and a file whose event cannot be
+written is kept and reported; 03 stages it like any removal.
 04 writes no commit, so a tracked copy is left as an unstaged deletion. A reset still removes the
 file, for installs that hold one.
 
