@@ -19,6 +19,7 @@ import {
   seedProviders,
   seedRepository,
 } from './support/upgrade-plan-fixtures.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 
 const COLUMN = {
   projectInfo: { name: 'acme', framework: 'drupal', docroot: 'web' },
@@ -87,12 +88,14 @@ async function cycle(agents: string, rtkOnAtApply: boolean) {
       ...over,
     }) as unknown as UpgradePlanOutput;
   const apply = async (over: Record<string, unknown>, formValues: Record<string, unknown>) => {
-    const out = await upgradeApplyStep.apply(ctxFor(loose, root), {
-      detected: plan(over),
-      formValues,
-      iteration: 0,
-      previousIterations: [],
-    });
+    const out = await recordWritten(
+      upgradeApplyStep.apply(ctxFor(loose, root), {
+        detected: plan(over),
+        formValues,
+        iteration: 0,
+        previousIterations: [],
+      }),
+    );
     await stamp();
     return out;
   };

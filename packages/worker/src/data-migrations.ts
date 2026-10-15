@@ -7,6 +7,7 @@ import {
   configService,
   logger,
   QUEUE_NAMES,
+  type BundleJobPayload,
   type OnboardingToolingMirror,
   type RepoJobPayload,
 } from '@haive/shared';
@@ -43,6 +44,10 @@ const log = logger.child({ module: 'data-migrations' });
 /** How long a repository must have sat at `cloning` before the boot reconciler will call it
  *  stranded. See `reconcileStrandedCloningRepos` for why an age is needed at all. */
 const STRANDED_CLONING_MIN_AGE_MS = 5 * 60 * 1000;
+
+const STRANDED_SYNCING_MIN_AGE_MS = 5 * 60 * 1000;
+
+let bundleQueue: Queue<BundleJobPayload> | null = null;
 
 /** What a data migration does to data that cannot be got back.
  *
@@ -361,6 +366,52 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
       and(inArray(schema.repositories.id, stranded), eq(schema.repositories.status, 'cloning')),
     );
   log.warn({ count: stranded.length }, 'released repositories stranded at cloning');
+}
+
+/** Fails a bundle left at `syncing` with no live job; resync and replace restart the clock. */
+export async function reconcileStrandedSyncingBundles(db: Database): Promise<void> {
+  const cutoff = new Date(Date.now() - STRANDED_SYNCING_MIN_AGE_MS);
+  const syncing = await db
+    .select({ id: schema.customBundles.id })
+    .from(schema.customBundles)
+    .where(
+      and(eq(schema.customBundles.status, 'syncing'), lt(schema.customBundles.updatedAt, cutoff)),
+    );
+  if (syncing.length === 0) return;
+
+  bundleQueue ??= new Queue<BundleJobPayload>(QUEUE_NAMES.BUNDLE, { connection: getBullRedis() });
+  const jobs = await bundleQueue.getJobs([
+    'waiting',
+    'delayed',
+    'prioritized',
+    'active',
+    'waiting-children',
+  ]);
+  const live = new Set<string>();
+  for (const job of jobs) {
+    const bundleId = (job?.data as { bundleId?: unknown } | undefined)?.bundleId;
+    if (typeof bundleId === 'string') live.add(bundleId);
+  }
+
+  const stranded = syncing.filter((row) => !live.has(row.id)).map((row) => row.id);
+  if (stranded.length === 0) return;
+
+  await db
+    .update(schema.customBundles)
+    .set({
+      status: 'failed',
+      lastSyncError:
+        'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        inArray(schema.customBundles.id, stranded),
+        eq(schema.customBundles.status, 'syncing'),
+        lt(schema.customBundles.updatedAt, cutoff),
+      ),
+    );
+  log.warn({ count: stranded.length }, 'failed bundles stranded at syncing');
 }
 
 /** Record, on every `kb_author` task that predates the record, whether it was created with a

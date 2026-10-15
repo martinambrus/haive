@@ -170,11 +170,11 @@ async function main(): Promise<void> {
         renderCtxSnapshot: REFERENCE_CONTEXT as unknown as Record<string, unknown>,
         backfilledRows: 0,
       } as unknown as UpgradePlanOutput;
-      const ctxFor = (taskId: string): StepContext =>
+      const ctxFor = (taskId: string, taskStepId: string = randomUUID()): StepContext =>
         ({
           round: 0,
           taskId,
-          taskStepId: randomUUID(),
+          taskStepId,
           userId,
           repoPath: root,
           workspacePath: root,
@@ -195,21 +195,27 @@ async function main(): Promise<void> {
         edit: (output: Record<string, unknown>) => void = () => undefined,
       ) {
         const upgradeTask = await task('onboarding_upgrade', 'running');
-        const output = (await upgradeApplyStep.apply(ctxFor(upgradeTask), {
+        const [step] = await db
+          .insert(schema.taskSteps)
+          .values({
+            taskId: upgradeTask,
+            stepId: '02-upgrade-apply',
+            stepIndex: 2,
+            title: 'apply',
+            status: 'running',
+          })
+          .returning({ id: schema.taskSteps.id });
+        const output = (await upgradeApplyStep.apply(ctxFor(upgradeTask, step!.id), {
           detected: plan,
           formValues,
           iteration: 0,
           previousIterations: [],
         })) as unknown as Record<string, unknown>;
         edit(output);
-        await db.insert(schema.taskSteps).values({
-          taskId: upgradeTask,
-          stepId: '02-upgrade-apply',
-          stepIndex: 2,
-          title: 'apply',
-          status: 'done',
-          output,
-        });
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'done', output })
+          .where(eq(schema.taskSteps.id, step!.id));
         await db
           .update(schema.tasks)
           .set({ status: 'completed', completedAt: new Date() })
