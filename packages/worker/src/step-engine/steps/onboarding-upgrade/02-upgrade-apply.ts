@@ -65,6 +65,7 @@ import {
   type RulesImportStubOutcome,
 } from '../onboarding/_rules-files.js';
 import { buildRtkAwarenessBlock, withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
+import { inHead } from '../onboarding/_stage-paths.js';
 import {
   backfillRecord,
   readRenderContextColumnRaw,
@@ -1811,14 +1812,20 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       });
       writtenPaths.push(...state.written);
       deletedPaths.push(...state.removed);
-      if ((await retireInstallManifest(ctx, warnings)) === 'removed') {
+      const manifest = await retireInstallManifest(ctx, warnings);
+      if (
+        manifest === 'removed' ||
+        (manifest === 'absent' && (await inHead(ctx.repoPath, INSTALL_MANIFEST_PATH)))
+      ) {
         deletedPaths.push(INSTALL_MANIFEST_PATH);
       }
       const keepTooling = (await toolingOutsideRecord(ctx.db, plan.repositoryId))
         ? [HAIVE_DATA_FILES.tooling]
         : [];
       for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings, keepTooling)) {
-        if (outcome === 'removed') deletedPaths.push(path);
+        if (outcome === 'removed' || (outcome === 'absent' && (await inHead(ctx.repoPath, path)))) {
+          deletedPaths.push(path);
+        }
       }
     } catch (err) {
       failIfColumnStale(err);

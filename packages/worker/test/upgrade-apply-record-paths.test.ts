@@ -1,7 +1,9 @@
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -17,10 +19,22 @@ const TASK = '00000000-0000-4000-8000-0000000000c1';
 
 const RECORD_PATHS = ['.haive-data/state/format.json', '.haive-data/state/project/render.json'];
 
+const run = promisify(execFile);
+
 const dirs: string[] = [];
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
+
+async function commitAll(root: string) {
+  const git = (...args: string[]) => run('git', ['-C', root, ...args]);
+  await git('init', '-q');
+  await git('config', 'user.email', 't@example.com');
+  await git('config', 'user.name', 'T');
+  await git('config', 'gc.auto', '0');
+  await git('add', '-A');
+  await git('commit', '-q', '--allow-empty', '-m', 'before the upgrade');
+}
 
 /** An upgrade with nothing to change, so that what 02 reports is what it did about the record. */
 async function setup(installJson?: string) {
@@ -138,7 +152,7 @@ describe('02 and .haive/install.json', () => {
     const out = await s.apply();
 
     expect(existsSync(join(s.root, INSTALL))).toBe(false);
-    expect(out).not.toHaveProperty('installManifestWritten');
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
 
   it('retires a Haive-shaped one and lists it for the commit to drop', async () => {
@@ -149,6 +163,30 @@ describe('02 and .haive/install.json', () => {
     expect(existsSync(join(s.root, INSTALL))).toBe(false);
     expect(out.deletedPaths).toContain(INSTALL);
     expect(out.warnings).toEqual([]);
+  });
+
+  it('lists it on a retry, when a first attempt removed it and HEAD still carries it', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await commitAll(s.root);
+    await rm(join(s.root, INSTALL));
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
+    expect(out.deletedPaths).toContain(INSTALL);
+    expect(out.warnings).toEqual([]);
+  });
+
+  it.each([
+    ['a repository that never tracked one', true],
+    ['no git at all', false],
+  ])('lists none in %s', async (_what, withGit) => {
+    const s = await setup();
+    if (withGit) await commitAll(s.root);
+
+    const out = await s.apply();
+
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
 
   it('keeps a file that is not Haive’s, lists nothing, and says so', async () => {
@@ -224,6 +262,31 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
         '.haive-data/state/settings/scope-exclude-globs.json',
       ]),
     );
+  });
+
+  it('lists them on a retry, when a first attempt removed them and HEAD still carries them', async () => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
+    await commitAll(s.root);
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) await rm(join(s.root, rel));
+
+    const out = await s.apply();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(false);
+      expect(out.deletedPaths, rel).toContain(rel);
+    }
+    expect(out.warnings).toEqual([]);
+  });
+
+  it('lists none that git never tracked, though the record carries their values', async () => {
+    const s = await withLegacy({}, true);
+    await commitAll(s.root);
+
+    const out = await s.apply();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(out.deletedPaths ?? [], rel).not.toContain(rel);
+    }
   });
 
   it('keeps a file that is not Haive’s, lists nothing, and says so', async () => {
