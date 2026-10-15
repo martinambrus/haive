@@ -389,7 +389,7 @@ describe('POST /tasks/:id/steps/:stepId/action', () => {
       schema.taskStepAgentMinings,
     ].map((table) => fake.rows(table));
 
-  describe.each(['retry', 'retry_ai', 'skip'])('%s', (action) => {
+  describe.each(['retry', 'retry_ai', 'skip', 'resume'])('%s', (action) => {
     it('moves the task back to the step while the system is normal', async () => {
       const fake = withFailedStep();
 
@@ -415,18 +415,15 @@ describe('POST /tasks/:id/steps/:stepId/action', () => {
     );
   });
 
-  describe('resume', () => {
-    it.each(['normal', 'draining'])(
-      'still re-runs the failed agents while the system is %s',
-      async (state) => {
-        const fake = withFailedStep();
-        h.state = state;
+  describe('abort', () => {
+    it('still cancels the task and queues its teardown while the system drains', async () => {
+      const fake = withFailedStep();
+      h.state = 'draining';
 
-        expect((await act('resume')).status).toBe(200);
-        expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
-        expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
-      },
-    );
+      expect((await act('abort')).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled' });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.CANCEL]);
+    });
   });
 });
 

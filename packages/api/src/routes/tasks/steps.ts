@@ -827,10 +827,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
   });
   if (!task) throw new HttpError(404, 'Task not found');
-  if (body.action === 'retry' || body.action === 'retry_ai' || body.action === 'skip') {
+  if (body.action !== 'abort') {
     assertNewWorkAllowed(c.get('maintenanceState'));
+    refuseDeadTask(task);
   }
-  if (body.action !== 'abort') refuseDeadTask(task);
 
   // Act on the round the caller named. A fix-loop step recurs once per round
   // (round 0 = original pass), each rendered as its own row with its own
