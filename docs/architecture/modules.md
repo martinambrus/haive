@@ -44,7 +44,8 @@ the module loads again.
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
   The worker neither ensures the schema of nor starts any job of a module that is deactivated when it
   boots (so a restart after Tear down leaves the dropped schema dropped; it reads the deactivated set
-  once for both), and a reconcile every 15 s
+  at the schema step and again right before starting jobs, and holds back the union), and a reconcile
+  every 15 s
   (`MODULE_JOBS_RECONCILE_MS`, `modules/loader.ts`) stops the jobs of one deactivated since. A stop
   still running after `MODULE_JOB_STOP_WAIT_MS` (10 s) is logged once and left running: the pass goes
   on with the other modules, a later pass or the shutdown waits on that same stop instead of calling it
@@ -55,7 +56,13 @@ the module loads again.
   module deactivated by then stops it. A failed
   ensure or start is tried again on the next passes, at most `MODULE_REACTIVATION_ATTEMPTS` (3) per
   reactivation; after the last one only a worker error log says so, until the next deactivation and
-  activation. A task type that uses the module, as its source or through any step, is
+  activation. A pass sees an activation by the module row's `updated_at` too, which every activate
+  and deactivate moves: when the stamp differs from the previous pass's (the first pass only records
+  it), the module counts as activated again, so its attempts start afresh, a start still running from
+  before is not counted if it fails, and a module that is not running its jobs is tried again. A
+  deactivation and activation that both fall between two passes are seen this way; any other write
+  to the row does the same to an idle module. A task type that uses the module, as its source or
+  through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
   at the same moment waits and then counts the new task. A task that reaches one of its steps later, after a Retry or a revive,
