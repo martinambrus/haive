@@ -456,6 +456,15 @@ describe('describePromptStepIssue', () => {
       expect(text('tools-not-supported-yet')).toContain('Remove');
     });
 
+    it('W10 no longer knows tools-not-supported-yet, as a problem kind or as a message', () => {
+      expect(PROMPT_STEP_PROBLEM_KINDS).not.toContain('tools-not-supported-yet');
+      const retired = describePromptStepIssue({
+        kind: 'tools-not-supported-yet' as never,
+        stepId: 's',
+      });
+      expect(retired ?? '').not.toContain('not supported yet');
+    });
+
     it('names a stored tool that no longer passes its checks, and counts the ones left unnamed', () => {
       expect(text('tool-no-longer-valid', 'repo_status')).toBe(
         'The tool `repo_status` no longer passes its checks; fix it or remove it.',
