@@ -113,14 +113,6 @@ export interface ApplySelections {
   conflictChoices: ReadonlyMap<string, ConflictChoice>;
 }
 
-/** Pure classifier for the apply loop. Splits the per-entry decision out of
- *  the imperative loop so each branch can be unit-tested without a DB or
- *  file system. `adopt` asks nothing: the file already holds the render. The `untrack`
- *  branch — supersede the artifact row without touching disk — fires when
- *  the user picked an obsolete file to be kept, or skipped an obsolete custom-bundle
- *  row whose source bundle item is gone AND no other entry in the plan rewrites the
- *  same diskPath; that combination signals the file is now user-owned and should
- *  drop out of drift tracking on the next upgrade. */
 const PLAN_NO_LONGER_HOLDS =
   "The repository's project settings changed after this upgrade was planned, so its plan " +
   'no longer holds. Retry the plan step to plan the upgrade again.';
@@ -141,6 +133,14 @@ function ownRecordColumn(plan: UpgradePlanOutput): unknown {
   }
 }
 
+/** Pure classifier for the apply loop. Splits the per-entry decision out of
+ *  the imperative loop so each branch can be unit-tested without a DB or
+ *  file system. `adopt` asks nothing: the file already holds the render. The `untrack`
+ *  branch — supersede the artifact row without touching disk — fires when
+ *  the user picked an obsolete file to be kept, or skipped an obsolete custom-bundle
+ *  row whose source bundle item is gone AND no other entry in the plan rewrites the
+ *  same diskPath; that combination signals the file is now user-owned and should
+ *  drop out of drift tracking on the next upgrade. */
 export function classifyApplyAction(
   entry: UpgradePlanEntry,
   allEntries: ReadonlyArray<UpgradePlanEntry>,
