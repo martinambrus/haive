@@ -186,14 +186,14 @@ const saveByStepId = (db: Database, stepId: string) => async (state: MergeResolv
     .where(eq(schema.taskSteps.id, stepId));
 };
 
-/** A merge gone before the cancel has no report: put its files back here, never throwing. */
+/** A merge gone before the cancel has no report: re-sync and put its files back here, never throwing. */
 async function settleGoneMerge(
   db: Database,
   taskId: string,
   recorded: RecordedMerge,
 ): Promise<void> {
   const { state } = recorded;
-  if (state?.mode !== 'same-branch' || !state.keptMetadata) return;
+  if (state?.mode !== 'same-branch') return;
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),

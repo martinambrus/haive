@@ -212,8 +212,17 @@ describe('recordLeftOpenMerges for a merge that is already gone', () => {
     expect(projections.settleProjections).not.toHaveBeenCalled();
   });
 
-  it('puts nothing back for a state that kept nothing, or merged in a worktree of its own', async () => {
+  it('still re-syncs a same-branch state that kept no metadata, since the checkout moved all the same', async () => {
     await run(step({ keptMetadata: undefined }));
+    expect(projections.settleProjections).toHaveBeenCalledTimes(1);
+    const [, repositoryId, state] = projections.settleProjections.mock.calls[0]!;
+    expect(repositoryId).toBe('repo-1');
+    expect(state).toEqual(
+      expect.objectContaining({ mode: 'same-branch', keptMetadata: undefined }),
+    );
+  });
+
+  it('puts nothing back for a merge in a worktree of its own', async () => {
     await run(step({ mode: 'cross-branch' }));
     expect(projections.settleProjections).not.toHaveBeenCalled();
   });
