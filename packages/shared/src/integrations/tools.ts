@@ -1,12 +1,11 @@
 import { z } from 'zod';
 import {
+  TOOL_NAME_PATTERN,
   integrationRequirementSchema,
   isCategoryId,
   isProviderId,
 } from '../modularity/contracts.js';
 import type { IntegrationOperation } from '../modularity/integrations.js';
-
-const TOOL_NAME = /^[a-z][a-z0-9_]{0,39}$/;
 
 export const integrationBindingSchema = z.object({
   requirementId: integrationRequirementSchema.shape.id,
@@ -56,9 +55,9 @@ export function integrationTools(
   }));
   const taken = new Set<string>();
   for (const { binding, op, name } of named) {
-    if (!TOOL_NAME.test(name) || taken.has(name)) {
+    if (!TOOL_NAME_PATTERN.test(name) || taken.has(name)) {
       throw new Error(
-        `integration operation ${op.opId} of requirement ${binding.requirementId} cannot be listed as ${JSON.stringify(name)}: a tool name must match ${TOOL_NAME} and be unique`,
+        `integration operation ${op.opId} of requirement ${binding.requirementId} cannot be listed as ${JSON.stringify(name)}: a tool name must match ${TOOL_NAME_PATTERN} and be unique`,
       );
     }
     taken.add(name);

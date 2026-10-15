@@ -1,8 +1,6 @@
 import { z } from 'zod';
 import { formSchemaSchema } from '../schemas/form.js';
-import { isCategoryId, isProviderId } from './contracts.js';
-
-const OP_ID_PATTERN = /^[a-z][a-z0-9_]{0,39}$/;
+import { TOOL_NAME_PATTERN, isCategoryId, isProviderId } from './contracts.js';
 
 const httpsUrlSchema = z.string().refine((value) => {
   try {
@@ -56,7 +54,7 @@ export const authMethodSpecSchema = z.discriminatedUnion('kind', [
 export type AuthMethodSpec = z.infer<typeof authMethodSpecSchema>;
 
 export const integrationOperationSchema = z.object({
-  opId: z.string().regex(OP_ID_PATTERN),
+  opId: z.string().regex(TOOL_NAME_PATTERN),
   description: z.string(),
   inputSchema: z.record(z.string(), z.unknown()),
   access: z.enum(['read', 'write']),
