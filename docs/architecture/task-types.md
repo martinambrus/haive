@@ -281,7 +281,8 @@ with it.
   sandbox files: the `haive-custom` server script (`/haive/haive-custom-mcp.mjs`), the tool list
   (`/haive/haive-custom.tools.json`: name, description and the input schema the api also checks) and
   the token (`/haive/haive-custom.token`) — never an environment variable. A run naming custom tools
-  fails (`custom-tools-unwired`) when their server could not be added to the CLI; a best-effort server
+  fails (`custom-tools-unwired`) when their server could not be added to the CLI, a CLI with no MCP
+  configuration included; a best-effort server
   failure elsewhere lets the run carry on.
 
 - **Schema** (`custom-tools.ts`): at most 10 typed params per tool, names matching `TOOL_NAME_PATTERN`,

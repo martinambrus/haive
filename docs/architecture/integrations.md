@@ -353,7 +353,8 @@ the public host. That gap is still open.
   token, so it is the same for every run of a task and the CLIs' merged configs do not churn. The
   script lists `[]` on any failure and answers a refused call as a tool error; the broker decides. A
   stamped run whose server cannot be delivered (no `CONFIG_ENCRYPTION_KEY`, no step, a config the
-  task volume did not take) fails `integrations-unwired` before its CLI starts, rather than running
+  task volume did not take, a CLI with no MCP configuration such as amp) fails `integrations-unwired`
+  before its CLI starts, rather than running
   without the tools its prompt names.
 - **Tool names** (`integrationTools`): a tool is named by its operation id; when two declared tools
   share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`). Every
