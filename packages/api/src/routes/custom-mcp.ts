@@ -12,7 +12,6 @@ import {
   type RagQueryTool,
 } from '@haive/shared/modularity';
 import { formatRagHits } from '@haive/shared/rag';
-import { verifyTaskToken } from '@haive/shared/task-token';
 import { getDb, type Database } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
@@ -21,6 +20,7 @@ import {
   type GuardReason,
   type GuardedResponse,
 } from '../lib/egress-guard.js';
+import { assertInvocationLive, claimsFromBearer } from '../lib/task-call-auth.js';
 import { sandboxBodyLimit } from '../middleware/sandbox-body-limit.js';
 import { executeRagSearch } from './rag.js';
 
@@ -76,27 +76,6 @@ const GUARD_FAILURES: Record<
     message: 'the request could not be completed',
   },
 };
-
-interface CallClaims {
-  taskId: string;
-  taskStepId: string;
-  cliInvocationId: string;
-}
-
-function claimsFromBearer(authHeader: string | undefined): CallClaims {
-  const secret = process.env.CONFIG_ENCRYPTION_KEY;
-  if (!secret) throw new HttpError(500, 'server misconfigured: CONFIG_ENCRYPTION_KEY unset');
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  const claims = token ? verifyTaskToken(token, 'custom-mcp', secret) : null;
-  if (!claims?.taskStepId || !claims.cliInvocationId) {
-    throw new HttpError(401, 'invalid or missing custom-mcp token');
-  }
-  return {
-    taskId: claims.taskId,
-    taskStepId: claims.taskStepId,
-    cliInvocationId: claims.cliInvocationId,
-  };
-}
 
 async function findInvocation(db: Database, invocationId: string) {
   const [row] = await db
@@ -164,7 +143,7 @@ customMcpRoutes.use('*', sandboxBodyLimit);
 
 customMcpRoutes.post('/call', async (c) => {
   const startedAt = Date.now();
-  const claims = claimsFromBearer(c.req.header('Authorization'));
+  const claims = claimsFromBearer(c.req.header('Authorization'), 'custom-mcp');
   const body = (await c.req.json().catch(() => null)) as {
     tool?: unknown;
     arguments?: unknown;
@@ -172,15 +151,7 @@ customMcpRoutes.post('/call', async (c) => {
   const db = getDb();
 
   const invocation = await findInvocation(db, claims.cliInvocationId);
-  if (
-    !invocation ||
-    invocation.taskId !== claims.taskId ||
-    invocation.taskStepId !== claims.taskStepId ||
-    invocation.endedAt !== null ||
-    invocation.supersededAt !== null
-  ) {
-    throw new HttpError(401, 'this invocation is not live', 'invocation-not-live');
-  }
+  assertInvocationLive(invocation, claims);
 
   // Empty until a declared tool is found: a name the agent chose is never stored.
   let tool: CustomTool | undefined;

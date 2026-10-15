@@ -1,5 +1,5 @@
 import { forgeProviderSchema, type ForgeProviderName } from '../schemas/repos.js';
-import { isForgeProviderName } from './registry.js';
+import { isForgeProviderName, resolveForgeProvider } from './registry.js';
 import { ForgeError } from './types.js';
 
 /** Public hosts whose forge is unambiguous; a self-hosted host's name cannot reveal its forge. */
@@ -121,3 +121,36 @@ export function credentialUsableForPr(
   const credHost = /^https?:\/\//i.test(originUrl.trim()) ? c.host : c.host.replace(/:\d+$/, '');
   return credHost.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);
 }
+
+type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };
+
+/** The host of the forge's default API base, which for github.com and bitbucket.org is not the web host. */
+function forgeApiHost(provider: string | null | undefined, host: string): string | null {
+  const forge = credentialForgeProvider(provider, host);
+  if (!forge) return null;
+  try {
+    return new URL(resolveForgeProvider(forge).defaultApiBase(host)).host;
+  } catch {
+    return null;
+  }
+}
+
+/** A blank API base falls back to the provider's own; a set one must be https on the credential's or the forge's host.
+ *  Endpoint paths are appended to the stored text, so a `?` or `#` in it would swallow them. */
+export const apiBaseFits = (b: ApiBaseTarget) => {
+  const base = b.apiBaseUrl?.trim();
+  if (!base) return true;
+  try {
+    const url = new URL(base);
+    const host = b.host.trim().toLowerCase();
+    return (
+      url.protocol === 'https:' &&
+      url.username === '' &&
+      url.password === '' &&
+      !/[?#]/.test(base) &&
+      (url.host === host || url.host === forgeApiHost(b.provider, host))
+    );
+  } catch {
+    return false;
+  }
+};
