@@ -199,6 +199,8 @@ export const MODULE_JOBS_RECONCILE_MS = 15_000;
 
 const jobsStarted = new Set<string>();
 const teardownsRunning = new Set<{ moduleId: string }>();
+// A teardown can begin and end between two passes, so no pass need have seen the deactivation.
+const tornDown = new Set<string>();
 
 export const moduleJobsStarted = (moduleId: string): boolean => jobsStarted.has(moduleId);
 
@@ -208,6 +210,7 @@ const tearingDown = (moduleId: string): boolean =>
 export function beginModuleTeardown(moduleId: string): () => void {
   const teardown = { moduleId };
   teardownsRunning.add(teardown);
+  tornDown.add(moduleId);
   return () => {
     teardownsRunning.delete(teardown);
   };
@@ -282,8 +285,9 @@ export async function startModuleJobs(
         continue;
       }
       // A module starts once per reactivation, and not while its teardown runs.
-      if (!pending.has(moduleId) || tearingDown(moduleId)) continue;
+      if ((!pending.has(moduleId) && !tornDown.has(moduleId)) || tearingDown(moduleId)) continue;
       pending.delete(moduleId);
+      tornDown.delete(moduleId);
       // Claimed before the first await, so a teardown that checks now is refused.
       jobsStarted.add(moduleId);
       try {

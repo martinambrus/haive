@@ -419,6 +419,41 @@ describe('the jobs reconcile', () => {
     await stopAll();
   });
 
+  it('ensures the schema of a module torn down and activated again between two passes once, on the first pass after the hook', async () => {
+    const m = moduleWithSchemaOnly('between-passes');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+    const hook = vi.fn<Hook>(async () => {});
+
+    await runModuleTeardown(teardownDeps(m, hook), 'between-passes');
+    expect(hook).toHaveBeenCalledOnce();
+    expect(m.ensure).not.toHaveBeenCalled();
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+
+    await stopAll();
+  });
+
+  it('ensures a module with jobs once, and starts its jobs once more, after a deactivation, a teardown and an activation', async () => {
+    const m = moduleWithSchema('cycled');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+    const hook = vi.fn<Hook>(async () => {});
+
+    await reconcile(new Set(['cycled']));
+    await runModuleTeardown(teardownDeps(m, hook), 'cycled');
+    await reconcile(new Set());
+    await reconcile(new Set());
+
+    expect(hook).toHaveBeenCalledOnce();
+    expect(m.ensure).toHaveBeenCalledOnce();
+    expect(m.jobs).toHaveBeenCalledTimes(2);
+
+    await stopAll();
+  });
+
   it('refuses a teardown begun while a reactivated module is starting, and allows one once the start has failed', async () => {
     const m = moduleWithSchema('claimed');
     let endEnsure!: () => void;
