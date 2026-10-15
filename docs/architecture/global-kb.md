@@ -117,7 +117,9 @@ connection string writes an audit row (`global_kb.connection_string.update`,
 `connection_string_in_use` while the store the save leaves in place is the external one, refused
 with 400 alongside a new string, and audited as `{connectionStringSet: false}`. A save that sets the
 string writes it (and its audit row) after the embedding-width check and before the mode, so no
-process finds the external store without its string, and a refused save writes nothing. Every
+process finds the external store without its string, and a refused save writes nothing. The one
+exception is a save that leaves the external store for the built-in one: it writes the mode first,
+so no process pairs the live external store with a string it is not switching to. Every
 process reads the mode and the string fresh, past the 30 s caches (`resolveGlobalKbSettings`), so a
 switch or a removal reaches the worker at once; a reader that finds the external store without a
 string reads the mode once more, since a switch to the built-in store writes the mode before it
