@@ -36,6 +36,7 @@ import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue } from './task-queue.js';
 import { autoResumeFailedStep } from './_step-reset.js';
+import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
 /** Max consecutive auto-resumes the poller performs before falling back to notify-only
  *  (anti-thrash). Reset to 0 on any manual action or the next successful step progress. */
@@ -111,9 +112,7 @@ function getUsagePollQueue(): Queue {
 
 /** Idempotent: upsertJobScheduler keys on POLL_JOB_ID, so a restart UPDATES the one
  *  scheduler rather than adding a duplicate. A fixed interval (no jitter) keeps it stable.
- *  The legacy-repeatable pre-sweep this used to carry is gone — bullmq 6 removed
- *  getRepeatableJobs/removeRepeatableByKey, and 38e13a2 already cleared the backlog while
- *  those APIs still existed. */
+ *  pruneJobSchedulers (job-scheduler-prune.ts) removes any legacy repeatable left from before. */
 export async function scheduleUsagePollTick(): Promise<void> {
   const queue = getUsagePollQueue();
   await queue.upsertJobScheduler(
@@ -121,6 +120,7 @@ export async function scheduleUsagePollTick(): Promise<void> {
     { every: POLL_BASE_INTERVAL_MS },
     { name: POLL_JOB_NAME, opts: { removeOnComplete: true, removeOnFail: 10 } },
   );
+  await pruneJobSchedulers(queue, [POLL_JOB_ID]);
 }
 
 /** Enqueue a one-off poll tick (e.g. right after an LLM step finishes) so the header

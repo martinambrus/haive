@@ -4,6 +4,7 @@ import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { handleIngestGit, handleIngestZip, handleResyncGit } from '../repo/bundle-ingest.js';
 import { runBundleGitSyncTick } from '../repo/bundle-sync.js';
+import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
 /** Daily tick interval, jittered by ±2h at schedule time so multiple worker
  *  pods don't pile up on the same boundary. */
@@ -26,8 +27,8 @@ function getBundleQueueLocal(): Queue {
  *
  *  Do NOT go back to `repeat: { every }`. That key WAS an options hash, so the jitter minted
  *  a fresh key on every restart and `jobId` never deduplicated them — 3308 accumulated on this
- *  queue and all kept firing. The one-time sweep that cleared them shipped in 38e13a2 and was
- *  removed with the bullmq 6 bump, which deletes getRepeatableJobs/removeRepeatableByKey. */
+ *  queue and all kept firing. pruneJobSchedulers (job-scheduler-prune.ts) clears any left over
+ *  at boot; the 38e13a2 sweep that did so went with the bullmq 6 bump, which dropped its API. */
 export async function scheduleBundleGitSyncTick(): Promise<void> {
   const queue = getBundleQueueLocal();
   const jitter = Math.floor((Math.random() * 4 - 2) * 60 * 60 * 1000);
@@ -40,6 +41,7 @@ export async function scheduleBundleGitSyncTick(): Promise<void> {
       opts: { removeOnComplete: true, removeOnFail: 10 },
     },
   );
+  await pruneJobSchedulers(queue, [GIT_SYNC_JOB_ID]);
 }
 
 export function startBundleWorker(bundleStorageRoot: string): Worker {
