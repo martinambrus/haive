@@ -55,6 +55,9 @@ describe('retireInstallManifest', () => {
     expect(outcome).not.toBe('removed');
     expect(existsSync(join(root, '.haive', 'install.json'))).toBe(true);
     expect(recorded).toEqual([]);
+    expect(warnings).toEqual([
+      '.haive/install.json was left in place: nothing could be read there before its removal, so it stays for the next attempt',
+    ]);
   });
 
   it('removes a file of Haive’s shape, with or without the bundles section', async () => {
