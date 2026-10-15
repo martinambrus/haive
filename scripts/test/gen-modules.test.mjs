@@ -417,15 +417,15 @@ describe('gen-modules: registry modules (@haive-module/<id>)', () => {
     assert.doesNotMatch(generated(tree), /haive-module/);
   });
 
-  it('ignores a registry package that exports no manifest and no web part', (t) => {
+  it('refuses a registry package that exports no manifest, naming the package and the export', (t) => {
     const tree = makeTree(t, {
       installed: { foo: { exports: ['./util'] } },
       api: registry('foo'),
       worker: registry('foo'),
     });
     const out = tree.run('gen-modules.mjs');
-    assert.equal(out.status, 0, out.stderr);
-    assert.doesNotMatch(generated(tree), /haive-module/);
+    assert.equal(out.status, 1, out.stdout);
+    assert.match(out.stderr, /^gen-modules: @haive-module\/foo .*\.\/manifest/);
   });
 
   it('treats a workspace folder named in the registry scope as a local module, once', (t) => {

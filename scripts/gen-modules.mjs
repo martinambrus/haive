@@ -52,6 +52,14 @@ const registry = apiRegistryNames.flatMap((name) => {
     return [];
   }
 });
+for (const pkg of registry) {
+  if (pkg.exports?.['./manifest'] === undefined) {
+    console.error(
+      `gen-modules: ${pkg.name} is a dependency of @haive/api but exports no ./manifest; every @haive-module/<id> package must`,
+    );
+    process.exit(1);
+  }
+}
 const packages = [...folders, ...registry].sort((a, b) =>
   a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
 );
