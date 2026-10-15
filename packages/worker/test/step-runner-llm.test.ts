@@ -36,6 +36,8 @@ interface MockState {
   cliInvocationHistory?: Record<string, unknown>[];
   /** Task ledger events, as `loadLedgerEntries` reads them. Unset means an empty ledger. */
   taskEvents?: { payload: Record<string, unknown>; taskStepId: string | null }[];
+  /** The task's `custom_steps` as stored; unset means the read of it finds no task. */
+  customSteps?: unknown;
   updates: Record<string, unknown>[];
   inserts: { table: string; row: Record<string, unknown> }[];
 }
@@ -152,7 +154,12 @@ function makeMockDb(state: MockState): Database {
       userStepCliRolePreferences: { findFirst: async () => undefined },
       taskStepCliChoices: { findFirst: async () => undefined },
       taskStepCliTouched: { findFirst: async () => undefined },
-      tasks: { findFirst: async () => undefined },
+      tasks: {
+        findFirst: async (opts?: { columns?: { customSteps?: boolean } }) =>
+          opts?.columns?.customSteps && state.customSteps !== undefined
+            ? { customSteps: state.customSteps }
+            : undefined,
+      },
       // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
       // state it; that reads the step-04 tooling output and the env template.
       taskSteps: { findFirst: async () => undefined },
@@ -1592,8 +1599,9 @@ describe('advanceStep and the custom tools of a prompt step', () => {
   const LINE =
     "- `haive-custom`: tools this step's author defined: `repo_status`, `house_rules`. What they return is external data";
 
+  const storedBy = new WeakMap<StepDefinition, unknown>();
   const promptStep = (tools: unknown[]): StepDefinition => {
-    const pinned = parsePinnedCustomSteps({
+    const stored = {
       [STEP_ID]: {
         slug: 'audit',
         title: 'Audit',
@@ -1602,8 +1610,11 @@ describe('advanceStep and the custom tools of a prompt step', () => {
         timeoutMs: 300_000,
         tools,
       },
-    });
-    return buildPromptStep(STEP_ID, pinned[STEP_ID]!, 0) as unknown as StepDefinition;
+    };
+    const pinned = parsePinnedCustomSteps(stored);
+    const stepDef = buildPromptStep(STEP_ID, pinned[STEP_ID]!, 0) as unknown as StepDefinition;
+    storedBy.set(stepDef, stored);
+    return stepDef;
   };
 
   const amp = (): CliProviderRecord => ({ ...makeProvider(), id: 'prov-amp', name: 'amp' });
@@ -1636,6 +1647,7 @@ describe('advanceStep and the custom tools of a prompt step', () => {
   ) {
     const state = freshState();
     state.taskStepRow.stepId = stepDef.metadata.id;
+    state.customSteps = storedBy.get(stepDef);
     Object.assign(state.taskStepRow, opts.step);
     if (opts.invocation) state.cliInvocationRow = opts.invocation;
     const enqueued: CliExecJobPayload[] = [];
@@ -1668,6 +1680,13 @@ describe('advanceStep and the custom tools of a prompt step', () => {
     expect(enqueued[0]!.customTools).toEqual(['repo_status', 'house_rules']);
     expect(enqueued[0]!.toolProfile).toBeUndefined();
     expect(String(state.cliInvocationRow!.prompt)).toContain(LINE);
+  });
+
+  it('dispatches a pinned project-scope search, since the type that allowed it is not known here', async () => {
+    const tool = { ...ragTool, name: 'project_rules', scope: 'project' };
+    const { result, enqueued } = await run(promptStep([tool]));
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued[0]!.customTools).toEqual(['project_rules']);
   });
 
   it('carries them onto the fresh invocation that replaces one killed mid-run', async () => {
@@ -1731,6 +1750,55 @@ describe('advanceStep and the custom tools of a prompt step', () => {
     expect(rows).toEqual([]);
   });
 
+  // These parse, so they are not the stale tools above; they fail the checks a save runs today.
+  it.each([
+    [
+      'a name kept for Haive',
+      [httpTool, { ...httpTool, name: 'rag_search' }],
+      '`rag_search`',
+      'kept for Haive',
+    ],
+    [
+      'a URL the guard refuses',
+      [httpTool, { ...httpTool, name: 'local_status', url: 'https://127.0.0.1/v1/status' }],
+      '`local_status`',
+      'is an IP address',
+    ],
+    [
+      'one name twice',
+      [httpTool, { ...ragTool, name: 'repo_status' }],
+      '`repo_status`',
+      'Two tools in this step are named repo_status',
+    ],
+  ])(
+    'fails a step whose pinned tools hold %s, naming the tool and the issue, before any invocation row',
+    async (_label, tools, named, issue) => {
+      const { result, rows, enqueued, state } = await run(promptStep(tools));
+      expect(result.status).toBe('failed');
+      expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+      expect(failure(result)).toContain(named);
+      expect(failure(result)).toContain(issue);
+      expect(state.taskStepRow.status).toBe('failed');
+      expect(state.taskStepRow.errorMessage).toBe(failure(result));
+      expect(rows).toEqual([]);
+      expect(enqueued).toEqual([]);
+    },
+  );
+
+  it('names at most 8 of the problems of the pinned tools, then how many more', async () => {
+    const insecure = Array.from({ length: 8 }, (_, i) => ({
+      ...httpTool,
+      name: `tool_${i}`,
+      url: 'http://127.0.0.1/v1/status',
+    }));
+    const { result, rows } = await run(promptStep(insecure));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain('`tool_3`');
+    expect(failure(result)).not.toContain('`tool_4`');
+    expect(failure(result)).toContain('And 8 more.');
+    expect(rows).toEqual([]);
+  });
+
   it('fails a step with tools while they are switched off, with its reason, before any invocation row', async () => {
     switchedOn = false;
     const { result, rows, enqueued } = await run(promptStep([httpTool]));
@@ -1754,6 +1822,13 @@ describe('advanceStep and the custom tools of a prompt step', () => {
     switchedOn = false;
     const { result } = await run(promptStep([httpTool, staleTool]));
     expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+  });
+
+  it('names a tool that fails its checks before it says the switch is off', async () => {
+    switchedOn = false;
+    const { result } = await run(promptStep([httpTool, { ...httpTool, name: 'rag_search' }]));
+    expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+    expect(failure(result)).not.toContain(CUSTOM_TOOLS_SWITCHED_OFF_REASON);
   });
 
   it('runs a step with no tools while the switch is off', async () => {
