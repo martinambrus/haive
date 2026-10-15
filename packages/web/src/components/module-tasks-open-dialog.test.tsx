@@ -307,4 +307,22 @@ describe('moduleOffNotice', () => {
         '- t9: connection reset',
     );
   });
+
+  it('adds one sentence after the counts when more tasks use the module than were listed', () => {
+    expect(moduleOffNotice('Alpha Search', result({ capped: true }), titles)).toBe(
+      'Turned off Alpha Search: 2 tasks stopped, 3 left (they fail when they reach one of its steps), 0 could not be stopped. More tasks use it than were listed; they fail when they reach one of its steps.',
+    );
+  });
+
+  it('keeps that sentence ahead of the tasks it could not stop', () => {
+    const failed = [{ id: 't6', error: 'sandbox refused to die' }];
+    expect(moduleOffNotice('Alpha', result({ capped: true, failed }), titles)).toBe(
+      'Turned off Alpha: 2 tasks stopped, 3 left (they fail when they reach one of its steps), 1 could not be stopped. More tasks use it than were listed; they fail when they reach one of its steps.\n' +
+        '- Six <b>: sandbox refused to die',
+    );
+  });
+
+  it('says nothing of more tasks when the list was not cut', () => {
+    expect(moduleOffNotice('Alpha', result({ capped: false }), titles)).not.toContain('More tasks');
+  });
 });
