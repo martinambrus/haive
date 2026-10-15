@@ -3,10 +3,15 @@ import { ForgeError, type OpenPrInput } from './types.js';
 
 export const PR_NUMBER_PATTERN = '^[1-9][0-9]{0,9}$';
 export const BRANCH_MAX_LENGTH = 255;
+export const TITLE_MIN_LENGTH = 1;
 export const TITLE_MAX_LENGTH = 256;
 export const BODY_MAX_LENGTH = 65_536;
 
 const PR_NUMBER = new RegExp(PR_NUMBER_PATTERN);
+
+// JSON Schema's maxLength counts code points, so a character outside the BMP is one, not its two UTF-16 units.
+const codePoints = (text: string): number =>
+  text.length - (text.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)?.length ?? 0);
 
 export interface ForgeOpArgs {
   get_pull_request_state: { prNumber: string };
@@ -63,17 +68,18 @@ export function validateForgeOpArgs(
       const fields = stringArgs(args, ['head', 'base', 'title', 'body']);
       if (typeof fields === 'string') return refuse(fields);
       if (!isBranchName(fields.head)) return refuse('head must be a valid branch name');
-      if (fields.head.length > BRANCH_MAX_LENGTH) {
+      if (codePoints(fields.head) > BRANCH_MAX_LENGTH) {
         return refuse(`head must be at most ${BRANCH_MAX_LENGTH} characters`);
       }
       if (!isBranchName(fields.base)) return refuse('base must be a valid branch name');
-      if (fields.base.length > BRANCH_MAX_LENGTH) {
+      if (codePoints(fields.base) > BRANCH_MAX_LENGTH) {
         return refuse(`base must be at most ${BRANCH_MAX_LENGTH} characters`);
       }
-      if (fields.title.length < 1 || fields.title.length > TITLE_MAX_LENGTH) {
-        return refuse(`title must be 1 to ${TITLE_MAX_LENGTH} characters`);
+      const title = codePoints(fields.title);
+      if (title < TITLE_MIN_LENGTH || title > TITLE_MAX_LENGTH) {
+        return refuse(`title must be ${TITLE_MIN_LENGTH} to ${TITLE_MAX_LENGTH} characters`);
       }
-      if (fields.body.length > BODY_MAX_LENGTH) {
+      if (codePoints(fields.body) > BODY_MAX_LENGTH) {
         return refuse(`body must be at most ${BODY_MAX_LENGTH} characters`);
       }
       return { ok: true, args: fields };

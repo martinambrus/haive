@@ -1241,6 +1241,19 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
       await expectRefusal(w, res, 400, 'invalid-arguments', WRITE);
     });
 
+    it('carries a body of 65536 characters outside the BMP sent as escaped surrogate pairs to the vendor', async () => {
+      const w = await seed({ access: 'write', writeSwitch: true });
+      const text = `{"tool":"${OPEN}","arguments":{"head":"feature/x","base":"main","title":"Add x","body":"${'\\uD83D\\uDE00'.repeat(65_536)}"}}`;
+
+      const res = await send(CALL, text, mint(w));
+
+      expect(Buffer.byteLength(text)).toBeGreaterThan(12 * 65_536);
+      served(res);
+      expect(JSON.parse(vendor.calls[0]!.body!).body).toBe(
+        String.fromCodePoint(0x1f600).repeat(65_536),
+      );
+    });
+
     it('carries a body of 65536 characters to the vendor when every character arrives JSON-escaped', async () => {
       const w = await seed({ access: 'write', writeSwitch: true });
       const text = `{"tool":"${OPEN}","arguments":{"head":"feature/x","base":"main","title":"Add x","body":"${'\\u0078'.repeat(65_536)}"}}`;

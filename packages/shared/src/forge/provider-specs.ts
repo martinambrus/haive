@@ -4,6 +4,7 @@ import {
   BRANCH_MAX_LENGTH,
   PR_NUMBER_PATTERN,
   TITLE_MAX_LENGTH,
+  TITLE_MIN_LENGTH,
 } from './op-args.js';
 
 const OPEN_PULL_REQUEST: IntegrationOperation = {
@@ -19,7 +20,7 @@ const OPEN_PULL_REQUEST: IntegrationOperation = {
         description: 'Source (feature) branch',
       },
       base: { type: 'string', maxLength: BRANCH_MAX_LENGTH, description: 'Target (base) branch' },
-      title: { type: 'string', maxLength: TITLE_MAX_LENGTH },
+      title: { type: 'string', minLength: TITLE_MIN_LENGTH, maxLength: TITLE_MAX_LENGTH },
       body: { type: 'string', maxLength: BODY_MAX_LENGTH },
     },
     required: ['head', 'base', 'title', 'body'],

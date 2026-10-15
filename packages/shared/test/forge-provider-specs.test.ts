@@ -72,7 +72,7 @@ describe('github sign-in methods', () => {
 });
 
 describe('the argument limits the input schemas publish', () => {
-  type Property = { type?: string; pattern?: string; maxLength?: number };
+  type Property = { type?: string; pattern?: string; minLength?: number; maxLength?: number };
   const propertiesOf = (spec: (typeof CORE_FORGE_PROVIDER_SPECS)[number], opId: string) =>
     (
       spec.operations!.find((operation) => operation.opId === opId)!.inputSchema as {
@@ -95,7 +95,11 @@ describe('the argument limits the input schemas publish', () => {
       const open = propertiesOf(spec, 'open_pull_request');
       expect(open.head).toMatchObject({ type: 'string', maxLength: BRANCH_MAX_LENGTH });
       expect(open.base).toMatchObject({ type: 'string', maxLength: BRANCH_MAX_LENGTH });
-      expect(open.title).toMatchObject({ type: 'string', maxLength: TITLE_MAX_LENGTH });
+      expect(open.title).toMatchObject({
+        type: 'string',
+        minLength: 1,
+        maxLength: TITLE_MAX_LENGTH,
+      });
       expect(open.body).toMatchObject({ type: 'string', maxLength: BODY_MAX_LENGTH });
     },
   );
