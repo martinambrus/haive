@@ -93,6 +93,15 @@ export function parseRemote(
   return { host, owner, repo };
 }
 
+/** The host a credential's default API base sits on. An ssh or git remote carries no forge port,
+ *  so a credential on the remote's host with a port names its API's; otherwise the remote's host. */
+export function credentialApiHost(credentialHost: string, remoteUrl: string): string {
+  const remoteHost = hostFromRemote(remoteUrl);
+  if (/^https?:\/\//i.test(remoteUrl.trim())) return remoteHost;
+  const host = credentialHost.trim().toLowerCase();
+  return host.replace(/:\d+$/, '') === remoteHost ? host : remoteHost;
+}
+
 /** Whether a stored credential can open a PR for this repo. The repo's forge is fixed by
  *  its origin URL; a credential is usable when its forge (explicit provider, else inferred
  *  from the credential's host) matches the repo's. For a self-hosted origin whose forge

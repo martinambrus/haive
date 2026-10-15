@@ -3,6 +3,7 @@ import { schema, type Database } from '@haive/database';
 import { getDecryptedCredentials } from '../repo/credentials.js';
 import {
   ForgeError,
+  credentialApiHost,
   credentialForgeProvider,
   hostFromRemote,
   parseRemote,
@@ -27,7 +28,7 @@ export async function resolveForgeContext(args: {
       eq(schema.repoCredentials.id, credentialId),
       eq(schema.repoCredentials.userId, userId),
     ),
-    columns: { provider: true, apiBaseUrl: true },
+    columns: { provider: true, host: true, apiBaseUrl: true },
   });
   if (!row) throw new ForgeError('Credential not found for pull-request creation.');
 
@@ -43,7 +44,9 @@ export async function resolveForgeContext(args: {
   const creds = await getDecryptedCredentials(db, credentialId, userId);
   const { host, owner, repo } = parseRemote(remoteUrl, provider);
   const impl = resolveForgeProvider(provider);
-  const apiBase = (row.apiBaseUrl?.trim() || impl.defaultApiBase(host)).replace(/\/+$/, '');
+  const apiBase = (
+    row.apiBaseUrl?.trim() || impl.defaultApiBase(credentialApiHost(row.host, remoteUrl))
+  ).replace(/\/+$/, '');
   if (!apiBase) {
     throw new ForgeError(
       `Could not determine a REST API base URL for ${provider} on ${host}. Set an API base override on the credential.`,

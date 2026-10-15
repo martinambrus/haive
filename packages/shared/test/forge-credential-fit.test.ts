@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { credentialUsableForPr, hostFromRemote } from '../src/forge/index.js';
+import { credentialApiHost, credentialUsableForPr, hostFromRemote } from '../src/forge/index.js';
 
 const PROVIDERS = [
   null,
@@ -192,5 +192,48 @@ describe('credentialUsableForPr', () => {
     expect(bits).toHaveLength(1344);
     expect([...bits].filter((bit) => bit === '1')).toHaveLength(174);
     expect(sha(bits)).toBe('9af5b30df78a1f6e0d556af6dc65216cd9a5e2a7c79fb45c174c544bb4807bd9');
+  });
+});
+
+describe('credentialApiHost', () => {
+  it.each([
+    [
+      'an ssh remote on a port',
+      'ssh://git@git.example.com:2222/a/b.git',
+      'git.example.com:8443',
+      'git.example.com:8443',
+    ],
+    [
+      'an scp remote',
+      'git@git.example.com:a/b.git',
+      'Git.Example.com:8443',
+      'git.example.com:8443',
+    ],
+    [
+      'an ssh remote, credential without a port',
+      'git@git.example.com:a/b.git',
+      'git.example.com',
+      'git.example.com',
+    ],
+    [
+      'an ssh remote, credential on another host',
+      'git@git.example.com:a/b.git',
+      'other.example.com:8443',
+      'git.example.com',
+    ],
+    [
+      'an https remote with a port',
+      'https://git.example.com:8443/a/b.git',
+      'git.example.com:9443',
+      'git.example.com:8443',
+    ],
+    [
+      'an https remote without a port',
+      'https://git.example.com/a/b.git',
+      'git.example.com:8443',
+      'git.example.com',
+    ],
+  ])('takes %s', (_what, remote, credentialHost, expected) => {
+    expect(credentialApiHost(credentialHost, remote)).toBe(expected);
   });
 });
