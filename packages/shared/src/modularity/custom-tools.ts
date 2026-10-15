@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { HIDDEN_CHARACTER } from '../utils/hidden-characters.js';
 
 export const CUSTOM_TOOLS_MAX_PER_STEP = 8;
 export const CUSTOM_TOOL_PARAMS_MAX = 10;
@@ -44,6 +45,7 @@ const isPlainText = (value: unknown, max: number): boolean =>
   value.length >= 1 &&
   value.length <= max &&
   !hasControl(value) &&
+  !HIDDEN_CHARACTER.test(value) &&
   value.isWellFormed();
 
 const plainText = (max: number) =>
@@ -267,7 +269,7 @@ function paramProblem(param: CustomToolParam, inPath: boolean): string | null {
     return `its name must start with a lowercase letter and use only lowercase letters, digits and underscores, up to ${CUSTOM_TOOL_NAME_MAX_LENGTH} characters`;
   }
   if (!isPlainText(param.description, CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH)) {
-    return `its description must be 1 to ${CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH} characters with no control characters`;
+    return `its description must be 1 to ${CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH} characters with no control or invisible characters`;
   }
   switch (param.type) {
     case 'string':
@@ -293,7 +295,7 @@ function paramProblem(param: CustomToolParam, inPath: boolean): string | null {
         return `values must list 1 to ${CUSTOM_TOOL_ENUM_MAX_VALUES} choices`;
       }
       if (!param.values.every((v) => isPlainText(v, CUSTOM_TOOL_ENUM_VALUE_MAX_LENGTH))) {
-        return `each value must be 1 to ${CUSTOM_TOOL_ENUM_VALUE_MAX_LENGTH} characters with no control characters`;
+        return `each value must be 1 to ${CUSTOM_TOOL_ENUM_VALUE_MAX_LENGTH} characters with no control or invisible characters`;
       }
       if (inPath && param.values.some(refusedInPath)) {
         return 'a value used in the URL path must not be . or .., and must not contain / or \\';
@@ -375,7 +377,7 @@ export function validateCustomTool(
   if (!isPlainText(tool.description, CUSTOM_TOOL_DESCRIPTION_MAX_LENGTH)) {
     add(
       'tool-description-invalid',
-      `The tool description must be 1 to ${CUSTOM_TOOL_DESCRIPTION_MAX_LENGTH} characters with no control characters.`,
+      `The tool description must be 1 to ${CUSTOM_TOOL_DESCRIPTION_MAX_LENGTH} characters with no control or invisible characters.`,
     );
   }
 

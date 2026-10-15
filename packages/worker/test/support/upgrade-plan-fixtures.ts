@@ -54,8 +54,8 @@ export function seedProviders(fake: Fake, providers: ProviderSeed[] = PROVIDERS)
   }
 }
 
-/** The repository row and the upgrade task 01 runs for. The fake applies no column default, so every
- *  column a reader selects is named here. */
+/** The repository row and the upgrade task 01 runs for. The fake defaults only id and createdAt, so
+ *  every other column a reader selects is named here. */
 export function seedRepository(
   fake: Fake,
   args: { source: string; rtkEnabled: boolean; renderContext?: unknown },

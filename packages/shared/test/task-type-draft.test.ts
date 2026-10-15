@@ -266,14 +266,19 @@ describe('pickTaskTypeDraft', () => {
     expect(key in picked.draft).toBe(false);
   });
 
-  it.each(['description', 'paramFormSchema', 'tools', 'agentPool', 'integrations', 'surprise'])(
-    'drops the prompt-step key %s and names its path',
-    (key) => {
-      const picked = pickTaskTypeDraft(withStep({ [key]: 'value' }));
-      expect(picked.dropped).toEqual([`promptSteps.review.${key}`]);
-      expect(picked.draft).toEqual(draftOf());
-    },
-  );
+  it.each([
+    'description',
+    'paramFormSchema',
+    'tools',
+    'agentPool',
+    'invalidTools',
+    'integrations',
+    'surprise',
+  ])('drops the prompt-step key %s and names its path', (key) => {
+    const picked = pickTaskTypeDraft(withStep({ [key]: 'value' }));
+    expect(picked.dropped).toEqual([`promptSteps.review.${key}`]);
+    expect(picked.draft).toEqual(draftOf());
+  });
 
   it('lists every dropped path in the order it meets them, with the entry it belongs to', () => {
     const picked = pickTaskTypeDraft({

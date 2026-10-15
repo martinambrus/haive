@@ -9,7 +9,7 @@ import {
 import {
   composableStepEntrySchema,
   derivePromptStepComposable,
-  promptStepEntrySchema,
+  parsePromptStepEntry,
   validateComposition,
   type CompositionIssue,
   type ComposableStepEntry,
@@ -119,18 +119,18 @@ export function withTaskCustomSteps(
   const merged = new Map(flags);
   for (const [stepId, raw] of entries) {
     const index = task.runListSnapshot?.indexOf(stepId) ?? -1;
-    const entry = promptStepEntrySchema.safeParse(raw);
-    if (index < 0 || !entry.success) continue;
+    const entry = parsePromptStepEntry(raw);
+    if (index < 0 || entry === null) continue;
     merged.set(stepId, {
       stepId,
-      title: entry.data.title,
+      title: entry.title,
       workflowType: 'custom',
       allowSkip: false,
       dispatchesStepCli: true,
       providerSensitive: false,
       cliRoles: null,
       stepIndex: index,
-      composable: derivePromptStepComposable(entry.data, task.type, task.repositoryId !== null),
+      composable: derivePromptStepComposable(entry, task.type, task.repositoryId !== null),
     });
   }
   return merged;

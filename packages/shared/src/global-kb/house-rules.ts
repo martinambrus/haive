@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { FACET_FILTER_DIMENSIONS } from '../rag/search.js';
 import { HOUSE_RULE_MODES } from '../step-engine/types.js';
 import { collapseToLine } from '../utils/collapse-line.js';
+import { HIDDEN_CHARACTER } from '../utils/hidden-characters.js';
 import {
   renderHouseRuleEntry,
   type EnforceSpec,
@@ -113,9 +114,6 @@ export function enforcementState(
     : { state: 'enforced', mode: 'files', globs: spec.globs };
 }
 
-// TAB and LF stay allowed; the rest is every character a model reads and a person does not see.
-const HIDDEN_CHARACTER =
-  /[\u{0}-\u{8}\u{B}-\u{1F}\u{7F}-\u{9F}\p{Default_Ignorable_Code_Point}\p{Cf}\p{Zl}\p{Zp}]/u;
 const LONE_SURROGATE = /\p{Cs}/u;
 // Prompt blocks skip themselves when their marker appears anywhere, so a quoted marker switches one off.
 const PROMPT_DELIMITER = /<\/?haive[_:-]|\[\[HAIVE_|<!--\s*\/?haive:|={4,}/i;
