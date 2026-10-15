@@ -106,8 +106,9 @@ export async function runModuleTeardown(
     );
   }
   if (deps.jobsStarted(moduleId)) {
+    // 15 s is MODULE_JOBS_RECONCILE_MS in index.ts.
     throw new ModuleTeardownRefusedError(
-      `Module ${moduleId} had its jobs started by this worker; restart the worker (a deactivated module's jobs do not start at boot) and try again`,
+      `Module ${moduleId}'s jobs are still running on this worker and stop within about 15 seconds of the deactivation; try again shortly`,
     );
   }
 

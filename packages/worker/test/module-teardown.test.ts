@@ -264,7 +264,7 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
       () => setModule('alpha', { deactivatedAt: OFF }),
       ['alpha'],
       ['alpha'],
-      /alpha.*jobs.*restart the worker/,
+      /alpha.*jobs.*still running on this worker.*about 15 seconds.*try again shortly/,
     ],
   ])(
     'refuses, by name, a module that %s, and never calls the hook',
