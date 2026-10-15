@@ -2,6 +2,7 @@ import { isBranchName } from '../git-args.js';
 import { ForgeError, type OpenPrInput } from './types.js';
 
 const PR_NUMBER = /^[1-9][0-9]{0,9}$/;
+const BRANCH_MAX_LENGTH = 255;
 const TITLE_MAX_LENGTH = 256;
 const BODY_MAX_LENGTH = 65_536;
 
@@ -60,7 +61,13 @@ export function validateForgeOpArgs(
       const fields = stringArgs(args, ['head', 'base', 'title', 'body']);
       if (typeof fields === 'string') return refuse(fields);
       if (!isBranchName(fields.head)) return refuse('head must be a valid branch name');
+      if (fields.head.length > BRANCH_MAX_LENGTH) {
+        return refuse(`head must be at most ${BRANCH_MAX_LENGTH} characters`);
+      }
       if (!isBranchName(fields.base)) return refuse('base must be a valid branch name');
+      if (fields.base.length > BRANCH_MAX_LENGTH) {
+        return refuse(`base must be at most ${BRANCH_MAX_LENGTH} characters`);
+      }
       if (fields.title.length < 1 || fields.title.length > TITLE_MAX_LENGTH) {
         return refuse(`title must be 1 to ${TITLE_MAX_LENGTH} characters`);
       }

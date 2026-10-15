@@ -117,6 +117,23 @@ describe('validateForgeOpArgs: open_pull_request', () => {
     }
   });
 
+  it.each(['head', 'base'] as const)('accepts a %s of 255 characters', (key) => {
+    expect(validateForgeOpArgs('open_pull_request', { ...valid, [key]: 'x'.repeat(255) }).ok).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    ['head', 256],
+    ['base', 256],
+    ['head', 1_000],
+    ['base', 1_000],
+  ] as const)('refuses a %s of %i characters, naming the limit', (key, length) => {
+    const error = refused('open_pull_request', { ...valid, [key]: 'x'.repeat(length) });
+    expect(error).toContain(key);
+    expect(error).toContain('255');
+  });
+
   it('refuses a title that is empty or longer than 256 characters', () => {
     expect(refused('open_pull_request', { ...valid, title: '' })).toContain('title');
     expect(refused('open_pull_request', { ...valid, title: 'x'.repeat(257) })).toContain('title');
