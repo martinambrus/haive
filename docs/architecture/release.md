@@ -34,9 +34,14 @@ database. `HAIVE_VERSION` has no default so the command fails rather than silent
 
 `haive upgrade` (the updater) sets `MAINTENANCE_STATE` to `draining`, waits until no task is live,
 then sets `maintenance` and takes the snapshot. Every api route that starts work refuses with 503
-while the state is `draining` or `maintenance` (`assertNewWorkAllowed`), and it reads the state past
-ConfigService's 30 s cache: the updater writes it from another process and counts live tasks at
-once, so a cached `normal` would admit work on an idle install after the drain began. The gate that
+while the state is `draining` or `maintenance`. Its authority is `admitNewWork`: a read of the state
+past ConfigService's 30 s cache inside the transaction that records the work, under a shared
+database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KEY`); most routes
+also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). The
+updater's switch to
+`draining`, like an administrator's maintenance write, takes the same fence exclusively: it waits
+for every admission in flight, so the live-task count it reads next includes each task admitted
+before it, and every admission after it reads `draining`. The gate that
 locks non-admins out during `maintenance` keeps its cached read, so that lockout can lag by up to
 30 s. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
 failed task while new work is refused (see [Worker restarts](worker-restarts.md)).
