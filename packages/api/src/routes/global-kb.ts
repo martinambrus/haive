@@ -411,7 +411,10 @@ async function putConfig(c: Context<AppEnv>) {
     );
   }
   const write = async () => {
-    // Before the mode, so no reader finds the external store without its string.
+    // Leaving for the built-in store, the mode goes first so no reader pairs external with a string
+    // it is not switching to; otherwise the string goes first so external never lacks one.
+    const modeFirst = isAdmin && d.mode === 'internal' && saved.mode !== 'internal';
+    if (modeFirst) await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode!);
     if (isAdmin && d.connectionString !== undefined && d.connectionString.trim().length > 0) {
       await secretsService.set(
         SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
@@ -429,7 +432,7 @@ async function putConfig(c: Context<AppEnv>) {
       await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
     if (d.digestEnabled !== undefined)
       await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
-    if (isAdmin && d.mode !== undefined)
+    if (isAdmin && d.mode !== undefined && !modeFirst)
       await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
     if (isAdmin && d.namespace !== undefined)
       await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);

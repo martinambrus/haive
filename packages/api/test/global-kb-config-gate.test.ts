@@ -493,6 +493,14 @@ describe('PUT /global-kb/config storing the connection string before the setting
     expect(h.setSecret).toHaveBeenCalledTimes(1);
   });
 
+  it('writes the mode that leaves for the built-in store before it stores a string sent with it', async () => {
+    h.settings = { ...SAVED, mode: 'external', connectionString: STORED_STRING };
+    const res = await put({ mode: 'internal', connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual([MODE, 'set-secret', 'audit']);
+  });
+
   it('stores them ahead of every setting of a full page save too', async () => {
     const res = await put({ ...PAGE, mode: 'external', connectionString: NEW_STRING });
 
