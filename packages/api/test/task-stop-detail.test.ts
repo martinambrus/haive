@@ -199,6 +199,17 @@ describe('GET /tasks/:id on a task an administrator stopped', () => {
       },
     );
 
+    it('names the stop that failed the task when a later stop of the failed task changed nothing', async () => {
+      setup({}, [
+        failedAtEvent(FAILED_AT.toISOString(), AFTER_FAILURE),
+        stopEvent(
+          { by: 'admin-1', byAdmin: true, reason: 'maintenance', failedAt: null },
+          new Date('2026-10-15T09:00:05.000Z'),
+        ),
+      ]);
+      expect(await stopOf()).toEqual({ reason: 'module_deactivated', moduleId: 'alpha' });
+    });
+
     it('has no stop when a retry failed in between, though the event was recorded after that failure', async () => {
       setup({ errorMessage: 'It broke', completedAt: AFTER_FAILURE }, [
         failedAtEvent(FAILED_AT.toISOString(), new Date('2026-10-15T09:00:02.000Z')),
