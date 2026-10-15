@@ -12,11 +12,11 @@ with the task owner's own account, without the agent ever holding that account's
   **`integrations` task token** names that run, and **`integration_calls`** logs every attempt.
 
 What is live and what is not: providers, connections, sign-in, the write switch, the forge code,
-resolution and the choice routes are merged. Nothing yet declares a step requirement, writes a stamp,
-mints an `integrations` token, writes `integration_calls` or calls `recordTaskGrants` — the broker
-(`/integration-mcp`) and the worker's dispatch wiring are the next steps. So today no task grant exists
-in production and the resolver's grant tier is always empty. The task page has no Integrations section
-yet either.
+resolution, the choice routes and the broker (`/integration-mcp`, see The broker) are merged. Nothing
+yet declares a step requirement, writes a stamp, mints an `integrations` token or calls
+`recordTaskGrants` — the worker's dispatch wiring is the next step — so no agent can reach the broker
+yet, today no task grant exists in production and the resolver's grant tier is always empty. The task
+page has no Integrations section yet either.
 
 ## Providers and categories
 
@@ -189,11 +189,11 @@ that provider and never set per task or per step. `PUT /integrations/providers/:
 audits `integration.write_switch`. It is in Postgres, with no ConfigService cache, so a flip is
 visible to the next read. `integrationTools` lists a binding's read operations always and its write
 operations only when the binding asked for write access and the caller's `writeAllowed` says yes —
-the broker, not wired yet, is to answer it from the owner's switch and, for a shared connection, the
-admin's too; anything that is not `read` counts as write. Tool names are computed from what
+the broker answers it from the task owner's switch and, for a shared connection, the admin's too;
+anything that is not `read` counts as write. Tool names are computed from what
 the bindings declare before the switch filters them, so a flip never renames a listed tool.
 `integration_connections.write_enabled` is the admin's switch for a shared connection (a write through
-one needs both); it is read nowhere yet.
+one needs both); the broker is its only reader.
 
 ## Choosing an account
 
@@ -330,9 +330,9 @@ the public host. That gap is still open.
   `{aud, taskId, taskStepId?, cliInvocationId?, exp}`, 24 h by default; the MAC key is derived per
   audience, so a token verifies under its own audience only. Audiences: `rag`, `ddev`, `custom-mcp`,
   `integrations`. An `integrations` token is meant to carry the step and the invocation too, tying
-  each call to the run whose bindings it may use; `verifyTaskToken` treats both as optional, so
-  requiring them is the broker's job. The broker must not live under `/integrations`, whose
-  `requireAuth` would answer a sandbox token 401.
+  each call to the run whose bindings it may use; `verifyTaskToken` treats both as optional, so the
+  broker requires them (`claimsFromBearer`, `api/src/lib/task-call-auth.ts`). The broker must not live
+  under `/integrations`, whose `requireAuth` would answer a sandbox token 401.
 - **`integration_calls`**: the provider id (`varchar(256)`, not null, no foreign key), the connection,
   task, step and invocation (each `SET NULL` on delete, so rows outlive a deleted task), tool, access,
   surface (`mcp` or `rest`), outcome (`ok`, `refused`, `error`, `running`), reason, duration, time.
@@ -347,6 +347,43 @@ the public host. That gap is still open.
   share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`). Every
   declared name is checked against `TOOL_NAME_PATTERN` and for uniqueness even while the write switch
   is off, and a bad name throws, naming the requirement and the operation, instead of being skipped.
+
+## The broker
+
+`POST /integration-mcp/tools/list` and `POST /integration-mcp/call` (`api/src/routes/integration-mcp.ts`)
+take an `integrations` token naming a step and an invocation, read that invocation and its task, and
+answer 401 `invocation-not-live` unless the invocation is the token's, of the token's step, not ended
+and not superseded. Both sit behind the shared 64 KiB sandbox body limit, which answers 413 before the
+token is read.
+
+- **tools/list** builds the tools from the invocation's stamp alone, never from grants or the current
+  resolution, with `writeAllowed` read now from the owner's switch and a shared connection's own. A
+  name clash answers 409 `tools-unlistable`. It writes no rows and logs the tool names.
+- **call** matches the tool name against the stamp with every write tool included, so a write the
+  switch has turned off is refused as `write-switched-off` with a row rather than as unknown; a name
+  the stamp never declared answers 403 `undeclared-tool` and writes nothing. Each later refusal is a
+  row with its reason: `provider-unavailable` (no spec or disabled), `connection-unavailable` (gone,
+  not `connected`, another provider, another user's, or its credential cannot be read),
+  `write-switched-off`, `invalid-arguments` (400), `no-remote` (409), `connection-not-for-repository`
+  (the credential's host is not the task's remote, or it has none), `unsafe-api-base` (`apiBaseFits`,
+  so older credentials saved before the rule are refused here rather than sent as is).
+- **Budget**: every row, refused or not, is a claim written under `pg_advisory_xact_lock` on
+  `integration-budget:<invocationId>`, at most `INTEGRATION_CALL_BUDGET` (50) per invocation; past it
+  the answer is 429 `budget-spent` and no row. A refused row whose connection is gone carries a NULL
+  `connection_id` (the foreign key).
+- **Deadline**: the row is claimed `running`, then one `AbortSignal.timeout(INTEGRATION_CALL_DEADLINE_MS)`
+  (30 s) covers the whole operation, the open-PR lookup included (`ForgeContext.signal`), on top of each
+  request's own timeout. Expiry finishes the row `error`/`timeout` and answers 504; a typed forge error
+  answers 502 with `vendor-auth`, `vendor-not-found`, `vendor-conflict`, `vendor-rate-limited` or
+  `vendor-error`; anything else is logged and answers 500 `internal-error`.
+- **The token stays in the api.** Error text is cut to 400 characters with the access token replaced
+  by `[redacted]`, also in the `Basic base64(username:token)` form Bitbucket Cloud sends, since a vendor
+  may echo its Authorization header. The gated harness (`api/test/integration-mcp-db.test.ts`) scans
+  every response, row and log line for both.
+- **Bounded vendor answers**: a success body is read up to `FORGE_RESPONSE_MAX_BYTES` (8 MiB; an
+  open-PR lookup on Gitea or Bitbucket Server lists a whole page of pull requests with their bodies),
+  an error body up to 4 KiB, and the stream is cancelled past either. This is in the shared
+  `BaseForgeProvider`, so the worker's forge calls are bounded too.
 
 ## Migrations
 
@@ -383,8 +420,11 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
     credential created or edited since the rule (9295cd3b3); older rows are not revalidated, and the
     worker sends their stored base as is.
 11. GitLab authenticates with `Authorization: Bearer`.
-12. A forge request has its own deadline; a stalled error body keeps its HTTP status.
+12. A forge request has its own deadline and takes the caller's; a stalled error body keeps its HTTP
+    status.
 13. Only scope-user, owner-matched connections resolve or are accepted; an install default names a
     provider, never an account.
 14. Credential drift after linking fails loudly with `CredentialProviderMismatchError`.
 15. `integration_calls` never stores arguments or results.
+16. The broker lists and runs only what the invocation's stamp declares and re-reads the write switches
+    on every call; it never reads grants, and no token or its Basic form reaches a response, row or log.
