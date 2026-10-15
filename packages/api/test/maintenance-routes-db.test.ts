@@ -227,7 +227,13 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       const res = await act(idle.id, 'stop');
 
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true, killed: 0, cancelled: 0, stopped: 0 });
+      expect(await res.json()).toEqual({
+        ok: true,
+        killed: 0,
+        cancelled: 0,
+        stopped: 0,
+        failedAt: null,
+      });
       expect(await events(idle.id, 'task.stopped')).toEqual([]);
       expect(await audits(idle.id, 'task.admin_stop')).toEqual([]);
       const after = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, idle.id) });
