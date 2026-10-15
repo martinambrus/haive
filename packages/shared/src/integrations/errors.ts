@@ -19,6 +19,26 @@ export class ConnectionNotFoundError extends Error {
   }
 }
 
+export class CredentialProviderMismatchError extends Error {
+  constructor(
+    readonly connectionId: string,
+    readonly connectionProvider: string,
+    readonly credentialProvider: string | null,
+  ) {
+    super(
+      `integration connection ${connectionId} is for ${connectionProvider}, but its Git credential now names ${credentialProvider ?? 'no known forge'}`,
+    );
+    this.name = 'CredentialProviderMismatchError';
+  }
+}
+
+export class IntegrationToolNameError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IntegrationToolNameError';
+  }
+}
+
 /** The provider answered with an OAuth `error` code. `code` is that JSON field: a known protocol
  *  code as it came, anything else redacted and bounded. */
 export class OauthVendorError extends Error {

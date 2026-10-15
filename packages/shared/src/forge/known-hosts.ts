@@ -1,5 +1,6 @@
 import { forgeProviderSchema, type ForgeProviderName } from '../schemas/repos.js';
-import { isForgeProviderName } from './registry.js';
+import { isForgeProviderName, resolveForgeProvider } from './registry.js';
+import { ForgeError } from './types.js';
 
 /** Public hosts whose forge is unambiguous; a self-hosted host's name cannot reveal its forge. */
 const KNOWN_HOST_PROVIDERS = new Map<string, ForgeProviderName>([
@@ -23,18 +24,82 @@ export function credentialForgeProvider(
   return explicit.success ? explicit.data : inferForgeProviderFromHost(host);
 }
 
-/** Host portion of a git remote (https, ssh:// or scp-style), provider-independent —
+/** Only an http(s) port is the forge's own; an ssh or git remote's port belongs to that transport. */
+function hostOf(url: URL): string {
+  const host = url.protocol === 'https:' || url.protocol === 'http:' ? url.host : url.hostname;
+  return host.toLowerCase();
+}
+
+/** Lower-case host portion of a git remote (https, ssh:// or scp-style), provider-independent —
  *  used to infer the forge for a well-known public host before the provider is known. */
 export function hostFromRemote(remoteUrl: string): string {
   const trimmed = remoteUrl.trim();
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
     try {
-      return new URL(trimmed).host;
+      return hostOf(new URL(trimmed));
     } catch {
       return '';
     }
   }
-  return trimmed.match(/^(?:[^@]+@)?([^:/]+):/)?.[1] ?? '';
+  return (trimmed.match(/^(?:[^@]+@)?([^:/]+):/)?.[1] ?? '').toLowerCase();
+}
+
+/** Parse a git remote URL (https, ssh:// or scp-style git@host:owner/repo) into
+ *  { host, owner, repo }, the host in lower case. owner is everything between the host and the
+ *  final path segment, so a GitLab subgroup path (group/subgroup/project) resolves to
+ *  owner=group/subgroup, repo=project. Bitbucket Server clone URLs put the repo under
+ *  /scm/{projectKey}/{slug}.git — the /scm prefix is stripped so owner=projectKey. */
+export function parseRemote(
+  remoteUrl: string,
+  provider: ForgeProviderName,
+): { host: string; owner: string; repo: string } {
+  const trimmed = remoteUrl.trim();
+  let host: string;
+  let rawPath: string;
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    let u: URL;
+    try {
+      u = new URL(trimmed);
+    } catch {
+      throw new ForgeError(`Cannot parse remote URL: ${remoteUrl}`);
+    }
+    host = hostOf(u);
+    rawPath = u.pathname;
+  } else {
+    // scp-like: [user@]host:owner/repo(.git)
+    const m = trimmed.match(/^(?:[^@]+@)?([^:/]+):(.+)$/);
+    if (!m || !m[1] || !m[2]) throw new ForgeError(`Cannot parse remote URL: ${remoteUrl}`);
+    host = m[1].toLowerCase();
+    rawPath = `/${m[2]}`;
+  }
+
+  let segments = rawPath
+    .replace(/^\/+/, '')
+    .replace(/\.git$/i, '')
+    .split('/')
+    .filter(Boolean);
+
+  if (provider === 'bitbucket_server' && segments[0] === 'scm') {
+    segments = segments.slice(1);
+  }
+
+  const repo = segments[segments.length - 1];
+  const ownerSegments = segments.slice(0, -1);
+  if (!repo || ownerSegments.length === 0) {
+    throw new ForgeError(`Remote URL has no owner/repo path: ${remoteUrl}`);
+  }
+  const owner = ownerSegments.join('/');
+  return { host, owner, repo };
+}
+
+/** The host a credential's default API base sits on. An ssh or git remote carries no forge port,
+ *  so a credential on the remote's host with a port names its API's; otherwise the remote's host. */
+export function credentialApiHost(credentialHost: string, remoteUrl: string): string {
+  const remoteHost = hostFromRemote(remoteUrl);
+  if (/^https?:\/\//i.test(remoteUrl.trim())) return remoteHost;
+  const host = credentialHost.trim().toLowerCase();
+  return host.replace(/:\d+$/, '') === remoteHost ? host : remoteHost;
 }
 
 /** Whether a stored credential can open a PR for this repo. The repo's forge is fixed by
@@ -52,5 +117,40 @@ export function credentialUsableForPr(
   const repoForge = inferForgeProviderFromHost(originHost);
   const credForge = credentialForgeProvider(c.provider, c.host);
   if (repoForge) return credForge === repoForge;
-  return c.host === originHost && isForgeProviderName(c.provider);
+  // An ssh or git remote names no forge port, so a credential's :port (its API's) is not compared.
+  const credHost = /^https?:\/\//i.test(originUrl.trim()) ? c.host : c.host.replace(/:\d+$/, '');
+  return credHost.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);
 }
+
+type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };
+
+/** The host of the forge's default API base, which for github.com and bitbucket.org is not the web host. */
+function forgeApiHost(provider: string | null | undefined, host: string): string | null {
+  const forge = credentialForgeProvider(provider, host);
+  if (!forge) return null;
+  try {
+    return new URL(resolveForgeProvider(forge).defaultApiBase(host)).host;
+  } catch {
+    return null;
+  }
+}
+
+/** A blank API base falls back to the provider's own; a set one must be https on the credential's or the forge's host.
+ *  Endpoint paths are appended to the stored text, so a `?` or `#` in it would swallow them. */
+export const apiBaseFits = (b: ApiBaseTarget) => {
+  const base = b.apiBaseUrl?.trim();
+  if (!base) return true;
+  try {
+    const url = new URL(base);
+    const host = b.host.trim().toLowerCase();
+    return (
+      url.protocol === 'https:' &&
+      url.username === '' &&
+      url.password === '' &&
+      !/[?#]/.test(base) &&
+      (url.host === host || url.host === forgeApiHost(b.provider, host))
+    );
+  } catch {
+    return false;
+  }
+};

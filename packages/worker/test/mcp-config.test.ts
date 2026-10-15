@@ -87,6 +87,42 @@ describe('buildDefaultMcpServers', () => {
     ).toBeUndefined();
   });
 
+  it('includes the haive-custom server when enabled with its path and url, and puts no token in it', () => {
+    const servers = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeCustomTools: true,
+      customServerPath: '/haive/haive-custom-mcp.mjs',
+      customApiUrl: 'http://api:3001',
+    });
+    expect(servers.at(-1)).toEqual({
+      name: 'haive-custom',
+      command: 'node',
+      args: ['/haive/haive-custom-mcp.mjs'],
+      env: { CUSTOM_MCP_API_URL: 'http://api:3001' },
+    });
+    expect(servers.map((s) => s.name)).toEqual(['filesystem', 'git', 'haive-custom']);
+  });
+
+  it('omits haive-custom when disabled or missing its path or url', () => {
+    const named = (opts: Parameters<typeof buildDefaultMcpServers>[0]) =>
+      buildDefaultMcpServers(opts).some((s) => s.name === 'haive-custom');
+    expect(named({ repoPath: '/r' })).toBe(false);
+    expect(named({ repoPath: '/r', includeCustomTools: false })).toBe(false);
+    expect(
+      named({
+        repoPath: '/r',
+        customServerPath: '/haive/haive-custom-mcp.mjs',
+        customApiUrl: 'http://api:3001',
+      }),
+    ).toBe(false);
+    expect(
+      named({ repoPath: '/r', includeCustomTools: true, customServerPath: '/haive/x.mjs' }),
+    ).toBe(false);
+    expect(
+      named({ repoPath: '/r', includeCustomTools: true, customApiUrl: 'http://api:3001' }),
+    ).toBe(false);
+  });
+
   it('caps chrome-devtools tool calls, and only that server', () => {
     const servers = buildDefaultMcpServers({
       repoPath: '/workspace/repo',
@@ -512,6 +548,39 @@ describe('buildMcpAddArgv', () => {
     ]);
   });
 
+  it('writes the haive-custom entry for codex and grok with its API address and nothing per invocation', () => {
+    const custom = buildDefaultMcpServers({
+      repoPath: '/r',
+      includeFilesystem: false,
+      includeGit: false,
+      includeCustomTools: true,
+      customServerPath: '/haive/haive-custom-mcp.mjs',
+      customApiUrl: 'http://api:3001',
+    })[0]!;
+    expect(buildMcpAddArgv('codex', custom)).toEqual([
+      'mcp',
+      'add',
+      '--env',
+      'CUSTOM_MCP_API_URL=http://api:3001',
+      'haive-custom',
+      '--',
+      'node',
+      '/haive/haive-custom-mcp.mjs',
+    ]);
+    expect(buildMcpAddArgv('grok', custom)).toEqual([
+      'mcp',
+      'add',
+      '-s',
+      'user',
+      '-e',
+      'CUSTOM_MCP_API_URL=http://api:3001',
+      'haive-custom',
+      'node',
+      '--',
+      '/haive/haive-custom-mcp.mjs',
+    ]);
+  });
+
   // A server with no args must not emit a dangling `--`: grok reads the next token as the
   // command, so a trailing separator with nothing after it is a parse error rather than a no-op.
   it('omits the grok separator when the server takes no args', () => {
@@ -676,6 +745,9 @@ describe('HAIVE_MCP_SERVER_NAMES', () => {
       ddevControlServerPath: '/haive/haive-ddev-mcp.mjs',
       ddevApiUrl: 'http://api:3001',
       ddevToken: 'tok-ddev',
+      includeCustomTools: true,
+      customServerPath: '/haive/haive-custom-mcp.mjs',
+      customApiUrl: 'http://api:3001',
     });
     expect(everything.map((s) => s.name).sort()).toEqual([...HAIVE_MCP_SERVER_NAMES].sort());
   });

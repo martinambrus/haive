@@ -72,6 +72,9 @@ describe('resolveGlobalKbContext against a store that does not answer', () => {
       [CONFIG_KEYS.GLOBAL_KB_NAMESPACE]: 'default',
     };
     vi.spyOn(configService, 'get').mockImplementation(async (key: string) => values[key] ?? null);
+    vi.spyOn(configService, 'getFresh').mockImplementation(
+      async (key: string) => values[key] ?? null,
+    );
     vi.spyOn(secretsService, 'get').mockImplementation(async (key: string) =>
       key === SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING
         ? `postgres://${USER}:${PASSWORD}@127.0.0.1:${port}/kb`

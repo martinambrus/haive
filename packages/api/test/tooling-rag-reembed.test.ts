@@ -381,7 +381,7 @@ describe('retrying the embedding of a degraded repository', () => {
     expect(await res.json()).toMatchObject({ degradationKept: true });
   });
 
-  it('restores nothing and answers 409 when the lock is lost during the second probe', async () => {
+  it('restores the degradation when the lock is lost during the second probe, and answers 200 for the save that landed', async () => {
     const fake = setup(STORE, true, true);
     h.awaitingSeq = [false, true];
     let selects = 0;
@@ -391,9 +391,12 @@ describe('retrying the embedding of a degraded repository', () => {
 
     const res = await retry();
 
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(200);
     expect(selects).toBe(2);
-    expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt).toBeNull();
+    const [row] = fake.rows(schema.repositories);
+    expect(row!.ragEmbedDegradedAt).toBeInstanceOf(Date);
+    expect(row!.ragEmbedDegradedReason).toBe('Ollama is unreachable');
+    expect(await res.json()).toMatchObject({ ok: true, degradationKept: true });
   });
 
   it('keeps the degradation when the probe fails', async () => {
@@ -632,9 +635,12 @@ describe('saving or clearing the app-login credentials of a repository', () => {
 
     expect(res.status).toBe(200);
     expect(set.mock.calls).toEqual([
-      [USER, `app_auth:${REPO}:username`, USERNAME, 'App login username'],
-      [USER, `app_auth:${REPO}:password`, PASSWORD, 'App login password'],
+      [USER, `app_auth:${REPO}:username`, USERNAME, 'App login username', expect.anything()],
+      [USER, `app_auth:${REPO}:password`, PASSWORD, 'App login password', expect.anything()],
     ]);
+    const [first, second] = set.mock.calls;
+    expect(second![4]).toBe(first![4]);
+    expect(first![4]).not.toBe(fake.db);
     expect(remove).not.toHaveBeenCalled();
     expect(auditedMetadata(fake)).toStrictEqual({ username: 'set', password: 'set' });
     expect(auditLines()).toEqual([
@@ -659,13 +665,14 @@ describe('saving or clearing the app-login credentials of a repository', () => {
     const res = await patch({ appAuthPassword: '' });
 
     expect(res.status).toBe(200);
-    expect(remove.mock.calls).toEqual([[USER, `app_auth:${REPO}:password`]]);
+    expect(remove.mock.calls).toEqual([[USER, `app_auth:${REPO}:password`, expect.anything()]]);
+    expect(remove.mock.calls[0]![2]).not.toBe(fake.db);
     expect(set).not.toHaveBeenCalled();
     expect(auditedMetadata(fake)).toStrictEqual({ password: 'cleared' });
     expect(auditLines()).toEqual([expect.objectContaining({ password: 'cleared' })]);
   });
 
-  it('records the username it saved when the password write then fails', async () => {
+  it('records no event when the password write fails after the username write', async () => {
     const fake = setup(STORE);
     vi.spyOn(userSecretsService, 'set')
       .mockResolvedValueOnce(undefined as never)
@@ -674,7 +681,8 @@ describe('saving or clearing the app-login credentials of a repository', () => {
     const res = await patch({ appAuthUsername: USERNAME, appAuthPassword: PASSWORD });
 
     expect(res.status).toBe(500);
-    expect(auditedMetadata(fake)).toStrictEqual({ username: 'set' });
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(auditLines()).toEqual([]);
   });
 
   it.each([[{ rtkEnabled: false }], [{ appAuthUsername: null, appAuthPassword: 7 }]])(

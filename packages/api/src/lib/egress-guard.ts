@@ -129,7 +129,12 @@ export function dnsResolver(servers?: readonly string[]): NameResolverFactory {
           ...(v6.status === 'fulfilled' ? v6.value.map((address) => ({ address, family: 6 })) : []),
         ];
         if (addresses.length > 0) return addresses;
-        const failed = [v4, v6].find((result) => result.status === 'rejected');
+        const rejected = [v4, v6].filter((result) => result.status === 'rejected');
+        // A timeout wins over a quick no-data answer from the other family, so the code never races.
+        const failed =
+          rejected.find(
+            (result) => (result.reason as NodeJS.ErrnoException)?.code === dns.TIMEOUT,
+          ) ?? rejected[0];
         throw Object.assign(new Error(`no address for ${hostname}`, { cause: failed?.reason }), {
           code: 'ENOTFOUND',
         });
@@ -137,6 +142,12 @@ export function dnsResolver(servers?: readonly string[]): NameResolverFactory {
       cancel: () => cares.cancel(),
     };
   };
+}
+
+// dnsResolver hands a timed-out query on as the cause of its ENOTFOUND.
+function lookupTimedOut(err: unknown): boolean {
+  const { code, cause } = (err ?? {}) as NodeJS.ErrnoException;
+  return code === dns.TIMEOUT || (cause as NodeJS.ErrnoException | undefined)?.code === dns.TIMEOUT;
 }
 
 /** The lookup the socket connects with: it refuses the whole answer when any address in it is blocked. */
@@ -228,7 +239,9 @@ function guardedRequest(
       settle(
         err instanceof EgressGuardError
           ? err
-          : new EgressGuardError('request-failed', null, { cause: err }),
+          : new EgressGuardError(lookupTimedOut(err) ? 'request-timeout' : 'request-failed', null, {
+              cause: err,
+            }),
       );
     }
 

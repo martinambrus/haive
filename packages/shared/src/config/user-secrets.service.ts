@@ -1,5 +1,5 @@
-import { eq, and } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { eq, and, inArray } from 'drizzle-orm';
+import { schema, type Database, type DbTx } from '@haive/database';
 import {
   envelopeEncrypt,
   envelopeDecrypt,
@@ -46,11 +46,52 @@ export class UserSecretsService {
     }
   }
 
-  async set(userId: string, keyName: string, value: string, description?: string): Promise<void> {
+  /** One SELECT, so the values come from one snapshot; a name with no row maps to null. */
+  async getMany(
+    userId: string,
+    keyNames: readonly string[],
+    executor?: DbTx,
+  ): Promise<Map<string, string | null>> {
     this.ensureInitialized();
+    const db = executor ?? this.db!;
+    const rows = await db.query.userSecrets.findMany({
+      where: and(
+        eq(schema.userSecrets.userId, userId),
+        inArray(schema.userSecrets.keyName, [...keyNames]),
+      ),
+      columns: { keyName: true, encryptedValue: true, encryptedDek: true },
+    });
+    const values = new Map<string, string | null>(keyNames.map((name) => [name, null]));
+    for (const row of rows) {
+      try {
+        values.set(
+          row.keyName,
+          envelopeDecrypt(
+            { encryptedValue: row.encryptedValue, encryptedDek: row.encryptedDek },
+            this.masterKek!,
+          ),
+        );
+      } catch (err) {
+        logger.error({ userId, keyName: row.keyName, err }, 'Failed to decrypt user secret');
+        throw new Error('Failed to decrypt user secret');
+      }
+    }
+    return values;
+  }
+
+  async set(
+    userId: string,
+    keyName: string,
+    value: string,
+    description?: string,
+    executor?: DbTx,
+  ): Promise<void> {
+    this.ensureInitialized();
+    const db = executor ?? this.db!;
     const envelope: EnvelopeEncrypted = envelopeEncrypt(value, this.masterKek!);
     const fingerprint = computeKeyFingerprint(value);
-    await this.db!.insert(schema.userSecrets)
+    await db
+      .insert(schema.userSecrets)
       .values({
         userId,
         keyName,
@@ -72,11 +113,12 @@ export class UserSecretsService {
       });
   }
 
-  async delete(userId: string, keyName: string): Promise<void> {
+  async delete(userId: string, keyName: string, executor?: DbTx): Promise<void> {
     this.ensureInitialized();
-    await this.db!.delete(schema.userSecrets).where(
-      and(eq(schema.userSecrets.userId, userId), eq(schema.userSecrets.keyName, keyName)),
-    );
+    const db = executor ?? this.db!;
+    await db
+      .delete(schema.userSecrets)
+      .where(and(eq(schema.userSecrets.userId, userId), eq(schema.userSecrets.keyName, keyName)));
   }
 
   async listForUser(userId: string): Promise<{ keyName: string; fingerprint: string | null }[]> {

@@ -1,8 +1,9 @@
-import { join, posix } from 'node:path';
-import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { posix } from 'node:path';
+import { lstatNoFollow, type EntryInfo } from '@haive/shared/fs-safe';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import { WORKER_REPO_STORAGE_ROOT } from '../../repo/worktree-git-boundary.js';
+import { splitRepoSubpath } from '../../repo/worktree-paths.js';
 
 /**
  * Read-only empty-file mask over a linked worktree's `.git` gitfile inside the
@@ -47,6 +48,16 @@ export interface GitDataBoundary {
 
 const NOTHING: GitDataBoundary = { mounts: [], masks: [] };
 
+/** The no-follow lstat of `name` below a repository mount, walked from the repository root. */
+export async function lookupInRepoMount(
+  subpath: string,
+  name: string,
+): Promise<{ anchor: string; rel: string; entry: EntryInfo | null }> {
+  const { anchor, rel: mountRel } = splitRepoSubpath(WORKER_REPO_STORAGE_ROOT, subpath);
+  const rel = [mountRel, name].filter((part) => part !== '').join('/');
+  return { anchor, rel, entry: await lstatNoFollow(anchor, rel) };
+}
+
 /**
  * The same boundary for an invocation mounted at the repository ROOT, where `.git` is a real
  * directory: mount it back over itself READ-ONLY.
@@ -82,9 +93,7 @@ export async function repoGitDataBoundary(
   // A read-only local-path repository is bound `:ro` whole, and a repo-less task's scratch
   // workspace has no git; `hasRepo` is what tells the second from a repository root.
   if (!opts.hasRepo || !repoMount?.subpath) return NOTHING;
-  // The subpath of a non-worktree invocation IS `<userId>/<repositoryId>`, the anchor every
-  // fs-safe read of a repository uses.
-  const entry = await lstatNoFollow(join(WORKER_REPO_STORAGE_ROOT, repoMount.subpath), '.git');
+  const { entry } = await lookupInRepoMount(repoMount.subpath, '.git');
   if (entry === null) return NOTHING;
   if (entry.kind !== 'directory') return { mounts: [], masks: worktreeGitfileMask(true) };
   return {

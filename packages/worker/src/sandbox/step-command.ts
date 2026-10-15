@@ -6,13 +6,14 @@ import { TaskCancelledError, type StepContext } from '../step-engine/step-defini
 import { resolveInvocationRepoMount, resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
 import { resolveSecretMasks } from '../queues/cli-exec/secret-mask.js';
 import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
+import { haiveDataBoundary } from '../queues/cli-exec/haive-data-boundary.js';
 import {
   AgentLeaseAbortedError,
   AgentLeaseTimeoutError,
   acquireAgentLease,
   type AgentLease,
 } from '../queues/cli-exec/agent-lease.js';
-import { agentPoolCap } from '../queues/cli-exec/handlers.js';
+import { agentPoolCap } from '../queues/cli-exec/agent-pool-cap.js';
 import { resolveAppReach } from '../queues/cli-exec/app-reach.js';
 import type { DockerVolumeMount } from './docker-runner.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
@@ -72,7 +73,10 @@ export async function runStepCommandInSandbox(
   const sandboxImage = await resolveSandboxImageTag(ctx.db, ctx.taskId, provider);
   const { repoMount, hasWorktree, hasRepo } = await resolveInvocationRepoMount(ctx.db, ctx.taskId);
   const gitData = await repoGitDataBoundary(repoMount, { hasWorktree, hasRepo });
-  const mounts: DockerVolumeMount[] = [...gitData.mounts];
+  const mounts: DockerVolumeMount[] = [
+    ...gitData.mounts,
+    ...(await haiveDataBoundary(repoMount, { hasRepo })),
+  ];
   if (repoMount) mounts.push(repoMount);
   const maskFiles = [
     ...(await resolveSecretMasks(ctx.db, ctx.taskId, repoMount)),

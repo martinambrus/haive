@@ -100,6 +100,12 @@ export interface BuildDefaultMcpServersOptions {
   ddevApiUrl?: string;
   /** Task-scoped bearer token the ddev proxy presents to the API. */
   ddevToken?: string;
+  /** Enable haive-custom (needs the path and url below); its entry holds no token, so it never varies. */
+  includeCustomTools?: boolean;
+  /** Container path of the bind-mounted haive-custom MCP server script. */
+  customServerPath?: string;
+  /** Base URL of the Haive API the custom-tools proxy calls (e.g. http://api:3001). */
+  customApiUrl?: string;
   /** Container path of the bind-mounted chrome-devtools body-diversion proxy. When set,
    *  the server is launched THROUGH it (`node <proxy> npx <cdm args>`) so network bodies
    *  are written to disk instead of into the model's context; see chrome-mcp-proxy.ts.
@@ -350,6 +356,15 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
         DDEV_API_URL: opts.ddevApiUrl,
         DDEV_TASK_TOKEN: opts.ddevToken,
       },
+    });
+  }
+
+  if (opts.includeCustomTools && opts.customServerPath && opts.customApiUrl) {
+    servers.push({
+      name: 'haive-custom',
+      command: 'node',
+      args: [opts.customServerPath],
+      env: { CUSTOM_MCP_API_URL: opts.customApiUrl },
     });
   }
 

@@ -8,12 +8,20 @@ export const CORE_STEP_ID_PATTERN = /^[0-9a-z_-]+$/;
 const MODULE_STEP_ID_PATTERN = /^module\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9_-]*)$/;
 const CUSTOM_STEP_ID_PATTERN = /^custom\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9-]*)$/;
 export const CORE_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+/** An MCP tool name Haive lists: integration operations and custom tools alike. */
+export const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,39}$/;
 export const PERSONA_ID_PATTERN_SOURCE = '[a-z0-9-]+';
 const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_PATTERN_SOURCE}$`);
 const TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 const MODULE_TASK_TYPE_SLUG_PATTERN = /^([a-z0-9][a-z0-9-]*)__[a-z0-9][a-z0-9_-]*$/;
+const MODULE_PACKAGE_PATTERN = /^(?:@haive\/module-|@haive-module\/)([a-z0-9][a-z0-9-]{0,22})$/;
 /** Slugs no task type may take: `new` is the admin create page and `catalog` the step catalog route. */
 export const RESERVED_TASK_TYPE_SLUGS: readonly string[] = ['new', 'catalog'];
+
+/** The module id a package name stands for: `@haive/module-<id>` (a folder) or `@haive-module/<id>` (the registry), else null. */
+export function modulePackageId(name: string): string | null {
+  return MODULE_PACKAGE_PATTERN.exec(name)?.[1] ?? null;
+}
 
 /** No module id and no admin slug holds an underscore and no built-in holds `__`, so the first `__` splits it. */
 export function moduleTaskTypeSlug(moduleId: string, local: string): string {
@@ -71,6 +79,11 @@ export function parseStepId(id: string): ParsedStepId | null {
   const custom = CUSTOM_STEP_ID_PATTERN.exec(id);
   if (custom) return { kind: 'custom', defSlug: custom[1]!, stepSlug: custom[2]! };
   return null;
+}
+
+export function isStepOfModule(stepId: string | null, moduleId: string): boolean {
+  const parsed = stepId === null ? null : parseStepId(stepId);
+  return parsed?.kind === 'module' && parsed.moduleId === moduleId;
 }
 
 function parseScopedId(id: string): ParsedScopedId | null {

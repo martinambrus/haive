@@ -1,3 +1,4 @@
+import type { IntegrationConnection, IntegrationProvider } from './integrations';
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
 import type { FormSchema } from '@haive/shared';
@@ -12,6 +13,7 @@ import type {
   PublicTaskType,
   TaskTypeAvailability,
   TaskTypeUpdate,
+  TypeDraftTurn,
 } from '@haive/shared/modularity';
 import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 
@@ -2505,6 +2507,34 @@ export function changedTaskType(err: ApiError): AdminTaskType | null {
 export const deleteTaskType = (slug: string) =>
   api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);
 
+/** The step every type_draft task cycles on; its revise loop re-targets itself, so submitting by step id is unambiguous. */
+export const TYPE_DRAFT_STEP_ID = '01-type-draft';
+
+export interface TypeDraftConversation {
+  status: TaskStatus;
+  awaitingMessage: boolean;
+  turns: TypeDraftTurn[];
+  latestDraft: Record<string, unknown> | null;
+}
+
+export const startTypeDraft = (body: {
+  message: string;
+  current?: Record<string, unknown>;
+  editingSlug?: string;
+}) => api.post<{ taskId: string }>('/admin/task-type-drafts', body);
+
+export const getTypeDraft = (taskId: string) =>
+  api.get<TypeDraftConversation>(`/admin/task-type-drafts/${taskId}`);
+
+/** A follow-up turn is the step form, as `submitPlanChatTurn` does it; `draft` is the editor state as JSON. */
+export const submitTypeDraftTurn = (taskId: string, message: string, draft?: string) =>
+  api.post(`/tasks/${taskId}/steps/${TYPE_DRAFT_STEP_ID}/submit`, {
+    values: draft === undefined ? { message } : { message, draft },
+  });
+
+/** A blank message is what the step reads as "no further turn". */
+export const endTypeDraft = (taskId: string) => submitTypeDraftTurn(taskId, '');
+
 export interface ModulesLoadedResponse {
   intent: ModuleIntentRow[];
   modules: ModuleDiff;
@@ -2528,6 +2558,7 @@ export interface ModuleOpenTask {
   title: string;
   status: string;
   ownerId: string;
+  currentStepId: string | null;
 }
 
 export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
@@ -2536,6 +2567,34 @@ export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
     ? (tasks as ModuleOpenTask[])
     : [];
 }
+
+/** True when the refusal's `tasks` list was cut at the api's cap. */
+export function moduleOpenCapped(err: ApiError): boolean {
+  const capped = (err.body as { capped?: unknown } | undefined)?.capped;
+  return err.code === 'module_tasks_open' && capped === true;
+}
+
+export interface ModuleUrgentResponse extends ModuleActiveResponse {
+  stopped: {
+    id: string;
+    title: string;
+    killed: number;
+    cancelled: number;
+    stopped: number;
+    failedAt?: string | null;
+    eventError?: string;
+    killError?: string;
+  }[];
+  left: { id: string; title: string; status: string; currentStepId: string | null }[];
+  failed: { id: string; title: string; error: string }[];
+  capped: boolean;
+}
+
+export const patchModuleUrgent = (moduleId: string) =>
+  api.patch<ModuleUrgentResponse>(`/modules/${encodeURIComponent(moduleId)}`, {
+    active: false,
+    mode: 'urgent',
+  });
 
 export interface ModuleTeardownDone {
   moduleId: string;
@@ -2561,3 +2620,62 @@ export const postModulePurge = (moduleId: string, confirm: string) =>
   api.post<ModulePurgeResponse>(`/modules/${encodeURIComponent(moduleId)}/purge`, { confirm });
 
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');
+
+export interface IntegrationPreference {
+  categoryId: string;
+  providerId: string;
+  connectionId: string | null;
+}
+
+export interface IntegrationDefault {
+  categoryId: string;
+  providerId: string;
+}
+
+export interface RepositoryIntegrationList {
+  restricted: boolean;
+  connectionIds: string[];
+}
+
+export const listIntegrationProviders = () =>
+  api.get<{ providers: IntegrationProvider[] }>('/integrations/providers');
+
+export const listIntegrationConnections = () =>
+  api.get<{ connections: IntegrationConnection[] }>('/integrations/connections');
+
+export const listIntegrationPreferences = () =>
+  api.get<{ preferences: IntegrationPreference[] }>('/integrations/preferences');
+
+export const saveIntegrationPreference = (
+  categoryId: string,
+  body: { providerId: string; connectionId: string | null },
+) =>
+  api.put<IntegrationPreference>(
+    `/integrations/preferences/${encodeURIComponent(categoryId)}`,
+    body,
+  );
+
+export const clearIntegrationPreference = (categoryId: string) =>
+  api.delete<{ ok: boolean }>(`/integrations/preferences/${encodeURIComponent(categoryId)}`);
+
+export const listIntegrationDefaults = () =>
+  api.get<{ defaults: IntegrationDefault[] }>('/integrations/defaults');
+
+export const listAdminIntegrationDefaults = () =>
+  api.get<{ defaults: IntegrationDefault[] }>('/admin/integrations/defaults');
+
+/** A null provider clears the category's default. */
+export const saveAdminIntegrationDefault = (categoryId: string, providerId: string | null) =>
+  api.put<{ categoryId: string; providerId: string | null }>(
+    `/admin/integrations/defaults/${encodeURIComponent(categoryId)}`,
+    { providerId },
+  );
+
+const repositoryIntegrationsPath = (repositoryId: string) =>
+  `/repositories/${encodeURIComponent(repositoryId)}/integrations`;
+
+export const getRepositoryIntegrations = (repositoryId: string) =>
+  api.get<RepositoryIntegrationList>(repositoryIntegrationsPath(repositoryId));
+
+export const saveRepositoryIntegrations = (repositoryId: string, body: RepositoryIntegrationList) =>
+  api.put<RepositoryIntegrationList>(repositoryIntegrationsPath(repositoryId), body);

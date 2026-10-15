@@ -296,10 +296,18 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     }
     existingPaths.push(...linkPaths);
     // A removal has nothing on disk to name; `git rm --cached` records it, and skips what git never
-    // tracked. Only while the path is still absent, since something may have been put there since.
+    // tracked. Only while the path is proven absent: one that cannot be read is not a removal.
     const removedPaths: string[] = [];
     for (const rel of appliedDeletedPaths(applied?.output)) {
-      if ((await lstatNoFollow(ctx.repoPath, rel)) === null) removedPaths.push(rel);
+      const gone = await lstatNoFollow(ctx.repoPath, rel, { strict: true }).then(
+        (entry) => entry === null,
+        (err: unknown) => {
+          const cause = err instanceof Error ? err.message : String(err);
+          warnings.push(`${rel} was not staged as removed: it could not be checked: ${cause}`);
+          return false;
+        },
+      );
+      if (gone) removedPaths.push(rel);
     }
     if (existingPaths.length === 0 && removedPaths.length === 0) {
       warnings.push('no upgrade files found to stage');

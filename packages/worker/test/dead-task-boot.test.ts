@@ -1,10 +1,17 @@
-import { and, asc, eq, inArray } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
-import type { WorkflowType } from '@haive/shared';
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDatabase, schema, type Database, type MergeResolveState } from '@haive/database';
+import { MERGE_LEFT_OPEN_EVENT, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import {
   handleResult,
   markTaskDead,
+  markTaskDeadFromJob,
+  processTaskJob,
   reconcileOrphanedSteps,
   resolveFixLoopGate,
 } from '../src/queues/task-queue.js';
@@ -14,8 +21,43 @@ import {
   type DeadTaskBootDeps,
   type DeadTaskView,
 } from '../src/queues/dead-task-boot.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
+import type { AdvanceStepResult } from '../src/step-engine/index.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
+import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { FIX_LOOP_TARGET_STEP_ID } from '../src/step-engine/steps/workflow/_fix-loop.js';
+
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  /** What the task queue was asked to enqueue. */
+  adds: [] as { name: string; data: unknown }[],
+  /** Each sandbox kill, with what `atKill` read from another connection at that moment. */
+  kills: [] as { taskId: string; seen: unknown }[],
+  atKill: undefined as ((taskId: string) => Promise<unknown>) | undefined,
+}));
+
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/redis.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/redis.js')>()),
+  getBullRedis: () => ({}),
+  getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
+}));
+vi.mock('bullmq', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('bullmq')>()),
+  Queue: class {
+    async add(name: string, data: unknown) {
+      h.adds.push({ name, data });
+    }
+  },
+}));
+vi.mock('../src/sandbox/sandbox-kill.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/sandbox-kill.js')>()),
+  killCliSandboxesForTask: async (taskId: string) => {
+    h.kills.push({ taskId, seen: await h.atKill?.(taskId) });
+    return 0;
+  },
+}));
 
 const url = process.env.DEAD_TASK_BOOT_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/dead_task_boot_test'))
@@ -23,18 +65,28 @@ if (url && !new URL(url).pathname.startsWith('/dead_task_boot_test'))
 
 const TYPE = 'j4a_dead_boot';
 const DYNAMIC = 'fnf136_dead_boot_dynamic';
+const LOOP_TYPE = 'fnf137_loop_back';
 const A = 'j4a-a';
 const B = 'j4a-b';
+const REVIEW = 'fnf137-review';
+const REVISER = 'fnf137-reviser';
 const GONE = 'module.j4a.gone';
 const LATER = 'module.j4a.later';
 const DEAD_AT = new Date('2026-10-14T08:00:00.000Z');
 const DEAD_REASON = `the run list names a step this install does not register: ${GONE}`;
 
-function stub(id: string, index: number): void {
+type StepRow = typeof schema.taskSteps.$inferSelect;
+
+function stub(
+  id: string,
+  index: number,
+  workflowType: string = TYPE,
+  over: Partial<StepDefinition> = {},
+): void {
   stepRegistry.register({
     metadata: {
       id,
-      workflowType: TYPE as WorkflowType,
+      workflowType: workflowType as WorkflowType,
       index,
       title: id,
       description: 'dead-task-boot test stub',
@@ -49,6 +101,7 @@ function stub(id: string, index: number): void {
     async apply() {
       return {};
     },
+    ...over,
   });
 }
 
@@ -183,9 +236,96 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     fixLoop: null,
     ...over,
   });
+  let repositoryId: string;
+  const job = (name: string, data: Record<string, unknown>) =>
+    ({
+      id: randomUUID(),
+      name,
+      data,
+      timestamp: Date.now(),
+      moveToDelayed: async () => undefined,
+    }) as unknown as Parameters<typeof processTaskJob>[0];
+  const mergeDirs: string[] = [];
+  /** A directory whose merge is left open, claimed by the task and recorded on a step row of it. */
+  const openMerge = async (taskId: string) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'haive-fnf137-merge-'));
+    mergeDirs.push(dir);
+    const git = (...args: string[]) =>
+      execFileSync(
+        'git',
+        ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'gc.auto=0', ...args],
+        { stdio: 'pipe' },
+      );
+    const commitFile = async (branch: string, text: string) => {
+      await writeFile(path.join(dir, 'f.txt'), text);
+      git('add', 'f.txt');
+      git('commit', '-q', '-m', branch);
+    };
+    git('init', '-q', '-b', 'main');
+    await commitFile('main', 'base\n');
+    git('checkout', '-q', '-b', 'feature');
+    await commitFile('feature', 'feature\n');
+    git('checkout', '-q', 'main');
+    await commitFile('main again', 'main\n');
+    expect(() => git('merge', 'feature')).toThrow();
+    const state: MergeResolveState = {
+      mode: 'same-branch',
+      phase: 'resolving',
+      baseBranch: 'main',
+      featureBranch: 'feature',
+      mergeDir: dir,
+      sandboxMergeDir: dir,
+      fixInvocationId: null,
+      conflictRetries: 0,
+      pendingQuestion: null,
+      pushAfterMerge: false,
+      merged: false,
+      skipReason: null,
+      pushed: false,
+    };
+    const step = await row(taskId, B, 'waiting_cli', { mergeResolveState: state });
+    const [claim] = await db
+      .insert(schema.mergeDirClaims)
+      .values({ mergeDir: dir, taskId, taskStepId: step.id })
+      .returning();
+    return { dir, step, claim: claim! };
+  };
+  const expectMergeLeftOpen = async (
+    taskId: string,
+    merge: Awaited<ReturnType<typeof openMerge>>,
+  ) => {
+    await expect(access(path.join(merge.dir, '.git', 'MERGE_HEAD'))).resolves.toBeUndefined();
+    expect(
+      await db
+        .select()
+        .from(schema.mergeDirClaims)
+        .where(eq(schema.mergeDirClaims.mergeDir, merge.dir)),
+    ).toEqual([merge.claim]);
+    expect((await stepRow(merge.step.id)).mergeResolveState).toEqual(merge.step.mergeResolveState);
+    expect(await events(taskId, MERGE_LEFT_OPEN_EVENT)).toHaveLength(0);
+    expect(h.adds.map((add) => add.name)).not.toContain(TASK_JOB_NAMES.ABORT_LEFT_MERGE);
+  };
+  const expectEndedAsDead = async (id: string) => {
+    const after = await runOf(id);
+    expect(after).toMatchObject({ exitCode: 137, errorMessage: 'cancelled: the task is dead' });
+    expect(after.endedAt).toBeInstanceOf(Date);
+    expect(after.supersededAt).toBeInstanceOf(Date);
+  };
 
   beforeAll(async () => {
     db = createDatabase(url as string);
+    h.db = db;
+    h.atKill = async (taskId) => ({
+      deadAt: (await task(taskId)).deadAt,
+      openRuns: (
+        await db
+          .select({ id: schema.cliInvocations.id })
+          .from(schema.cliInvocations)
+          .where(
+            and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.endedAt)),
+          )
+      ).length,
+    });
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     const [user] = await db
       .insert(schema.users)
@@ -199,6 +339,18 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       })
       .returning();
     userId = user!.id;
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'dead-task-boot',
+        source: 'local_path',
+        localPath: os.tmpdir(),
+        storagePath: os.tmpdir(),
+        status: 'ready',
+      })
+      .returning();
+    repositoryId = repo!.id;
     await db
       .insert(schema.taskTypeDefinitions)
       .values({ slug: TYPE, displayName: TYPE, runListStrategy: 'static', source: 'test' })
@@ -214,13 +366,23 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       .onConflictDoNothing();
     stub(A, 1);
     stub(B, 2);
+    stub(FIX_LOOP_TARGET_STEP_ID, 0, LOOP_TYPE);
+    stub(REVIEW, 1, LOOP_TYPE, {
+      fixLoop: { evaluate: () => ({ blocking: true, diagnosis: 'the review found a defect' }) },
+    });
+    stub(REVISER, 2, LOOP_TYPE, {
+      reviseLoop: { evaluate: () => ({ targetStepId: FIX_LOOP_TARGET_STEP_ID }) },
+    });
   });
 
   beforeEach(async () => {
+    h.adds.length = 0;
+    h.kills.length = 0;
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
 
   afterAll(async () => {
+    await Promise.all(mergeDirs.map((dir) => rm(dir, { recursive: true, force: true })));
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     await db
       .delete(schema.taskTypeDefinitions)
@@ -802,7 +964,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
   });
 
   describe('markTaskDead', () => {
-    it('supersedes the runs that have not started and leaves a started one alone', async () => {
+    it('supersedes every open run, started or not, and leaves the others alone', async () => {
       const id = await make();
       const step = await row(id, A, 'waiting_cli');
       const queued = await run(id, step.id);
@@ -813,7 +975,6 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       const otherTask = await make();
       const elsewhere = await run(otherTask, null);
       const before = {
-        started: await runOf(started.id),
         ended: await runOf(ended.id),
         superseded: await runOf(superseded.id),
         elsewhere: await runOf(elsewhere.id),
@@ -823,14 +984,10 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         true,
       );
 
-      for (const r of [queued, recap]) {
-        const after = await runOf(r.id);
-        expect(after.exitCode).toBe(137);
-        expect(after.endedAt).toBeInstanceOf(Date);
-        expect(after.supersededAt).toBeInstanceOf(Date);
-        expect(after.startedAt).toBeNull();
-      }
-      expect(await runOf(started.id)).toEqual(before.started);
+      for (const r of [queued, recap, started]) await expectEndedAsDead(r.id);
+      expect((await runOf(queued.id)).startedAt).toBeNull();
+      expect((await runOf(recap.id)).startedAt).toBeNull();
+      expect((await runOf(started.id)).startedAt).toEqual(DEAD_AT);
       expect(await runOf(ended.id)).toEqual(before.ended);
       expect(await runOf(superseded.id)).toEqual(before.superseded);
       expect(await runOf(elsewhere.id)).toEqual(before.elsewhere);
@@ -877,6 +1034,388 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
 
       expect((await runOf(free.id)).supersededAt).toBeInstanceOf(Date);
       expect((await runOf(held.id)).supersededAt).toBeNull();
+    });
+  });
+
+  describe('the sandboxes of a task marked dead', () => {
+    type Over = Partial<typeof schema.tasks.$inferInsert>;
+    const WAYS: Record<
+      string,
+      (over?: Over) => Promise<{ id: string; fire: () => Promise<unknown> }>
+    > = {
+      'a job that meets an unresolved step, on its step row': async (over) => {
+        const id = await make(over);
+        await row(id, A, 'waiting_cli');
+        const opts = { epoch: 3, unresolved: [GONE], stepId: A, round: 0 };
+        return { id, fire: () => markTaskDeadFromJob(db, id, 'gone', opts) };
+      },
+      'a job that meets an unresolved step, with no step row': async (over) => {
+        const id = await make(over);
+        const opts = { epoch: 3, unresolved: [GONE] };
+        return { id, fire: () => markTaskDeadFromJob(db, id, 'gone', opts) };
+      },
+      'a hand-off from a step outside the run list': async (over) => {
+        const id = await make({ runListSnapshot: [B], currentStepId: A, ...over });
+        const finished = await row(id, A, 'done');
+        const result = { status: 'done', row: finished, output: {} } as const;
+        return { id, fire: () => handleResult(db, ctxFor(id, [B]), A, result) };
+      },
+      'a START whose run list names a missing step': async (over) => {
+        const id = await make({
+          status: 'queued',
+          currentStepId: null,
+          runListSnapshot: [A, GONE],
+          repositoryId,
+          ...over,
+        });
+        const start = job(TASK_JOB_NAMES.START, { taskId: id, userId });
+        return { id, fire: () => processTaskJob(start) };
+      },
+    };
+
+    it.each(Object.entries(WAYS))(
+      'ends every open run, started or not: %s',
+      async (_name, build) => {
+        const { id, fire } = await build();
+        const queued = await run(id, null);
+        const started = await run(id, null, { startedAt: DEAD_AT });
+        const elsewhere = await run(await make(), null);
+        const before = await runOf(elsewhere.id);
+
+        await fire();
+
+        expect((await task(id)).deadAt).toBeInstanceOf(Date);
+        for (const r of [queued, started]) await expectEndedAsDead(r.id);
+        expect(await runOf(elsewhere.id)).toEqual(before);
+      },
+    );
+
+    it.each(Object.entries(WAYS))(
+      'kills the sandboxes once, after the mark committed, and leaves a merge open: %s',
+      async (_name, build) => {
+        const { id, fire } = await build();
+        await run(id, null);
+        await run(id, null, { startedAt: DEAD_AT });
+        const merge = await openMerge(id);
+
+        await fire();
+
+        expect(h.kills).toEqual([{ taskId: id, seen: { deadAt: expect.any(Date), openRuns: 0 } }]);
+        await expectMergeLeftOpen(id, merge);
+      },
+    );
+
+    it.each(
+      Object.entries(WAYS).flatMap(([name, build]) => [
+        [`a cancelled task: ${name}`, build, { status: 'cancelled' }] as const,
+        [
+          `a task already dead: ${name}`,
+          build,
+          { deadAt: DEAD_AT, deadReason: DEAD_REASON },
+        ] as const,
+      ]),
+    )('kills nothing for %s', async (_name, build, over) => {
+      const { id, fire } = await build(over);
+      const started = await run(id, null, { startedAt: DEAD_AT });
+      const before = await runOf(started.id);
+
+      await fire();
+
+      expect(h.kills).toEqual([]);
+      expect(await runOf(started.id)).toEqual(before);
+    });
+
+    it('kills nothing and ends nothing when the transaction the mark ran in rolls back', async () => {
+      const id = await make();
+      const step = await row(id, A, 'waiting_cli');
+      const queued = await run(id, step.id);
+      const started = await run(id, null, { startedAt: DEAD_AT });
+      const before = [await runOf(queued.id), await runOf(started.id)];
+
+      await expect(
+        db.transaction(async (tx) => {
+          await expect(markTaskDead(tx, id, 'gone', { epoch: 3 })).resolves.toBe(true);
+          throw new Error('rolled back');
+        }),
+      ).rejects.toThrow('rolled back');
+
+      expect(h.kills).toEqual([]);
+      expect([await runOf(queued.id), await runOf(started.id)]).toEqual(before);
+      expect((await task(id)).deadAt).toBeNull();
+    });
+
+    it('kills nothing when the job that marks it fails before the mark commits', async () => {
+      const id = await make();
+      const step = await row(id, A, 'waiting_cli');
+      const started = await run(id, step.id, { startedAt: DEAD_AT });
+      const before = await runOf(started.id);
+      // A BigInt cannot be written to the task.dead event's JSON, so the append in the mark throws.
+      const unserializable = [1n] as unknown as string[];
+
+      await expect(
+        markTaskDeadFromJob(db, id, 'gone', {
+          epoch: 3,
+          unresolved: unserializable,
+          stepId: A,
+          round: 0,
+        }),
+      ).rejects.toThrow();
+
+      expect(h.kills).toEqual([]);
+      expect(await runOf(started.id)).toEqual(before);
+      expect((await task(id)).deadAt).toBeNull();
+    });
+  });
+
+  describe.each([
+    {
+      event: 'step.done',
+      source: A,
+      snapshot: [A, B],
+      next: { stepId: B, round: 0 },
+      result: (finished: StepRow): AdvanceStepResult => ({
+        status: 'done',
+        row: finished,
+        output: {},
+      }),
+    },
+    {
+      event: 'step.loop_back',
+      source: REVIEW,
+      snapshot: [FIX_LOOP_TARGET_STEP_ID, REVIEW],
+      next: { stepId: FIX_LOOP_TARGET_STEP_ID, round: 1 },
+      result: (finished: StepRow): AdvanceStepResult => ({
+        status: 'loop_back',
+        row: finished,
+        diagnosis: 'the review found a defect',
+        sourceStepId: REVIEW,
+      }),
+    },
+    {
+      event: 'step.revise',
+      source: REVISER,
+      snapshot: [FIX_LOOP_TARGET_STEP_ID, REVISER],
+      next: { stepId: FIX_LOOP_TARGET_STEP_ID, round: 1 },
+      result: (finished: StepRow): AdvanceStepResult => ({
+        status: 'revise',
+        row: finished,
+        targetStepId: FIX_LOOP_TARGET_STEP_ID,
+        sourceStepId: REVISER,
+      }),
+    },
+  ])('a duplicate delivery of the advance of a finished step, $event', (kind) => {
+    const deliver = (taskId: string, epoch = 3) =>
+      processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId: kind.source, round: 0, epoch }),
+      );
+    const finished = async () => {
+      const id = await make({
+        repositoryId,
+        currentStepId: kind.source,
+        runListSnapshot: kind.snapshot,
+      });
+      const done = await row(id, kind.source, 'done', {
+        output: {},
+        endedAt: DEAD_AT,
+        updatedAt: DEAD_AT,
+      });
+      return { id, done };
+    };
+    const firstPass = (id: string, done: StepRow) =>
+      handleResult(
+        db,
+        ctxFor(id, kind.snapshot, { currentStepId: kind.source }),
+        kind.source,
+        kind.result(done),
+      );
+    const loseHandOff = async (id: string) => {
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: kind.source, currentRound: 0 })
+        .where(eq(schema.tasks.id, id));
+      h.adds.length = 0;
+    };
+    const recorded = async (id: string, done: StepRow) =>
+      (await events(id, kind.event)).filter((e) => e.taskStepId === done.id);
+    const expectHandedOn = async (id: string, epoch = 3) => {
+      expect((await task(id)).currentStepId).toBe(kind.next.stepId);
+      expect(h.adds).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId: id, userId, stepId: kind.next.stepId, round: kind.next.round, epoch },
+        },
+      ]);
+    };
+
+    it('records no second event when the first pass recorded one, and still hands the task on', async () => {
+      const { id, done } = await finished();
+      await firstPass(id, done);
+      await loseHandOff(id);
+
+      await deliver(id);
+
+      expect(await recorded(id, done)).toHaveLength(1);
+      await expectHandedOn(id);
+    });
+
+    it('stamps the event with the ended_at of the row it ends', async () => {
+      const { id, done } = await finished();
+
+      await firstPass(id, done);
+
+      expect((await recorded(id, done)).map((e) => e.payload)).toMatchObject([
+        { endedAt: DEAD_AT.toISOString() },
+      ]);
+    });
+
+    it('appends the event of a first pass whatever is recorded', async () => {
+      const { id, done } = await finished();
+      await firstPass(id, done);
+      await loseHandOff(id);
+
+      await firstPass(id, done);
+
+      expect(await recorded(id, done)).toHaveLength(2);
+    });
+
+    it('records the event a first pass died before recording, once however often it is re-driven', async () => {
+      const { id, done } = await finished();
+      const earlier = await row(id, 'j4a-earlier', 'done');
+      const otherRound = await row(id, kind.source, 'done', { round: 1 });
+      const stamped = { stepId: kind.source, endedAt: DEAD_AT.toISOString() };
+      await db.insert(schema.taskEvents).values([
+        { taskId: id, taskStepId: earlier.id, eventType: kind.event, payload: stamped },
+        { taskId: id, taskStepId: otherRound.id, eventType: kind.event, payload: stamped },
+        { taskId: id, taskStepId: done.id, eventType: 'step.waiting_cli', payload: stamped },
+      ]);
+
+      await deliver(id);
+      await loseHandOff(id);
+      await deliver(id);
+
+      expect(await recorded(id, done)).toHaveLength(1);
+      expect(await events(id, kind.event)).toHaveLength(3);
+      await expectHandedOn(id);
+    });
+
+    it('records the event of a rerun after a Retry whose pass died before recording', async () => {
+      const { id, done } = await finished();
+      await firstPass(id, done);
+      const rerunEndedAt = new Date(DEAD_AT.getTime() + 3_600_000);
+      await resetStepAndDownstream(db, id, kind.source, 0);
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'done', output: {}, endedAt: rerunEndedAt, updatedAt: rerunEndedAt })
+        .where(eq(schema.taskSteps.id, done.id));
+      await loseHandOff(id);
+
+      await deliver(id, 4);
+
+      const both = await recorded(id, done);
+      expect(both).toHaveLength(2);
+      expect(both.map((e) => e.payload)).toMatchObject([
+        { endedAt: DEAD_AT.toISOString() },
+        { endedAt: rerunEndedAt.toISOString() },
+      ]);
+      await expectHandedOn(id, 4);
+    });
+
+    it('records no second event when the epoch moved on after the first pass, as a revive or a stalled re-drive moves it', async () => {
+      const { id, done } = await finished();
+      await firstPass(id, done);
+      await loseHandOff(id);
+      await db.update(schema.tasks).set({ orchestrationEpoch: 4 }).where(eq(schema.tasks.id, id));
+
+      await deliver(id, 4);
+
+      expect(await recorded(id, done)).toHaveLength(1);
+      await expectHandedOn(id, 4);
+    });
+
+    it('records the event again when the earlier one carries no stamp', async () => {
+      const { id, done } = await finished();
+      await db.insert(schema.taskEvents).values({
+        taskId: id,
+        taskStepId: done.id,
+        eventType: kind.event,
+        payload: { stepId: kind.source },
+      });
+
+      await deliver(id);
+
+      expect(await recorded(id, done)).toHaveLength(2);
+      await expectHandedOn(id);
+    });
+
+    it('records the event again when the row carries no ended_at', async () => {
+      const { id, done } = await finished();
+      await db
+        .update(schema.taskSteps)
+        .set({ endedAt: null })
+        .where(eq(schema.taskSteps.id, done.id));
+      await db.insert(schema.taskEvents).values({
+        taskId: id,
+        taskStepId: done.id,
+        eventType: kind.event,
+        payload: { stepId: kind.source, endedAt: null },
+      });
+
+      await deliver(id);
+
+      expect(await recorded(id, done)).toHaveLength(2);
+      await expectHandedOn(id);
+    });
+  });
+
+  describe('a duplicate delivery of the advance of a skipped step', () => {
+    const deliver = (taskId: string) =>
+      processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId: A, round: 0, epoch: 3 }),
+      );
+    const loseHandOff = async (id: string) => {
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: A, currentRound: 0 })
+        .where(eq(schema.tasks.id, id));
+      h.adds.length = 0;
+    };
+    const skippedEvents = async (id: string, skippedId: string) =>
+      (await events(id, 'step.skipped')).filter((e) => e.taskStepId === skippedId);
+
+    it('records step.skipped once for a step the api skipped, however often its advance is delivered', async () => {
+      const id = await make({ repositoryId });
+      const skipped = await row(id, A, 'skipped', { endedAt: DEAD_AT, updatedAt: DEAD_AT });
+
+      await deliver(id);
+      await loseHandOff(id);
+      await deliver(id);
+
+      expect((await skippedEvents(id, skipped.id)).map((e) => e.payload)).toMatchObject([
+        { stepId: A, endedAt: DEAD_AT.toISOString() },
+      ]);
+      expect((await task(id)).currentStepId).toBe(B);
+      expect(h.adds).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId: id, userId, stepId: B, round: 0, epoch: 3 },
+        },
+      ]);
+    });
+
+    it('records it again for a skip that ended at another time', async () => {
+      const id = await make({ repositoryId });
+      const skipped = await row(id, A, 'skipped', { endedAt: DEAD_AT, updatedAt: DEAD_AT });
+      await deliver(id);
+      await loseHandOff(id);
+      const later = new Date(DEAD_AT.getTime() + 60_000);
+      await db
+        .update(schema.taskSteps)
+        .set({ endedAt: later, updatedAt: later })
+        .where(eq(schema.taskSteps.id, skipped.id));
+
+      await deliver(id);
+
+      expect(await skippedEvents(id, skipped.id)).toHaveLength(2);
     });
   });
 

@@ -319,8 +319,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 - [Sandbox](docs/architecture/sandbox.md): per-task containers, auth volumes, the base image,
   image builds per tag. `sandbox-core-image.ts`, `handleBuildSandboxImageJob`.
-- [Secret and git-data masking](docs/architecture/sandbox-masking.md): secrets and `.git` masked
-  in the sandbox, hardened host git. `secret-mask.ts`, `gitfile-mask.ts`.
+- [Secret and git-data masking](docs/architecture/sandbox-masking.md): secrets, `.git` and
+  `.haive-data` masked in the sandbox, hardened host git. `secret-mask.ts`, `gitfile-mask.ts`.
 - [Per-call agent isolation](docs/architecture/agent-isolation.md): empty agent directories and a
   pasted persona. `agentIsolationApplies`.
 - [DDEV runtime](docs/architecture/ddev-runtime.md): import checks, framework detection,
@@ -361,6 +361,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 ### Modularity
 
 - [Modules](docs/architecture/modules.md): the four states, `pnpm module add|remove`. `gen-modules.mjs`, `module.mjs`.
+- [Integrations](docs/architecture/integrations.md): accounts, write switch, resolution, forge calls. `resolver.ts`.
+- [Task types](docs/architecture/task-types.md): seeding, composer, prompt steps, custom tools, creator. `task_type_definitions`.
 
 ## Review guidelines
 

@@ -1,4 +1,12 @@
 import type { IntegrationOperation, IntegrationProviderSpec } from '../modularity/integrations.js';
+import {
+  BODY_MAX_LENGTH,
+  BRANCH_MAX_LENGTH,
+  BRANCH_MIN_LENGTH,
+  PR_NUMBER_PATTERN,
+  TITLE_MAX_LENGTH,
+  TITLE_MIN_LENGTH,
+} from './op-args.js';
 
 const OPEN_PULL_REQUEST: IntegrationOperation = {
   opId: 'open_pull_request',
@@ -7,10 +15,20 @@ const OPEN_PULL_REQUEST: IntegrationOperation = {
   inputSchema: {
     type: 'object',
     properties: {
-      head: { type: 'string', description: 'Source (feature) branch' },
-      base: { type: 'string', description: 'Target (base) branch' },
-      title: { type: 'string' },
-      body: { type: 'string' },
+      head: {
+        type: 'string',
+        minLength: BRANCH_MIN_LENGTH,
+        maxLength: BRANCH_MAX_LENGTH,
+        description: 'Source (feature) branch',
+      },
+      base: {
+        type: 'string',
+        minLength: BRANCH_MIN_LENGTH,
+        maxLength: BRANCH_MAX_LENGTH,
+        description: 'Target (base) branch',
+      },
+      title: { type: 'string', minLength: TITLE_MIN_LENGTH, maxLength: TITLE_MAX_LENGTH },
+      body: { type: 'string', maxLength: BODY_MAX_LENGTH },
     },
     required: ['head', 'base', 'title', 'body'],
     additionalProperties: false,
@@ -26,6 +44,7 @@ const GET_PULL_REQUEST_STATE: IntegrationOperation = {
     properties: {
       prNumber: {
         type: 'string',
+        pattern: PR_NUMBER_PATTERN,
         description: 'Forge PR identifier, as returned by open_pull_request',
       },
     },

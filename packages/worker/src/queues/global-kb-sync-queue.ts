@@ -30,6 +30,7 @@ import {
   extractMarkdownSections,
   slugifyHeading,
 } from '../step-engine/steps/onboarding/_rag-chunkers.js';
+import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
 const log = logger.child({ module: 'global-kb-sync' });
 
@@ -388,20 +389,23 @@ export async function purgeArchivedGlobalKbEntries(): Promise<void> {
 }
 
 /** Register the daily archived-entry retention sweep. Idempotent: upsertJobScheduler keys on
- *  PURGE_JOB_ID, so a restart UPDATES the one scheduler. The legacy-repeatable pre-sweep this
- *  used to carry is gone — bullmq 6 removed getRepeatableJobs/removeRepeatableByKey, and
- *  38e13a2 already cleared the backlog while those APIs still existed. */
+ *  PURGE_JOB_ID, so a restart UPDATES the one scheduler. scheduleGlobalKbReconcile prunes any
+ *  legacy repeatable left on this queue (job-scheduler-prune.ts). */
 export async function scheduleGlobalKbPurge(): Promise<void> {
   const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
-  await queue.upsertJobScheduler(
-    PURGE_JOB_ID,
-    { every: PURGE_INTERVAL_MS },
-    {
-      name: GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED,
-      data: {},
-      opts: { removeOnComplete: true, removeOnFail: 5 },
-    },
-  );
+  try {
+    await queue.upsertJobScheduler(
+      PURGE_JOB_ID,
+      { every: PURGE_INTERVAL_MS },
+      {
+        name: GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED,
+        data: {},
+        opts: { removeOnComplete: true, removeOnFail: 5 },
+      },
+    );
+  } finally {
+    await queue.close().catch(() => {});
+  }
 }
 
 const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
@@ -409,6 +413,8 @@ const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 // `add` still in flight, so only an entry pending for longer than this is treated as lost.
 const RECONCILE_GRACE_MS = 2 * 60 * 1000;
 const RECONCILE_JOB_ID = 'global-kb-reconcile-pending-repeatable';
+/** Both scheduler ids on this queue; the prune keeps both, so neither upsert's can go. */
+export const GLOBAL_KB_SCHEDULER_IDS = [PURGE_JOB_ID, RECONCILE_JOB_ID] as const;
 
 /** The pending entries no job will embed. Only a waiting or running UPSERT counts as queued: a
  *  `delete` job leaves an active entry alone, so it never embeds one. */
@@ -575,15 +581,20 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
  *  the code that registered it: rolling this back also takes `removeJobScheduler(RECONCILE_JOB_ID)`. */
 export async function scheduleGlobalKbReconcile(): Promise<void> {
   const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
-  await queue.upsertJobScheduler(
-    RECONCILE_JOB_ID,
-    { every: RECONCILE_INTERVAL_MS },
-    {
-      name: GLOBAL_KB_JOB_NAMES.RECONCILE_PENDING,
-      data: {},
-      opts: { removeOnComplete: true, removeOnFail: 5 },
-    },
-  );
+  try {
+    await queue.upsertJobScheduler(
+      RECONCILE_JOB_ID,
+      { every: RECONCILE_INTERVAL_MS },
+      {
+        name: GLOBAL_KB_JOB_NAMES.RECONCILE_PENDING,
+        data: {},
+        opts: { removeOnComplete: true, removeOnFail: 5 },
+      },
+    );
+    await pruneJobSchedulers(queue, GLOBAL_KB_SCHEDULER_IDS);
+  } finally {
+    await queue.close().catch(() => {});
+  }
 }
 
 export function startGlobalKbSyncWorker(): Worker {

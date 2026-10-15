@@ -78,6 +78,7 @@ import {
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
+import { loadTaskStop } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { getTaskQueue } from '../../queues.js';
 import {
@@ -109,6 +110,7 @@ import {
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 import { mergeRoutes } from './merges.js';
+import { taskIntegrationRoutes } from './integrations.js';
 
 export const taskRoutes = new Hono<AppEnv>();
 
@@ -1086,6 +1088,7 @@ taskRoutes.get('/:id', async (c) => {
   return c.json({
     task: taskWithActive,
     dead: await loadTaskDead(db, task),
+    stop: await loadTaskStop(db, task),
     steps,
     upcomingCliSteps,
     providerBreakdown,
@@ -1769,3 +1772,6 @@ taskRoutes.route('/', mergeRoutes);
 // Task file attachments (/:id/attachments...): user-uploaded reference files the
 // AI CLI agent reads from the task workspace.
 taskRoutes.route('/', attachmentRoutes);
+
+// Integration choices (/:id/integrations...): which connection serves each category for this task.
+taskRoutes.route('/', taskIntegrationRoutes);

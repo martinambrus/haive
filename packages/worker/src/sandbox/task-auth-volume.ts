@@ -171,10 +171,10 @@ const VOLUME_REMOVE_RETRIES = 5;
  * file layout.
  */
 const ensureVolumeRuns = new Map<string, Promise<void>>();
-const rtkSeedRuns = new Map<string, Promise<void>>();
-const cliMcpMergeRuns = new Map<string, Promise<void>>();
-const geminiMcpMergeRuns = new Map<string, Promise<void>>();
-const mcpFileWriteRuns = new Map<string, Promise<void>>();
+const rtkSeedRuns = new Map<string, Promise<boolean>>();
+const cliMcpMergeRuns = new Map<string, Promise<boolean>>();
+const geminiMcpMergeRuns = new Map<string, Promise<boolean>>();
+const mcpFileWriteRuns = new Map<string, Promise<boolean>>();
 
 /**
  * Tail of the in-flight chain for one preparation SCOPE, i.e. one file in one task's volume.
@@ -186,10 +186,10 @@ const mcpFileWriteRuns = new Map<string, Promise<void>>();
  * them is not the same as choosing the order — the later WRITE still wins, which is why the
  * step-summary pass is kept out of MCP resolution entirely rather than raced with.
  */
-const authPreparationLocks = new Map<string, Promise<void>>();
+const authPreparationLocks = new Map<string, Promise<unknown>>();
 
 /** Run `fn` after every preparation already queued for `scope`, whatever their outcomes. */
-function withScopeLock(scope: string, fn: () => Promise<void>): Promise<void> {
+function withScopeLock<T>(scope: string, fn: () => Promise<T>): Promise<T> {
   const prev = authPreparationLocks.get(scope) ?? Promise.resolve();
   const run = prev.catch(() => {}).then(fn);
   const tail = run.catch(() => {});
@@ -200,14 +200,14 @@ function withScopeLock(scope: string, fn: () => Promise<void>): Promise<void> {
   return run;
 }
 
-function coalesceAuthPreparation(
-  runs: Map<string, Promise<void>>,
+function coalesceAuthPreparation<T>(
+  runs: Map<string, Promise<T>>,
   key: string,
-  work: () => Promise<void>,
-): Promise<void> {
+  work: () => Promise<T>,
+): Promise<T> {
   const existing = runs.get(key);
   if (existing) return existing;
-  let tracked: Promise<void>;
+  let tracked: Promise<T>;
   tracked = work().finally(() => {
     if (runs.get(key) === tracked) runs.delete(key);
   });
@@ -240,21 +240,24 @@ const appliedAuthPreparations = new Map<string, string>();
 /** Coalesce like {@link coalesceAuthPreparation}, and additionally SKIP a preparation whose
  *  exact identity is the one already applied to that slot. `work` reports whether it
  *  actually applied: a best-effort helper that logged and returned changed nothing, so the
- *  slot is forgotten rather than recorded and the next caller tries again. */
+ *  slot is forgotten rather than recorded and the next caller tries again.
+ *  Resolves to whether the slot holds this identity, for every caller coalesced onto one run. */
 async function applyAuthPreparationOnce(
-  runs: Map<string, Promise<void>>,
+  runs: Map<string, Promise<boolean>>,
   scope: string,
   key: string,
   work: () => Promise<boolean>,
-): Promise<void> {
-  if (appliedAuthPreparations.get(scope) === key) return;
-  await coalesceAuthPreparation(runs, `${scope}|${key}`, () =>
+): Promise<boolean> {
+  if (appliedAuthPreparations.get(scope) === key) return true;
+  return coalesceAuthPreparation(runs, `${scope}|${key}`, () =>
     withScopeLock(scope, async () => {
       // Re-checked INSIDE the lock: an identical preparation may have been applied while
       // this one waited, which is the whole point of queueing behind it.
-      if (appliedAuthPreparations.get(scope) === key) return;
-      if (await work()) appliedAuthPreparations.set(scope, key);
+      if (appliedAuthPreparations.get(scope) === key) return true;
+      const applied = await work();
+      if (applied) appliedAuthPreparations.set(scope, key);
       else appliedAuthPreparations.delete(scope);
+      return applied;
     }),
   );
 }
@@ -655,14 +658,14 @@ export function resolveTaskAuthMounts(
  * insertions. Failures are logged but do not throw — rtk seeding is a
  * best-effort layer over the auth-restore path.
  */
-export function seedRtkInTaskVolume(
+export async function seedRtkInTaskVolume(
   taskId: string,
   providerName: CliProviderName,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<void> {
   // The seed writes the same thing every time for a given provider, so its identity is the
   // slot itself: applied once per task, not once per invocation.
-  return applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|${providerName}|rtk`, 'seeded', () =>
+  await applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|${providerName}|rtk`, 'seeded', () =>
     seedRtkInTaskVolumeUnlocked(taskId, providerName, runner),
   );
 }
@@ -772,7 +775,7 @@ export function mergeGeminiMcpIntoSettings(
   mcpServers: Record<string, unknown>,
   runner: DockerRunner = defaultDockerRunner,
   opts: { clear?: boolean } = {},
-): Promise<void> {
+): Promise<boolean> {
   const content = JSON.stringify(mcpServers);
   const clear = opts.clear === true;
   return applyAuthPreparationOnce(
@@ -901,7 +904,7 @@ export function mergeCliMcpIntoTaskVolume(
   image: string | null,
   servers: McpServerSpec[],
   runner: DockerRunner = defaultDockerRunner,
-): Promise<void> {
+): Promise<boolean> {
   // The surface is the same for siblings of one fan-out. Include it in the key
   // so only byte-equivalent preparations coalesce or skip; a genuinely different
   // surface still runs its own reconciliation.
@@ -958,6 +961,7 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
   const script = [
     'set -u',
     SANDBOX_USER_PREFIX_INIT,
+    'add_failed=0',
     repairOwnership(home),
     // `mcp remove <name>` is the same on grok and codex (measured against 1.0.3 / 0.147.0);
     // only `mcp add` differs, which is why that one goes through buildMcpAddArgv.
@@ -972,7 +976,7 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
     ...servers.map((server) => {
       const argv = buildMcpAddArgv(providerName, server).map(shellQuote).join(' ');
       const failure = shellQuote(`haive-mcp: add ${server.name} failed`);
-      return `${runCli} ${argv} >/dev/null || echo ${failure} >&2`;
+      return `${runCli} ${argv} >/dev/null || { echo ${failure} >&2; add_failed=1; }`;
     }),
     // Written by the root shell (the redirection is the shell's, not the CLI's) and owned
     // back by the trailing repair. Nothing but this module reads it, so the sub-second
@@ -981,6 +985,8 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
       ? `printf '%s\\n' ${servers.map((s) => shellQuote(s.name)).join(' ')} > ${quotedMarker}`
       : `: > ${quotedMarker}`,
     repairOwnership(home),
+    // Exits last, so the marker and the repair above still run when an add failed.
+    'exit "$add_failed"',
   ].join('\n');
 
   const result = await runner.run({
@@ -1017,7 +1023,7 @@ export function writeMcpFileIntoTaskVolume(
   containerPath: string,
   content: string,
   runner: DockerRunner = defaultDockerRunner,
-): Promise<void> {
+): Promise<boolean> {
   return applyAuthPreparationOnce(
     mcpFileWriteRuns,
     `${taskId}|${providerName}|mcp-file|${containerPath}`,

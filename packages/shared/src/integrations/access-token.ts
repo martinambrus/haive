@@ -1,11 +1,13 @@
 import { eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { secretsService } from '../config/secrets.service.js';
-import { envelopeDecrypt } from '../crypto/index.js';
+import { decrypt, decryptDek, envelopeDecrypt } from '../crypto/index.js';
+import { credentialForgeProvider } from '../forge/known-hosts.js';
 import { logger } from '../logger/index.js';
 import { decryptConnectionTokens, encryptConnectionTokens } from './connection-tokens.js';
 import {
   ConnectionNotFoundError,
+  CredentialProviderMismatchError,
   NeedsReauthError,
   OauthUnavailableError,
   OauthVendorError,
@@ -30,11 +32,51 @@ export interface AccessTokenOptions {
   now?: () => number;
 }
 
+/** username, apiBaseUrl and host are the Git credential's, so null for an OAuth connection. */
+export interface ConnectionCredential {
+  accessToken: string;
+  username: string | null;
+  provider: string;
+  apiBaseUrl: string | null;
+  host: string | null;
+}
+
 // Per database client, so one process shares a refresh among its callers while two pools do not.
 const refreshing = new WeakMap<Database, Map<string, Promise<string>>>();
 
 function isExpiring(row: ConnectionRow, nowMs: number): boolean {
   return row.expiresAt !== null && row.expiresAt.getTime() - REFRESH_MARGIN_MS <= nowMs;
+}
+
+async function loadConnectedRow(db: Database, connectionId: string): Promise<ConnectionRow> {
+  const [row] = await db
+    .select()
+    .from(schema.integrationConnections)
+    .where(eq(schema.integrationConnections.id, connectionId));
+  if (!row) throw new ConnectionNotFoundError(connectionId);
+  if (row.status !== 'connected') throw new NeedsReauthError(connectionId, row.status);
+  return row;
+}
+
+/** The linked Git credential; editable after linking, so refused once it names another forge. */
+async function loadLinkedCredential(db: Database, row: ConnectionRow, credentialId: string) {
+  const [credential] = await db
+    .select({
+      usernameEncrypted: schema.repoCredentials.usernameEncrypted,
+      secretEncrypted: schema.repoCredentials.secretEncrypted,
+      encryptedDek: schema.repoCredentials.encryptedDek,
+      apiBaseUrl: schema.repoCredentials.apiBaseUrl,
+      host: schema.repoCredentials.host,
+      provider: schema.repoCredentials.provider,
+    })
+    .from(schema.repoCredentials)
+    .where(eq(schema.repoCredentials.id, credentialId));
+  if (!credential) throw new ConnectionNotFoundError(row.id);
+  const forge = credentialForgeProvider(credential.provider, credential.host);
+  if (forge !== row.providerId) {
+    throw new CredentialProviderMismatchError(row.id, row.providerId, forge);
+  }
+  return credential;
 }
 
 /**
@@ -47,24 +89,15 @@ export async function getConnectionAccessToken(
   options: AccessTokenOptions,
 ): Promise<string> {
   const now = options.now ?? Date.now;
-  const [row] = await db
-    .select()
-    .from(schema.integrationConnections)
-    .where(eq(schema.integrationConnections.id, connectionId));
-  if (!row) throw new ConnectionNotFoundError(connectionId);
-  if (row.status !== 'connected') throw new NeedsReauthError(connectionId, row.status);
+  const row = await loadConnectedRow(db, connectionId);
 
   const kek = await secretsService.getMasterKek();
   if (row.repoCredentialId !== null) {
-    const [credential] = await db
-      .select({
-        encryptedValue: schema.repoCredentials.secretEncrypted,
-        encryptedDek: schema.repoCredentials.encryptedDek,
-      })
-      .from(schema.repoCredentials)
-      .where(eq(schema.repoCredentials.id, row.repoCredentialId));
-    if (!credential) throw new ConnectionNotFoundError(connectionId);
-    return envelopeDecrypt(credential, kek);
+    const credential = await loadLinkedCredential(db, row, row.repoCredentialId);
+    return envelopeDecrypt(
+      { encryptedValue: credential.secretEncrypted, encryptedDek: credential.encryptedDek },
+      kek,
+    );
   }
   if (!isExpiring(row, now())) return decryptConnectionTokens(row, kek).accessToken;
 
@@ -78,6 +111,29 @@ export async function getConnectionAccessToken(
     inFlight.set(connectionId, flight);
   }
   return flight;
+}
+
+/** getConnectionAccessToken plus the Git credential's username and API base, for a forge call. */
+export async function getConnectionCredential(
+  db: Database,
+  connectionId: string,
+  options: AccessTokenOptions,
+): Promise<ConnectionCredential> {
+  const row = await loadConnectedRow(db, connectionId);
+  if (row.repoCredentialId === null) {
+    const accessToken = await getConnectionAccessToken(db, connectionId, options);
+    return { accessToken, username: null, provider: row.providerId, apiBaseUrl: null, host: null };
+  }
+
+  const credential = await loadLinkedCredential(db, row, row.repoCredentialId);
+  const dek = decryptDek(credential.encryptedDek, await secretsService.getMasterKek());
+  return {
+    accessToken: decrypt(credential.secretEncrypted, dek),
+    username: decrypt(credential.usernameEncrypted, dek),
+    provider: row.providerId,
+    apiBaseUrl: credential.apiBaseUrl,
+    host: credential.host,
+  };
 }
 
 async function refreshLocked(

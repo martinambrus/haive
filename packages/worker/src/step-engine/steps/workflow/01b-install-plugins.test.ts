@@ -5,6 +5,8 @@ const hasWorkspaceEntry = vi.fn();
 const resolveDdevWorkspace = vi.fn();
 const loadConfiguredLspLanguages = vi.fn();
 const runInSandbox = vi.fn();
+const resolveInvocationRepoMount = vi.fn();
+const haiveDataBoundary = vi.fn();
 
 vi.mock('../../../sandbox/sandbox-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../sandbox/sandbox-runner.js')>()),
@@ -14,7 +16,7 @@ vi.mock('../../../queues/cli-exec-queue.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../queues/cli-exec-queue.js')>()),
   resolveAuthMounts: async () => [],
   resolveSandboxImageTag: async () => null,
-  resolveInvocationRepoMount: async () => ({ repoMount: null, hasWorktree: false, hasRepo: false }),
+  resolveInvocationRepoMount: (...args: unknown[]) => resolveInvocationRepoMount(...args),
 }));
 vi.mock('../../../queues/cli-exec/images.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../queues/cli-exec/images.js')>()),
@@ -27,6 +29,9 @@ vi.mock('../../../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
 vi.mock('../../../queues/cli-exec/gitfile-mask.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../queues/cli-exec/gitfile-mask.js')>()),
   repoGitDataBoundary: async () => ({ mounts: [], masks: [] }),
+}));
+vi.mock('../../../queues/cli-exec/haive-data-boundary.js', () => ({
+  haiveDataBoundary: (...args: unknown[]) => haiveDataBoundary(...args),
 }));
 
 vi.mock('../../workspace-probe.js', () => ({
@@ -68,6 +73,14 @@ function ctx(): Ctx {
 }
 
 beforeEach(() => {
+  resolveInvocationRepoMount.mockReset();
+  resolveInvocationRepoMount.mockResolvedValue({
+    repoMount: null,
+    hasWorktree: false,
+    hasRepo: false,
+  });
+  haiveDataBoundary.mockReset();
+  haiveDataBoundary.mockResolvedValue([]);
   hasWorkspaceEntry.mockReset();
   resolveDdevWorkspace.mockReset();
   loadConfiguredLspLanguages.mockReset();
@@ -203,6 +216,34 @@ describe('01b-install-plugins apply: what the step records', () => {
     expect(runInSandbox).toHaveBeenCalled();
     for (const call of runInSandbox.mock.calls) {
       expect(call[1]).toMatchObject({ taskId: ctx().taskId });
+    }
+  });
+
+  it('mounts the .haive-data boundary the agent sandboxes get, under the repository mount', async () => {
+    runInSandbox.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+    const repoMount = { source: 'haive_repos', target: '/haive/workdir', subpath: 'u/r/wt' };
+    const boundary = [
+      {
+        source: 'haive_repos',
+        target: '/haive/workdir/.haive-data',
+        subpath: 'u/r/wt/.haive-data',
+        readOnly: true,
+      },
+      {
+        source: 'haive_repos',
+        target: '/haive/workdir/.haive-data/learnings',
+        subpath: 'u/r/wt/.haive-data/learnings',
+      },
+    ];
+    resolveInvocationRepoMount.mockResolvedValue({ repoMount, hasWorktree: true, hasRepo: true });
+    haiveDataBoundary.mockResolvedValue(boundary);
+
+    await installPluginsStep.apply(ctx(), detectedWith(null));
+
+    expect(haiveDataBoundary).toHaveBeenCalledWith(repoMount, { hasRepo: true });
+    expect(runInSandbox).toHaveBeenCalled();
+    for (const call of runInSandbox.mock.calls) {
+      expect(call[1].extraMounts).toEqual([...boundary, repoMount]);
     }
   });
 

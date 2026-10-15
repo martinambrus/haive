@@ -28,14 +28,6 @@ export const GLOBAL_KB_DB_NAME = databaseName('kb_global');
 const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
 const DEFAULT_EMBED_DIMENSIONS = 2560;
 
-/** An unset embedding URL means the bundled daemon, for the same reason the model
- *  above has a default: "internal mode" is what a fresh install IS, and the key is
- *  only written once someone opens the settings page and saves. Blank is not the off
- *  switch — GLOBAL_KB_ENABLED is — so defaulting here makes an enabled KB do what
- *  being enabled already promises. Shared with every other Ollama consumer so the
- *  meaning of "unset" cannot be decided differently per screen (it was, and the same
- *  daemon read as working on one and broken on the other). */
-
 /** Default window before a superseded (archived) entry is hard-deleted by the
  *  retention sweep. 0 = keep archived entries forever. */
 const DEFAULT_ARCHIVE_RETENTION_DAYS = 30;
@@ -98,7 +90,8 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
   ] = await Promise.all([
     resolveGlobalKbEnabled(configService),
     configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, true),
-    configService.get(CONFIG_KEYS.GLOBAL_KB_MODE),
+    // Mode and connection string skip the 30 s caches: another process may switch or clear them.
+    configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_NAMESPACE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL),
     configService.get(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL),
@@ -108,11 +101,14 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
       DEFAULT_ARCHIVE_RETENTION_DAYS,
     ),
   ]);
-  const connectionString = await secretsService.get(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
+  const connectionString = await secretsService.getFresh(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
+  // Leaving external writes the mode before it removes or replaces the string, so external is read again.
+  const settledMode =
+    mode === 'external' ? await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE) : mode;
   return {
     enabled,
     digestEnabled,
-    mode: mode === 'external' ? 'external' : 'internal',
+    mode: settledMode === 'external' ? 'external' : 'internal',
     namespace: namespace || 'default',
     connectionString: connectionString || null,
     ollamaUrl: ollamaUrl || IN_STACK_OLLAMA_URL,

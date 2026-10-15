@@ -1,16 +1,18 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
 import {
+  moduleOpenCapped,
   moduleOpenTasks,
   postModulePurge,
   type ApiError,
   type ModuleOpenTask,
   type ModulePurgeResponse,
 } from '@/lib/api-client';
+import { useViewerId } from '@/lib/use-viewer-id';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { ModuleTaskTitle, ModuleTasksCapNote } from '@/components/module-tasks-open-dialog';
 import { Button, FormError, Input } from '@/components/ui';
 
 export const modulePurgeArmed = (typed: string, moduleId: string): boolean =>
@@ -29,12 +31,16 @@ export function ModulePurgeDialog({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [blockedBy, setBlockedBy] = useState<ModuleOpenTask[]>([]);
+  const [capped, setCapped] = useState(false);
+
+  const viewerId = useViewerId(target !== null);
 
   const id = target?.id ?? null;
   useEffect(() => {
     setTyped('');
     setError(null);
     setBlockedBy([]);
+    setCapped(false);
   }, [id]);
 
   const armed = id !== null && modulePurgeArmed(typed, id) && !running;
@@ -49,10 +55,12 @@ export function ModulePurgeDialog({
     setRunning(true);
     setError(null);
     setBlockedBy([]);
+    setCapped(false);
     try {
       onDone(await postModulePurge(id, typed));
     } catch (err) {
       setBlockedBy(moduleOpenTasks(err as ApiError));
+      setCapped(moduleOpenCapped(err as ApiError));
       setError((err as ApiError).message ?? 'Failed to purge the module');
     } finally {
       setRunning(false);
@@ -92,20 +100,13 @@ export function ModulePurgeDialog({
           <ul className="mt-3 flex max-h-48 flex-col gap-1 overflow-y-auto">
             {blockedBy.map((t) => (
               <li key={t.id} className="flex items-baseline justify-between gap-3 text-sm">
-                {/* New tab, so the typed confirmation survives while the task is dealt with. */}
-                <Link
-                  href={`/tasks/${t.id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="min-w-0 text-indigo-300 underline [overflow-wrap:anywhere]"
-                >
-                  {t.title} ↗
-                </Link>
+                <ModuleTaskTitle task={t} viewerId={viewerId} />
                 <span className="shrink-0 text-xs text-neutral-500">{t.status}</span>
               </li>
             ))}
           </ul>
         )}
+        {blockedBy.length > 0 && capped && <ModuleTasksCapNote />}
         <div className="mt-3">
           <FormError message={error} />
         </div>

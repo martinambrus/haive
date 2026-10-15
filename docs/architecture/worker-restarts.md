@@ -112,6 +112,14 @@ failure after it was sent, such as a Stop, keeps it out. `advanceStep`'s own `do
 is left as it is: the START path that reaches it has no moved-chain check, so a verdict re-driven
 there could bump a round.
 
+The re-drive records the step's end-of-step event (`step.done`, `step.skipped`, `step.loop_back` or
+`step.revise`) only when the pass it repeats did not. Each of those events carries the row's
+`ended_at` as `endedAt`, which names the pass, since a Retry clears it and the rerun sets a new one;
+on the re-drive path the event is appended only when no event of that type for that row carries the
+same stamp (`appendEventOnce`). A first pass always appends, and a missing stamp never matches.
+Before this, a job that died after the event and before the hand-off left two events for one end,
+and the statistics count them.
+
 **A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through
 apply, and a fan-out's agents each queue an advance as they finish, so two advances of one step can
 both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and round to one advance
@@ -154,7 +162,11 @@ supersede, and every few seconds after (`run-superseded.ts`); a run that reads s
 sandbox or loses the one it has. A Stop takes the Retry's steps in one transaction
 (`stopActiveCliInvocations`): runs, steps, a second sweep of runs, then the task, and the sandboxes
 are killed only once it commits. No reader sees a run cancelled beside a step still running, and a
-Stop that fails leaves every run as it was and kills nothing. The allowance auto-resume
+Stop that fails leaves every run as it was and kills nothing. When the Stop's own update fails the
+task it returns that update's `completedAt` as `failedAt`, and the `task.stopped` event an
+administrator's Stop writes carries it: the task page names a stop as the cause of a failure only
+when that stamp equals the task's `completedAt` (`loadTaskStop`), since the event is written after
+the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
 loses takes back every write before it. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
@@ -242,8 +254,8 @@ when a parked PR's current history has no classifiable evidence; its initial
 A task is **dead** when its data names a step this install no longer registers: a module was removed, or a step its
 run list names went away (`UnresolvedStepError`). Dead is neither failed nor completed. `markTaskDead`
 (`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends `task.dead`
-(`TASK_DEAD_EVENT`) naming the missing ids, supersedes the runs that have not started, and tears nothing down, so a
-revive finds the task as it was. The api refuses every advancing action on a dead task with 409 `task_dead`
+(`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and otherwise tears nothing down, so
+a revive finds the task as it was. The api refuses every advancing action on a dead task with 409 `task_dead`
 (`api/src/lib/task-dead.ts`); Cancel stays.
 
 **What marks it.** At boot, `reconcileDeadTasks` (`queues/dead-task-boot.ts`) runs after the orphaned jobs are handed
@@ -260,7 +272,9 @@ an advance for a running one, none for a form that is still parked.
 
 **Runs.** cli-exec ends a dead task's run instead of starting it (ended, superseded, exit 137): one dispatched after
 the mark, or requeued at run time, would otherwise still spend a CLI call. A run already started when the mark lands
-runs to its end; the next boot pass ends what is still open. A settled dead task's runtime runner can be preempted on
+is superseded with the rest, and once the mark has committed its caller removes the task's CLI sandboxes
+(`killCliSandboxesForTask`, the best-effort kill Stop uses), so the agent stops spending too. The kill touches no merge
+state: an open merge stays open, as after Stop. A settled dead task's runtime runner can be preempted on
 demand, like a paused one's, instead of waiting for the grace sweep. After a mark lands the pass resyncs the project
 state (`resyncAfterTaskEnd`), as every other end of a task does.
 

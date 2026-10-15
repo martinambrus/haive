@@ -235,6 +235,7 @@ jobs:
           worker test/dead-task-boot.test.ts DEAD_TASK_BOOT_TEST_URL dead_task_boot_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
+          api test/task-type-drafts-db.test.ts TASK_TYPE_DRAFTS_TEST_URL task_type_drafts_test pg
           api test/task-custom-steps-db.test.ts TASK_CUSTOM_STEPS_TEST_URL task_custom_steps_test pg
           api test/module-deactivation-db.test.ts MODULE_DEACTIVATION_API_TEST_URL module_deactivation_api_test pg
           api test/module-missing-db.test.ts MODULE_MISSING_API_TEST_URL module_missing_api_test pg
@@ -249,6 +250,9 @@ jobs:
           shared test/integrations-resolution-db.test.ts INTEGRATIONS_RESOLUTION_TEST_URL integrations_resolution_test pg
           database test/integration-connection-keys.test.ts INTEGRATION_KEYS_TEST_URL integration_keys_test pg
           api test/admin-integrations-db.test.ts ADMIN_INTEGRATIONS_TEST_URL admin_integrations_test pg
+          api test/integration-choice-routes-db.test.ts INTEGRATION_CHOICE_ROUTES_TEST_URL integration_choice_routes_test pg
+          api test/integration-mcp-db.test.ts INTEGRATION_MCP_TEST_URL integration_mcp_test pg
+          api test/tooling-app-auth-atomic-db.test.ts TOOLING_APP_AUTH_TEST_URL tooling_app_auth_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector

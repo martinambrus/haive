@@ -1183,6 +1183,16 @@ export const cliInvocations = pgTable(
     /** The prompt carries the output-truncation shrink notice, so a run cut off again is not retried
      *  a second time. Migration 0184. */
     truncationRetry: boolean('truncation_retry').notNull().default(false),
+    /** Mirrors `IntegrationBinding` in @haive/shared (circular import); NULL when not recorded. */
+    integrations: jsonb('integrations').$type<
+      Array<{
+        requirementId: string;
+        categoryId: string | null;
+        providerId: string;
+        connectionId: string;
+        access: 'read' | 'write';
+      }>
+    >(),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),

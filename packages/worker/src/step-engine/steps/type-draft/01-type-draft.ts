@@ -4,10 +4,10 @@ import type { FormSchema } from '@haive/shared';
 import {
   TYPE_DRAFT_MESSAGE_EVENT,
   TYPE_DRAFT_MESSAGE_MAX_CHARS,
-  composableStepEntrySchema,
   type TypeDraftAssistantTurn,
   type TypeDraftUserTurn,
 } from '@haive/shared/modularity';
+import { readStepCatalog } from '@haive/shared/modularity-server';
 import { stepRegistry, type StepRegistry } from '../../registry.js';
 import {
   RetryableParseError,
@@ -40,29 +40,20 @@ export async function loadDraftCatalog(
   db: Database,
   registry: StepRegistry = stepRegistry,
 ): Promise<DraftCatalogStep[]> {
-  const [rows, off] = await Promise.all([
-    db
-      .select({
-        stepId: schema.stepCatalog.stepId,
-        source: schema.stepCatalog.source,
-        entry: schema.stepCatalog.entry,
-      })
-      .from(schema.stepCatalog)
-      .where(eq(schema.stepCatalog.composable, true))
-      .orderBy(asc(schema.stepCatalog.stepId)),
+  const [catalog, off] = await Promise.all([
+    readStepCatalog(db, { ordered: true }),
     db
       .select({ moduleId: schema.modules.moduleId })
       .from(schema.modules)
       .where(isNotNull(schema.modules.deactivatedAt)),
   ]);
   const deactivated = new Set(off.map((m) => `module:${m.moduleId}`));
-  return rows.flatMap((row) => {
-    const parsed = composableStepEntrySchema.safeParse(row.entry);
-    if (!parsed.success || deactivated.has(row.source)) return [];
-    return [
-      { entry: parsed.data, description: registry.get(row.stepId)?.metadata.description ?? '' },
-    ];
-  });
+  return catalog.steps
+    .filter((step) => !deactivated.has(step.source))
+    .map((step) => ({
+      entry: step.entry,
+      description: registry.get(step.stepId)?.metadata.description ?? '',
+    }));
 }
 
 export function collectPersonas(): DraftPersona[] {
@@ -103,8 +94,16 @@ export const typeDraftStep: StepDefinition<TypeDraftDetect, TypeDraftApply> = {
   },
 
   async detect(ctx): Promise<TypeDraftDetect> {
-    const [steps, rows] = await Promise.all([
+    const [steps, slugs, [task], rows] = await Promise.all([
       loadDraftCatalog(ctx.db),
+      ctx.db
+        .select({ slug: schema.taskTypeDefinitions.slug })
+        .from(schema.taskTypeDefinitions)
+        .orderBy(asc(schema.taskTypeDefinitions.slug)),
+      ctx.db
+        .select({ metadata: schema.tasks.metadata })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, ctx.taskId)),
       ctx.db
         .select({ eventType: schema.taskEvents.eventType, payload: schema.taskEvents.payload })
         .from(schema.taskEvents)
@@ -119,7 +118,13 @@ export const typeDraftStep: StepDefinition<TypeDraftDetect, TypeDraftApply> = {
         )
         .orderBy(asc(schema.taskEvents.createdAt)),
     ]);
-    return { steps, personas: collectPersonas(), ...deriveConversation(rows) };
+    const editing = task?.metadata?.editingSlug;
+    return {
+      steps,
+      personas: collectPersonas(),
+      takenSlugs: slugs.map((row) => row.slug).filter((slug) => slug !== editing),
+      ...deriveConversation(rows),
+    };
   },
 
   llm: {
@@ -157,6 +162,7 @@ export const typeDraftStep: StepDefinition<TypeDraftDetect, TypeDraftApply> = {
           description:
             'Sent by the task type editor: the draft as it stands there, as JSON. Leave empty when typing here.',
           required: false,
+          hidden: true,
         },
       ],
     };

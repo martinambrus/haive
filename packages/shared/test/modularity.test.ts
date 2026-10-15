@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  MODULE_ID_MAX_LENGTH,
   CORE_INTEGRATION_CATEGORIES,
   PERSONA_ID_PATTERN_SOURCE,
   composableStepEntrySchema,
@@ -11,6 +12,8 @@ import {
   isModuleStepId,
   isPersonaId,
   isProviderId,
+  isStepOfModule,
+  modulePackageId,
   parseCategoryId,
   parseProviderId,
   parseStepId,
@@ -177,6 +180,19 @@ describe('step id grammar', () => {
   });
 });
 
+describe('isStepOfModule', () => {
+  it.each([
+    ['module.alpha.x', 'alpha', true],
+    ['module.alpha-two.x', 'alpha', false],
+    ['module.beta.x', 'alpha', false],
+    ['07-phase-2-implement', 'alpha', false],
+    ['custom.alpha.x', 'alpha', false],
+    [null, 'alpha', false],
+  ])('%s in module %s is %s', (stepId, moduleId, expected) => {
+    expect(isStepOfModule(stepId, moduleId)).toBe(expected);
+  });
+});
+
 describe('provider and category id grammar', () => {
   it.each([
     ['openai', { kind: 'core' }],
@@ -241,6 +257,58 @@ describe('persona id', () => {
     expect(isPersonaId('A')).toBe(false);
     expect(isPersonaId('a_b')).toBe(false);
     expect(isPersonaId('a b')).toBe(false);
+  });
+});
+
+describe('module package names', () => {
+  const NAMES: [string, string | null][] = [
+    ['@haive/module-statistics', 'statistics'],
+    ['@haive-module/deep-analysis', 'deep-analysis'],
+    ['@haive/module-a', 'a'],
+    ['@haive-module/9x', '9x'],
+    ['@haive/module-a--b', 'a--b'],
+    ['@haive/module-', null],
+    ['@haive-module/', null],
+    ['@haive/module--x', null],
+    ['@haive-module/-x', null],
+    ['@haive/module-Foo', null],
+    ['@haive-module/Foo', null],
+    ['@haive/module-foo_bar', null],
+    ['@haive-module/foo/bar', null],
+    [`@haive-module/${'a'.repeat(23)}`, 'a'.repeat(23)],
+    [`@haive/module-${'a'.repeat(24)}`, null],
+    [`@haive-module/${'a'.repeat(24)}`, null],
+    ['@haive/module-foo/web', null],
+    ['@haive/statistics', null],
+    ['@haive/shared', null],
+    ['@haive-modules/foo', null],
+    ['@haive-module/foo\n', null],
+    [' @haive-module/foo', null],
+    ['haive-module/foo', null],
+    ['@other/module-foo', null],
+    ['@other/foo', null],
+    ['module-foo', null],
+    ['', null],
+  ];
+
+  it.each(NAMES)('reads %j as the module id %j', (name, id) => {
+    expect(modulePackageId(name)).toBe(id);
+  });
+
+  it("accepts an id exactly as long as a manifest's, and no longer", () => {
+    expect(modulePackageId(`@haive-module/${'a'.repeat(MODULE_ID_MAX_LENGTH)}`)).not.toBeNull();
+    expect(modulePackageId(`@haive-module/${'a'.repeat(MODULE_ID_MAX_LENGTH + 1)}`)).toBeNull();
+  });
+
+  it('is the rule scripts/gen-modules.mjs applies, name for name', () => {
+    const script = readFileSync(
+      new URL('../../../scripts/gen-modules.mjs', import.meta.url),
+      'utf8',
+    );
+    const literal = /^const MODULE_PACKAGE = \/(.+)\/;$/m.exec(script)?.[1];
+    expect(literal).toBeDefined();
+    const copy = new RegExp(literal!);
+    for (const [name] of NAMES) expect(copy.exec(name)?.[1] ?? null).toBe(modulePackageId(name));
   });
 });
 

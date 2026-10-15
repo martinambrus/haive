@@ -2,12 +2,20 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { moduleDatabaseName } from '@haive/shared/module-db';
-import type { LoadedWorkerModule, WorkerModuleEntry } from '../src/modules/loader.js';
+import {
+  MODULE_JOBS_RECONCILE_MS,
+  moduleTeardownRunning,
+  startModuleJobs,
+  type LoadedWorkerModule,
+  type WorkerModuleEntry,
+} from '../src/modules/loader.js';
 import {
   ModuleTeardownRefusedError,
   processModuleControlJob,
   runModuleTeardown,
 } from '../src/queues/module-control-queue.js';
+
+vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 
 const url = process.env.MODULE_TEARDOWN_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/module_teardown_test'))
@@ -42,6 +50,7 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
     loaded: ids.map(loadedOf),
     entries: ids.map((id) => entryOf(id, hooks[id])),
     jobsStarted: (id: string) => jobsRunning.includes(id),
+    teardownRunning: moduleTeardownRunning,
   });
   const setModule = (moduleId: string, over: Partial<typeof schema.modules.$inferInsert> = {}) =>
     db.insert(schema.modules).values({
@@ -150,13 +159,15 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
 
   it('fails a hook that does not finish in time and records nothing', async () => {
     await setModule('alpha', { deactivatedAt: OFF });
-    const hook: Hook = () => new Promise<void>(() => {});
+    let endHook!: () => void;
+    const hook: Hook = () => new Promise<void>((resolve) => (endHook = resolve));
     const failure = await runModuleTeardown(
       { ...deps(['alpha'], { alpha: hook }), hookTimeoutMs: 50 },
       'alpha',
     ).catch((err: unknown) => err);
     expect((failure as Error).message).toBe("Module alpha's teardown did not finish within 0 s");
     expect((await row('alpha'))?.tornDownAt).toBeNull();
+    endHook();
   });
 
   it('turns a hook that throws a bare value into an error carrying that value', async () => {
@@ -198,6 +209,44 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
     expect((await row('alpha'))?.tornDownAt).toBeNull();
   });
 
+  it.each<[string, () => Promise<void>]>([
+    ['finishes', async () => {}],
+    [
+      'fails',
+      async () => {
+        throw new Error('drop failed');
+      },
+    ],
+  ])(
+    'keeps the jobs of a module activated again while its hook runs from starting until the hook %s',
+    async (_how, finish) => {
+      await setModule('alpha', { deactivatedAt: OFF });
+      const jobs = vi.fn(async () => async () => {});
+      const { reconcile, stopAll } = await startModuleJobs(
+        [loadedOf('alpha')],
+        [{ ...entryOf('alpha'), jobs }],
+        new Set(['alpha']),
+      );
+      let startedDuringHook = -1;
+      const hook: Hook = async () => {
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: null })
+          .where(eq(schema.modules.moduleId, 'alpha'));
+        await reconcile(new Set());
+        startedDuringHook = jobs.mock.calls.length;
+        await finish();
+      };
+
+      await runModuleTeardown(deps(['alpha'], { alpha: hook }), 'alpha').catch(() => undefined);
+      expect(startedDuringHook).toBe(0);
+
+      await reconcile(new Set());
+      expect(jobs).toHaveBeenCalledOnce();
+      await stopAll();
+    },
+  );
+
   it.each<[string, () => Promise<unknown>, string[], string[], RegExp]>([
     [
       'is not in this worker registry',
@@ -216,11 +265,13 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
       /alpha.*missing/,
     ],
     [
-      'had its jobs started by this worker',
+      'had its jobs or schema setup started by this worker',
       () => setModule('alpha', { deactivatedAt: OFF }),
       ['alpha'],
       ['alpha'],
-      /alpha.*jobs.*restart the worker/,
+      new RegExp(
+        `alpha.*jobs or schema setup.*still running on this worker.*try again once they have stopped.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds`,
+      ),
     ],
   ])(
     'refuses, by name, a module that %s, and never calls the hook',

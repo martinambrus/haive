@@ -1,7 +1,4 @@
-import { resolveAgentConcurrency } from '../sandbox/runtime-admission.js';
-
-/** Concurrency when config is unavailable (e.g. focused unit tests) or the governor is off. */
-const STATIC_PARALLEL_CAP = 3;
+import { STATIC_PARALLEL_AGENTS, currentAgentCap } from '../queues/cli-exec/agent-pool-cap.js';
 
 /**
  * The max parallel agents/CLI invocations (floored at 1; no upper limit — set per
@@ -13,8 +10,8 @@ const STATIC_PARALLEL_CAP = 3;
  */
 export async function resolveParallelCap(): Promise<number> {
   try {
-    return Math.max(1, Math.floor(await resolveAgentConcurrency(STATIC_PARALLEL_CAP)));
+    return await currentAgentCap();
   } catch {
-    return STATIC_PARALLEL_CAP;
+    return STATIC_PARALLEL_AGENTS;
   }
 }

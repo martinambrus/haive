@@ -150,8 +150,8 @@ Haive already integrates with git forges, in a hardcoded way:
   card. GitLab, Gitea and Bitbucket take a pasted token.
 - The sandbox already has the pattern that keeps credentials out of it: `haive-rag` and
   `ddev-control` (`sandbox/mcp-config.ts:247`, `buildDefaultMcpServers`) are dependency-free stdio
-  MCP servers that call the api with a task-scoped token (`signRagToken`,
-  `packages/shared/src/rag/token.ts:22`), and the api does the privileged work.
+  MCP servers that call the api with a task-scoped token (`signRagToken` when written; now
+  `signTaskToken` with an audience, `@haive/shared/task-token`), and the api does the privileged work.
 - Repository-supplied MCP servers (`mcp_settings.json`) reach the CLI only under the consent rules in
   `docs/architecture/mcp-consent.md`. Those are the repository's servers; nothing lets a user connect
   their own accounts.

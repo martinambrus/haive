@@ -86,6 +86,7 @@ import { resolveRepoMirrors } from './repo-mirrors.js';
 import { assertPastedPersonasStillAllowed, resolveSecretMasks } from './secret-mask.js';
 import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
 import { repoGitDataBoundary } from './gitfile-mask.js';
+import { haiveDataBoundary } from './haive-data-boundary.js';
 import { consumePreemptionMark } from './preempt-mark.js';
 import { SUPERSEDED_RUN_ERROR, watchSupersededRun } from './run-superseded.js';
 import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
@@ -419,6 +420,7 @@ export async function executeByKind(
   // repository ROOT gets its real `.git` directory mounted back read-only. Same boundary, and the
   // two shapes are mutually exclusive by construction — see repoGitDataBoundary.
   const gitData = await repoGitDataBoundary(repoMount, { hasWorktree, hasRepo });
+  const boundaryMounts = [...gitData.mounts, ...(await haiveDataBoundary(repoMount, { hasRepo }))];
   const maskFiles = [
     ...(await resolveSecretMasks(db, payload.taskId, repoMount)),
     ...gitData.masks,
@@ -442,7 +444,7 @@ export async function executeByKind(
       // prompt references — the worktree-only mount hides the repo-root .haive/ otherwise.
       const uploadsMount = await resolveTaskUploadsMount(db, payload.taskId, repoMount);
       if (uploadsMount) authMounts.push(uploadsMount);
-      authMounts.push(...gitData.mounts);
+      authMounts.push(...boundaryMounts);
       // A persona body pasted at DISPATCH is rechecked against the CURRENT masking policy before
       // anything starts: a deny rule or the switch can change while the job waits in the queue, and
       // a prompt cannot be unsent. Throws SecretMaskError, which handleCliExecJob already records on
@@ -501,6 +503,7 @@ export async function executeByKind(
               hasWorktree,
               hasRepo,
               networkPolicy,
+              payload,
             )
           : { files: [], extraArgs: [] };
       // Pre-warm the shared npm cache for the MCP servers that are fetched from npm.
@@ -591,7 +594,7 @@ export async function executeByKind(
         repoMount,
         sandboxWorkdir,
         maskFiles,
-        gitData.mounts,
+        boundaryMounts,
         hasWorktree,
         hasRepo,
       );
@@ -604,7 +607,7 @@ export async function executeByKind(
         repoMount,
         sandboxWorkdir,
         maskFiles,
-        gitData.mounts,
+        boundaryMounts,
         hasWorktree,
         hasRepo,
       );

@@ -3,14 +3,24 @@ import { eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, isLockNotAvailable, schema, type Database } from '@haive/database';
 import { secretsService } from '../src/config/secrets.service.js';
-import { decrypt, decryptDek, envelopeEncrypt } from '../src/crypto/index.js';
+import {
+  decrypt,
+  decryptDek,
+  encrypt,
+  encryptDek,
+  envelopeEncrypt,
+  generateDek,
+} from '../src/crypto/index.js';
+import { BitbucketCloudForgeProvider, type ForgeContext } from '../src/forge/index.js';
 import {
   ConnectionNotFoundError,
+  CredentialProviderMismatchError,
   NeedsReauthError,
   OauthUnavailableError,
   OauthVendorError,
   encryptConnectionTokens,
   getConnectionAccessToken,
+  getConnectionCredential,
 } from '../src/integrations/index.js';
 
 const url = process.env.INTEGRATIONS_REFRESH_TEST_URL;
@@ -718,6 +728,302 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
         }),
       );
       expect(err).toBeInstanceOf(ConnectionNotFoundError);
+    });
+  });
+
+  describe('the credential a forge call needs', () => {
+    async function createCredentialConnection(
+      over: {
+        providerId?: string;
+        host?: string;
+        username?: string;
+        secret?: string;
+        apiBaseUrl?: string | null;
+        status?: ConnectionInsert['status'];
+      } = {},
+    ): Promise<string> {
+      const owner = await createUser();
+      const dek = generateDek();
+      const [credential] = await dbA
+        .insert(schema.repoCredentials)
+        .values({
+          userId: owner,
+          label: 'a git credential',
+          host: over.host ?? 'github.com',
+          apiBaseUrl: over.apiBaseUrl ?? null,
+          usernameEncrypted: encrypt(over.username ?? 'octocat', dek),
+          secretEncrypted: encrypt(over.secret ?? 'stub-git-secret', dek),
+          encryptedDek: encryptDek(dek, KEK),
+        })
+        .returning({ id: schema.repoCredentials.id });
+      return createConnection({
+        ownerUserId: owner,
+        providerId: over.providerId ?? 'github',
+        authMethod: 'token',
+        repoCredentialId: credential!.id,
+        accessTokenEncrypted: null,
+        refreshTokenEncrypted: null,
+        encryptedDek: null,
+        expiresAt: null,
+        ...(over.status ? { status: over.status } : {}),
+      });
+    }
+
+    const forgeContextOf = (
+      credential: { accessToken: string; username: string | null },
+      over: Partial<ForgeContext>,
+    ): ForgeContext => ({
+      provider: 'bitbucket_cloud',
+      apiBase: 'https://api.bitbucket.org/2.0',
+      host: 'bitbucket.org',
+      owner: 'acme',
+      repo: 'app',
+      token: credential.accessToken,
+      username: credential.username ?? '',
+      ...over,
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('hands back the secret, the username, the provider, the API base and the host of a credential-backed connection', async () => {
+      const id = await createCredentialConnection({
+        username: 'octocat',
+        secret: 'stub-git-secret',
+        apiBaseUrl: 'https://ghe.example.com/api/v3',
+      });
+      const vendor = createVendor();
+
+      const credential = await getConnectionCredential(dbA, id, { fetchFn: vendor.fetchFn });
+
+      expect(credential).toEqual({
+        accessToken: 'stub-git-secret',
+        username: 'octocat',
+        provider: 'github',
+        apiBaseUrl: 'https://ghe.example.com/api/v3',
+        host: 'github.com',
+      });
+      expect(credential.accessToken).toBe(
+        await getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn }),
+      );
+      expect(vendor.calls()).toBe(0);
+    });
+
+    it('names the connection provider and no API base when the credential has none', async () => {
+      const id = await createCredentialConnection({ providerId: 'gitlab', host: 'gitlab.com' });
+      expect(await getConnectionCredential(dbA, id, { fetchFn: createVendor().fetchFn })).toEqual({
+        accessToken: 'stub-git-secret',
+        username: 'octocat',
+        provider: 'gitlab',
+        apiBaseUrl: null,
+        host: 'gitlab.com',
+      });
+    });
+
+    describe('a credential edited after it was linked', () => {
+      const editCredentialOf = async (
+        connectionId: string,
+        change: { host: string; provider?: string },
+      ) => {
+        const { repoCredentialId } = await readRow(connectionId);
+        await dbA
+          .update(schema.repoCredentials)
+          .set(change)
+          .where(eq(schema.repoCredentials.id, repoCredentialId!));
+      };
+
+      async function bothReadersRefuse(id: string): Promise<CredentialProviderMismatchError[]> {
+        const readers = [getConnectionAccessToken, getConnectionCredential];
+        const outcomes = await Promise.all(
+          readers.map((read) => rejection(read(dbA, id, { fetchFn: createVendor().fetchFn }))),
+        );
+        expect(
+          readers.filter((_read, i) => outcomes[i] === null).map((read) => read.name),
+          'readers that returned a value instead of refusing',
+        ).toEqual([]);
+        for (const err of outcomes) expect(err).toBeInstanceOf(CredentialProviderMismatchError);
+        return outcomes as CredentialProviderMismatchError[];
+      }
+
+      it.each([
+        ['its host moved to another public forge', { host: 'gitlab.com' }, 'gitlab'],
+        [
+          'its provider pinned to another forge on a self-hosted host',
+          { host: 'git.example.com', provider: 'gitea' },
+          'gitea',
+        ],
+      ] as const)('refuses both readers once %s', async (_edit, change, credentialProvider) => {
+        const id = await createCredentialConnection();
+        await editCredentialOf(id, change);
+
+        for (const err of await bothReadersRefuse(id)) {
+          expect(err).toMatchObject({
+            connectionId: id,
+            connectionProvider: 'github',
+            credentialProvider,
+          });
+          expect(err.message).toContain(id);
+          expect(err.message).toContain('github');
+          expect(err.message).toContain(credentialProvider);
+          expect(err.message).not.toContain('stub-git-secret');
+        }
+      });
+
+      it('refuses both readers once its host is self-hosted with no provider, so no forge is known', async () => {
+        const id = await createCredentialConnection();
+        await editCredentialOf(id, { host: 'git.example.com' });
+
+        for (const err of await bothReadersRefuse(id)) {
+          expect(err).toMatchObject({
+            connectionId: id,
+            connectionProvider: 'github',
+            credentialProvider: null,
+          });
+          expect(err.message).toContain(id);
+          expect(err.message).toContain('github');
+          expect(err.message).not.toContain('null');
+          expect(err.message).not.toContain('stub-git-secret');
+        }
+      });
+
+      it('keeps serving a credential edited to another host of the same forge', async () => {
+        const id = await createCredentialConnection({
+          apiBaseUrl: 'https://ghe.example.com/api/v3',
+        });
+        await editCredentialOf(id, { host: 'ghe.example.com', provider: 'github' });
+        const vendor = createVendor();
+
+        expect(await getConnectionCredential(dbA, id, { fetchFn: vendor.fetchFn })).toEqual({
+          accessToken: 'stub-git-secret',
+          username: 'octocat',
+          provider: 'github',
+          apiBaseUrl: 'https://ghe.example.com/api/v3',
+          host: 'ghe.example.com',
+        });
+        expect(await getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn })).toBe(
+          'stub-git-secret',
+        );
+        expect(vendor.calls()).toBe(0);
+      });
+    });
+
+    it('has no username or host for an OAuth connection, and refreshes it as before', async () => {
+      const fresh = await createConnection({ expiresAt: new Date(Date.now() + 10 * 60_000) });
+      const vendor = createVendor();
+      expect(await getConnectionCredential(dbA, fresh, { fetchFn: vendor.fetchFn })).toEqual({
+        accessToken: 'stub-access-0',
+        username: null,
+        provider: 'github',
+        apiBaseUrl: null,
+        host: null,
+      });
+      expect(vendor.calls()).toBe(0);
+
+      const expired = await createConnection();
+      expect(await getConnectionCredential(dbA, expired, { fetchFn: vendor.fetchFn })).toEqual({
+        accessToken: 'stub-access-1',
+        username: null,
+        provider: 'github',
+        apiBaseUrl: null,
+        host: null,
+      });
+      expect(vendor.calls()).toBe(1);
+      expect(await storedTokens(expired)).toEqual({
+        access: 'stub-access-1',
+        refresh: 'stub-refresh-1',
+      });
+    });
+
+    it.each(['needs_reauth', 'revoked', 'provider_unavailable'] as const)(
+      'throws NeedsReauthError for status %s, for either kind of connection, without a vendor call',
+      async (status) => {
+        const vendor = createVendor();
+        for (const id of [
+          await createConnection({ status }),
+          await createCredentialConnection({ status }),
+        ]) {
+          const err = await rejection(
+            getConnectionCredential(dbA, id, { fetchFn: vendor.fetchFn }),
+          );
+          expect(err).toBeInstanceOf(NeedsReauthError);
+          expect(err).toMatchObject({ connectionId: id, status });
+        }
+        expect(vendor.calls()).toBe(0);
+      },
+    );
+
+    it('carries the OAuth refresh failures of getConnectionAccessToken through unchanged', async () => {
+      const id = await createConnection({ refreshToken: null });
+      const err = await rejection(
+        getConnectionCredential(dbA, id, { fetchFn: createVendor().fetchFn }),
+      );
+      expect(err).toBeInstanceOf(NeedsReauthError);
+      expect((await readRow(id)).status).toBe('needs_reauth');
+    });
+
+    it('throws ConnectionNotFoundError for an id that is not a connection', async () => {
+      const err = await rejection(
+        getConnectionCredential(dbA, '00000000-0000-4000-8000-000000000001', {
+          fetchFn: createVendor().fetchFn,
+        }),
+      );
+      expect(err).toBeInstanceOf(ConnectionNotFoundError);
+    });
+
+    it('lets a Bitbucket Cloud app password reach the adapter as Basic auth with its username', async () => {
+      const id = await createCredentialConnection({
+        providerId: 'bitbucket_cloud',
+        host: 'bitbucket.org',
+        username: 'alice',
+        secret: 'stub-app-password',
+      });
+      const requests: { url: string; authorization: string | undefined }[] = [];
+      vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+        requests.push({
+          url,
+          authorization: (init?.headers as Record<string, string> | undefined)?.Authorization,
+        });
+        return new Response(JSON.stringify({ id: 5, state: 'OPEN' }), { status: 200 });
+      });
+
+      const credential = await getConnectionCredential(dbA, id, {
+        fetchFn: createVendor().fetchFn,
+      });
+      await new BitbucketCloudForgeProvider().getPullRequestState(
+        forgeContextOf(credential, {}),
+        '5',
+      );
+
+      expect(requests).toEqual([
+        {
+          url: 'https://api.bitbucket.org/2.0/repositories/acme/app/pullrequests/5',
+          authorization: `Basic ${Buffer.from('alice:stub-app-password').toString('base64')}`,
+        },
+      ]);
+    });
+
+    it('sends the token as a Bearer when the connection records no username', async () => {
+      const id = await createConnection({
+        providerId: 'bitbucket_cloud',
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      });
+      const seen: (string | undefined)[] = [];
+      vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+        seen.push((init?.headers as Record<string, string> | undefined)?.Authorization);
+        return new Response(JSON.stringify({ id: 5, state: 'OPEN' }), { status: 200 });
+      });
+
+      const credential = await getConnectionCredential(dbA, id, {
+        fetchFn: createVendor().fetchFn,
+      });
+      await new BitbucketCloudForgeProvider().getPullRequestState(
+        forgeContextOf(credential, {}),
+        '5',
+      );
+
+      expect(credential.username).toBeNull();
+      expect(seen).toEqual(['Bearer stub-access-0']);
     });
   });
 });

@@ -583,8 +583,8 @@ every put-back 00a triggers runs under its checkout's merge-dir lock (`inMergeDi
 is refused while another task's claim holds it. Each restore runs under the domain's lock, after the
 caller's fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there,
 and a task that started meanwhile answers `held` with the files untouched; 00a runs that restore and its move in its claim's merge-dir section (`withMergeDirSection`, fenced on the pass's epoch), so a Stop or a cancel refuses both; and the sync base is pointed at
-the record HEAD commits (`rebaseProjectStateOnHeadLocked`, under the restore's lock; a checkout with no record gets an
-EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
+the record HEAD now commits (`rebaseProjectStateOnHeadLocked`, read from the commit inside the
+restore's transaction; a HEAD with no record gets an EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
 a clash is asked about, never imported over it, and one whose record cannot be read keeps the old
 base and answers in `last_error`), because the writer's base already holds the pending change and
 a sync against it would read the incoming head as the other side's revert. The plan needs no such
@@ -689,7 +689,19 @@ a JSON object with `schemaVersion` 1, a string `templateSetHash` and a `template
 anything else at that name is the person's, kept and reported in the step's warnings. It returns
 `removed`, `absent` or `kept`, and never throws. 12 lists the path in `ownRemoved` unless it was
 kept, `absent` included, so a Retry after a failed commit still stages a deletion an earlier attempt
-made; 02 lists it in `deletedPaths` only when it removed it, and 03 stages it like any removal.
+made; 02 lists it in `deletedPaths` only when this task removed it, now or in an earlier attempt
+that recorded the removal as an `upgrade.haive_file_retired` task event, so a Retry after a later
+failure still stages it, even one whose own record write fails and so retires nothing new (it lists
+each such path that is gone, and says so when it cannot look them up), while a person's own
+deletion of a file this task never judged is never claimed. An earlier record stops counting once
+a retry sees anything at that path again, and that retry deletes it, so a later retry after a crash
+does not count it: if the file then vanishes, the deletion is the person's and is not listed. The event is written after a read of the file at its own name passes the shape check and
+before fs-safe parks it for removal, so no database wait happens while the file is parked; a file whose event cannot be written is kept and
+reported, and an event whose file is not removed after all (replaced or deleted during that wait, or
+a removal that failed) is taken back by its id, a failed take-back reported as a warning. A worker
+killed between the event and the removal leaves the event standing, so a Retry that finds the file
+gone, because the person deleted that judged Haive file meanwhile, stages the deletion the removal
+would have made; 03 stages it like any removal.
 04 writes no commit, so a tracked copy is left as an unstaged deletion. A reset still removes the
 file, for installs that hold one.
 
@@ -704,7 +716,8 @@ is retired only by a successful record write. After a successful `writeProjectSt
 repository whose column holds nothing keeps its legacy file, which stays the only copy. The shape
 check is the mirror's own (`schemaVersion` 1, the environment's two objects, a list of strings for
 the globs, a `tooling` object); anything else at the name is the person's, kept and reported in the warnings. 12 lists the
-path in `ownRemoved` unless it was kept, 02 lists it in `deletedPaths` only when it removed it, 04
+path in `ownRemoved` unless it was kept, 02 lists it in `deletedPaths` only when this task removed it
+(the same task event), 04
 does not touch them. The clone import (`importHaiveDataMirror`) decides per unit too: a column is
 left to the sync when the record's unit file exists in the checkout (`lstatNoFollow`, a stale legacy
 file never outranks it); a column the sync then left empty (it threw, or refused, deferred,

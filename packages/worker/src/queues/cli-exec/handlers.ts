@@ -34,7 +34,6 @@ import {
   type OllamaProvisionJobPayload,
   type OllamaProvisionResult,
 } from '@haive/shared';
-import { resolveAgentConcurrency } from '../../sandbox/runtime-admission.js';
 import { resolvePause } from '../../orchestrator/pause.js';
 import { cleanupTaskScratchWorkspace } from '../../repo/scratch-workspace.js';
 import { LEDGER_SUMMARY_MAX_CHARS, recordLedgerEntry } from '../../step-engine/task-ledger.js';
@@ -84,6 +83,7 @@ import {
   type CliExecQueuePayload,
 } from './_shared.js';
 import { reserveAgentSlot, type AgentSlot } from './agent-lease.js';
+import { STATIC_PARALLEL_AGENTS, currentAgentCap, publishAgentCap } from './agent-pool-cap.js';
 import { enforceRuntimeHolderReserve } from './agent-reserve.js';
 import { executeByKind, interpretCliFailure } from './exec-core.js';
 import { fatalClassFromMessage } from './failure-class.js';
@@ -106,6 +106,7 @@ import {
 } from '../../cli-adapters/codex-app-server-verdict.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
 import { supersedeDeadTaskRuns } from '../task-queue.js';
+import { pruneJobSchedulers } from '../job-scheduler-prune.js';
 import { agentRulesOf } from '../../orchestrator/agent-rules.js';
 import { houseRulesOf } from '../../orchestrator/house-rules.js';
 import { scoreHouseRulesInBackground } from '../../orchestrator/house-rules-similarity.js';
@@ -248,7 +249,7 @@ async function runCliExecJob(
     );
     return;
   }
-  // The dead mark supersedes only runs not yet started; one dispatched or requeued since ends here.
+  // The dead mark supersedes every open run; one dispatched or requeued after it ends here.
   if (row.task.deadAt && row.task.status !== 'cancelled' && row.task.status !== 'completed') {
     await db.transaction((tx) => supersedeDeadTaskRuns(tx, eq(schema.cliInvocations.id, row.id)));
     log.info(
@@ -1183,6 +1184,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
       opts: { removeOnComplete: true, removeOnFail: 10 },
     },
   );
+  await pruneJobSchedulers(queue, [VERSION_REFRESH_JOB_ID]);
   // Boot kick, so a fresh install populates the caches without waiting up to 12h for the
   // scheduler. Skipped when a refresh is already in flight.
   //
@@ -1232,33 +1234,12 @@ async function versionRefreshInFlight(queue: Queue<CliExecQueuePayload>): Promis
   }
 }
 
-/** Concurrency used when config is unavailable, or when the resource governor is off and there
- *  is no budget to size against. The pre-feature fixed value. */
-const STATIC_PARALLEL_AGENTS = 3;
-
 /** How often auto-sized concurrency re-reads the runtime pool. Runners come and go outside any
  *  config change (a boot, a teardown, the reaper), and none of those publish on the concurrency
  *  channel — without this poll the agent pool would only retune when an admin touched a setting. */
 const AGENT_CONCURRENCY_POLL_MS = 30_000;
 
-/** Floor the parallel-agent cap at 1 (BullMQ requires concurrency >= 1). No upper
- *  limit — the host operator sets it to whatever their machine can handle. */
-function clampParallelCap(n: number): number {
-  if (!Number.isFinite(n)) return STATIC_PARALLEL_AGENTS;
-  return Math.max(1, Math.floor(n));
-}
-
-/** The agent pool's size right now: what the INVOKE gate admits against and a lease is sized by. */
-export async function currentAgentCap(): Promise<number> {
-  return clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
-}
-
-let publishedAgentCap: number | undefined;
-
-/** The cap the INVOKE gate admits against, for the lease lane: the worker's last read, else a fresh one. */
-export async function agentPoolCap(): Promise<number> {
-  return publishedAgentCap ?? currentAgentCap();
-}
+export { agentPoolCap, currentAgentCap } from './agent-pool-cap.js';
 
 /** Pull/build a provider's in-stack Ollama model after a create/edit so it is
  *  ready without a worker restart. Delegates to provisionOllamaProvider, which
@@ -1487,7 +1468,7 @@ export async function startCliExecWorker(
   let concurrency = STATIC_PARALLEL_AGENTS + LIGHT_JOB_LANE;
   try {
     agentCap = await currentAgentCap();
-    publishedAgentCap = agentCap;
+    publishAgentCap(agentCap);
     concurrency = agentCap + LIGHT_JOB_LANE;
   } catch {
     /* config not initialized — keep the default */
@@ -1585,7 +1566,7 @@ export async function startCliExecWorker(
       // The retune tracks the AGENT pool; the worker always runs LIGHT_JOB_LANE wider so a
       // sign-in or version refresh is never queued behind agents.
       agentCap = await currentAgentCap();
-      publishedAgentCap = agentCap;
+      publishAgentCap(agentCap);
       next = agentCap + LIGHT_JOB_LANE;
     } catch (err) {
       log.warn({ err }, 'cli-exec concurrency resolve failed; keeping the current value');
