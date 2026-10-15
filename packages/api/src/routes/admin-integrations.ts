@@ -12,6 +12,12 @@ import {
 import type { IntegrationProviderSpec } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import {
+  listAdminDefaults,
+  removePreference,
+  requireValidChoice,
+  upsertPreference,
+} from '../lib/integration-choice.js';
 import { webOrigin } from '../lib/request-origin.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -35,6 +41,8 @@ const updateSchema = z
   .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'Nothing to change',
   });
+
+const defaultSchema = z.object({ providerId: z.string().min(1).max(256).nullable() });
 
 function providerJson(spec: IntegrationProviderSpec, row: ConfigRow | undefined) {
   return {
@@ -106,4 +114,30 @@ adminIntegrationRoutes.put('/providers/:id', async (c) => {
     },
   });
   return c.json({ provider: providerJson(spec, saved) });
+});
+
+adminIntegrationRoutes.get('/defaults', async (c) => {
+  return c.json({ defaults: await listAdminDefaults(getDb()) });
+});
+
+adminIntegrationRoutes.put('/defaults/:categoryId', async (c) => {
+  const categoryId = c.req.param('categoryId');
+  const { providerId } = defaultSchema.parse(await c.req.json());
+  const userId = c.get('userId');
+  const db = getDb();
+
+  if (providerId === null) {
+    await removePreference(db, null, categoryId);
+  } else {
+    await requireValidChoice(db, userId, { categoryId, providerId, connectionId: null });
+    await upsertPreference(db, { userId: null, categoryId, providerId, connectionId: null });
+  }
+
+  await recordAuditEvent(db, {
+    actorUserId: userId,
+    action: 'integration.category_default.update',
+    targetType: 'integration_category_default',
+    metadata: { categoryId, providerId },
+  });
+  return c.json({ categoryId, providerId });
 });
