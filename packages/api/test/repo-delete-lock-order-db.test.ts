@@ -38,7 +38,7 @@ const backendPid = async (tx: Tx): Promise<number> => {
   return row!.pid;
 };
 
-describe.skipIf(!url)('a repository delete racing a Retry or a worker claim, on Postgres', () => {
+describe.skipIf(!url)('a repository delete racing another writer of its tasks, on Postgres', () => {
   let db: Database;
   let racer: Database;
   let userId: string;
@@ -142,6 +142,33 @@ describe.skipIf(!url)('a repository delete racing a Retry or a worker claim, on 
         .where(eq(schema.tasks.id, taskId))
         .for('share'),
   });
+
+  const endStep =
+    (stepId: string, status: StepStatus): Writes =>
+    (tx) =>
+      tx
+        .update(schema.taskSteps)
+        .set({ status, endedAt: new Date(), updatedAt: new Date() })
+        .where(eq(schema.taskSteps.id, stepId));
+
+  const endTask =
+    (taskId: string, status: TaskStatus): Writes =>
+    (tx) =>
+      tx
+        .update(schema.tasks)
+        .set({ status, completedAt: new Date(), updatedAt: new Date() })
+        .where(eq(schema.tasks.id, taskId));
+
+  const cancelEvents = (taskId: string) =>
+    db
+      .select({ id: schema.taskEvents.id })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, taskId),
+          eq(schema.taskEvents.eventType, 'task.cancelled'),
+        ),
+      );
 
   async function lockedTaskRows(): Promise<string[]> {
     const tasks = await db
@@ -287,6 +314,54 @@ describe.skipIf(!url)('a repository delete racing a Retry or a worker claim, on 
       task: 'cancelled',
       steps: [{ status: 'failed' }, { status: 'failed' }],
     });
+  }, 30_000);
+
+  it('does not cancel a task a Stop failed while the delete waited', async () => {
+    const { taskId, stepIds } = await seedTask('running', ['running', 'pending']);
+
+    const { failures, cancelled } = await raceDelete({
+      first: endStep(stepIds[0]!, 'failed'),
+      second: endTask(taskId, 'failed'),
+    });
+
+    expect(failures).toEqual([]);
+    expect.soft(await stateOf(taskId)).toMatchObject({
+      task: 'failed',
+      steps: [{ status: 'failed' }, { status: 'pending' }],
+    });
+    expect.soft(await cancelEvents(taskId)).toEqual([]);
+    expect.soft(cancelled).toEqual([]);
+  }, 30_000);
+
+  it('does not cancel a task completed while the delete waited on its last step', async () => {
+    const { taskId, stepIds } = await seedTask('running', ['done', 'running']);
+
+    const { failures, cancelled } = await raceDelete({
+      first: endStep(stepIds[1]!, 'done'),
+      second: endTask(taskId, 'completed'),
+    });
+
+    expect(failures).toEqual([]);
+    expect.soft(await stateOf(taskId)).toMatchObject({
+      task: 'completed',
+      steps: [{ status: 'done' }, { status: 'done' }],
+    });
+    expect.soft(await cancelEvents(taskId)).toEqual([]);
+    expect.soft(cancelled).toEqual([]);
+  }, 30_000);
+
+  it('does not cancel a task completed while the delete waited on its row', async () => {
+    const { taskId } = await seedTask('running', ['done', 'done']);
+
+    const { failures, cancelled } = await raceDelete({
+      first: endTask(taskId, 'completed'),
+      second: async () => undefined,
+    });
+
+    expect(failures).toEqual([]);
+    expect.soft((await stateOf(taskId)).task).toBe('completed');
+    expect.soft(await cancelEvents(taskId)).toEqual([]);
+    expect.soft(cancelled).toEqual([]);
   }, 30_000);
 
   it('returns nothing and writes nothing when no task is open', async () => {

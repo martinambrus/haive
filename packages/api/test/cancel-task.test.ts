@@ -34,7 +34,9 @@ function makeFakeTx(selectReturn: Array<{ id: string }> = []): {
           recorded.selectArgs = cols;
           recorded.fromArg = table;
           recorded.whereArg = clause;
-          return Promise.resolve(selectReturn);
+          return Object.assign(Promise.resolve(selectReturn), {
+            orderBy: () => ({ for: async () => selectReturn }),
+          });
         },
       }),
     }),

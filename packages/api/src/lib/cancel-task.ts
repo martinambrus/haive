@@ -123,31 +123,32 @@ export async function cancelOpenTasksForRepo(
   repoId: string,
   userId: string,
 ): Promise<Array<{ id: string }>> {
-  const open = await tx
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, repoId),
-        eq(schema.tasks.userId, userId),
-        notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
-      ),
-    );
-  if (open.length === 0) return open;
+  const isOpen = and(
+    eq(schema.tasks.repositoryId, repoId),
+    eq(schema.tasks.userId, userId),
+    notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+  );
+  const seen = await tx.select({ id: schema.tasks.id }).from(schema.tasks).where(isOpen);
+  if (seen.length === 0) return seen;
+  const ids = seen.map((t) => t.id);
   // Step rows before task rows: the order every other transaction that writes both takes.
   await tx
     .select({ id: schema.taskSteps.id })
     .from(schema.taskSteps)
     .where(
       and(
-        inArray(
-          schema.taskSteps.taskId,
-          open.map((t) => t.id),
-        ),
+        inArray(schema.taskSteps.taskId, ids),
         inArray(schema.taskSteps.status, [...OPEN_STEP_STATUSES]),
       ),
     )
     .orderBy(schema.taskSteps.id)
+    .for('no key update');
+  // The wait may have let a Stop or a completion end a task, so cancel only those still open.
+  const open = await tx
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(and(inArray(schema.tasks.id, ids), isOpen))
+    .orderBy(schema.tasks.id)
     .for('no key update');
   for (const t of open) {
     await cancelTaskRow(tx, t.id, { by: userId, reason: 'repository_deleted' });
