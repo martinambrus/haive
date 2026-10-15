@@ -610,7 +610,9 @@ did not merge puts the files back and, once no merge or rebase is open, re-syncs
 the merge section recovers them before it reaches the caller, and reaching done re-syncs. The owner
 and mode a set-aside captured ride in the merge state (`keptMetadata`, never the bytes), so the
 call that ends a merge restores them even when an earlier call set the files aside; a merge left
-open keeps them for its end. A cancelled task's merge ends elsewhere, and each ending restores them
+open keeps them for its end. They are restored, and cleared, only after a re-sync that completed:
+`resyncHaiveProjections` answers whether both halves re-synced, and one that returned early (a merge
+or rebase open) or failed leaves `keptMetadata` in the state for a later settle. A cancelled task's merge ends elsewhere, and each ending restores them
 too: the abort job, a cancel that finds the merge already gone, or the next task's merge that
 clears it, which takes them into its own state first. It reads no checkout-holding count, and a state file edited by
 hand halts it by name even when the incoming commit leaves that file alone, as it halts a refresh or

@@ -133,7 +133,11 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
   logged. A fast-forward of the checkout is handed back the same way from the commit before it
   (`handBackAfterMove`): 00a's on the checked-out branch, a repository refresh's, and `landPlanMerge`'s
-  for a plan Pull, Save or confirm. `.haive/`,
+  for a plan Pull, Save or confirm. In the checkout, Haive's projection files and their directories
+  (`.haive-data/state/**`, `plan.json`, `plan.md`) are left out of all three hand-backs: the worker
+  writes them, and `restoreKeptMetadata` restores the owner and mode a set-aside captured only on a
+  file the worker still owns. A worktree is never set aside, so there they are handed back like any
+  other path; `knowledge_base/` and `learnings/` are handed back everywhere. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
   not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
   removed later takes the link with it. A name is judged by its bytes (the plan merge's
