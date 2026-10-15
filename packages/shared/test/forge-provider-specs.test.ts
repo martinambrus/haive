@@ -93,8 +93,16 @@ describe('the argument limits the input schemas publish', () => {
         pattern: PR_NUMBER_PATTERN,
       });
       const open = propertiesOf(spec, 'open_pull_request');
-      expect(open.head).toMatchObject({ type: 'string', maxLength: BRANCH_MAX_LENGTH });
-      expect(open.base).toMatchObject({ type: 'string', maxLength: BRANCH_MAX_LENGTH });
+      expect(open.head).toMatchObject({
+        type: 'string',
+        minLength: 1,
+        maxLength: BRANCH_MAX_LENGTH,
+      });
+      expect(open.base).toMatchObject({
+        type: 'string',
+        minLength: 1,
+        maxLength: BRANCH_MAX_LENGTH,
+      });
       expect(open.title).toMatchObject({
         type: 'string',
         minLength: 1,

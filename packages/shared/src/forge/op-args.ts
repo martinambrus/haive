@@ -2,6 +2,7 @@ import { isBranchName } from '../git-args.js';
 import { ForgeError, type OpenPrInput } from './types.js';
 
 export const PR_NUMBER_PATTERN = '^[1-9][0-9]{0,9}$';
+export const BRANCH_MIN_LENGTH = 1;
 export const BRANCH_MAX_LENGTH = 255;
 export const TITLE_MIN_LENGTH = 1;
 export const TITLE_MAX_LENGTH = 256;

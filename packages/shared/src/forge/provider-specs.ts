@@ -2,6 +2,7 @@ import type { IntegrationOperation, IntegrationProviderSpec } from '../modularit
 import {
   BODY_MAX_LENGTH,
   BRANCH_MAX_LENGTH,
+  BRANCH_MIN_LENGTH,
   PR_NUMBER_PATTERN,
   TITLE_MAX_LENGTH,
   TITLE_MIN_LENGTH,
@@ -16,10 +17,16 @@ const OPEN_PULL_REQUEST: IntegrationOperation = {
     properties: {
       head: {
         type: 'string',
+        minLength: BRANCH_MIN_LENGTH,
         maxLength: BRANCH_MAX_LENGTH,
         description: 'Source (feature) branch',
       },
-      base: { type: 'string', maxLength: BRANCH_MAX_LENGTH, description: 'Target (base) branch' },
+      base: {
+        type: 'string',
+        minLength: BRANCH_MIN_LENGTH,
+        maxLength: BRANCH_MAX_LENGTH,
+        description: 'Target (base) branch',
+      },
       title: { type: 'string', minLength: TITLE_MIN_LENGTH, maxLength: TITLE_MAX_LENGTH },
       body: { type: 'string', maxLength: BODY_MAX_LENGTH },
     },
