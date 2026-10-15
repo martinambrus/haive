@@ -20,6 +20,7 @@ import {
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { buildRtkAwarenessBlock } from '../src/step-engine/steps/onboarding/_rtk-templates.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -51,6 +52,7 @@ async function setup(agents: string | Buffer = AGENTS) {
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
+    ...RECORD_WRITE_TABLES,
   });
   const noop = () => undefined;
   const ctxFor = (taskId: string) =>
@@ -86,12 +88,14 @@ async function setup(agents: string | Buffer = AGENTS) {
     backfilledRows: 0,
   } as UpgradePlanOutput;
   const apply = () =>
-    upgradeApplyStep.apply(ctxFor(TASK), {
-      detected: plan,
-      formValues: {},
-      iteration: 0,
-      previousIterations: [],
-    });
+    recordWritten(
+      upgradeApplyStep.apply(ctxFor(TASK), {
+        detected: plan,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      }),
+    );
   const rollBack = (rtkBlockStrips: RtkBlockStrip[] | undefined) =>
     upgradeRollbackStep.apply(ctxFor(ROLLBACK), {
       detected: {
