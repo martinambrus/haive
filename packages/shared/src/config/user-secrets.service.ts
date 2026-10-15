@@ -1,4 +1,4 @@
-import { eq, and } from 'drizzle-orm';
+import { eq, and, inArray } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import {
   envelopeEncrypt,
@@ -44,6 +44,34 @@ export class UserSecretsService {
       logger.error({ userId, keyName, err }, 'Failed to decrypt user secret');
       throw new Error('Failed to decrypt user secret');
     }
+  }
+
+  /** One SELECT, so the values come from one snapshot; a name with no row maps to null. */
+  async getMany(userId: string, keyNames: readonly string[]): Promise<Map<string, string | null>> {
+    this.ensureInitialized();
+    const rows = await this.db!.query.userSecrets.findMany({
+      where: and(
+        eq(schema.userSecrets.userId, userId),
+        inArray(schema.userSecrets.keyName, [...keyNames]),
+      ),
+      columns: { keyName: true, encryptedValue: true, encryptedDek: true },
+    });
+    const values = new Map<string, string | null>(keyNames.map((name) => [name, null]));
+    for (const row of rows) {
+      try {
+        values.set(
+          row.keyName,
+          envelopeDecrypt(
+            { encryptedValue: row.encryptedValue, encryptedDek: row.encryptedDek },
+            this.masterKek!,
+          ),
+        );
+      } catch (err) {
+        logger.error({ userId, keyName: row.keyName, err }, 'Failed to decrypt user secret');
+        throw new Error('Failed to decrypt user secret');
+      }
+    }
+    return values;
   }
 
   async set(

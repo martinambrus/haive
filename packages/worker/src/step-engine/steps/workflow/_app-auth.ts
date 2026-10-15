@@ -127,10 +127,9 @@ export async function loginAppBrowser(
   const cfg = repo.appAuth as AppAuthConfig;
 
   const names = appAuthSecretNames(task.repositoryId);
-  const [username, password] = await Promise.all([
-    userSecretsService.get(ctx.userId, names.username),
-    userSecretsService.get(ctx.userId, names.password),
-  ]);
+  const secrets = await userSecretsService.getMany(ctx.userId, [names.username, names.password]);
+  const username = secrets.get(names.username);
+  const password = secrets.get(names.password);
   if (!username || !password) {
     return {
       attempted: false,

@@ -1,8 +1,23 @@
-import { describe, it, expect } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import type { StepContext } from '../../step-definition.js';
+
+const m = vi.hoisted(() => ({ get: vi.fn(), getMany: vi.fn(), runnerExec: vi.fn() }));
+
+vi.mock('@haive/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared')>()),
+  userSecretsService: { get: m.get, getMany: m.getMany },
+}));
+vi.mock('../../../sandbox/ddev-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../sandbox/ddev-runner.js')>()),
+  runnerExec: m.runnerExec,
+}));
+
 import {
   appAuthPromptLines,
   appAuthSecretNames,
   isUsableAppAuth,
+  loginAppBrowser,
   parseLoginOutput,
 } from './_app-auth.js';
 
@@ -117,5 +132,69 @@ describe('appAuthSecretNames', () => {
       password: 'app_auth:repo-1:password',
     });
     expect(appAuthSecretNames('repo-2').password).not.toBe(appAuthSecretNames('repo-1').password);
+  });
+});
+
+describe('loginAppBrowser reads the credential pair', () => {
+  const names = appAuthSecretNames('repo-1');
+  const store = new Map<string, string>();
+  // Generated: a literal username and password pair reads as a leaked credential to secret scanners.
+  const username = `user-${randomUUID()}`;
+  const password = `pass-${randomUUID()}`;
+  const ctx = {
+    userId: 'user-1',
+    taskId: 'task-1',
+    db: {
+      query: {
+        tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) },
+        repositories: { findFirst: async () => ({ appAuth: VALID }) },
+      },
+    },
+  } as unknown as StepContext;
+  const runtime = { mode: 'ddev' as const, handle: {} as never };
+
+  beforeEach(() => {
+    store.clear();
+    m.get
+      .mockReset()
+      .mockImplementation(async (_userId: string, key: string) => store.get(key) ?? null);
+    m.getMany
+      .mockReset()
+      .mockImplementation(
+        async (_userId: string, keys: string[]) =>
+          new Map<string, string | null>(keys.map((k) => [k, store.get(k) ?? null])),
+      );
+    m.runnerExec.mockReset().mockResolvedValue({ exitCode: 0, output: '{"ok":true,"reason":""}' });
+  });
+
+  it('with one getMany call naming both keys, never two gets, and logs in with that pair', async () => {
+    store.set(names.username, username).set(names.password, password);
+    expect(await loginAppBrowser(ctx, runtime)).toEqual({ attempted: true, ok: true, reason: '' });
+    expect(m.getMany).toHaveBeenCalledTimes(1);
+    expect(m.getMany).toHaveBeenCalledWith('user-1', [names.username, names.password]);
+    expect(m.get).not.toHaveBeenCalled();
+    expect(m.runnerExec).toHaveBeenCalledWith(
+      runtime.handle,
+      expect.any(String),
+      expect.objectContaining({
+        env: { HAIVE_APP_USERNAME: username, HAIVE_APP_PASSWORD: password },
+      }),
+    );
+  });
+
+  it.each<[string, string[]]>([
+    ['the password is missing', [names.username]],
+    ['the username is missing', [names.password]],
+    ['both are missing', []],
+  ])('and answers "credentials are missing" when %s', async (_case, stored) => {
+    for (const key of stored) store.set(key, 'stored');
+    expect(await loginAppBrowser(ctx, runtime)).toEqual({
+      attempted: false,
+      ok: false,
+      reason: 'app login is configured but its credentials are missing from the secret store',
+    });
+    expect(m.getMany).toHaveBeenCalledTimes(1);
+    expect(m.get).not.toHaveBeenCalled();
+    expect(m.runnerExec).not.toHaveBeenCalled();
   });
 });
