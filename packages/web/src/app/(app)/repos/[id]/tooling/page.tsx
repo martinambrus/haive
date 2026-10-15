@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api-client';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { Button, Card, FormError, Label } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
@@ -52,7 +53,8 @@ interface ToolingConfig {
     submitSelector: string;
     successCondition: { type: string; value: string };
   } | null;
-  appAuthCredentialsSet: boolean;
+  appAuthUsernameSet: boolean;
+  appAuthPasswordSet: boolean;
   prWorkflowEnabled: boolean;
   stepGuidanceEnabled: boolean;
   stepGuidance: GuidanceItem[];
@@ -139,7 +141,11 @@ export default function RepoToolingPage() {
   const [appAuthCondValue, setAppAuthCondValue] = useState('');
   const [appAuthUsername, setAppAuthUsername] = useState('');
   const [appAuthPassword, setAppAuthPassword] = useState('');
-  const [appAuthCredsSet, setAppAuthCredsSet] = useState(false);
+  const [appAuthUsernameSet, setAppAuthUsernameSet] = useState(false);
+  const [appAuthPasswordSet, setAppAuthPasswordSet] = useState(false);
+  const [clearCredsOpen, setClearCredsOpen] = useState(false);
+  const [clearCredsBusy, setClearCredsBusy] = useState(false);
+  const [clearCredsError, setClearCredsError] = useState<string | null>(null);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState(false);
   const [stepGuidanceEnabled, setStepGuidanceEnabled] = useState(true);
   const [reviewDimensions, setReviewDimensions] = useState<Set<string>>(new Set());
@@ -217,7 +223,8 @@ export default function RepoToolingPage() {
         setAppAuthSubmitSel(cfg.appAuth?.submitSelector ?? '');
         setAppAuthCondType(cfg.appAuth?.successCondition?.type ?? 'url_contains');
         setAppAuthCondValue(cfg.appAuth?.successCondition?.value ?? '');
-        setAppAuthCredsSet(cfg.appAuthCredentialsSet ?? false);
+        setAppAuthUsernameSet(cfg.appAuthUsernameSet ?? false);
+        setAppAuthPasswordSet(cfg.appAuthPasswordSet ?? false);
         setPrWorkflowEnabled(cfg.prWorkflowEnabled);
         setStepGuidanceEnabled(cfg.stepGuidanceEnabled ?? true);
         setReviewDimensions(new Set(cfg.reviewDimensions ?? []));
@@ -322,7 +329,8 @@ export default function RepoToolingPage() {
         ...(appAuthUsername ? { appAuthUsername } : {}),
         ...(appAuthPassword ? { appAuthPassword } : {}),
       });
-      if (appAuthUsername || appAuthPassword) setAppAuthCredsSet(true);
+      if (appAuthUsername) setAppAuthUsernameSet(true);
+      if (appAuthPassword) setAppAuthPasswordSet(true);
       setAppAuthUsername('');
       setAppAuthPassword('');
       setSaved(true);
@@ -330,6 +338,28 @@ export default function RepoToolingPage() {
       setError((err as Error).message ?? 'Failed to save tooling');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleClearCredentials() {
+    if (clearCredsBusy) return;
+    setClearCredsBusy(true);
+    setClearCredsError(null);
+    try {
+      // '' is the api's deliberate clear, which is why Save never sends one.
+      await api.patch(`/repositories/${repositoryId}/tooling`, {
+        appAuthUsername: '',
+        appAuthPassword: '',
+      });
+      setAppAuthUsernameSet(false);
+      setAppAuthPasswordSet(false);
+      setAppAuthUsername('');
+      setAppAuthPassword('');
+      setClearCredsOpen(false);
+    } catch (err) {
+      setClearCredsError((err as Error).message ?? 'Failed to clear the stored credentials');
+    } finally {
+      setClearCredsBusy(false);
     }
   }
 
@@ -731,7 +761,7 @@ export default function RepoToolingPage() {
                   id="appAuthUsername"
                   autoComplete="off"
                   className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-xs text-neutral-100 disabled:opacity-50"
-                  placeholder={appAuthCredsSet ? '•••••• (stored)' : 'test user'}
+                  placeholder={appAuthUsernameSet ? '•••••• (stored)' : 'test user'}
                   value={appAuthUsername}
                   disabled={!appAuthEnabled}
                   onChange={(e) => {
@@ -747,7 +777,7 @@ export default function RepoToolingPage() {
                   type="password"
                   autoComplete="new-password"
                   className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-xs text-neutral-100 disabled:opacity-50"
-                  placeholder={appAuthCredsSet ? '•••••• (stored)' : ''}
+                  placeholder={appAuthPasswordSet ? '•••••• (stored)' : ''}
                   value={appAuthPassword}
                   disabled={!appAuthEnabled}
                   onChange={(e) => {
@@ -758,10 +788,59 @@ export default function RepoToolingPage() {
               </div>
             </div>
             <p className="mt-2 text-xs text-neutral-600">
-              {appAuthCredsSet
+              {appAuthUsernameSet && appAuthPasswordSet
                 ? 'Credentials are stored. Leave both blank to keep them; type to replace.'
                 : "Credentials are stored encrypted, separately from this repository's settings."}
             </p>
+            {(appAuthUsernameSet || appAuthPasswordSet) && (
+              <>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="mt-3"
+                  onClick={() => {
+                    setClearCredsError(null);
+                    setClearCredsOpen(true);
+                  }}
+                >
+                  Clear stored credentials
+                </Button>
+                <Dialog
+                  className="mx-4"
+                  open={clearCredsOpen}
+                  onOpenChange={(open) => !open && !clearCredsBusy && setClearCredsOpen(false)}
+                >
+                  <DialogContent role="alertdialog" aria-labelledby="clear-creds-title">
+                    <DialogHeader>
+                      <DialogTitle id="clear-creds-title">Clear stored credentials</DialogTitle>
+                      <p className="text-sm text-neutral-300 [overflow-wrap:anywhere]">
+                        Remove the stored username and password for this repository&apos;s app
+                        login? Runs that need them will fail to log in until you enter new ones.
+                      </p>
+                    </DialogHeader>
+                    <FormError message={clearCredsError} />
+                    <div className="mt-4 flex justify-end gap-2">
+                      <Button
+                        variant="secondary"
+                        className="h-11"
+                        disabled={clearCredsBusy}
+                        onClick={() => setClearCredsOpen(false)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        className="h-11"
+                        disabled={clearCredsBusy}
+                        onClick={() => void handleClearCredentials()}
+                      >
+                        {clearCredsBusy ? 'Clearing...' : 'Clear credentials'}
+                      </Button>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+              </>
+            )}
           </Card>
 
           <Card>
