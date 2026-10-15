@@ -128,12 +128,27 @@ describe('resolveGlobalKbSettings when the mode and the string are read either s
     expect(modeReads()).toBe(2);
   });
 
-  it.each([
-    ['external with a stored string', 'external', true],
-    ['internal with none', 'internal', false],
-  ])('reads the mode once for %s', async (_what, mode, stored) => {
-    redisValues.set(CONFIG_KEYS.GLOBAL_KB_MODE, mode);
-    if (!stored) storedSecret = null;
+  it('resolves the built-in store when a switch away stores a new string between the two reads', async () => {
+    beforeSecretRead = async () => {
+      await otherConfig.set(CONFIG_KEYS.GLOBAL_KB_MODE, 'internal');
+      storedSecret = encrypt('postgres://kb.example/new', encryptionKey);
+    };
+
+    expect(await resolveGlobalKbSettings()).toMatchObject({ mode: 'internal' });
+    expect(modeReads()).toBe(2);
+  });
+
+  it('keeps the external store and its string when the second read still says external', async () => {
+    expect(await resolveGlobalKbSettings()).toMatchObject({
+      mode: 'external',
+      connectionString: CONNECTION_STRING,
+    });
+    expect(modeReads()).toBe(2);
+  });
+
+  it('reads the mode once for the built-in store', async () => {
+    redisValues.set(CONFIG_KEYS.GLOBAL_KB_MODE, 'internal');
+    storedSecret = null;
 
     await resolveGlobalKbSettings();
 

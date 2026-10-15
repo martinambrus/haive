@@ -121,9 +121,9 @@ process finds the external store without its string, and a refused save writes n
 exception is a save that leaves the external store for the built-in one: it writes the mode first,
 so no process pairs the live external store with a string it is not switching to. Every
 process reads the mode and the string fresh, past the 30 s caches (`resolveGlobalKbSettings`), so a
-switch or a removal reaches the worker at once; a reader that finds the external store without a
-string reads the mode once more, since a switch to the built-in store writes the mode before it
-deletes the string. The house-rules switch lives in
+switch or a removal reaches the worker at once; a reader that finds the external store reads the
+mode once more after the string, since leaving the external store writes the mode before it removes
+or replaces the string. The house-rules switch lives in
 the admin console, and an admin who points the KB at an external store trusts every writer of that
 database: a row it marks enforced is honoured. The
 enrich task refuses to re-enrich an enforced entry, since a retry would demote it.
