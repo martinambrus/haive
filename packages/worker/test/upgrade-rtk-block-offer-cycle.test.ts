@@ -57,6 +57,7 @@ async function cycle(agents: string, rtkOnAtApply: boolean) {
     projectStateSync: schema.projectStateSync,
     projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
+    taskEvents: schema.taskEvents,
   });
   const loose = fake as unknown as Parameters<typeof seedProviders>[0];
   seedProviders(loose, PROVIDERS);
