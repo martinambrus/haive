@@ -1881,9 +1881,17 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       // What this task removed, now or in an earlier attempt, is still listed.
       try {
         for (const path of await retiredByThisTask(ctx.db, ctx.taskId)) {
-          if (!deletedPaths.includes(path) && (await lstatNoFollow(ctx.repoPath, path)) === null) {
-            deletedPaths.push(path);
-          }
+          if (deletedPaths.includes(path)) continue;
+          // Strict: only a path proven missing is listed, never one that could not be read.
+          const gone = await lstatNoFollow(ctx.repoPath, path, { strict: true }).then(
+            (entry) => entry === null,
+            (err: unknown) => {
+              const cause = err instanceof Error ? err.message : String(err);
+              warnings.push(`${path} was not listed as removed: it could not be checked: ${cause}`);
+              return false;
+            },
+          );
+          if (gone) deletedPaths.push(path);
         }
       } catch (lookupErr) {
         const cause = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);

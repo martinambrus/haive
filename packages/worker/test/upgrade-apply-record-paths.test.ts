@@ -495,6 +495,26 @@ describe('02 and .haive/install.json', () => {
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
 
+  it('does not list one whose path cannot be checked, though its removal was recorded', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    const outside = await mkdtemp(join(tmpdir(), 'retire-outside-'));
+    dirs.push(outside);
+    await writeFile(join(outside, 'install.json'), HAIVE_SHAPED);
+    await rm(join(s.root, '.haive'), { recursive: true, force: true });
+    await symlink(outside, join(s.root, '.haive'));
+    refuseRecordWriteOnce(s);
+
+    const out = await s.apply();
+
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(
+      out.warnings.some((w) =>
+        w.startsWith(`${INSTALL} was not listed as removed: it could not be checked`),
+      ),
+    ).toBe(true);
+  });
+
   it('lists it once when the failure comes after its own retirement listed it', async () => {
     const s = await setup(HAIVE_SHAPED);
     const select = s.fake.db.select;
