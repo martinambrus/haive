@@ -286,6 +286,36 @@ async function appendEvent(
   });
 }
 
+/** The pass's name: a Retry clears the row's ended_at and the rerun sets a new one. */
+function endedAtOf(row: { endedAt: Date | null }): string | null {
+  return row.endedAt?.toISOString() ?? null;
+}
+
+/** Appends the event once per pass (row, type, `endedAt`); a missing `endedAt` never matches. */
+async function appendEventOnce(
+  db: Database,
+  taskId: string,
+  taskStepId: string,
+  eventType: string,
+  payload: Record<string, unknown> & { endedAt: string | null },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [seen] = await tx
+      .select({ id: schema.taskEvents.id })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, taskId),
+          eq(schema.taskEvents.taskStepId, taskStepId),
+          eq(schema.taskEvents.eventType, eventType),
+          sql`${schema.taskEvents.payload}->>'endedAt' = ${payload.endedAt}`,
+        ),
+      )
+      .limit(1);
+    if (!seen) await appendEvent(tx, taskId, taskStepId, eventType, payload);
+  });
+}
+
 /** A task nobody has started yet: created, or queued by the start action or a task Retry. */
 const STARTABLE_TASK_STATUSES = ['created', 'queued'] as const satisfies readonly TaskStatus[];
 
@@ -661,8 +691,8 @@ export async function supersedeDeadTaskRuns(tx: DbHandle, runs: SQL | undefined)
 
 /** Mark the task dead: it is neither failed nor completed, keeps its status and epoch, and tears
  *  nothing down, so a revive finds it as it was. Only while the task is not cancelled or completed,
- *  still at the epoch, and not already dead; false when nothing was written. Its runs that have not
- *  started are superseded. */
+ *  still at the epoch, and not already dead; false when nothing was written. Every open run of it is
+ *  superseded; whoever owns the outermost transaction kills its CLI sandboxes once that commits. */
 export async function markTaskDead(
   db: Database | DbHandle,
   taskId: string,
@@ -688,10 +718,7 @@ export async function markTaskDead(
       )
       .returning({ id: schema.tasks.id });
     if (!dead) return false;
-    await supersedeDeadTaskRuns(
-      tx,
-      and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.startedAt)),
-    );
+    await supersedeDeadTaskRuns(tx, eq(schema.cliInvocations.taskId, taskId));
     await appendEvent(tx, taskId, null, TASK_DEAD_EVENT, {
       reason,
       unresolved: fence.unresolved ?? [],
@@ -725,6 +752,7 @@ async function markTaskDeadOnStep(
       round,
     });
   });
+  if (marked) await killCliSandboxesForTask(ctx.taskId);
   if (marked) await resyncAfterTaskEnd(db, ctx.taskId);
 }
 
@@ -751,7 +779,9 @@ export async function markTaskDeadFromJob(
         .limit(1)
     : [];
   if (!row) {
-    if (await markTaskDead(db, taskId, reason, opts)) await resyncAfterTaskEnd(db, taskId);
+    const marked = await markTaskDead(db, taskId, reason, opts);
+    if (marked) await killCliSandboxesForTask(taskId);
+    if (marked) await resyncAfterTaskEnd(db, taskId);
     return;
   }
   const marked = await db.transaction(async (tx) => {
@@ -768,6 +798,7 @@ export async function markTaskDeadFromJob(
     if (!locked) return false;
     return markTaskDead(tx, taskId, reason, opts);
   });
+  if (marked) await killCliSandboxesForTask(taskId);
   if (marked) await resyncAfterTaskEnd(db, taskId);
 }
 
@@ -1658,8 +1689,11 @@ export async function handleResult(
   ctx: ResolvedTaskContext,
   stepId: string,
   result: AdvanceStepResult,
+  opts: { redrive?: boolean } = {},
 ): Promise<void> {
   const stepDef = requireTaskStep(ctx, stepId);
+  // A first pass appends; only a re-driven hand-off can repeat the events its pass already wrote.
+  const record = opts.redrive ? appendEventOnce : appendEvent;
   // The pass ran under the epoch its job was picked up at. A Retry, a reset or a cancel that moved
   // the task on while it ran owns the task now, so this result hands nothing off.
   if (result.status !== 'superseded' && (await taskEpochMoved(db, ctx))) {
@@ -1684,8 +1718,9 @@ export async function handleResult(
     }
     case 'done':
     case 'skipped': {
-      await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
+      await record(db, ctx.taskId, result.row.id, `step.${result.status}`, {
         stepId,
+        endedAt: endedAtOf(result.row),
       });
       // A fan-out step DEGRADES on a dead agent rather than failing (a reviewer that died
       // is not evidence the code is wrong), so its budget kills would otherwise leave no
@@ -1822,10 +1857,11 @@ export async function handleResult(
         columns: { maxFixRounds: true },
       });
       const cap = taskRow?.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
-      await appendEvent(db, ctx.taskId, result.row.id, 'step.loop_back', {
+      await record(db, ctx.taskId, result.row.id, 'step.loop_back', {
         stepId,
         sourceStepId: result.sourceStepId,
         round: nextRound,
+        endedAt: endedAtOf(result.row),
       });
       // Oscillation guard: before the round cap, catch a non-converging loop (two checks
       // with contradictory criteria ping-ponging) and escalate to the SAME Continue/Accept/
@@ -2026,11 +2062,12 @@ export async function handleResult(
       // preserved, per-card timer, terminal re-opens on the fresh row) — mirrors loop_back.
       const selfLoop = result.targetStepId === result.sourceStepId;
       const targetRound = selfLoop ? result.row.round : result.row.round + 1;
-      await appendEvent(db, ctx.taskId, result.row.id, 'step.revise', {
+      await record(db, ctx.taskId, result.row.id, 'step.revise', {
         stepId,
         sourceStepId: result.sourceStepId,
         targetStepId: result.targetStepId,
         round: targetRound,
+        endedAt: endedAtOf(result.row),
       });
       const reset = await resetStepAndDownstream(
         db,
@@ -2234,6 +2271,7 @@ async function handleStartTask(
       unresolved: err.ids,
       statuses: STARTABLE_TASK_STATUSES,
     });
+    if (marked) await killCliSandboxesForTask(ctx.taskId);
     if (marked) await resyncAfterTaskEnd(db, ctx.taskId);
     return;
   }
@@ -2296,6 +2334,10 @@ async function handleStartTask(
   // too: a pass a Stop cut off can still be on the step when a Retry queues this START.
   const release = await takeStepHold(`${ctx.taskId}:${first.metadata.id}:0`);
   try {
+    // The task is live, so a deactivation must count it; one already under way is waited out.
+    const moduleDeactivation = await moduleDeactivationMessage(db, first.metadata.id, {
+      lock: true,
+    });
     const providers = await loadProviders(db, ctx.userId);
     const result = await advanceStep({
       db,
@@ -2311,6 +2353,7 @@ async function handleStartTask(
       providers,
       deps: workerDeps,
       epoch: ctx.orchestrationEpoch,
+      moduleDeactivation,
     });
     await handleResult(db, ctx, first.metadata.id, result);
   } finally {
@@ -2605,7 +2648,7 @@ async function handleAdvanceStep(
     if (gate) {
       await resolveFixLoopGate(db, ctx, existing, gate.action, round, gate.instruction);
     } else if (redriven) {
-      await handleResult(db, ctx, payload.stepId, redriven);
+      await handleResult(db, ctx, payload.stepId, redriven, { redrive: true });
     }
     return;
   }
@@ -2630,7 +2673,14 @@ async function handleAdvanceStep(
   // Don't re-run it; advance to the next step from the registry run list (the api
   // can't see unmaterialized future steps to compute the next step itself).
   if (existing?.status === 'skipped') {
-    await handleResult(db, ctx, payload.stepId, { status: 'skipped', row: existing });
+    // The row is terminal before any delivery hands it off, so every delivery may repeat the event.
+    await handleResult(
+      db,
+      ctx,
+      payload.stepId,
+      { status: 'skipped', row: existing },
+      { redrive: true },
+    );
     return;
   }
 

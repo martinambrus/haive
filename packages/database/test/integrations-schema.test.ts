@@ -58,6 +58,64 @@ describe('integration tables', () => {
     expect(pk?.columns.map((c) => c.name)).toEqual(['user_id', 'provider_id']);
   });
 
+  it('keeps the choices of a task per category, and an account gone leaves the provider', () => {
+    const config = getTableConfig(schema.taskIntegrationChoices);
+    expect(config.name).toBe('task_integration_choices');
+    expect(config.columns.map((c) => c.name)).toEqual([
+      'task_id',
+      'category_id',
+      'provider_id',
+      'connection_id',
+      'updated_at',
+    ]);
+    expect(config.primaryKeys[0]?.columns.map((c) => c.name)).toEqual(['task_id', 'category_id']);
+    const references = config.foreignKeys.map((fk) => ({
+      from: fk.reference().columns.map((c) => c.name),
+      to: getTableConfig(fk.reference().foreignTable).name,
+      onDelete: fk.onDelete,
+    }));
+    expect(references).toEqual([
+      { from: ['task_id'], to: 'tasks', onDelete: 'cascade' },
+      { from: ['connection_id'], to: 'integration_connections', onDelete: 'set null' },
+    ]);
+    const providerId = config.columns.find((c) => c.name === 'provider_id');
+    expect(providerId?.notNull).toBe(true);
+  });
+
+  it('declares the preferred account and the allow-list switch last, the order a migration appends them in', () => {
+    const preferences = getTableConfig(schema.integrationCategoryPreferences);
+    expect(preferences.columns.at(-1)?.name).toBe('connection_id');
+    const account = preferences.foreignKeys.find((fk) =>
+      fk.reference().columns.some((c) => c.name === 'connection_id'),
+    );
+    expect(getTableConfig(account!.reference().foreignTable).name).toBe('integration_connections');
+    expect(account?.onDelete).toBe('set null');
+    const repositories = getTableConfig(schema.repositories);
+    const switchColumn = repositories.columns.at(-1);
+    expect(switchColumn?.name).toBe('integrations_restricted');
+    expect(switchColumn?.notNull).toBe(true);
+    expect(switchColumn?.default).toBe(false);
+  });
+
+  it('keys a task grant on task and category and a repository grant on repository and account', () => {
+    const indexes = getTableConfig(schema.integrationGrants).indexes.map((i) => i.config);
+    const named = (name: string) => indexes.find((i) => i.name === name);
+    const task = named('integration_grants_task_category_key_idx');
+    expect(task?.unique).toBe(true);
+    expect(task?.columns.map((c) => (c as { name: string }).name)).toEqual([
+      'task_id',
+      'category_id',
+    ]);
+    expect(task?.where).toBeDefined();
+    const repository = named('integration_grants_repository_connection_key_idx');
+    expect(repository?.unique).toBe(true);
+    expect(repository?.columns.map((c) => (c as { name: string }).name)).toEqual([
+      'repository_id',
+      'connection_id',
+    ]);
+    expect(repository?.where).toBeDefined();
+  });
+
   it('stores no call arguments or results', () => {
     const columns = getTableConfig(schema.integrationCalls).columns.map((c) => c.name);
     expect(columns).toEqual([
@@ -72,6 +130,51 @@ describe('integration tables', () => {
       'surface',
       'outcome',
       'created_at',
+      'reason',
+      'duration_ms',
+    ]);
+  });
+
+  it('records an attempt before its outcome, so a crash leaves it running', () => {
+    expect(schema.integrationCallOutcomeEnum.enumValues).toEqual([
+      'ok',
+      'refused',
+      'error',
+      'running',
+    ]);
+  });
+
+  it('finds the calls of one task and of one invocation by index', () => {
+    const indexes = getTableConfig(schema.integrationCalls).indexes.map((i) => i.config);
+    expect(
+      indexes.map((i) => [i.name, i.columns.map((c) => (c as { name: string }).name)]),
+    ).toEqual([
+      ['integration_calls_task_id_idx', ['task_id']],
+      ['integration_calls_cli_invocation_id_idx', ['cli_invocation_id']],
+    ]);
+  });
+
+  it('declares the reason and the duration of a call last, both optional', () => {
+    const [reason, duration] = getTableConfig(schema.integrationCalls).columns.slice(-2);
+    expect([reason?.name, reason?.columnType, reason?.notNull]).toEqual([
+      'reason',
+      'PgVarchar',
+      false,
+    ]);
+    expect((reason as { length?: number }).length).toBe(64);
+    expect([duration?.name, duration?.columnType, duration?.notNull]).toEqual([
+      'duration_ms',
+      'PgInteger',
+      false,
+    ]);
+  });
+
+  it('declares the integrations a CLI run was given last on the invocation, optional', () => {
+    const last = getTableConfig(schema.cliInvocations).columns.at(-1);
+    expect([last?.name, last?.columnType, last?.notNull]).toEqual([
+      'integrations',
+      'PgJsonb',
+      false,
     ]);
   });
 });

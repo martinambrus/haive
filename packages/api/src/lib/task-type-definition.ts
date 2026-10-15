@@ -7,18 +7,16 @@ import {
   workflowTypeSchema,
 } from '@haive/shared';
 import {
-  composableStepEntrySchema,
   mergePromptStepCatalog,
   moduleIdsOfTaskType,
   parsePromptSteps,
   promptStepId,
   resolveTaskTypeAvailability,
-  type ComposableStepEntry,
   type CompositionIssue,
-  type PromptStepEntry,
   type TaskTypeModuleRef,
   type TaskTypeModuleState,
 } from '@haive/shared/modularity';
+import { readStepCatalog } from '@haive/shared/modularity-server';
 import { HttpError } from '../context.js';
 
 const BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(schema.workflowTypeEnum.enumValues);
@@ -57,7 +55,7 @@ export function acceptsSavedDatabase(slug: string, restores: boolean): boolean {
 export interface TaskTypeDefinitionForCreate {
   runListSnapshot: string[] | null;
   /** The type's prompt steps by step id, only those in the snapshot; the task keeps this copy. */
-  customSteps: Record<string, PromptStepEntry> | null;
+  customSteps: Record<string, unknown> | null;
   requiresRepository: boolean;
   /** True when a SEEDED definition needs no repository, so the task records whether it was anchored. */
   repoOptional: boolean;
@@ -87,28 +85,6 @@ const unseededBuiltin = (slug: string): TaskTypeDefinitionForCreate => ({
 
 function describeIssue(issue: CompositionIssue): string {
   return 'stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind;
-}
-
-async function readCatalog(handle: Pick<Database, 'select'>) {
-  const rows = await handle
-    .select({
-      stepId: schema.stepCatalog.stepId,
-      dispatchesCli: schema.stepCatalog.dispatchesCli,
-      composable: schema.stepCatalog.composable,
-      entry: schema.stepCatalog.entry,
-    })
-    .from(schema.stepCatalog);
-  if (rows.length === 0) return null;
-  const composable = new Map<string, ComposableStepEntry>();
-  for (const row of rows) {
-    const parsed = row.composable ? composableStepEntrySchema.safeParse(row.entry) : null;
-    if (parsed?.success) composable.set(row.stepId, parsed.data);
-  }
-  return {
-    stepIds: new Set(rows.map((r) => r.stepId)),
-    dispatchesCli: new Set(rows.filter((r) => r.dispatchesCli).map((r) => r.stepId)),
-    composable,
-  };
 }
 
 // FOR KEY SHARE on named rows: a deactivate running meanwhile waits, then counts the new task.
@@ -162,8 +138,8 @@ export async function definitionForCreate(
   }
   const modules = await readModuleStates(handle, moduleIdsOfTaskType(def));
   const storedCatalog =
-    def.runListStrategy === 'static' && def.stepIds !== null ? await readCatalog(handle) : null;
-  const catalog = storedCatalog && mergePromptStepCatalog(storedCatalog, def);
+    def.runListStrategy === 'static' && def.stepIds !== null ? await readStepCatalog(handle) : null;
+  const catalog = storedCatalog?.synced ? mergePromptStepCatalog(storedCatalog, def) : null;
   const availability = resolveTaskTypeAvailability({
     definition: def,
     switches: {
@@ -221,9 +197,9 @@ export async function definitionForCreate(
   const notBuiltin = def.source !== 'builtin';
   // Prompt steps stay with admin rows; every other trait is shared by module and admin rows.
   const promptEntries =
-    def.source === 'admin' ? Object.values(parsePromptSteps(def.promptSteps)) : [];
+    def.source === 'admin' ? Object.entries(parsePromptSteps(def.promptSteps)) : [];
   // Every prompt step dispatches a CLI, which the stored entries prove without a synced catalog.
-  const promptIds = new Set(promptEntries.map((entry) => promptStepId(def.slug, entry.slug)));
+  const promptIds = new Set(promptEntries.map(([, entry]) => promptStepId(def.slug, entry.slug)));
   let snapshot = def.runListStrategy === 'static' ? def.stepIds : null;
   if (
     notBuiltin &&
@@ -234,10 +210,11 @@ export async function definitionForCreate(
     snapshot = [MODEL_HEALTH_STEP_ID, ...snapshot];
   }
   const has = (id: string) => snapshot?.includes(id) === true;
-  const customSteps: Record<string, PromptStepEntry> = {};
-  for (const entry of promptEntries) {
+  const customSteps: Record<string, unknown> = {};
+  for (const [key, entry] of promptEntries) {
     const id = promptStepId(def.slug, entry.slug);
-    if (has(id)) customSteps[id] = entry;
+    // As stored: the parsed copy drops a tool that no longer parses, which a task must still name.
+    if (has(id)) customSteps[id] = def.promptSteps[key];
   }
   return {
     runListSnapshot: snapshot,

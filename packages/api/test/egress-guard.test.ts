@@ -810,6 +810,16 @@ describe('guardedGet', () => {
       expect(connections).toBe(0);
     });
 
+    it('reports a name lookup that timed out by itself as request-timeout, as the deadline does', async () => {
+      const timedOut = Object.assign(new Error('queryA ETIMEOUT'), { code: dns.TIMEOUT });
+
+      const error = await refusal(get('/', { resolver: fixed(() => Promise.reject(timedOut)) }));
+
+      expect(error.reason).toBe('request-timeout');
+      expect(error.cause).toBe(timedOut);
+      expect(connections).toBe(0);
+    });
+
     it('counts the TLS handshake in the deadline: a server that accepts and never speaks', async () => {
       const held: net.Socket[] = [];
       const silent = net.createServer((socket) => held.push(socket));
@@ -947,6 +957,15 @@ describe('guardedGet', () => {
       );
 
       expect(error.reason).toBe('request-failed');
+    });
+
+    it('reports a name lookup the nameserver failed as request-failed, with the failure as its cause', async () => {
+      const failure = Object.assign(new Error('queryA ESERVFAIL'), { code: 'ESERVFAIL' });
+
+      const error = await refusal(get('/', { resolver: fixed(() => Promise.reject(failure)) }));
+
+      expect(error.reason).toBe('request-failed');
+      expect(error.cause).toBe(failure);
     });
 
     it('reports a refused connection as request-failed', async () => {
@@ -1405,6 +1424,35 @@ describe('the production entry point', () => {
     expect(cares.cancel).toHaveBeenCalled();
     expect(lookup).not.toHaveBeenCalled();
     expect(promisesLookup).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['request-timeout', dns.TIMEOUT],
+    ['request-failed', 'ENOTFOUND'],
+    ['request-failed', 'ESERVFAIL'],
+  ])('reports %s when both families of a name fail with %s', async (reason, code) => {
+    const first = caresError(code);
+    mockCares({ a: first, aaaa: caresError(code) });
+
+    const error = await refusal(
+      guardedGet(new URL('https://prod.test/'), { timeoutMs: 1500, maxBytes: 4096 }),
+    );
+
+    expect(error.reason).toBe(reason);
+    expect((error.cause as Error).cause).toBe(first);
+  });
+
+  it.each([
+    ['A answers at once, AAAA times out', 'ENODATA', dns.TIMEOUT],
+    ['AAAA answers at once, A times out', dns.TIMEOUT, 'ENODATA'],
+  ])('reports request-timeout when %s', async (_name, a, aaaa) => {
+    mockCares({ a: caresError(a), aaaa: caresError(aaaa) });
+
+    const error = await refusal(
+      guardedGet(new URL('https://prod.test/'), { timeoutMs: 1500, maxBytes: 4096 }),
+    );
+
+    expect(error.reason).toBe('request-timeout');
   });
 
   it('ignores a classifier, a resolver or a CA slipped in through its options', async () => {

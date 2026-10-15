@@ -647,9 +647,9 @@ export interface Container {
 }
 
 /** Task types the browser can encounter. A superset of the ones the create-task
- *  form offers: kb_author and the three plan types are spawned by their own
- *  endpoints (they need context the generic form has no field for) but still
- *  appear in the task list and detail views. */
+ *  form offers: kb_author, advisory, type_draft and the plan types are spawned by
+ *  their own endpoints (they need context the generic form has no field for) but
+ *  still appear in the task list and detail views. */
 export type WorkflowType =
   | 'onboarding'
   | 'workflow'
@@ -661,6 +661,7 @@ export type WorkflowType =
   | 'advisory'
   | 'plan_sequence'
   | 'plan_merge'
+  | 'type_draft'
   | (string & {});
 
 /** Execution path chosen at the 00-triage step (workflow tasks). Mirrors

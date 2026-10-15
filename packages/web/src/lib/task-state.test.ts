@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { pausedByLabel, taskBadgeKind, taskMenuKeys, taskStatusWord } from './task-state';
+import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
+import {
+  pausedByLabel,
+  taskBadgeKind,
+  taskClockEndMs,
+  taskMenuKeys,
+  taskStatusWord,
+  taskStoppedAt,
+} from './task-state';
 
 const DEAD_AT = '2026-10-14T10:00:00.000Z';
 const PAUSED_AT = '2026-10-14T09:00:00.000Z';
@@ -135,5 +143,76 @@ describe('pausedByLabel', () => {
     // NEGATIVE CONTROL: a version that always says an administrator fails these two.
     expect(pausedByLabel({ pausedByAdmin: false })).toBe('Paused by you');
     expect(pausedByLabel({})).toBe('Paused by you');
+  });
+});
+
+describe('task clocks', () => {
+  const MIN = 60_000;
+  const NOW = Date.parse('2026-10-14T12:00:00.000Z');
+  const ago = (minutes: number) => new Date(NOW - minutes * MIN).toISOString();
+  type Clock = { startedAt: string; completedAt: string | null; deadAt: string | null };
+  const alive: Clock = { startedAt: ago(20), completedAt: null, deadAt: null };
+  const dead: Clock = { ...alive, deadAt: ago(10) };
+  // Open for 20 minutes, the last 15 of them waiting at a gate.
+  const gate: TaskTimingStep[] = [
+    {
+      startedAt: ago(20),
+      endedAt: null,
+      idleMs: 0,
+      userActiveMs: 0,
+      waitingStartedAt: ago(15),
+      status: 'waiting_form',
+    },
+  ];
+  // What the task page shows: the wall clock, and the open step and wait billed up to the same end.
+  const reading = (task: Clock, nowMs: number) => {
+    const endMs = taskClockEndMs(task, nowMs);
+    return { wallMs: endMs - Date.parse(task.startedAt), ...computeTaskTiming(gate, endMs) };
+  };
+
+  it('reads an alive task up to now', () => {
+    expect(reading(alive, NOW)).toEqual({
+      wallMs: 20 * MIN,
+      workMs: 5 * MIN,
+      idleMs: 15 * MIN,
+      userActiveMs: 0,
+    });
+    expect(reading(alive, NOW + 5 * MIN).wallMs).toBe(25 * MIN);
+    expect(taskStoppedAt(alive)).toBeNull();
+  });
+
+  it.each([-15, 0, 1, 90, 6000])(
+    'stops a dead task at dead_at when now is %i minutes from the reference time',
+    (minutesFromNow) => {
+      expect(reading(dead, NOW + minutesFromNow * MIN)).toEqual({
+        wallMs: 10 * MIN,
+        workMs: 5 * MIN,
+        idleMs: 5 * MIN,
+        userActiveMs: 0,
+      });
+    },
+  );
+
+  it('names dead_at as the instant a dead task stopped', () => {
+    expect(taskStoppedAt(dead)).toBe(dead.deadAt);
+  });
+
+  it('ticks again once the task is revived', () => {
+    const revived = { ...dead, deadAt: null };
+    expect(taskStoppedAt(revived)).toBeNull();
+    expect(reading(revived, NOW).wallMs).toBe(20 * MIN);
+    expect(reading(revived, NOW + 5 * MIN).wallMs).toBe(25 * MIN);
+  });
+
+  it('stops a finished task at completed_at, a dead_at left on the row included', () => {
+    const finished = { ...alive, completedAt: ago(15), deadAt: ago(10) };
+    expect(taskStoppedAt(finished)).toBe(finished.completedAt);
+    expect(reading(finished, NOW).wallMs).toBe(5 * MIN);
+    expect(reading(finished, NOW + 90 * MIN).wallMs).toBe(5 * MIN);
+  });
+
+  it('reads an api that predates dead_at as alive', () => {
+    expect(taskStoppedAt({ completedAt: null })).toBeNull();
+    expect(taskClockEndMs({}, NOW)).toBe(NOW);
   });
 });

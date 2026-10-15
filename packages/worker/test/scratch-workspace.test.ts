@@ -192,4 +192,27 @@ describe('ensureTaskScratchWorkspace', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  // As root every chown succeeds, so only a non-root runner can show the refusal.
+  it.skipIf(process.getuid?.() === 0)(
+    'still creates the workspace where the sandbox user cannot be given it',
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), 'scratch-ensure-'));
+      try {
+        vi.resetModules();
+        vi.doMock('../src/sandbox/sandbox-identity.js', () => ({
+          SANDBOX_UID: process.getuid!() + 1,
+          SANDBOX_GID: process.getgid!() + 1,
+        }));
+        process.env.REPO_STORAGE_ROOT = root;
+        const mod = await import('../src/repo/scratch-workspace.js');
+        const dir = await mod.ensureTaskScratchWorkspace('u-other', TASK);
+        expect(dir).toBe(path.join(root, 'u-other', '_scratch', TASK));
+        expect((await stat(dir)).isDirectory()).toBe(true);
+      } finally {
+        vi.doUnmock('../src/sandbox/sandbox-identity.js');
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

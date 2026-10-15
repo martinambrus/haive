@@ -29,7 +29,10 @@ export function taskScratchSubpath(userId: string, taskId: string): string {
  *  state and should still fail loudly — a workflow run whose repo vanished cannot do anything
  *  useful, and silently handing it an empty directory would turn that into a confusing agent
  *  failure several minutes later. */
-export const REPO_OPTIONAL_BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(['kb_author']);
+export const REPO_OPTIONAL_BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set([
+  'kb_author',
+  'type_draft',
+]);
 
 const BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(knownTaskTypes());
 

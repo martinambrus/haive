@@ -50,6 +50,7 @@ import {
   releaseEmbedModelIfUnused,
 } from '@haive/shared/rag';
 import { getDb } from '../db.js';
+import { recordAuditEvent } from '../lib/audit.js';
 import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
@@ -424,6 +425,12 @@ async function putConfig(c: Context<AppEnv>) {
       d.connectionString.trim(),
       'Global KB external connection string',
     );
+    await recordAuditEvent(getDb(), {
+      actorUserId: c.get('userId'),
+      action: 'global_kb.connection_string.update',
+      targetType: 'global_kb',
+      metadata: { connectionStringSet: true },
+    });
   }
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
 }

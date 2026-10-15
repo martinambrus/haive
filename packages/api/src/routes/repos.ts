@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -594,9 +595,15 @@ repoRoutes.post('/upload/init', async (c) => {
 
   const storageRoot = await ensureUploadsDir(userId);
 
+  const sessionId = randomUUID();
+  const ext = format === 'tar.gz' ? 'tar.gz' : format;
+  const archiveRel = `${uploadsRel(userId)}/${sessionId}.${ext}.partial`;
+  const archivePath = path.join(storageRoot, archiveRel);
+
   const inserted = await db
     .insert(schema.repoUploads)
     .values({
+      id: sessionId,
       userId,
       name: body.name?.trim() || null,
       branch: body.branch?.trim() || 'main',
@@ -605,15 +612,10 @@ repoRoutes.post('/upload/init', async (c) => {
       totalSize: body.totalSize,
       bytesReceived: 0,
       chunkSize: body.chunkSize,
-      archivePath: '',
+      archivePath,
       status: 'uploading',
     })
     .returning();
-  const session = inserted[0]!;
-
-  const ext = format === 'tar.gz' ? 'tar.gz' : format;
-  const archiveRel = `${uploadsRel(userId)}/${session.id}.${ext}.partial`;
-  const archivePath = path.join(storageRoot, archiveRel);
   // `open(path, 'w')` truncated whatever stood at the name, a link included. The name embeds a
   // fresh session id, so exclusive creation is the same outcome for every legitimate call.
   const fh = await openFileNoFollow(storageRoot, archiveRel, 'create-exclusive', {
@@ -621,13 +623,7 @@ repoRoutes.post('/upload/init', async (c) => {
   });
   await fh.close();
 
-  const updated = await db
-    .update(schema.repoUploads)
-    .set({ archivePath, updatedAt: new Date() })
-    .where(eq(schema.repoUploads.id, session.id))
-    .returning();
-
-  return c.json({ session: sessionFromRow(updated[0]!) }, 201);
+  return c.json({ session: sessionFromRow(inserted[0]!) }, 201);
 });
 
 repoRoutes.get('/upload/:id', async (c) => {

@@ -14,6 +14,7 @@ import { registerWorkflowSteps } from './workflow/index.js';
 import { registerKbAuthorSteps } from './kb-author/index.js';
 import { registerRunAppSteps } from './run-app/index.js';
 import { registerPlanSteps } from './plan/index.js';
+import { registerTypeDraftSteps } from './type-draft/index.js';
 
 export {
   registerOnboardingSteps,
@@ -23,6 +24,7 @@ export {
   registerKbAuthorSteps,
   registerRunAppSteps,
   registerPlanSteps,
+  registerTypeDraftSteps,
 };
 
 export function dispatchesCli(def: StepDefinition): boolean {
@@ -46,6 +48,7 @@ export function registerAllSteps(registry: StepRegistry): void {
   registerKbAuthorSteps(registry);
   registerRunAppSteps(registry);
   registerPlanSteps(registry);
+  registerTypeDraftSteps(registry);
   assertProviderSensitiveListInSync(registry);
   assertCliDispatchListInSync(registry);
   assertSkippableListInSync(registry);

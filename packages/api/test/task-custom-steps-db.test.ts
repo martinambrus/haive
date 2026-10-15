@@ -1,6 +1,7 @@
 import { eq, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { customToolSchema, parsePinnedCustomSteps } from '@haive/shared/modularity';
 
 const url = process.env.TASK_CUSTOM_STEPS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/task_custom_steps_test'))
@@ -194,7 +195,9 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
 
     expect(await customStepsText(task.id)).toBe(before);
     const { def: later } = await insertTask();
-    expect(later.customSteps?.[CUSTOM_ID]?.template).toBe('Second {{task.description}}');
+    expect(later.customSteps?.[CUSTOM_ID]).toMatchObject({
+      template: 'Second {{task.description}}',
+    });
   });
 
   it('leaves the pinned prompt bodies out of the task list', async () => {
@@ -312,6 +315,54 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
         steps: { stepId: string; canSkip: boolean }[];
       };
       expect(view.steps.find((s) => s.stepId === WORKTREE)).toMatchObject({ canSkip: true });
+    });
+  });
+
+  describe('a stored prompt step with a tool that no longer parses', () => {
+    const BAD_TYPE = 'tcs-bad-tool';
+    const BAD_ID = `custom.${BAD_TYPE}.review`;
+    const tool = (name: string) =>
+      customToolSchema.parse({
+        name,
+        description: 'Fetches the status.',
+        action: 'http-get',
+        url: 'https://api.example.com/v1/status',
+      });
+    const store = async (tools: unknown[]) => {
+      const stored = { ...promptStep('Check {{task.title}}'), tools };
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: BAD_TYPE,
+        displayName: 'Bad tool',
+        runListStrategy: 'static',
+        stepIds: ['tcs-a', BAD_ID],
+        promptSteps: { review: stored },
+        source: 'admin',
+      });
+      return stored;
+    };
+    const pinnedOf = async (taskId: string) =>
+      JSON.parse((await customStepsText(taskId))!) as Record<string, unknown>;
+
+    it('pins both tools as stored with no invalidTools, and a read of the pin names the broken one', async () => {
+      const stored = await store([
+        tool('good_tool'),
+        { ...tool('bad_tool'), description: 'd'.repeat(1025) },
+      ]);
+      const { task } = await insertTask(BAD_TYPE);
+      const pinned = await pinnedOf(task.id);
+      expect(pinned[BAD_ID]).toEqual(stored);
+      expect(pinned[BAD_ID]).not.toHaveProperty('invalidTools');
+      const read = parsePinnedCustomSteps(pinned)[BAD_ID];
+      expect(read?.tools.map((t) => t.name)).toEqual(['good_tool']);
+      expect(read?.invalidTools).toEqual(['bad_tool']);
+    });
+
+    it('pins a step whose tools all parse as stored, and a read of the pin has no invalidTools', async () => {
+      const stored = await store([tool('good_tool')]);
+      const { task } = await insertTask(BAD_TYPE);
+      const pinned = await pinnedOf(task.id);
+      expect(pinned[BAD_ID]).toEqual(stored);
+      expect(parsePinnedCustomSteps(pinned)[BAD_ID]).not.toHaveProperty('invalidTools');
     });
   });
 });

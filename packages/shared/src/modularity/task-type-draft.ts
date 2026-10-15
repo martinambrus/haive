@@ -2,10 +2,11 @@ import { validateComposition, type CompositionIssue } from './composition.js';
 import { isCustomStepId, type ComposableStepEntry } from './contracts.js';
 import {
   derivePromptStepComposable,
+  parsePromptStepEntry,
   parsePromptTemplate,
-  promptStepEntrySchema,
   promptStepId,
   validatePromptStep,
+  type ParsedPromptStepEntry,
   type PromptStepEntry,
   type PromptStepProblemKind,
 } from './prompt-steps.js';
@@ -15,13 +16,13 @@ import {
   type TaskTypeDefaultsIssue,
 } from './task-types.js';
 
-/** Stored prompt steps by slug; an entry that no longer parses is left out, so its id reads as a missing step. */
-export function parsePromptSteps(raw: unknown): Record<string, PromptStepEntry> {
-  const out: Record<string, PromptStepEntry> = {};
+/** Stored prompt steps by slug; an entry whose fields other than its tools no longer parse is left out, so its id reads as a missing step. */
+export function parsePromptSteps(raw: unknown): Record<string, ParsedPromptStepEntry> {
+  const out: Record<string, ParsedPromptStepEntry> = {};
   if (typeof raw !== 'object' || raw === null) return out;
   for (const [slug, value] of Object.entries(raw)) {
-    const parsed = promptStepEntrySchema.safeParse(value);
-    if (parsed.success) out[slug] = parsed.data;
+    const parsed = parsePromptStepEntry(value);
+    if (parsed !== null) out[slug] = parsed;
   }
   return out;
 }
@@ -175,13 +176,15 @@ export function pickTaskTypeDraft(raw: unknown): {
   return { draft, dropped };
 }
 
-export interface TaskTypeDraftWarning {
-  kind: 'persona-not-in-catalog';
-  stepId: string;
-  raw: string;
-  start: number;
-  message: string;
-}
+export type TaskTypeDraftWarning =
+  | {
+      kind: 'persona-not-in-catalog';
+      stepId: string;
+      raw: string;
+      start: number;
+      message: string;
+    }
+  | { kind: 'slug-taken'; slug: string; message: string };
 
 /** A schema failure is {path, message} as the error handler returns it; the rest are the stages' own issues. */
 export type TaskTypeDraftIssue =
@@ -212,11 +215,23 @@ function personaWarnings(
   return warnings;
 }
 
+function slugWarnings(slug: string, takenSlugs: Iterable<string>): TaskTypeDraftWarning[] {
+  if (!new Set(takenSlugs).has(slug)) return [];
+  return [
+    {
+      kind: 'slug-taken',
+      slug,
+      message: `The slug ${slug} belongs to a task type that already exists.`,
+    },
+  ];
+}
+
 /** The checks POST /admin/task-types runs, in its order and stopping at the first stage that finds a problem. */
 export function validateTaskTypeDraft(
   draft: unknown,
   catalog: CatalogSets,
   personaIds?: Iterable<string>,
+  takenSlugs?: Iterable<string>,
 ): { issues: TaskTypeDraftIssue[]; warnings: TaskTypeDraftWarning[] } {
   const parsed = customTaskTypeCreateSchema.safeParse(draft);
   if (!parsed.success) {
@@ -225,8 +240,10 @@ export function validateTaskTypeDraft(
   }
   const body = parsed.data;
   const promptSteps = body.promptSteps ?? {};
-  const warnings =
-    personaIds === undefined ? [] : personaWarnings(body.slug, promptSteps, personaIds);
+  const warnings = [
+    ...(takenSlugs === undefined ? [] : slugWarnings(body.slug, takenSlugs)),
+    ...(personaIds === undefined ? [] : personaWarnings(body.slug, promptSteps, personaIds)),
+  ];
   const promptIssues = checkPromptSteps(body, promptSteps, catalog);
   if (promptIssues.length > 0) return { issues: promptIssues, warnings };
   const { composable } = mergePromptStepCatalog(catalog, {
@@ -241,3 +258,30 @@ export function validateTaskTypeDraft(
   if (issues.length > 0) return { issues, warnings };
   return { issues: validateTaskTypeDefaults(body, composable), warnings };
 }
+
+export const TYPE_DRAFT_MESSAGE_EVENT = 'type_draft.message';
+export const TYPE_DRAFT_MESSAGE_MAX_CHARS = 8_000;
+export const TYPE_DRAFT_STATE_MAX_BYTES = 64 * 1024;
+
+export interface TypeDraftUserTurn {
+  role: 'user';
+  body: string;
+  /** The editor's state when the message was sent, cut to the draftable keys. */
+  draft?: Record<string, unknown>;
+  draftIgnored?: 'not-json' | 'too-large';
+}
+
+export interface TypeDraftAssistantTurn {
+  role: 'assistant';
+  body: string;
+  draft: Record<string, unknown> | null;
+  issues: TaskTypeDraftIssue[];
+  warnings: TaskTypeDraftWarning[];
+  /** The keys of the agent's draft that were cut because the editor cannot show them. */
+  dropped: string[];
+  repaired?: true;
+  /** Set when the agent's reply could not be read, so the turn has no draft. */
+  error?: string;
+}
+
+export type TypeDraftTurn = TypeDraftUserTurn | TypeDraftAssistantTurn;

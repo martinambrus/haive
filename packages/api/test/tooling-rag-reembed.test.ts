@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   internalExists: false,
   tableMissing: false,
   onStatement: null as ((statement: string) => void) | null,
+  logged: [] as unknown[][],
 }));
 
 const lockFake = vi.hoisted(() => ({ value: undefined as unknown }));
@@ -28,6 +29,12 @@ vi.mock('../src/middleware/auth.js', () => ({
     await next();
   },
 }));
+vi.mock('@haive/shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared')>();
+  const record = (...args: unknown[]) => void h.logged.push(args);
+  const child = { trace: record, debug: record, info: record, warn: record, error: record };
+  return { ...actual, logger: Object.create(actual.logger, { child: { value: () => child } }) };
+});
 vi.mock('@haive/shared/rag', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/rag')>();
   const { createFakeRagLock } = await import('./rag-lock-fake.js');
@@ -121,6 +128,7 @@ function setup(
     repositories: schema.repositories,
     projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
+    auditEvents: schema.auditEvents,
   });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -148,6 +156,7 @@ function setup(
   h.awaitingSeq = [];
   h.probeError = false;
   h.onStatement = null;
+  h.logged = [];
   return fake;
 }
 
@@ -577,5 +586,136 @@ describe('a RAG embed action while a sync of the repository runs', () => {
     h.batches = [0];
 
     expect((await retry()).status).toBe(200);
+  });
+});
+
+describe('saving or clearing the app-login credentials of a repository', () => {
+  const STORE = 'postgres://rag:rag@127.0.0.1:1/rag';
+  const USERNAME = 'audit-user-7f3';
+  const PASSWORD = 'audit-pass-9c1';
+  const ACTION = 'repository.app_auth.update';
+
+  const patch = (body: Record<string, unknown>) =>
+    app.request(`/${REPO}/tooling`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  const spySecrets = () => ({
+    set: vi.spyOn(userSecretsService, 'set').mockResolvedValue(undefined as never),
+    remove: vi.spyOn(userSecretsService, 'delete').mockResolvedValue(undefined as never),
+  });
+
+  const auditLines = () =>
+    h.logged
+      .map(([fields]) => fields as { action?: string } | undefined)
+      .filter((fields) => fields?.action === ACTION);
+
+  const auditedMetadata = (fake: ReturnType<typeof setup>) => {
+    const rows = fake.rows(schema.auditEvents);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      actorUserId: USER,
+      action: ACTION,
+      targetType: 'repository',
+      targetId: REPO,
+    });
+    return rows[0]!.metadata;
+  };
+
+  it('records one event naming both fields as set, and neither value', async () => {
+    const fake = setup(STORE);
+    const { set, remove } = spySecrets();
+
+    const res = await patch({ appAuthUsername: USERNAME, appAuthPassword: PASSWORD });
+
+    expect(res.status).toBe(200);
+    expect(set.mock.calls).toEqual([
+      [USER, `app_auth:${REPO}:username`, USERNAME, 'App login username'],
+      [USER, `app_auth:${REPO}:password`, PASSWORD, 'App login password'],
+    ]);
+    expect(remove).not.toHaveBeenCalled();
+    expect(auditedMetadata(fake)).toStrictEqual({ username: 'set', password: 'set' });
+    expect(auditLines()).toEqual([
+      expect.objectContaining({
+        actorUserId: USER,
+        targetType: 'repository',
+        targetId: REPO,
+        username: 'set',
+        password: 'set',
+      }),
+    ]);
+    for (const value of [USERNAME, PASSWORD]) {
+      expect(JSON.stringify(fake.rows(schema.auditEvents))).not.toContain(value);
+      expect(JSON.stringify(h.logged)).not.toContain(value);
+    }
+  });
+
+  it('records a cleared password as cleared and leaves the untouched username out', async () => {
+    const fake = setup(STORE);
+    const { set, remove } = spySecrets();
+
+    const res = await patch({ appAuthPassword: '' });
+
+    expect(res.status).toBe(200);
+    expect(remove.mock.calls).toEqual([[USER, `app_auth:${REPO}:password`]]);
+    expect(set).not.toHaveBeenCalled();
+    expect(auditedMetadata(fake)).toStrictEqual({ password: 'cleared' });
+    expect(auditLines()).toEqual([expect.objectContaining({ password: 'cleared' })]);
+  });
+
+  it('records the username it saved when the password write then fails', async () => {
+    const fake = setup(STORE);
+    vi.spyOn(userSecretsService, 'set')
+      .mockResolvedValueOnce(undefined as never)
+      .mockRejectedValueOnce(new Error('secret store unavailable'));
+
+    const res = await patch({ appAuthUsername: USERNAME, appAuthPassword: PASSWORD });
+
+    expect(res.status).toBe(500);
+    expect(auditedMetadata(fake)).toStrictEqual({ username: 'set' });
+  });
+
+  it.each([[{ rtkEnabled: false }], [{ appAuthUsername: null, appAuthPassword: 7 }]])(
+    'records no event when the request sets or clears neither field: %j',
+    async (body) => {
+      const fake = setup(STORE);
+      const { set, remove } = spySecrets();
+
+      const res = await patch(body);
+
+      expect(res.status).toBe(200);
+      expect(set).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      expect(fake.rows(schema.auditEvents)).toEqual([]);
+      expect(auditLines()).toEqual([]);
+    },
+  );
+
+  const refusals: Array<[string, number, () => void]> = [
+    ['the sync lock is held', 409, () => fakeLock.state.held.add(REPO)],
+    ['Redis cannot be reached', 503, () => (fakeLock.state.redisDown = true)],
+    ['Redis does not answer the lock command', 503, () => (fakeLock.state.stalled = true)],
+  ];
+
+  it.each(refusals)('writes no secret and no event when %s', async (_why, status, arrange) => {
+    const fake = setup(STORE, true, true);
+    const before = structuredClone(fake.rows(schema.repositories));
+    const { set, remove } = spySecrets();
+    arrange();
+
+    const res = await patch({
+      ragEmbedAction: 'retry',
+      appAuthUsername: USERNAME,
+      appAuthPassword: '',
+    });
+
+    expect(res.status).toBe(status);
+    expect(fake.rows(schema.repositories)).toEqual(before);
+    expect(set).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(auditLines()).toEqual([]);
   });
 });

@@ -13,7 +13,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  userSecretsService: { get: async () => null },
+  userSecretsService: { get: async () => null, listForUser: async () => [] },
 }));
 
 import { Hono } from 'hono';

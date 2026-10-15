@@ -13,7 +13,9 @@ import {
   diffModuleIntent,
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
+  modulePackageId,
   type ModuleManifest,
+  type ModuleSource,
 } from '@haive/shared/modularity';
 import {
   moduleSettingKey,
@@ -28,6 +30,7 @@ import { getModuleControlQueue, getModuleControlQueueEvents } from '../queues.js
 import { getRedis } from '../redis.js';
 import {
   deactivatedModuleIds,
+  deactivateUrgently,
   isModuleDeactivated,
   liveDependents,
   setModuleActive,
@@ -36,6 +39,7 @@ import { PurgeIncompleteError, purgeModule } from './purge.js';
 
 export type ApiModuleEntry = {
   packageName: string;
+  source?: ModuleSource;
   manifest: unknown;
   routes?: (ctx: ModuleRouteContext) => Hono<AppEnv>;
 };
@@ -47,7 +51,10 @@ export type LoadedApiModule = {
 };
 
 const putBodySchema = z.object({ values: z.record(z.string(), z.unknown()) });
-const patchBodySchema = z.object({ active: z.boolean() }).strict();
+const patchBodySchema = z
+  .object({ active: z.boolean(), mode: z.literal('urgent').optional() })
+  .strict()
+  .refine((body) => body.mode === undefined || !body.active);
 const purgeBodySchema = z.object({ confirm: z.string() });
 const TEARDOWN_WAIT_MS = 120_000;
 
@@ -77,9 +84,9 @@ export async function mountModules(
       );
     }
     const manifest = parsed.data;
-    if (entry.packageName !== `@haive/module-${manifest.id}`) {
+    if (modulePackageId(entry.packageName) !== manifest.id) {
       throw new Error(
-        `Module ${entry.packageName} declares id "${manifest.id}"; its package must be named @haive/module-${manifest.id}`,
+        `Module ${entry.packageName} declares id "${manifest.id}"; its package must be named @haive/module-${manifest.id} or @haive-module/${manifest.id}`,
       );
     }
     if (seen.has(manifest.id)) {
@@ -190,8 +197,28 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
 
   routes.patch('/:id', requireAdmin, async (c) => {
     const id = c.req.param('id');
-    const { active } = patchBodySchema.parse(await c.req.json());
+    const { active, mode } = patchBodySchema.parse(await c.req.json());
     const db = getDb();
+    if (mode === 'urgent') {
+      const urgent = await deactivateUrgently(db, id, c.get('userId'));
+      if (urgent.kind === 'missing') throw new HttpError(404, 'Module not found');
+      await recordAuditEvent(db, {
+        actorUserId: c.get('userId'),
+        action: 'module.deactivate',
+        targetType: 'module',
+        targetId: null,
+        metadata: { moduleId: id, mode, stopped: urgent.stopped.length },
+      });
+      return c.json({
+        moduleId: id,
+        active: false,
+        deactivatedAt: urgent.deactivatedAt.toISOString(),
+        stopped: urgent.stopped,
+        left: urgent.left,
+        failed: urgent.failed,
+        capped: urgent.capped,
+      });
+    }
     const result = await setModuleActive(db, id, active);
     if (result.kind === 'missing') throw new HttpError(404, 'Module not found');
     if (result.kind === 'open') {
@@ -200,6 +227,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
           error: 'Live tasks still use this module. Finish or cancel them first.',
           code: 'module_tasks_open',
           tasks: result.tasks,
+          capped: result.capped,
         },
         409,
       );
@@ -296,13 +324,14 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       throw new HttpError(409, 'The api or the worker still loads this module', 'module_loaded');
     }
     const db = getDb();
-    const tasks = await liveDependents(db, id, true);
+    const { tasks, capped } = await liveDependents(db, id, true);
     if (tasks.length > 0) {
       return c.json(
         {
           error: 'Live tasks still use this module, dead ones included. Cancel them first.',
           code: 'module_tasks_open',
           tasks,
+          capped,
         },
         409,
       );

@@ -50,6 +50,8 @@ import {
 import { buildSequencePrompt } from './plan/03-plan-sequence.js';
 import { buildCoverageRepairPrompt } from './plan/02-plan-coverage.js';
 import { appAuthPromptLines } from './workflow/_app-auth.js';
+import { CORE_COMPOSABLE_STEPS } from '../composable-core.js';
+import { collectPersonas } from './type-draft/01-type-draft.js';
 
 /**
  * Verification item 2's tripwire: which BUILT-IN prompts name an agent directory once Haive's own
@@ -980,6 +982,8 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
     'text house rules read file paths from, never sent to a CLI',
   'step-engine/steps/workflow/_rag-usage.ts#buildRagUsagePrompt':
     '13-pr-wait llm builder, already scanned through the registry',
+  'step-engine/steps/type-draft/_type-draft.ts#buildDraftPrompt':
+    '01-type-draft llm builder, already scanned through the registry',
   'cli-adapters/antigravity.ts#antigravityStdinPrompt':
     'wraps an already-built prompt for stdin; adds no text of its own',
   'cli-adapters/prompt-delivery.ts#deliverPrompt':
@@ -1036,6 +1040,38 @@ const FIX_GUIDANCE_FIXTURE = 'Validate each finding against the code before you 
  * parameter is invisible to it (`lensesForLevel(d.level)` was found by review, not by this), and a
  * `typeof x === 'string'` guard is a false positive.
  */
+const TYPE_DRAFT_SAMPLE = {
+  slug: 'todo-audit',
+  displayName: 'TODO audit',
+  requiresRepository: true,
+  stepIds: ['custom.todo-audit.list-todos'],
+  promptSteps: {
+    'list-todos': {
+      slug: 'list-todos',
+      title: 'List TODO comments',
+      template: 'List every TODO comment in the repository.',
+      capabilities: ['tool_use'],
+      timeoutMs: 600_000,
+    },
+  },
+};
+
+function typeDraftFixture(): Record<string, unknown> {
+  const registry = bootRegistry();
+  return {
+    steps: CORE_COMPOSABLE_STEPS.map((entry) => ({
+      entry,
+      description: registry.get(entry.stepId)?.metadata.description ?? '',
+    })),
+    personas: collectPersonas(),
+    takenSlugs: ['onboarding', 'workflow'],
+    transcript: [{ role: 'user', body: 'Make a type that lists TODO comments.' }],
+    pendingQuestion: 'Make a type that lists TODO comments.',
+    currentDraft: null,
+    repairPending: null,
+  };
+}
+
 const DETECT_VARIANTS: Record<
   string,
   Array<{ suffix: string; fields: Record<string, unknown> }>
@@ -1077,6 +1113,40 @@ const DETECT_VARIANTS: Record<
         fixIsHuman: true,
         fixMarked: true,
         fixGuidance: FIX_GUIDANCE_FIXTURE,
+      },
+    },
+  ],
+  // The arms the proxy cannot choose between, over the real catalog and personas.
+  '01-type-draft': [
+    { suffix: ', first message', fields: typeDraftFixture() },
+    {
+      suffix: ', editor state',
+      fields: { ...typeDraftFixture(), currentDraft: { from: 'editor', draft: TYPE_DRAFT_SAMPLE } },
+    },
+    {
+      suffix: ', last agent draft',
+      fields: {
+        ...typeDraftFixture(),
+        transcript: [
+          { role: 'user', body: 'Make a type that lists TODO comments.' },
+          { role: 'assistant', body: 'Here is a draft.' },
+          { role: 'user', body: 'Add a step that rates them.' },
+        ],
+        pendingQuestion: 'Add a step that rates them.',
+        currentDraft: { from: 'assistant', draft: TYPE_DRAFT_SAMPLE },
+      },
+    },
+    {
+      suffix: ', repair',
+      fields: {
+        ...typeDraftFixture(),
+        repairPending: {
+          reply: 'Here is a draft.',
+          draft: TYPE_DRAFT_SAMPLE,
+          issues: [{ kind: 'unknown-step', index: 1, stepId: 'no-such-step' }],
+          warnings: [],
+          dropped: [],
+        },
       },
     },
   ],
@@ -1659,7 +1729,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(194);
+    ).toBe(198);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -1852,6 +1922,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
       ['05a-resolve-spec-warnings', AUTHORING, REVIEWING],
       ['08b-test-management', ACTING, REVIEWING],
       ['01-plan-chat', AUTHORING, REVIEWING],
+      ['01-type-draft', AUTHORING, REVIEWING],
       ['custom prompt step (read)', ANSWER, REVIEWING],
       ['custom prompt step (write)', ACTING, REVIEWING],
     ] as const) {

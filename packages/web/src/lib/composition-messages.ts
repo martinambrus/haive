@@ -378,7 +378,7 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
     case 'tool-name-duplicate':
       return `${issue.raw ? `Two tools are named ${inlineCode(issue.raw)}` : 'Two tools have the same name'}; give each tool in a step its own name.`;
     case 'tool-description-invalid':
-      return `${tool} needs a description of 1 to ${CUSTOM_TOOL_DESCRIPTION_MAX_LENGTH} characters with no control characters, so the agent knows when to call it.`;
+      return `${tool} needs a description of 1 to ${CUSTOM_TOOL_DESCRIPTION_MAX_LENGTH} characters with no control or invisible characters, so the agent knows when to call it.`;
     case 'tool-url-invalid':
       return `${tool} has a URL that is not valid: it must be one https:// address of at most ${CUSTOM_TOOL_URL_MAX_LENGTH} characters, with no spaces, control characters, backslashes or stray braces.`;
     case 'tool-url-not-https':

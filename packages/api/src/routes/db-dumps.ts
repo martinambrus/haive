@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono } from 'hono';
 import { eq, and } from 'drizzle-orm';
@@ -98,35 +99,30 @@ dbDumpRoutes.post('/upload/init', async (c) => {
 
   const anchor = await ensureUploadsDir(userId);
 
+  const sessionId = randomUUID();
+  const ext = dumpDiskExtension(body.filename);
+  const dumpRel = `${uploadsRel(userId)}/db-${sessionId}.${ext}.partial`;
+  const dumpPath = path.join(anchor, dumpRel);
+
   const inserted = await db
     .insert(schema.dbUploads)
     .values({
+      id: sessionId,
       userId,
       filename: body.filename,
       dumpFormat: format,
       totalSize: body.totalSize,
       chunkSize: body.chunkSize,
-      dumpPath: '',
+      dumpPath,
       status: 'uploading',
     })
     .returning();
-  const session = inserted[0]!;
-
-  const ext = dumpDiskExtension(body.filename);
-  const dumpRel = `${uploadsRel(userId)}/db-${session.id}.${ext}.partial`;
-  const dumpPath = path.join(anchor, dumpRel);
   // `open(path, 'w')` truncated whatever stood at the name, a link included. The name embeds a
   // fresh session id, so exclusive creation is the same outcome for every legitimate call.
   const fh = await openFileNoFollow(anchor, dumpRel, 'create-exclusive', { fileMode: 0o644 });
   await fh.close();
 
-  const updated = await db
-    .update(schema.dbUploads)
-    .set({ dumpPath, updatedAt: new Date() })
-    .where(eq(schema.dbUploads.id, session.id))
-    .returning();
-
-  return c.json({ session: sessionFromRow(updated[0]!) }, 201);
+  return c.json({ session: sessionFromRow(inserted[0]!) }, 201);
 });
 
 dbDumpRoutes.get('/upload/:id', async (c) => {

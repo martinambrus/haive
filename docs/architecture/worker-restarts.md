@@ -112,6 +112,14 @@ failure after it was sent, such as a Stop, keeps it out. `advanceStep`'s own `do
 is left as it is: the START path that reaches it has no moved-chain check, so a verdict re-driven
 there could bump a round.
 
+The re-drive records the step's end-of-step event (`step.done`, `step.skipped`, `step.loop_back` or
+`step.revise`) only when the pass it repeats did not. Each of those events carries the row's
+`ended_at` as `endedAt`, which names the pass, since a Retry clears it and the rerun sets a new one;
+on the re-drive path the event is appended only when no event of that type for that row carries the
+same stamp (`appendEventOnce`). A first pass always appends, and a missing stamp never matches.
+Before this, a job that died after the event and before the hand-off left two events for one end,
+and the statistics count them.
+
 **A step's advances run one at a time.** A continuation leaves the row `waiting_cli` through
 apply, and a fan-out's agents each queue an advance as they finish, so two advances of one step can
 both reach apply. `holdStepAdvance` (`task-queue.ts`) holds each task, step and round to one advance
@@ -236,3 +244,40 @@ invocation unnecessary. `resolveLlmPhase` then returns null output to apply
 before constructing the prompt or reserving a run. RAG finalization uses this
 when a parked PR's current history has no classifiable evidence; its initial
 `skipIf` must still allow refresh because reopening can have added queries.
+
+## Dead tasks
+
+A task is **dead** when its data names a step this install no longer registers: a module was removed, or a step its
+run list names went away (`UnresolvedStepError`). Dead is neither failed nor completed. `markTaskDead`
+(`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends `task.dead`
+(`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and otherwise tears nothing down, so
+a revive finds the task as it was. The api refuses every advancing action on a dead task with 409 `task_dead`
+(`api/src/lib/task-dead.ts`); Cancel stays.
+
+**What marks it.** At boot, `reconcileDeadTasks` (`queues/dead-task-boot.ts`) runs after the orphaned jobs are handed
+back and before orphaned steps are recovered; it checks every live task that has a run-list snapshot and marks one that
+names a missing step. At run time the hand-off marks a task whose current or next step does not resolve. A task with no
+snapshot (the dynamic types) is only ever marked at run time.
+
+**What revives it.** The same boot pass revives a dead task once what it was missing resolves again: a snapshot task
+when its whole run list does, a snapshot-less one when the step ids its last `task.dead` event named and its current
+step do. Judging a snapshot-less task by its current step alone revived one whose death named a step that was still
+missing, and its first job killed it again on every boot. `reviveDeadTask` clears the mark under the epoch
+compare-and-swap, records `task.revived`, and enqueues the job the task's status is owed: a start for a queued task,
+an advance for a running one, none for a form that is still parked.
+
+**Runs.** cli-exec ends a dead task's run instead of starting it (ended, superseded, exit 137): one dispatched after
+the mark, or requeued at run time, would otherwise still spend a CLI call. A run already started when the mark lands
+is superseded with the rest, and once the mark has committed its caller removes the task's CLI sandboxes
+(`killCliSandboxesForTask`, the best-effort kill Stop uses), so the agent stops spending too. The kill touches no merge
+state: an open merge stays open, as after Stop. A settled dead task's runtime runner can be preempted on
+demand, like a paused one's, instead of waiting for the grace sweep. After a mark lands the pass resyncs the project
+state (`resyncAfterTaskEnd`), as every other end of a task does.
+
+**Admission.** A dead task keeps its admission slot (one live onboarding or upgrade per repository): it can revive, and
+a second one started beside it would leave two live after the revive. Cancelling it frees the slot. It holds no
+checkout, so the checkout-holder checks skip it.
+
+**Display.** A dead task reads as stopped, not running. The Running and "Waiting for slot" filters leave it out, its
+clocks and its list row's timing stop at `dead_at`, it shows no slot wait, and an open plan chat or merge panel
+refreshes once when it first sees the task dead, then re-checks every 30 s so a revive is noticed.

@@ -36,6 +36,7 @@ import {
   normalizeReviewDimensionIds,
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
+import { recordAuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -467,6 +468,12 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
   const versionMap = await loadToolVersions(db);
   const versionsFor = (tool: ToolName): string[] => versionMap.get(tool)?.versions ?? [];
 
+  const storedKeys = new Set(
+    (await userSecretsService.listForUser(userId)).map((secret) => secret.keyName),
+  );
+  const appAuthUsernameSet = storedKeys.has(`app_auth:${repositoryId}:username`);
+  const appAuthPasswordSet = storedKeys.has(`app_auth:${repositoryId}:password`);
+
   const lspOptions = LSP_SERVER_OPTIONS.map((o) => {
     const tool = LSP_KEY_TO_TOOL[o.value]!;
     const meta = TOOL_INSTALL_METADATA[tool];
@@ -494,10 +501,9 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     appAuth: repo.appAuth ?? null,
     // Whether credentials exist, never what they are. The password is in the encrypted
     // secret store precisely so it never travels back out over an API.
-    appAuthCredentialsSet: Boolean(
-      (await userSecretsService.get(userId, `app_auth:${repositoryId}:username`)) &&
-      (await userSecretsService.get(userId, `app_auth:${repositoryId}:password`)),
-    ),
+    appAuthUsernameSet,
+    appAuthPasswordSet,
+    appAuthCredentialsSet: appAuthUsernameSet && appAuthPasswordSet,
     prWorkflowEnabled: repo.prWorkflowEnabled,
     stepGuidanceEnabled: repo.stepGuidanceEnabled,
     // RAG embedding health. `ragEmbedDegradedAt` is the structural flag the page
@@ -795,15 +801,30 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     // Credentials go to the encrypted per-user store, keyed per repository. An empty
     // string is a deliberate clear; `undefined` leaves the stored value alone, so saving
     // the form without retyping the password does not wipe it.
-    for (const [field, suffix] of [
-      ['appAuthUsername', 'username'],
-      ['appAuthPassword', 'password'],
-    ] as const) {
-      const value = body[field];
-      if (typeof value !== 'string') continue;
-      const key = `app_auth:${repositoryId}:${suffix}`;
-      if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`);
-      else await userSecretsService.delete(userId, key);
+    const appAuthChanges: Record<string, 'set' | 'cleared'> = {};
+    try {
+      for (const [field, suffix] of [
+        ['appAuthUsername', 'username'],
+        ['appAuthPassword', 'password'],
+      ] as const) {
+        const value = body[field];
+        if (typeof value !== 'string') continue;
+        const key = `app_auth:${repositoryId}:${suffix}`;
+        if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`);
+        else await userSecretsService.delete(userId, key);
+        appAuthChanges[suffix] = value ? 'set' : 'cleared';
+      }
+    } finally {
+      // A write that failed after another landed still leaves the one that landed on record.
+      if (Object.keys(appAuthChanges).length > 0) {
+        await recordAuditEvent(db, {
+          actorUserId: userId,
+          action: 'repository.app_auth.update',
+          targetType: 'repository',
+          targetId: repositoryId,
+          metadata: appAuthChanges,
+        });
+      }
     }
 
     // RAG embed-health actions. A re-embed is forced only where hash vectors can

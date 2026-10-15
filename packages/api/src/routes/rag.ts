@@ -329,6 +329,7 @@ export async function executeRagSearch(
   taskId: string,
   query: string,
   topK?: number,
+  scope: 'local' | 'global' | 'all' = 'all',
 ): Promise<RagSearchHit[]> {
   const effectiveTopK = topK ?? DEFAULT_RAG_SEARCH_CONFIG.topK;
   const db = getDb();
@@ -343,7 +344,7 @@ export async function executeRagSearch(
   // ragMode 'none' contributes no local hits; a local failure is still a hard 500
   // (no facet filter here, so the per-repo SQL is identical to before). ---
   let localHits: RagSearchHit[] = [];
-  if (prefs.ragMode !== 'none') {
+  if (scope !== 'global' && prefs.ragMode !== 'none') {
     let conn: RagConnection | null = null;
     try {
       // No type fetch: its query would reject with no caller once the deadline destroys the pool.
@@ -419,7 +420,7 @@ export async function executeRagSearch(
   // failure must never break per-repo retrieval (plan §6.4). ---
   let globalHits: RagSearchHit[] = [];
   let globalBodies = new Map<string, GlobalKbEntryBody>();
-  const globalEnabled = await resolveGlobalKbEnabled(configService);
+  const globalEnabled = scope !== 'local' && (await resolveGlobalKbEnabled(configService));
   if (globalEnabled) {
     try {
       const embedSettings = await resolveGlobalKbSettings();

@@ -274,6 +274,8 @@ export const repositories = pgTable(
     renderContext: jsonb('render_context'),
     /** `{ test?, lint?, typecheck? }`: a key absent is Auto, `null` is Off, a string is a custom command. */
     verifyCommands: jsonb('verify_commands'),
+    /** The switch restricts, not the grant list: with it on, deleting the last listed account leaves none allowed. */
+    integrationsRestricted: boolean('integrations_restricted').notNull().default(false),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),
