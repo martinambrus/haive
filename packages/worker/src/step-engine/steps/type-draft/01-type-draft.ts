@@ -162,6 +162,7 @@ export const typeDraftStep: StepDefinition<TypeDraftDetect, TypeDraftApply> = {
           description:
             'Sent by the task type editor: the draft as it stands there, as JSON. Leave empty when typing here.',
           required: false,
+          hidden: true,
         },
       ],
     };

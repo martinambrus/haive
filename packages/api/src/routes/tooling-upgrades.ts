@@ -801,31 +801,15 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     // Credentials go to the encrypted per-user store, keyed per repository. An empty
     // string is a deliberate clear; `undefined` leaves the stored value alone, so saving
     // the form without retyping the password does not wipe it.
-    const appAuthChanges: Record<string, 'set' | 'cleared'> = {};
-    try {
-      for (const [field, suffix] of [
+    const appAuthWrites = (
+      [
         ['appAuthUsername', 'username'],
         ['appAuthPassword', 'password'],
-      ] as const) {
-        const value = body[field];
-        if (typeof value !== 'string') continue;
-        const key = `app_auth:${repositoryId}:${suffix}`;
-        if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`);
-        else await userSecretsService.delete(userId, key);
-        appAuthChanges[suffix] = value ? 'set' : 'cleared';
-      }
-    } finally {
-      // A write that failed after another landed still leaves the one that landed on record.
-      if (Object.keys(appAuthChanges).length > 0) {
-        await recordAuditEvent(db, {
-          actorUserId: userId,
-          action: 'repository.app_auth.update',
-          targetType: 'repository',
-          targetId: repositoryId,
-          metadata: appAuthChanges,
-        });
-      }
-    }
+      ] as const
+    ).flatMap(([field, suffix]) => {
+      const value = body[field];
+      return typeof value === 'string' ? [{ suffix, value }] : [];
+    });
 
     // RAG embed-health actions. A re-embed is forced only where hash vectors can
     // actually be on disk: leaving lexical-only mode, or an explicit rebuild. A repo
@@ -892,11 +876,28 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         .update(schema.repositories)
         .set(updates)
         .where(eq(schema.repositories.id, repositoryId));
+      for (const { suffix, value } of appAuthWrites) {
+        const key = `app_auth:${repositoryId}:${suffix}`;
+        if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`, tx);
+        else await userSecretsService.delete(userId, key, tx);
+      }
       if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, userId);
       if (PORTABLE_SETTING_UPDATE_KEYS.some((key) => key in updates)) {
         await markProjectStateDirty(tx, repositoryId);
       }
     });
+    if (appAuthWrites.length > 0) {
+      // After the commit: a swallowed audit-insert failure would leave a transaction aborted.
+      await recordAuditEvent(db, {
+        actorUserId: userId,
+        action: 'repository.app_auth.update',
+        targetType: 'repository',
+        targetId: repositoryId,
+        metadata: Object.fromEntries(
+          appAuthWrites.map(({ suffix, value }) => [suffix, value ? 'set' : 'cleared']),
+        ),
+      });
+    }
     // A sync can write fallback rows between the probe and the clear; look once more after it.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
       assertRagLockHeld(lock);

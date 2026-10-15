@@ -711,20 +711,17 @@ describe('tools on a prompt step', () => {
     expect(bad('repo_status')).toBe(false);
   });
 
-  it('refuses a step that carries a valid tool, once, until the worker wires tools', () => {
-    expect(kinds(entry({ tools: [httpTool] }))).toEqual(['tools-not-supported-yet']);
-    expect(kinds(entry({ tools: [ragTool] }))).toEqual(['tools-not-supported-yet']);
-    expect(kinds(entry({ tools: [httpTool, ragTool, named('a'), named('b')] }))).toEqual([
-      'tools-not-supported-yet',
-    ]);
+  it('accepts a step that carries valid tools', () => {
+    expect(kinds(entry({ tools: [httpTool] }))).toEqual([]);
+    expect(kinds(entry({ tools: [ragTool] }))).toEqual([]);
+    expect(kinds(entry({ tools: [httpTool, ragTool, named('a'), named('b')] }))).toEqual([]);
     expect(kinds(entry({ tools: [] }))).toEqual([]);
     expect(kinds(entry())).toEqual([]);
   });
 
-  it('words the refusal in the problem it returns', () => {
-    const [problem] = validatePromptStep(entry({ tools: [httpTool] }), ctx);
-    expect(problem).toMatchObject({ kind: 'tools-not-supported-yet', raw: '', start: 0 });
-    expect(problem!.message).toMatch(/not supported yet/);
+  it('no longer raises tools-not-supported-yet, though the kind stays listed', () => {
+    expect(validatePromptStep(entry({ tools: [httpTool] }), ctx)).toEqual([]);
+    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tools-not-supported-yet');
   });
 
   it('adds the problems of each tool, with the tool name as the raw text', () => {
@@ -741,30 +738,23 @@ describe('tools on a prompt step', () => {
     expect(found.map((p) => [p.kind, p.raw])).toEqual([
       ['tool-url-not-https', 'bad'],
       ['tool-name-reserved', 'rag_search'],
-      ['tools-not-supported-yet', ''],
     ]);
     expect(found.every((p) => p.start === 0 && p.message.length > 0)).toBe(true);
   });
 
   it('puts the list-level problems on the step', () => {
     const nine = Array.from({ length: 9 }, (_, i) => named(`tool_${i}`));
-    expect(kinds(entry({ tools: nine }))).toEqual(['too-many-tools', 'tools-not-supported-yet']);
-    expect(kinds(entry({ tools: [named('a'), named('a')] }))).toEqual([
-      'tool-name-duplicate',
-      'tools-not-supported-yet',
-    ]);
+    expect(kinds(entry({ tools: nine }))).toEqual(['too-many-tools']);
+    expect(kinds(entry({ tools: [named('a'), named('a')] }))).toEqual(['tool-name-duplicate']);
   });
 
   it('checks a rag-query tool against the type the step sits on', () => {
     const project: CustomTool = { ...ragTool, scope: 'project' };
-    expect(kinds(entry({ tools: [project] }))).toEqual(['tools-not-supported-yet']);
+    expect(kinds(entry({ tools: [project] }))).toEqual([]);
     expect(kinds(entry({ tools: [project] }), { ...ctx, requiresRepository: false })).toEqual([
       'tool-scope-needs-repository',
-      'tools-not-supported-yet',
     ]);
-    expect(kinds(entry({ tools: [ragTool] }), { ...ctx, requiresRepository: false })).toEqual([
-      'tools-not-supported-yet',
-    ]);
+    expect(kinds(entry({ tools: [ragTool] }), { ...ctx, requiresRepository: false })).toEqual([]);
   });
 
   it('reports tool problems next to the problems of the template and leaves those alone', () => {
@@ -776,12 +766,7 @@ describe('tools on a prompt step', () => {
       }),
     );
     expect(new Set(found)).toEqual(
-      new Set([
-        'unknown-token',
-        'timeout-out-of-range',
-        'tool-host-not-public',
-        'tools-not-supported-yet',
-      ]),
+      new Set(['unknown-token', 'timeout-out-of-range', 'tool-host-not-public']),
     );
   });
 
@@ -803,9 +788,64 @@ describe('tools on a prompt step', () => {
       'step-token-not-own-line',
     ]);
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tools-not-supported-yet');
+    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tool-no-longer-valid');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tool-url-not-https');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('too-many-tools');
     expect(new Set(PROMPT_STEP_PROBLEM_KINDS).size).toBe(PROMPT_STEP_PROBLEM_KINDS.length);
+  });
+
+  describe('a stored tool that no longer parses', () => {
+    const withInvalid = (invalidTools: string[], over: Partial<PromptStepValidationInput> = {}) =>
+      validatePromptStep(entry({ invalidTools, ...over }), ctx);
+
+    it('raises one problem for each, in order, naming the tool as the raw text', () => {
+      const found = withInvalid(['too_long', '#3', 'too_long']);
+      expect(found.map((p) => [p.kind, p.raw, p.start])).toEqual([
+        ['tool-no-longer-valid', 'too_long', 0],
+        ['tool-no-longer-valid', '#3', 0],
+        ['tool-no-longer-valid', 'too_long', 0],
+      ]);
+      expect(found[0]!.message).toContain('`too_long`');
+      expect(found[1]!.message).toContain('`#3`');
+    });
+
+    it('raises nothing for a step with no invalid tool', () => {
+      expect(withInvalid([])).toEqual([]);
+      expect(validatePromptStep(entry({ tools: [httpTool] }), ctx)).toEqual([]);
+    });
+
+    it('stands beside the problems of the tools that did parse', () => {
+      const found = withInvalid(['stale'], {
+        tools: [{ ...httpTool, url: 'http://api.example.com/v1/repos/{repo}/status' }],
+      });
+      expect(found.map((p) => [p.kind, p.raw])).toEqual([
+        ['tool-url-not-https', 'repo_status'],
+        ['tool-no-longer-valid', 'stale'],
+      ]);
+    });
+
+    it('names at most 8 of them and counts the rest in one problem with no name', () => {
+      const names = Array.from({ length: 12 }, (_, i) => `tool_${i}`);
+      const found = withInvalid(names);
+      expect(found).toHaveLength(9);
+      expect(found.slice(0, 8).map((p) => p.raw)).toEqual(names.slice(0, 8));
+      expect(found[8]).toMatchObject({ kind: 'tool-no-longer-valid', raw: '', start: 0 });
+      expect(found[8]!.message).toContain('4 more');
+    });
+
+    it('cuts a long name to 64 characters and keeps it on one line, in a code span', () => {
+      const [problem] = withInvalid(['x'.repeat(5000)]);
+      expect(problem!.raw.length).toBeLessThanOrEqual(64);
+      expect(problem!.raw.endsWith('…')).toBe(true);
+      expect(problem!.message.length).toBeLessThan(400);
+      const [multiline] = withInvalid(['a\nb\r\nc']);
+      expect(multiline!.raw).toBe('a b c');
+    });
+
+    it('keeps a backtick in a name from closing its code span', () => {
+      const [problem] = withInvalid(['a`b']);
+      expect(problem!.message).toContain('`` a`b ``');
+    });
   });
 });
 

@@ -82,6 +82,7 @@ import {
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
+import { loadTaskStop } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { getTaskQueue } from '../../queues.js';
 import {
@@ -1091,6 +1092,7 @@ taskRoutes.get('/:id', async (c) => {
   return c.json({
     task: taskWithActive,
     dead: await loadTaskDead(db, task),
+    stop: await loadTaskStop(db, task),
     steps,
     upcomingCliSteps,
     providerBreakdown,

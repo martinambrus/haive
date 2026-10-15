@@ -177,7 +177,7 @@ describe('promptStepIssues', () => {
     expect(issues(['04-phase-0b-pre-planning'], { a: entry('a', { template: '' }) })).toEqual([]);
   });
 
-  it('refuses tools for now and names the tool of each tool problem', () => {
+  it('names the tool of each tool problem and raises nothing for a tool that passes', () => {
     const tool: CustomTool = {
       name: 'repo_status',
       description: 'Fetches the status of one repository.',
@@ -191,8 +191,9 @@ describe('promptStepIssues', () => {
     const out = issues(['custom.t.a'], { a: entry('a', { tools: [tool] }) });
     expect(out.map((i) => [i.kind, i.raw, i.stepId])).toEqual([
       ['tool-url-not-https', 'repo_status', 'custom.t.a'],
-      ['tools-not-supported-yet', '', 'custom.t.a'],
     ]);
+    const passing = { ...tool, url: 'https://api.example.com/v1/status' };
+    expect(issues(['custom.t.a'], { a: entry('a', { tools: [passing] }) })).toEqual([]);
   });
 });
 

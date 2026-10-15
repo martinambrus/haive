@@ -1,9 +1,10 @@
 import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import { parseStepId } from '@haive/shared/modularity';
+import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
 import { recordAuditEvent } from '../lib/audit.js';
-import { stopActiveCliInvocations } from '../lib/task-control.js';
+import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
+import { supersedeLiveRuns } from '../lib/task-control.js';
 import { LIVE_TASK_STATES } from '../routes/maintenance.js';
 import { appendTaskEvent } from '../routes/tasks/_helpers.js';
 
@@ -31,17 +32,17 @@ interface UrgentReport {
     killed: number;
     cancelled: number;
     stopped: number;
+    failedAt: string | null;
     eventError?: string;
+    killError?: string;
   }[];
   left: Pick<ModuleDependent, 'id' | 'title' | 'status' | 'currentStepId'>[];
-  failed: { id: string; error: string }[];
+  failed: { id: string; title: string; error: string }[];
   capped: boolean;
 }
 
 export type UrgentDeactivation =
   { kind: 'missing' } | ({ kind: 'ok'; deactivatedAt: Date } & UrgentReport);
-
-const DEPENDENTS_CAP = 200;
 
 export async function deactivatedModuleIds(db: Reader): Promise<Set<string>> {
   const rows = await db
@@ -97,8 +98,11 @@ export async function liveDependents(
   moduleId: string,
   includeDead = false,
 ): Promise<{ tasks: ModuleDependent[]; capped: boolean }> {
-  const rows = await dependentRows(db, moduleId, includeDead).limit(DEPENDENTS_CAP + 1);
-  return { tasks: rows.slice(0, DEPENDENTS_CAP), capped: rows.length > DEPENDENTS_CAP };
+  const rows = await dependentRows(db, moduleId, includeDead).limit(MODULE_DEPENDENTS_CAP + 1);
+  return {
+    tasks: rows.slice(0, MODULE_DEPENDENTS_CAP),
+    capped: rows.length > MODULE_DEPENDENTS_CAP,
+  };
 }
 
 export function setModuleActive(
@@ -132,12 +136,7 @@ export function setModuleActive(
   });
 }
 
-const inModuleStep = (stepId: string | null, moduleId: string): boolean => {
-  const parsed = stepId === null ? null : parseStepId(stepId);
-  return parsed?.kind === 'module' && parsed.moduleId === moduleId;
-};
-
-// starts_with only narrows the rows in SQL; inModuleStep is the exact test.
+// starts_with only narrows the rows in SQL; isStepOfModule is the exact test.
 const dependentsInModuleStep = async (db: Reader, moduleId: string): Promise<ModuleDependent[]> => {
   const rows = await dependentRows(
     db,
@@ -145,10 +144,32 @@ const dependentsInModuleStep = async (db: Reader, moduleId: string): Promise<Mod
     false,
     sql`starts_with(${schema.tasks.currentStepId}, ${`module.${moduleId}.`})`,
   );
-  return rows.filter((row) => inModuleStep(row.currentStepId, moduleId));
+  return rows.filter((row) => isStepOfModule(row.currentStepId, moduleId));
 };
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+// The stop commits before the kill, so a kill that throws is noted on the result, never thrown.
+const stopTask = async (
+  db: Database,
+  taskId: string,
+): Promise<{
+  killed: number;
+  cancelled: number;
+  stopped: number;
+  failedAt: string | null;
+  killError?: string;
+}> => {
+  const counts = await db.transaction((tx) =>
+    supersedeLiveRuns(tx, taskId, { failTask: true, actor: 'admin' }),
+  );
+  try {
+    return { ...counts, killed: await killTaskSandboxesOrThrow(taskId) };
+  } catch (err) {
+    log.error({ err, taskId }, 'sandbox kill for an urgent stop failed');
+    return { ...counts, killed: 0, killError: errorText(err) };
+  }
+};
 
 export async function deactivateUrgently(
   db: Database,
@@ -178,17 +199,18 @@ export async function deactivateUrgently(
 
   const report: UrgentReport = { stopped: [], left: [], failed: [], capped: stamped.capped };
   for (const { id, title, status, ownerId, currentStepId } of stamped.dependents) {
-    if (!inModuleStep(currentStepId, moduleId)) {
+    if (!isStepOfModule(currentStepId, moduleId)) {
       report.left.push({ id, title, status, currentStepId });
       continue;
     }
     try {
-      const result = await stopActiveCliInvocations(db, id, { failTask: true, actor: 'admin' });
+      const { killError, ...result } = await stopTask(db, id);
       if (result.cancelled === 0 && result.stopped === 0) {
         report.left.push({ id, title, status, currentStepId });
         continue;
       }
       const entry: UrgentReport['stopped'][number] = { id, title, ...result };
+      if (killError !== undefined) entry.killError = killError;
       report.stopped.push(entry);
       // The stop is committed: a failed record is noted on the entry, not as a failed stop.
       try {
@@ -211,7 +233,7 @@ export async function deactivateUrgently(
         entry.eventError = errorText(err);
       }
     } catch (err) {
-      report.failed.push({ id, error: errorText(err) });
+      report.failed.push({ id, title, error: errorText(err) });
     }
   }
   return { kind: 'ok', deactivatedAt: stamped.deactivatedAt, ...report };

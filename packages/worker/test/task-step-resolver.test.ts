@@ -7,6 +7,7 @@ import {
 } from '../src/queues/run-list.js';
 import { StepRegistry, UnresolvedStepError } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { promptStepTools } from '../src/step-engine/steps/custom/prompt-step.js';
 
 function step(id: string, index: number): StepDefinition {
   return {
@@ -104,6 +105,18 @@ describe('resolveRunList with pinned steps', () => {
   });
 });
 
+describe('promptStepTools', () => {
+  it('lists no tools for a pinned step that defines none, and nothing for any other step', () => {
+    const def = resolveTaskStep(
+      { taskId: 't11', customSteps: parseCustomSteps({ [ID]: entry }) },
+      ID,
+      registry(),
+    );
+    expect(promptStepTools(def!)).toEqual({ names: [], invalid: [] });
+    expect(promptStepTools(registry().get('a')!)).toBeUndefined();
+  });
+});
+
 describe('a pinned step with a tool that no longer parses', () => {
   const tool = (name: string, over: object = {}) => ({
     name,
@@ -124,6 +137,11 @@ describe('a pinned step with a tool that no longer parses', () => {
     const parsed = pinned()[ID];
     expect(parsed?.tools.map((t) => t.name)).toEqual(['good']);
     expect(parsed?.invalidTools).toEqual(['too_long']);
+  });
+
+  it('tells the runner its valid tools by name and the invalid ones apart', () => {
+    const def = resolveTaskStep({ taskId: 't8a', customSteps: pinned() }, ID, registry());
+    expect(promptStepTools(def!)).toEqual({ names: ['good'], invalid: ['too_long'] });
   });
 
   it('resolves as the current step instead of a missing one', () => {
