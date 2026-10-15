@@ -300,9 +300,11 @@ codeberg.org as Gitea, bitbucket.org) is a `Map`, so a host named like an object
 forge; a self-hosted host's name cannot reveal its forge. Every host is lower case. An ssh, scp or git
 remote's port belongs to the transport and is dropped; an http(s) remote keeps its port.
 `parseRemote` takes everything between the host and the last segment as the owner (GitLab subgroups)
-and strips Bitbucket Server's `/scm/`. `credentialUsableForPr`: a public host's forge must equal the
-credential's; a self-hosted host needs a host match and an explicit provider; for an ssh/git remote the
-credential's port is not compared; comparisons ignore case. `credentialApiHost`: for an ssh/git remote
+and strips Bitbucket Server's `/scm/`. `credentialUsableForPr`: for a public host, the credential's forge
+must be that host's and the credential's own host (port dropped) must infer the same forge, so a
+self-hosted credential of the same forge never fits a public remote; a self-hosted host needs a host
+match and an explicit provider; for an ssh/git remote the credential's port is not compared;
+comparisons ignore case. `credentialApiHost`: for an ssh/git remote
 on the credential's host, the default API base keeps the credential's port (a token for
 `git.example.com:8443` used to go to `https://git.example.com/api/v1`); an http(s) remote's host stays
 authoritative.
@@ -318,11 +320,11 @@ appended to the stored text), and sit on the credential's host (port included) o
 forge's default API base (api.github.com, api.bitbucket.org). An edit reads, checks and writes under
 the row's lock, judging the value that will be stored against the new host. A plain-http self-hosted
 forge therefore cannot be given an http API base, and its default base is https, so its pull-request
-calls cannot reach it. The rule runs on create and edit only: a row stored before it keeps whatever base
-it had, and `resolveForgeContext` uses the stored value as is. With no stored base, the default follows
-an http(s) remote's host; for a public-host remote `credentialUsableForPr` compares forges, not hosts,
-so a self-hosted credential of the same forge chosen for a public-host repository sends its token to
-the public host. That gap is still open.
+calls cannot reach it. The rule runs on create and edit; a row stored before it may still hold another
+base, so `resolveForgeContext` (worker, PR open and poll) re-checks every use: before the token is
+decrypted it refuses, with a ForgeError naming the fix, a credential that does not fit the repository's
+remote (`credentialUsableForPr`) and a stored base that fails `apiBaseFits`. With no stored base, the
+default follows an http(s) remote's host.
 
 ## The call log, the stamp and the token
 
@@ -422,9 +424,9 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
 8. The OAuth attempt is consumed before any vendor call or write; the exchange uses the starting client;
    no state-changing GET.
 9. Agent-reachable forge input is validated before a URL is built, and adapters re-check the PR number.
-10. A stored API base is https on the credential's own host or its forge's API host, for every
-    credential created or edited since the rule (9295cd3b3); older rows are not revalidated, and the
-    worker sends their stored base as is.
+10. A stored API base is https on the credential's own host or its forge's API host: checked on create
+    and edit since 9295cd3b3, and again on every use by the broker (`unsafe-api-base`) and by
+    `resolveForgeContext`, so an older row is refused rather than sent.
 11. GitLab authenticates with `Authorization: Bearer`.
 12. A forge request has its own deadline and takes the caller's; a stalled error body keeps its HTTP
     status.
