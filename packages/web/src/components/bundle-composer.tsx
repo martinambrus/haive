@@ -209,6 +209,7 @@ export function BundleComposer({
 
   useEffect(() => {
     let cancelled = false;
+    let loaded = false;
     let handle: ReturnType<typeof setInterval> | null = null;
 
     const fetchOnce = async (): Promise<void> => {
@@ -228,6 +229,7 @@ export function BundleComposer({
           }>;
         };
         if (cancelled) return;
+        loaded = true;
         const next: BundleComposerEntry[] = bundles.map((b) => ({
           id: b.id,
           name: b.name,
@@ -256,7 +258,7 @@ export function BundleComposer({
 
     void fetchOnce();
     handle = setInterval(() => {
-      if (valueRef.current.some((v) => v.status === 'syncing')) void fetchOnce();
+      if (!loaded || valueRef.current.some((v) => v.status === 'syncing')) void fetchOnce();
     }, 2500);
     return () => {
       cancelled = true;
