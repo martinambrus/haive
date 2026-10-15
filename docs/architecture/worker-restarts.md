@@ -143,9 +143,11 @@ stays stored on its row and the advance is dropped, so an answer accepted while 
 cannot reopen it during a drain. Both answer routes read the task's status inside their own
 transaction, with no row lock (one taken before the step write would cross a Retry's order: step rows
 first, the task row last), and admit a failed task through the same fence, 503 while new work is
-held. A clarification answer rides `task_events` rather than the job, so its route sets the task
-`running` itself before it queues the advance, and only when that read found it failed: a task that
-fails after the read keeps the answer and stays failed until a Retry.
+held. Each route also sets the task `running` itself, in the transaction that writes the answer and
+before it queues the advance, so a drain that takes the fence right after counts it live (a
+clarification answer rides `task_events` rather than the job besides); it does so only when that read
+found the task failed: a task that fails after the read keeps the answer and stays failed until a
+Retry.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. A task Retry's START, which only a task that never reached a step still takes, runs its first
