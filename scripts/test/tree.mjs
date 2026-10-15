@@ -29,11 +29,14 @@ const sorted = (entries) =>
 const hostText = (name, dependencies) =>
   `{\n  "name": "${name}",\n  "files": ["dist"],\n  "dependencies": ${JSON.stringify(dependencies, null, 2).replaceAll('\n', '\n  ')},\n  "devDependencies": {\n    "vitest": "^5.0.3"\n  }\n}\n`;
 
-const moduleText = (id, { name = `@haive/module-${id}`, exports = ['./manifest'] }) =>
+const moduleText = (
+  id,
+  { name = `@haive/module-${id}`, version = '0.1.0', exports = ['./manifest'] },
+) =>
   `${JSON.stringify(
     {
       name,
-      version: '0.1.0',
+      version,
       type: 'module',
       exports: Object.fromEntries(
         exports.map((key) => [key, { import: `./dist/${key.slice(2)}.js` }]),
@@ -52,6 +55,7 @@ export function makeTree(
     api = [],
     worker = [],
     web = [],
+    installed = {},
     base = { '@haive/shared': 'workspace:*', zod: '^4.6.5' },
   } = {},
 ) {
@@ -68,7 +72,7 @@ export function makeTree(
   }
   put(
     join(bin, 'pnpm'),
-    `#!/bin/sh\necho "$(pwd -P) $*" >> "${log}"\nexit "\${STUB_PNPM_EXIT:-0}"\n`,
+    `#!/bin/sh\necho "$(pwd -P) $*" >> "${log}"\nif [ "$1" = view ]; then\n  printf '%s' "$STUB_PNPM_VIEW"\n  [ "\${STUB_PNPM_VIEW_EXIT:-0}" = 0 ] || echo "npm error code E404" >&2\n  exit "\${STUB_PNPM_VIEW_EXIT:-0}"\nfi\nexit "\${STUB_PNPM_EXIT:-0}"\n`,
   );
   chmodSync(join(bin, 'pnpm'), 0o755);
   put(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
@@ -77,12 +81,19 @@ export function makeTree(
   for (const [host, names] of Object.entries(hosts)) {
     const dependencies = sorted([
       ...Object.entries(base),
-      ...names.map((name) => [name, 'workspace:*']),
+      ...names.map((name) => [name, name.startsWith('@haive-module/') ? '1.0.0' : 'workspace:*']),
     ]);
     put(join(root, 'packages', host, 'package.json'), hostText(`@haive/${host}`, dependencies));
   }
   for (const [id, options] of Object.entries(modules)) {
     put(join(root, 'modules', id, 'package.json'), moduleText(id, options));
+  }
+  for (const [id, options] of Object.entries(installed)) {
+    const name = `@haive-module/${id}`;
+    put(
+      join(root, 'packages', 'api', 'node_modules', name, 'package.json'),
+      moduleText(id, { name, version: '1.0.0', ...options }),
+    );
   }
 
   const files = () =>
@@ -111,3 +122,4 @@ export function makeTree(
 }
 
 export const names = (...ids) => ids.map((id) => `@haive/module-${id}`);
+export const registry = (...ids) => ids.map((id) => `@haive-module/${id}`);

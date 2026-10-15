@@ -8,3 +8,4 @@ export * from './providers.js';
 export * from './redirect-uri.js';
 export * from './resolution.js';
 export * from './resolver.js';
+export * from './tools.js';

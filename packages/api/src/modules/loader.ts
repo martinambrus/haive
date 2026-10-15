@@ -13,7 +13,9 @@ import {
   diffModuleIntent,
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
+  modulePackageId,
   type ModuleManifest,
+  type ModuleSource,
 } from '@haive/shared/modularity';
 import {
   moduleSettingKey,
@@ -37,6 +39,7 @@ import { PurgeIncompleteError, purgeModule } from './purge.js';
 
 export type ApiModuleEntry = {
   packageName: string;
+  source?: ModuleSource;
   manifest: unknown;
   routes?: (ctx: ModuleRouteContext) => Hono<AppEnv>;
 };
@@ -81,9 +84,9 @@ export async function mountModules(
       );
     }
     const manifest = parsed.data;
-    if (entry.packageName !== `@haive/module-${manifest.id}`) {
+    if (modulePackageId(entry.packageName) !== manifest.id) {
       throw new Error(
-        `Module ${entry.packageName} declares id "${manifest.id}"; its package must be named @haive/module-${manifest.id}`,
+        `Module ${entry.packageName} declares id "${manifest.id}"; its package must be named @haive/module-${manifest.id} or @haive-module/${manifest.id}`,
       );
     }
     if (seen.has(manifest.id)) {
