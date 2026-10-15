@@ -10,6 +10,7 @@ import {
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
+import { gitOperationInProgress } from '../repo/git-operation.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import {
   abortFailureNote,
@@ -42,6 +43,7 @@ import {
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
+  type KeptFile,
   type KeptFiles,
   type RestoreSection,
 } from '../project-state/set-aside.js';
@@ -324,6 +326,52 @@ function asideHalt(why: { outcome: 'refused'; reason: string } | { outcome: 'ret
     : "Haive's project files kept changing under the merge; nothing was merged. Retry this step.";
 }
 
+type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
+
+function keptMetadataOf(kept: KeptFiles): KeptMetadata {
+  const metadata: KeptMetadata = {};
+  for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
+    const entry: KeptMetadata[string] = {};
+    if (untracked && Buffer.isBuffer(bytes) && owner && mode !== undefined) {
+      entry.owner = owner;
+      entry.mode = mode;
+    }
+    if (parents && parents.length > 0) entry.parents = parents;
+    if (Object.keys(entry).length > 0) metadata[path] = entry;
+  }
+  return metadata;
+}
+
+function keptFilesOf(metadata: KeptMetadata): KeptFiles {
+  return new Map(
+    Object.entries(metadata).map(([path, { owner, mode, parents }]): [string, KeptFile] => [
+      path,
+      { index: null, bytes: Buffer.alloc(0), untracked: owner !== undefined, owner, mode, parents },
+    ]),
+  );
+}
+
+async function restoreKeptMetadataOf(state: MergeResolveState): Promise<MergeResolveState> {
+  if (!state.keptMetadata) return state;
+  await restoreKeptMetadata(state.mergeDir, keptFilesOf(state.keptMetadata));
+  return { ...state, keptMetadata: undefined };
+}
+
+async function settleGivenUp(
+  db: Database,
+  current: TaskStepRow,
+  params: AdvanceStepParams,
+  given: MergeResolveState,
+): Promise<void> {
+  const repositoryId =
+    given.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
+  if (!repositoryId || (await gitOperationInProgress(given.mergeDir))) return;
+  await resyncHaiveProjections(db, repositoryId, given.mergeDir);
+  if (given.keptMetadata) {
+    await saveMergeState(db, current.id, await restoreKeptMetadataOf(given));
+  }
+}
+
 /** Terminal success: tear down a transient base worktree, release the merge dir and mark the state
  *  done, in one section. */
 async function reachDone(
@@ -336,7 +384,10 @@ async function reachDone(
   // The push may fail, so the record and plan the merge brought in are re-synced first.
   const repositoryId =
     state.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
-  if (repositoryId) await resyncHaiveProjections(db, repositoryId, state.mergeDir);
+  if (repositoryId) {
+    await resyncHaiveProjections(db, repositoryId, state.mergeDir);
+    state = await restoreKeptMetadataOf(state);
+  }
   // Pushes the commit a section read, so a pass that lost the dir cannot send another task's work.
   // Idempotent on re-entry: a completed push reports "up-to-date".
   if (state.pushAfterMerge && !state.pushed) {
@@ -592,6 +643,7 @@ async function prePushSync(
   }
   const rounds = state.baseSyncRounds ?? 0;
   if (rounds >= MAX_BASE_SYNC_ROUNDS) {
+    await settleGivenUp(db, current, params, state);
     const row = await halt(
       db,
       current,
@@ -890,11 +942,9 @@ export async function resolveMergePhase(
       throw err;
     }
   };
-  /** What this call set aside gets its owner and mode back once the merge's end re-synced it. */
-  const finish = async (row: TaskStepRow, landed: MergeResolveState): Promise<MergeResolved> => {
-    const done = await finishMerge(db, stepDef, row, ctx, params, landed);
-    if (kept.size > 0) await restoreKeptMetadata(landed.mergeDir, kept);
-    return done;
+  const withKept = (from: MergeResolveState): MergeResolveState => {
+    const metadata = { ...keptMetadataOf(kept), ...from.keptMetadata };
+    return Object.keys(metadata).length > 0 ? { ...from, keptMetadata: metadata } : from;
   };
 
   // --- init: snapshot the merge target + mode from the detect output ---
@@ -988,6 +1038,7 @@ export async function resolveMergePhase(
       try {
         await seedPlanBaseFromCheckout(db, repositoryId, pending.mergeDir);
       } catch (err) {
+        await settleGivenUp(db, current, params, pending);
         return haltFailed(
           db,
           current,
@@ -997,6 +1048,7 @@ export async function resolveMergePhase(
       }
       const refused = await setAside(repositoryId, pending.mergeDir);
       if (refused !== null) {
+        await settleGivenUp(db, current, params, pending);
         const why = asideHalt({ outcome: 'refused', reason: refused });
         return haltFailed(db, current, why, 'haive files changed');
       }
@@ -1008,7 +1060,7 @@ export async function resolveMergePhase(
       }
       // The base tip before ANY merge round: the squash resets back to it, and it is the
       // documented undo point, measured in the dir the merge runs in.
-      let armed = pending;
+      let armed = withKept(pending);
       if (!armed.baseShaBefore) {
         const baseHead = await gitRun(armed.mergeDir, ['rev-parse', 'HEAD']);
         if (baseHead.code === 0) armed = { ...armed, baseShaBefore: baseHead.stdout.trim() };
@@ -1074,6 +1126,7 @@ export async function resolveMergePhase(
       const refused = await setAside(repositoryId, pending.mergeDir);
       if (refused !== null) {
         await putBack(repositoryId, pending.mergeDir);
+        await settleGivenUp(db, current, params, pending);
         const why = asideHalt({ outcome: 'refused', reason: refused });
         return haltFailed(db, current, why, 'haive files changed');
       }
@@ -1082,10 +1135,12 @@ export async function resolveMergePhase(
     state = attempt.armed;
     if (attempt.kind === 'unaborted') {
       await putBack(repositoryId, state.mergeDir);
+      await settleGivenUp(db, current, params, pending);
       return haltUnaborted(db, current, params.taskId, state, attempt.stale);
     }
     if (attempt.kind === 'held') {
       await putBack(repositoryId, state.mergeDir);
+      await settleGivenUp(db, current, params, pending);
       return haltFailed(db, current, attempt.held, 'merge index held');
     }
     if (attempt.staleOpen) {
@@ -1099,16 +1154,18 @@ export async function resolveMergePhase(
     }
     if (attempt.kind === 'aside') {
       await putBack(repositoryId, state.mergeDir);
+      await settleGivenUp(db, current, params, pending);
       return haltFailed(db, current, asideHalt(attempt.again), 'haive files changed');
     }
     if (attempt.kind === 'opened') {
       current = await noteOwnFileFallbacks(db, current, ctx, state.mergeDir, attempt.warnings);
     }
     if (attempt.opened.kind === 'merged') {
-      return finish(current, state);
+      return finishMerge(db, stepDef, current, ctx, params, state);
     }
     if (attempt.opened.kind === 'refused') {
       await putBack(repositoryId, state.mergeDir);
+      await settleGivenUp(db, current, params, pending);
       return haltRefused(db, current, state, attempt.opened.detail);
     }
     // Conflict: leave the mid-merge LIVE (no --abort) so the fix agent edits it.
@@ -1209,6 +1266,7 @@ export async function resolveMergePhase(
           const aborted = await section(failedDir, () => abortMerge(failedDir));
           const why = inv.errorMessage ?? 'fatal provider error';
           if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+          await settleGivenUp(db, current, params, state);
           return haltFailed(db, current, why, 'fatal provider error');
         }
         await db
@@ -1266,12 +1324,14 @@ export async function resolveMergePhase(
       const aborted = await section(dir, () => abortMerge(dir));
       const why = `Merge conflict merging ${state.featureBranch} into ${state.baseBranch}: auto-resolution exhausted after ${MAX_MERGE_CONFLICT_RETRIES} attempts. Resolve manually or use "Retry with AI".`;
       if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      await settleGivenUp(db, current, params, state);
       return haltFailed(db, current, why, 'merge conflict');
     }
     if (!params.providers || !params.deps) {
       const aborted = await section(dir, () => abortMerge(dir));
       const why = 'Merge conflict requires a CLI provider to resolve, but none were supplied.';
       if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      await settleGivenUp(db, current, params, state);
       return haltFailed(db, current, why, 'no provider');
     }
     // Recreate the live merge if it isn't open (after an abort or a crash). One open for another
@@ -1283,6 +1343,7 @@ export async function resolveMergePhase(
     if (repositoryId && !(await peekOpenMerge(dir))) {
       const refused = await setAside(repositoryId, dir);
       if (refused !== null) {
+        await settleGivenUp(db, current, params, state);
         const why = asideHalt({ outcome: 'refused', reason: refused });
         return haltFailed(db, current, why, 'haive files changed');
       }
@@ -1332,6 +1393,7 @@ export async function resolveMergePhase(
       const refused = await setAside(repositoryId, dir);
       if (refused !== null) {
         await putBack(repositoryId, dir);
+        await settleGivenUp(db, current, params, state);
         const why = asideHalt({ outcome: 'refused', reason: refused });
         return haltFailed(db, current, why, 'haive files changed');
       }
@@ -1339,10 +1401,12 @@ export async function resolveMergePhase(
     }
     if (reopened.kind === 'unaborted') {
       await putBack(repositoryId, dir);
+      await settleGivenUp(db, current, params, state);
       return haltUnaborted(db, current, params.taskId, state, reopened.cleared);
     }
     if (reopened.kind === 'held') {
       await putBack(repositoryId, dir);
+      await settleGivenUp(db, current, params, state);
       return haltFailed(db, current, reopened.held, 'merge index held');
     }
     if (reopened.staleOpen) {
@@ -1350,14 +1414,17 @@ export async function resolveMergePhase(
     }
     if (reopened.kind === 'aside') {
       await putBack(repositoryId, dir);
+      await settleGivenUp(db, current, params, state);
       return haltFailed(db, current, asideHalt(reopened.again), 'haive files changed');
     }
     if (reopened.kind !== 'refused') {
       current = await noteOwnFileFallbacks(db, current, ctx, dir, reopened.warnings);
     }
-    if (reopened.kind === 'merged') return finish(current, state);
+    state = withKept(state);
+    if (reopened.kind === 'merged') return finishMerge(db, stepDef, current, ctx, params, state);
     if (reopened.kind === 'refused') {
       await putBack(repositoryId, dir);
+      await settleGivenUp(db, current, params, state);
       return haltRefused(db, current, state, reopened.detail);
     }
     const fixBaseline = reopened.fixBaseline;
@@ -1400,6 +1467,7 @@ export async function resolveMergePhase(
       const aborted = await section(dir, () => abortMerge(dir));
       const why = 'No CLI provider available for merge conflict resolution.';
       if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      await settleGivenUp(db, current, params, state);
       return haltFailed(db, current, why, 'no provider');
     }
     // 'ok': the onInserted hook above already saved state.fixInvocationId.
