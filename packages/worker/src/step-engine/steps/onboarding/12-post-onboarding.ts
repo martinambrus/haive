@@ -684,6 +684,22 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           const message = err instanceof Error ? err.message : String(err);
           warnings.push(`project state record write failed: ${message}`);
           ctx.logger.warn({ err }, 'project state record write failed');
+          if (!recorded) {
+            try {
+              // Nothing is retired now, but an earlier attempt may have: list it only if proven gone.
+              if (
+                (await lstatNoFollow(ctx.repoPath, INSTALL_MANIFEST_PATH, { strict: true })) ===
+                null
+              ) {
+                ownRemoved.push(INSTALL_MANIFEST_PATH);
+              }
+            } catch (lookupErr) {
+              const cause = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
+              warnings.push(
+                `${INSTALL_MANIFEST_PATH} was not listed as removed: it could not be checked: ${cause}`,
+              );
+            }
+          }
         }
       }
       try {
