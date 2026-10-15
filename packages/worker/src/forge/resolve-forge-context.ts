@@ -1,6 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { getDecryptedCredentials } from '../repo/credentials.js';
+import { decryptCredentialRow } from '../repo/credentials.js';
 import {
   ForgeError,
   apiBaseFits,
@@ -26,12 +26,20 @@ export async function resolveForgeContext(args: {
 }): Promise<ForgeContext> {
   const { db, userId, credentialId, remoteUrl } = args;
 
+  // One read serves the checks and the decrypt, so an edit between them cannot split the two.
   const row = await db.query.repoCredentials.findFirst({
     where: and(
       eq(schema.repoCredentials.id, credentialId),
       eq(schema.repoCredentials.userId, userId),
     ),
-    columns: { provider: true, host: true, apiBaseUrl: true },
+    columns: {
+      provider: true,
+      host: true,
+      apiBaseUrl: true,
+      usernameEncrypted: true,
+      secretEncrypted: true,
+      encryptedDek: true,
+    },
   });
   if (!row) throw new ForgeError('Credential not found for pull-request creation.');
 
@@ -55,7 +63,7 @@ export async function resolveForgeContext(args: {
     );
   }
 
-  const creds = await getDecryptedCredentials(db, credentialId, userId);
+  const creds = await decryptCredentialRow(row);
   const { host, owner, repo } = parseRemote(remoteUrl, provider);
   const impl = resolveForgeProvider(provider);
   const apiBase = (
