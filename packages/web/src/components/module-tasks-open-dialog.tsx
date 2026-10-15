@@ -45,11 +45,11 @@ export function moduleOffNotice(
 ): string {
   const stopped = `${result.stopped.length} task${result.stopped.length === 1 ? '' : 's'} stopped`;
   const more = result.capped
-    ? ' More tasks use it than were listed; they fail when they reach one of its steps.'
+    ? ' More tasks use it than were listed; those it did not stop fail when they reach one of its steps.'
     : '';
   return [
     `Turned off ${name}: ${stopped}, ${result.left.length} left (they fail when they reach one of its steps), ${result.failed.length} could not be stopped.${more}`,
-    ...result.failed.map((f) => `- ${titles.get(f.id) ?? f.id}: ${f.error}`),
+    ...result.failed.map((f) => `- ${titles.get(f.id) ?? f.title}: ${f.error}`),
   ].join('\n');
 }
 

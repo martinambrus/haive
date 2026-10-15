@@ -218,7 +218,7 @@ describe('Modules page after Turn off now', () => {
     const page = await turnedOff({
       ...RESULT,
       stopped: [],
-      failed: [{ id: 't1', error: 'sandbox refused to die' }],
+      failed: [{ id: 't1', title: 'Task t1', error: 'sandbox refused to die' }],
     });
     expect(textOf(page.notice())).toBe(
       'Turned off Alpha Search: 0 tasks stopped, 1 left (they fail when they reach one of its steps), 1 could not be stopped.\n' +

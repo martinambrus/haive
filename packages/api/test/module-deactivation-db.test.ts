@@ -732,7 +732,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         eventError?: string;
       }[];
       left: { id: string; title: string; status: string; currentStepId: string | null }[];
-      failed: { id: string; error: string }[];
+      failed: { id: string; title: string; error: string }[];
       capped: boolean;
     };
     const step = async (taskId: string, stepId: string, status: 'waiting_cli' | 'waiting_form') => {
@@ -998,8 +998,13 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       const res = await patchUrgent('alpha');
       expect(res.status).toBe(200);
       const body = (await res.json()) as Body;
-      expect(body.failed.sort((x, y) => x.id.localeCompare(y.id))).toEqual(
-        [a.id, c.id].sort().map((id) => ({ id, error: `refused ${id}` })),
+      expect(
+        body.failed
+          .sort((x, y) => x.id.localeCompare(y.id))
+          .map(({ id, error }) => ({ id, error })),
+      ).toEqual([a.id, c.id].sort().map((id) => ({ id, error: `refused ${id}` })));
+      expect(body.failed.every(({ title }) => typeof title === 'string' && title !== '')).toBe(
+        true,
       );
       expect(body.stopped).toEqual([]);
       expect(idsOf(body.left)).toEqual(sorted([b.id, d.id]));

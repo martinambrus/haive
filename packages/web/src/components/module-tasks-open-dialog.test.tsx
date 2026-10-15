@@ -314,28 +314,28 @@ describe('moduleOffNotice', () => {
     );
   });
 
-  it('lists each task it could not stop by title with its error, and by id when it has no title', () => {
+  it('lists each task it could not stop by the title the dialog listed, else by the title the answer gives', () => {
     const failed = [
-      { id: 't6', error: 'sandbox refused to die' },
-      { id: 't9', error: 'connection reset' },
+      { id: 't6', title: 'Six as answered', error: 'sandbox refused to die' },
+      { id: 't9', title: 'Nine, unlisted', error: 'connection reset' },
     ];
     expect(moduleOffNotice('Alpha', result({ failed }), titles)).toBe(
       'Turned off Alpha: 2 tasks stopped, 3 left (they fail when they reach one of its steps), 2 could not be stopped.\n' +
         '- Six <b>: sandbox refused to die\n' +
-        '- t9: connection reset',
+        '- Nine, unlisted: connection reset',
     );
   });
 
   it('adds one sentence after the counts when more tasks use the module than were listed', () => {
     expect(moduleOffNotice('Alpha Search', result({ capped: true }), titles)).toBe(
-      'Turned off Alpha Search: 2 tasks stopped, 3 left (they fail when they reach one of its steps), 0 could not be stopped. More tasks use it than were listed; they fail when they reach one of its steps.',
+      'Turned off Alpha Search: 2 tasks stopped, 3 left (they fail when they reach one of its steps), 0 could not be stopped. More tasks use it than were listed; those it did not stop fail when they reach one of its steps.',
     );
   });
 
   it('keeps that sentence ahead of the tasks it could not stop', () => {
-    const failed = [{ id: 't6', error: 'sandbox refused to die' }];
+    const failed = [{ id: 't6', title: 'Six', error: 'sandbox refused to die' }];
     expect(moduleOffNotice('Alpha', result({ capped: true, failed }), titles)).toBe(
-      'Turned off Alpha: 2 tasks stopped, 3 left (they fail when they reach one of its steps), 1 could not be stopped. More tasks use it than were listed; they fail when they reach one of its steps.\n' +
+      'Turned off Alpha: 2 tasks stopped, 3 left (they fail when they reach one of its steps), 1 could not be stopped. More tasks use it than were listed; those it did not stop fail when they reach one of its steps.\n' +
         '- Six <b>: sandbox refused to die',
     );
   });

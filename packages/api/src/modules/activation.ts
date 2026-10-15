@@ -34,7 +34,7 @@ interface UrgentReport {
     eventError?: string;
   }[];
   left: Pick<ModuleDependent, 'id' | 'title' | 'status' | 'currentStepId'>[];
-  failed: { id: string; error: string }[];
+  failed: { id: string; title: string; error: string }[];
   capped: boolean;
 }
 
@@ -207,7 +207,7 @@ export async function deactivateUrgently(
         entry.eventError = errorText(err);
       }
     } catch (err) {
-      report.failed.push({ id, error: errorText(err) });
+      report.failed.push({ id, title, error: errorText(err) });
     }
   }
   return { kind: 'ok', deactivatedAt: stamped.deactivatedAt, ...report };
