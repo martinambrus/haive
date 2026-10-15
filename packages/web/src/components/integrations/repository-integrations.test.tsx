@@ -324,6 +324,25 @@ describe('saving the allow-list', () => {
     view.draw();
     expect(view.save()!.props.disabled).toBe(false);
   });
+
+  it('holds the switch and the ticks while a request is out, so "Saved." never covers a later edit', async () => {
+    let finish!: () => void;
+    api.saveRepositoryIntegrations.mockReturnValueOnce(
+      new Promise<void>((resolve) => (finish = resolve)),
+    );
+    const view = await mount();
+    view.restrict(true);
+    const inputs = () =>
+      [SWITCH, 'allow-c-gitlab-1', 'allow-c-github-1'].map((id) => view.field(id)!.props.disabled);
+    expect(inputs()).toEqual([false, false, false]);
+    view.save()!.props.onClick!();
+    view.draw();
+    expect(inputs()).toEqual([true, true, true]);
+    finish();
+    await flush();
+    view.draw();
+    expect(inputs()).toEqual([false, false, false]);
+  });
 });
 
 describe('when the allow-list cannot load', () => {

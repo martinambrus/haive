@@ -89,6 +89,7 @@ export function RepositoryIntegrations({ repositoryId }: { repositoryId: string 
               type="checkbox"
               className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500"
               checked={restricted}
+              disabled={saving}
               onChange={(e) => changed(() => setRestricted(e.target.checked))}
             />
             <Label htmlFor="integrationsRestricted">Restrict to these accounts</Label>
@@ -121,6 +122,7 @@ export function RepositoryIntegrations({ repositoryId }: { repositoryId: string 
                           type="checkbox"
                           className="h-4 w-4 shrink-0"
                           checked={ticked.includes(connection.id)}
+                          disabled={saving}
                           onChange={(e) =>
                             changed(() =>
                               setTicked(
