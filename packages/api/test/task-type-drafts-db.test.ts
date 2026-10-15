@@ -48,6 +48,7 @@ const STEP_ID = '01-type-draft';
 const AUDIT_ACTION = 'task_type_draft.start';
 const BASE = '/admin/task-type-drafts';
 const OPENING = 'A read-only step that lists TODO comments and rates each one';
+const EDITED = 'tdr-edited';
 
 const step = (over: Record<string, unknown> = {}) => ({
   slug: 'list-todos',
@@ -177,6 +178,13 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
       selectable: false,
       requiresRepository: false,
     });
+    await db.insert(schema.taskTypeDefinitions).values({
+      slug: EDITED,
+      displayName: 'Edited type',
+      runListStrategy: 'static',
+      stepIds: [],
+      source: 'admin',
+    });
   });
 
   beforeEach(async () => {
@@ -205,7 +213,7 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
     await clean();
     await db
       .delete(schema.taskTypeDefinitions)
-      .where(eq(schema.taskTypeDefinitions.slug, 'type_draft'));
+      .where(inArray(schema.taskTypeDefinitions.slug, ['type_draft', EDITED]));
     await db.delete(schema.stepCatalog).where(eq(schema.stepCatalog.stepId, STEP_ID));
     await db.delete(schema.users).where(inArray(schema.users.id, userIds));
     await db.$client.end({ timeout: 5 });
@@ -363,6 +371,29 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
       await nothingCreated();
     });
 
+    it('stores the type being edited in the task metadata, beside what the worker already reads', async () => {
+      const taskId = await started({ message: OPENING, editingSlug: EDITED });
+      const [task] = await drafts();
+      expect(task).toMatchObject({ id: taskId });
+      expect(task!.metadata).toEqual({
+        anchorRepositoryId: null,
+        egress: { mode: 'none', domains: [], ips: [] },
+        editingSlug: EDITED,
+      });
+    });
+
+    it('refuses a type that does not exist, creating nothing', async () => {
+      const res = await start({ message: OPENING, editingSlug: 'no-such-type' });
+      expect(res.status).toBe(400);
+      await nothingCreated();
+      expect(await auditRows()).toEqual([]);
+    });
+
+    it('refuses an editingSlug that is not a string, creating nothing', async () => {
+      expect((await start({ message: OPENING, editingSlug: 7 })).status).toBe(400);
+      await nothingCreated();
+    });
+
     it.each(['draining', 'maintenance'])(
       'refuses while the system is %s, as POST /tasks does, creating nothing',
       async (state) => {
@@ -410,6 +441,7 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         status: 'queued',
+        awaitingMessage: false,
         turns: [{ role: 'user', body: OPENING }],
         latestDraft: null,
       });
@@ -448,6 +480,7 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         status: 'waiting_user',
+        awaitingMessage: false,
         turns: [
           { role: 'user', body: 'first' },
           assistant('first answer', { draft: first }),
@@ -459,6 +492,7 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
               { kind: 'persona-not-in-catalog', stepId: 's', raw: 'r', start: 0, message: 'm' },
             ],
             dropped: ['promptSteps.list-todos.tools'],
+            repaired: true,
           }),
           assistant('a question'),
         ],
@@ -490,6 +524,115 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
       expect(((await (await read(taskId)).json()) as { turns: unknown[] }).turns).toEqual([
         { role: 'user', body: 'real' },
       ]);
+    });
+
+    it('carries what the worker recorded about a turn, and no such key on a turn without it', async () => {
+      const taskId = await taskOf();
+      const log = (payload: object, second: number) =>
+        event(taskId, TYPE_DRAFT_MESSAGE_EVENT, payload, second);
+      await log({ role: 'user', body: 'one', draftIgnored: 'not-json' }, 1);
+      await log({ role: 'user', body: 'two', draftIgnored: 'too-large' }, 2);
+      await log(assistant('cut off', { error: 'unreadable-reply' }), 3);
+      await log(assistant('fixed', { repaired: true }), 4);
+      await log({ role: 'user', body: 'plain' }, 5);
+      await log(assistant('plain answer'), 6);
+      const { turns } = (await (await read(taskId)).json()) as { turns: object[] };
+      expect(turns).toEqual([
+        { role: 'user', body: 'one', draftIgnored: 'not-json' },
+        { role: 'user', body: 'two', draftIgnored: 'too-large' },
+        assistant('cut off', { error: 'unreadable-reply' }),
+        assistant('fixed', { repaired: true }),
+        { role: 'user', body: 'plain' },
+        assistant('plain answer'),
+      ]);
+      for (const plain of turns.slice(4)) {
+        for (const key of ['draftIgnored', 'error', 'repaired']) {
+          expect(plain).not.toHaveProperty(key);
+        }
+      }
+    });
+
+    it('leaves out a recorded field that has the wrong type', async () => {
+      const taskId = await taskOf();
+      await event(
+        taskId,
+        TYPE_DRAFT_MESSAGE_EVENT,
+        { role: 'user', body: 'a', draftIgnored: 7 },
+        1,
+      );
+      await event(
+        taskId,
+        TYPE_DRAFT_MESSAGE_EVENT,
+        assistant('b', { error: { code: 1 }, repaired: 'yes' }),
+        2,
+      );
+      expect(((await (await read(taskId)).json()) as { turns: unknown[] }).turns).toEqual([
+        { role: 'user', body: 'a' },
+        assistant('b'),
+      ]);
+    });
+
+    describe('awaitingMessage', () => {
+      const stepOf = (
+        taskId: string,
+        status: (typeof schema.taskSteps.$inferInsert)['status'],
+        waitingStartedAt: Date | null,
+        round = 0,
+      ) =>
+        db.insert(schema.taskSteps).values({
+          taskId,
+          stepId: STEP_ID,
+          stepIndex: 0,
+          round,
+          title: 'Draft a task type',
+          status,
+          waitingStartedAt,
+        });
+      const awaiting = async (taskId: string) =>
+        ((await (await read(taskId)).json()) as { awaitingMessage: unknown }).awaitingMessage;
+
+      it.each([
+        { step: 'parked on its form', status: 'waiting_form', stamped: true, expected: true },
+        {
+          step: 'on its form, a turn just submitted and the worker not back yet',
+          status: 'waiting_form',
+          stamped: false,
+          expected: false,
+        },
+        { step: 'running', status: 'running', stamped: false, expected: false },
+        {
+          step: 'waiting for a slot, which stamps the same column',
+          status: 'pending',
+          stamped: true,
+          expected: false,
+        },
+        {
+          step: 'waiting on its agent, the stamp left behind',
+          status: 'waiting_cli',
+          stamped: true,
+          expected: false,
+        },
+        { step: 'done', status: 'done', stamped: false, expected: false },
+      ] as const)('is $expected for a step $step', async ({ status, stamped, expected }) => {
+        const taskId = await taskOf();
+        await stepOf(taskId, status, stamped ? at(0) : null);
+        expect(await awaiting(taskId)).toBe(expected);
+      });
+
+      it('is false before the task has a step row', async () => {
+        expect(await awaiting(await taskOf())).toBe(false);
+      });
+
+      it('reads the newest round, whichever round was written first', async () => {
+        const parkedNow = await taskOf();
+        await stepOf(parkedNow, 'done', null, 0);
+        await stepOf(parkedNow, 'waiting_form', at(0), 1);
+        expect(await awaiting(parkedNow)).toBe(true);
+        const parkedBefore = await taskOf();
+        await stepOf(parkedBefore, 'waiting_form', at(0), 0);
+        await stepOf(parkedBefore, 'running', null, 1);
+        expect(await awaiting(parkedBefore)).toBe(false);
+      });
     });
 
     it('answers 404 for another administrator, an unknown id, a malformed id and a task of another type', async () => {

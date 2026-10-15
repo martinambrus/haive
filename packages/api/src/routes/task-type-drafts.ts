@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { refusesNewWork } from '@haive/shared';
 import {
@@ -28,6 +28,7 @@ const startSchema = z.object({
       'The editor state is too large',
     )
     .optional(),
+  editingSlug: z.string().optional(),
 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -45,6 +46,9 @@ function toTurn(payload: unknown) {
       role: 'user' as const,
       body,
       ...(isRecord(payload.draft) ? { draft: payload.draft } : {}),
+      ...(payload.draftIgnored === 'not-json' || payload.draftIgnored === 'too-large'
+        ? { draftIgnored: payload.draftIgnored }
+        : {}),
     };
   }
   if (payload.role !== 'assistant') return null;
@@ -55,6 +59,8 @@ function toTurn(payload: unknown) {
     issues: list(payload.issues),
     warnings: list(payload.warnings),
     dropped: list(payload.dropped),
+    ...(typeof payload.error === 'string' ? { error: payload.error } : {}),
+    ...(payload.repaired === true ? { repaired: true as const } : {}),
   };
 }
 
@@ -74,6 +80,13 @@ taskTypeDraftRoutes.post('/', async (c) => {
   const body = startSchema.parse(await c.req.json());
   const db = getDb();
   if (body.cliProviderId) await loadUsableProvider(db, userId, body.cliProviderId);
+  if (body.editingSlug !== undefined) {
+    const edited = await db.query.taskTypeDefinitions.findFirst({
+      where: eq(schema.taskTypeDefinitions.slug, body.editingSlug),
+      columns: { slug: true },
+    });
+    if (!edited) throw new HttpError(400, `Unknown task type ${body.editingSlug}`);
+  }
   const { draft } = pickTaskTypeDraft(body.current ?? {});
 
   // The opening message is written before the start is queued: the step reads it on its first detect.
@@ -94,6 +107,7 @@ taskTypeDraftRoutes.post('/', async (c) => {
         metadata: {
           anchorRepositoryId: null,
           egress: { mode: 'none', domains: [], ips: [] },
+          ...(body.editingSlug !== undefined ? { editingSlug: body.editingSlug } : {}),
         },
         autoContinue: true,
         runListSnapshot,
@@ -137,6 +151,11 @@ taskTypeDraftRoutes.get('/:taskId', async (c) => {
     columns: { status: true },
   });
   if (!task) throw new HttpError(404, NOT_FOUND);
+  const step = await db.query.taskSteps.findFirst({
+    where: eq(schema.taskSteps.taskId, taskId),
+    columns: { status: true, waitingStartedAt: true },
+    orderBy: desc(schema.taskSteps.round),
+  });
   const rows = await db
     .select({ payload: schema.taskEvents.payload })
     .from(schema.taskEvents)
@@ -149,5 +168,10 @@ taskTypeDraftRoutes.get('/:taskId', async (c) => {
     .orderBy(asc(schema.taskEvents.createdAt));
   const turns = rows.flatMap(({ payload }) => toTurn(payload) ?? []);
   const latest = turns.findLast((turn) => turn.role === 'assistant' && turn.draft !== null);
-  return c.json({ status: task.status, turns, latestDraft: latest?.draft ?? null });
+  return c.json({
+    status: task.status,
+    awaitingMessage: step?.status === 'waiting_form' && step.waitingStartedAt !== null,
+    turns,
+    latestDraft: latest?.draft ?? null,
+  });
 });

@@ -54,7 +54,7 @@ export interface DraftVerdict {
 export interface TypeDraftDetect {
   steps: DraftCatalogStep[];
   personas: DraftPersona[];
-  /** The slug of every task type that exists, built-in ones included. */
+  /** The slug of every task type that exists, built-in ones included, bar the one being edited. */
   takenSlugs: string[];
   transcript: { role: 'user' | 'assistant'; body: string }[];
   /** The newest user message with no agent turn after it; null once the conversation is up to date. */
