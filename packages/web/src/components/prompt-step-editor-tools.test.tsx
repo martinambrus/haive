@@ -216,7 +216,7 @@ const PARAM_CASES: ParamCase[] = [
     name: 'state',
     description: 'Which state to list.',
     required: true,
-    extras: [[NAME.values, 'open, closed']],
+    extras: [[NAME.values, 'open\nclosed']],
     param: { type: 'enum', required: true, values: ['open', 'closed'] },
   },
 ];

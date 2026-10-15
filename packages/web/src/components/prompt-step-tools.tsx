@@ -54,19 +54,31 @@ type TextFieldProps = Omit<
   value: string;
   disabled: boolean;
   onValue: (text: string) => void;
+  rows?: number;
 };
 
-function TextField({ label, value, disabled, onValue, ...input }: TextFieldProps) {
+function TextField({ label, value, disabled, onValue, rows, ...input }: TextFieldProps) {
   return (
     <label className={FIELD}>
       {label}
-      <Input
-        {...input}
-        value={value}
-        disabled={disabled}
-        onChange={(e) => onValue(e.target.value)}
-        className="h-11 text-sm text-neutral-100"
-      />
+      {rows === undefined ? (
+        <Input
+          {...input}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onValue(e.target.value)}
+          className="h-11 text-sm text-neutral-100"
+        />
+      ) : (
+        <textarea
+          rows={rows}
+          placeholder={input.placeholder}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onValue(e.target.value)}
+          className={cn('w-full py-2', CONTROL)}
+        />
+      )}
     </label>
   );
 }
@@ -95,6 +107,10 @@ const LIST: Codec<string[]> = {
       .split(',')
       .map((item) => item.trim())
       .filter((item) => item !== ''),
+};
+const LINES: Codec<string[]> = {
+  show: (value) => value.join('\n'),
+  read: (text) => text.split(/\r?\n/).filter((line) => line.trim() !== ''),
 };
 
 type ParsedFieldProps<T> = Omit<TextFieldProps, 'value' | 'onValue'> & {
@@ -214,10 +230,11 @@ function ParamRow({ param, disabled, onChange, onRemove }: ParamRowProps) {
       )}
       {param.type === 'enum' && (
         <ParsedField
-          label="Values (comma separated)"
-          placeholder="open, closed"
+          label="Values (one per line)"
+          rows={3}
+          placeholder={'open\nclosed'}
           value={param.values}
-          codec={LIST}
+          codec={LINES}
           disabled={disabled}
           onValue={(values) => onChange({ ...param, values })}
         />

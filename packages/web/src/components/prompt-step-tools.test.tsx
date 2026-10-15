@@ -59,6 +59,7 @@ function mountEditor(start: PromptStepEntry) {
   const find = (name: RegExp) => controls(view.tree(), name)[0]!;
   return {
     find,
+    tags: (name: RegExp) => controls(view.tree(), name).map((host) => host.tag),
     type: (name: RegExp, text: string) => {
       fire.type(find(name), text);
       view.draw();
@@ -73,17 +74,23 @@ function mountEditor(start: PromptStepEntry) {
 }
 
 describe('a tool parameter field that parses what is typed', () => {
-  it('keeps the text while it still reads as the value, so a comma can be typed', () => {
+  it('keeps the text while it still reads as the value, so a line break can be typed', () => {
     const m = mountEditor({
       ...base,
       tools: [httpTool('t', [param('state', { type: 'enum', values: ['open'] })])],
     });
-    m.type(/^values\b/, 'open,');
-    expect(valueOf(m.find(/^values\b/))).toBe('open,');
+    m.type(/^values\b/, 'open\n');
+    expect(valueOf(m.find(/^values\b/))).toBe('open\n');
     expect(m.params()[0]).toMatchObject({ values: ['open'] });
-    m.type(/^values\b/, 'open, closed');
-    expect(valueOf(m.find(/^values\b/))).toBe('open, closed');
+    m.type(/^values\b/, 'open\n\nclosed');
+    expect(valueOf(m.find(/^values\b/))).toBe('open\n\nclosed');
     expect(m.params()[0]).toMatchObject({ values: ['open', 'closed'] });
+  });
+
+  it('still reads the query parameter names as a comma separated list', () => {
+    const m = mountEditor({ ...base, tools: [httpTool('t')] });
+    m.type(/^query parameters$/, 'page, limit,');
+    expect(m.tool().query).toEqual(['page', 'limit']);
   });
 
   it('turns a line break typed or pasted into a tool description into a space', () => {
@@ -125,6 +132,35 @@ describe('a tool parameter field that parses what is typed', () => {
     });
     m.press(/^remove parameter a$/);
     expect(valueOf(m.find(/^max length$/))).toBe('20');
+  });
+});
+
+describe('the values of an enum parameter', () => {
+  const VALUES = /^values\b/;
+  const mountState = (values: string[]) =>
+    mountEditor({ ...base, tools: [httpTool('t', [param('state', { type: 'enum', values })])] });
+
+  it('is a textarea named Values (one per line)', () => {
+    expect(mountState(['open']).tags(/^values \(one per line\)$/)).toEqual(['textarea']);
+  });
+
+  it('shows and reads back a value with a comma or surrounding spaces unchanged', () => {
+    const values = ['Washington, D.C.', ' padded ', 'plain'];
+    const m = mountState(values);
+    const shown = valueOf(m.find(VALUES));
+    expect(shown).toBe('Washington, D.C.\n padded \nplain');
+    m.type(VALUES, shown);
+    expect(m.params()[0]).toMatchObject({ values });
+    m.type(VALUES, `${shown}\nlast`);
+    expect(m.params()[0]).toMatchObject({ values: [...values, 'last'] });
+  });
+
+  it('reads one value a line, dropping blank lines and trimming nothing', () => {
+    const m = mountState(['x']);
+    m.type(VALUES, 'a\nb\n\nc');
+    expect(m.params()[0]).toMatchObject({ values: ['a', 'b', 'c'] });
+    m.type(VALUES, ' a \r\n\r\n  \r\nb,c');
+    expect(m.params()[0]).toMatchObject({ values: [' a ', 'b,c'] });
   });
 });
 
