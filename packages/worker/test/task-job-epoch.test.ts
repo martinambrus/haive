@@ -1,5 +1,5 @@
 import type { Job } from 'bullmq';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configService, TASK_JOB_NAMES } from '@haive/shared';
 import {
   finishFailedStep,
@@ -460,6 +460,10 @@ stepRegistry.register({
     return {};
   },
 } as StepDefinition);
+
+beforeEach(() => {
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+});
 
 afterEach(() => {
   h.state.taskEpoch = 5;

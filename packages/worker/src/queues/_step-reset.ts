@@ -207,7 +207,8 @@ export async function resetStepAndDownstream(
  *  its span and would bill as WORK — CLOSED_GAP_INTO_IDLE_MS credits it to idle in the same
  *  update, exactly as the api re-open sites do. Does NOT enqueue the advance itself (that
  *  would import the task queue and form a cycle) — the caller enqueues ADVANCE_STEP when this
- *  returns true. Throws NewWorkHeld, writing nothing, while the system is held. */
+ *  returns true. Throws NewWorkHeld, writing nothing, while the system is held, and
+ *  MaintenanceStateUnreadable, writing nothing, when the held state cannot be read. */
 export async function autoResumeFailedStep(
   db: Database,
   args: {

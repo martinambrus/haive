@@ -78,6 +78,11 @@ function setup(status: 'failed' | 'running' = 'failed') {
       log.push(READS_STATE);
       return value;
     });
+  const unreadable = () =>
+    vi.spyOn(configService, 'getFresh').mockImplementation(async () => {
+      log.push(READS_STATE);
+      throw new Error('redis went away');
+    });
   const task = () => fake.rows(schema.tasks).find((r) => r.id === TASK)!;
   const events = () => fake.rows(schema.taskEvents).map((r) => r.eventType);
   const revive = () =>
@@ -93,7 +98,7 @@ function setup(status: 'failed' | 'running' = 'failed') {
       via: 'test',
       watchSince: null,
     });
-  return { fake, log, stored, task, events, revive, park, resume };
+  return { fake, log, stored, unreadable, task, events, revive, park, resume };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -139,12 +144,15 @@ describe.each([
     expect(t.task()).toMatchObject({ status: lands });
   });
 
-  it('writes when the stored state cannot be read', async () => {
+  it('reopens nothing and writes nothing when the stored state cannot be read under the fence', async () => {
     const t = setup();
-    vi.spyOn(configService, 'getFresh').mockRejectedValue(new Error('redis went away'));
+    t.unreadable();
 
-    expect(await reopen(t)).toBe(true);
-    expect(t.task()).toMatchObject({ status: lands });
+    await expect(reopen(t)).rejects.toMatchObject({ name: 'MaintenanceStateUnreadable' });
+
+    expect(t.task()).toMatchObject({ status: 'failed', errorMessage: 'boom' });
+    expect(t.events()).toEqual([]);
+    expect(t.log).toEqual([FENCE, READS_STATE]);
   });
 });
 
@@ -174,6 +182,18 @@ describe('the allowance auto-resume of a failed task', () => {
       expect(t.log).toEqual([FENCE, READS_STATE]);
     },
   );
+
+  it('resumes nothing and writes nothing when the stored state cannot be read under the fence', async () => {
+    const t = setup();
+    t.unreadable();
+
+    await expect(t.resume()).rejects.toMatchObject({ name: 'MaintenanceStateUnreadable' });
+
+    expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
+    expect(t.fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'failed' });
+    expect(t.events()).toEqual([]);
+    expect(t.log).toEqual([FENCE, READS_STATE]);
+  });
 
   it('answers false for a task that is no longer failed, whatever the system holds', async () => {
     const t = setup('running');

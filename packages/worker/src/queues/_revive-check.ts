@@ -24,6 +24,14 @@ export class NewWorkHeld extends Error {
   }
 }
 
+/** Thrown, with nothing written, when the state a reopen reads under the fence cannot be read. */
+export class MaintenanceStateUnreadable extends Error {
+  constructor(cause: unknown) {
+    super('the maintenance state could not be read, so a failed task is not reopened', { cause });
+    this.name = 'MaintenanceStateUnreadable';
+  }
+}
+
 /** The stored state, past the config cache since the api that sets it is another process. */
 export async function readMaintenanceState(taskId: string): Promise<MaintenanceState> {
   return parseMaintenanceState(
@@ -37,7 +45,11 @@ export async function readMaintenanceState(taskId: string): Promise<MaintenanceS
 /** Call first in the transaction that reopens a failed task; a state write waits for its commit. */
 export async function admitReopen(tx: DbTx, taskId: string): Promise<void> {
   await lockNewWorkFenceShared(tx);
-  const state = await readMaintenanceState(taskId);
+  const state = parseMaintenanceState(
+    await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
+      throw new MaintenanceStateUnreadable(err);
+    }),
+  );
   if (!refusesNewWork(state)) return;
   const [task] = await tx
     .select({ status: schema.tasks.status })

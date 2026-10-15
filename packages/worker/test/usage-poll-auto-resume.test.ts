@@ -35,16 +35,19 @@ function config(mode: string, stored: string) {
   );
 }
 
-/** The stored state, read past the cache once per check: each value answers one read, then normal. */
-function storedStates(...values: string[]) {
+/** The stored state, read past the cache once per check: each value or Error answers one read, then normal. */
+function storedStates(...values: (string | Error)[]) {
   const queue = [...values];
   vi.spyOn(configService, 'get').mockImplementation(async (key) => {
     if (key === CONFIG_KEYS.ALLOWANCE_WATCH_MODE) return 'auto';
     return key === CONFIG_KEYS.MAINTENANCE_STATE ? 'normal' : null;
   });
-  vi.spyOn(configService, 'getFresh').mockImplementation(async (key) =>
-    key === CONFIG_KEYS.MAINTENANCE_STATE ? (queue.shift() ?? 'normal') : null,
-  );
+  vi.spyOn(configService, 'getFresh').mockImplementation(async (key) => {
+    if (key !== CONFIG_KEYS.MAINTENANCE_STATE) return null;
+    const next = queue.shift() ?? 'normal';
+    if (next instanceof Error) throw next;
+    return next;
+  });
 }
 
 /** A task armed after a rate limit whose reset has passed; the poller's join read answers it. */
@@ -208,14 +211,11 @@ describe.each(['draining', 'maintenance'])(
 );
 
 describe('the allowance auto-resume when the stored state cannot be read', () => {
+  const down = new Error('redis went away');
   afterEach(() => vi.restoreAllMocks());
 
   it('warns, treats the system as normal, and goes on to resume the next armed task', async () => {
-    config('auto', 'normal');
-    vi.spyOn(configService, 'getFresh').mockImplementation(async (key) => {
-      if (key === CONFIG_KEYS.MAINTENANCE_STATE) throw new Error('redis went away');
-      return null;
-    });
+    storedStates(down, 'normal', down, 'normal');
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     const t = setup();
     t.fake.insert(schema.tasks, { ...t.task(), id: NEXT_TASK });
@@ -240,5 +240,39 @@ describe('the allowance auto-resume when the stored state cannot be read', () =>
       { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: TASK } },
       { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: NEXT_TASK } },
     ]);
+  });
+
+  describe('under the fence', () => {
+    it('fails the tick, changing nothing, queueing nothing and spending no attempt', async () => {
+      storedStates('normal', down);
+      const t = setup();
+
+      await expect(checkProviderRecovery(t.db)).rejects.toMatchObject({
+        name: 'MaintenanceStateUnreadable',
+      });
+
+      expect(t.writes).toEqual([]);
+      expect(h.queued).toEqual([]);
+      expect(t.task()).toMatchObject({
+        status: 'failed',
+        allowanceAutoResumeCount: 0,
+        awaitingAllowanceProviderId: PROVIDER,
+        allowanceReplenishedAt: null,
+      });
+      expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+    });
+
+    it('resumes it on a later poll once the state can be read again', async () => {
+      storedStates('normal', down, 'normal', 'normal');
+      const t = setup();
+      await expect(checkProviderRecovery(t.db)).rejects.toMatchObject({
+        name: 'MaintenanceStateUnreadable',
+      });
+
+      await checkProviderRecovery(t.db);
+
+      expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+      expect(h.queued).toHaveLength(1);
+    });
   });
 });

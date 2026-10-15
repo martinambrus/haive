@@ -394,7 +394,8 @@ async function resolveCurrentStepIndex(
 
 /** Run a task write that can lift a failed task (no fence, or one that may revive) after the
  *  creation's checks, in one transaction; false when one refused, recorded, or nothing landed.
- *  Throws NewWorkHeld, with nothing written, while the system drains or is in maintenance. */
+ *  Throws NewWorkHeld, with nothing written, while the system drains or is in maintenance, and
+ *  MaintenanceStateUnreadable, with nothing written, when that state cannot be read. */
 async function writeReviving(
   db: Database | DbHandle,
   taskId: string,
