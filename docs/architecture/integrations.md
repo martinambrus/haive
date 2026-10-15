@@ -12,11 +12,12 @@ with the task owner's own account, without the agent ever holding that account's
   **`integrations` task token** names that run, and **`integration_calls`** logs every attempt.
 
 What is live and what is not: providers, connections, sign-in, the write switch, the forge code,
-resolution, the choice routes and the broker (`/integration-mcp`, see The broker) are merged. Nothing
-yet declares a step requirement, writes a stamp, mints an `integrations` token or calls
-`recordTaskGrants` — the worker's dispatch wiring is the next step — so no agent can reach the broker
-yet, today no task grant exists in production and the resolver's grant tier is always empty. The task
-page has no Integrations section yet either.
+resolution, the choice routes, the broker (`/integration-mcp`, see The broker) and the exec side of the
+worker are merged: a run whose invocation row carries a stamp gets the `haive-integrations` MCP server
+and its own `integrations` token (see The call log, the stamp and the token). Nothing yet declares a
+step requirement, writes a stamp or calls `recordTaskGrants` — the worker's dispatch side is the next
+step — so no agent reaches the broker yet, today no task grant exists in production and the
+resolver's grant tier is always empty. The task page has no Integrations section yet either.
 
 ## Providers and categories
 
@@ -343,6 +344,17 @@ the public host. That gap is still open.
   (`{requirementId, categoryId|null, providerId, connectionId, access}`), NULL when none. One decision,
   one value: a run keeps the provider its prompt named, and the next dispatch resolves again.
   `parseIntegrationBindings` drops any entry that does not parse.
+- **The run's server** (`worker/src/queues/cli-exec/resolvers.ts`, `sandbox/integrations-mcp-server.ts`):
+  at exec, a run whose invocation row carries a non-empty stamp and whose MCP profile is full (not
+  `rag_only`, not `none`) gets the `haive-integrations` server: a script at
+  `/haive/haive-integrations-mcp.mjs` and a token file beside it holding an `integrations` token for
+  that task, step and invocation (lifetime: the run's timeout plus 15 min, the same rule as
+  `haive-custom`). The server's entry names only the api URL (`INTEGRATIONS_MCP_API_URL`), never the
+  token, so it is the same for every run of a task and the CLIs' merged configs do not churn. The
+  script lists `[]` on any failure and answers a refused call as a tool error; the broker decides. A
+  stamped run whose server cannot be delivered (no `CONFIG_ENCRYPTION_KEY`, no step, a config the
+  task volume did not take) fails `integrations-unwired` before its CLI starts, rather than running
+  without the tools its prompt names.
 - **Tool names** (`integrationTools`): a tool is named by its operation id; when two declared tools
   share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`). Every
   declared name is checked against `TOOL_NAME_PATTERN` and for uniqueness even while the write switch
