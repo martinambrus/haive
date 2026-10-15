@@ -529,6 +529,9 @@ export default function GlobalKbPage() {
   const [houseRulesOn, setHouseRulesOn] = useState(true);
   const [cfgBusy, setCfgBusy] = useState(false);
   const [cfgMsg, setCfgMsg] = useState<string | null>(null);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   const [dbTest, setDbTest] = useState<{ busy: boolean; ok: boolean | null; msg: string | null }>({
     busy: false,
     ok: null,
@@ -656,6 +659,24 @@ export default function GlobalKbPage() {
       setCfgMsg((err as ApiError).message ?? 'Save failed');
     } finally {
       setCfgBusy(false);
+    }
+  }
+
+  async function clearConnectionString() {
+    if (clearBusy) return;
+    setClearBusy(true);
+    setClearError(null);
+    try {
+      const res = await api.put<GlobalKbConfig>('/global-kb/config', {
+        clearConnectionString: true,
+      });
+      setCfgSet(res.connectionStringSet);
+      setCfg((p) => ({ ...p, connectionString: '' }));
+      setClearOpen(false);
+    } catch (err) {
+      setClearError((err as ApiError).message ?? 'Removing the connection string failed');
+    } finally {
+      setClearBusy(false);
     }
   }
 
@@ -1605,6 +1626,59 @@ export default function GlobalKbPage() {
                   onChange={(e) => setCfg({ ...cfg, connectionString: e.target.value })}
                   placeholder="postgres://user:pass@host:5432/db"
                 />
+              </div>
+            )}
+            {canEnforce && cfgSet && cfg.mode === 'internal' && (
+              <div className="flex flex-col items-start gap-1.5">
+                <p className="text-xs text-neutral-400">
+                  A connection string for an external database is still stored. The built-in store
+                  does not use it.
+                </p>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setClearError(null);
+                    setClearOpen(true);
+                  }}
+                >
+                  Remove stored connection string
+                </Button>
+                <Dialog
+                  className="mx-4"
+                  open={clearOpen}
+                  onOpenChange={(open) => !open && !clearBusy && setClearOpen(false)}
+                >
+                  <DialogContent role="alertdialog" aria-labelledby="remove-conn-title">
+                    <DialogHeader>
+                      <DialogTitle id="remove-conn-title">
+                        Remove stored connection string
+                      </DialogTitle>
+                      <p className="text-sm text-neutral-300">
+                        Delete the stored connection string for the external database? Nothing uses
+                        it while the built-in store is selected. To use an external store again, you
+                        will have to enter a new one.
+                      </p>
+                    </DialogHeader>
+                    <FormError message={clearError} />
+                    <div className="mt-4 flex justify-end gap-2">
+                      <Button
+                        variant="secondary"
+                        disabled={clearBusy}
+                        onClick={() => setClearOpen(false)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        disabled={clearBusy}
+                        onClick={() => void clearConnectionString()}
+                      >
+                        {clearBusy ? 'Removing…' : 'Remove connection string'}
+                      </Button>
+                    </div>
+                  </DialogContent>
+                </Dialog>
               </div>
             )}
             {canEnforce && (

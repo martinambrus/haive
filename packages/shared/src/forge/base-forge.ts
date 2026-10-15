@@ -14,10 +14,14 @@ import {
   ForgeRateLimitError,
 } from './types.js';
 
+export const FORGE_REQUEST_TIMEOUT_MS = 30_000;
+
 /** Shared base for the forge adapters. Provides one authenticated JSON request
  *  helper that maps HTTP failures to typed ForgeErrors; subclasses supply their
  *  auth header and the endpoint shapes. Never logs the token. */
 export abstract class BaseForgeProvider implements ForgeProvider {
+  constructor(private readonly timeoutMs: number = FORGE_REQUEST_TIMEOUT_MS) {}
+
   abstract readonly name: ForgeProviderName;
   abstract defaultApiBase(host: string): string;
   abstract openPullRequest(ctx: ForgeContext, input: OpenPrInput): Promise<OpenPrResult>;
@@ -40,17 +44,24 @@ export abstract class BaseForgeProvider implements ForgeProvider {
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
+    const signal = AbortSignal.timeout(this.timeoutMs);
+    const failure = (err: unknown): ForgeError =>
+      new ForgeError(
+        signal.aborted
+          ? `${this.name} request timed out after ${this.timeoutMs} ms (${method} ${path})`
+          : `${this.name} request failed (${method} ${path}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+
     let res: Response;
     try {
       res = await fetch(url, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
+        signal,
       });
     } catch (err) {
-      throw new ForgeError(
-        `${this.name} request failed (${method} ${path}): ${err instanceof Error ? err.message : String(err)}`,
-      );
+      throw failure(err);
     }
 
     if (!res.ok) {
@@ -58,7 +69,12 @@ export abstract class BaseForgeProvider implements ForgeProvider {
     }
 
     if (res.status === 204) return undefined as T;
-    const text = await res.text();
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      throw failure(err);
+    }
     if (!text) return undefined as T;
     try {
       return JSON.parse(text) as T;

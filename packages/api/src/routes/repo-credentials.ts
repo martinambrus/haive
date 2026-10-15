@@ -11,6 +11,7 @@ import {
   forgeProviderSchema,
   secretsService,
 } from '@haive/shared';
+import { credentialForgeProvider, resolveForgeProvider } from '@haive/shared/forge';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -33,10 +34,73 @@ const BOTH_OR_NEITHER = 'gitName and gitEmail must be set together, or both left
 const identityIsWhole = (b: { gitName?: string; gitEmail?: string }) =>
   Boolean(b.gitName?.length) === Boolean(b.gitEmail?.length);
 
+const HOST_LABEL = '[a-z0-9]+(?:-+[a-z0-9]+)*';
+const HOST_NAME = new RegExp(`^${HOST_LABEL}(?:\\.${HOST_LABEL})*(?::([1-9][0-9]{0,4}))?$`);
+
+const isHostName = (v: string) => {
+  const m = HOST_NAME.exec(v);
+  if (m === null || (m[1] !== undefined && Number(m[1]) > 65535)) return false;
+  // The URL parser rewrites numeric hosts and drops a default port; refuse what would not survive it.
+  try {
+    return new URL(`https://${v}/`).host === v;
+  } catch {
+    return false;
+  }
+};
+
+/** A host name with an optional port, stored trimmed and lower case, so no userinfo or path can ride into a URL built from it. */
+const hostField = z
+  .string()
+  .max(255)
+  .trim()
+  .toLowerCase()
+  .refine(isHostName, { message: 'host must be a host name, optionally followed by :port' });
+
+const API_BASE_ON_HOST =
+  "apiBaseUrl must be an https URL on the credential's host or its forge's API host, with no user, query or fragment";
+
+type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };
+
+/** The host of the forge's default API base, which for github.com and bitbucket.org is not the web host. */
+function forgeApiHost(provider: string | null | undefined, host: string): string | null {
+  const forge = credentialForgeProvider(provider, host);
+  if (!forge) return null;
+  try {
+    return new URL(resolveForgeProvider(forge).defaultApiBase(host)).host;
+  } catch {
+    return null;
+  }
+}
+
+/** A blank API base falls back to the provider's own; a set one must be https on the credential's or the forge's host.
+ *  Endpoint paths are appended to the stored text, so a `?` or `#` in it would swallow them. */
+const apiBaseOnHost = (b: ApiBaseTarget) => {
+  const base = b.apiBaseUrl?.trim();
+  if (!base) return true;
+  try {
+    const url = new URL(base);
+    const host = b.host.trim().toLowerCase();
+    return (
+      url.protocol === 'https:' &&
+      url.username === '' &&
+      url.password === '' &&
+      !/[?#]/.test(base) &&
+      (url.host === host || url.host === forgeApiHost(b.provider, host))
+    );
+  } catch {
+    return false;
+  }
+};
+
+// What an edit leaves behind: the stored provider and URL stand in for whatever the request omits.
+const apiBaseTargetSchema = z
+  .object({ host: z.string(), provider: z.string().nullish(), apiBaseUrl: z.string().nullish() })
+  .refine(apiBaseOnHost, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
+
 const createCredentialSchema = z
   .object({
     label: z.string().min(1).max(255),
-    host: z.string().min(1).max(255),
+    host: hostField,
     username: z.string().min(1).max(255),
     secret: z.string().min(1).max(4096),
     // Which forge to call for PR creation/polling. '' = auto-detect from host (only
@@ -48,7 +112,8 @@ const createCredentialSchema = z
     gitName: gitNameField,
     gitEmail: gitEmailField,
   })
-  .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] });
+  .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] })
+  .refine(apiBaseOnHost, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
 
 // Edit: label/host always; username/secret optional — blank means "keep the
 // current value" (the encrypted values are never sent to the client, so the
@@ -61,7 +126,7 @@ const createCredentialSchema = z
 const updateCredentialSchema = z
   .object({
     label: z.string().min(1).max(255),
-    host: z.string().min(1).max(255),
+    host: hostField,
     username: z.string().max(255).optional(),
     secret: z.string().max(4096).optional(),
     provider: z.union([z.literal(''), forgeProviderSchema]).optional(),
@@ -154,12 +219,6 @@ repoCredentialsRoutes.put('/:id', async (c) => {
   const body = updateCredentialSchema.parse(await c.req.json());
   const db = getDb();
 
-  const existing = await db.query.repoCredentials.findFirst({
-    where: and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)),
-    columns: { id: true, encryptedDek: true },
-  });
-  if (!existing) throw new HttpError(404, 'Credential not found');
-
   const update: {
     label: string;
     host: string;
@@ -188,28 +247,48 @@ repoCredentialsRoutes.put('/:id', async (c) => {
   // per-credential DEK so the stored secret never round-trips to the client.
   const newUsername = body.username?.trim();
   const newSecret = typeof body.secret === 'string' && body.secret.length > 0 ? body.secret : null;
-  if (newUsername || newSecret !== null) {
-    const masterKek = await secretsService.getMasterKek();
-    const dekHex = decryptDek(existing.encryptedDek, masterKek);
-    if (newUsername) update.usernameEncrypted = encrypt(newUsername, dekHex);
-    if (newSecret !== null) update.secretEncrypted = encrypt(newSecret, dekHex);
-  }
+  const masterKek = newUsername || newSecret !== null ? await secretsService.getMasterKek() : null;
 
-  const updated = await db
-    .update(schema.repoCredentials)
-    .set(update)
-    .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
-    .returning({
-      id: schema.repoCredentials.id,
-      label: schema.repoCredentials.label,
-      host: schema.repoCredentials.host,
-      provider: schema.repoCredentials.provider,
-      apiBaseUrl: schema.repoCredentials.apiBaseUrl,
-      gitName: schema.repoCredentials.gitName,
-      gitEmail: schema.repoCredentials.gitEmail,
-      createdAt: schema.repoCredentials.createdAt,
-      updatedAt: schema.repoCredentials.updatedAt,
+  // One lock from read to write, so an overlapping edit cannot change the row the check judged.
+  const updated = await db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select({
+        encryptedDek: schema.repoCredentials.encryptedDek,
+        provider: schema.repoCredentials.provider,
+        apiBaseUrl: schema.repoCredentials.apiBaseUrl,
+      })
+      .from(schema.repoCredentials)
+      .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
+      .for('update');
+    if (!existing) throw new HttpError(404, 'Credential not found');
+    apiBaseTargetSchema.parse({
+      host: body.host,
+      provider: body.provider ?? existing.provider,
+      apiBaseUrl: body.apiBaseUrl ?? existing.apiBaseUrl,
     });
+
+    if (masterKek !== null) {
+      const dekHex = decryptDek(existing.encryptedDek, masterKek);
+      if (newUsername) update.usernameEncrypted = encrypt(newUsername, dekHex);
+      if (newSecret !== null) update.secretEncrypted = encrypt(newSecret, dekHex);
+    }
+
+    return tx
+      .update(schema.repoCredentials)
+      .set(update)
+      .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
+      .returning({
+        id: schema.repoCredentials.id,
+        label: schema.repoCredentials.label,
+        host: schema.repoCredentials.host,
+        provider: schema.repoCredentials.provider,
+        apiBaseUrl: schema.repoCredentials.apiBaseUrl,
+        gitName: schema.repoCredentials.gitName,
+        gitEmail: schema.repoCredentials.gitEmail,
+        createdAt: schema.repoCredentials.createdAt,
+        updatedAt: schema.repoCredentials.updatedAt,
+      });
+  });
 
   await recordAuditEvent(db, {
     actorUserId: userId,

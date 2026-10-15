@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { userSecretsService } from '@haive/shared';
 import {
@@ -9,8 +9,8 @@ import {
   createPkcePair,
   exchangeAuthorizationCode,
   getIntegrationProvider,
-  isProviderEnabled,
   listIntegrationProviders,
+  loadProviderEnablement,
   oauthRedirectUri,
   resolveOauthClient,
   resolveOauthClientById,
@@ -18,6 +18,12 @@ import {
 import { requireAuth } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import {
+  listAdminDefaults,
+  removePreference,
+  requireValidChoice,
+  upsertPreference,
+} from '../lib/integration-choice.js';
 import { getRedis } from '../redis.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { pollDeviceSignIn, startDeviceSignIn } from '../lib/integration-device.js';
@@ -68,6 +74,10 @@ const completeSchema = z.union([
 const pollSchema = z.object({ handle: z.string().min(1).max(512) });
 const writeSchema = z.object({ writeEnabled: z.boolean() });
 const linkSchema = z.object({ repoCredentialId: z.string().uuid() });
+const preferenceSchema = z.object({
+  providerId: z.string().min(1).max(256),
+  connectionId: z.string().uuid().nullish(),
+});
 
 /** What the provider's `error` parameter said, cut down to a code that is safe to echo. */
 const errorCodeOf = (raw: string) => raw.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 64) || 'unknown';
@@ -110,9 +120,10 @@ integrationsRoutes.get('/providers', async (c) => {
         .where(eq(schema.integrationUserSettings.userId, userId))
     ).map((setting) => [setting.providerId, setting.writeEnabled]),
   );
+  const enablement = await loadProviderEnablement(db);
   const providers = [];
   for (const spec of listIntegrationProviders()) {
-    const enabled = await isProviderEnabled(db, spec.id);
+    const enabled = enablement.get(spec.id) === true;
     providers.push({
       id: spec.id,
       displayName: spec.displayName,
@@ -245,4 +256,37 @@ integrationsRoutes.post('/providers/:id/link-credential', async (c) => {
     repoCredentialId,
   );
   return c.json({ connection }, 201);
+});
+
+integrationsRoutes.get('/preferences', async (c) => {
+  const preferences = await getDb()
+    .select({
+      categoryId: schema.integrationCategoryPreferences.categoryId,
+      providerId: schema.integrationCategoryPreferences.providerId,
+      connectionId: schema.integrationCategoryPreferences.connectionId,
+    })
+    .from(schema.integrationCategoryPreferences)
+    .where(eq(schema.integrationCategoryPreferences.userId, c.get('userId')))
+    .orderBy(asc(schema.integrationCategoryPreferences.categoryId));
+  return c.json({ preferences });
+});
+
+integrationsRoutes.put('/preferences/:categoryId', async (c) => {
+  const userId = c.get('userId');
+  const categoryId = c.req.param('categoryId');
+  const body = preferenceSchema.parse(await c.req.json());
+  const pick = { categoryId, providerId: body.providerId, connectionId: body.connectionId ?? null };
+  const db = getDb();
+  await requireValidChoice(db, userId, pick);
+  await upsertPreference(db, { userId, ...pick });
+  return c.json(pick);
+});
+
+integrationsRoutes.delete('/preferences/:categoryId', async (c) => {
+  await removePreference(getDb(), c.get('userId'), c.req.param('categoryId'));
+  return c.json({ ok: true });
+});
+
+integrationsRoutes.get('/defaults', async (c) => {
+  return c.json({ defaults: await listAdminDefaults(getDb()) });
 });

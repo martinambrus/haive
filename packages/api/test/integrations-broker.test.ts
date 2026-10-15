@@ -72,6 +72,11 @@ vi.mock('@haive/shared/integrations', async (importOriginal) => {
     ...original,
     listIntegrationProviders: providers,
     getIntegrationProvider: (id: string) => providers().find((p) => p.id === id),
+    loadProviderEnablement: async (db: Parameters<typeof original.loadProviderEnablement>[0]) =>
+      new Map([
+        ...(await original.loadProviderEnablement(db)),
+        [h.stub.id, await original.isProviderEnabled(db, h.stub.id)],
+      ]),
   };
 });
 
