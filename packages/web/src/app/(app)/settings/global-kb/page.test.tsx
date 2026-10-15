@@ -31,6 +31,9 @@ vi.mock('react', async (importOriginal) => ({
   useEffect: (effect: () => void) => {
     if (hooks.mounting) effect();
   },
+  useInsertionEffect: (effect: () => void) => {
+    if (hooks.mounting) effect();
+  },
   useCallback: (fn: unknown) => fn,
   useMemo: (fn: () => unknown) => fn(),
   useRef: (initial: unknown) => {

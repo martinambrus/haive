@@ -38,6 +38,9 @@ vi.mock('react', async (importOriginal) => ({
   useEffect: (effect: () => void) => {
     if (hooks.mounting) effect();
   },
+  useInsertionEffect: (effect: () => void) => {
+    if (hooks.mounting) effect();
+  },
 }));
 vi.mock('react-dom', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react-dom')>()),

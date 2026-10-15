@@ -631,6 +631,21 @@ function Suspends() {
   return null;
 }
 
+let renders = 0;
+
+function Counts() {
+  renders++;
+  return null;
+}
+
+function Waits({ gate, onSuspend }: { gate: Promise<void>; onSuspend: () => void }) {
+  // React resumes the same render when the promise settles in the microtask after a suspension.
+  if (!reached) queueMicrotask(onSuspend);
+  reached = true;
+  use(gate);
+  return null;
+}
+
 function Stack({ top }: { top: boolean }) {
   return (
     <Scene open>
@@ -682,6 +697,35 @@ function openSecond() {
   byId('a2').focus();
   focusLog.length = 0;
   show(<Stack top />);
+}
+
+async function openByResumedTransition(children: ReactNode) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const userFocusesOpener = () => {
+    byId('opener').focus();
+    release();
+  };
+  reached = false;
+  renders = 0;
+  show(<Scene />);
+  byId('before').focus();
+  await act(async () => {
+    startTransition(() => {
+      root.render(
+        <Scene open>
+          <Counts />
+          <Waits gate={gate} onSuspend={userFocusesOpener} />
+          {children}
+        </Scene>,
+      );
+    });
+  });
+  expect(reached).toBe(true);
+  expect(renders).toBe(1);
+  expect(panels()).toHaveLength(1);
 }
 
 describe('Dialog focus', () => {
@@ -1092,6 +1136,19 @@ describe('Dialog focus', () => {
     byId('opener').focus();
     show(<Scene open>{buttons}</Scene>);
     show(<Scene>{buttons}</Scene>);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C18 (a) a transition that suspends while opening takes the opener when it commits', async () => {
+    await openByResumedTransition(buttons);
+    show(<Scene>{buttons}</Scene>);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C18 (b) an autoFocus child still takes focus when that transition commits, and closing restores the opener', async () => {
+    await openByResumedTransition(withField);
+    expect(where()).toBe('input#name');
+    show(<Scene>{withField}</Scene>);
     expect(where()).toBe('button#opener');
   });
 

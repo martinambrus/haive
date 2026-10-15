@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, type HTMLAttributes } from 'react';
+import { useEffect, useInsertionEffect, useRef, type HTMLAttributes } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '@/lib/cn';
 
@@ -53,11 +53,10 @@ function leavesPanel(panel: HTMLElement, stops: HTMLElement[], backwards: boolea
 export function Dialog({ open, onOpenChange, children, className }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
-  const committedRef = useRef(false);
-  // Read on each render until the opening commits: autoFocus takes focus before any effect runs.
-  if (open && !committedRef.current) {
-    openerRef.current = document.activeElement as HTMLElement | null;
-  }
+  // Insertion effects run before the layout phase, where a child's autoFocus takes focus.
+  useInsertionEffect(() => {
+    if (open) openerRef.current = document.activeElement as HTMLElement | null;
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -83,7 +82,6 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
     const panel = panelRef.current;
     if (!open || !panel) return;
     const entry = { panel, opener: openerRef.current };
-    committedRef.current = true;
     if (!panel.contains(document.activeElement)) panel.focus();
     openPanels.push(entry);
     const onTab = (e: KeyboardEvent) => {
@@ -102,7 +100,6 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
       openPanels.splice(at, 1);
       // Still attached means Strict Mode's rehearsal, not a close.
       if (panel.isConnected) return;
-      committedRef.current = false;
       openerRef.current = null;
       // A dialog opened from inside this one gives focus back where this one would have.
       for (const above of openPanels.slice(at)) {
