@@ -34,6 +34,12 @@ import {
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
+import {
+  CUSTOM_MCP_SERVER_JS,
+  CUSTOM_MCP_SERVER_PATH,
+  CUSTOM_MCP_TOKEN_PATH,
+  CUSTOM_MCP_TOOLS_PATH,
+} from '../../sandbox/custom-mcp-server.js';
 import { CHROME_MCP_PROXY_JS, CHROME_MCP_PROXY_PATH } from '../../sandbox/chrome-mcp-proxy.js';
 import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
 import { resolveMcpSurface, type McpProfile } from '../../sandbox/mcp-surface.js';
@@ -57,6 +63,8 @@ import { sandboxWorktreePath, splitRepoSubpath } from '../../repo/worktree-paths
 import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { customToolInputSchema, parsePinnedCustomSteps } from '@haive/shared/modularity';
+import { signTaskToken } from '@haive/shared/task-token';
 import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
 import {
   HOST_REPO_ROOT,
@@ -227,6 +235,62 @@ export function networkPolicyReachesPackageRegistries(policy: CliNetworkPolicy |
   return !policy || policy.mode === 'full';
 }
 
+const CUSTOM_TOKEN_GRACE_SECONDS = 15 * 60;
+
+type CustomRun = Pick<
+  CliExecJobPayload,
+  'customTools' | 'invocationId' | 'taskStepId' | 'timeoutMs'
+>;
+
+/** The haive-custom script, tool list and this run's token as sandbox files; null when no named tool is pinned. */
+async function resolveCustomFiles(
+  db: Database,
+  taskId: string,
+  run: CustomRun,
+  names: readonly string[],
+): Promise<SandboxExtraFile[] | null> {
+  if (run.taskStepId === null) return null;
+  const step = await db.query.taskSteps.findFirst({
+    where: and(eq(schema.taskSteps.id, run.taskStepId), eq(schema.taskSteps.taskId, taskId)),
+    columns: { stepId: true },
+  });
+  if (!step) return null;
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { customSteps: true },
+  });
+  const tools = (parsePinnedCustomSteps(task?.customSteps)[step.stepId]?.tools ?? []).filter(
+    (tool) => names.includes(tool.name),
+  );
+  if (tools.length === 0) return null;
+  const token = signTaskToken(
+    {
+      aud: 'custom-mcp',
+      taskId,
+      taskStepId: run.taskStepId,
+      cliInvocationId: run.invocationId,
+      ...(run.timeoutMs === undefined
+        ? {}
+        : { ttlSeconds: Math.ceil(run.timeoutMs / 1000) + CUSTOM_TOKEN_GRACE_SECONDS }),
+    },
+    process.env.CONFIG_ENCRYPTION_KEY as string,
+  );
+  return [
+    { containerPath: CUSTOM_MCP_SERVER_PATH, content: CUSTOM_MCP_SERVER_JS },
+    {
+      containerPath: CUSTOM_MCP_TOOLS_PATH,
+      content: JSON.stringify(
+        tools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: customToolInputSchema(tool),
+        })),
+      ),
+    },
+    { containerPath: CUSTOM_MCP_TOKEN_PATH, content: token },
+  ];
+}
+
 export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
@@ -259,6 +323,8 @@ export async function resolveMcpExtraFiles(
   /** The invocation's effective egress. Required, like the two flags above: a default would let
    *  a new call site declare a server the sandbox cannot fetch. */
   networkPolicy: CliNetworkPolicy | null,
+  /** The run these files are for; only a prompt step's own run names custom tools. */
+  run?: CustomRun,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
@@ -270,7 +336,11 @@ export async function resolveMcpExtraFiles(
   // THE decision — shared with the dispatcher, which renders the same object into the
   // prompt. Materialization below must read it rather than re-deriving any part, or a
   // prompt can advertise a server this mount does not wire.
-  const surface = await resolveMcpSurface(db, taskId, ragOnly);
+  const surface = await resolveMcpSurface(db, taskId, ragOnly, run?.customTools);
+  const customFiles =
+    run && surface.custom?.enabled
+      ? await resolveCustomFiles(db, taskId, run, surface.custom.tools)
+      : null;
 
   const ragLspAvailable =
     cliAdapterRegistry.has(providerName) &&
@@ -358,6 +428,9 @@ export async function resolveMcpExtraFiles(
     ddevControlServerPath: DDEV_MCP_SERVER_PATH,
     ddevApiUrl: surface.ddevControl.apiUrl,
     ddevToken: surface.ddevControl.token,
+    includeCustomTools: customFiles !== null,
+    customServerPath: CUSTOM_MCP_SERVER_PATH,
+    customApiUrl: process.env.RAG_API_INTERNAL_URL || 'http://api:3001',
   });
 
   // User's custom MCP servers (.claude/mcp_settings.json) merged additively so
@@ -385,7 +458,12 @@ export async function resolveMcpExtraFiles(
   // ONE list, spread at every return below. Each delivery mode returns its own `files`, so
   // three separate arrays combined per-site is where a newly added server quietly misses a
   // branch -- and a missing script file means its MCP server does not start at all.
-  const serverFiles: SandboxExtraFile[] = [...ragFiles, ...ddevFiles, ...chromeFiles];
+  const serverFiles: SandboxExtraFile[] = [
+    ...ragFiles,
+    ...ddevFiles,
+    ...chromeFiles,
+    ...(customFiles ?? []),
+  ];
 
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME, userServers);
   if (!config) return empty;

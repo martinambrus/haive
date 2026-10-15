@@ -166,6 +166,10 @@ export interface DispatchRequest {
   /** The step's declared MCP narrowing, passed straight to resolveMcpSurface so the
    *  advertised surface matches the one cli-exec will wire for the same invocation. */
   toolProfile?: 'rag_only' | 'none';
+  /** The custom tools a prompt step's author defined, by name; set by that step's own dispatch only. */
+  customTools?: string[];
+  /** A provider whose CLI cannot host MCP servers is ineligible, as for a dispatch needing sub-agents. */
+  requiresMcp?: boolean;
   /** Computed by resolveTaskDispatch. Exposed on the pure resolver only for
    *  deterministic unit tests; null means "advertise nothing". */
   mcpSurface?: McpSurface | null;
@@ -339,7 +343,7 @@ export async function resolveTaskDispatch(
     resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
     req.toolProfile === 'none'
       ? emptyMcpSurface()
-      : resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
+      : resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only', req.customTools),
     resolveGlobalKbContext(db, taskId, { houseRules: houseRules !== undefined }),
     resolveAppReach(db, taskId),
     resolveCodexAppServerVerdicts(db, taskId),
@@ -590,11 +594,20 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   const needsSubagents = req.input.capabilities.includes('subagents');
   const needsVision = req.input.capabilities.includes('vision');
 
+  let sawWithoutMcp = false;
+  let sawWithMcp = false;
   for (const { provider, adapter } of dispatchCandidates(enabled, req.preferredProviderId ?? null, {
     needsVision,
     preferVision: req.preferVision,
     registry: req.registry,
   })) {
+    if (req.requiresMcp === true) {
+      if (!adapter.supportsMcp) {
+        sawWithoutMcp = true;
+        continue;
+      }
+      sawWithMcp = true;
+    }
     const plan = buildCliSidePlan(adapter, provider, req, needsSubagents);
     if (plan) return plan;
   }
@@ -602,6 +615,9 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   // Name the capability that went unmet. The runner turns this straight into the
   // step's failure message, and "no provider matched required capabilities" tells
   // the reader nothing about what to change.
+  if (sawWithoutMcp && !sawWithMcp) {
+    return skipPlan('this step needs MCP servers and no enabled CLI provider can host them');
+  }
   return skipPlan(
     needsVision
       ? 'this task has attachments that can only be read by LOOKING at them (an image, or a document no text could be extracted from) and no enabled CLI provider can see images — configure a vision-capable model, or remove those files'

@@ -45,9 +45,13 @@ import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
-import { TEMPLATE_PERSONA_MARKER_PATTERN, parseStepId } from '@haive/shared/modularity';
+import {
+  TEMPLATE_PERSONA_MARKER_PATTERN,
+  describeInvalidTools,
+  parseStepId,
+} from '@haive/shared/modularity';
 import { moduleDeactivationMessage } from '../modules/activation.js';
-import { promptStepNamedText } from './steps/custom/prompt-step.js';
+import { promptStepNamedText, promptStepTools } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
 import { closeAppRunnerExtraTabs, restoreAppRunnerBrowserWindow } from '../sandbox/app-runner.js';
@@ -548,6 +552,29 @@ async function insertInvocationOrNull<T>(insert: () => Promise<T>): Promise<T | 
   }
 }
 
+export const CUSTOM_TOOL_INVALID_REASON = 'custom-tool-invalid';
+export const CUSTOM_TOOLS_SWITCHED_OFF_REASON = 'custom-tools-switched-off';
+
+/** The tool names a prompt step's dispatch carries, or the failure that stops it; null for a step with none. */
+async function resolveCustomTools(
+  stepDef: StepDefinition,
+): Promise<{ names: string[] } | { failure: string } | null> {
+  const tools = promptStepTools(stepDef);
+  if (!tools) return null;
+  if (tools.invalid.length > 0) {
+    return {
+      failure: `${CUSTOM_TOOL_INVALID_REASON}: this step's tools no longer pass their checks: ${describeInvalidTools(tools.invalid)}. The task pinned them when it was created; fix them in the task type and start a new task.`,
+    };
+  }
+  if (tools.names.length === 0) return null;
+  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+    return {
+      failure: `${CUSTOM_TOOLS_SWITCHED_OFF_REASON}: custom tools are switched off on this install, so this step cannot run. Switch them on, then retry the step.`,
+    };
+  }
+  return { names: tools.names };
+}
+
 async function resolveLlmPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -768,6 +795,19 @@ async function resolveLlmPhase(
     };
   }
 
+  const custom = llmSpec.toolProfile === undefined ? await resolveCustomTools(stepDef) : null;
+  if (custom && 'failure' in custom) {
+    const failed = await updateRow(db, current.id, {
+      status: 'failed',
+      errorMessage: custom.failure,
+      endedAt: new Date(),
+    });
+    return {
+      resolved: false,
+      result: { status: 'failed', row: failed, error: failed.errorMessage ?? custom.failure },
+    };
+  }
+
   // Optional async setup the invocation depends on (e.g. 08a starting the
   // runner's headed browser so chrome-devtools MCP can connect). Idempotent;
   // a throw here fails the step like any dispatch error.
@@ -879,6 +919,7 @@ async function resolveLlmPhase(
       capabilities: llmSpec.requiredCapabilities,
     },
     toolProfile: llmSpec.toolProfile,
+    ...(custom ? { customTools: custom.names, requiresMcp: true } : {}),
     agentPool: llmSpec.agentPool,
     ...(promptStepPersonaIds ? { promptStepPersonaIds } : {}),
     skipAgentRules: llmSpec.skipAgentRules,
@@ -1014,6 +1055,7 @@ async function resolveLlmPhase(
     effortLevel: preferredEffort ?? undefined,
     kind: payloadKind,
     toolProfile: llmSpec.toolProfile,
+    ...(custom ? { customTools: custom.names } : {}),
     worktreeRel,
     spec: plan.invocation.spec,
     timeoutMs: budget.timeoutMs,

@@ -54,6 +54,8 @@ const NOT_A_RESOURCE = [
   // DDEV snapshot files (access/migrated/import) live in the task's repository, not Docker's
   // resource namespace; their task UUID supplies the isolation.
   /haive-(?:task|rag|mcp|chrome-mcp-proxy|price-sync|runtime-tools|worker|data|ide-ensure|api-|access-|migrated-|import-|pre-migrate|pre-rename)/,
+  // An MCP server name, and the files beside its script: a CLI and the stats module read them.
+  /haive-custom\b/,
 ];
 
 function sourceFiles(dir: string): string[] {
