@@ -6,7 +6,7 @@ import {
   parseIntegrationBindings,
   type IntegrationBinding,
 } from '../src/integrations/index.js';
-import type { IntegrationOperation } from '../src/modularity/index.js';
+import { integrationOperationSchema, type IntegrationOperation } from '../src/modularity/index.js';
 
 type StoredBindings = NonNullable<(typeof schema.cliInvocations.$inferInsert)['integrations']>;
 
@@ -49,6 +49,16 @@ const specsOf =
 
 const names = (tools: ReadonlyMap<string, unknown>): string[] => [...tools.keys()];
 const switchIs = (writeAllowed: boolean) => ({ writeAllowed: () => writeAllowed });
+
+function thrown(run: () => unknown): Error {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof Error) return error;
+    throw error;
+  }
+  throw new Error('the call did not throw');
+}
 
 describe('integrationTools', () => {
   it('offers a read binding the read operations alone, whatever the write switch says', () => {
@@ -195,44 +205,96 @@ describe('integrationTools', () => {
     for (const name of [...names(alone), ...names(shared)]) expect(name).toMatch(TOOL_NAME);
   });
 
-  it('maps the separators an operation id may hold and keeps the vendor id on the operation', () => {
-    const specs = specsOf({ p: [op('search.pages', 'read'), op('get-page', 'read')] });
-    const tools = integrationTools([bind('docs', 'p', 'read')], specs, switchIs(false));
+  it.each([
+    ['a short id', 'get_page'],
+    ['digits and underscores', 'a1_b2'],
+    ['40 characters', 'x'.repeat(40)],
+  ])('lists an operation with %s under its own id, as the spec schema allows', (_name, opId) => {
+    const operation = op(opId, 'read');
+    const tools = integrationTools(
+      [bind('docs', 'p', 'read')],
+      specsOf({ p: [operation] }),
+      switchIs(false),
+    );
 
-    expect(names(tools)).toEqual(['search_pages', 'get_page']);
-    expect(tools.get('search_pages')?.op.opId).toBe('search.pages');
+    expect(integrationOperationSchema.safeParse(operation).success).toBe(true);
+    expect(names(tools)).toEqual([opId]);
   });
 
-  it('offers no operation whose name cannot take the grammar', () => {
-    const specs = specsOf({
-      p: [
-        op('2fa_enable', 'read'),
-        op('x'.repeat(41), 'read'),
-        op('x'.repeat(40), 'read'),
-        op('fine', 'read'),
-      ],
-    });
-    const tools = integrationTools([bind('docs', 'p', 'read')], specs, switchIs(false));
+  it.each([
+    ['a leading digit', '2fa_enable'],
+    ['41 characters', 'x'.repeat(41)],
+    ['a dot', 'get.page'],
+    ['a hyphen', 'get-page'],
+    ['an uppercase letter', 'Get_page'],
+  ])('throws for an operation with %s, as the spec schema refuses it', (_name, opId) => {
+    const operation = op(opId, 'read');
+    const specs = specsOf({ p: [operation, op('fine', 'read')] });
+    const error = thrown(() =>
+      integrationTools([bind('docs', 'p', 'read')], specs, switchIs(false)),
+    );
 
-    expect(names(tools)).toEqual(['x'.repeat(40), 'fine']);
+    expect(integrationOperationSchema.safeParse(operation).success).toBe(false);
+    for (const part of ['docs', opId]) expect(error.message).toContain(part);
   });
 
-  it('offers a prefixed name up to 40 characters and none beyond', () => {
+  it('offers a prefixed name of 40 characters', () => {
     const fits = bind('source-repository', 'github', 'read', 0);
-    const tooLong = bind('source-repository2', 'gitlab', 'read', 1);
-    const tools = integrationTools([fits, tooLong], coreSpecOf, switchIs(false));
+    const mirror = bind('mirror', 'gitlab', 'read', 1);
+    const tools = integrationTools([fits, mirror], coreSpecOf, switchIs(false));
 
-    expect(names(tools)).toEqual(['source_repository_get_pull_request_state']);
+    expect(names(tools)).toEqual([
+      'source_repository_get_pull_request_state',
+      'mirror_get_pull_request_state',
+    ]);
     expect('source_repository_get_pull_request_state').toHaveLength(40);
     expect(tools.get('source_repository_get_pull_request_state')?.binding).toBe(fits);
   });
 
-  it('never lets one operation replace another that took its name', () => {
-    const specs = specsOf({ p: [op('get.page', 'read'), op('get-page', 'read')] });
-    const tools = integrationTools([bind('docs', 'p', 'read')], specs, switchIs(false));
+  it('throws for a prefixed name of 41 characters, naming the requirement, the operation and the name', () => {
+    const bindings = [
+      bind('mirror', 'github', 'read', 0),
+      bind('source-repository2', 'gitlab', 'read', 1),
+    ];
+    const error = thrown(() => integrationTools(bindings, coreSpecOf, switchIs(false)));
 
-    expect(tools.size).toBe(1);
-    expect([...tools.values()][0]?.op.opId).toBe('get.page');
+    expect('source_repository2_get_pull_request_state').toHaveLength(41);
+    for (const part of [
+      'source-repository2',
+      'get_pull_request_state',
+      'source_repository2_get_pull_request_state',
+    ]) {
+      expect(error.message).toContain(part);
+    }
+  });
+
+  it('throws for a requirement id that starts with a digit once its prefix is needed', () => {
+    const digit = bind('2nd-source', 'github', 'read', 0);
+    const mirror = bind('mirror', 'gitlab', 'read', 1);
+    const error = thrown(() => integrationTools([digit, mirror], coreSpecOf, switchIs(false)));
+
+    for (const part of [
+      '2nd-source',
+      'get_pull_request_state',
+      '2nd_source_get_pull_request_state',
+    ]) {
+      expect(error.message).toContain(part);
+    }
+    expect(names(integrationTools([digit], coreSpecOf, switchIs(false)))).toEqual([
+      'get_pull_request_state',
+    ]);
+  });
+
+  it('throws when an operation would take a name another operation already has', () => {
+    const specs = specsOf({ p: [op('x_y', 'read')], q: [op('alpha_x_y', 'read')] });
+    const bindings = [
+      bind('alpha', 'p', 'read', 0),
+      bind('beta', 'p', 'read', 1),
+      bind('gamma', 'q', 'read', 2),
+    ];
+    const error = thrown(() => integrationTools(bindings, specs, switchIs(false)));
+
+    for (const part of ['gamma', 'alpha_x_y']) expect(error.message).toContain(part);
   });
 
   it('offers nothing for a provider with no spec, or a spec with no operations', () => {

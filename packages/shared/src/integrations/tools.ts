@@ -43,7 +43,7 @@ export function integrationTools(
   const declared = bindings.flatMap((binding) =>
     (specOf(binding.providerId)?.operations ?? [])
       .filter((op) => op.access === 'read' || binding.access === 'write')
-      .map((op) => ({ binding, op, base: toolName(op.opId) })),
+      .map((op) => ({ binding, op, base: op.opId })),
   );
   // Names follow what bindings declare, not the write switch: a flip never renames a listed tool.
   const uses = new Map<string, number>();
@@ -53,7 +53,12 @@ export function integrationTools(
   for (const { binding, op, base } of declared) {
     if (op.access !== 'read' && !options.writeAllowed(binding)) continue;
     const name = (uses.get(base) ?? 0) > 1 ? toolName(`${binding.requirementId}_${op.opId}`) : base;
-    if (TOOL_NAME.test(name) && !tools.has(name)) tools.set(name, { binding, op });
+    if (!TOOL_NAME.test(name) || tools.has(name)) {
+      throw new Error(
+        `integration operation ${op.opId} of requirement ${binding.requirementId} cannot be listed as ${JSON.stringify(name)}: a tool name must match ${TOOL_NAME} and be unique`,
+      );
+    }
+    tools.set(name, { binding, op });
   }
   return tools;
 }

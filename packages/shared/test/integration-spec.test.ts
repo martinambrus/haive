@@ -30,7 +30,7 @@ const tokenAuth = {
 };
 
 const op = {
-  opId: 'issues.list',
+  opId: 'issues_list',
   description: 'List issues',
   inputSchema: { type: 'object', properties: {} },
   access: 'read',
@@ -43,7 +43,7 @@ const forge = {
   selfHosted: false,
   auth: [oauth, tokenAuth],
   mcp: { kind: 'remote', url: 'https://mcp.example.com/sse' },
-  operations: [op, { ...op, opId: 'issues.create', access: 'write' }],
+  operations: [op, { ...op, opId: 'issues_create', access: 'write' }],
 };
 
 const moduleProvider = {
@@ -76,6 +76,12 @@ describe('integrationProviderSpecSchema', () => {
     expect(integrationProviderSpecSchema.safeParse(image).success).toBe(true);
   });
 
+  it('accepts operation ids up to 40 characters', () => {
+    const operations = ['get_page', 'x'.repeat(40)].map((opId) => ({ ...op, opId }));
+
+    expect(integrationProviderSpecSchema.safeParse({ ...forge, operations }).success).toBe(true);
+  });
+
   it.each([
     ['no surface', { ...forge, mcp: undefined, operations: undefined }],
     ['an empty operations list and no mcp', { ...forge, mcp: undefined, operations: [] }],
@@ -90,6 +96,18 @@ describe('integrationProviderSpecSchema', () => {
     ],
     ['an http mcp url', { ...forge, mcp: { kind: 'remote', url: 'http://mcp.example.com' } }],
     ['a duplicate opId', { ...forge, operations: [op, { ...op, description: 'again' }] }],
+    ['an opId that starts with a digit', { ...forge, operations: [{ ...op, opId: '2fa_enable' }] }],
+    ['an opId of 41 characters', { ...forge, operations: [{ ...op, opId: 'x'.repeat(41) }] }],
+    [
+      'opIds that differ by a separator only',
+      {
+        ...forge,
+        operations: [
+          { ...op, opId: 'get.page' },
+          { ...op, opId: 'get-page' },
+        ],
+      },
+    ],
     ['empty categories', { ...forge, categories: [] }],
     ['duplicate categories', { ...forge, categories: ['forge', 'forge'] }],
     ['a bad category id', { ...forge, categories: ['Not A Category'] }],
@@ -173,11 +191,19 @@ describe('integrationOperationSchema', () => {
   });
 
   it.each([
-    ['an uppercase opId', { ...op, opId: 'Issues.List' }],
-    ['a leading dot opId', { ...op, opId: '.list' }],
+    ['an uppercase opId', { ...op, opId: 'Get_page' }],
+    ['a leading underscore opId', { ...op, opId: '_list' }],
+    ['a leading digit opId', { ...op, opId: '2fa_enable' }],
+    ['a 41 character opId', { ...op, opId: 'x'.repeat(41) }],
+    ['an opId with a dot', { ...op, opId: 'get.page' }],
+    ['an opId with a hyphen', { ...op, opId: 'get-page' }],
     ['an unknown access', { ...op, access: 'admin' }],
   ])('rejects %s', (_name, bad) => {
     expect(integrationOperationSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it.each([['get_page'], ['x'.repeat(40)]])('accepts the opId %s', (opId) => {
+    expect(integrationOperationSchema.safeParse({ ...op, opId }).success).toBe(true);
   });
 });
 

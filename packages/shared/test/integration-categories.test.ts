@@ -79,7 +79,7 @@ describe('isCategoryId against the registry', () => {
           help: 'Create a token.',
         },
       ],
-      operations: [{ opId: 'a.b', description: 'd', inputSchema: {}, access: 'read' }],
+      operations: [{ opId: 'a_b', description: 'd', inputSchema: {}, access: 'read' }],
     };
     expect(integrationProviderSpecSchema.safeParse(provider).success).toBe(true);
     expect(
