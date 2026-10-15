@@ -80,6 +80,20 @@ async function admitAnswer(tx: DbHandle, taskId: string): Promise<boolean> {
   return true;
 }
 
+/** An admitted answer makes the task live in its own transaction, where a drain's count sees it. */
+async function reopenFailedTask(tx: DbHandle, taskId: string, now: Date): Promise<void> {
+  await tx
+    .update(schema.tasks)
+    .set({
+      status: 'running',
+      errorMessage: null,
+      completedAt: null,
+      ...CLEAR_ALLOWANCE_WATCH,
+      updatedAt: now,
+    })
+    .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
+}
+
 /** Blank a set of step rows so the worker re-runs them from detect: supersede their live
  *  invocations, drop their agent minings, clear the wedged DAG level, and zero each row's
  *  live state after folding its finishing run into carried_*.
@@ -690,11 +704,10 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   // The answer reopens a failed task, which is new work.
   if (task.status === 'failed') await assertNewWorkAllowed();
   refuseDeadTask(task);
-  // Answering a failed upgrade's form revives it in the worker, which the index refuses there.
+  // Answering a failed upgrade's form revives it, which the index refuses; this names the live one.
   if (task.status === 'failed' && task.type === 'onboarding_upgrade' && task.repositoryId) {
     await refuseBesideLiveUpgrade(db, task.repositoryId);
   }
-  if (task.status === 'failed') await db.transaction((tx) => refuseReviveBesideLive(tx, id));
 
   // Target the row awaiting submission: filter to waiting_form + the latest round, so a
   // round > 0 parked form (a fix-loop escalation gate or a manual-mode fix round) is
@@ -720,8 +733,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   const closedIdleMs = step.waitingStartedAt
     ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
     : 0;
-  await db.transaction(async (tx) => {
-    await admitAnswer(tx, id);
+  const writeAnswer = async (tx: DbHandle) => {
     await tx
       .update(schema.taskSteps)
       .set({
@@ -736,6 +748,12 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
       stepId,
       fieldCount: Object.keys(body.values).length,
     });
+  };
+  await db.transaction(async (tx) => {
+    if (!(await admitAnswer(tx, id))) return writeAnswer(tx);
+    await refuseReviveBesideLive(tx, id);
+    await writeAnswer(tx);
+    await reopenFailedTask(tx, id, now);
   });
 
   const queue = getTaskQueue();
@@ -813,16 +831,7 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     if (!reopens) return;
     // Answering reopens a task that failed while this form waited. The answer rides task_events
     // rather than the job, so the worker cannot tell this advance from one queued before the failure.
-    await tx
-      .update(schema.tasks)
-      .set({
-        status: 'running',
-        errorMessage: null,
-        completedAt: null,
-        ...CLEAR_ALLOWANCE_WATCH,
-        updatedAt: now,
-      })
-      .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')));
+    await reopenFailedTask(tx, id, now);
   });
 
   const queue = getTaskQueue();

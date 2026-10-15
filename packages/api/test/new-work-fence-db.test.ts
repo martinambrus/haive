@@ -162,6 +162,51 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
   const statusOf = async (id: string) =>
     (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, id) }))?.status;
 
+  /** The updater's live-work count (liveTaskCount, packages/updater/src/run.ts), for this user. */
+  const liveTasks = async () => {
+    const [row] = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from tasks
+           where user_id = ${USER} and dead_at is null
+             and status in ('queued', 'running', 'paused', 'waiting_user', 'waiting_pr')`,
+    );
+    return row?.n;
+  };
+
+  const STEP = '11d-skill-sync';
+  const ANSWERS = [
+    { route: 'submit' as const, body: { values: { choice: 'yes' } } },
+    { route: 'clarify' as const, body: { answer: 'Keep the incoming change.' } },
+  ];
+  const parkedFailedTask = async (over: Partial<typeof schema.tasks.$inferInsert> = {}) => {
+    const [task] = await db
+      .insert(schema.tasks)
+      .values({
+        userId: USER,
+        type: 'workflow',
+        title: 'fence-parked',
+        status: 'failed',
+        errorMessage: 'boom',
+        completedAt: new Date(),
+        currentStepId: STEP,
+        ...over,
+      })
+      .returning();
+    const [step] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: task!.id,
+        stepId: STEP,
+        stepIndex: 1,
+        runSeq: 1,
+        round: 0,
+        title: 'a step',
+        status: 'waiting_form',
+        waitingStartedAt: new Date(Date.now() - 60_000),
+      })
+      .returning();
+    return { task: task!, step: step! };
+  };
+
   beforeAll(async () => {
     db = createDatabase(url as string);
     updater = createDatabase(url as string);
@@ -359,7 +404,6 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
   });
 
   describe('a Retry racing an answer to the same failed task', () => {
-    const STEP = '11d-skill-sync';
     const ROW_LOCK =
       /^(update "(tasks|task_steps)" |select [\s\S]* from "(tasks|task_steps)" [\s\S]* for (no key )?update)/;
     type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -436,34 +480,6 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
     const until = (done: () => boolean | Promise<boolean>) =>
       vi.waitFor(async () => expect(await done()).toBe(true), { timeout: 5_000, interval: 20 });
 
-    const parkedFailedTask = async () => {
-      const [task] = await db
-        .insert(schema.tasks)
-        .values({
-          userId: USER,
-          type: 'workflow',
-          title: 'fence-parked',
-          status: 'failed',
-          errorMessage: 'boom',
-          completedAt: new Date(),
-          currentStepId: STEP,
-        })
-        .returning();
-      const [step] = await db
-        .insert(schema.taskSteps)
-        .values({
-          taskId: task!.id,
-          stepId: STEP,
-          stepIndex: 1,
-          runSeq: 1,
-          round: 0,
-          title: 'a step',
-          status: 'waiting_form',
-          waitingStartedAt: new Date(Date.now() - 60_000),
-        })
-        .returning();
-      return { task: task!, step: step! };
-    };
     /** The Retry holds its first lock; the answer holds one or waits for it; then both go on. */
     const race = async (route: 'submit' | 'clarify', body: unknown) => {
       const { task, step } = await parkedFailedTask();
@@ -491,10 +507,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       }
     };
 
-    describe.each([
-      { route: 'submit' as const, body: { values: { choice: 'yes' } } },
-      { route: 'clarify' as const, body: { answer: 'Keep the incoming change.' } },
-    ])('$route', ({ route, body }) => {
+    describe.each(ANSWERS)('$route', ({ route, body }) => {
       it('commits both, whichever of them waits for the other', async () => {
         const { task, retry, answer } = await race(route, body);
 
@@ -502,5 +515,119 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
         expect(await statusOf(task.id)).toBe('running');
       }, 20_000);
     });
+
+    /** The answer holds its first lock; the Retry waits for it or holds one; then both go on. */
+    const raceAnswerFirst = async (route: 'submit' | 'clarify', body: unknown) => {
+      const { task, step } = await parkedFailedTask({ repositoryId });
+      const retrier = side();
+      const answerer = side();
+      h.db = holdingItsFirstRowLock(answerer);
+      const answer = post(`/tasks/${task.id}/steps/${STEP}/${route}`, body);
+      let retry: Promise<string> | undefined;
+      try {
+        await until(() => answerer.reached);
+        retry = retryTaskAtStep(holdingItsFirstRowLock(retrier), task.id, USER, step).then(
+          () => 'committed',
+          (err: unknown) => errorCode(err),
+        );
+        await until(async () => retrier.reached || (await waitsForALock(retrier)));
+        answerer.release();
+        retrier.release();
+        const status = (await answer).status;
+        return { retry: await retry, answer: answerer.aborted ?? status };
+      } finally {
+        answerer.release();
+        retrier.release();
+        await retry;
+        await Promise.allSettled(requests);
+        h.db = db;
+      }
+    };
+
+    describe.each(ANSWERS)(
+      '$route, arriving first on a task of a repository',
+      ({ route, body }) => {
+        it('holds the Retry back at the repository lock instead of crossing it', async () => {
+          const { retry, answer } = await raceAnswerFirst(route, body);
+
+          expect({ answer, retryDeadlocked: retry === '40P01' }).toEqual({
+            answer: 200,
+            retryDeadlocked: false,
+          });
+        }, 20_000);
+      },
+    );
   });
+
+  describe.each(ANSWERS)(
+    'POST /tasks/:id/steps/:stepId/$route of a failed task',
+    ({ route, body }) => {
+      const answer = (id: string) => post(`/tasks/${id}/steps/${STEP}/${route}`, body);
+      /** An upgrade of the repository goes live after the route's early checks, before its transaction. */
+      const overtakenByAnUpgrade = (): Database => {
+        let overtaken = false;
+        return new Proxy(db, {
+          get(target, prop) {
+            const value: unknown = Reflect.get(target, prop, target);
+            if (prop !== 'transaction') {
+              return typeof value === 'function' ? value.bind(target) : value;
+            }
+            return async (fn: Parameters<Database['transaction']>[0]) => {
+              if (!overtaken) {
+                overtaken = true;
+                await target.insert(schema.tasks).values({
+                  userId: USER,
+                  repositoryId,
+                  type: 'onboarding_upgrade',
+                  title: 'fence-overtaking-upgrade',
+                  status: 'running',
+                });
+              }
+              return target.transaction(fn);
+            };
+          },
+        });
+      };
+
+      it('commits the task running, so the drain taking the fence right after it counts it live', async () => {
+        const { task } = await parkedFailedTask();
+
+        expect(await answered(answer(task.id))).toMatchObject({ status: 200 });
+        await holdFence();
+
+        expect(await liveTasks()).toBe(1);
+        expect(await statusOf(task.id)).toBe('running');
+      });
+
+      it('answers 409 and writes nothing when an upgrade of the repository goes live before the revival', async () => {
+        await db.insert(schema.tasks).values({
+          userId: USER,
+          repositoryId,
+          type: 'onboarding',
+          title: 'fence-onboarded',
+          status: 'completed',
+          completedAt: new Date(Date.now() - 60_000),
+        });
+        const { task, step } = await parkedFailedTask({ type: 'onboarding_upgrade', repositoryId });
+        h.db = overtakenByAnUpgrade();
+        let res: Awaited<ReturnType<typeof answered>>;
+        try {
+          res = await answered(answer(task.id));
+        } finally {
+          h.db = db;
+        }
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ error: expect.stringContaining('already in progress') });
+        expect(await statusOf(task.id)).toBe('failed');
+        expect(
+          await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, step.id) }),
+        ).toEqual(step);
+        expect(
+          await db.select().from(schema.taskEvents).where(eq(schema.taskEvents.taskId, task.id)),
+        ).toEqual([]);
+        expect(h.queued).toEqual([]);
+      });
+    },
+  );
 });

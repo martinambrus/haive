@@ -751,9 +751,9 @@ describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
 });
 
 describe.each([
-  { route: 'submit', body: { values: { choice: 'yes' } }, statusAfter: 'failed' },
-  { route: 'clarify', body: { answer: 'Keep the incoming change.' }, statusAfter: 'running' },
-])('POST /tasks/:id/steps/:stepId/$route', ({ route, body, statusAfter }) => {
+  { route: 'submit', body: { values: { choice: 'yes' } } },
+  { route: 'clarify', body: { answer: 'Keep the incoming change.' } },
+])('POST /tasks/:id/steps/:stepId/$route', ({ route, body }) => {
   const TASK = '00000000-0000-4000-8000-0000000000e1';
   const STEP = '11d-skill-sync';
   const answer = () => app.request(`/tasks/${TASK}/steps/${STEP}/${route}`, request({ body }));
@@ -770,6 +770,9 @@ describe.each([
       title: 'a task',
       status,
       errorMessage: status === 'failed' ? 'boom' : null,
+      completedAt: status === 'failed' ? new Date(0) : null,
+      awaitingProviderReason: status === 'failed' ? 'rate_limit' : null,
+      awaitingProviderSince: status === 'failed' ? new Date(0) : null,
       orchestrationEpoch: 3,
       currentStepId: STEP,
       currentRound: 0,
@@ -795,9 +798,31 @@ describe.each([
     const fake = withParkedForm('failed');
 
     expect((await answer()).status).toBe(200);
-    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: statusAfter });
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({
+      status: 'running',
+      errorMessage: null,
+      completedAt: null,
+      awaitingProviderReason: null,
+      awaitingProviderSince: null,
+    });
     expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ waitingStartedAt: null });
     expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+  });
+
+  it('reopens a failed task in the transaction that writes the answer', async () => {
+    const fake = withParkedForm('failed');
+    const before = written(fake);
+    let atCommit: unknown;
+    fake.hooks.beforeCommit = () => {
+      atCommit = fake.rows(schema.tasks)[0]?.status;
+      throw new Error('commit failed');
+    };
+
+    expect((await answer()).status).toBe(500);
+
+    expect(atCommit).toBe('running');
+    expect(written(fake)).toEqual(before);
+    expect(h.queued).toEqual([]);
   });
 
   it.each(['draining', 'maintenance'])(
@@ -834,10 +859,11 @@ describe.each([
     'still takes the answer to a %s task while the system drains',
     async (status) => {
       const fake = withParkedForm(status);
+      const tasksBefore = fake.rows(schema.tasks);
       h.state = 'draining';
 
       expect((await answer()).status).toBe(200);
-      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status });
+      expect(fake.rows(schema.tasks)).toEqual(tasksBefore);
       expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ waitingStartedAt: null });
       expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
     },
@@ -882,7 +908,7 @@ describe.each([
       expect((await answer()).status).toBe(200);
 
       expect(stored).toHaveBeenCalledTimes(1);
-      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: statusAfter });
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
       expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
     });
 
@@ -909,6 +935,18 @@ describe.each([
       expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
     });
 
+    it('leaves a task that was cancelled after the answer read it failed cancelled', async () => {
+      const fake = withParkedForm('failed');
+      fake.hooks.beforeUpdate = (table) => {
+        if (table !== schema.taskSteps) return;
+        fake.patch(schema.tasks, TASK, { status: 'cancelled' });
+      };
+
+      expect((await answer()).status).toBe(200);
+
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled' });
+    });
+
     it('does not reopen a task that failed after the answer read its status, though the system drains', async () => {
       const fake = withParkedForm('waiting_user');
       h.state = 'draining';
@@ -932,7 +970,7 @@ describe.each([
       states('normal', 'normal');
 
       expect((await answerThroughGate()).status).toBe(200);
-      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: statusAfter });
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
       expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
     });
 

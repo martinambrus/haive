@@ -19,7 +19,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 
 import { Hono } from 'hono';
-import { liveTaskIdOfType, schema } from '@haive/database';
+import { liveTaskIdOfType, ONE_LIVE_UPGRADE_INDEX, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -48,7 +48,6 @@ type Revival = {
   step: Record<string, unknown>;
   task?: Record<string, unknown>;
   mining?: boolean;
-  worker?: boolean;
   request: () => Response | Promise<Response>;
 };
 
@@ -94,7 +93,6 @@ const revivals: Revival[] = [
   },
   {
     name: 'an answer to the parked form',
-    worker: true,
     step: { status: 'waiting_form', waitingStartedAt: new Date() },
     request: () => json(`/${TASK}/steps/${STEP}/submit`, { values: {} }),
   },
@@ -240,7 +238,7 @@ describe.each([
         h.add.mockClear();
         const t = setup(type, revival, other);
         expect((await revival.request()).status).toBe(200);
-        if (!revival.worker) expect(t.task().status).not.toBe('failed');
+        expect(t.task().status).not.toBe('failed');
         expect(h.add).toHaveBeenCalledTimes(1);
       }
     });
@@ -272,7 +270,7 @@ describe.each([
     it('still revives when no reset happened', async () => {
       const t = setup('onboarding_upgrade', failedWith);
       expect((await revival.request()).status).toBe(200);
-      if (!revival.worker) expect(t.task().status).not.toBe('failed');
+      expect(t.task().status).not.toBe('failed');
       expect(h.add).toHaveBeenCalledTimes(1);
     });
   });
@@ -314,6 +312,31 @@ describe('reviving a task of another type', () => {
     const t = setup('workflow', revivals[2]!, { type: 'onboarding_upgrade', status: 'running' });
     expect((await revivals[2]!.request()).status).toBe(200);
     expect(t.task().status).toBe('running');
+  });
+});
+
+describe('an answer to the parked form of a failed upgrade that another upgrade overtakes', () => {
+  it('answers 409 and leaves the form unanswered when the index refuses the revival', async () => {
+    const answer = revivals.find((r) => r.name === 'an answer to the parked form')!;
+    const t = setup('onboarding_upgrade', answer);
+    const stepsBefore = t.fake.rows(schema.taskSteps);
+    t.fake.hooks.beforeUpdate = (table) => {
+      if (table !== schema.tasks) return;
+      throw new Error('query failed', {
+        cause: { code: '23505', constraint_name: ONE_LIVE_UPGRADE_INDEX },
+      });
+    };
+
+    const res = await answer.request();
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: expect.stringContaining('already in progress'),
+    });
+    expect(t.task()).toMatchObject({ status: 'failed', orchestrationEpoch: 3 });
+    expect(t.fake.rows(schema.taskSteps)).toEqual(stepsBefore);
+    expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
   });
 });
 
