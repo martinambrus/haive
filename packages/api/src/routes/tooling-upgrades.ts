@@ -468,6 +468,12 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
   const versionMap = await loadToolVersions(db);
   const versionsFor = (tool: ToolName): string[] => versionMap.get(tool)?.versions ?? [];
 
+  const storedKeys = new Set(
+    (await userSecretsService.listForUser(userId)).map((secret) => secret.keyName),
+  );
+  const appAuthUsernameSet = storedKeys.has(`app_auth:${repositoryId}:username`);
+  const appAuthPasswordSet = storedKeys.has(`app_auth:${repositoryId}:password`);
+
   const lspOptions = LSP_SERVER_OPTIONS.map((o) => {
     const tool = LSP_KEY_TO_TOOL[o.value]!;
     const meta = TOOL_INSTALL_METADATA[tool];
@@ -495,10 +501,9 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     appAuth: repo.appAuth ?? null,
     // Whether credentials exist, never what they are. The password is in the encrypted
     // secret store precisely so it never travels back out over an API.
-    appAuthCredentialsSet: Boolean(
-      (await userSecretsService.get(userId, `app_auth:${repositoryId}:username`)) &&
-      (await userSecretsService.get(userId, `app_auth:${repositoryId}:password`)),
-    ),
+    appAuthUsernameSet,
+    appAuthPasswordSet,
+    appAuthCredentialsSet: appAuthUsernameSet && appAuthPasswordSet,
     prWorkflowEnabled: repo.prWorkflowEnabled,
     stepGuidanceEnabled: repo.stepGuidanceEnabled,
     // RAG embedding health. `ragEmbedDegradedAt` is the structural flag the page
