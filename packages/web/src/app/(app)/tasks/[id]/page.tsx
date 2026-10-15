@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { ragUsageStyle } from '@/lib/rag-usage';
+import { customToolsCell, hasNothingToShow, toolUsageRows } from '@/lib/call-log-cells';
 import { useParams } from 'next/navigation';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
@@ -3247,12 +3248,11 @@ function TaskToolUsagePanel({
 
   if (error && !data) return <p className="text-xs text-red-400">{error}</p>;
   if (!data) return <p className="text-xs text-neutral-500">Loading tool usage…</p>;
-  if (data.coverage.total === 0) {
+  if (hasNothingToShow(data)) {
     return <p className="text-xs text-neutral-500">No CLI run is attributed to a step yet.</p>;
   }
 
-  const rows = data.steps.filter((s) => s.usage !== null);
-  const cell = (s: (typeof rows)[number]) => s.usage as TaskToolUsageStep;
+  const rows = toolUsageRows(data.steps);
   const runsCell = (u: TaskToolUsageStep) =>
     u.observable === 0 && u.runs > 0 ? (
       <span className="text-neutral-500">{u.runs} not observable</span>
@@ -3275,33 +3275,35 @@ function TaskToolUsagePanel({
               <th className="px-2 py-1 font-medium">personas assigned → opened</th>
               <th className="px-2 py-1 font-medium">skills invoked / opened</th>
               <th className="px-2 py-1 font-medium">MCP</th>
+              <th className="px-2 py-1 font-medium">custom tools</th>
               <th className="px-2 py-1 font-medium">sub-agents</th>
               <th className="px-2 py-1 text-right font-medium">tool calls</th>
             </tr>
           </thead>
           <tbody className="text-neutral-300">
             {rows.map((s) => {
-              const u = cell(s);
+              const u = s.usage;
               return (
                 <tr key={s.stepRowId} className="border-t border-neutral-800 align-top">
                   <td className="px-2 py-1 font-mono">
                     {s.stepId}
                     {s.round > 0 && <span className="ml-1 text-neutral-500">r{s.round}</span>}
                   </td>
-                  <td className="px-2 py-1 text-right font-mono">{runsCell(u)}</td>
-                  <td className="px-2 py-1 text-indigo-300">{personasCell(u)}</td>
+                  <td className="px-2 py-1 text-right font-mono">{u ? runsCell(u) : '—'}</td>
+                  <td className="px-2 py-1 text-indigo-300">{u ? personasCell(u) : '—'}</td>
                   <td className="px-2 py-1 text-emerald-300">
-                    {u.skillsInvoked.length === 0 && u.skillsRead.length === 0
+                    {!u || (u.skillsInvoked.length === 0 && u.skillsRead.length === 0)
                       ? '—'
                       : `${countedList(u.skillsInvoked)} / ${countedList(u.skillsRead)}`}
                   </td>
                   <td className="px-2 py-1 text-amber-300">
-                    {u.mcp.length === 0
+                    {!u || u.mcp.length === 0
                       ? '—'
                       : u.mcp.map((m) => `${m.server}/${m.tool} (${m.calls})`).join(', ')}
                   </td>
-                  <td className="px-2 py-1 text-sky-300">{countedList(u.subagents)}</td>
-                  <td className="px-2 py-1 text-right font-mono">{u.toolCalls}</td>
+                  <td className="px-2 py-1 text-violet-300">{customToolsCell(s.customTools)}</td>
+                  <td className="px-2 py-1 text-sky-300">{u ? countedList(u.subagents) : '—'}</td>
+                  <td className="px-2 py-1 text-right font-mono">{u ? u.toolCalls : '—'}</td>
                 </tr>
               );
             })}
@@ -3319,6 +3321,9 @@ function TaskToolUsagePanel({
                   ? '—'
                   : data.totals.mcp.map((m) => `${m.server}/${m.tool} (${m.calls})`).join(', ')}
               </td>
+              <td className="px-2 py-1 text-violet-300">
+                {customToolsCell(data.callTotals.customTools)}
+              </td>
               <td className="px-2 py-1 text-sky-300">{countedList(data.totals.subagents)}</td>
               <td className="px-2 py-1 text-right font-mono">{data.totals.toolCalls}</td>
             </tr>
@@ -3334,6 +3339,8 @@ function TaskToolUsagePanel({
           ` ${data.coverage.unrecorded} ran before this record existed.`}{' '}
         Personas assigned by Haive are recorded only once the dispatch-side stamping ships; until
         then only the definition files an agent opened on its own appear. Opened is not applied.
+        Custom tools and integrations count every call Haive logged for this task, refused calls and
+        replaced runs included, so they need not match the MCP column.
       </p>
     </div>
   );

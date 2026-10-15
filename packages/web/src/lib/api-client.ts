@@ -1178,6 +1178,20 @@ export interface TaskToolUsageCounted {
   n: number;
 }
 
+/** Calls a broker served or refused, by outcome; `error` is shown as "failed". */
+export interface TaskCallOutcomeCounts {
+  ok: number;
+  refused: number;
+  error: number;
+  running: number;
+}
+
+/** An empty `tool` is a call to a name the step never declared. */
+export interface TaskCustomToolCall extends TaskCallOutcomeCounts {
+  tool: string;
+  action: string;
+}
+
 /** What one step used, with the coverage counters a reader needs to judge the lists by: a step
  *  whose runs are all unobservable has empty lists that mean nothing. */
 export interface TaskToolUsageStep {
@@ -1205,6 +1219,8 @@ export interface TaskToolUsage {
     title: string;
     /** Null for a step with no attributed run — a dash, never a row of zeros. */
     usage: TaskToolUsageStep | null;
+    /** From the call log, not from `usage`: a step with calls can have `usage: null`. */
+    customTools: TaskCustomToolCall[];
   }>;
   totals: TaskToolUsageStep;
   coverage: {
@@ -1214,6 +1230,8 @@ export interface TaskToolUsage {
     unobservable: number;
     unrecorded: number;
   };
+  /** Every call logged for the task, those no step owns included. */
+  callTotals: { customTools: TaskCustomToolCall[] };
 }
 
 export async function getTaskToolUsage(taskId: string): Promise<TaskToolUsage> {
