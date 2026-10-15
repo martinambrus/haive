@@ -7,6 +7,8 @@ import {
   configService,
   logger,
   parseAllowanceWatchMode,
+  parseMaintenanceState,
+  refusesNewWork,
   type AuthMode,
   type CliProviderName,
 } from '@haive/shared';
@@ -567,6 +569,17 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
       task.currentStepId &&
       task.autoResumeCount < ALLOWANCE_AUTO_RESUME_CAP
     ) {
+      // Past the config cache: the api that sets the state is another process.
+      const state = parseMaintenanceState(
+        await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
+      );
+      if (refusesNewWork(state)) {
+        log.info(
+          { taskId: task.id, providerId: task.providerId, state },
+          'provider recovered; auto-resume held while the system drains or is in maintenance',
+        );
+        continue;
+      }
       const resumed = await autoResumeFailedStep(db, {
         taskId: task.id,
         stepId: task.currentStepId,
