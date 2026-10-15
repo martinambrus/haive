@@ -82,6 +82,7 @@ import { upgradeRoutes } from '../src/routes/upgrades.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { maintenanceGate } from '../src/middleware/maintenance.js';
 import type { AppEnv } from '../src/context.js';
+import { seedStepCatalog } from './step-flags-fixture.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const PROVIDER = '00000000-0000-4000-8000-0000000000c1';
@@ -328,6 +329,104 @@ describe('POST /tasks/:id/action', () => {
       expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled' });
       expect(h.queued).toEqual([TASK_JOB_NAMES.CANCEL]);
     });
+  });
+});
+
+describe('POST /tasks/:id/steps/:stepId/action', () => {
+  const TASK = '00000000-0000-4000-8000-0000000000e1';
+  const STEP = '11d-skill-sync';
+  const STEP_ROW = '00000000-0000-4000-8000-0000000000e2';
+  const act = (action: string) =>
+    app.request(`/tasks/${TASK}/steps/${STEP}/action`, request({ body: { action, round: 0 } }));
+  const withFailedStep = () => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      taskEvents: schema.taskEvents,
+      cliInvocations: schema.cliInvocations,
+      taskStepAgentMinings: schema.taskStepAgentMinings,
+      taskDagPlans: schema.taskDagPlans,
+      stepCatalog: schema.stepCatalog,
+    });
+    seedStepCatalog(fake);
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      type: 'workflow',
+      title: 'a task',
+      status: 'failed',
+      errorMessage: 'boom',
+      orchestrationEpoch: 3,
+      currentStepId: STEP,
+      currentRound: 0,
+    });
+    fake.insert(schema.taskSteps, {
+      id: STEP_ROW,
+      taskId: TASK,
+      stepId: STEP,
+      stepIndex: 1,
+      runSeq: 1,
+      round: 0,
+      status: 'failed',
+      errorMessage: 'boom',
+      idleMs: 0,
+    });
+    fake.insert(schema.taskStepAgentMinings, {
+      taskStepId: STEP_ROW,
+      agentId: 'peer-reviewer',
+      status: 'failed',
+    });
+    h.db = fake.db;
+    h.queued = [];
+    return fake;
+  };
+  const written = (fake: ReturnType<typeof withFailedStep>) =>
+    [
+      schema.tasks,
+      schema.taskSteps,
+      schema.taskEvents,
+      schema.cliInvocations,
+      schema.taskStepAgentMinings,
+    ].map((table) => fake.rows(table));
+
+  describe.each(['retry', 'retry_ai', 'skip'])('%s', (action) => {
+    it('moves the task back to the step while the system is normal', async () => {
+      const fake = withFailedStep();
+
+      expect((await act(action)).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+    });
+
+    it.each(['draining', 'maintenance'])(
+      'answers 503 and queues and writes nothing while the system is %s',
+      async (state) => {
+        const fake = withFailedStep();
+        const before = written(fake);
+        h.state = state;
+
+        const res = await act(action);
+
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+        expect(h.queued).toEqual([]);
+        expect(written(fake)).toEqual(before);
+      },
+    );
+  });
+
+  describe('resume', () => {
+    it.each(['normal', 'draining'])(
+      'still re-runs the failed agents while the system is %s',
+      async (state) => {
+        const fake = withFailedStep();
+        h.state = state;
+
+        expect((await act('resume')).status).toBe(200);
+        expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
+        expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+      },
+    );
   });
 });
 

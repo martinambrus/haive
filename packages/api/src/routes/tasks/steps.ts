@@ -45,6 +45,7 @@ import { getDb } from '../../db.js';
 import { rollupToolUsage } from '@haive/shared/stats-server';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { HttpError, type AppEnv } from '../../context.js';
+import { assertNewWorkAllowed } from '../../middleware/maintenance.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
 import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
@@ -826,6 +827,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  if (body.action === 'retry' || body.action === 'retry_ai' || body.action === 'skip') {
+    assertNewWorkAllowed(c.get('maintenanceState'));
+  }
   if (body.action !== 'abort') refuseDeadTask(task);
 
   // Act on the round the caller named. A fix-loop step recurs once per round
