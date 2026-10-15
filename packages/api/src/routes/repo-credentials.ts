@@ -33,6 +33,20 @@ const BOTH_OR_NEITHER = 'gitName and gitEmail must be set together, or both left
 const identityIsWhole = (b: { gitName?: string; gitEmail?: string }) =>
   Boolean(b.gitName?.length) === Boolean(b.gitEmail?.length);
 
+const API_BASE_ON_HOST = "apiBaseUrl must be an https URL on the credential's host";
+
+/** A blank API base falls back to the provider's own; a set one must be https on the credential's host. */
+const apiBaseOnHost = (b: { host: string; apiBaseUrl?: string }) => {
+  const base = b.apiBaseUrl?.trim();
+  if (!base) return true;
+  try {
+    const url = new URL(base);
+    return url.protocol === 'https:' && url.host === b.host.trim().toLowerCase();
+  } catch {
+    return false;
+  }
+};
+
 const createCredentialSchema = z
   .object({
     label: z.string().min(1).max(255),
@@ -48,7 +62,8 @@ const createCredentialSchema = z
     gitName: gitNameField,
     gitEmail: gitEmailField,
   })
-  .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] });
+  .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] })
+  .refine(apiBaseOnHost, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
 
 // Edit: label/host always; username/secret optional — blank means "keep the
 // current value" (the encrypted values are never sent to the client, so the
@@ -73,7 +88,8 @@ const updateCredentialSchema = z
     message: BOTH_OR_NEITHER,
     path: ['gitEmail'],
   })
-  .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] });
+  .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] })
+  .refine(apiBaseOnHost, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
 
 export const repoCredentialsRoutes = new Hono<AppEnv>();
 repoCredentialsRoutes.use('*', requireAuth);
