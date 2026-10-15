@@ -32,12 +32,13 @@ export interface AccessTokenOptions {
   now?: () => number;
 }
 
-/** username and apiBaseUrl are the Git credential's, so null for an OAuth connection. */
+/** username, apiBaseUrl and host are the Git credential's, so null for an OAuth connection. */
 export interface ConnectionCredential {
   accessToken: string;
   username: string | null;
   provider: string;
   apiBaseUrl: string | null;
+  host: string | null;
 }
 
 // Per database client, so one process shares a refresh among its callers while two pools do not.
@@ -121,7 +122,7 @@ export async function getConnectionCredential(
   const row = await loadConnectedRow(db, connectionId);
   if (row.repoCredentialId === null) {
     const accessToken = await getConnectionAccessToken(db, connectionId, options);
-    return { accessToken, username: null, provider: row.providerId, apiBaseUrl: null };
+    return { accessToken, username: null, provider: row.providerId, apiBaseUrl: null, host: null };
   }
 
   const credential = await loadLinkedCredential(db, row, row.repoCredentialId);
@@ -131,6 +132,7 @@ export async function getConnectionCredential(
     username: decrypt(credential.usernameEncrypted, dek),
     provider: row.providerId,
     apiBaseUrl: credential.apiBaseUrl,
+    host: credential.host,
   };
 }
 

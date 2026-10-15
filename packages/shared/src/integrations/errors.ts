@@ -32,6 +32,13 @@ export class CredentialProviderMismatchError extends Error {
   }
 }
 
+export class IntegrationToolNameError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IntegrationToolNameError';
+  }
+}
+
 /** The provider answered with an OAuth `error` code. `code` is that JSON field: a known protocol
  *  code as it came, anything else redacted and bounded. */
 export class OauthVendorError extends Error {

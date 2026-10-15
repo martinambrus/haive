@@ -255,6 +255,7 @@ jobs:
           api test/new-work-fence-db.test.ts NEW_WORK_FENCE_TEST_URL new_work_fence_test pg
           updater test/new-work-fence-db.test.ts UPDATER_FENCE_TEST_URL updater_fence_test pg
           api test/integration-choice-routes-db.test.ts INTEGRATION_CHOICE_ROUTES_TEST_URL integration_choice_routes_test pg
+          api test/integration-mcp-db.test.ts INTEGRATION_MCP_TEST_URL integration_mcp_test pg
           api test/tooling-app-auth-atomic-db.test.ts TOOLING_APP_AUTH_TEST_URL tooling_app_auth_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
