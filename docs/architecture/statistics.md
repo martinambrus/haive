@@ -252,8 +252,11 @@ attributed run still gets a row. `GET /tasks/:id` also answers `loggedCallCount`
 both logs with detached ones included, so the panel opens for a task whose only runs were replaced or
 whose step rows are gone (`showsToolUsage`, `web/src/lib/call-log-cells.ts`); with no run in the
 rollup the total row shows a dash, not 0, in every column read from runs, and the footer says so
-(`web/src/components/task-tool-usage-table.tsx`). A `running` count that never settles is a call a
-crash left unfinished.
+(`web/src/components/task-tool-usage-table.tsx`). It also answers `runningCallCount`, those rows still
+`running`, from the same query; the panel (`TaskToolUsagePanel`) reads the usage again whenever either
+count changes on the page's 2 s poll, so a call that settles or a new call shows while the task runs.
+The columns read from runs refresh only then and when the task ends. A `running` count that never
+settles is a call a crash left unfinished.
 
 **The unused report compares what is installed with what the runs used, and it reads the
 installed half from disk by NAME only.** `shared/src/stats-server/tool-inventory.ts` walks the catalog's
