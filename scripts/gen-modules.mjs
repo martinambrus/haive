@@ -88,6 +88,18 @@ const HOSTS = [
   { host: '@haive/web', file: 'packages/web/package.json', pkg: webPackage },
 ];
 const hostsHolding = (name) => HOSTS.filter(({ pkg }) => pkg.dependencies?.[name] !== undefined);
+// pnpm links a workspace folder only through the workspace: protocol; any other spec installs the registry copy.
+for (const folder of folders.filter(({ name }) => name.startsWith('@haive-module/'))) {
+  const pinned = hostsHolding(folder.name).filter(
+    ({ pkg }) => !String(pkg.dependencies[folder.name]).startsWith('workspace:'),
+  );
+  if (pinned.length > 0) {
+    console.error(
+      `gen-modules: ${folder.name} is the folder modules/${folder.dir}, but ${pinned.map(({ file, pkg }) => `${file} pins it to "${pkg.dependencies[folder.name]}"`).join(', ')}, which pnpm installs from the registry instead; depend on the folder as "workspace:*" or rename its package`,
+    );
+    process.exit(1);
+  }
+}
 const holdersOf = (name) =>
   hostsHolding(name)
     .filter(({ pkg }) => pkg !== apiPackage)

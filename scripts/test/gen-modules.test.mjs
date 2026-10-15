@@ -14,13 +14,7 @@ const WEB = ['./manifest', './routes', './web', './dashboard'];
 
 const generated = (tree) => REGISTRIES.map((rel) => tree.read(rel)).join('\n');
 
-const specTree = (t, specs) => {
-  const tree = makeTree(t, {
-    installed: { foo: { exports: WEB } },
-    api: registry('foo'),
-    worker: registry('foo'),
-    web: registry('foo'),
-  });
+const setSpecs = (tree, specs) => {
   for (const [host, spec] of Object.entries(specs)) {
     const rel = `packages/${host}/package.json`;
     const pkg = JSON.parse(tree.read(rel));
@@ -29,6 +23,16 @@ const specTree = (t, specs) => {
   }
   return tree;
 };
+const specTree = (t, specs) =>
+  setSpecs(
+    makeTree(t, {
+      installed: { foo: { exports: WEB } },
+      api: registry('foo'),
+      worker: registry('foo'),
+      web: registry('foo'),
+    }),
+    specs,
+  );
 
 describe('gen-modules: installed = depended on by api', () => {
   it('includes a module that api and worker both depend on', (t) => {
@@ -428,17 +432,28 @@ describe('gen-modules: registry modules (@haive-module/<id>)', () => {
     assert.match(out.stderr, /^gen-modules: @haive-module\/foo .*\.\/manifest/);
   });
 
-  it('treats a workspace folder named in the registry scope as a local module, once', (t) => {
-    const tree = makeTree(t, {
+  const scopedFolder = (t) =>
+    makeTree(t, {
       modules: { foo: { name: '@haive-module/foo', exports: ['./manifest'] } },
       api: registry('foo'),
       worker: registry('foo'),
     });
+
+  it('treats a workspace folder named in the registry scope as a local module, once', (t) => {
+    const tree = setSpecs(scopedFolder(t), { api: 'workspace:*', worker: 'workspace:*' });
     const out = tree.run('gen-modules.mjs');
     assert.equal(out.status, 0, out.stderr);
     const api = tree.read(REGISTRIES[0]);
     assert.equal(api.match(/packageName: '@haive-module\/foo'/g)?.length, 1);
     assert.match(api, /packageName: '@haive-module\/foo', source: 'local'/);
+  });
+
+  it('refuses a folder in the registry scope that the hosts pin to a version, naming the fix', (t) => {
+    const out = scopedFolder(t).run('gen-modules.mjs');
+    assert.equal(out.status, 1, out.stdout);
+    for (const part of ['@haive-module/foo', 'modules/foo', '"1.0.0"', '"workspace:*"']) {
+      assert.ok(out.stderr.includes(part), out.stderr);
+    }
   });
 
   for (const version of ['1.0.0', '1.0.0-rc.1']) {
