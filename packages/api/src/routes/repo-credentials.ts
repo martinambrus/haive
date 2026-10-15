@@ -11,6 +11,7 @@ import {
   forgeProviderSchema,
   secretsService,
 } from '@haive/shared';
+import { credentialForgeProvider, resolveForgeProvider } from '@haive/shared/forge';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -33,19 +34,42 @@ const BOTH_OR_NEITHER = 'gitName and gitEmail must be set together, or both left
 const identityIsWhole = (b: { gitName?: string; gitEmail?: string }) =>
   Boolean(b.gitName?.length) === Boolean(b.gitEmail?.length);
 
-const API_BASE_ON_HOST = "apiBaseUrl must be an https URL on the credential's host";
+const API_BASE_ON_HOST =
+  "apiBaseUrl must be an https URL on the credential's host or its forge's API host";
 
-/** A blank API base falls back to the provider's own; a set one must be https on the credential's host. */
-const apiBaseOnHost = (b: { host: string; apiBaseUrl?: string }) => {
+type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };
+
+/** The host of the forge's default API base, which for github.com and bitbucket.org is not the web host. */
+function forgeApiHost(provider: string | null | undefined, host: string): string | null {
+  const forge = credentialForgeProvider(provider, host);
+  if (!forge) return null;
+  try {
+    return new URL(resolveForgeProvider(forge).defaultApiBase(host)).host;
+  } catch {
+    return null;
+  }
+}
+
+/** A blank API base falls back to the provider's own; a set one must be https on the credential's or the forge's host. */
+const apiBaseOnHost = (b: ApiBaseTarget) => {
   const base = b.apiBaseUrl?.trim();
   if (!base) return true;
   try {
     const url = new URL(base);
-    return url.protocol === 'https:' && url.host === b.host.trim().toLowerCase();
+    const host = b.host.trim().toLowerCase();
+    return (
+      url.protocol === 'https:' &&
+      (url.host === host || url.host === forgeApiHost(b.provider, host))
+    );
   } catch {
     return false;
   }
 };
+
+// What an edit leaves behind: the stored provider and URL stand in for whatever the request omits.
+const apiBaseTargetSchema = z
+  .object({ host: z.string(), provider: z.string().nullish(), apiBaseUrl: z.string().nullish() })
+  .refine(apiBaseOnHost, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
 
 const createCredentialSchema = z
   .object({
@@ -88,8 +112,7 @@ const updateCredentialSchema = z
     message: BOTH_OR_NEITHER,
     path: ['gitEmail'],
   })
-  .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] })
-  .refine(apiBaseOnHost, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
+  .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] });
 
 export const repoCredentialsRoutes = new Hono<AppEnv>();
 repoCredentialsRoutes.use('*', requireAuth);
@@ -172,9 +195,14 @@ repoCredentialsRoutes.put('/:id', async (c) => {
 
   const existing = await db.query.repoCredentials.findFirst({
     where: and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)),
-    columns: { id: true, encryptedDek: true },
+    columns: { id: true, encryptedDek: true, provider: true },
   });
   if (!existing) throw new HttpError(404, 'Credential not found');
+  apiBaseTargetSchema.parse({
+    host: body.host,
+    provider: body.provider ?? existing.provider,
+    apiBaseUrl: body.apiBaseUrl,
+  });
 
   const update: {
     label: string;

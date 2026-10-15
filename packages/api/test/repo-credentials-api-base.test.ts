@@ -34,7 +34,10 @@ const app = new Hono<AppEnv>();
 app.route('/', repoCredentialsRoutes);
 app.onError(errorHandler);
 
-function setup(stored: string | null = STORED) {
+function setup(
+  stored: string | null = STORED,
+  row: { host?: string; provider?: string | null } = {},
+) {
   const fake = createFakeDb({
     repoCredentials: schema.repoCredentials,
     auditEvents: schema.auditEvents,
@@ -44,8 +47,8 @@ function setup(stored: string | null = STORED) {
     id: CREDENTIAL,
     userId: USER,
     label: 'work',
-    host: HOST,
-    provider: 'gitea',
+    host: row.host ?? HOST,
+    provider: row.provider === undefined ? 'gitea' : row.provider,
     apiBaseUrl: stored,
     usernameEncrypted: encrypt('ci', dek),
     secretEncrypted: encrypt('tok', dek),
@@ -117,6 +120,80 @@ const ACCEPTED: [string, string, string][] = [
   ['a url with surrounding space', `  ${STORED}  `, STORED],
 ];
 
+type ForgeApiCase = [name: string, host: string, provider: string | undefined, apiBaseUrl: string];
+
+const FORGE_API_ACCEPTED: ForgeApiCase[] = [
+  ['github.com with github set', 'github.com', 'github', 'https://api.github.com'],
+  ['github.com with a blank provider', 'github.com', '', 'https://api.github.com'],
+  ['github.com with no provider', 'github.com', undefined, 'https://api.github.com'],
+  ['github.com typed in capitals', 'GitHub.com', 'github', 'https://api.github.com'],
+  ['github.com with a sub path', 'github.com', 'github', 'https://api.github.com/v3'],
+  [
+    'bitbucket.org with bitbucket_cloud set',
+    'bitbucket.org',
+    'bitbucket_cloud',
+    'https://api.bitbucket.org/2.0',
+  ],
+  ['bitbucket.org with a blank provider', 'bitbucket.org', '', 'https://api.bitbucket.org/2.0'],
+  [
+    'GitHub Enterprise on its own host',
+    'ghe.example.com',
+    'github',
+    'https://ghe.example.com/api/v3',
+  ],
+];
+
+const FORGE_API_REFUSED: ForgeApiCase[] = [
+  ['another host for github.com', 'github.com', 'github', 'https://evil.example'],
+  ['api.github.com over http', 'github.com', 'github', 'http://api.github.com'],
+  [
+    'a host that only starts with api.github.com',
+    'github.com',
+    'github',
+    'https://api.github.com.evil.example',
+  ],
+  ['api.github.com as userinfo', 'github.com', 'github', 'https://api.github.com@evil.example'],
+  ['another port on api.github.com', 'github.com', 'github', 'https://api.github.com:8443'],
+  [
+    'the Bitbucket Cloud api host for github.com',
+    'github.com',
+    'github',
+    'https://api.bitbucket.org/2.0',
+  ],
+  [
+    'api.github.com when github.com is set to gitlab',
+    'github.com',
+    'gitlab',
+    'https://api.github.com',
+  ],
+  ['api.github.com for GitHub Enterprise', 'ghe.example.com', 'github', 'https://api.github.com'],
+  ['api.github.com for a self-hosted gitea', 'git.example.com', 'gitea', 'https://api.github.com'],
+  [
+    'api.github.com for a self-hosted host with no provider',
+    'git.example.com',
+    undefined,
+    'https://api.github.com',
+  ],
+  [
+    'api.bitbucket.org over http',
+    'bitbucket.org',
+    'bitbucket_cloud',
+    'http://api.bitbucket.org/2.0',
+  ],
+  [
+    'another host for bitbucket.org',
+    'bitbucket.org',
+    'bitbucket_cloud',
+    'https://evil.example/2.0',
+  ],
+  [
+    'api.bitbucket.org when bitbucket.org is set to gitea',
+    'bitbucket.org',
+    'gitea',
+    'https://api.bitbucket.org/2.0',
+  ],
+];
+
 beforeEach(() => {
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
 });
@@ -173,6 +250,35 @@ describe('creating a credential with an API base URL', () => {
       'https://git.example.com:8443/api/v1',
     );
   });
+
+  it.each(FORGE_API_ACCEPTED)(
+    'takes the API base of %s',
+    async (_name, host, provider, apiBaseUrl) => {
+      const fake = setup();
+
+      const res = await create({ host, provider, apiBaseUrl });
+
+      expect(res.status).toBe(201);
+      expect(fake.rows(schema.repoCredentials).find((r) => r.label === 'new')?.apiBaseUrl).toBe(
+        apiBaseUrl,
+      );
+    },
+  );
+
+  it.each(FORGE_API_REFUSED)(
+    'refuses %s with a 400 and stores nothing',
+    async (_name, host, provider, apiBaseUrl) => {
+      const fake = setup();
+      const before = fake.rows(schema.repoCredentials).length;
+
+      const res = await create({ host, provider, apiBaseUrl });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { issues: { path: string }[] };
+      expect(body.issues.map((i) => i.path)).toContain('apiBaseUrl');
+      expect(fake.rows(schema.repoCredentials)).toHaveLength(before);
+    },
+  );
 });
 
 describe('updating a credential with an API base URL', () => {
@@ -231,4 +337,51 @@ describe('updating a credential with an API base URL', () => {
       apiBaseUrl: 'https://other.example.com/api/v1',
     });
   });
+
+  it.each(FORGE_API_ACCEPTED)(
+    'takes the API base of %s',
+    async (_name, host, provider, apiBaseUrl) => {
+      const fake = setup(null, { host, provider: provider || null });
+
+      const res = await update({ host, apiBaseUrl });
+
+      expect(res.status).toBe(200);
+      expect(rowOf(fake).apiBaseUrl).toBe(apiBaseUrl);
+    },
+  );
+
+  it.each(FORGE_API_REFUSED)(
+    'refuses %s with a 400 and changes nothing',
+    async (_name, host, provider, apiBaseUrl) => {
+      const fake = setup(null, { host, provider: provider || null });
+
+      const res = await update({ host, apiBaseUrl });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { issues: { path: string }[] };
+      expect(body.issues.map((i) => i.path)).toContain('apiBaseUrl');
+      expect(rowOf(fake)).toMatchObject({ label: 'work', apiBaseUrl: null });
+    },
+  );
+
+  it('judges the URL against the stored provider when the request names none', async () => {
+    const fake = setup(null, { provider: 'bitbucket_cloud' });
+
+    const res = await update({ apiBaseUrl: 'https://api.bitbucket.org/2.0' });
+
+    expect(res.status).toBe(200);
+    expect(rowOf(fake).apiBaseUrl).toBe('https://api.bitbucket.org/2.0');
+  });
+
+  it.each([[''], ['gitea']])(
+    'judges the URL against the provider the request names (%j), not the stored one',
+    async (provider) => {
+      const fake = setup(null, { provider: 'bitbucket_cloud' });
+
+      const res = await update({ provider, apiBaseUrl: 'https://api.bitbucket.org/2.0' });
+
+      expect(res.status).toBe(400);
+      expect(rowOf(fake)).toMatchObject({ provider: 'bitbucket_cloud', apiBaseUrl: null });
+    },
+  );
 });
