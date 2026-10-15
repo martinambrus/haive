@@ -204,6 +204,7 @@ export async function ensureModuleSchemas(
 export const MODULE_JOBS_RECONCILE_MS = 15_000;
 export const MODULE_JOB_START_WAIT_MS = 10_000;
 export const MODULE_JOB_STOP_WAIT_MS = 10_000;
+export const MODULE_REACTIVATION_ATTEMPTS = 3;
 
 const jobsStarted = new Set<string>();
 const teardownsRunning = new Set<string>();
@@ -308,12 +309,16 @@ export async function startModuleJobs(
   }
 
   const held = new Set<string>();
+  // Attempts made so far by a reactivation the next pass is to try again; that try takes them.
+  const attemptsMade = new Map<string, number>();
   const reactivate = (
     moduleId: string,
     ensureSchema: WorkerModuleEntry['ensureSchema'],
     jobs: WorkerModuleEntry['jobs'],
   ): Promise<void> =>
     new Promise<void>((resolve) => {
+      const attempt = (attemptsMade.get(moduleId) ?? 0) + 1;
+      attemptsMade.delete(moduleId);
       starting.add(moduleId);
       const timer = setTimeout(() => {
         logger.warn(
@@ -330,10 +335,19 @@ export async function startModuleJobs(
             logger.info({ module: moduleId }, 'module jobs started: the module is active again');
           }
         } catch (err) {
-          logger.error(
-            { err, module: moduleId },
-            'module schema or jobs failed to start; deactivate and reactivate the module to try again',
-          );
+          if (attempt < MODULE_REACTIVATION_ATTEMPTS) {
+            attemptsMade.set(moduleId, attempt);
+            pending.add(moduleId);
+            logger.warn(
+              { err, module: moduleId, attempt },
+              `module schema or jobs failed to start (attempt ${attempt} of ${MODULE_REACTIVATION_ATTEMPTS}); trying again on the next pass`,
+            );
+          } else {
+            logger.error(
+              { err, module: moduleId },
+              'module schema or jobs failed to start; deactivate and reactivate the module to try again',
+            );
+          }
         } finally {
           if (!stops.has(moduleId)) jobsStarted.delete(moduleId);
           starting.delete(moduleId);
@@ -351,6 +365,7 @@ export async function startModuleJobs(
       if ((!jobs && !ensureSchema) || stops.has(moduleId) || starting.has(moduleId)) continue;
       if (nowDeactivated.has(moduleId)) {
         pending.add(moduleId);
+        attemptsMade.delete(moduleId);
         held.delete(moduleId);
         continue;
       }
