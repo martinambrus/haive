@@ -106,6 +106,7 @@ import {
 } from '../../cli-adapters/codex-app-server-verdict.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
 import { supersedeDeadTaskRuns } from '../task-queue.js';
+import { pruneJobSchedulers } from '../job-scheduler-prune.js';
 import { agentRulesOf } from '../../orchestrator/agent-rules.js';
 import { houseRulesOf } from '../../orchestrator/house-rules.js';
 import { scoreHouseRulesInBackground } from '../../orchestrator/house-rules-similarity.js';
@@ -1183,6 +1184,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
       opts: { removeOnComplete: true, removeOnFail: 10 },
     },
   );
+  await pruneJobSchedulers(queue, [VERSION_REFRESH_JOB_ID]);
   // Boot kick, so a fresh install populates the caches without waiting up to 12h for the
   // scheduler. Skipped when a refresh is already in flight.
   //

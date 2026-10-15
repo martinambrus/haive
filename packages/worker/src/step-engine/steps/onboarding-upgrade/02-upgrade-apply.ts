@@ -2,6 +2,7 @@ import {
   decodeUtf8Strict,
   errno,
   isPathContainmentError,
+  lstatNoFollow,
   ParkedFileError,
   removeFileIfNoFollow,
   rewriteFileIfNoFollow,
@@ -74,6 +75,27 @@ import {
 } from './01-upgrade-plan.js';
 
 const RESTORE_RTK_BLOCK_FIELD = 'restoreRtkBlock';
+
+/** One per Haive file 02 removes, so a retry that finds it gone knows this task removed it. */
+export const HAIVE_FILE_RETIRED_EVENT = 'upgrade.haive_file_retired';
+
+async function retiredByThisTask(db: Database, taskId: string): Promise<Map<string, string[]>> {
+  const events = await db
+    .select({ id: schema.taskEvents.id, payload: schema.taskEvents.payload })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, taskId),
+        eq(schema.taskEvents.eventType, HAIVE_FILE_RETIRED_EVENT),
+      ),
+    );
+  const ids = new Map<string, string[]>();
+  for (const { id, payload } of events) {
+    const path = payload?.path;
+    if (typeof path === 'string') ids.set(path, [...(ids.get(path) ?? []), id]);
+  }
+  return ids;
+}
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
@@ -1799,6 +1821,20 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     }
 
     ctx.throwIfCancelled();
+    let recordWritten = false;
+    // Any entry this attempt saw there means an earlier record no longer proves this task removed it.
+    const seenPresent = new Set<string>();
+    // Voided in the database too, so a retry after a crash does not count those records again.
+    const voidEarlier = async (path: string, ids: readonly string[]) => {
+      try {
+        for (const id of ids) {
+          await ctx.db.delete(schema.taskEvents).where(eq(schema.taskEvents.id, id));
+        }
+      } catch (err) {
+        const cause = err instanceof Error ? err.message : String(err);
+        warnings.push(`${path}: the earlier record of its removal could not be voided: ${cause}`);
+      }
+    };
     try {
       const state = await writeProjectStateRecord(ctx.db, {
         repositoryId: plan.repositoryId,
@@ -1809,17 +1845,49 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           ? { expectedColumns: plannedColumns(plan), holdingTaskId: ctx.taskId }
           : {}),
       });
+      recordWritten = true;
       writtenPaths.push(...state.written);
       deletedPaths.push(...state.removed);
-      if ((await retireInstallManifest(ctx, warnings)) === 'removed') {
-        deletedPaths.push(INSTALL_MANIFEST_PATH);
-      }
+      const retiredEarlier = await retiredByThisTask(ctx.db, ctx.taskId);
+      const recordRetired = async (path: string) => {
+        seenPresent.add(path);
+        const [event] = await ctx.db
+          .insert(schema.taskEvents)
+          .values({
+            taskId: ctx.taskId,
+            taskStepId: ctx.taskStepId,
+            eventType: HAIVE_FILE_RETIRED_EVENT,
+            payload: { path },
+          })
+          .returning({ id: schema.taskEvents.id });
+        return async () => {
+          await ctx.db.delete(schema.taskEvents).where(eq(schema.taskEvents.id, event!.id));
+        };
+      };
+      const listRetired = async (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
+        for (const { path, outcome } of retired) {
+          if (outcome !== 'absent') seenPresent.add(path);
+          if (
+            outcome === 'removed' ||
+            (outcome === 'absent' && retiredEarlier.has(path) && !seenPresent.has(path))
+          ) {
+            deletedPaths.push(path);
+          } else if (seenPresent.has(path) && retiredEarlier.has(path)) {
+            await voidEarlier(path, retiredEarlier.get(path) ?? []);
+            retiredEarlier.delete(path);
+          }
+        }
+      };
+      await listRetired([
+        {
+          path: INSTALL_MANIFEST_PATH,
+          outcome: await retireInstallManifest(ctx, warnings, recordRetired),
+        },
+      ]);
       const keepTooling = (await toolingOutsideRecord(ctx.db, plan.repositoryId))
         ? [HAIVE_DATA_FILES.tooling]
         : [];
-      for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings, keepTooling)) {
-        if (outcome === 'removed') deletedPaths.push(path);
-      }
+      await listRetired(await retireLegacyMirrors(ctx, warnings, keepTooling, recordRetired));
     } catch (err) {
       failIfColumnStale(err);
       if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);
@@ -1829,8 +1897,32 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         deletedPaths.push(...err.removed);
       }
       const message = err instanceof Error ? err.message : String(err);
-      warnings.push(`project state record write failed: ${message}`);
-      ctx.logger.warn({ err }, 'project state record write failed');
+      const failed = recordWritten
+        ? 'the record was written, but retiring the files it replaces failed'
+        : 'project state record write failed';
+      warnings.push(`${failed}: ${message}`);
+      ctx.logger.warn({ err }, failed);
+      // What this task removed, now or in an earlier attempt, is still listed.
+      try {
+        for (const [path, ids] of await retiredByThisTask(ctx.db, ctx.taskId)) {
+          if (deletedPaths.includes(path) || seenPresent.has(path)) continue;
+          // Strict: only a path proven missing is listed, never one that could not be read.
+          const entry = await lstatNoFollow(ctx.repoPath, path, { strict: true }).then(
+            (found) => found,
+            (err: unknown) => {
+              const cause = err instanceof Error ? err.message : String(err);
+              warnings.push(`${path} was not listed as removed: it could not be checked: ${cause}`);
+              return undefined;
+            },
+          );
+          if (entry === null) deletedPaths.push(path);
+          else if (entry !== undefined) await voidEarlier(path, ids);
+        }
+      } catch (lookupErr) {
+        const cause = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
+        warnings.push(`did not list the files this task removed earlier: ${cause}`);
+        ctx.logger.warn({ err: lookupErr }, 'earlier removals not listed');
+      }
     }
 
     ctx.logger.info(

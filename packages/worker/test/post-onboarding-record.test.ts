@@ -296,6 +296,63 @@ describe('12 retires .haive/install.json', () => {
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(true);
   });
+
+  const refuseRecordWrite = (s: Awaited<ReturnType<typeof seededSetup>>) => {
+    let refused = false;
+    s.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+  };
+
+  it('stages the deletion an earlier attempt made when the record write fails', async () => {
+    const s = await seededSetup(HAIVE_SHAPED);
+    await rm(join(s.root, '.haive', 'install.json'));
+    refuseRecordWrite(s);
+
+    const out = await s.applyCommit();
+
+    expect(out.warnings).toContain('project state record write failed: database refused');
+    expect(out.stagedPaths).toContain('.haive/install.json');
+    expect(await trackedFiles(s.root)).not.toContain('.haive/install.json');
+    expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
+  });
+
+  it('stages no deletion it cannot prove, and says so, when the record write fails', async () => {
+    const s = await seededSetup(HAIVE_SHAPED);
+    const outside = await mkdtemp(join(tmpdir(), 'post-onboarding-record-out-'));
+    dirs.push(outside);
+    await writeFile(join(outside, 'install.json'), HAIVE_SHAPED);
+    await rm(join(s.root, '.haive'), { recursive: true });
+    await symlink(outside, join(s.root, '.haive'));
+    refuseRecordWrite(s);
+
+    const out = await s.applyCommit();
+
+    expect(out.stagedPaths).not.toContain('.haive/install.json');
+    expect(await trackedFiles(s.root)).toContain('.haive/install.json');
+    expect(existsSync(join(outside, 'install.json'))).toBe(true);
+    expect(
+      out.warnings.some((w) =>
+        w.startsWith('.haive/install.json was not listed as removed: it could not be checked'),
+      ),
+    ).toBe(true);
+  });
+
+  it('stages no deletion for a manifest still on disk when the record write fails', async () => {
+    const s = await seededSetup(HAIVE_SHAPED);
+    refuseRecordWrite(s);
+
+    const out = await s.applyCommit();
+
+    expect(out.warnings).toContain('project state record write failed: database refused');
+    expect(out.warnings.filter((w) => w.includes('was not listed as removed'))).toEqual([]);
+    expect(out.stagedPaths).not.toContain('.haive/install.json');
+    expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(true);
+    expect(await trackedFiles(s.root)).toContain('.haive/install.json');
+  });
 });
 
 describe('12 retires the legacy environment, exclusions and tooling mirrors', () => {

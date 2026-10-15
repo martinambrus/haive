@@ -12,7 +12,10 @@ import { openModuleDatabase, type ModuleDatabase } from '@haive/shared/module-db
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
+  MODULE_JOBS_RECONCILE_MS,
+  beginModuleTeardown,
   moduleJobsStarted,
+  moduleTeardownRunning,
   type LoadedWorkerModule,
   type WorkerModuleEntry,
 } from '../modules/loader.js';
@@ -26,6 +29,13 @@ export class ModuleTeardownRefusedError extends Error {
   }
 }
 
+class ModuleTeardownEndedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModuleTeardownEndedError';
+  }
+}
+
 export const TEARDOWN_HOOK_TIMEOUT_MS = 10 * 60_000;
 
 export type ModuleControlDeps = {
@@ -33,6 +43,7 @@ export type ModuleControlDeps = {
   loaded: readonly LoadedWorkerModule[];
   entries: readonly WorkerModuleEntry[];
   jobsStarted: (moduleId: string) => boolean;
+  teardownRunning: (moduleId: string) => boolean;
   hookTimeoutMs?: number;
 };
 
@@ -41,8 +52,15 @@ async function runHook(
   moduleId: string,
   teardown: NonNullable<WorkerModuleEntry['teardown']>,
   timeoutMs: number,
+  release: () => void,
 ): Promise<void> {
   const opened: ModuleDatabase[] = [];
+  // Set when the close pass below begins: a database opened after it would never be closed.
+  let ended = false;
+  const endedError = (): Error =>
+    new ModuleTeardownEndedError(
+      `Module ${moduleId}'s teardown job has ended; its hook can no longer open the module database`,
+    );
   let timer: NodeJS.Timeout | undefined;
   // A hook that never settles would hold the job, so every later Tear down would wait on it.
   const timedOut = new Promise<never>((_, reject) => {
@@ -56,23 +74,30 @@ async function runHook(
       timeoutMs,
     );
   });
+  const hook = (async () =>
+    teardown({
+      moduleId,
+      logger: logger.child({ module: moduleId }),
+      openDatabase: async () => {
+        if (ended) throw endedError();
+        const moduleDb = await openModuleDatabase(db, moduleId);
+        if (ended) {
+          await moduleDb.close();
+          throw endedError();
+        }
+        opened.push(moduleDb);
+        return moduleDb;
+      },
+    }))();
+  // Only the hook's own end frees the module: past the timeout it may still be dropping data.
+  void hook.then(release, release);
   try {
-    await Promise.race([
-      teardown({
-        moduleId,
-        logger: logger.child({ module: moduleId }),
-        openDatabase: async () => {
-          const moduleDb = await openModuleDatabase(db, moduleId);
-          opened.push(moduleDb);
-          return moduleDb;
-        },
-      }),
-      timedOut,
-    ]);
+    await Promise.race([hook, timedOut]);
   } catch (err) {
     throw err instanceof Error ? err : new Error(String(err));
   } finally {
     clearTimeout(timer);
+    ended = true;
     await Promise.allSettled(opened.map((moduleDb) => moduleDb.close()));
   }
 }
@@ -106,13 +131,26 @@ export async function runModuleTeardown(
   }
   if (deps.jobsStarted(moduleId)) {
     throw new ModuleTeardownRefusedError(
-      `Module ${moduleId} had its jobs started by this worker; restart the worker (a deactivated module's jobs do not start at boot) and try again`,
+      `Module ${moduleId}'s jobs or schema setup are still running on this worker; try again once they have stopped, normally within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation`,
+    );
+  }
+  if (deps.teardownRunning(moduleId)) {
+    throw new ModuleTeardownRefusedError(
+      `Module ${moduleId}'s earlier teardown is still running on this worker; try again once it has ended`,
     );
   }
 
   const teardown = deps.entries[index]?.teardown;
   if (teardown) {
-    await runHook(db, moduleId, teardown, deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS);
+    // The jobs reconcile starts nothing of this module while its hook drops data.
+    const endTeardown = beginModuleTeardown(moduleId);
+    await runHook(
+      db,
+      moduleId,
+      teardown,
+      deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS,
+      endTeardown,
+    );
   }
 
   // Conditional: a module activated again while the hook ran must not read as torn down.
@@ -150,7 +188,15 @@ export function startModuleControlWorker(
   const worker = new Worker<ModuleTeardownPayload, ModuleTeardownResult>(
     QUEUE_NAMES.MODULE_CONTROL,
     (job) =>
-      processModuleControlJob({ ...modules, db: getDb(), jobsStarted: moduleJobsStarted }, job),
+      processModuleControlJob(
+        {
+          ...modules,
+          db: getDb(),
+          jobsStarted: moduleJobsStarted,
+          teardownRunning: moduleTeardownRunning,
+        },
+        job,
+      ),
     // A worker that dies mid-hook fails the job instead of running the hook again unasked.
     { connection: getBullRedis(), concurrency: 1, maxStalledCount: 0 },
   );

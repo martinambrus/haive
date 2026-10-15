@@ -503,6 +503,22 @@ describe('commit steps stage only the paths their step outputs record', () => {
     expect(await tracked(repo)).not.toContain('src/a.ts');
   });
 
+  it('03 stages no removal it cannot prove, as when a link stands in the path', async () => {
+    const repo = await seeded({ '.claude/settings.json': '{}\n' });
+    const outside = await mkdtemp(path.join(tmpdir(), 'commit-scope-out-'));
+    dirs.push(outside);
+    await writeFile(path.join(outside, 'settings.json'), '{}\n');
+    await rm(path.join(repo, '.claude'), { recursive: true, force: true });
+    await symlink(outside, path.join(repo, '.claude'));
+    const out = await three(repo, { writtenPaths: [], deletedPaths: ['.claude/settings.json'] });
+    expect(await tracked(repo)).toContain('.claude/settings.json');
+    expect(
+      out.warnings.some((w) =>
+        w.startsWith('.claude/settings.json was not staged as removed: it could not be checked'),
+      ),
+    ).toBe(true);
+  });
+
   it('9: 12 commits the project state files a failed record write left on disk', async () => {
     const repo = await seeded();
     await put(repo, { '.claude/agents/a.md': 'a\n' });

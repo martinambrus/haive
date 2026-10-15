@@ -787,7 +787,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
       vi.unstubAllGlobals();
     });
 
-    it('hands back the secret, the username, the provider and the API base of a credential-backed connection', async () => {
+    it('hands back the secret, the username, the provider, the API base and the host of a credential-backed connection', async () => {
       const id = await createCredentialConnection({
         username: 'octocat',
         secret: 'stub-git-secret',
@@ -802,6 +802,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
         username: 'octocat',
         provider: 'github',
         apiBaseUrl: 'https://ghe.example.com/api/v3',
+        host: 'github.com',
       });
       expect(credential.accessToken).toBe(
         await getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn }),
@@ -816,6 +817,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
         username: 'octocat',
         provider: 'gitlab',
         apiBaseUrl: null,
+        host: 'gitlab.com',
       });
     });
 
@@ -897,6 +899,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
           username: 'octocat',
           provider: 'github',
           apiBaseUrl: 'https://ghe.example.com/api/v3',
+          host: 'ghe.example.com',
         });
         expect(await getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn })).toBe(
           'stub-git-secret',
@@ -905,7 +908,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
       });
     });
 
-    it('has no username for an OAuth connection, and refreshes it as before', async () => {
+    it('has no username or host for an OAuth connection, and refreshes it as before', async () => {
       const fresh = await createConnection({ expiresAt: new Date(Date.now() + 10 * 60_000) });
       const vendor = createVendor();
       expect(await getConnectionCredential(dbA, fresh, { fetchFn: vendor.fetchFn })).toEqual({
@@ -913,6 +916,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
         username: null,
         provider: 'github',
         apiBaseUrl: null,
+        host: null,
       });
       expect(vendor.calls()).toBe(0);
 
@@ -922,6 +926,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
         username: null,
         provider: 'github',
         apiBaseUrl: null,
+        host: null,
       });
       expect(vendor.calls()).toBe(1);
       expect(await storedTokens(expired)).toEqual({

@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { lstatNoFollow, removeFileIfNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, readFileNoFollow, removeFileIfNoFollow } from '@haive/shared/fs-safe';
 import {
   HAIVE_DATA_FILES,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
@@ -22,6 +22,8 @@ const RETIRE_READ_CAP = 8 * 1024 * 1024;
 
 type Outcome = 'removed' | 'absent' | 'kept';
 type RetireContext = Pick<StepContext, 'repoPath' | 'logger'>;
+/** Awaited before a Haive file is parked: a throw keeps it, a returned undo runs if it is not removed. */
+type OnRetire = (path: string) => Promise<(() => Promise<void>) | void>;
 
 function jsonObject(data: Buffer): Record<string, unknown> | null {
   let parsed: unknown;
@@ -88,16 +90,40 @@ async function retireHaiveFile(
     requires?: string;
   },
   warnings: string[],
+  onRetire?: OnRetire,
 ): Promise<Outcome> {
   let outcome: Outcome;
   let reason = `it is not a Haive ${target.label}`;
+  let undo: (() => Promise<void>) | undefined;
   try {
     if (target.requires && (await lstatNoFollow(ctx.repoPath, target.requires)) === null) {
       return 'kept';
     }
-    outcome = await removeFileIfNoFollow(ctx.repoPath, target.path, target.accept, {
-      maxBytes: RETIRE_READ_CAP,
-    });
+    const held = await readFileNoFollow(ctx.repoPath, target.path, { maxBytes: RETIRE_READ_CAP });
+    if (held !== null && (held.truncated || !target.accept(held.data))) {
+      outcome = 'kept';
+    } else {
+      if (held !== null) {
+        try {
+          undo = (await onRetire?.(target.path)) || undefined;
+        } catch (err) {
+          const cause = err instanceof Error ? err.message : String(err);
+          throw new Error(`its removal could not be recorded: ${cause}`);
+        }
+      }
+      // Nothing read means nothing recorded, so whatever stands there by the removal stays.
+      const judge =
+        held === null
+          ? () => {
+              reason =
+                'nothing could be read there before its removal, so it stays for the next attempt';
+              return false;
+            }
+          : target.accept;
+      outcome = await removeFileIfNoFollow(ctx.repoPath, target.path, judge, {
+        maxBytes: RETIRE_READ_CAP,
+      });
+    }
   } catch (err) {
     outcome = 'kept';
     reason = err instanceof Error ? err.message : String(err);
@@ -106,17 +132,33 @@ async function retireHaiveFile(
     warnings.push(`${target.path} was left in place: ${reason}`);
     ctx.logger.warn({ path: target.path, reason }, `${target.label} kept`);
   }
+  if (undo && outcome !== 'removed') {
+    try {
+      await undo();
+    } catch (err) {
+      const cause = err instanceof Error ? err.message : String(err);
+      warnings.push(
+        `${target.path}: the record of its removal could not be taken back, so the stale record stays: ${cause}`,
+      );
+      ctx.logger.warn({ path: target.path, err }, 'removal record not taken back');
+    }
+  }
   return outcome;
 }
 
 /** Delete `.haive/install.json` while it still has the shape Haive wrote it in: nothing reads it, and
  *  the project state record carries what it held. Any other file at that name is the person's. Never
  *  throws; a file it could not judge is reported as kept. */
-export function retireInstallManifest(ctx: RetireContext, warnings: string[]): Promise<Outcome> {
+export function retireInstallManifest(
+  ctx: RetireContext,
+  warnings: string[],
+  onRetire?: OnRetire,
+): Promise<Outcome> {
   return retireHaiveFile(
     ctx,
     { path: INSTALL_MANIFEST_PATH, label: 'install manifest', accept: isHaiveInstallManifest },
     warnings,
+    onRetire,
   );
 }
 
@@ -139,6 +181,7 @@ export async function retireLegacyMirrors(
   ctx: RetireContext,
   warnings: string[],
   keep: readonly string[] = [],
+  onRetire?: OnRetire,
 ): Promise<Array<{ path: string; outcome: Outcome }>> {
   const targets = [
     {
@@ -164,7 +207,9 @@ export async function retireLegacyMirrors(
   for (const target of targets) {
     results.push({
       path: target.path,
-      outcome: keep.includes(target.path) ? 'kept' : await retireHaiveFile(ctx, target, warnings),
+      outcome: keep.includes(target.path)
+        ? 'kept'
+        : await retireHaiveFile(ctx, target, warnings, onRetire),
     });
   }
   return results;
