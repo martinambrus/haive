@@ -20,8 +20,8 @@ if ((command !== 'add' && command !== 'remove') || target === undefined || extra
 const registry = /^@haive-module\/([a-z0-9][a-z0-9-]*)(?:@(.*))?$/.exec(target);
 const id = registry?.[1] ?? target;
 const version = registry?.[2];
-if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
-  fail(`"${id}" is not a module id (id = [a-z0-9][a-z0-9-]*)`);
+if (!/^[a-z0-9][a-z0-9-]{0,22}$/.test(id)) {
+  fail(`"${id}" is not a module id (id = [a-z0-9][a-z0-9-]*, at most 23 characters)`);
 }
 if (
   registry !== null &&

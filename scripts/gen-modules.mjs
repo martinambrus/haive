@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const modulesDir = join(root, 'modules');
 // Copy of the pattern behind modulePackageId in @haive/shared/modularity; packages/shared/test/modularity.test.ts pins the two equal.
-const MODULE_PACKAGE = /^(?:@haive\/module-|@haive-module\/)([a-z0-9][a-z0-9-]*)$/;
+const MODULE_PACKAGE = /^(?:@haive\/module-|@haive-module\/)([a-z0-9][a-z0-9-]{0,22})$/;
 const idOf = (name) => MODULE_PACKAGE.exec(name)?.[1] ?? null;
 
 const folders = readdirSync(modulesDir, { withFileTypes: true })
@@ -181,7 +181,7 @@ ${apiEntries.join('\n')}
 for (const pkg of apiModules) {
   if (idOf(pkg.name) === null) {
     console.error(
-      `gen-modules: ${pkg.name} exports ./manifest but is not named @haive/module-<id> or @haive-module/<id> (id = [a-z0-9][a-z0-9-]*); the loaders refuse it at boot`,
+      `gen-modules: ${pkg.name} exports ./manifest but is not named @haive/module-<id> or @haive-module/<id> (id = [a-z0-9][a-z0-9-]*, at most 23 characters); the loaders refuse it at boot`,
     );
     process.exit(1);
   }
@@ -238,7 +238,7 @@ const webModuleFor = (pkg, part) => {
   const id = idOf(pkg.name);
   if (id === null) {
     console.error(
-      `gen-modules: ${pkg.name} exports ${part} but is not named @haive/module-<id> or @haive-module/<id> (id = [a-z0-9][a-z0-9-]*)`,
+      `gen-modules: ${pkg.name} exports ${part} but is not named @haive/module-<id> or @haive-module/<id> (id = [a-z0-9][a-z0-9-]*, at most 23 characters)`,
     );
     process.exit(1);
   }

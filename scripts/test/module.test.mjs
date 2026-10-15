@@ -332,6 +332,16 @@ describe('module add @haive-module/<id>@<version>', () => {
     assert.deepEqual(tree.pnpmCalls(), [viewCall(tree)]);
   });
 
+  it('refuses a registry id longer than a manifest id may be, and writes nothing', (t) => {
+    const tree = makeTree(t);
+    const before = tree.snapshot();
+    const out = tree.run('module.mjs', ['add', `@haive-module/${'a'.repeat(24)}@1.0.0`]);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /at most 23 characters/);
+    assert.deepEqual(tree.snapshot(), before);
+    assert.deepEqual(tree.pnpmCalls(), []);
+  });
+
   it('refuses a package that publishes no exports at all', (t) => {
     const tree = makeTree(t);
     const before = tree.snapshot();

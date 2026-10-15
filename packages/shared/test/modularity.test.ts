@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  MODULE_ID_MAX_LENGTH,
   CORE_INTEGRATION_CATEGORIES,
   PERSONA_ID_PATTERN_SOURCE,
   composableStepEntrySchema,
@@ -260,6 +261,9 @@ describe('module package names', () => {
     ['@haive-module/Foo', null],
     ['@haive/module-foo_bar', null],
     ['@haive-module/foo/bar', null],
+    [`@haive-module/${'a'.repeat(23)}`, 'a'.repeat(23)],
+    [`@haive/module-${'a'.repeat(24)}`, null],
+    [`@haive-module/${'a'.repeat(24)}`, null],
     ['@haive/module-foo/web', null],
     ['@haive/statistics', null],
     ['@haive/shared', null],
@@ -275,6 +279,11 @@ describe('module package names', () => {
 
   it.each(NAMES)('reads %j as the module id %j', (name, id) => {
     expect(modulePackageId(name)).toBe(id);
+  });
+
+  it("accepts an id exactly as long as a manifest's, and no longer", () => {
+    expect(modulePackageId(`@haive-module/${'a'.repeat(MODULE_ID_MAX_LENGTH)}`)).not.toBeNull();
+    expect(modulePackageId(`@haive-module/${'a'.repeat(MODULE_ID_MAX_LENGTH + 1)}`)).toBeNull();
   });
 
   it('is the rule scripts/gen-modules.mjs applies, name for name', () => {
