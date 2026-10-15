@@ -55,7 +55,7 @@ const NOT_A_RESOURCE = [
   // resource namespace; their task UUID supplies the isolation.
   /haive-(?:task|rag|mcp|chrome-mcp-proxy|price-sync|runtime-tools|worker|data|ide-ensure|api-|access-|migrated-|import-|pre-migrate|pre-rename)/,
   // An MCP server name, and the files beside its script: a CLI and the stats module read them.
-  /haive-custom\b/,
+  /haive-(?:custom|integrations)\b/,
 ];
 
 function sourceFiles(dir: string): string[] {

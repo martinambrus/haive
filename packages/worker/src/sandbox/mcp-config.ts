@@ -106,6 +106,12 @@ export interface BuildDefaultMcpServersOptions {
   customServerPath?: string;
   /** Base URL of the Haive API the custom-tools proxy calls (e.g. http://api:3001). */
   customApiUrl?: string;
+  /** Enable haive-integrations (needs the path and url below); its entry holds no token, so it never varies. */
+  includeIntegrations?: boolean;
+  /** Container path of the bind-mounted haive-integrations MCP server script. */
+  integrationsServerPath?: string;
+  /** Base URL of the Haive API the integrations proxy calls (e.g. http://api:3001). */
+  integrationsApiUrl?: string;
   /** Container path of the bind-mounted chrome-devtools body-diversion proxy. When set,
    *  the server is launched THROUGH it (`node <proxy> npx <cdm args>`) so network bodies
    *  are written to disk instead of into the model's context; see chrome-mcp-proxy.ts.
@@ -365,6 +371,15 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
       command: 'node',
       args: [opts.customServerPath],
       env: { CUSTOM_MCP_API_URL: opts.customApiUrl },
+    });
+  }
+
+  if (opts.includeIntegrations && opts.integrationsServerPath && opts.integrationsApiUrl) {
+    servers.push({
+      name: 'haive-integrations',
+      command: 'node',
+      args: [opts.integrationsServerPath],
+      env: { INTEGRATIONS_MCP_API_URL: opts.integrationsApiUrl },
     });
   }
 
