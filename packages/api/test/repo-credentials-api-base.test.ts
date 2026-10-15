@@ -384,4 +384,51 @@ describe('updating a credential with an API base URL', () => {
       expect(rowOf(fake)).toMatchObject({ provider: 'bitbucket_cloud', apiBaseUrl: null });
     },
   );
+
+  it('judges the stored URL against a new host when the request leaves the URL out', async () => {
+    const fake = setup();
+
+    const res = await update({ host: 'other.example.com' });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { issues: { path: string }[] };
+    expect(body.issues.map((i) => i.path)).toContain('apiBaseUrl');
+    expect(rowOf(fake)).toMatchObject({ host: HOST, apiBaseUrl: STORED });
+  });
+
+  it('judges the stored URL against a new provider when the request leaves the URL out', async () => {
+    const fake = setup('https://api.github.com', { host: 'github.com', provider: 'github' });
+
+    const res = await update({ host: 'github.com', provider: 'gitea' });
+
+    expect(res.status).toBe(400);
+    expect(rowOf(fake)).toMatchObject({ provider: 'github', apiBaseUrl: 'https://api.github.com' });
+  });
+
+  it('moves a credential that has no URL to a new host', async () => {
+    const fake = setup(null);
+
+    const res = await update({ host: 'other.example.com' });
+
+    expect(res.status).toBe(200);
+    expect(rowOf(fake)).toMatchObject({ host: 'other.example.com', apiBaseUrl: null });
+  });
+
+  it('moves a credential to a new host when the request clears the stored URL', async () => {
+    const fake = setup();
+
+    const res = await update({ host: 'other.example.com', apiBaseUrl: '' });
+
+    expect(res.status).toBe(200);
+    expect(rowOf(fake)).toMatchObject({ host: 'other.example.com', apiBaseUrl: null });
+  });
+
+  it('keeps a stored URL that still fits the host and provider the row ends up with', async () => {
+    const fake = setup('https://api.github.com', { host: 'github.com', provider: 'github' });
+
+    const res = await update({ host: 'github.com', label: 'renamed' });
+
+    expect(res.status).toBe(200);
+    expect(rowOf(fake)).toMatchObject({ label: 'renamed', apiBaseUrl: 'https://api.github.com' });
+  });
 });

@@ -195,13 +195,13 @@ repoCredentialsRoutes.put('/:id', async (c) => {
 
   const existing = await db.query.repoCredentials.findFirst({
     where: and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)),
-    columns: { id: true, encryptedDek: true, provider: true },
+    columns: { id: true, encryptedDek: true, provider: true, apiBaseUrl: true },
   });
   if (!existing) throw new HttpError(404, 'Credential not found');
   apiBaseTargetSchema.parse({
     host: body.host,
     provider: body.provider ?? existing.provider,
-    apiBaseUrl: body.apiBaseUrl,
+    apiBaseUrl: body.apiBaseUrl ?? existing.apiBaseUrl,
   });
 
   const update: {
