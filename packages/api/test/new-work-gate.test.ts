@@ -78,6 +78,7 @@ import { globalKbEntries } from '@haive/shared/global-kb';
 import { globalKbRoutes } from '../src/routes/global-kb.js';
 import { planRoutes } from '../src/routes/plan.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
+import { taskTypeDraftRoutes } from '../src/routes/task-type-drafts.js';
 import { upgradeRoutes } from '../src/routes/upgrades.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { maintenanceGate } from '../src/middleware/maintenance.js';
@@ -99,6 +100,7 @@ app.route('/tasks', taskRoutes);
 app.route('/repositories', upgradeRoutes);
 app.route('/repositories', planRoutes);
 app.route('/global-kb', globalKbRoutes);
+app.route('/admin/task-type-drafts', taskTypeDraftRoutes);
 app.onError(errorHandler);
 
 const ROUTES: { name: string; path: string; body: unknown }[] = [
@@ -127,6 +129,11 @@ const ROUTES: { name: string; path: string; body: unknown }[] = [
     name: 'POST /repositories/:id/plan/nodes/:nodeId/advisory',
     path: `/repositories/${REPO}/plan/nodes/${NODE}/advisory`,
     body: { question: 'Which queue?' },
+  },
+  {
+    name: 'POST /admin/task-type-drafts',
+    path: '/admin/task-type-drafts',
+    body: { message: 'Draft a step that greets the user.' },
   },
   {
     name: 'POST /global-kb/enrich',
@@ -444,6 +451,7 @@ describe('the code that creates a task', () => {
       'lib/spawn-plan-task.ts',
       'routes/global-kb.ts',
       'routes/plan.ts',
+      'routes/task-type-drafts.ts',
       'routes/tasks/index.ts',
       'routes/upgrades.ts',
     ]);
