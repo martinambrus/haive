@@ -212,8 +212,8 @@ export interface SandboxRunResult extends DockerRunResult {
  * the invoked executable in place of spec.command. The wrapper file is
  * cleaned up after the run regardless of exit code.
  *
- * Mounts only the wrapper volume (read-only); no worker fs leaks into
- * the sandbox. Host Docker daemon resolves the named volume.
+ * Mounts only this run's own subpaths of the wrapper volume, never its root; no worker fs
+ * leaks into the sandbox. Host Docker daemon resolves the named volume.
  */
 export async function runInSandbox(
   spec: SandboxRunSpec,
@@ -232,10 +232,7 @@ export async function runInSandbox(
   // an operator pinned themselves via SANDBOX_IMAGE.
   await ensureSandboxCoreImage(image, runner);
 
-  const mounts: DockerVolumeMount[] = [
-    { source: volumeName, target: wrapperSandboxRoot, readOnly: true },
-    ...(options.extraMounts ?? []),
-  ];
+  const mounts: DockerVolumeMount[] = [...(options.extraMounts ?? [])];
 
   const policy = options.networkPolicy ?? null;
 
@@ -271,6 +268,12 @@ export async function runInSandbox(
       await writeFile(wrapperWorkerPath, normalizeWrapperContent(spec.wrapperContent), 'utf8');
       await chmod(wrapperWorkerPath, 0o755);
       resolvedCommand = wrapperSandboxPath;
+      mounts.push({
+        source: volumeName,
+        subpath: `${wrapperId}/${fileName}`,
+        target: wrapperSandboxPath,
+        readOnly: true,
+      });
     }
 
     assertNoAuthVolumeNesting(spec.extraFiles ?? [], mounts);
