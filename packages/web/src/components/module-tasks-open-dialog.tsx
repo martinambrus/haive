@@ -25,14 +25,17 @@ export interface ModuleTasksBlocked {
 const COPY_TAIL =
   'Module code already running finishes its current call, and its background jobs stop at the next worker restart.';
 
-function turnOffCopy({ moduleId, name, tasks }: ModuleTasksBlocked): string {
+function turnOffCopy({ moduleId, name, tasks, capped }: ModuleTasksBlocked): string {
   const lead = `Turns ${inlineCode(name || moduleId)} off now.`;
   const inStep = tasks.filter((t) => isStepOfModule(t.currentStepId, moduleId)).length;
   if (inStep === 0) {
-    return `${lead} No listed task is in one of its steps now, so none is stopped; each fails when it next runs one of its steps. ${COPY_TAIL}`;
+    return capped
+      ? `${lead} No listed task is in one of its steps now, but more tasks use it than are listed: any of those whose agent is running in one of its steps is stopped, and every other task fails when it next runs one of its steps. ${COPY_TAIL}`
+      : `${lead} No listed task is in one of its steps now, so none is stopped; each fails when it next runs one of its steps. ${COPY_TAIL}`;
   }
   const count = inStep === 1 ? '1 listed task is' : `${inStep} listed tasks are`;
-  return `${lead} A task whose agent is running in one of its steps is stopped (Retry it once the module is on again); every other task fails when it next runs one of its steps. ${count} in one of its steps now. ${COPY_TAIL}`;
+  const more = capped ? 'More tasks use it than are listed; the same applies to them. ' : '';
+  return `${lead} A task whose agent is running in one of its steps is stopped (Retry it once the module is on again); every other task fails when it next runs one of its steps. ${count} in one of its steps now. ${more}${COPY_TAIL}`;
 }
 
 export function moduleOffNotice(

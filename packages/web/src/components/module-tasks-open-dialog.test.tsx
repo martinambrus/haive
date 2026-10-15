@@ -243,9 +243,27 @@ describe('ModuleTasksOpenDialog copy', () => {
     expect(copyOf({ tasks: [elsewhere('c'), elsewhere('d')] })).toBe(LEAD + NONE + COPY_TAIL);
   });
 
-  it('reads the same when the list was cut, which the cap note says', () => {
-    expect(copyOf({ tasks: [inStep('a'), inStep('b')], capped: true })).toBe(TWO);
-    expect(copyOf({ tasks: [elsewhere('c')], capped: true })).toBe(LEAD + NONE + COPY_TAIL);
+  const MORE = 'More tasks use it than are listed; the same applies to them. ';
+  const NONE_CUT =
+    'No listed task is in one of its steps now, but more tasks use it than are listed: any of those whose agent is running in one of its steps is stopped, and every other task fails when it next runs one of its steps. ';
+
+  it('adds that the tasks not listed are treated the same, after the count of listed ones: 2', () => {
+    expect(copyOf({ tasks: [inStep('a'), inStep('b')], capped: true })).toBe(
+      LEAD + RULE + '2 listed tasks are in one of its steps now. ' + MORE + COPY_TAIL,
+    );
+  });
+
+  it('adds it after the count of one listed task as well: 1', () => {
+    expect(copyOf({ tasks: [inStep('a'), elsewhere('c')], capped: true })).toBe(
+      LEAD + RULE + '1 listed task is in one of its steps now. ' + MORE + COPY_TAIL,
+    );
+  });
+
+  it('does not say none is stopped when the list was cut and no listed task is in a step: 0', () => {
+    const beta = task('d', 'Task d', 'running', 'module.beta.x');
+    const copy = copyOf({ tasks: [elsewhere('c'), beta], capped: true });
+    expect(copy).toBe(LEAD + NONE_CUT + COPY_TAIL);
+    expect(copy).not.toContain('none is stopped');
   });
 
   it('shows a name as text, never as markup', () => {
