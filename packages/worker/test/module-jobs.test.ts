@@ -464,4 +464,73 @@ describe('the jobs reconcile', () => {
     await runModuleTeardown(teardownDeps(bad, hook), 'abandoned');
     expect(hook).toHaveBeenCalledOnce();
   });
+
+  it.each(['resolves', 'rejects'] as const)(
+    'keeps a module whose teardown job timed out from starting until the hook itself %s',
+    async (how) => {
+      const id = `outlasted-${how}`;
+      const m = moduleWithJobs(id);
+      const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+      let endHook!: () => void;
+      const hook: Hook = () =>
+        new Promise<void>((resolve, reject) => {
+          endHook = how === 'resolves' ? resolve : () => reject(new Error('late failure'));
+        });
+
+      const failure = await runModuleTeardown(teardownDeps(m, hook, 20), id).catch(
+        (err: unknown) => err,
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(ModuleTeardownRefusedError);
+
+      await reconcile(new Set());
+      expect(m.jobs).not.toHaveBeenCalled();
+      expect(moduleJobsStarted(id)).toBe(false);
+
+      endHook();
+      await new Promise((resolve) => setImmediate(resolve));
+      await reconcile(new Set());
+      expect(m.jobs).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      await stopAll();
+    },
+  );
+
+  it('holds a module back until every teardown running for it has ended', async () => {
+    const m = moduleWithJobs('twice');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set(['twice']));
+
+    const endFirst = beginModuleTeardown('twice');
+    const endSecond = beginModuleTeardown('twice');
+    endFirst();
+    await reconcile(new Set());
+    expect(m.jobs).not.toHaveBeenCalled();
+
+    endSecond();
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledOnce();
+
+    await stopAll();
+  });
+
+  it('frees a module whose teardown hook throws before it returns a promise', async () => {
+    const m = moduleWithJobs('throws-early');
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['throws-early']),
+    );
+    const hook: Hook = () => {
+      throw new Error('hook refused');
+    };
+
+    await expect(runModuleTeardown(teardownDeps(m, hook), 'throws-early')).rejects.toThrow(
+      'hook refused',
+    );
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledOnce();
+
+    await stopAll();
+  });
 });

@@ -196,14 +196,18 @@ export async function ensureModuleSchemas(
 }
 
 const jobsStarted = new Set<string>();
-const teardownsRunning = new Set<string>();
+const teardownsRunning = new Set<{ moduleId: string }>();
 
 export const moduleJobsStarted = (moduleId: string): boolean => jobsStarted.has(moduleId);
 
+const tearingDown = (moduleId: string): boolean =>
+  [...teardownsRunning].some((teardown) => teardown.moduleId === moduleId);
+
 export function beginModuleTeardown(moduleId: string): () => void {
-  teardownsRunning.add(moduleId);
+  const teardown = { moduleId };
+  teardownsRunning.add(teardown);
   return () => {
-    teardownsRunning.delete(moduleId);
+    teardownsRunning.delete(teardown);
   };
 }
 
@@ -276,7 +280,7 @@ export async function startModuleJobs(
         continue;
       }
       // A module starts once per reactivation, and not while its teardown runs.
-      if (!pending.has(moduleId) || teardownsRunning.has(moduleId)) continue;
+      if (!pending.has(moduleId) || tearingDown(moduleId)) continue;
       pending.delete(moduleId);
       // Claimed before the first await, so a teardown that checks now is refused.
       jobsStarted.add(moduleId);

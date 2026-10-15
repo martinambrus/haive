@@ -156,13 +156,15 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
 
   it('fails a hook that does not finish in time and records nothing', async () => {
     await setModule('alpha', { deactivatedAt: OFF });
-    const hook: Hook = () => new Promise<void>(() => {});
+    let endHook!: () => void;
+    const hook: Hook = () => new Promise<void>((resolve) => (endHook = resolve));
     const failure = await runModuleTeardown(
       { ...deps(['alpha'], { alpha: hook }), hookTimeoutMs: 50 },
       'alpha',
     ).catch((err: unknown) => err);
     expect((failure as Error).message).toBe("Module alpha's teardown did not finish within 0 s");
     expect((await row('alpha'))?.tornDownAt).toBeNull();
+    endHook();
   });
 
   it('turns a hook that throws a bare value into an error carrying that value', async () => {

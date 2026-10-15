@@ -42,6 +42,7 @@ async function runHook(
   moduleId: string,
   teardown: NonNullable<WorkerModuleEntry['teardown']>,
   timeoutMs: number,
+  release: () => void,
 ): Promise<void> {
   const opened: ModuleDatabase[] = [];
   let timer: NodeJS.Timeout | undefined;
@@ -57,19 +58,20 @@ async function runHook(
       timeoutMs,
     );
   });
+  const hook = (async () =>
+    teardown({
+      moduleId,
+      logger: logger.child({ module: moduleId }),
+      openDatabase: async () => {
+        const moduleDb = await openModuleDatabase(db, moduleId);
+        opened.push(moduleDb);
+        return moduleDb;
+      },
+    }))();
+  // Only the hook's own end frees the module: past the timeout it may still be dropping data.
+  void hook.then(release, release);
   try {
-    await Promise.race([
-      teardown({
-        moduleId,
-        logger: logger.child({ module: moduleId }),
-        openDatabase: async () => {
-          const moduleDb = await openModuleDatabase(db, moduleId);
-          opened.push(moduleDb);
-          return moduleDb;
-        },
-      }),
-      timedOut,
-    ]);
+    await Promise.race([hook, timedOut]);
   } catch (err) {
     throw err instanceof Error ? err : new Error(String(err));
   } finally {
@@ -116,11 +118,13 @@ export async function runModuleTeardown(
   if (teardown) {
     // The jobs reconcile starts nothing of this module while its hook drops data.
     const endTeardown = beginModuleTeardown(moduleId);
-    try {
-      await runHook(db, moduleId, teardown, deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS);
-    } finally {
-      endTeardown();
-    }
+    await runHook(
+      db,
+      moduleId,
+      teardown,
+      deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS,
+      endTeardown,
+    );
   }
 
   // Conditional: a module activated again while the hook ran must not read as torn down.
