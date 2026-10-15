@@ -9,6 +9,7 @@ import { describePromptStepIssue, type PromptStepIssue } from '@/lib/composition
 import { TEST_CATALOG } from '@/lib/composition-test-catalog';
 import { newTool } from '@/lib/prompt-step-editing';
 import { PromptStepEditor } from './prompt-step-editor';
+import { PromptStepTools } from './prompt-step-tools';
 import { TaskTypeComposer } from './task-type-composer';
 import {
   buttons,
@@ -166,8 +167,13 @@ describe('the values of an enum parameter', () => {
 
 describe('where the composer puts a problem with a tool', () => {
   const bad = { ...httpTool('repo_status'), url: 'http://api.example.com/v1/status' };
-  const asked = (kind: PromptStepIssue['kind'], raw?: string) =>
-    describePromptStepIssue({ kind, stepId: 's', ...(raw === undefined ? {} : { raw }) });
+  const asked = (kind: PromptStepIssue['kind'], raw?: string, param?: string) =>
+    describePromptStepIssue({
+      kind,
+      stepId: 's',
+      ...(raw === undefined ? {} : { raw }),
+      ...(param === undefined ? {} : { param }),
+    });
   const times = (view: Renderer, text: string) => textOf(view.tree()).split(text).length - 1;
 
   function mountComposer(tools: PromptStepEntry['tools'], server: PromptStepIssue[] = []) {
@@ -219,5 +225,82 @@ describe('where the composer puts a problem with a tool', () => {
     open(view);
     expect(times(view, message)).toBe(1);
     expect(textOf(rowOf(view, ''))).not.toContain(message);
+  });
+
+  describe('problems about different parameters of one tool', () => {
+    const flag = (name: string) => param(name, { type: 'boolean' });
+    const unusedAbout = (name: string): PromptStepIssue => ({
+      kind: 'tool-param-unused',
+      stepId: 'custom.t.a',
+      index: 0,
+      raw: 'repo_status',
+      start: 0,
+      param: name,
+    });
+    const forA = asked('tool-param-unused', 'repo_status', 'a');
+    const forB = asked('tool-param-unused', 'repo_status', 'b');
+    const summary = (view: Renderer) => textOf(view.tree());
+
+    it('words them apart, each naming its parameter', () => {
+      expect(forA).toContain('`a`');
+      expect(forB).toContain('`b`');
+      expect(forA).not.toBe(forB);
+    });
+
+    it('shows one on the tool row for each parameter, and counts them all', () => {
+      const view = mountComposer([httpTool('repo_status', [flag('a'), flag('b')])]);
+      expect(times(view, forA)).toBe(1);
+      expect(times(view, forB)).toBe(1);
+      open(view);
+      expect(times(view, forA)).toBe(1);
+      expect(times(view, forB)).toBe(1);
+      expect(textOf(rowOf(view, 'repo_status'))).toContain(forA);
+      expect(textOf(rowOf(view, 'repo_status'))).toContain(forB);
+      expect(summary(view)).toContain('2 problems');
+    });
+
+    it('shows a server problem the check here found too only once', () => {
+      const view = mountComposer([httpTool('repo_status', [flag('a')])], [unusedAbout('a')]);
+      open(view);
+      expect(times(view, forA)).toBe(1);
+      expect(summary(view)).toContain('1 problem');
+      expect(summary(view)).not.toContain('2 problems');
+    });
+
+    it('keeps the server problems about each parameter, and one of a repeat', () => {
+      const server = [unusedAbout('a'), unusedAbout('a'), unusedAbout('b')];
+      const view = mountComposer([httpTool('repo_status')], server);
+      open(view);
+      expect(times(view, forA)).toBe(1);
+      expect(times(view, forB)).toBe(1);
+      expect(textOf(rowOf(view, 'repo_status'))).toContain(forB);
+      expect(summary(view)).toContain('2 problems');
+    });
+
+    // The test renderer keeps no keys, so the row is called as a function and its elements are read.
+    type Node = { type: unknown; key: string | null; props: Record<string, unknown> };
+    const isNode = (value: unknown): value is Node =>
+      typeof value === 'object' && value !== null && 'type' in value && 'props' in value;
+    const nodes = (value: unknown): Node[] => {
+      if (Array.isArray(value)) return value.flatMap(nodes);
+      return isNode(value) ? [value, ...nodes(value.props.children)] : [];
+    };
+
+    it('gives the problems on a tool row keys that differ', () => {
+      const issues = [unusedAbout('a'), unusedAbout('b')];
+      const list = PromptStepTools({
+        tools: [httpTool('repo_status')],
+        issues,
+        disabled: false,
+        onChange: () => {},
+      });
+      const row = nodes(list).find((n) => typeof n.type === 'function' && 'tool' in n.props)!;
+      const lines = issues.map(describePromptStepIssue);
+      const keys = nodes((row.type as (props: unknown) => unknown)(row.props))
+        .filter((n) => lines.includes(n.props.body as string))
+        .map((n) => n.key);
+      expect(keys).toHaveLength(2);
+      expect(new Set(keys).size).toBe(2);
+    });
   });
 });

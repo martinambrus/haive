@@ -742,6 +742,28 @@ describe('tools on a prompt step', () => {
     expect(found.every((p) => p.start === 0 && p.message.length > 0)).toBe(true);
   });
 
+  it('carries the parameter a tool problem is about, and only on those problems', () => {
+    const unused = (name: string) => ({
+      name,
+      type: 'boolean' as const,
+      description: 'A flag.',
+      required: false,
+    });
+    const tool: CustomTool = {
+      ...httpTool,
+      url: 'http://api.example.com/v1/status',
+      params: [unused('a'), unused('b')],
+    };
+    const found = validatePromptStep(entry({ tools: [tool] }), ctx);
+    expect(found.map((p) => [p.kind, p.raw, p.param])).toEqual([
+      ['tool-url-not-https', 'repo_status', undefined],
+      ['tool-param-unused', 'repo_status', 'a'],
+      ['tool-param-unused', 'repo_status', 'b'],
+    ]);
+    expect(found[0]).not.toHaveProperty('param');
+    expect(validatePromptStep(entry({ template: '{{nope}}' }), ctx)[0]).not.toHaveProperty('param');
+  });
+
   it('puts the list-level problems on the step', () => {
     const nine = Array.from({ length: 9 }, (_, i) => named(`tool_${i}`));
     expect(kinds(entry({ tools: nine }))).toEqual(['too-many-tools']);

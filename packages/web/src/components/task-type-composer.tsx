@@ -65,7 +65,8 @@ const ICON_BUTTON = 'h-11 min-w-11 px-0';
 const NO_PROMPT_STEPS: PromptSteps = {};
 const NO_PROMPT_ISSUES: PromptStepIssue[] = [];
 
-const promptIssueKey = (i: PromptStepIssue) => `${i.kind}|${i.stepId}|${i.raw ?? ''}`;
+const promptIssueKey = (i: PromptStepIssue) =>
+  JSON.stringify([i.kind, i.stepId, i.raw ?? '', i.param ?? '']);
 
 function Chips({ label, tokens }: { label: string; tokens: string[] }) {
   if (tokens.length === 0) return null;

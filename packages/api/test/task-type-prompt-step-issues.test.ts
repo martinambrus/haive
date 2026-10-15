@@ -133,3 +133,37 @@ describe('GET /admin/task-types/:slug and the prompt steps it stores', () => {
     expect(((await builtin.json()) as { promptStepIssues?: unknown }).promptStepIssues).toEqual([]);
   });
 });
+
+describe('GET /admin/task-types/:slug and a stored tool with parameter problems', () => {
+  it('names each parameter a problem is about', async () => {
+    const unusedParams = {
+      ...goodTool,
+      name: 'two_unused',
+      params: [
+        { name: 'owner', type: 'boolean', description: 'The owner.' },
+        { name: 'repo', type: 'boolean', description: 'The repository.' },
+      ],
+    };
+    h.defs = [
+      definition({
+        promptSteps: {
+          review: {
+            slug: 'review',
+            title: 'Review',
+            template: 'Review {{task.title}}',
+            capabilities: [],
+            tools: [unusedParams],
+            timeoutMs: 300_000,
+          },
+        },
+      }),
+    ];
+    const res = await app.request(`/admin/task-types/${TYPE}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { promptStepIssues?: unknown };
+    expect(body.promptStepIssues).toEqual([
+      expect.objectContaining({ kind: 'tool-param-unused', raw: 'two_unused', param: 'owner' }),
+      expect.objectContaining({ kind: 'tool-param-unused', raw: 'two_unused', param: 'repo' }),
+    ]);
+  });
+});

@@ -687,6 +687,27 @@ describe('the pieces the save path and the draft check share', () => {
     ]);
   });
 
+  it('checkPromptSteps carries the parameter a tool problem is about, and only on those issues', () => {
+    const def = { slug: TYPE, stepIds: ['ta-a', CUSTOM_ID], requiresRepository: true };
+    const stored = parsePromptSteps({
+      review: step('review', { tools: [{ ...httpTool, params: [param('a'), param('b')] }] }),
+    });
+    expect(
+      checkPromptSteps(def, stored, catalog).map((i) => [
+        i.kind,
+        i.stepId,
+        i.index,
+        i.raw,
+        i.param,
+      ]),
+    ).toEqual([
+      ['tool-param-unused', CUSTOM_ID, 1, 'repo_status', 'a'],
+      ['tool-param-unused', CUSTOM_ID, 1, 'repo_status', 'b'],
+    ]);
+    const plain = parsePromptSteps({ review: step('review', { template: 'Say {{nope}}' }) });
+    expect(checkPromptSteps(def, plain, catalog)[0]).not.toHaveProperty('param');
+  });
+
   it('checkPromptSteps accepts a stored step whose tools all parse', () => {
     const def = { slug: TYPE, stepIds: ['ta-a', CUSTOM_ID], requiresRepository: true };
     const stored = parsePromptSteps({ review: step('review', { tools: [httpTool] }) });

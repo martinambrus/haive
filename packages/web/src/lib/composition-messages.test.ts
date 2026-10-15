@@ -490,6 +490,43 @@ describe('describePromptStepIssue', () => {
       expect(text('tool-url-not-https', 'a`b')).toContain('`` a`b ``');
     });
 
+    describe('a problem about one parameter', () => {
+      const ABOUT_ONE_PARAM = [
+        'tool-param-undeclared',
+        'tool-param-unused',
+        'tool-param-reused',
+        'tool-param-duplicate',
+        'tool-param-invalid',
+      ] as const;
+      const about = (kind: (typeof ABOUT_ONE_PARAM)[number], param?: string) =>
+        describePromptStepIssue({
+          kind,
+          stepId: 's',
+          raw: 'repo_status',
+          ...(param === undefined ? {} : { param }),
+        });
+
+      it('names the tool and the parameter, each in a code span', () => {
+        for (const kind of ABOUT_ONE_PARAM) {
+          expect(about(kind, 'page_size'), kind).toContain('`repo_status`');
+          expect(about(kind, 'page_size'), kind).toContain('`page_size`');
+        }
+      });
+
+      it('words two parameters of one tool apart', () => {
+        for (const kind of ABOUT_ONE_PARAM)
+          expect(about(kind, 'a'), kind).not.toBe(about(kind, 'b'));
+      });
+
+      it('keeps a backtick in the parameter name from closing the code span', () => {
+        expect(about('tool-param-unused', 'a`b')).toContain('`` a`b ``');
+      });
+
+      it('reads the same for no parameter name and for an empty one', () => {
+        for (const kind of ABOUT_ONE_PARAM) expect(about(kind, ''), kind).toBe(about(kind));
+      });
+    });
+
     it('puts the limits of a tool in the words of its refusals', () => {
       expect(text('too-many-tools')).toContain('8 tools');
       expect(text('tool-too-many-params', 't')).toContain('10 parameters');
@@ -551,6 +588,19 @@ describe('promptStepIssuesOf', () => {
 
   it('tolerates a body with no issues', () => {
     expect(promptStepIssuesOf(undefined)).toEqual([]);
+  });
+
+  it('passes the parameter a tool issue names through, with the rest of the issue', () => {
+    const issue = {
+      kind: 'tool-param-unused',
+      stepId: 'custom.t.a',
+      index: 0,
+      raw: 'repo_status',
+      start: 0,
+      param: 'page_size',
+      message: 'The parameter page_size is not used in the URL path or the query list.',
+    };
+    expect(promptStepIssuesOf([issue])).toEqual([issue]);
   });
 
   it('keeps the tool kinds an api save answers with, and drops the retired tools-not-supported-yet', () => {

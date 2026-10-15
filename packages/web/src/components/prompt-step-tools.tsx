@@ -392,7 +392,7 @@ function ToolRow({ tool, issues, disabled, onChange, onRemove }: ToolRowProps) {
       )}
       {issues.map((issue) => (
         <InlineMarkdown
-          key={issue.kind}
+          key={`${issue.kind}:${issue.param ?? ''}`}
           className="text-xs text-red-300 [overflow-wrap:anywhere]"
           body={describePromptStepIssue(issue)}
         />

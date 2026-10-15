@@ -179,6 +179,8 @@ export interface CustomToolProblem {
   kind: CustomToolProblemKind;
   /** The name of the tool it is about, as written; empty for a problem of the whole list. */
   tool: string;
+  /** The parameter it is about, as written; set only on the parameter kinds. */
+  param?: string;
   message: string;
 }
 
@@ -186,7 +188,7 @@ export interface CustomToolValidationContext {
   requiresRepository: boolean;
 }
 
-type Add = (kind: CustomToolProblemKind, message: string) => void;
+type Add = (kind: CustomToolProblemKind, message: string, param?: string) => void;
 
 const PLACEHOLDER = /\{([^{}]*)\}/g;
 const URL_PARTS = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/s;
@@ -349,10 +351,12 @@ function checkParams(
       add(
         'tool-param-invalid',
         `The parameter ${JSON.stringify(param.name)} is not valid: ${problem}.`,
+        param.name,
       );
     }
   }
-  for (const name of repeated) add('tool-param-duplicate', `Two parameters are named ${name}.`);
+  for (const name of repeated)
+    add('tool-param-duplicate', `Two parameters are named ${name}.`, name);
 }
 
 function checkUsage(declared: readonly string[], used: readonly string[], add: Add): void {
@@ -362,6 +366,7 @@ function checkUsage(declared: readonly string[], used: readonly string[], add: A
       add(
         'tool-param-undeclared',
         `The URL or query list uses ${JSON.stringify(name)}, which is not a declared parameter.`,
+        name,
       );
     }
   }
@@ -371,11 +376,13 @@ function checkUsage(declared: readonly string[], used: readonly string[], add: A
       add(
         'tool-param-unused',
         `The parameter ${name} is not used in the URL path or the query list.`,
+        name,
       );
     } else if (times > 1) {
       add(
         'tool-param-reused',
         `The parameter ${name} is used ${times} times; use each parameter once, in the URL path or the query list.`,
+        name,
       );
     }
   }
@@ -386,7 +393,8 @@ export function validateCustomTool(
   ctx: CustomToolValidationContext,
 ): CustomToolProblem[] {
   const problems: CustomToolProblem[] = [];
-  const add: Add = (kind, message) => problems.push({ kind, tool: tool.name, message });
+  const add: Add = (kind, message, param) =>
+    problems.push({ kind, tool: tool.name, message, ...(param === undefined ? {} : { param }) });
 
   if (!TOOL_NAME_PATTERN.test(tool.name)) {
     add(

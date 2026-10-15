@@ -200,6 +200,32 @@ describe('promptStepIssues', () => {
     const passing = { ...tool, url: 'https://api.example.com/v1/status' };
     expect(issues(['custom.t.a'], { a: entry('a', { tools: [passing] }) })).toEqual([]);
   });
+
+  it('names the parameter of each parameter problem, and of no other', () => {
+    const flag = (name: string): CustomToolParam => ({
+      name,
+      type: 'boolean',
+      description: 'A flag.',
+      required: false,
+    });
+    const tool: CustomTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of one repository.',
+      action: 'http-get',
+      url: 'http://api.example.com/v1/status',
+      query: [],
+      params: [flag('a'), flag('b')],
+      timeoutMs: 10_000,
+      maxResponseBytes: 32_768,
+    };
+    const out = issues(['custom.t.a'], { a: entry('a', { tools: [tool] }) });
+    expect(out.map((i) => [i.kind, i.raw, i.param])).toEqual([
+      ['tool-url-not-https', 'repo_status', undefined],
+      ['tool-param-unused', 'repo_status', 'a'],
+      ['tool-param-unused', 'repo_status', 'b'],
+    ]);
+    expect(out[0]).not.toHaveProperty('param');
+  });
 });
 
 describe('renamePromptStepTokens', () => {

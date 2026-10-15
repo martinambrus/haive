@@ -100,13 +100,13 @@ export function promptStepIssues(input: {
     if (!entry) return;
     if (entry.title.trim() === '') issues.push({ kind: 'title-empty', stepId, index });
     if (entry.template.trim() === '') issues.push({ kind: 'template-empty', stepId, index });
-    for (const { kind, raw, start } of validatePromptStep(entry, {
+    for (const { kind, raw, start, param } of validatePromptStep(entry, {
       typeSlug,
       requiresRepository: input.requiresRepository,
       stepIdsBefore: stepIds.slice(0, index),
       quotableStepIds: quotable,
     })) {
-      issues.push({ kind, stepId, index, raw, start });
+      issues.push({ kind, stepId, index, raw, start, ...(param === undefined ? {} : { param }) });
     }
   });
   return issues;
