@@ -1804,9 +1804,10 @@ describe('one RAG sync per repository at a time', () => {
     const second = syncOf(
       ctxFor('repo-1', { emitProgress: async (m: string) => void progress.push(m) }),
     );
-    await sleep(150);
+    const refused = /another RAG sync of this repository/i;
+    for (let i = 0; i < 400 && !refused.test(progress.join('\n')); i += 1) await sleep(5);
     expect(mocks.connect).toHaveBeenCalledTimes(1);
-    expect(progress.join('\n')).toMatch(/another RAG sync of this repository/i);
+    expect(progress.join('\n')).toMatch(refused);
     gate.resolve();
     await Promise.all([first, second]);
     expect(mocks.connect).toHaveBeenCalledTimes(2);

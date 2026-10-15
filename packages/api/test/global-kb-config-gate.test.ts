@@ -13,7 +13,13 @@ const h = vi.hoisted(() => ({
   set: vi.fn(async (key: string, _value: string) => {
     h.events.push(`set:${key}`);
   }),
-  setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {}),
+  setSecret: vi.fn(async (_key: string, _value: string, _label: string) => {
+    h.events.push('set-secret');
+  }),
+  deleteSecret: vi.fn(async (_key: string) => {
+    h.events.push('delete-secret');
+    h.settings = { ...h.settings, connectionString: null };
+  }),
   db: undefined as unknown,
   audits: [] as { table: unknown; row: unknown }[],
   auditLog: { info: vi.fn(), error: vi.fn() },
@@ -92,7 +98,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
       getBoolean: async (key: string, fallback: boolean) => h.flags.get(key) ?? fallback,
       set: h.set,
     },
-    secretsService: { set: h.setSecret },
+    secretsService: { set: h.setSecret, delete: h.deleteSecret },
   };
 });
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
@@ -160,6 +166,7 @@ const written = () => h.set.mock.calls.map(([key, value]) => [key, value]);
 beforeEach(() => {
   h.set.mockClear();
   h.setSecret.mockClear();
+  h.deleteSecret.mockClear();
   h.connect.mockClear();
   h.db = undefined;
   h.audits = [];
@@ -461,6 +468,246 @@ describe('PUT /global-kb/config audit trail', () => {
       expect(h.audits).toEqual([]);
       expect(h.auditLog.info).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('PUT /global-kb/config storing the connection string before the settings', () => {
+  const NEW_STRING = 'postgres://kb:pw@new.example:5432/kb';
+  const MODE = `set:${CONFIG_KEYS.GLOBAL_KB_MODE}`;
+
+  beforeEach(() => {
+    h.db = {
+      insert: () => ({
+        values: async () => {
+          h.events.push('audit');
+        },
+      }),
+    };
+  });
+
+  it('stores the string and records its one audit row before it writes the mode that switches to it', async () => {
+    const res = await put({ mode: 'external', connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual(['set-secret', 'audit', MODE]);
+    expect(h.setSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes the mode that leaves for the built-in store before it stores a string sent with it', async () => {
+    h.settings = { ...SAVED, mode: 'external', connectionString: STORED_STRING };
+    const res = await put({ mode: 'internal', connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual([MODE, 'set-secret', 'audit']);
+  });
+
+  it('stores them ahead of every setting of a full page save too', async () => {
+    const res = await put({ ...PAGE, mode: 'external', connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.events.slice(0, 2)).toEqual(['set-secret', 'audit']);
+    expect(h.events).toContain(MODE);
+    expect(h.events.filter((event) => event === 'audit')).toHaveLength(1);
+  });
+
+  it('keeps the single write of a save that sends only the mode', async () => {
+    h.settings = { ...SAVED, connectionString: STORED_STRING };
+    const res = await put({ mode: 'external' });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual([MODE]);
+  });
+
+  it('keeps the single write of a save that sends only the string', async () => {
+    const res = await put({ connectionString: NEW_STRING });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual(['set-secret', 'audit']);
+  });
+
+  describe('when the same save changes the embedding width and re-sends the stored string', () => {
+    const RESEND = { ...PAGE, embedDimensions: 1024, connectionString: STORED_STRING };
+
+    beforeEach(() => {
+      h.settings = { ...SAVED, connectionString: STORED_STRING };
+    });
+
+    it('stores nothing and records nothing when the width lock refuses the new width', async () => {
+      h.vectorType = 'vector(2560)';
+      const res = await put(RESEND);
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { code: string }).code).toBe('embed_dimensions_locked');
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.events).toEqual(['begin', 'lock', 'read', 'rollback', 'close']);
+    });
+
+    it('stores nothing and records nothing when the store cannot be reached', async () => {
+      h.connect.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+      const res = await put(RESEND);
+
+      expect(res.status).toBe(500);
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.events).toEqual([]);
+    });
+
+    it('stores it once, with its one audit row, inside the lock after the width is read and before the mode', async () => {
+      const res = await put(RESEND);
+
+      expect(res.status).toBe(200);
+      expect(h.events.slice(0, 5)).toEqual(['begin', 'lock', 'read', 'set-secret', 'audit']);
+      expect(h.events).toContain(MODE);
+      expect(h.events.filter((event) => event === 'audit')).toHaveLength(1);
+      expect(h.setSecret).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe('PUT /global-kb/config removing the stored connection string', () => {
+  const ADMIN_ID = '00000000-0000-4000-8000-0000000000a1';
+  const CLEAR = { clearConnectionString: true };
+  const OTHER_STRING = 'postgres://other:pw@elsewhere:5432/kb';
+  const codeOf = async (res: Response) => ((await res.json()) as { code: string }).code;
+  const untouched = () => {
+    expect(h.deleteSecret).not.toHaveBeenCalled();
+    expect(h.setSecret).not.toHaveBeenCalled();
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.audits).toEqual([]);
+    expect(h.auditLog.info).not.toHaveBeenCalled();
+  };
+
+  beforeEach(() => {
+    h.settings = { ...SAVED, connectionString: STORED_STRING };
+    h.db = {
+      insert: (table: unknown) => ({
+        values: async (row: unknown) => {
+          h.audits.push({ table, row });
+        },
+      }),
+    };
+  });
+
+  it('deletes the secret once and records one event with no part of it, while the store is the built-in one', async () => {
+    const res = await put(CLEAR);
+
+    expect(res.status).toBe(200);
+    expect(h.deleteSecret).toHaveBeenCalledTimes(1);
+    expect(h.deleteSecret).toHaveBeenCalledWith(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
+    expect(h.setSecret).not.toHaveBeenCalled();
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.audits).toHaveLength(1);
+    expect(h.audits[0]?.table).toBe(schema.auditEvents);
+    expect(h.audits[0]?.row).toEqual({
+      actorUserId: ADMIN_ID,
+      action: 'global_kb.connection_string.update',
+      targetType: 'global_kb',
+      targetId: null,
+      metadata: { connectionStringSet: false },
+    });
+    expect(h.auditLog.info).toHaveBeenCalledTimes(1);
+    expect(h.auditLog.info.mock.calls[0]?.[0]).toMatchObject({
+      actorUserId: ADMIN_ID,
+      action: 'global_kb.connection_string.update',
+      connectionStringSet: false,
+    });
+    expect(
+      JSON.stringify([h.audits.map(({ row }) => row), h.auditLog.info.mock.calls]),
+    ).not.toContain('secret');
+    expect(((await res.json()) as { connectionStringSet: boolean }).connectionStringSet).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ['a blank connection string', { connectionString: '' }],
+    ['a whitespace one', { connectionString: '   ' }],
+    ['a full page save whose connection string is blank', { ...PAGE }],
+  ])(
+    'counts %s sent with the flag as no new string, and still removes the stored one',
+    async (_what, extra) => {
+      const res = await put({ ...extra, ...CLEAR });
+
+      expect(res.status).toBe(200);
+      expect(h.deleteSecret).toHaveBeenCalledTimes(1);
+      expect(h.audits).toHaveLength(1);
+    },
+  );
+
+  describe('is refused with 409 while the store it leaves in place is the external one', () => {
+    it('when the store is saved as external', async () => {
+      h.settings = { ...SAVED, mode: 'external', connectionString: STORED_STRING };
+      const res = await put(CLEAR);
+
+      expect(res.status).toBe(409);
+      expect(await codeOf(res)).toBe('connection_string_in_use');
+      untouched();
+    });
+
+    it('when the same save switches the store to it, writing no other setting either', async () => {
+      const res = await put({ ...PAGE, mode: 'external', ...CLEAR });
+
+      expect(res.status).toBe(409);
+      expect(await codeOf(res)).toBe('connection_string_in_use');
+      untouched();
+    });
+  });
+
+  it('is allowed when the same save switches the store to the built-in one, and removes the string only after the mode is written', async () => {
+    h.settings = { ...SAVED, mode: 'external', connectionString: STORED_STRING };
+    const res = await put({ mode: 'internal', ...CLEAR });
+
+    expect(res.status).toBe(200);
+    expect(h.events).toEqual([`set:${CONFIG_KEYS.GLOBAL_KB_MODE}`, 'delete-secret']);
+    expect(h.audits).toHaveLength(1);
+  });
+
+  it.each([
+    ['a new connection string', { connectionString: OTHER_STRING }],
+    [
+      'a full page save that names a new connection string',
+      { ...PAGE, connectionString: OTHER_STRING },
+    ],
+  ])(
+    'is refused with 400 when the flag is sent with %s, and changes nothing',
+    async (_what, body) => {
+      const res = await put({ ...body, ...CLEAR });
+
+      expect(res.status).toBe(400);
+      expect(await codeOf(res)).toBe('connection_string_set_and_clear');
+      untouched();
+    },
+  );
+
+  it.each([
+    ['alone', CLEAR],
+    ['with the rest of a full page save', { ...PAGE, ...CLEAR }],
+  ])(
+    'is refused to a regular user sending the flag %s, who deletes and writes nothing',
+    async (_how, body) => {
+      h.role = 'user';
+      const res = await put(body);
+
+      expect(res.status).toBe(403);
+      expect(await codeOf(res)).toBe('admin_required');
+      untouched();
+    },
+  );
+
+  it.each([
+    ['blank', { ...PAGE, connectionString: '' }],
+    ['whitespace', { ...PAGE, connectionString: '   ' }],
+    ['absent', { archiveRetentionDays: 7 }],
+    [
+      'absent next to an explicit false flag',
+      { archiveRetentionDays: 7, clearConnectionString: false },
+    ],
+  ])('deletes nothing for a save whose connection string is %s', async (_how, body) => {
+    const res = await put(body);
+
+    expect(res.status).toBe(200);
+    expect(h.deleteSecret).not.toHaveBeenCalled();
+    expect(h.audits).toEqual([]);
+    expect(h.auditLog.info).not.toHaveBeenCalled();
   });
 });
 

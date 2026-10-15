@@ -681,20 +681,18 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
 
   describe('GET /tasks', () => {
     it.each(['', '?includeChats=1'])(
-      'GET /tasks%s lists an ordinary task and never a draft conversation',
+      'GET /tasks%s lists a draft conversation beside an ordinary task',
       async (query) => {
         const draftId = await started();
         const [ordinary] = await db
           .insert(schema.tasks)
           .values({ userId: adminId, type: 'workflow', title: 'Ordinary task', status: 'running' })
           .returning({ id: schema.tasks.id });
-        const cookie = await sessionOf(adminId, 'admin');
-        const res = await send(app, cookie, 'GET', `/tasks${query}`);
+        const res = await send(app, await sessionOf(adminId, 'admin'), 'GET', `/tasks${query}`);
         expect(res.status).toBe(200);
         const listed = (await res.json()) as { tasks: { id: string }[]; total: number };
-        expect(listed.tasks.map((task) => task.id)).toEqual([ordinary!.id]);
-        expect(listed.total).toBe(1);
-        expect((await send(app, cookie, 'GET', `/tasks/${draftId}`)).status).toBe(200);
+        expect(listed.tasks.map((task) => task.id).sort()).toEqual([draftId, ordinary!.id].sort());
+        expect(listed.total).toBe(2);
       },
     );
   });

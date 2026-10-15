@@ -1,3 +1,4 @@
+import type { IntegrationConnection, IntegrationProvider } from './integrations';
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
 import type { FormSchema } from '@haive/shared';
@@ -2565,3 +2566,62 @@ export const postModulePurge = (moduleId: string, confirm: string) =>
   api.post<ModulePurgeResponse>(`/modules/${encodeURIComponent(moduleId)}/purge`, { confirm });
 
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');
+
+export interface IntegrationPreference {
+  categoryId: string;
+  providerId: string;
+  connectionId: string | null;
+}
+
+export interface IntegrationDefault {
+  categoryId: string;
+  providerId: string;
+}
+
+export interface RepositoryIntegrationList {
+  restricted: boolean;
+  connectionIds: string[];
+}
+
+export const listIntegrationProviders = () =>
+  api.get<{ providers: IntegrationProvider[] }>('/integrations/providers');
+
+export const listIntegrationConnections = () =>
+  api.get<{ connections: IntegrationConnection[] }>('/integrations/connections');
+
+export const listIntegrationPreferences = () =>
+  api.get<{ preferences: IntegrationPreference[] }>('/integrations/preferences');
+
+export const saveIntegrationPreference = (
+  categoryId: string,
+  body: { providerId: string; connectionId: string | null },
+) =>
+  api.put<IntegrationPreference>(
+    `/integrations/preferences/${encodeURIComponent(categoryId)}`,
+    body,
+  );
+
+export const clearIntegrationPreference = (categoryId: string) =>
+  api.delete<{ ok: boolean }>(`/integrations/preferences/${encodeURIComponent(categoryId)}`);
+
+export const listIntegrationDefaults = () =>
+  api.get<{ defaults: IntegrationDefault[] }>('/integrations/defaults');
+
+export const listAdminIntegrationDefaults = () =>
+  api.get<{ defaults: IntegrationDefault[] }>('/admin/integrations/defaults');
+
+/** A null provider clears the category's default. */
+export const saveAdminIntegrationDefault = (categoryId: string, providerId: string | null) =>
+  api.put<{ categoryId: string; providerId: string | null }>(
+    `/admin/integrations/defaults/${encodeURIComponent(categoryId)}`,
+    { providerId },
+  );
+
+const repositoryIntegrationsPath = (repositoryId: string) =>
+  `/repositories/${encodeURIComponent(repositoryId)}/integrations`;
+
+export const getRepositoryIntegrations = (repositoryId: string) =>
+  api.get<RepositoryIntegrationList>(repositoryIntegrationsPath(repositoryId));
+
+export const saveRepositoryIntegrations = (repositoryId: string, body: RepositoryIntegrationList) =>
+  api.put<RepositoryIntegrationList>(repositoryIntegrationsPath(repositoryId), body);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { credentialForgeProvider, inferForgeProviderFromHost } from './index.js';
-import { hostFromRemote, parseRemote } from './resolve-forge-context.js';
+import { hostFromRemote, parseRemote } from '@haive/shared/forge';
 
 describe('parseRemote', () => {
   it('parses an https URL', () => {
