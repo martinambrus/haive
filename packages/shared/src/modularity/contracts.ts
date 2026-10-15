@@ -14,8 +14,14 @@ export const PERSONA_ID_PATTERN_SOURCE = '[a-z0-9-]+';
 const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_PATTERN_SOURCE}$`);
 const TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 const MODULE_TASK_TYPE_SLUG_PATTERN = /^([a-z0-9][a-z0-9-]*)__[a-z0-9][a-z0-9_-]*$/;
+const MODULE_PACKAGE_PATTERN = /^(?:@haive\/module-|@haive-module\/)([a-z0-9][a-z0-9-]{0,22})$/;
 /** Slugs no task type may take: `new` is the admin create page and `catalog` the step catalog route. */
 export const RESERVED_TASK_TYPE_SLUGS: readonly string[] = ['new', 'catalog'];
+
+/** The module id a package name stands for: `@haive/module-<id>` (a folder) or `@haive-module/<id>` (the registry), else null. */
+export function modulePackageId(name: string): string | null {
+  return MODULE_PACKAGE_PATTERN.exec(name)?.[1] ?? null;
+}
 
 /** No module id and no admin slug holds an underscore and no built-in holds `__`, so the first `__` splits it. */
 export function moduleTaskTypeSlug(moduleId: string, local: string): string {
