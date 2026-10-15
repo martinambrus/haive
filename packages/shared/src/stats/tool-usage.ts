@@ -179,6 +179,17 @@ export function sumCustomToolCalls(lists: CustomToolCallCount[][]): CustomToolCa
   return mergeCallCounts(lists, (entry) => [entry.tool, entry.action]);
 }
 
+export interface IntegrationCallCount extends CallOutcomeCounts {
+  providerId: string;
+  tool: string;
+  access: 'read' | 'write';
+}
+
+/** Merged by provider, tool and access; the most calls first, then in that order. */
+export function sumIntegrationCalls(lists: IntegrationCallCount[][]): IntegrationCallCount[] {
+  return mergeCallCounts(lists, (entry) => [entry.providerId, entry.tool, entry.access]);
+}
+
 /* ------------------------------------------------------------------ */
 /* Installed against used: the unused report                            */
 /* ------------------------------------------------------------------ */

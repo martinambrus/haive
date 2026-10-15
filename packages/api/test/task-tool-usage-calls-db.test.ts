@@ -30,10 +30,16 @@ const DECOY_TASK = '00000000-0000-4000-8000-0000000000f4';
 const FOREIGN_TASK = '00000000-0000-4000-8000-0000000000f5';
 
 type Outcome = 'ok' | 'refused' | 'error' | 'running';
+type Access = 'read' | 'write';
 type Counts = Record<Outcome, number>;
 interface CustomEntry extends Counts {
   tool: string;
   action: string;
+}
+interface IntegrationEntry extends Counts {
+  providerId: string;
+  tool: string;
+  access: Access;
 }
 interface Body {
   taskId: string;
@@ -44,15 +50,24 @@ interface Body {
     title: string;
     usage: Record<string, unknown> | null;
     customTools: CustomEntry[];
+    integrations: IntegrationEntry[];
   }>;
   totals: Record<string, unknown>;
   coverage: Record<string, number>;
-  callTotals: { customTools: CustomEntry[] };
+  callTotals: { customTools: CustomEntry[]; integrations: IntegrationEntry[] };
 }
 interface CustomGroup {
   task_step_id: string | null;
   tool: string;
   action: string;
+  outcome: Outcome;
+  n: number;
+}
+interface IntegrationGroup {
+  task_step_id: string | null;
+  provider_id: string;
+  tool: string;
+  access: Access;
   outcome: Outcome;
   n: number;
 }
@@ -84,9 +99,17 @@ const custom = (tool: string, action: string, over: Partial<Counts> = {}): Custo
   action,
   ...counts(over),
 });
-const identity = (tool: string, action: string) => JSON.stringify([tool, action]);
-const inAnyOrder = (entries: CustomEntry[]) =>
-  [...entries].sort((a, b) => identity(a.tool, a.action).localeCompare(identity(b.tool, b.action)));
+const integration = (
+  providerId: string,
+  tool: string,
+  access: Access,
+  over: Partial<Counts> = {},
+): IntegrationEntry => ({ providerId, tool, access, ...counts(over) });
+const identity = (...parts: string[]) => JSON.stringify(parts);
+const customIdentity = (e: CustomEntry) => identity(e.tool, e.action);
+const integrationIdentity = (e: IntegrationEntry) => identity(e.providerId, e.tool, e.access);
+const inAnyOrder = <E>(entries: E[], identityOf: (entry: E) => string) =>
+  [...entries].sort((a, b) => identityOf(a).localeCompare(identityOf(b)));
 
 describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () => {
   let db: Database;
@@ -138,7 +161,51 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     return [...byIdentity.values()];
   };
 
+  const integrationRows = (
+    n: number,
+    taskStepId: string,
+    providerId: string,
+    tool: string,
+    access: Access,
+    outcome: Outcome,
+    over: { cliInvocationId?: string; taskId?: string; taskStepId?: null } = {},
+  ) =>
+    Array.from({ length: n }, () => ({
+      taskId: TASK,
+      taskStepId: taskStepId as string | null,
+      cliInvocationId: null as string | null,
+      providerId,
+      tool,
+      access,
+      surface: 'rest' as const,
+      outcome,
+      ...over,
+    }));
+  const integrationOracle = async (): Promise<IntegrationGroup[]> =>
+    (await db.execute(
+      sql`select task_step_id, provider_id, tool, access, outcome, count(*)::int as n
+        from integration_calls where task_id = ${TASK}
+        group by task_step_id, provider_id, tool, access, outcome`,
+    )) as unknown as IntegrationGroup[];
+  const integrationsFromOracle = (
+    groups: IntegrationGroup[],
+    stepRowId?: string,
+  ): IntegrationEntry[] => {
+    const byIdentity = new Map<string, IntegrationEntry>();
+    for (const g of groups) {
+      if (stepRowId !== undefined && g.task_step_id !== stepRowId) continue;
+      const entry = integration(g.provider_id, g.tool, g.access);
+      const known = byIdentity.get(integrationIdentity(entry)) ?? entry;
+      known[g.outcome] += g.n;
+      byIdentity.set(integrationIdentity(entry), known);
+    }
+    return [...byIdentity.values()];
+  };
+
   const wipe = async () => {
+    await db
+      .delete(schema.integrationCalls)
+      .where(inArray(schema.integrationCalls.taskId, [TASK, DECOY_TASK, FOREIGN_TASK]));
     await db.delete(schema.tasks).where(inArray(schema.tasks.userId, [USER, OTHER_USER]));
     await db.delete(schema.users).where(inArray(schema.users.id, [USER, OTHER_USER]));
   };
@@ -217,6 +284,28 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
         ...customRows(50, decoyStep, 'lookup', 'http-get', 'ok', { taskId: DECOY_TASK }),
         ...customRows(40, foreignStep, 'lookup', 'http-get', 'ok', { taskId: FOREIGN_TASK }),
       ]);
+
+    const READ_PR = 'get_pull_request_state';
+    const OPEN_PR = 'open_pull_request';
+    await db.insert(schema.integrationCalls).values([
+      ...integrationRows(2, stepA, 'github', READ_PR, 'read', 'ok', { cliInvocationId: live!.id }),
+      ...integrationRows(1, stepA, 'github', READ_PR, 'read', 'ok', {
+        cliInvocationId: replaced!.id,
+      }),
+      ...integrationRows(1, stepA, 'github', READ_PR, 'read', 'error'),
+      ...integrationRows(1, stepA, 'github', OPEN_PR, 'write', 'ok'),
+      ...integrationRows(2, stepA, 'github', OPEN_PR, 'write', 'refused'),
+      ...integrationRows(1, stepA, 'github', OPEN_PR, 'write', 'running'),
+      ...integrationRows(1, stepA, 'gitlab', READ_PR, 'read', 'ok'),
+      ...integrationRows(1, stepC, 'github', READ_PR, 'read', 'ok'),
+      ...integrationRows(2, stepC, 'github', READ_PR, 'read', 'error'),
+      ...integrationRows(1, stepC, 'gitlab', 'open_merge_request', 'write', 'refused'),
+      ...integrationRows(3, stepA, 'github', OPEN_PR, 'write', 'refused', { taskStepId: null }),
+      ...integrationRows(50, decoyStep, 'github', READ_PR, 'read', 'ok', { taskId: DECOY_TASK }),
+      ...integrationRows(40, foreignStep, 'github', READ_PR, 'read', 'ok', {
+        taskId: FOREIGN_TASK,
+      }),
+    ]);
   });
 
   afterAll(async () => {
@@ -268,10 +357,11 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
       'taskId',
       'totals',
     ]);
-    expect(Object.keys(body.callTotals).sort()).toEqual(['customTools']);
+    expect(Object.keys(body.callTotals).sort()).toEqual(['customTools', 'integrations']);
     for (const step of body.steps) {
       expect(Object.keys(step).sort()).toEqual([
         'customTools',
+        'integrations',
         'round',
         'stepId',
         'stepRowId',
@@ -286,8 +376,8 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     const groups = await customOracle();
     expect(groups.length).toBeGreaterThan(0);
     for (const id of [stepA, stepB, stepC]) {
-      expect(inAnyOrder(stepOf(body, id).customTools)).toEqual(
-        inAnyOrder(customFromOracle(groups, id)),
+      expect(inAnyOrder(stepOf(body, id).customTools, customIdentity)).toEqual(
+        inAnyOrder(customFromOracle(groups, id), customIdentity),
       );
     }
   });
@@ -316,11 +406,60 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
   it('totals every row of the task, one with no step among them, and no other task', async () => {
     const body = await fetchBody();
     const groups = await customOracle();
-    expect(inAnyOrder(body.callTotals.customTools)).toEqual(inAnyOrder(customFromOracle(groups)));
+    expect(inAnyOrder(body.callTotals.customTools, customIdentity)).toEqual(
+      inAnyOrder(customFromOracle(groups), customIdentity),
+    );
     expect(body.callTotals.customTools).toEqual([
       custom('lookup', 'http-get', { ok: 5, refused: 3, error: 3, running: 1 }),
       custom('notes', 'rag-query', { ok: 2 }),
       custom('', '', { refused: 1 }),
+    ]);
+  });
+
+  it('groups each step integration calls by the rows the database holds for it', async () => {
+    const body = await fetchBody();
+    const groups = await integrationOracle();
+    expect(groups.length).toBeGreaterThan(0);
+    for (const id of [stepA, stepB, stepC]) {
+      expect(inAnyOrder(stepOf(body, id).integrations, integrationIdentity)).toEqual(
+        inAnyOrder(integrationsFromOracle(groups, id), integrationIdentity),
+      );
+    }
+  });
+
+  it('counts the integration calls of a tool by outcome, a replaced run and a refusal included', async () => {
+    const body = await fetchBody();
+    expect(stepOf(body, stepA).integrations).toEqual([
+      integration('github', 'get_pull_request_state', 'read', { ok: 3, error: 1 }),
+      integration('github', 'open_pull_request', 'write', { ok: 1, refused: 2, running: 1 }),
+      integration('gitlab', 'get_pull_request_state', 'read', { ok: 1 }),
+    ]);
+  });
+
+  it('keeps the integration calls of a fix-loop round apart from its first round', async () => {
+    const body = await fetchBody();
+    expect(stepOf(body, stepC).integrations).toEqual([
+      integration('github', 'get_pull_request_state', 'read', { ok: 1, error: 2 }),
+      integration('gitlab', 'open_merge_request', 'write', { refused: 1 }),
+    ]);
+  });
+
+  it('answers [] for a step with no integration row', async () => {
+    const body = await fetchBody();
+    expect(stepOf(body, stepB).integrations).toEqual([]);
+  });
+
+  it('totals every integration row of the task, one with no step among them, and no other task', async () => {
+    const body = await fetchBody();
+    const groups = await integrationOracle();
+    expect(inAnyOrder(body.callTotals.integrations, integrationIdentity)).toEqual(
+      inAnyOrder(integrationsFromOracle(groups), integrationIdentity),
+    );
+    expect(body.callTotals.integrations).toEqual([
+      integration('github', 'get_pull_request_state', 'read', { ok: 4, error: 3 }),
+      integration('github', 'open_pull_request', 'write', { ok: 1, refused: 5, running: 1 }),
+      integration('gitlab', 'get_pull_request_state', 'read', { ok: 1 }),
+      integration('gitlab', 'open_merge_request', 'write', { refused: 1 }),
     ]);
   });
 
@@ -330,6 +469,11 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
       .from(schema.customToolCalls)
       .where(eq(schema.customToolCalls.taskId, FOREIGN_TASK));
     expect(held).toHaveLength(40);
+    const heldIntegrations = await db
+      .select({ id: schema.integrationCalls.id })
+      .from(schema.integrationCalls)
+      .where(eq(schema.integrationCalls.taskId, FOREIGN_TASK));
+    expect(heldIntegrations).toHaveLength(40);
     const res = await app.request(`/tasks/${FOREIGN_TASK}/tool-usage`);
     expect(res.status).toBe(404);
   });

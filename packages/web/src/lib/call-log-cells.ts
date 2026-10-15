@@ -1,4 +1,9 @@
-import type { TaskCallOutcomeCounts, TaskCustomToolCall, TaskToolUsage } from './api-client';
+import type {
+  TaskCallOutcomeCounts,
+  TaskCustomToolCall,
+  TaskIntegrationCall,
+  TaskToolUsage,
+} from './api-client';
 
 type ToolUsageStep = TaskToolUsage['steps'][number];
 
@@ -24,10 +29,21 @@ export function customToolsCell(entries: TaskCustomToolCall[]): string {
   return entries.map((e) => `${e.tool || UNDECLARED_TOOL} ${outcomesOf(e)}`).join(', ');
 }
 
+export function integrationsCell(entries: TaskIntegrationCall[]): string {
+  if (entries.length === 0) return NONE;
+  return entries.map((e) => `${e.providerId}/${e.tool} (${e.access}) ${outcomesOf(e)}`).join(', ');
+}
+
 export function toolUsageRows(steps: ToolUsageStep[]): ToolUsageStep[] {
-  return steps.filter((s) => s.usage !== null || s.customTools.length > 0);
+  return steps.filter(
+    (s) => s.usage !== null || s.customTools.length > 0 || s.integrations.length > 0,
+  );
 }
 
 export function hasNothingToShow(data: Pick<TaskToolUsage, 'coverage' | 'callTotals'>): boolean {
-  return data.coverage.total === 0 && data.callTotals.customTools.length === 0;
+  return (
+    data.coverage.total === 0 &&
+    data.callTotals.customTools.length === 0 &&
+    data.callTotals.integrations.length === 0
+  );
 }

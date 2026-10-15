@@ -2,7 +2,12 @@
 
 import Link from 'next/link';
 import { ragUsageStyle } from '@/lib/rag-usage';
-import { customToolsCell, hasNothingToShow, toolUsageRows } from '@/lib/call-log-cells';
+import {
+  customToolsCell,
+  hasNothingToShow,
+  integrationsCell,
+  toolUsageRows,
+} from '@/lib/call-log-cells';
 import { useParams } from 'next/navigation';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
@@ -3276,6 +3281,7 @@ function TaskToolUsagePanel({
               <th className="px-2 py-1 font-medium">skills invoked / opened</th>
               <th className="px-2 py-1 font-medium">MCP</th>
               <th className="px-2 py-1 font-medium">custom tools</th>
+              <th className="px-2 py-1 font-medium">integrations</th>
               <th className="px-2 py-1 font-medium">sub-agents</th>
               <th className="px-2 py-1 text-right font-medium">tool calls</th>
             </tr>
@@ -3302,6 +3308,7 @@ function TaskToolUsagePanel({
                       : u.mcp.map((m) => `${m.server}/${m.tool} (${m.calls})`).join(', ')}
                   </td>
                   <td className="px-2 py-1 text-violet-300">{customToolsCell(s.customTools)}</td>
+                  <td className="px-2 py-1 text-teal-300">{integrationsCell(s.integrations)}</td>
                   <td className="px-2 py-1 text-sky-300">{u ? countedList(u.subagents) : '—'}</td>
                   <td className="px-2 py-1 text-right font-mono">{u ? u.toolCalls : '—'}</td>
                 </tr>
@@ -3323,6 +3330,9 @@ function TaskToolUsagePanel({
               </td>
               <td className="px-2 py-1 text-violet-300">
                 {customToolsCell(data.callTotals.customTools)}
+              </td>
+              <td className="px-2 py-1 text-teal-300">
+                {integrationsCell(data.callTotals.integrations)}
               </td>
               <td className="px-2 py-1 text-sky-300">{countedList(data.totals.subagents)}</td>
               <td className="px-2 py-1 text-right font-mono">{data.totals.toolCalls}</td>

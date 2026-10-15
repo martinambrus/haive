@@ -44,7 +44,7 @@ import {
 import { getDb } from '../../db.js';
 import { rollupToolUsage } from '@haive/shared/stats-server';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
-import { loadCustomToolCalls } from './_call-log.js';
+import { loadCustomToolCalls, loadIntegrationCalls } from './_call-log.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
@@ -535,7 +535,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
   if (!task) throw new HttpError(404, 'Task not found');
 
   const inv = schema.cliInvocations;
-  const [rollup, stepRows, customCalls] = await Promise.all([
+  const [rollup, stepRows, customCalls, integrationCalls] = await Promise.all([
     rollupToolUsage(db, {
       where: and(
         eq(inv.taskId, id),
@@ -561,6 +561,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
         asc(schema.taskSteps.stepIndex),
       ),
     loadCustomToolCalls(db, id),
+    loadIntegrationCalls(db, id),
   ]);
 
   const byStep = new Map<string, ToolUsageStepRow>();
@@ -616,6 +617,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
       title: s.title,
       usage: byStep.get(s.id) ?? null,
       customTools: customCalls.byStep.get(s.id) ?? [],
+      integrations: integrationCalls.byStep.get(s.id) ?? [],
     })),
     totals,
     coverage: {
@@ -625,7 +627,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
       unobservable: totals.unobservable,
       unrecorded: totals.unrecorded,
     },
-    callTotals: { customTools: customCalls.all },
+    callTotals: { customTools: customCalls.all, integrations: integrationCalls.all },
   });
 });
 

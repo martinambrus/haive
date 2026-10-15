@@ -1192,6 +1192,12 @@ export interface TaskCustomToolCall extends TaskCallOutcomeCounts {
   action: string;
 }
 
+export interface TaskIntegrationCall extends TaskCallOutcomeCounts {
+  providerId: string;
+  tool: string;
+  access: 'read' | 'write';
+}
+
 /** What one step used, with the coverage counters a reader needs to judge the lists by: a step
  *  whose runs are all unobservable has empty lists that mean nothing. */
 export interface TaskToolUsageStep {
@@ -1221,6 +1227,7 @@ export interface TaskToolUsage {
     usage: TaskToolUsageStep | null;
     /** From the call log, not from `usage`: a step with calls can have `usage: null`. */
     customTools: TaskCustomToolCall[];
+    integrations: TaskIntegrationCall[];
   }>;
   totals: TaskToolUsageStep;
   coverage: {
@@ -1231,7 +1238,7 @@ export interface TaskToolUsage {
     unrecorded: number;
   };
   /** Every call logged for the task, those no step owns included. */
-  callTotals: { customTools: TaskCustomToolCall[] };
+  callTotals: { customTools: TaskCustomToolCall[]; integrations: TaskIntegrationCall[] };
 }
 
 export async function getTaskToolUsage(taskId: string): Promise<TaskToolUsage> {

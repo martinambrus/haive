@@ -2,8 +2,10 @@ import { eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   sumCustomToolCalls,
+  sumIntegrationCalls,
   type CallOutcomeCounts,
   type CustomToolCallCount,
+  type IntegrationCallCount,
 } from '@haive/shared/stats';
 
 /** A task's call log, merged: `byStep` by task_steps.id, `all` with the rows no step owns. */
@@ -59,5 +61,36 @@ export async function loadCustomToolCalls(
       entry: { tool: r.tool, action: r.action, ...oneOutcome(r.outcome, r.n) },
     })),
     sumCustomToolCalls,
+  );
+}
+
+export async function loadIntegrationCalls(
+  db: Database,
+  taskId: string,
+): Promise<CallGroups<IntegrationCallCount>> {
+  const calls = schema.integrationCalls;
+  const rows = await db
+    .select({
+      taskStepId: calls.taskStepId,
+      providerId: calls.providerId,
+      tool: calls.tool,
+      access: calls.access,
+      outcome: calls.outcome,
+      n: sql<number>`count(*)::int`,
+    })
+    .from(calls)
+    .where(eq(calls.taskId, taskId))
+    .groupBy(calls.taskStepId, calls.providerId, calls.tool, calls.access, calls.outcome);
+  return groupCalls(
+    rows.map((r) => ({
+      taskStepId: r.taskStepId,
+      entry: {
+        providerId: r.providerId,
+        tool: r.tool,
+        access: r.access,
+        ...oneOutcome(r.outcome, r.n),
+      },
+    })),
+    sumIntegrationCalls,
   );
 }

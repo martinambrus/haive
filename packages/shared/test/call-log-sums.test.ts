@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   sumCustomToolCalls,
+  sumIntegrationCalls,
   type CallOutcomeCounts,
   type CustomToolCallCount,
+  type IntegrationCallCount,
 } from '../src/stats/tool-usage.js';
 
 const counts = (over: Partial<CallOutcomeCounts> = {}): CallOutcomeCounts => ({
@@ -17,6 +19,14 @@ const custom = (
   action: string,
   over: Partial<CallOutcomeCounts> = {},
 ): CustomToolCallCount => ({ tool, action, ...counts(over) });
+
+const integration = (
+  providerId: string,
+  tool: string,
+  access: 'read' | 'write',
+  over: Partial<CallOutcomeCounts> = {},
+): IntegrationCallCount => ({ providerId, tool, access, ...counts(over) });
+const label = (e: IntegrationCallCount) => `${e.providerId}/${e.tool}/${e.access}`;
 
 describe('sumCustomToolCalls', () => {
   it('is [] for no input', () => {
@@ -95,5 +105,85 @@ describe('sumCustomToolCalls', () => {
     expect(merged).toEqual([custom('lookup', 'http-get', { ok: 3 })]);
     expect(first[0]).toEqual(custom('lookup', 'http-get', { ok: 1 }));
     expect(second[0]).toEqual(custom('lookup', 'http-get', { ok: 2 }));
+  });
+});
+
+describe('sumIntegrationCalls', () => {
+  it('is [] for no input', () => {
+    expect(sumIntegrationCalls([])).toEqual([]);
+    expect(sumIntegrationCalls([[], []])).toEqual([]);
+  });
+
+  it('adds every outcome of one identity across lists', () => {
+    const merged = sumIntegrationCalls([
+      [integration('github', 'get_pull_request_state', 'read', { ok: 2, refused: 1 })],
+      [integration('github', 'get_pull_request_state', 'read', { ok: 3, error: 1, running: 1 })],
+    ]);
+    expect(merged).toEqual([
+      integration('github', 'get_pull_request_state', 'read', {
+        ok: 5,
+        refused: 1,
+        error: 1,
+        running: 1,
+      }),
+    ]);
+  });
+
+  it('keeps identities that differ in the provider, the tool or the access apart', () => {
+    const merged = sumIntegrationCalls([
+      [
+        integration('github', 'open_pull_request', 'write', { ok: 1 }),
+        integration('github', 'open_pull_request', 'read', { ok: 1 }),
+        integration('gitlab', 'open_pull_request', 'write', { ok: 1 }),
+      ],
+      [integration('github', 'get_pull_request_state', 'read', { ok: 1 })],
+    ]);
+    expect(merged.map(label)).toEqual([
+      'github/get_pull_request_state/read',
+      'github/open_pull_request/read',
+      'github/open_pull_request/write',
+      'gitlab/open_pull_request/write',
+    ]);
+  });
+
+  it('keeps apart identities whose parts run together alike', () => {
+    const merged = sumIntegrationCalls([
+      [
+        integration('a', 'bc', 'read', { ok: 1 }),
+        integration('ab', 'c', 'read', { ok: 1 }),
+        integration('', 'abc', 'read', { ok: 1 }),
+      ],
+    ]);
+    expect(merged).toHaveLength(3);
+  });
+
+  it('orders by every outcome counted, then provider, then tool, then access', () => {
+    const merged = sumIntegrationCalls([
+      [
+        integration('gitlab', 'get', 'read', { ok: 2 }),
+        integration('github', 'open', 'write', { refused: 2 }),
+        integration('github', 'open', 'read', { ok: 1, refused: 1 }),
+        integration('github', 'get', 'read', { running: 2 }),
+        integration('zeta', 'any', 'read', { ok: 1, refused: 1, error: 1 }),
+      ],
+    ]);
+    expect(merged.map(label)).toEqual([
+      'zeta/any/read',
+      'github/get/read',
+      'github/open/read',
+      'github/open/write',
+      'gitlab/get/read',
+    ]);
+  });
+
+  it('leaves its input as it was', () => {
+    const first = Object.freeze([Object.freeze(integration('github', 'get', 'read', { ok: 1 }))]);
+    const second = Object.freeze([
+      Object.freeze(integration('github', 'get', 'read', { error: 2 })),
+    ]);
+    const merged = sumIntegrationCalls([[...first], [...second]]);
+    expect(merged).toEqual([integration('github', 'get', 'read', { ok: 1, error: 2 })]);
+    expect(first[0]).toEqual(integration('github', 'get', 'read', { ok: 1 }));
+    expect(second[0]).toEqual(integration('github', 'get', 'read', { error: 2 }));
   });
 });
