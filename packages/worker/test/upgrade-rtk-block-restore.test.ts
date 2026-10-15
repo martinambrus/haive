@@ -12,6 +12,7 @@ import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { buildRtkAwarenessBlock } from '../src/step-engine/steps/onboarding/_rtk-templates.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -87,12 +88,14 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
     backfilledRows: 0,
   } as UpgradePlanOutput;
   const apply = (formValues: Record<string, unknown>) =>
-    upgradeApplyStep.apply(ctxFor(TASK), {
-      detected: plan,
-      formValues,
-      iteration: 0,
-      previousIterations: [],
-    });
+    recordWritten(
+      upgradeApplyStep.apply(ctxFor(TASK), {
+        detected: plan,
+        formValues,
+        iteration: 0,
+        previousIterations: [],
+      }),
+    );
   const rollBack = (rtkBlockRestores: unknown) =>
     upgradeRollbackStep.apply(ctxFor(ROLLBACK), {
       detected: {
