@@ -36,7 +36,7 @@ vi.mock('../src/lib/spawn-plan-task.js', () => ({
     repositoryId: string;
     type: string;
     title: string;
-    seed?: (id: string) => Promise<void>;
+    seed?: (id: string, tx: unknown) => Promise<void>;
   }) => {
     const id = h.insertTask({
       userId: args.userId,
@@ -45,7 +45,7 @@ vi.mock('../src/lib/spawn-plan-task.js', () => ({
       title: args.title,
       status: 'created',
     });
-    await args.seed?.(id);
+    await args.seed?.(id, h.db);
     return id;
   },
   enqueuePlanTask: async () => undefined,

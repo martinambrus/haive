@@ -11,8 +11,8 @@ vi.mock('../src/lib/plan-mirror.js', () => ({
   savePlanMirror: vi.fn(),
 }));
 vi.mock('../src/lib/spawn-plan-task.js', () => ({
-  spawnPlanTask: vi.fn(async (args: { seed?: (id: string) => Promise<void> }) => {
-    await args.seed?.(TASK);
+  spawnPlanTask: vi.fn(async (args: { seed?: (id: string, tx: unknown) => Promise<void> }) => {
+    await args.seed?.(TASK, h.db);
     return TASK;
   }),
 }));

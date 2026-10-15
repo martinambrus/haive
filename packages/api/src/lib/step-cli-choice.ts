@@ -1,5 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_PROVIDER_CATALOG, type CliProviderName } from '@haive/shared';
 import { HttpError } from '../context.js';
 
@@ -38,7 +38,7 @@ export async function loadUsableProvider(
  *  an unknown or disabled provider is rejected before anything is written. A null provider
  *  clears the slot: for this task, and from the saved preferences when remembered. */
 export async function writeStepCliChoice(
-  db: Database,
+  db: Database | DbTx,
   params: {
     userId: string;
     taskId: string;
@@ -55,7 +55,7 @@ export async function writeStepCliChoice(
     const provider = await loadUsableProvider(db, userId, cliProviderId);
     effortLevel = clampEffort(provider.name, params.requestedEffort);
   }
-  await db.transaction(async (tx) => {
+  await (db as Database).transaction(async (tx) => {
     await tx
       .insert(schema.taskStepCliChoices)
       .values({ taskId, stepId, role, cliProviderId, effortLevel })

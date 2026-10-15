@@ -105,22 +105,14 @@ describe('POST /enrich pins the kb_author step list', () => {
     expect(fake.rows(globalKbEntries)).toHaveLength(0);
   });
 
-  it('keeps the skeleton entry when the task insert committed but its reply was lost', async () => {
+  it('keeps the skeleton entry when the task committed but the reply to the commit was lost', async () => {
     const real = fake.db;
     h.db = new Proxy(real, {
       get(target, prop, receiver) {
-        if (prop !== 'insert') return Reflect.get(target, prop, receiver);
-        return (table: unknown) => {
-          const builder = real.insert(table as typeof schema.tasks);
-          if (table !== schema.tasks) return builder;
-          return {
-            values: (v: unknown) => ({
-              returning: async () => {
-                await builder.values(v as never).returning();
-                throw new Error('connection dropped');
-              },
-            }),
-          };
+        if (prop !== 'transaction') return Reflect.get(target, prop, receiver);
+        return async (run: Parameters<typeof real.transaction>[0]) => {
+          await real.transaction(run);
+          throw new Error('connection dropped');
         };
       },
     });

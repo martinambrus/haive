@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
@@ -575,6 +576,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
     generic: false,
   });
 
+  const taskId = randomUUID();
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
     const [row] = await gdb
       .insert(globalKbEntries)
@@ -594,16 +596,18 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
         status: 'skeleton',
         source: 'user',
         embedStatus: 'pending',
+        // So the UI can offer a "watch task" link. The task is inserted below under this id.
+        sourceTaskId: taskId,
       })
       .returning();
     return presentEntry(row!, await houseRuleContext(settings.namespace));
   });
 
-  let task: typeof schema.tasks.$inferSelect | undefined;
+  let queued: Awaited<ReturnType<typeof markQueuedForStart>>;
   try {
-    [task] = await db
-      .insert(schema.tasks)
-      .values({
+    queued = await db.transaction(async (tx) => {
+      await tx.insert(schema.tasks).values({
+        id: taskId,
         userId,
         type: 'kb_author',
         title: `Enrich: ${data.title}`.slice(0, 512),
@@ -632,9 +636,9 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
         runListSnapshot,
         customSteps,
         status: 'created',
-      })
-      .returning();
-    if (!task) throw new HttpError(500, 'failed to create enrichment task');
+      });
+      return markQueuedForStart(tx, taskId);
+    });
   } catch (err) {
     // The entry lives in the global KB database, so no transaction spans both writes. Only an insert
     // Postgres refused is known to have written nothing; any other failure may still commit.
@@ -654,17 +658,9 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
     throw err;
   }
 
-  // Link the entry back to its task so the UI can offer a "watch task" link.
-  await withGlobalKb(db, async ({ db: gdb }) => {
-    await gdb
-      .update(globalKbEntries)
-      .set({ sourceTaskId: task.id })
-      .where(eq(globalKbEntries.id, entry.id));
-  });
+  if (queued) await enqueueStart(taskId, userId);
 
-  if (await markQueuedForStart(db, task.id)) await enqueueStart(task.id, userId);
-
-  return c.json({ entry, taskId: task.id }, 201);
+  return c.json({ entry, taskId }, 201);
 });
 
 /** Each entry's source task status, read from the main database since the global KB is a separate

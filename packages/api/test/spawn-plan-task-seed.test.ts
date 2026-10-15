@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { db, taskQueue, order, inserted } = vi.hoisted(() => {
+const { db, tx, taskQueue, order, inserted } = vi.hoisted(() => {
   const order: string[] = [];
   const inserted: Record<string, unknown>[] = [];
-  const db = {
+  const tx = {
     insert: () => ({
       values: (row: Record<string, unknown>) => ({
         returning: async () => {
@@ -24,12 +24,20 @@ const { db, taskQueue, order, inserted } = vi.hoisted(() => {
       }),
     }),
   };
+  const db = {
+    ...tx,
+    transaction: async (run: (handle: typeof tx) => Promise<unknown>) => {
+      const result = await run(tx);
+      order.push('commit');
+      return result;
+    },
+  };
   const taskQueue = {
     add: vi.fn(async () => {
       order.push('enqueue');
     }),
   };
-  return { db, taskQueue, order, inserted };
+  return { db, tx, taskQueue, order, inserted };
 });
 
 vi.mock('../src/db.js', () => ({ getDb: () => db }));
@@ -66,25 +74,25 @@ describe('spawnPlanTask seeding', () => {
     cliProviderId: null,
   };
 
-  it('seeds after the row exists and queues the task only once seeded', async () => {
+  it('seeds after the row exists and queues START only once it is seeded and committed', async () => {
     await spawnPlanTask({
       ...args,
       seed: async (taskId) => {
         order.push(`seed:${taskId}`);
       },
     });
-    expect(order).toEqual(['insert', 'seed:task-1', 'queued', 'enqueue']);
+    expect(order).toEqual(['insert', 'seed:task-1', 'queued', 'commit', 'enqueue']);
   });
 
-  it('hands the seed the id of the row it just wrote', async () => {
-    const seen: string[] = [];
-    await spawnPlanTask({ ...args, seed: async (id) => void seen.push(id) });
-    expect(seen).toEqual(['task-1']);
+  it('hands the seed the id of the row it just wrote and the transaction it was written in', async () => {
+    const seen: unknown[] = [];
+    await spawnPlanTask({ ...args, seed: async (id, handle) => void seen.push(id, handle) });
+    expect(seen).toEqual(['task-1', tx]);
   });
 
   it('still enqueues when there is nothing to seed', async () => {
     await spawnPlanTask(args);
-    expect(order).toEqual(['insert', 'queued', 'enqueue']);
+    expect(order).toEqual(['insert', 'queued', 'commit', 'enqueue']);
   });
 
   it('creates without enqueueing when the start is deferred', async () => {
@@ -95,7 +103,7 @@ describe('spawnPlanTask seeding', () => {
     // exists to avoid.
     const id = await spawnPlanTask({ ...args, type: 'plan_build' as const, enqueue: false });
     expect(id).toBe('task-1');
-    expect(order).toEqual(['insert']);
+    expect(order).toEqual(['insert', 'commit']);
     expect(taskQueue.add).not.toHaveBeenCalled();
   });
 
@@ -108,7 +116,7 @@ describe('spawnPlanTask seeding', () => {
         order.push(`seed:${taskId}`);
       },
     });
-    expect(order).toEqual(['insert', 'seed:task-1']);
+    expect(order).toEqual(['insert', 'seed:task-1', 'commit']);
   });
 
   it('does not enqueue a task whose seed failed', async () => {
@@ -122,6 +130,7 @@ describe('spawnPlanTask seeding', () => {
         },
       }),
     ).rejects.toThrow('message insert failed');
+    expect(order).toEqual(['insert']);
     expect(taskQueue.add).not.toHaveBeenCalled();
   });
 });
