@@ -487,6 +487,23 @@ function Pair({ below, above }: { below: boolean; above: boolean }) {
   );
 }
 
+function Nested({ mounted, inner }: { mounted: boolean; inner: boolean }) {
+  return (
+    <>
+      <button id="before">before</button>
+      {mounted && (
+        <Dialog open onOpenChange={() => {}}>
+          <button id="a1">a1</button>
+          <button id="a2">a2</button>
+          <Dialog open={inner} onOpenChange={() => {}}>
+            <button id="b1">b1</button>
+          </Dialog>
+        </Dialog>
+      )}
+    </>
+  );
+}
+
 function openSecond() {
   show(<Stack top={false} />);
   byId('a2').focus();
@@ -626,6 +643,37 @@ describe('Dialog focus', () => {
     byId('b1').focus();
     show(<Pair below={false} above />);
     expect(where()).toBe('button#b1');
+  });
+
+  it('C12 unmounting a dialog with an open dialog inside gives focus back to the outer opener', () => {
+    show(<Nested mounted={false} inner={false} />);
+    byId('before').focus();
+    show(<Nested mounted inner={false} />);
+    byId('a2').focus();
+    show(<Nested mounted inner />);
+    show(<Nested mounted={false} inner={false} />);
+    expect(where()).toBe('button#before');
+  });
+
+  it('C12 closing two stacked dialogs in one update gives focus back to the lower opener', () => {
+    show(<Pair below={false} above={false} />);
+    byId('before').focus();
+    show(<Pair below above={false} />);
+    byId('a2').focus();
+    show(<Pair below above />);
+    show(<Pair below={false} above={false} />);
+    expect(where()).toBe('button#before');
+  });
+
+  it("C12 a dialog opened from inside one that closed first gives focus back to that one's opener", () => {
+    show(<Pair below={false} above={false} />);
+    byId('before').focus();
+    show(<Pair below above={false} />);
+    byId('a2').focus();
+    show(<Pair below above />);
+    show(<Pair below={false} above />);
+    show(<Pair below={false} above={false} />);
+    expect(where()).toBe('button#before');
   });
 
   it('C5 closing restores focus to the opener', () => {

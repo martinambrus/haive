@@ -14,7 +14,7 @@ interface DialogProps {
 }
 
 const TABBABLE = 'a[href], button, input, select, textarea, [tabindex]';
-const openPanels: HTMLElement[] = [];
+const openPanels: { panel: HTMLElement; opener: HTMLElement | null | undefined }[] = [];
 
 function tabbables(panel: HTMLElement) {
   return Array.from(panel.querySelectorAll<HTMLElement>(TABBABLE)).filter(
@@ -44,7 +44,7 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
       if (e.key !== 'Escape') return;
       // A dialog stacked above this one takes the key.
       const top = openPanels.at(-1);
-      if (top && top !== panelRef.current) return;
+      if (top && top.panel !== panelRef.current) return;
       // Stop here rather than let it reach window-level handlers. The
       // data-haive-dialog marker below is not enough on its own: React flushes
       // this close synchronously on a discrete event, so the portal is already
@@ -60,11 +60,11 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
   useEffect(() => {
     const panel = panelRef.current;
     if (!open || !panel) return;
-    const opener = openerRef.current;
+    const entry = { panel, opener: openerRef.current };
     if (!panel.contains(document.activeElement)) panel.focus();
-    openPanels.push(panel);
+    openPanels.push(entry);
     const onTab = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== panel) return;
+      if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== entry) return;
       const items = tabbables(panel);
       const first = items[0];
       const last = items.at(-1);
@@ -75,13 +75,18 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
     document.addEventListener('keydown', onTab);
     return () => {
       document.removeEventListener('keydown', onTab);
-      const wasTop = openPanels.at(-1) === panel;
-      openPanels.splice(openPanels.indexOf(panel), 1);
+      const at = openPanels.indexOf(entry);
+      const wasTop = at === openPanels.length - 1;
+      openPanels.splice(at, 1);
       // Still attached means Strict Mode's rehearsal, not a close.
       if (panel.isConnected) return;
       openerRef.current = undefined;
+      // A dialog opened from inside this one gives focus back where this one would have.
+      for (const above of openPanels.slice(at)) {
+        if (above.opener && panel.contains(above.opener)) above.opener = entry.opener;
+      }
       // A dialog still open above this one keeps the focus.
-      if (wasTop && opener?.isConnected) opener.focus();
+      if (wasTop && entry.opener?.isConnected) entry.opener.focus();
     };
   }, [open]);
 
