@@ -62,11 +62,9 @@ import {
 } from './sandbox/runtime-admission.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
-import { startModuleJobs } from './modules/loader.js';
+import { MODULE_JOBS_RECONCILE_MS, startModuleJobs } from './modules/loader.js';
 import { startModuleControlWorker } from './queues/module-control-queue.js';
 import { deactivatedModuleIds } from './modules/activation.js';
-
-const MODULE_JOBS_RECONCILE_MS = 15_000;
 
 async function main(): Promise<void> {
   const buildStamp = initBuildStamp();

@@ -12,6 +12,7 @@ import { openModuleDatabase, type ModuleDatabase } from '@haive/shared/module-db
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
+  MODULE_JOBS_RECONCILE_MS,
   beginModuleTeardown,
   moduleJobsStarted,
   type LoadedWorkerModule,
@@ -108,9 +109,8 @@ export async function runModuleTeardown(
     );
   }
   if (deps.jobsStarted(moduleId)) {
-    // 15 s is MODULE_JOBS_RECONCILE_MS in index.ts.
     throw new ModuleTeardownRefusedError(
-      `Module ${moduleId}'s jobs are still running on this worker and stop within about 15 seconds of the deactivation; try again shortly`,
+      `Module ${moduleId}'s jobs are still running on this worker and stop within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation; try again shortly`,
     );
   }
 

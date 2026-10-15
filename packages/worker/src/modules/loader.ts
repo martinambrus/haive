@@ -195,6 +195,8 @@ export async function ensureModuleSchemas(
   return result;
 }
 
+export const MODULE_JOBS_RECONCILE_MS = 15_000;
+
 const jobsStarted = new Set<string>();
 const teardownsRunning = new Set<{ moduleId: string }>();
 

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createDatabase, schema, type Database } from '@haive/database';
 import { moduleDatabaseName } from '@haive/shared/module-db';
 import {
+  MODULE_JOBS_RECONCILE_MS,
   startModuleJobs,
   type LoadedWorkerModule,
   type WorkerModuleEntry,
@@ -266,7 +267,9 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
       () => setModule('alpha', { deactivatedAt: OFF }),
       ['alpha'],
       ['alpha'],
-      /alpha.*jobs.*still running on this worker.*about 15 seconds.*try again shortly/,
+      new RegExp(
+        `alpha.*jobs.*still running on this worker.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds.*try again shortly`,
+      ),
     ],
   ])(
     'refuses, by name, a module that %s, and never calls the hook',
