@@ -62,7 +62,14 @@ const usageData = (
   callTotals: { customTools: [REFUSED], integrations: [] },
 });
 
-const textOf = (markup: string) => markup.replace(/<[^>]+>/g, '');
+const textOf = (markup: string) => {
+  let text = markup;
+  for (let before = ''; before !== text;) {
+    before = text;
+    text = text.replace(/<[^>]+>/g, '');
+  }
+  return text;
+};
 const render = (data: TaskToolUsage) => renderToStaticMarkup(<TaskToolUsageTable data={data} />);
 const bodyRows = (markup: string): string[][] =>
   [...markup.matchAll(/<tr[^>]*>(.*?)<\/tr>/gs)]
