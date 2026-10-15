@@ -224,7 +224,10 @@ export function beginModuleTeardown(moduleId: string): () => void {
 }
 
 export type ModuleJobsHandle = {
-  reconcile: (deactivated: ReadonlySet<string>) => Promise<void>;
+  reconcile: (
+    deactivated: ReadonlySet<string>,
+    stamps?: ReadonlyMap<string, number>,
+  ) => Promise<void>;
   stopAll: () => Promise<void>;
 };
 
@@ -311,8 +314,16 @@ export async function startModuleJobs(
   const held = new Set<string>();
   // Attempts made so far by a reactivation the next pass is to try again; that try takes them.
   const attemptsMade = new Map<string, number>();
-  // A pass saw these deactivated while their start still ran: that start's outcome is not an attempt.
+  // A pass saw these deactivated or activated again while their start still ran: that start's outcome is not an attempt.
   const endedWhileStarting = new Set<string>();
+  // Every activate and deactivate moves a module's updated_at, so one that fell between two passes shows as a changed stamp.
+  const seenStamps = new Map<string, number>();
+  const stampChanged = (moduleId: string, stamp: number | undefined): boolean => {
+    if (stamp === undefined) return false;
+    const before = seenStamps.get(moduleId);
+    seenStamps.set(moduleId, stamp);
+    return before !== undefined && before !== stamp;
+  };
   const reactivate = (
     moduleId: string,
     ensureSchema: WorkerModuleEntry['ensureSchema'],
@@ -340,7 +351,7 @@ export async function startModuleJobs(
           if (endedWhileStarting.has(moduleId)) {
             logger.warn(
               { err, module: moduleId },
-              'module schema or jobs failed to start after the module was deactivated; its next activation starts afresh',
+              'module schema or jobs failed to start after the module was deactivated or activated again; its attempts start afresh',
             );
           } else if (attempt < MODULE_REACTIVATION_ATTEMPTS) {
             attemptsMade.set(moduleId, attempt);
@@ -364,13 +375,21 @@ export async function startModuleJobs(
         }
       })();
     });
-  const reconcile = async (nowDeactivated: ReadonlySet<string>): Promise<void> => {
+  const reconcile = async (
+    nowDeactivated: ReadonlySet<string>,
+    stamps?: ReadonlyMap<string, number>,
+  ): Promise<void> => {
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
       const jobs = entries[index]?.jobs;
       const ensureSchema = entries[index]?.ensureSchema;
       const moduleId = module.manifest.id;
       if (!jobs && !ensureSchema) continue;
+      if (stampChanged(moduleId, stamps?.get(moduleId)) && !nowDeactivated.has(moduleId)) {
+        attemptsMade.delete(moduleId);
+        if (starting.has(moduleId)) endedWhileStarting.add(moduleId);
+        if (!stops.has(moduleId)) pending.add(moduleId);
+      }
       if (starting.has(moduleId) && nowDeactivated.has(moduleId)) {
         endedWhileStarting.add(moduleId);
         pending.add(moduleId);

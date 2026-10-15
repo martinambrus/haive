@@ -64,7 +64,7 @@ import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
 import { MODULE_JOBS_RECONCILE_MS, startModuleJobs } from './modules/loader.js';
 import { startModuleControlWorker } from './queues/module-control-queue.js';
-import { deactivatedModuleIds } from './modules/activation.js';
+import { deactivatedModuleIds, moduleActivationState } from './modules/activation.js';
 
 async function main(): Promise<void> {
   const buildStamp = initBuildStamp();
@@ -279,7 +279,8 @@ async function main(): Promise<void> {
   let moduleJobsPass: Promise<void> | null = null;
   const reconcileModuleJobs = async (): Promise<void> => {
     try {
-      await moduleJobs.reconcile(await deactivatedModuleIds(getDb()));
+      const { deactivated, stamps } = await moduleActivationState(getDb());
+      await moduleJobs.reconcile(deactivated, stamps);
     } catch (err) {
       logger.warn({ err }, 'module jobs reconcile skipped');
     }

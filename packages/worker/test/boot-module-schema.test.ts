@@ -101,12 +101,15 @@ describe('the module schemas at worker boot', () => {
     await stopAll();
   });
 
-  it('starts the jobs with every module deactivated at the schema read or now held back, and the reconcile pass reads the set again', () => {
+  it('starts the jobs with every module deactivated at the schema read or now held back, and the reconcile pass reads the set and the activation stamps again', () => {
     const boot = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 
     expect(boot).toMatch(
       /startModuleJobs\(\s*loadedModules,\s*moduleEntries,\s*new Set\(\[\.\.\.deactivatedAtBoot, \.\.\.\(await deactivatedModuleIds\(getDb\(\)\)\)\]\),?\s*\)/,
     );
-    expect(boot.match(/deactivatedModuleIds\(/g)).toHaveLength(2);
+    expect(boot.match(/deactivatedModuleIds\(/g)).toHaveLength(1);
+    expect(boot).toMatch(
+      /const \{ deactivated, stamps \} = await moduleActivationState\(getDb\(\)\);\s*await moduleJobs\.reconcile\(deactivated, stamps\);/,
+    );
   });
 });
