@@ -25,6 +25,7 @@ import {
   type SecretMaskSource,
 } from './git-merge.js';
 import { inMergeDirLock, liveClaimHolder } from './merge-dir-claim.js';
+import { settleProjections } from './merge-projections.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { addStepWarning } from './step-ownership.js';
 import type { TaskStepRow } from './step-runner.js';
@@ -53,6 +54,7 @@ interface RecordedMerge {
   stepId: string;
   fixInvocationId: string | null;
   fixBaseline: FixBaseline | FixBaselineUnavailable | null;
+  state: MergeResolveState | null;
 }
 
 /** HEAD and MERGE_HEAD of the merge open in `dir`, or null when none is. */
@@ -78,6 +80,7 @@ async function recordedMerges(db: Database, taskId: string): Promise<RecordedMer
       stepId: id,
       fixInvocationId: state.fixInvocationId,
       fixBaseline: state.fixBaseline ?? null,
+      state,
     });
   }
   const [task] = await db
@@ -113,6 +116,7 @@ async function recordedMerges(db: Database, taskId: string): Promise<RecordedMer
       stepId,
       fixInvocationId: ms.fixInvocationId ?? null,
       fixBaseline: ms.fixBaseline ?? null,
+      state: null,
     });
   }
   return merges;
@@ -244,7 +248,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
-      columns: { status: true },
+      columns: { status: true, repositoryId: true },
     });
     if (task?.status !== 'cancelled') return;
     const target = (await taskLeftOpen(db, taskId)).find(
@@ -329,6 +333,20 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
         target.ref,
         decision.leftovers,
       );
+    }
+    if (
+      task.repositoryId &&
+      recorded?.state?.mode === 'same-branch' &&
+      (decision.outcome === 'aborted' || decision.outcome === 'moved')
+    ) {
+      const { stepId } = recorded;
+      // A cancel leaves the step `failed`, which `updateOwnedStep` refuses: write it by id.
+      await settleProjections(db, task.repositoryId, recorded.state, async (cleared) => {
+        await db
+          .update(schema.taskSteps)
+          .set({ mergeResolveState: cleared, updatedAt: new Date() })
+          .where(eq(schema.taskSteps.id, stepId));
+      });
     }
     await settle(db, taskId, target, decision.outcome, decision.reason);
   } catch (err) {

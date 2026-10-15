@@ -20,11 +20,16 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { schema, type MergeResolveState } from '@haive/database';
-import { HAIVE_DATA_FILES, logger, type RepoJobPayload } from '@haive/shared';
+import {
+  HAIVE_DATA_FILES,
+  logger,
+  MERGE_LEFT_OPEN_SETTLED_EVENT,
+  type RepoJobPayload,
+} from '@haive/shared';
 import { applyPlanPatch } from '@haive/shared/plan';
 import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
@@ -47,7 +52,8 @@ import { writePlanMirror } from '../src/plan/mirror.js';
 import { syncBaseStep } from '../src/step-engine/steps/workflow/00a-sync-base.js';
 import { resolveMergePhase } from '../src/step-engine/merge-resolver.js';
 import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
-import { claimMergeDir } from '../src/step-engine/merge-dir-claim.js';
+import { claimMergeDir, releaseTaskMergeClaims } from '../src/step-engine/merge-dir-claim.js';
+import { abortLeftMerge, recordLeftOpenMerges } from '../src/step-engine/left-open-merge.js';
 import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
 
 const log = logger.child({ module: 'repo-refresh-smoke' });
@@ -3431,7 +3437,7 @@ async function main(): Promise<void> {
       );
     });
 
-    // C12 parks a merge in one call and ends it in a later one, as the runner does once a fixer has answered.
+    // C12 parks a merge in one call; a later one ends it: the runner (fixer answered) or the abort job (cancelled).
     const [fixerProvider] = await db
       .insert(schema.cliProviders)
       .values({
@@ -3448,6 +3454,24 @@ async function main(): Promise<void> {
       const info = await stat(p).catch(() => null);
       return info === null ? null : info.mode & 0o7777;
     };
+    // What handleCancelTask leaves for the abort job: the steps failed, the open merge reported, the claims released.
+    const cancelTask = async (taskId: string) => {
+      await db.update(schema.tasks).set({ status: 'cancelled' }).where(eq(schema.tasks.id, taskId));
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'failed', errorMessage: 'Task cancelled', endedAt: new Date() })
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, taskId),
+            inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
+          ),
+        );
+      await recordLeftOpenMerges(db, taskId);
+      await releaseTaskMergeClaims(db, taskId);
+      await db
+        .insert(schema.taskEvents)
+        .values({ taskId, taskStepId: null, eventType: 'task.cancel_finished', payload: {} });
+    };
     for (const ending of [
       'finishes',
       'fatal',
@@ -3457,6 +3481,8 @@ async function main(): Promise<void> {
       'pending-refused',
       'max-rounds',
       'unaborted',
+      'cancel-abort',
+      'cancel-by-hand',
     ] as const) {
       await attempt(`C12: ${ending}`, async () => {
         // A remote of its own: the shared one's record already holds every directory.
@@ -3538,6 +3564,46 @@ async function main(): Promise<void> {
                 !/"(bytes|index|indexPatch)"/.test(JSON.stringify(parked.keptMetadata)),
               { kept: parked.keptMetadata },
             );
+          }
+          if (ending === 'cancel-abort' || ending === 'cancel-by-hand') {
+            const mergeHead = git(c.dest, 'rev-parse', 'MERGE_HEAD');
+            const before = await modeIn(path.join(c.dest, RENDER_REL));
+            await cancelTask(task!.id);
+            if (ending === 'cancel-by-hand') git(c.dest, 'merge', '--abort');
+            await abortLeftMerge(db, { taskId: task!.id, userId, dir: c.dest, mergeHead });
+            const settled = await db
+              .select({ payload: schema.taskEvents.payload })
+              .from(schema.taskEvents)
+              .where(
+                and(
+                  eq(schema.taskEvents.taskId, task!.id),
+                  eq(schema.taskEvents.eventType, MERGE_LEFT_OPEN_SETTLED_EVENT),
+                ),
+              );
+            const outcomes = settled.map((e) => (e.payload as { outcome: string }).outcome);
+            const kept = (await stepRow())!.mergeResolveState!.keptMetadata;
+            const modes = {
+              file: await modeIn(path.join(c.dest, RENDER_REL)),
+              dir: await modeIn(recordDir),
+            };
+            check(
+              `C12: ${ending}: settling the cancelled task's merge gives the file back at the mode it had, in the directory it had, before any sweep, and keeps no record of them`,
+              before === null &&
+                isDeepEqual(outcomes, [ending === 'cancel-abort' ? 'aborted' : 'moved']) &&
+                !mergeOpen(c.dest) &&
+                git(c.dest, 'rev-parse', 'HEAD') === head &&
+                modes.file === 0o600 &&
+                modes.dir === 0o700 &&
+                kept === undefined,
+              {
+                before,
+                outcomes,
+                file: modes.file?.toString(8) ?? null,
+                dir: modes.dir?.toString(8) ?? null,
+                kept,
+              },
+            );
+            return;
           }
           const answered = ending === 'finishes' || ending === 'max-rounds';
           if (answered || ending === 'fatal') {

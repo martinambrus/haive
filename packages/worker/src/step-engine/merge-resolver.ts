@@ -10,7 +10,6 @@ import {
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
-import { gitOperationInProgress } from '../repo/git-operation.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import {
   abortFailureNote,
@@ -39,11 +38,9 @@ import {
   putBackAfterFailure,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
   resyncHaiveProjections,
   setAsideHaiveProjections,
-  type KeptFile,
   type KeptFiles,
   type RestoreSection,
 } from '../project-state/set-aside.js';
@@ -55,6 +52,7 @@ import {
   type DbHandle,
 } from './merge-dir-claim.js';
 import { noteAbortedByNext, peekOpenMerge, relocateLeftOpenFixers } from './left-open-merge.js';
+import { keptMetadataOf, restoreKeptMetadataOf, settleProjections } from './merge-projections.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import {
   addStepWarning,
@@ -326,37 +324,6 @@ function asideHalt(why: { outcome: 'refused'; reason: string } | { outcome: 'ret
     : "Haive's project files kept changing under the merge; nothing was merged. Retry this step.";
 }
 
-type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
-
-function keptMetadataOf(kept: KeptFiles): KeptMetadata {
-  const metadata: KeptMetadata = {};
-  for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
-    const entry: KeptMetadata[string] = {};
-    if (untracked && Buffer.isBuffer(bytes) && owner && mode !== undefined) {
-      entry.owner = owner;
-      entry.mode = mode;
-    }
-    if (parents && parents.length > 0) entry.parents = parents;
-    if (Object.keys(entry).length > 0) metadata[path] = entry;
-  }
-  return metadata;
-}
-
-function keptFilesOf(metadata: KeptMetadata): KeptFiles {
-  return new Map(
-    Object.entries(metadata).map(([path, { owner, mode, parents }]): [string, KeptFile] => [
-      path,
-      { index: null, bytes: Buffer.alloc(0), untracked: owner !== undefined, owner, mode, parents },
-    ]),
-  );
-}
-
-async function restoreKeptMetadataOf(state: MergeResolveState): Promise<MergeResolveState> {
-  if (!state.keptMetadata) return state;
-  await restoreKeptMetadata(state.mergeDir, keptFilesOf(state.keptMetadata));
-  return { ...state, keptMetadata: undefined };
-}
-
 async function settleGivenUp(
   db: Database,
   current: TaskStepRow,
@@ -365,11 +332,10 @@ async function settleGivenUp(
 ): Promise<void> {
   const repositoryId =
     given.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
-  if (!repositoryId || (await gitOperationInProgress(given.mergeDir))) return;
-  await resyncHaiveProjections(db, repositoryId, given.mergeDir);
-  if (given.keptMetadata) {
-    await saveMergeState(db, current.id, await restoreKeptMetadataOf(given));
-  }
+  if (!repositoryId) return;
+  await settleProjections(db, repositoryId, given, (cleared) =>
+    saveMergeState(db, current.id, cleared),
+  );
 }
 
 /** Terminal success: tear down a transient base worktree, release the merge dir and mark the state
