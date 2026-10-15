@@ -13,18 +13,23 @@ interface DialogProps {
   className?: string;
 }
 
-const TABBABLE = 'a[href], button, input, select, textarea, [tabindex]';
+const TABBABLE =
+  'a[href], button, input, select, textarea, [tabindex], summary, iframe, [contenteditable], audio[controls], video[controls], area[href]';
 const openPanels: { panel: HTMLElement; opener: HTMLElement | null }[] = [];
 
 const isRadio = (el: Element): el is HTMLInputElement => (el as HTMLInputElement).type === 'radio';
 const inGroup = (a: HTMLInputElement, b: HTMLInputElement) =>
   !!a.name && a.name === b.name && a.form === b.form;
+// An editing host reports tabIndex -1 although Tab reaches it, unless it carries a tabindex.
+const isStop = (el: HTMLElement) =>
+  el.tabIndex >= 0 || (el.isContentEditable && !el.hasAttribute('tabindex'));
+const tabOrder = (el: HTMLElement) => (el.tabIndex > 0 ? el.tabIndex : Number.MAX_SAFE_INTEGER);
 
-// Tab stops as a browser orders them: a radio group is one stop, and `from`'s own group is skipped.
+// Browser tab order: positive tabindex first, a radio group is one stop, `from`'s own is skipped.
 function tabbables(panel: HTMLElement, from: Element | null) {
-  const items = Array.from(panel.querySelectorAll<HTMLElement>(TABBABLE)).filter(
-    (el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.getClientRects().length > 0,
-  );
+  const items = Array.from(panel.querySelectorAll<HTMLElement>(TABBABLE))
+    .filter((el) => isStop(el) && !el.matches(':disabled') && el.getClientRects().length > 0)
+    .sort((a, b) => tabOrder(a) - tabOrder(b));
   const radios = items.filter(isRadio);
   return items.filter(
     (el) =>
@@ -34,10 +39,13 @@ function tabbables(panel: HTMLElement, from: Element | null) {
   );
 }
 
-function leavesPanel(panel: HTMLElement, edge: HTMLElement | undefined, backwards: boolean) {
+function leavesPanel(panel: HTMLElement, stops: HTMLElement[], backwards: boolean) {
   const active = document.activeElement;
+  const edge = backwards ? stops[0] : stops.at(-1);
   if (!edge || !active || active === edge || active === panel) return true;
   if (!panel.contains(active)) return true;
+  // Tab order places a listed stop, not the document: positive tabindex reorders them.
+  if (stops.some((stop) => stop === active)) return false;
   const beyond = backwards ? Node.DOCUMENT_POSITION_PRECEDING : Node.DOCUMENT_POSITION_FOLLOWING;
   return (edge.compareDocumentPosition(active) & beyond) !== 0;
 }
@@ -81,7 +89,7 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
     const onTab = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== entry) return;
       const ahead = tabbables(panel, document.activeElement);
-      if (!leavesPanel(panel, e.shiftKey ? ahead[0] : ahead.at(-1), e.shiftKey)) return;
+      if (!leavesPanel(panel, ahead, e.shiftKey)) return;
       const stops = tabbables(panel, null);
       e.preventDefault();
       ((e.shiftKey ? stops.at(-1) : stops[0]) ?? panel).focus();

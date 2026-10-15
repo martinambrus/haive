@@ -145,7 +145,7 @@ class FakeNode extends FakeTarget {
   }
 }
 
-const NATIVE = ['button', 'input', 'select', 'textarea'];
+const NATIVE = ['button', 'input', 'select', 'textarea', 'summary', 'iframe'];
 const tabindexOf = (el: FakeElement) => Number.parseInt(el.getAttribute('tabindex') ?? '', 10);
 
 class FakeElement extends FakeNode {
@@ -193,12 +193,11 @@ class FakeElement extends FakeNode {
   get children() {
     return this.childNodes.filter((c): c is FakeElement => c instanceof FakeElement);
   }
+  get isContentEditable() {
+    return this.getAttribute('contenteditable') === 'true';
+  }
   private get native() {
-    return (
-      NATIVE.includes(this.localName) ||
-      (this.localName === 'a' && this.hasAttribute('href')) ||
-      this.getAttribute('contenteditable') === 'true'
-    );
+    return NATIVE.includes(this.localName) || (this.localName === 'a' && this.hasAttribute('href'));
   }
   get tabIndex() {
     const given = tabindexOf(this);
@@ -211,8 +210,12 @@ class FakeElement extends FakeNode {
     return this.isConnected ? [{}] : [];
   }
   get focusable() {
-    const listed = this.native || !Number.isNaN(tabindexOf(this));
+    const listed = this.native || this.isContentEditable || !Number.isNaN(tabindexOf(this));
     return listed && !this.disabled && this.getClientRects().length > 0;
+  }
+  get tabbable() {
+    const given = tabindexOf(this);
+    return this.focusable && (Number.isNaN(given) || given >= 0);
   }
   compareDocumentPosition(other: FakeElement) {
     if (other === this) return 0;
@@ -296,10 +299,14 @@ const panel = (n = 1) => panels()[n - 1]!.children.at(-1)!;
 const isRadio = (el: FakeElement) => el.type === 'radio';
 const inGroup = (a: FakeElement, b: FakeElement) =>
   !!a.name && a.name === b.name && a.form === b.form;
+const tabOrder = (el: FakeElement) => (el.tabIndex > 0 ? el.tabIndex : Number.MAX_SAFE_INTEGER);
 
 // One stop per radio group: its checked radio, else the first going forward and the last backward.
 function tabStops(from: FakeElement | null) {
-  const order = doc.documentElement.descendants().filter((el) => el.focusable && el.tabIndex >= 0);
+  const order = doc.documentElement
+    .descendants()
+    .filter((el) => el.tabbable)
+    .sort((a, b) => tabOrder(a) - tabOrder(b));
   const radios = order.filter(isRadio);
   return order.filter(
     (el) =>
@@ -316,11 +323,13 @@ function press(key: string, init: { shiftKey?: boolean } = {}) {
   });
   if (key === 'Tab' && !event.defaultPrevented) {
     const all = [doc.documentElement, ...doc.documentElement.descendants()];
-    const from = all.indexOf(doc.activeElement);
-    const order = tabStops(doc.activeElement);
+    const from = doc.activeElement;
+    const order = tabStops(from);
     const wrap = tabStops(null);
-    const after = order.filter((el) => all.indexOf(el) > from);
-    const before = order.filter((el) => all.indexOf(el) < from);
+    const cmp = (el: FakeElement) =>
+      tabOrder(el) - tabOrder(from) || all.indexOf(el) - all.indexOf(from);
+    const after = order.filter((el) => cmp(el) > 0);
+    const before = order.filter((el) => cmp(el) < 0);
     (init.shiftKey ? (before.at(-1) ?? wrap.at(-1)) : (after[0] ?? wrap[0]))?.focus();
   }
   return event;
@@ -446,7 +455,7 @@ const mixed = (
 const editorInTheMiddle = (
   <>
     <button id="top">top</button>
-    <div id="editor" contentEditable suppressContentEditableWarning />
+    <div id="editor" contentEditable tabIndex={-1} suppressContentEditableWarning />
     <button id="save">save</button>
   </>
 );
@@ -455,15 +464,31 @@ const editorLast = (
   <>
     <button id="top">top</button>
     <button id="save">save</button>
-    <div id="editor" contentEditable suppressContentEditableWarning />
+    <div id="editor" contentEditable tabIndex={-1} suppressContentEditableWarning />
   </>
 );
 
 const editorFirst = (
   <>
-    <div id="editor" contentEditable suppressContentEditableWarning />
+    <div id="editor" contentEditable tabIndex={-1} suppressContentEditableWarning />
     <button id="top">top</button>
     <button id="save">save</button>
+  </>
+);
+
+const tabbableEditorLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <div id="editor" contentEditable suppressContentEditableWarning />
+  </>
+);
+
+const uneditableLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <div id="editor" contentEditable={false} />
   </>
 );
 
@@ -552,6 +577,48 @@ const onlyRadios = (
   <>
     <input id="r1" type="radio" name="g" />
     <input id="r2" type="radio" name="g" defaultChecked />
+  </>
+);
+
+const summaryLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <details>
+      <summary id="more">more</summary>
+      <p>shown when opened</p>
+    </details>
+  </>
+);
+
+const iframeLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <iframe id="frame" />
+  </>
+);
+
+const positiveAndButton = (
+  <>
+    <button id="two" tabIndex={2}>
+      two
+    </button>
+    <button id="one" tabIndex={1}>
+      one
+    </button>
+    <button id="save">save</button>
+  </>
+);
+
+const positiveOnly = (
+  <>
+    <button id="two" tabIndex={2}>
+      two
+    </button>
+    <button id="one" tabIndex={1}>
+      one
+    </button>
   </>
 );
 
@@ -1026,5 +1093,72 @@ describe('Dialog focus', () => {
     show(<Scene open>{buttons}</Scene>);
     show(<Scene>{buttons}</Scene>);
     expect(where()).toBe('button#opener');
+  });
+
+  it('C16 (a) a summary is a tab stop: Tab reaches a last one and wraps from it', () => {
+    openDialog(summaryLast);
+    byId('save').focus();
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('summary#more');
+    expect(press('Tab').defaultPrevented).toBe(true);
+    expect(where()).toBe('button#top');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
+    expect(where()).toBe('summary#more');
+  });
+
+  it('C16 (b) a contenteditable host is a tab stop: Tab reaches a last one and wraps from it', () => {
+    openDialog(tabbableEditorLast);
+    byId('save').focus();
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('div#editor');
+    expect(press('Tab').defaultPrevented).toBe(true);
+    expect(where()).toBe('button#top');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
+    expect(where()).toBe('div#editor');
+  });
+
+  it('C16 (c) a contenteditable element Tab skips is not a stop: tabindex -1, contenteditable="false"', () => {
+    for (const scene of [editorLast, uneditableLast]) {
+      openDialog(scene);
+      byId('save').focus();
+      expect(press('Tab').defaultPrevented).toBe(true);
+      expect(where()).toBe('button#top');
+    }
+  });
+
+  it('C16 (d) an iframe is a tab stop: Tab reaches a last one', () => {
+    openDialog(iframeLast);
+    byId('save').focus();
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('iframe#frame');
+  });
+
+  it('C17 (a) positive tabindex stops come first, ascending: the dialog wraps at the ends of that order', () => {
+    openDialog(positiveAndButton);
+    byId('save').focus();
+    expect(press('Tab').defaultPrevented).toBe(true);
+    expect(where()).toBe('button#one');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
+    expect(where()).toBe('button#save');
+    byId('two').focus();
+    expect(press('Tab').defaultPrevented).toBe(false);
+    byId('two').focus();
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(false);
+    expect(where()).toBe('button#one');
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('button#two');
+  });
+
+  it('C17 (b) a dialog of positive tabindex stops only: Tab wraps from the highest to the lowest', () => {
+    openDialog(positiveOnly);
+    byId('two').focus();
+    expect(press('Tab').defaultPrevented).toBe(true);
+    expect(where()).toBe('button#one');
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('button#two');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(false);
+    expect(where()).toBe('button#one');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
+    expect(where()).toBe('button#two');
   });
 });
