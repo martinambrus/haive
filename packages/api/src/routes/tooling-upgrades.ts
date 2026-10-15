@@ -899,8 +899,8 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       });
     }
     // A sync can write fallback rows between the probe and the clear; look once more after it.
+    // Unfenced: the save has committed, and a lock lost by expiry leaves no sync to restore the flag.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
-      assertRagLockHeld(lock);
       await db
         .update(schema.repositories)
         .set(retryCleared)
