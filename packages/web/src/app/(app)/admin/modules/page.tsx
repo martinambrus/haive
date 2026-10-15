@@ -5,19 +5,24 @@ import { useRouter } from 'next/navigation';
 import type { ModuleDiffRow, ModuleState } from '@haive/shared/modularity';
 import {
   getModulesLoaded,
+  moduleOpenCapped,
   moduleOpenTasks,
   patchModuleActive,
   type ApiError,
-  type ModuleOpenTask,
   type ModulePurgeResponse,
   type ModulesLoadedResponse,
   type ModuleTeardownResponse,
+  type ModuleUrgentResponse,
 } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
 import { ModuleActiveCell } from '@/components/module-active-cell';
 import { ModulePurgeDialog } from '@/components/module-purge-dialog';
 import { ModuleSkippedSeeds } from '@/components/module-skipped-seeds';
-import { ModuleTasksOpenDialog } from '@/components/module-tasks-open-dialog';
+import {
+  ModuleTasksOpenDialog,
+  moduleOffNotice,
+  type ModuleTasksBlocked,
+} from '@/components/module-tasks-open-dialog';
 import { ModuleTeardownDialog } from '@/components/module-teardown-dialog';
 import { Badge, FormError } from '@/components/ui';
 
@@ -65,9 +70,7 @@ export default function ModulesPage() {
   const [data, setData] = useState<ModulesLoadedResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [blocked, setBlocked] = useState<{ moduleId: string; tasks: ModuleOpenTask[] } | null>(
-    null,
-  );
+  const [blocked, setBlocked] = useState<ModuleTasksBlocked | null>(null);
   const [tearingDown, setTearingDown] = useState<string | null>(null);
   const [purging, setPurging] = useState<{ id: string; tornDown: boolean } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -95,11 +98,27 @@ export default function ModulesPage() {
       router.refresh();
     } catch (err) {
       const tasks = moduleOpenTasks(err as ApiError);
-      if (tasks.length > 0) setBlocked({ moduleId: row.id, tasks });
-      else setError((err as ApiError).message ?? 'Failed to update the module');
+      if (tasks.length > 0) {
+        setBlocked({
+          moduleId: row.id,
+          name: row.name,
+          tasks,
+          capped: moduleOpenCapped(err as ApiError),
+        });
+      } else {
+        setError((err as ApiError).message ?? 'Failed to update the module');
+      }
     } finally {
       setBusy(false);
     }
+  }
+
+  function turnedOff(result: ModuleUrgentResponse) {
+    const titles = new Map((blocked?.tasks ?? []).map((t) => [t.id, t.title]));
+    setNotice(moduleOffNotice(blocked?.name || result.moduleId, result, titles));
+    setBlocked(null);
+    void load();
+    router.refresh();
   }
 
   function tornDown(result: ModuleTeardownResponse) {
@@ -140,7 +159,7 @@ export default function ModulesPage() {
       {notice !== null && (
         <div
           role="status"
-          className="rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-200"
+          className="whitespace-pre-line rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-200"
         >
           {notice}
         </div>
@@ -212,7 +231,11 @@ export default function ModulesPage() {
         </div>
       )}
       {data && <ModuleSkippedSeeds rows={data.modules.rows} />}
-      <ModuleTasksOpenDialog blocked={blocked} onClose={() => setBlocked(null)} />
+      <ModuleTasksOpenDialog
+        blocked={blocked}
+        onClose={() => setBlocked(null)}
+        onDone={turnedOff}
+      />
       <ModuleTeardownDialog
         moduleId={tearingDown}
         onClose={() => setTearingDown(null)}

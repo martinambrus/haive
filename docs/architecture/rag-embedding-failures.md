@@ -133,7 +133,10 @@ holder counts its lock lost once a heartbeat finds the key gone or taken over, o
 confirmed for a whole expiry. Both syncs open their store through `fenceRagStore`, which checks the lock
 before every statement it sends, and they check it again before writing the degraded flag (also after
 the awaited NULL-hash read that gates its clear); the api checks it before each re-embed batch and each
-repository write. A sync that lost it fails with a retryable error, and the api answers 409. A statement
+repository write. A sync that lost it fails with a retryable error, and the api answers 409, except
+after a tooling save has committed: its second probe then restores the degraded flag whether or not it
+still holds the lock, and answers 200 for the save that landed. A lock lost by expiry leaves no sync to
+write the flag, and a flag restored needlessly is cleared by the next healthy sync. A statement
 already in flight when the lock is lost still lands: the store cannot see the lock, so closing that
 window would take a fencing token the store itself checks. A run with no repository id takes no lock.
 Deleting a repository reclaims its internal store under the same lock (`cleanupRagForRepository`): while

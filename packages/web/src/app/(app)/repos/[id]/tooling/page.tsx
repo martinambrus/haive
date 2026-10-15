@@ -7,6 +7,7 @@ import { api } from '@/lib/api-client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { Button, Card, FormError, Label } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { RepositoryIntegrations } from '@/components/integrations/repository-integrations';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
 import { usePageTitle } from '@/lib/use-page-title';
 import type { VerifyCommands } from '@haive/shared/schemas';
@@ -1074,6 +1075,8 @@ export default function RepoToolingPage() {
               <span className="text-sm text-emerald-400">Saved. Rebuilds on next task.</span>
             )}
           </div>
+
+          <RepositoryIntegrations repositoryId={repositoryId} />
         </>
       )}
     </div>

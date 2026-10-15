@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { Dialog } from '@/components/dialog';
 import { Button, FormError } from '@/components/ui';
+import { RepositoryIntegrations } from '@/components/integrations/repository-integrations';
 import RepoToolingPage from './page';
 
 const TYPED_PASSWORD = crypto.randomUUID();
@@ -44,6 +45,7 @@ type El = ReactElement<{
   disabled?: boolean;
   open?: boolean;
   message?: string | null;
+  repositoryId?: string;
   onClick?: () => void;
   onChange?: (event: { target: { value?: string; checked?: boolean } }) => void;
   onOpenChange?: (open: boolean) => void;
@@ -136,6 +138,7 @@ async function mount(config: Record<string, unknown> = {}) {
 
   const all = () => flatten(tree);
   const dialog = () => all().find((e) => e.type === Dialog);
+  const integrations = () => all().find((e) => e.type === RepositoryIntegrations);
   const button = (name: string) => all().find((e) => e.type === Button && textOf(e) === name);
   const field = (id: string) => {
     const el = all().find((e) => e.props.id === id);
@@ -147,6 +150,7 @@ async function mount(config: Record<string, unknown> = {}) {
     button,
     field,
     dialog,
+    integrations,
     dialogError: () =>
       flatten(dialog()?.props.children).find((e) => e.type === FormError)?.props.message ?? null,
     text: () => textOf(tree),
@@ -850,5 +854,12 @@ describe('after a failed clear or save, the page re-reads which credentials are 
     await view.press(SAVE);
     expect(api.patch).toHaveBeenCalledTimes(1);
     expect(api.get).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the integrations section of the tooling page', () => {
+  it('is rendered for this repository once the tooling has loaded', async () => {
+    const view = await mount();
+    expect(view.integrations()?.props.repositoryId).toBe('repo-1');
   });
 });

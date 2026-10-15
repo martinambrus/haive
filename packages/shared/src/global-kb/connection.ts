@@ -28,14 +28,6 @@ export const GLOBAL_KB_DB_NAME = databaseName('kb_global');
 const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
 const DEFAULT_EMBED_DIMENSIONS = 2560;
 
-/** An unset embedding URL means the bundled daemon, for the same reason the model
- *  above has a default: "internal mode" is what a fresh install IS, and the key is
- *  only written once someone opens the settings page and saves. Blank is not the off
- *  switch — GLOBAL_KB_ENABLED is — so defaulting here makes an enabled KB do what
- *  being enabled already promises. Shared with every other Ollama consumer so the
- *  meaning of "unset" cannot be decided differently per screen (it was, and the same
- *  daemon read as working on one and broken on the other). */
-
 /** Default window before a superseded (archived) entry is hard-deleted by the
  *  retention sweep. 0 = keep archived entries forever. */
 const DEFAULT_ARCHIVE_RETENTION_DAYS = 30;

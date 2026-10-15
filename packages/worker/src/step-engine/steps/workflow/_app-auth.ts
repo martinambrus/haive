@@ -117,20 +117,31 @@ export async function loginAppBrowser(
   });
   if (!task?.repositoryId) return { attempted: false, ok: false, reason: 'task has no repository' };
 
-  const repo = await ctx.db.query.repositories.findFirst({
-    where: eq(schema.repositories.id, task.repositoryId),
-    columns: { appAuth: true },
-  });
-  if (!isUsableAppAuth(repo?.appAuth)) {
+  const repositoryId = task.repositoryId;
+  const names = appAuthSecretNames(repositoryId);
+  // One snapshot: a save between two reads would pair the old login page with the new account.
+  const snapshot = await ctx.db.transaction(
+    async (tx) => {
+      const repo = await tx.query.repositories.findFirst({
+        where: eq(schema.repositories.id, repositoryId),
+        columns: { appAuth: true },
+      });
+      if (!isUsableAppAuth(repo?.appAuth)) return null;
+      const secrets = await userSecretsService.getMany(
+        ctx.userId,
+        [names.username, names.password],
+        tx,
+      );
+      return { cfg: repo.appAuth as AppAuthConfig, secrets };
+    },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
+  if (!snapshot) {
     return { attempted: false, ok: false, reason: 'no app login configured for this repository' };
   }
-  const cfg = repo.appAuth as AppAuthConfig;
-
-  const names = appAuthSecretNames(task.repositoryId);
-  const [username, password] = await Promise.all([
-    userSecretsService.get(ctx.userId, names.username),
-    userSecretsService.get(ctx.userId, names.password),
-  ]);
+  const { cfg, secrets } = snapshot;
+  const username = secrets.get(names.username);
+  const password = secrets.get(names.password);
   if (!username || !password) {
     return {
       attempted: false,

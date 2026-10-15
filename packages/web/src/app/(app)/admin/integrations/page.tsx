@@ -12,8 +12,10 @@ import {
   type AdminIntegrationUpdate,
   type IntegrationAuthKind,
 } from '@/lib/admin-integrations';
+import { categoryLabel } from '@/lib/integrations';
 import { usePageTitle } from '@/lib/use-page-title';
 import { Badge, Button, Card, FormError, Input, Label } from '@/components/ui';
+import { DefaultsByKind } from '@/components/integrations/defaults-by-kind';
 
 const AUTH_LABEL: Record<IntegrationAuthKind, string> = {
   oauth2: 'OAuth 2.0',
@@ -89,7 +91,7 @@ function ProviderCard({
           <div className="mt-2 flex flex-wrap gap-1.5">
             {provider.categories.map((category) => (
               <Badge key={category} variant="info">
-                {category}
+                {categoryLabel(category)}
               </Badge>
             ))}
             {provider.authKinds.map((kind) => (
@@ -237,6 +239,7 @@ export default function AdminIntegrationsPage() {
           <ProviderCard key={provider.id} provider={provider} onSaved={replace} />
         ))}
       </div>
+      {providers && <DefaultsByKind providers={providers} />}
     </div>
   );
 }

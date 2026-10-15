@@ -55,6 +55,7 @@ import {
   removePlanMergeWorktree,
 } from '../plan/merge.js';
 import { moveAsideRecordedLeftovers } from '../plan/merge-baseline.js';
+import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
 const SWEEP_EVERY_MS = 10_000;
 const SWEEP_JOB_ID = 'plan-mirror-dirty-sweep';
@@ -583,6 +584,7 @@ export async function schedulePlanMirrorSweep(): Promise<void> {
       opts: { removeOnComplete: true, removeOnFail: 10 },
     },
   );
+  await pruneJobSchedulers(queue, [SWEEP_JOB_ID]);
   await queue.close();
 }
 

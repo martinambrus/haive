@@ -26,8 +26,20 @@ the module loads again.
   render for that user, while its declared pages without data endpoints still do.
 - **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
   `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
-  `module_tasks_open`, which the page shows as a list of up to 200 tasks, while a live task's run list
-  names one of the module's steps or its type is one the module seeded. The code stays loaded: its api routes and
+  `module_tasks_open` while a live task's run list names one of the module's steps or its type is one
+  the module seeded; the answer lists up to `MODULE_DEPENDENTS_CAP` (200) of them, each with the step
+  it is on, and says `capped` when more exist. The page shows that list and offers **Turn off now**,
+  which sends `{"active": false, "mode": "urgent"}`. Urgent mode stamps `deactivated_at` under the
+  module row's lock, then stops every task that is in one of the module's steps, listed or not: each
+  stop commits on its own (the Stop button's `supersedeLiveRuns`, failing the task as stopped by an
+  administrator), then the task's sandboxes are killed, then a `task.stopped` event (reason
+  `module_deactivated`) and a `task.admin_stop` audit row are written. A step waiting on a form has
+  nothing to stop, so that task is left, as is every task elsewhere in its run list: those fail when
+  they next run one of the module's steps. The answer reports `stopped` (with `killError` when,
+  after the stop committed, the task's sandboxes could not be listed or one was still listed 3 s after
+  a failed removal, and `eventError` when the event or audit write failed), `left` and `failed` (only
+  a stop transaction that threw); the page shows the counts and names each
+  task it could not stop or whose kill or record failed. The code stays loaded: its api routes and
   settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
   The worker starts no job of a module that is deactivated when it boots, and a reconcile every 15 s

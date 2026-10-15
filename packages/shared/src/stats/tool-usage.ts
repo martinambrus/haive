@@ -18,6 +18,7 @@ export const HAIVE_MCP_SERVER_NAMES = [
   'chrome-devtools',
   'haive-rag',
   'ddev-control',
+  'haive-custom',
 ] as const;
 
 export function isHaiveMcpServer(name: string): boolean {

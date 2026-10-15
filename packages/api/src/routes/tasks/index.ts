@@ -9,7 +9,6 @@ import {
   lt,
   isNotNull,
   isNull,
-  ne,
   not,
   notInArray,
   or,
@@ -79,6 +78,7 @@ import {
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
+import { loadTaskStop } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { getTaskQueue } from '../../queues.js';
 import {
@@ -251,8 +251,6 @@ taskRoutes.get('/', async (c) => {
   // the plan page, and its attention signal is the banner there, not a toast that
   // would open the task page instead.
   if (!includeChats) conds.push(notInArray(schema.tasks.type, ['plan_chat', 'plan_merge']));
-  // A type-draft conversation lives in the task type editor, so no list shows it, chats or not.
-  conds.push(ne(schema.tasks.type, 'type_draft'));
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
   const where = and(...conds);
 
@@ -1090,6 +1088,7 @@ taskRoutes.get('/:id', async (c) => {
   return c.json({
     task: taskWithActive,
     dead: await loadTaskDead(db, task),
+    stop: await loadTaskStop(db, task),
     steps,
     upcomingCliSteps,
     providerBreakdown,

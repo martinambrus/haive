@@ -58,6 +58,7 @@ function check(name: string, ok: boolean, detail?: unknown): void {
 
 const STEP_ID = '01-type-draft';
 const WAIT_MS = 90_000;
+const existingSlug = `td-smoke-${randomBytes(3).toString('hex')}`;
 
 const promptStep = (over: Record<string, unknown> = {}) => ({
   slug: 'list-todos',
@@ -90,6 +91,11 @@ const draftTwo = () => ({
   },
 });
 const draftInvalid = () => ({ ...draftOne(), stepIds: [FIRST_ID, 'no-such-step'] });
+const draftNamed = (slug: string) => ({
+  ...draftOne(),
+  slug,
+  stepIds: [`custom.${slug}.list-todos`],
+});
 const withTool = { name: 'repo_status', description: 'Fetches the status.', action: 'x' };
 
 interface Call {
@@ -120,6 +126,8 @@ const scenarios: Record<string, Scenario> = {
     draft: { ...draftOne(), promptSteps: { 'list-todos': promptStep({ tools: [withTool] }) } },
   }),
   S4: () => 'Sorry, I cannot produce JSON today.',
+  S5a: () => ({ reply: 'Kept the slug.', draft: draftNamed(existingSlug) }),
+  S5b: () => ({ reply: 'Same slug.', draft: draftNamed(existingSlug) }),
 };
 
 async function main(): Promise<void> {
@@ -131,7 +139,6 @@ async function main(): Promise<void> {
   setContainerCleanupRunner(async () => 0);
 
   const userId = randomUUID();
-  const existingSlug = `td-smoke-${randomBytes(3).toString('hex')}`;
   let worker: ReturnType<typeof startTaskWorker> | null = null;
   let queue: Queue<TaskJobPayload> | null = null;
 
@@ -215,6 +222,7 @@ async function main(): Promise<void> {
     definitionSteps: string[],
     opening: string,
     editorState?: Record<string, unknown>,
+    editingSlug?: string,
   ) => {
     const [task] = await db
       .insert(schema.tasks)
@@ -224,7 +232,11 @@ async function main(): Promise<void> {
         title: 'Draft a task type',
         repositoryId: null,
         autoContinue: true,
-        metadata: { anchorRepositoryId: null, egress: { mode: 'none', domains: [], ips: [] } },
+        metadata: {
+          anchorRepositoryId: null,
+          egress: { mode: 'none', domains: [], ips: [] },
+          ...(editingSlug !== undefined ? { editingSlug } : {}),
+        },
         runListSnapshot: definitionSteps,
         status: 'created',
       })
@@ -470,6 +482,55 @@ async function main(): Promise<void> {
         typeof s4Messages[1]?.error === 'string' &&
         (await events(s4)).every((e) => e.type !== TYPE_DRAFT_REPAIR_EVENT),
       s4Messages[1],
+    );
+
+    // S5: the same reply names a type that exists; only the conversation that edits that type may keep its slug.
+    const takenLine = (prompt: string) =>
+      /## Slugs that are taken\n[^\n]*\n([^\n]*)/.exec(prompt)?.[1] ?? '';
+    const slugTaken = (m: Record<string, unknown> | undefined) =>
+      Array.isArray(m?.warnings) &&
+      (m.warnings as { kind?: string }[]).some((w) => w.kind === 'slug-taken');
+    const s5a = await open(
+      snapshot,
+      'S5a: a change to a saved type',
+      { ...draftNamed(existingSlug), displayName: 'Existing admin type' },
+      existingSlug,
+    );
+    const s5aEnd = await finish(s5a, 1);
+    const s5aMessages = await messages(s5a);
+    const [s5aTask] = await db
+      .select({ metadata: schema.tasks.metadata })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, s5a));
+    check(
+      'S5a editing a saved type: the task names it, and the agent was shown the editor state of that type',
+      s5aEnd.status === 'completed' &&
+        s5aTask?.metadata?.editingSlug === existingSlug &&
+        callsFor('S5a')[0]?.fromEditor === true &&
+        same(callsFor('S5a')[0]?.editorDraft, {
+          ...draftNamed(existingSlug),
+          displayName: 'Existing admin type',
+        }),
+      { task: s5aTask, calls: callsFor('S5a') },
+    );
+    check(
+      'S5a the slug of the type being edited is neither warned about nor listed to the agent as taken',
+      !slugTaken(s5aMessages[1]) &&
+        same(s5aMessages[1]?.issues, []) &&
+        !takenLine(callsFor('S5a')[0]?.prompt ?? '').includes(existingSlug) &&
+        takenLine(callsFor('S5a')[0]?.prompt ?? '').includes('`workflow`'),
+      { reply: s5aMessages[1], taken: takenLine(callsFor('S5a')[0]?.prompt ?? '') },
+    );
+    const s5b = await open(snapshot, 'S5b: the same slug on a conversation about a new type');
+    const s5bEnd = await finish(s5b, 1);
+    const s5bMessages = await messages(s5b);
+    check(
+      'S5b without a type to edit, the same slug is warned about and listed as taken, and still not refused',
+      s5bEnd.status === 'completed' &&
+        slugTaken(s5bMessages[1]) &&
+        same(s5bMessages[1]?.issues, []) &&
+        takenLine(callsFor('S5b')[0]?.prompt ?? '').includes(existingSlug),
+      { reply: s5bMessages[1], taken: takenLine(callsFor('S5b')[0]?.prompt ?? '') },
     );
 
     const after = await definitionsFingerprint();

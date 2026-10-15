@@ -53,11 +53,7 @@ describe('buildSidebarTree — the default arrangement', () => {
 
   it('drops the hidden task types', () => {
     const nodes = buildSidebarTree(
-      [
-        task('t1', 'haive', 'plan_build'),
-        task('t2', 'haive', 'plan_chat'),
-        task('t3', 'haive', 'type_draft'),
-      ],
+      [task('t1', 'haive', 'plan_build'), task('t2', 'haive', 'plan_chat')],
       EMPTY_SIDEBAR_TREE,
     );
     expect(nodes).toHaveLength(0);

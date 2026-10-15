@@ -53,6 +53,8 @@ export const textareaFieldSchema = baseField.extend({
   default: z.string().optional(),
   placeholder: z.string().optional(),
   rows: z.number().int().positive().optional(),
+  /** Never shown and never required of the person, but its value is still submitted: for a field another page fills in. */
+  hidden: z.boolean().optional(),
 });
 
 export const optionSchema = z.object({
@@ -456,6 +458,7 @@ export type FormSubmission = z.infer<typeof formSubmissionSchema>;
  *  Works for accordion-nested fields too, since `values` is the whole form's map. */
 export function isFieldVisible(
   field: {
+    hidden?: boolean;
     visibleWhen?: {
       field: string;
       equals?: string | boolean;
@@ -465,6 +468,7 @@ export function isFieldVisible(
   },
   values: Record<string, unknown>,
 ): boolean {
+  if (field.hidden === true) return false;
   const vw = field.visibleWhen;
   if (!vw) return true;
   const current = values[vw.field];

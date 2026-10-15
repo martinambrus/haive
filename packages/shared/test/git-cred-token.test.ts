@@ -3,10 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_GIT_CRED_TOKEN_TTL_SECONDS,
   signRepoGitCredToken,
-  verifyLegacyRepoGitCredToken,
   verifyRepoGitCredToken,
 } from '../src/git/token.js';
-import { signRagToken, verifyRagToken } from '../src/rag/token.js';
 import { TASK_TOKEN_AUDIENCES, signTaskToken, verifyTaskToken } from '../src/task-token.js';
 
 const SECRET = 'test-secret-key-0123456789';
@@ -173,12 +171,11 @@ describe('repo git credential token', () => {
 });
 
 describe('no other token verifies as a git credential token', () => {
-  it.each(AUDIENCES)('a %s task token is refused, by either verifier', (aud) => {
+  it.each(AUDIENCES)('a %s task token is refused', (aud) => {
     const token = signTaskToken({ aud, taskId: 'repo-abc' }, SECRET);
 
     expect(verifyTaskToken(token, aud, SECRET)).not.toBeNull();
     expect(verifyRepoGitCredToken(token, SECRET)).toBeNull();
-    expect(verifyLegacyRepoGitCredToken(token, SECRET)).toBeNull();
   });
 
   it.each(AUDIENCES)('a %s task token is refused when its payload carries the claims', (aud) => {
@@ -188,27 +185,21 @@ describe('no other token verifies as a git credential token', () => {
 
     expect(verifyTaskToken(token, aud, SECRET)).not.toBeNull();
     expect(verifyRepoGitCredToken(token, SECRET)).toBeNull();
-    expect(verifyLegacyRepoGitCredToken(token, SECRET)).toBeNull();
   });
 
-  it('the legacy RAG token is refused, by either verifier', () => {
-    const token = signRagToken('repo-abc', SECRET);
+  it('the legacy two-part RAG token is refused', () => {
+    const token = legacyToken({ taskId: 'repo-abc', exp: inAMinute() });
 
-    expect(verifyRagToken(token, SECRET)).not.toBeNull();
     expect(verifyRepoGitCredToken(token, SECRET)).toBeNull();
-    expect(verifyLegacyRepoGitCredToken(token, SECRET)).toBeNull();
   });
 });
 
 describe('a git credential token verifies nowhere else', () => {
   const v1 = () => signRepoGitCredToken('repo-abc', 'user-1', SECRET);
-  const legacy = () => legacyToken({ ...CLAIMS, exp: inAMinute() });
 
   it.each(AUDIENCES)('under the %s task token audience', (aud) => {
     expect(verifyRepoGitCredToken(v1(), SECRET)).not.toBeNull();
-    expect(verifyLegacyRepoGitCredToken(legacy(), SECRET)).not.toBeNull();
     expect(verifyTaskToken(v1(), aud, SECRET)).toBeNull();
-    expect(verifyTaskToken(legacy(), aud, SECRET)).toBeNull();
   });
 
   it.each(AUDIENCES)('under the %s audience even when its payload names it', (aud) => {
@@ -216,71 +207,5 @@ describe('a git credential token verifies nowhere else', () => {
 
     expect(verifyRepoGitCredToken(token, SECRET)).toEqual(CLAIMS);
     expect(verifyTaskToken(token, aud, SECRET)).toBeNull();
-  });
-
-  it('as a legacy RAG token', () => {
-    expect(verifyRagToken(v1(), SECRET)).toBeNull();
-    expect(verifyRagToken(legacy(), SECRET)).toBeNull();
-  });
-});
-
-describe('the legacy two-part git credential token', () => {
-  it('verifies through the fallback and recovers repositoryId + userId', () => {
-    const token = legacyToken({ ...CLAIMS, exp: inAMinute() });
-
-    expect(verifyLegacyRepoGitCredToken(token, SECRET)).toEqual(CLAIMS);
-  });
-
-  it('is refused by the v1 verifier, and a v1 token by the fallback', () => {
-    const legacy = legacyToken({ ...CLAIMS, exp: inAMinute() });
-    const v1 = signRepoGitCredToken('repo-abc', 'user-1', SECRET);
-
-    expect(verifyRepoGitCredToken(legacy, SECRET)).toBeNull();
-    expect(verifyLegacyRepoGitCredToken(v1, SECRET)).toBeNull();
-  });
-
-  it('is refused under a different secret', () => {
-    const token = legacyToken({ ...CLAIMS, exp: inAMinute() });
-
-    expect(verifyLegacyRepoGitCredToken(token, 'other-secret')).toBeNull();
-  });
-
-  it('is refused with a tampered payload (different repo/user) under the original MAC', () => {
-    const [, mac] = legacyToken({ ...CLAIMS, exp: inAMinute() }).split('.');
-    const forged = b64({ repositoryId: 'evil', userId: 'attacker', exp: 99_999_999_999 });
-
-    expect(verifyLegacyRepoGitCredToken(`${forged}.${mac}`, SECRET)).toBeNull();
-  });
-
-  it('is refused once expired, by the second', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(NOW_SECONDS * 1000);
-    const token = legacyToken({ ...CLAIMS, exp: NOW_SECONDS + 10 });
-
-    vi.setSystemTime((NOW_SECONDS + 10) * 1000);
-    expect(verifyLegacyRepoGitCredToken(token, SECRET)).not.toBeNull();
-    vi.setSystemTime((NOW_SECONDS + 11) * 1000);
-    expect(verifyLegacyRepoGitCredToken(token, SECRET)).toBeNull();
-  });
-
-  it('is refused in every malformed shape', () => {
-    expect(verifyLegacyRepoGitCredToken('', SECRET)).toBeNull();
-    expect(verifyLegacyRepoGitCredToken('not-a-token', SECRET)).toBeNull();
-    expect(verifyLegacyRepoGitCredToken('a.b.c', SECRET)).toBeNull();
-  });
-
-  it('is refused when a correctly signed payload is not a claims object', () => {
-    const exp = inAMinute();
-    const payloads: Record<string, unknown> = {
-      'not JSON': 'not json',
-      'a JSON null': 'null',
-      'no repositoryId': { userId: 'user-1', exp },
-      'a numeric userId': { repositoryId: 'repo-abc', userId: 5, exp },
-      'no exp': CLAIMS,
-    };
-
-    for (const [name, claims] of Object.entries(payloads)) {
-      expect(verifyLegacyRepoGitCredToken(legacyToken(claims), SECRET), name).toBeNull();
-    }
   });
 });

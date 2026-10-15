@@ -60,8 +60,10 @@ import {
   failureBanner,
   isTaskDead,
   modelIdentityBanner,
+  moduleStopBanner,
   parkBanner,
   type DeadStepRow,
+  type TaskStopRow,
 } from '@/lib/step-banners';
 import { taskBadgeKind, taskClockEndMs, taskMenuKeys, taskStoppedAt } from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
@@ -566,6 +568,8 @@ interface TaskDetailResponse {
   task: Task;
   /** The steps the worker could not resolve; null while the task is alive. */
   dead?: { at: string; steps: DeadStepRow[] } | null;
+  /** Why an administrator stopped the task; null unless it is failed and that stop explains it. */
+  stop?: TaskStopRow | null;
   steps: TaskStep[];
   /** CLI steps with no row yet — the CLIs tab's content. Absent on an older server. */
   upcomingCliSteps?: UpcomingCliStep[];
@@ -690,6 +694,7 @@ export default function TaskDetailPage() {
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
   const [deadSteps, setDeadSteps] = useState<DeadStepRow[]>([]);
+  const [stop, setStop] = useState<TaskStopRow | null>(null);
   const history = useTaskHistory(id, steps);
   const [historyStepToFocus, setHistoryStepToFocus] = useState<string | null>(null);
   const [upcomingCliSteps, setUpcomingCliSteps] = useState<UpcomingCliStep[]>([]);
@@ -792,6 +797,7 @@ export default function TaskDetailPage() {
       setTask(data.task);
       setSteps(data.steps);
       setDeadSteps(data.dead?.steps ?? []);
+      setStop(data.stop ?? null);
       setUpcomingCliSteps(data.upcomingCliSteps ?? []);
       setProviderBreakdown(data.providerBreakdown ?? []);
       setCostDisplay(data.costDisplay ?? USD_DISPLAY);
@@ -1558,6 +1564,7 @@ export default function TaskDetailPage() {
   const taskFinished = task.status === 'completed' || task.status === 'cancelled';
   const badgeKind = taskBadgeKind(task);
   const deadNote = deadBanner(task, deadSteps);
+  const stopNote = moduleStopBanner(task, stop);
   // A CLI step is actively executing. The Stop buttons (top-right + the running
   // step row) target it: stop the CLI, keep the environment, task stays open.
   // Cancel, by contrast, ends the whole task and tears the environment down.
@@ -1946,6 +1953,7 @@ export default function TaskDetailPage() {
         {task.status === 'failed' && task.errorMessage && (
           <p className="text-sm text-red-400">Error: {task.errorMessage}</p>
         )}
+        {stopNote && <p className="text-sm text-red-400">{stopNote.text}</p>}
         {/* Amber, not red: a mismatch is a fact worth seeing, not a failure. Some are
             benign (an alias resolving to a dated snapshot); the one that matters is an
             endpoint quietly serving a different model than the one configured. The
