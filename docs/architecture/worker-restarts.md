@@ -137,10 +137,15 @@ dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-r
 task `running` first. An answer submitted to a form still parked is the one exception, since
 answering it is what reopens the task; an advance onto that form that carries no answer is dropped
 like any other. While the system drains or is in maintenance (`refusesNewWork`, read past the config
-cache, once per job and only for a failed task) that exception closes, as does the fix-loop gate one
-below: the answer stays stored on its row and the advance is dropped, so an answer accepted while the
-task was live cannot reopen it during a drain. A clarification answer is one of those, since it rides `task_events` rather than the
-job, so its route sets a failed task `running` itself before it queues the advance.
+cache early in the job and again in the transaction that reopens the task, under the shared new-work
+fence a drain's write waits for) that exception closes, as does the fix-loop gate one below: the answer
+stays stored on its row and the advance is dropped, so an answer accepted while the task was live
+cannot reopen it during a drain. Both answer routes read the task's status inside their own
+transaction, with no row lock (one taken before the step write would cross a Retry's order: step rows
+first, the task row last), and admit a failed task through the same fence, 503 while new work is
+held. A clarification answer rides `task_events` rather than the job, so its route sets the task
+`running` itself before it queues the advance, and only when that read found it failed: a task that
+fails after the read keeps the answer and stays failed until a Retry.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. A task Retry's START, which only a task that never reached a step still takes, runs its first
