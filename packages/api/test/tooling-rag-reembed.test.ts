@@ -381,7 +381,7 @@ describe('retrying the embedding of a degraded repository', () => {
     expect(await res.json()).toMatchObject({ degradationKept: true });
   });
 
-  it('restores nothing and answers 409 when the lock is lost during the second probe', async () => {
+  it('restores nothing when the lock is lost during the second probe, and answers 200 for the save that landed', async () => {
     const fake = setup(STORE, true, true);
     h.awaitingSeq = [false, true];
     let selects = 0;
@@ -391,9 +391,10 @@ describe('retrying the embedding of a degraded repository', () => {
 
     const res = await retry();
 
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(200);
     expect(selects).toBe(2);
     expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt).toBeNull();
+    expect(await res.json()).toMatchObject({ ok: true, degradationKept: false });
   });
 
   it('keeps the degradation when the probe fails', async () => {
