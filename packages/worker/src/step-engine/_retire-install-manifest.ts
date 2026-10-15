@@ -111,7 +111,9 @@ async function retireHaiveFile(
           throw new Error(`its removal could not be recorded: ${cause}`);
         }
       }
-      outcome = await removeFileIfNoFollow(ctx.repoPath, target.path, target.accept, {
+      // Nothing read means nothing recorded, so whatever stands there by the removal stays.
+      const judge = held === null ? () => false : target.accept;
+      outcome = await removeFileIfNoFollow(ctx.repoPath, target.path, judge, {
         maxBytes: RETIRE_READ_CAP,
       });
     }

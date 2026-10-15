@@ -2,11 +2,17 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileNoFollow } from '@haive/shared/fs-safe';
 import {
   retireInstallManifest,
   retireLegacyMirrors,
 } from '../src/step-engine/_retire-install-manifest.js';
+
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return { ...real, readFileNoFollow: vi.fn(real.readFileNoFollow) };
+});
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -31,6 +37,26 @@ async function retire(content: string | null) {
 const SHAPED = { schemaVersion: 1, templateSetHash: 'abc', templates: [] };
 
 describe('retireInstallManifest', () => {
+  it('removes nothing its read did not see, though a Haive file stands there by the removal', async () => {
+    vi.mocked(readFileNoFollow).mockResolvedValueOnce(null);
+    const recorded: string[] = [];
+    const root = await mkdtemp(join(tmpdir(), 'retire-install-manifest-'));
+    dirs.push(root);
+    await mkdir(join(root, '.haive'), { recursive: true });
+    await writeFile(join(root, '.haive', 'install.json'), JSON.stringify(SHAPED));
+    const warnings: string[] = [];
+    const outcome = await retireInstallManifest(
+      { repoPath: root, logger } as never,
+      warnings,
+      async (path) => {
+        recorded.push(path);
+      },
+    );
+    expect(outcome).not.toBe('removed');
+    expect(existsSync(join(root, '.haive', 'install.json'))).toBe(true);
+    expect(recorded).toEqual([]);
+  });
+
   it('removes a file of Haive’s shape, with or without the bundles section', async () => {
     for (const doc of [SHAPED, { ...SHAPED, bundles: [] }]) {
       const r = await retire(JSON.stringify(doc));
