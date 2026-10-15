@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { makeTree, names, registry } from './tree.mjs';
 
@@ -11,6 +13,22 @@ const REGISTRIES = [
 const WEB = ['./manifest', './routes', './web', './dashboard'];
 
 const generated = (tree) => REGISTRIES.map((rel) => tree.read(rel)).join('\n');
+
+const specTree = (t, specs) => {
+  const tree = makeTree(t, {
+    installed: { foo: { exports: WEB } },
+    api: registry('foo'),
+    worker: registry('foo'),
+    web: registry('foo'),
+  });
+  for (const [host, spec] of Object.entries(specs)) {
+    const rel = `packages/${host}/package.json`;
+    const pkg = JSON.parse(tree.read(rel));
+    pkg.dependencies['@haive-module/foo'] = spec;
+    writeFileSync(join(tree.root, rel), `${JSON.stringify(pkg, null, 2)}\n`);
+  }
+  return tree;
+};
 
 describe('gen-modules: installed = depended on by api', () => {
   it('includes a module that api and worker both depend on', (t) => {
@@ -300,6 +318,21 @@ describe('gen-modules: a half-installed state fails loudly', () => {
     });
     fails(tree, '@haive/foo', '@haive/module-<id>', '@haive-module/<id>');
   });
+
+  it('registry module declared as a range: names the package, the spec and the api', (t) => {
+    const tree = specTree(t, { api: '^1.0.0', worker: '^1.0.0', web: '^1.0.0' });
+    fails(tree, '@haive-module/foo', '"^1.0.0"', 'packages/api/package.json');
+  });
+
+  it('registry module at another version in the worker: names both specs and the worker', (t) => {
+    const tree = specTree(t, { worker: '1.0.1' });
+    fails(tree, '@haive-module/foo', '"1.0.0"', '"1.0.1"', 'packages/worker/package.json');
+  });
+
+  it('registry module at another version in the web: names both specs and the web', (t) => {
+    const tree = specTree(t, { web: '1.0.1' });
+    fails(tree, '@haive-module/foo', '"1.0.0"', '"1.0.1"', 'packages/web/package.json');
+  });
 });
 
 describe('gen-modules: registry modules (@haive-module/<id>)', () => {
@@ -401,6 +434,28 @@ describe('gen-modules: registry modules (@haive-module/<id>)', () => {
     const api = tree.read(REGISTRIES[0]);
     assert.equal(api.match(/packageName: '@haive-module\/foo'/g)?.length, 1);
     assert.match(api, /packageName: '@haive-module\/foo', source: 'local'/);
+  });
+
+  for (const version of ['1.0.0', '1.0.0-rc.1']) {
+    it(`generates the registries from the exact version ${version} in api, worker and web`, (t) => {
+      const tree = specTree(t, { api: version, worker: version, web: version });
+      const out = tree.run('gen-modules.mjs');
+      assert.equal(out.status, 0, out.stderr);
+      for (const rel of REGISTRIES.slice(0, 2)) {
+        assert.match(tree.read(rel), /packageName: '@haive-module\/foo', source: 'registry'/);
+      }
+      assert.match(tree.read(REGISTRIES[2]), /import w0 from '@haive-module\/foo\/web';/);
+    });
+  }
+
+  it('uses the exact-version pattern of scripts/module.mjs, character for character', () => {
+    const literal = (file, pattern) =>
+      pattern.exec(readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'))?.[1];
+    const copy = literal('gen-modules.mjs', /^const EXACT_VERSION = \/(.+)\/;$/m);
+    const original = literal('module.mjs', /!\/(.+)\/\.test\(version \?\? ''\)/);
+    assert.ok(copy, 'gen-modules.mjs has no EXACT_VERSION literal');
+    assert.ok(original, 'module.mjs has no exact-version literal');
+    assert.equal(copy, original);
   });
 });
 

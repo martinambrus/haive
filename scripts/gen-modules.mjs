@@ -74,13 +74,16 @@ for (const [name, where] of [
   providers.set(id, `${name} (${where})`);
 }
 
+const HOSTS = [
+  { host: '@haive/api', file: 'packages/api/package.json', pkg: apiPackage },
+  { host: '@haive/worker', file: 'packages/worker/package.json', pkg: workerPackage },
+  { host: '@haive/web', file: 'packages/web/package.json', pkg: webPackage },
+];
+const hostsHolding = (name) => HOSTS.filter(({ pkg }) => pkg.dependencies?.[name] !== undefined);
 const holdersOf = (name) =>
-  [
-    ['@haive/worker', workerPackage],
-    ['@haive/web', webPackage],
-  ]
-    .filter(([, host]) => host.dependencies?.[name] !== undefined)
-    .map(([host]) => host);
+  hostsHolding(name)
+    .filter(({ pkg }) => pkg !== apiPackage)
+    .map(({ host }) => host);
 const missingFromApi = (name, spec, holders) => {
   console.error(
     `gen-modules: ${name} is a dependency of ${holders.join(' and ')} but not of @haive/api; add "${name}": "${spec}" to packages/api/package.json`,
@@ -107,6 +110,23 @@ for (const name of new Set([...registryNames(workerPackage), ...registryNames(we
     workerPackage.dependencies?.[name] ?? webPackage.dependencies?.[name],
     holdersOf(name),
   );
+}
+
+// Copy of the exact-version pattern in scripts/module.mjs; scripts/test/gen-modules.test.mjs pins the two equal.
+const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+for (const name of apiRegistryNames) {
+  const apiSpec = apiPackage.dependencies[name];
+  const holders = hostsHolding(name);
+  if (
+    !EXACT_VERSION.test(apiSpec) ||
+    holders.some(({ pkg }) => pkg.dependencies[name] !== apiSpec)
+  ) {
+    const specs = holders.map(({ host, pkg }) => `${host}: "${pkg.dependencies[name]}"`);
+    console.error(
+      `gen-modules: ${name} must be one exact version, the same in every package that depends on it (${specs.join(', ')}); change it in ${holders.map(({ file }) => file).join(', ')}`,
+    );
+    process.exit(1);
+  }
 }
 
 const apiImports = apiModules.flatMap((pkg, i) => [
