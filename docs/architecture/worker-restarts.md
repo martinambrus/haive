@@ -66,9 +66,10 @@ duplicate; `created` is left alone, since a deferred-start draft waits there on 
 route that starts a task moves it from `created` to `queued` before it queues START, after every
 write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), so a START that was lost
 or could not be queued is the sweep's to give, and the route answers as though it had been
-queued. POST /tasks inserts and queues in one transaction, so a creation that fails there leaves
-no task; a spawner that does not (a plan task's seed, the global-KB enrich across its own database)
-leaves one that failed partway `created`, where nothing starts it. And a `waiting_cli`
+queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each insert the
+task and claim its START in one transaction, so a creation that fails there leaves no task; the
+enrich writes its KB entry in its own database first and removes it again when the task insert
+fails. And a `waiting_cli`
 current step with a run recorded before the cutoff that no cli-exec job owes, no run of its own
 running and no task-queue job, is recovered exactly as boot recovers a parked step
 (`recoverParkedStep`), bounded by `bornBefore`: only runs started or recorded before the cutoff are
