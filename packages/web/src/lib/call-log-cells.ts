@@ -26,7 +26,14 @@ function outcomesOf(counts: TaskCallOutcomeCounts): string {
 
 export function customToolsCell(entries: TaskCustomToolCall[]): string {
   if (entries.length === 0) return NONE;
-  return entries.map((e) => `${e.tool || UNDECLARED_TOOL} ${outcomesOf(e)}`).join(', ');
+  // A name is unique within a step only, so the task's total can hold one name twice.
+  const repeated = (tool: string) => entries.filter((e) => e.tool === tool).length > 1;
+  return entries
+    .map((e) => {
+      const name = e.tool || UNDECLARED_TOOL;
+      return `${repeated(e.tool) ? `${name} (${e.action})` : name} ${outcomesOf(e)}`;
+    })
+    .join(', ');
 }
 
 export function integrationsCell(entries: TaskIntegrationCall[]): string {

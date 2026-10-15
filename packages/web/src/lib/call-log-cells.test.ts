@@ -103,6 +103,16 @@ describe('customToolsCell', () => {
       '(undeclared) 1 refused',
     );
   });
+
+  it('adds the action to a name two entries share, as two steps may in the total', () => {
+    expect(
+      customToolsCell([
+        custom('fetch', { action: 'http-get', ok: 1 }),
+        custom('fetch', { action: 'rag-query', ok: 2 }),
+        custom('other', { action: 'http-get', ok: 1 }),
+      ]),
+    ).toBe('fetch (http-get) 1 ok, fetch (rag-query) 2 ok, other 1 ok');
+  });
 });
 
 describe('integrationsCell', () => {
