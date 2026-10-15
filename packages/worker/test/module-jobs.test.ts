@@ -25,6 +25,7 @@ vi.mock('@haive/shared/module-db', async (importOriginal) => ({
 
 const {
   MODULE_JOBS_RECONCILE_MS,
+  MODULE_JOB_START_WAIT_MS,
   MODULE_JOB_STOP_WAIT_MS,
   beginModuleTeardown,
   moduleJobsStarted,
@@ -88,6 +89,24 @@ function moduleWithSchema(id: string) {
   return { ...base, ensure, entry: { ...base.entry, ensureSchema: ensure } as Entry };
 }
 
+function moduleWithHungStart(id: string, hung: 'ensureSchema' | 'jobs') {
+  const m = moduleWithSchema(id);
+  let end!: { resolve: () => void; reject: (err: Error) => void };
+  if (hung === 'ensureSchema') {
+    m.ensure.mockImplementationOnce(
+      () => new Promise<void>((resolve, reject) => (end = { resolve, reject })),
+    );
+  } else {
+    m.jobs.mockImplementationOnce(
+      () =>
+        new Promise<typeof m.stop>((resolve, reject) => {
+          end = { resolve: () => resolve(m.stop), reject };
+        }),
+    );
+  }
+  return { ...m, end: () => end };
+}
+
 function moduleWithSchemaOnly(id: string) {
   const ensure = vi.fn(async () => {});
   return {
@@ -96,6 +115,15 @@ function moduleWithSchemaOnly(id: string) {
     ensure,
   };
 }
+
+const track = (promise: Promise<unknown>) => {
+  const state = { settled: false };
+  const settle = () => {
+    state.settled = true;
+  };
+  void promise.then(settle, settle);
+  return state;
+};
 
 describe('startModuleJobs', () => {
   it('starts no job of a deactivated module and every job of an active one', async () => {
@@ -706,15 +734,6 @@ describe('the jobs reconcile', () => {
 });
 
 describe('the jobs reconcile with a stop that does not end', () => {
-  const track = (promise: Promise<unknown>) => {
-    const state = { settled: false };
-    const settle = () => {
-      state.settled = true;
-    };
-    void promise.then(settle, settle);
-    return state;
-  };
-
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -887,5 +906,292 @@ describe('the jobs reconcile with a stop that does not end', () => {
     await reconcile(new Set(['failing-late']));
     expect(m.stop).toHaveBeenCalledTimes(2);
     expect(moduleJobsStarted('failing-late')).toBe(false);
+  });
+});
+
+describe('the jobs reconcile with a start that does not end', () => {
+  const hooks = ['ensureSchema', 'jobs'] as const;
+
+  beforeEach(() => {
+    moduleDb.gate = undefined;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it.each(hooks)(
+    'goes on after the wait without a module whose %s hook never settles, having started the other modules of that pass',
+    async (which) => {
+      const hung = moduleWithHungStart(`hung-${which}`, which);
+      const next = moduleWithJobs(`after-hung-${which}`);
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const { reconcile } = await startModuleJobs(
+        [hung.loaded, next.loaded],
+        [hung.entry, next.entry],
+        new Set([`hung-${which}`, `after-hung-${which}`]),
+      );
+
+      const pass = track(reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS - 1);
+      expect(pass.settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pass.settled).toBe(true);
+      expect(next.jobs).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted(`after-hung-${which}`)).toBe(true);
+      expect(hung.ensure).toHaveBeenCalledOnce();
+      expect(hung.jobs).toHaveBeenCalledTimes(which === 'jobs' ? 1 : 0);
+    },
+  );
+
+  it.each(hooks)(
+    'records a module whose %s hook ends after the wait as started, as a prompt start would',
+    async (which) => {
+      const id = `started-late-${which}`;
+      const m = moduleWithHungStart(id, which);
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+      const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+      const pass = track(reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+      expect(pass.settled).toBe(true);
+      expect(moduleJobsStarted(id)).toBe(true);
+      expect(info).not.toHaveBeenCalledWith(
+        { module: id },
+        'module jobs started: the module is active again',
+      );
+
+      m.end().resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(m.jobs).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted(id)).toBe(true);
+      expect(info).toHaveBeenCalledWith(
+        { module: id },
+        'module jobs started: the module is active again',
+      );
+
+      await stopAll();
+      expect(m.stop).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted(id)).toBe(false);
+    },
+  );
+
+  it.each(hooks)(
+    'logs a failure of the %s hook after the wait, leaves the module not started, and tries it again only after another deactivation and activation',
+    async (which) => {
+      const id = `failed-late-${which}`;
+      const jobsCalls = which === 'jobs' ? 1 : 0;
+      const m = moduleWithHungStart(id, which);
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+      const pass = track(reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+      expect(pass.settled).toBe(true);
+      expect(error).not.toHaveBeenCalled();
+
+      m.end().reject(new Error('no queue'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(error).toHaveBeenCalledOnce();
+      expect(error).toHaveBeenCalledWith(
+        expect.objectContaining({ module: id, err: expect.any(Error) }),
+        expect.stringMatching(/failed to start/),
+      );
+      expect(moduleJobsStarted(id)).toBe(false);
+
+      await reconcile(new Set());
+      await reconcile(new Set());
+      expect(m.ensure).toHaveBeenCalledOnce();
+      expect(m.jobs).toHaveBeenCalledTimes(jobsCalls);
+      expect(moduleJobsStarted(id)).toBe(false);
+
+      await reconcile(new Set([id]));
+      await reconcile(new Set());
+      expect(m.ensure).toHaveBeenCalledTimes(2);
+      expect(m.jobs).toHaveBeenCalledTimes(jobsCalls + 1);
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      await stopAll();
+    },
+  );
+
+  it.each(hooks)(
+    'starts the jobs of a module once when it is deactivated and activated again while its %s hook still runs',
+    async (which) => {
+      const id = `flipped-${which}`;
+      const m = moduleWithHungStart(id, which);
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+      const pass = track(reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+      expect(pass.settled).toBe(true);
+
+      await reconcile(new Set([id]));
+      await reconcile(new Set());
+      await reconcile(new Set());
+      expect(m.ensure).toHaveBeenCalledOnce();
+      expect(m.jobs).toHaveBeenCalledTimes(which === 'jobs' ? 1 : 0);
+
+      m.end().resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await reconcile(new Set());
+      expect(m.ensure).toHaveBeenCalledOnce();
+      expect(m.jobs).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      await stopAll();
+      expect(m.stop).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(hooks)(
+    'does not wait on a module deactivated while its %s hook still runs, and stops it on the first pass after the start ends',
+    async (which) => {
+      const id = `off-while-starting-${which}`;
+      const m = moduleWithHungStart(id, which);
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+      const first = track(reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+      expect(first.settled).toBe(true);
+
+      const during = track(reconcile(new Set([id])));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(during.settled).toBe(true);
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      m.end().resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(m.jobs).toHaveBeenCalledOnce();
+      expect(m.stop).not.toHaveBeenCalled();
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      await reconcile(new Set([id]));
+      expect(m.stop).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted(id)).toBe(false);
+
+      await reconcile(new Set());
+      expect(m.jobs).toHaveBeenCalledTimes(2);
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      await stopAll();
+    },
+  );
+
+  it('warns once for each start that outlives the wait, naming the module and the wait, and not again for later passes', async () => {
+    const slowSchema = moduleWithHungStart('slow-schema', 'ensureSchema');
+    const slowJobs = moduleWithHungStart('slow-jobs', 'jobs');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs(
+      [slowSchema.loaded, slowJobs.loaded],
+      [slowSchema.entry, slowJobs.entry],
+      new Set(['slow-schema', 'slow-jobs']),
+    );
+
+    const pass = track(reconcile(new Set()));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS * 2);
+    expect(pass.settled).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(2);
+    for (const module of ['slow-schema', 'slow-jobs']) {
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ module, waitMs: MODULE_JOB_START_WAIT_MS }),
+        expect.any(String),
+      );
+    }
+
+    await reconcile(new Set());
+    await reconcile(new Set(['slow-schema', 'slow-jobs']));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS * 2);
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs no warning for a start that ends within the wait, however long the clock then runs', async () => {
+    const m = moduleWithJobs('nearly-started');
+    m.jobs.mockImplementationOnce(
+      () =>
+        new Promise<typeof m.stop>((resolve) =>
+          setTimeout(() => resolve(m.stop), MODULE_JOB_START_WAIT_MS - 1),
+        ),
+    );
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['nearly-started']),
+    );
+
+    const pass = track(reconcile(new Set()));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS - 1);
+    expect(pass.settled).toBe(true);
+    expect(moduleJobsStarted('nearly-started')).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS * 2);
+    expect(warn).not.toHaveBeenCalled();
+
+    await stopAll();
+  });
+
+  it.each(hooks)(
+    'keeps a module whose %s hook still runs marked as started, so its teardown is refused until the start has failed',
+    async (which) => {
+      const id = `pinned-${which}`;
+      const m = moduleWithHungStart(id, which);
+      const teardown = vi.fn<Hook>(async () => {});
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      const { reconcile } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+      const pass = track(reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+      expect(pass.settled).toBe(true);
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      const refusal = (await runModuleTeardown(teardownDeps(m, teardown), id).catch(
+        (err: unknown) => err,
+      )) as Error;
+      expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
+      expect(refusal.message).toMatch(new RegExp(`${id}.*still running`));
+      expect(teardown).not.toHaveBeenCalled();
+
+      m.end().reject(new Error('no queue'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(moduleJobsStarted(id)).toBe(false);
+      await runModuleTeardown(teardownDeps(m, teardown), id);
+      expect(teardown).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('goes on after the wait without the schema setup of a module that has no jobs, and ensures it once', async () => {
+    const m = moduleWithSchemaOnly('schema-only-hung');
+    let endEnsure!: () => void;
+    m.ensure.mockImplementationOnce(() => new Promise<void>((resolve) => (endEnsure = resolve)));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['schema-only-hung']),
+    );
+
+    const pass = track(reconcile(new Set()));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(pass.settled).toBe(true);
+    expect(moduleJobsStarted('schema-only-hung')).toBe(true);
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+
+    endEnsure();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(moduleJobsStarted('schema-only-hung')).toBe(false);
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
   });
 });

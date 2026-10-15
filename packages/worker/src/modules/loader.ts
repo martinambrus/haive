@@ -196,6 +196,7 @@ export async function ensureModuleSchemas(
 }
 
 export const MODULE_JOBS_RECONCILE_MS = 15_000;
+export const MODULE_JOB_START_WAIT_MS = 10_000;
 export const MODULE_JOB_STOP_WAIT_MS = 10_000;
 
 const jobsStarted = new Set<string>();
@@ -228,6 +229,8 @@ export async function startModuleJobs(
   const stops = new Map<string, () => Promise<void>>();
   // A stop need not be idempotent: later callers wait on one still running, never call it again.
   const stopping = new Map<string, Promise<void>>();
+  // A start the pass went on without still runs; no pass begins another for that module.
+  const starting = new Set<string>();
   const pending = new Set(deactivated);
   const start = async (
     moduleId: string,
@@ -299,13 +302,47 @@ export async function startModuleJobs(
   }
 
   const held = new Set<string>();
+  const reactivate = (
+    moduleId: string,
+    ensureSchema: WorkerModuleEntry['ensureSchema'],
+    jobs: WorkerModuleEntry['jobs'],
+  ): Promise<void> =>
+    new Promise<void>((resolve) => {
+      starting.add(moduleId);
+      const timer = setTimeout(() => {
+        logger.warn(
+          { module: moduleId, waitMs: MODULE_JOB_START_WAIT_MS },
+          `module schema or jobs still starting after ${MODULE_JOB_START_WAIT_MS / 1000} s; going on without them`,
+        );
+        resolve();
+      }, MODULE_JOB_START_WAIT_MS);
+      void (async () => {
+        try {
+          if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
+          if (jobs) {
+            await start(moduleId, jobs);
+            logger.info({ module: moduleId }, 'module jobs started: the module is active again');
+          }
+        } catch (err) {
+          logger.error(
+            { err, module: moduleId },
+            'module schema or jobs failed to start; deactivate and reactivate the module to try again',
+          );
+        } finally {
+          if (!stops.has(moduleId)) jobsStarted.delete(moduleId);
+          starting.delete(moduleId);
+          clearTimeout(timer);
+          resolve();
+        }
+      })();
+    });
   const reconcile = async (nowDeactivated: ReadonlySet<string>): Promise<void> => {
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
       const jobs = entries[index]?.jobs;
       const ensureSchema = entries[index]?.ensureSchema;
       const moduleId = module.manifest.id;
-      if ((!jobs && !ensureSchema) || stops.has(moduleId)) continue;
+      if ((!jobs && !ensureSchema) || stops.has(moduleId) || starting.has(moduleId)) continue;
       if (nowDeactivated.has(moduleId)) {
         pending.add(moduleId);
         held.delete(moduleId);
@@ -328,20 +365,7 @@ export async function startModuleJobs(
       tornDown.delete(moduleId);
       // Claimed before the first await, so a teardown that checks now is refused.
       jobsStarted.add(moduleId);
-      try {
-        if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
-        if (jobs) {
-          await start(moduleId, jobs);
-          logger.info({ module: moduleId }, 'module jobs started: the module is active again');
-        }
-      } catch (err) {
-        logger.error(
-          { err, module: moduleId },
-          'module schema or jobs failed to start; deactivate and reactivate the module to try again',
-        );
-      } finally {
-        if (!stops.has(moduleId)) jobsStarted.delete(moduleId);
-      }
+      await reactivate(moduleId, ensureSchema, jobs);
     }
   };
 
