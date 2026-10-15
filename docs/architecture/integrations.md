@@ -15,7 +15,8 @@ What is live and what is not: providers, connections, sign-in, the write switch,
 resolution and the choice routes are merged. Nothing yet declares a step requirement, writes a stamp,
 mints an `integrations` token, writes `integration_calls` or calls `recordTaskGrants` — the broker
 (`/integration-mcp`) and the worker's dispatch wiring are the next steps. So today no task grant exists
-in production and the resolver's grant tier is always empty.
+in production and the resolver's grant tier is always empty. The task page has no Integrations section
+yet either.
 
 ## Providers and categories
 
@@ -25,11 +26,13 @@ refresh finds its method by kind and a second `oauth2` entry would refresh throu
 token endpoint), an optional remote/stdio `mcp` surface, `operations[]` (`{opId, description,
 inputSchema, access: read|write}`) and an optional `entitlementId`. A spec needs `mcp` or at least one
 operation. An operation id must match `TOOL_NAME_PATTERN` (`^[a-z][a-z0-9_]{0,39}$`, `contracts.ts`),
-the same grammar as a custom tool's name, so every declared operation lists under its own id.
+the same grammar as a custom tool's name, so an operation can list under its own id (two declared
+tools that share one are renamed; see Tool names).
 
 Auth kinds: `oauth2` (authorize/token/optional revoke URLs, read and write scopes, PKCE always,
 `clientRegistration`, optional `userInfo` = an https URL plus JSON pointers for the account id and
-label), `device` (device-code and token URLs, scopes, `userInfo`), `token` (a form and help text).
+label), `device` (device-code and token URLs, scopes, optional `userInfo`, without which it cannot
+sign anyone in), `token` (a form and help text).
 
 Ids: a core provider or category is `^[a-z0-9][a-z0-9_-]*$`, a module's is `module.<moduleId>.<id>`.
 `isCategoryId` accepts a module-grammar id or a registered core id only; the choice routes are
@@ -52,7 +55,8 @@ the provider's current state for `enabled`, not the column's `false`, so saving 
 id never switches a core provider off. Enablement gates integration features only — sign-in, link,
 choices and resolution. The worker's PR open and PR poll never read it, and the repository form's
 GitHub device sign-in skips it (`checkEnabled: false`), so that path can still create a connection
-for a disabled GitHub provider, which resolution then answers with `provider-disabled`.
+for a disabled GitHub provider, which resolution never selects: it answers `provider-disabled` when a
+choice or grant names that account, or when no enabled provider's account serves the category.
 
 Both `@haive/shared/integrations` (server-only, imports the database) and `@haive/shared/forge` stay
 out of the root barrel. Web imports `@haive/shared/forge`, so nothing loaded by that subpath may import
@@ -106,7 +110,9 @@ provider be called `oauth` or `connections`.
   old one and the keyspace stays bounded under `noeviction`.
 - **The callback is a web page**, `/settings/integrations/callback/<provider>`
   (`oauthRedirectUri`, one helper for the authorize request and the admin page). It strips `code`
-  and `state` from the address bar and POSTs once to `/integrations/oauth/complete`; it never retries.
+  and `state` from the address bar and POSTs once to `/integrations/oauth/complete`, never retrying a
+  refusal; the web client's one resend after refreshing an expired cookie is the only repeat, and only
+  that send reaches the attempt.
   This replaced the plan's api GET callback: the work happens in a cookie-authenticated POST that
   passes the Origin check, the web client refreshes an expired cookie, `WEB_ORIGIN` is always defined
   where the public api origin is not, and the api keeps no state-changing GET. The per-provider path
@@ -119,7 +125,8 @@ provider be called `oauth` or `connections`.
 - **Device flow.** `POST /providers/:id/device/start|poll`. The browser gets a 32-byte opaque handle;
   the vendor's device code stays in Redis (`integration-device:<user>:<provider>`, TTL the vendor's
   `expires_in` bounded to 1–1800 s). A poll claims the record by moving `nextPollAt`, so an early or
-  concurrent poll answers `pending` without calling the vendor; `slow_down` adds 5 s from now. While
+  concurrent poll answers `pending` without calling the vendor; `slow_down` lengthens the interval by
+  5 s, and the next poll is due one new interval from now. While
   the token endpoint is polled, a vendor refusal drops the record (400) and an unavailable vendor keeps
   it (502); once the token poll succeeds the record is consumed whatever the account lookup and the
   sign-in then answer. The legacy
@@ -157,9 +164,11 @@ can come back. A connection with no recorded client (`oauth_client_id` NULL, e.g
 0202) refreshes with whichever client currently ranks first, so replacing a client does not move such a
 row to `needs_reauth`. `invalid_grant` (and GitHub's `bad_refresh_token`) means `needs_reauth`, written inside
 the transaction and thrown after it commits; `invalid_client` keeps the status and the tokens and
-records `last_error`, since fixing the client heals every connection; a network error, a 5xx or a
-timeout writes nothing. A successful refresh writes both tokens under a new DEK, keeps the old refresh
-token when the vendor does not rotate it, and keeps the granted scopes when none are sent.
+records `last_error`, since fixing the client heals every connection (GitHub's
+`incorrect_client_credentials` likewise); a connection that holds no refresh token becomes
+`needs_reauth`; a network error, a 5xx or a timeout writes nothing. A successful refresh writes both
+tokens under a new DEK, keeps the old refresh token when the vendor does not rotate it, and keeps the
+granted scopes when none are sent.
 
 `getConnectionCredential` adds the credential's username and API base for a forge call (Bitbucket
 Cloud app passwords need Basic auth); an OAuth connection answers `username` and `apiBaseUrl` null.
@@ -210,12 +219,15 @@ The rules that look odd and are deliberate:
 - **Status is checked only on the account the tiers picked, never used to filter candidates.** A
   picked account that is not connected answers `connection-unavailable` with its id, so an expired
   token fails by name instead of quietly switching to another vendor.
-- **Explicit beats soft.** A task choice or grant whose provider is disabled, whose account the
-  repository's allow-list excludes, or (forge) whose task has no repository or remote stops there with
-  that reason. An account that is gone, foreign or no longer fits the repository counts as absent: a
-  choice then asks again (`needs-choice`), a grant falls through to the next tier. The preference and
-  the install default skip a provider that is disabled, not connected, not allowed or not for this
-  repository, and record why.
+- **Explicit beats soft.** A task choice resolves only through its account: one that names none (the
+  PUT allows it, and deleting the account leaves one) answers `needs-choice` whatever its provider's
+  state. A choice or grant whose account's provider is disabled, whose account the repository's
+  allow-list excludes, or (forge) whose task has no repository or remote stops there with that reason.
+  An account that is gone, foreign or no longer fits the repository counts as absent: a choice then
+  asks again (`needs-choice`), a grant falls through to the next tier. The preference and the install
+  default skip a provider that is disabled, not connected, not allowed or not for this repository, and
+  record why; a preferred provider with several usable accounts, none of them named, stops the walk
+  with `needs-choice`.
 - A forge connection with no linked credential never fits; every forge connection has one today.
 - One resolution per target per call: two requirements naming the same category get the same account.
 - Choices are the desired state the api writes; grants are the applied state written where resolution
@@ -225,7 +237,8 @@ The rules that look odd and are deliberate:
 - `integration_grants.tool_allow_list` is never written, so nothing reads it.
 
 `resolveStepIntegrations(db, {taskId} | {draft}, requirements)` is read-only;
-`resolveTaskCategories` serves the task page; `recordTaskGrants` upserts one grant per category (a
+`resolveTaskCategories` answers `GET /tasks/:id/integrations`, meant for the task page, which does not
+call it yet; `recordTaskGrants` upserts one grant per category (a
 no-op when unchanged) and skips unresolved and provider-pinned results. The agreed dispatch contract:
 the grant is written FIRST and the stamped invocation inserted after it, in one transaction, so no run
 holds a connection without a grant.
@@ -248,8 +261,9 @@ that category's task grant. Refusals (`api/src/lib/integration-choice.ts`): unkn
 unknown provider, a provider that does not serve the category, an account of another provider, a
 forge account that does not fit the task's repository and an account outside a restricted repository's
 allow-list are 400; a disabled provider is 409 (403 on sign-in and link — both pinned by tests); a
-connection that is not the caller's is 404, missing and foreign alike; a finished task is 409 and a dead
-one 409 `task_dead`. Admins get no override on another user's preferences, repositories or tasks.
+connection that is not the caller's is 404, missing and foreign alike; a completed or cancelled task is
+409 (a failed one can still change) and a dead one 409 `task_dead`. Admins get no override on another
+user's preferences, repositories or tasks.
 
 ## Forges
 
@@ -296,14 +310,19 @@ authoritative.
 **Credential host and API base** (`api/src/routes/repo-credentials.ts`). This is where a secret's
 destination is decided. The host is stored trimmed and lower case and must survive
 `https://<host>/` parsing unchanged, which refuses numeric forms such as `2130706433` and `0x7f.1`; it
-says nothing about the kind of destination, so `localhost` and IP literals are accepted (self-hosted
+says nothing about the kind of destination, so `localhost` and dotted IPv4 literals are accepted (a
+bracketed IPv6 literal does not match the host grammar and is refused; self-hosted
 forges on a private network are legitimate, and the host is set by the user, never by an agent). A set
 API base must be `https:`, carry no user or password, contain no `?` or `#` (endpoint paths are
 appended to the stored text), and sit on the credential's host (port included) or on the host of the
 forge's default API base (api.github.com, api.bitbucket.org). An edit reads, checks and writes under
 the row's lock, judging the value that will be stored against the new host. A plain-http self-hosted
-forge therefore gets no API base. The rule runs on create and edit only: a row stored before it keeps
-whatever base it had, and `resolveForgeContext` uses the stored value as is.
+forge therefore cannot be given an http API base, and its default base is https, so its pull-request
+calls cannot reach it. The rule runs on create and edit only: a row stored before it keeps whatever base
+it had, and `resolveForgeContext` uses the stored value as is. With no stored base, the default follows
+an http(s) remote's host; for a public-host remote `credentialUsableForPr` compares forges, not hosts,
+so a self-hosted credential of the same forge chosen for a public-host repository sends its token to
+the public host. That gap is still open.
 
 ## The call log, the stamp and the token
 
@@ -314,11 +333,12 @@ whatever base it had, and `resolveForgeContext` uses the stored value as is.
   whose bindings it may use; `verifyTaskToken` treats both as optional, so requiring them is the
   broker's job. The broker must not live under `/integrations`, whose `requireAuth` would answer a
   sandbox token 401.
-- **`integration_calls`**: the provider id (text, not null, no foreign key), the connection, task,
-  step and invocation (each `SET NULL` on delete, so rows outlive a deleted task), tool, access,
-  surface (`mcp` or `rest`), outcome (`ok`, `refused`, `error`, `running`), reason, duration, time. Never arguments or results — those are someone's mail
-  and documents (pinned by `database/test/integrations-schema.test.ts`). `running` lets the broker write
-  the row before the vendor answers, so a crash leaves an honest "attempted, outcome unknown".
+- **`integration_calls`**: the provider id (`varchar(256)`, not null, no foreign key), the connection,
+  task, step and invocation (each `SET NULL` on delete, so rows outlive a deleted task), tool, access,
+  surface (`mcp` or `rest`), outcome (`ok`, `refused`, `error`, `running`), reason, duration, time.
+  Never arguments or results — those are someone's mail and documents (pinned by
+  `database/test/integrations-schema.test.ts`). `running` lets the broker write the row before the
+  vendor answers, so a crash leaves an honest "attempted, outcome unknown".
 - **The stamp**: `cli_invocations.integrations`, the bindings resolved at dispatch
   (`{requirementId, categoryId|null, providerId, connectionId, access}`), NULL when none. One decision,
   one value: a run keeps the provider its prompt named, and the next dispatch resolves again.
@@ -333,22 +353,25 @@ whatever base it had, and `resolveForgeContext` uses the stored value as is.
 All guarded and idempotent. 0192 created the six tables and enums (its first line is the rollback).
 0202 added `oauth_client_id` and the two partial unique keys (one connection per external account, one
 per credential). 0206 added `task_integration_choices`, a preference's `connection_id`,
-`repositories.integrations_restricted` and the partial unique keys for task and repository grants;
-PostgreSQL truncates three of the integration foreign-key names (over 63 characters) with a NOTICE,
-which is harmless and still caught by the guard on a re-run. 0207 added the `running` outcome (an enum
-value cannot be dropped, so its undo leaves it), `reason`, `duration_ms`, the invocation index and the
-stamp column. The admin-default row is a preference with `user_id` NULL, unique with `NULLS NOT
-DISTINCT`; drizzle 0.45.2 has no such uniqueIndex option, hence a `unique(...).nullsNotDistinct()`
-constraint.
+`repositories.integrations_restricted` and the partial unique keys for task and repository grants.
+PostgreSQL truncates three integration foreign-key names over 63 characters (one in 0192, two in 0206)
+with a NOTICE, which is harmless and still caught by the guard on a re-run. 0207 added the `running`
+outcome (an enum value cannot be dropped, so an undo would have to leave it; the file states no undo),
+`reason`, `duration_ms`, the invocation index and the stamp column. The admin-default row is a
+preference with `user_id` NULL, unique with `NULLS NOT DISTINCT`; drizzle 0.45.2 has no such
+uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
 
 ## Do not change
 
 1. Status is checked on the selected account only; never filter candidates by status.
-2. A blocked choice or grant stops; soft tiers skip and say why; an absent account (gone, foreign or
-   no longer fitting) makes a grant fall through and a choice ask again.
+2. A blocked choice or grant stops; a soft tier skips and says why, or stops at `needs-choice` when its
+   provider has several usable accounts and none is named; a choice with no account asks again, and an
+   absent account (gone, foreign or no longer fitting) makes a grant fall through and a choice ask
+   again.
 3. The allow-list fails closed on `integrations_restricted`, never on entry existence.
 4. Refresh: row lock, re-check, single flight, under the issuing client (the current top client for a
-   row that recorded none); a client refusal keeps the status; a missing client writes nothing.
+   row that recorded none); a client refusal keeps the status; a replaced issuing client writes
+   `needs_reauth`; no configured client writes nothing.
 5. Branch on the OAuth `error` code, never on text; known codes pass whole.
 6. Forge connections point at a credential and never copy its token; no expiring forge tokens; a
    disconnect removes only the pointer.
@@ -356,9 +379,9 @@ constraint.
 8. The OAuth attempt is consumed before any vendor call or write; the exchange uses the starting client;
    no state-changing GET.
 9. Agent-reachable forge input is validated before a URL is built, and adapters re-check the PR number.
-10. A secret goes only over https to its own host or its forge's API host — for every credential
-    created or edited since the rule (9295cd3b3); older rows are not revalidated, and the worker sends
-    their stored base as is.
+10. A stored API base is https on the credential's own host or its forge's API host, for every
+    credential created or edited since the rule (9295cd3b3); older rows are not revalidated, and the
+    worker sends their stored base as is.
 11. GitLab authenticates with `Authorization: Bearer`.
 12. A forge request has its own deadline; a stalled error body keeps its HTTP status.
 13. Only scope-user, owner-matched connections resolve or are accepted; an install default names a
