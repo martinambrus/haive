@@ -240,6 +240,17 @@ by the same `coalesce(task_step_id, summary_for_step_id)` fold as the step badge
 per-step rows with `sumToolUsageSteps` (`@haive/shared/stats`), so the browser does no
 arithmetic.
 
+**The task endpoint also carries the two brokers' call logs**, which the rollup does not read:
+per step `customTools` (from `custom_tool_calls`, by tool and action) and `integrations` (from
+`integration_calls`, by provider, tool and access), each entry with its ok, refused, error and
+running count, plus `callTotals` over every row of the task, rows whose step row is gone
+included (`api/src/routes/tasks/_call-log.ts`, merged by `sumCustomToolCalls` /
+`sumIntegrationCalls`). They count EVERY row, runs since replaced included, because the call
+happened (and for an integration the vendor saw it); so they need not match the MCP column, which
+counts the CLI's own events on runs not replaced, and the panel says so. A step with calls but no
+attributed run still gets a row. A `running` count that never settles is a call a crash left
+unfinished.
+
 **The unused report compares what is installed with what the runs used, and it reads the
 installed half from disk by NAME only.** `shared/src/stats-server/tool-inventory.ts` walks the catalog's
 `projectAgentsDir` / `projectSkillsDir` union through `@haive/shared/fs-safe` from the repository
