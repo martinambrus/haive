@@ -2,6 +2,7 @@ import type {
   TaskCallOutcomeCounts,
   TaskCustomToolCall,
   TaskIntegrationCall,
+  TaskStep,
   TaskToolUsage,
 } from './api-client';
 
@@ -45,6 +46,12 @@ export function toolUsageRows(steps: ToolUsageStep[]): ToolUsageStep[] {
   return steps.filter(
     (s) => s.usage !== null || s.customTools.length > 0 || s.integrations.length > 0,
   );
+}
+
+export function showsToolUsage(
+  steps: Pick<TaskStep, 'cliInvocationCount' | 'loggedCallCount'>[],
+): boolean {
+  return steps.some((s) => s.cliInvocationCount > 0 || s.loggedCallCount > 0);
 }
 
 export function hasNothingToShow(data: Pick<TaskToolUsage, 'coverage' | 'callTotals'>): boolean {

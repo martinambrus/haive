@@ -9,6 +9,7 @@ import {
   customToolsCell,
   hasNothingToShow,
   integrationsCell,
+  showsToolUsage,
   toolUsageRows,
 } from './call-log-cells';
 
@@ -215,5 +216,28 @@ describe('hasNothingToShow', () => {
         },
       }),
     ).toBe(false);
+  });
+});
+
+describe('showsToolUsage', () => {
+  const counters = (cliInvocationCount: number, loggedCallCount: number) => ({
+    cliInvocationCount,
+    loggedCallCount,
+  });
+
+  it('is true once a step ran a CLI', () => {
+    expect(showsToolUsage([counters(0, 0), counters(2, 0)])).toBe(true);
+  });
+
+  it('is true for a step with logged calls but no live run', () => {
+    expect(showsToolUsage([counters(0, 0), counters(0, 3)])).toBe(true);
+  });
+
+  it('is false when no step has a run or a call', () => {
+    expect(showsToolUsage([counters(0, 0), counters(0, 0)])).toBe(false);
+  });
+
+  it('is false for a task with no step', () => {
+    expect(showsToolUsage([])).toBe(false);
   });
 });

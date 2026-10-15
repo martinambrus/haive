@@ -1,4 +1,5 @@
 import { eq, sql } from 'drizzle-orm';
+import { unionAll } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
   sumCustomToolCalls,
@@ -93,4 +94,27 @@ export async function loadIntegrationCalls(
     })),
     sumIntegrationCalls,
   );
+}
+
+/** Call rows both brokers logged per step, replaced runs included. */
+export async function loadLoggedCallCounts(
+  db: Database,
+  taskId: string,
+): Promise<Map<string, number>> {
+  const custom = schema.customToolCalls;
+  const integration = schema.integrationCalls;
+  const calls = unionAll(
+    db.select({ taskStepId: custom.taskStepId }).from(custom).where(eq(custom.taskId, taskId)),
+    db
+      .select({ taskStepId: integration.taskStepId })
+      .from(integration)
+      .where(eq(integration.taskId, taskId)),
+  ).as('calls');
+  const rows = await db
+    .select({ taskStepId: calls.taskStepId, n: sql<number>`count(*)::int` })
+    .from(calls)
+    .groupBy(calls.taskStepId);
+  const counts = new Map<string, number>();
+  for (const r of rows) if (r.taskStepId !== null) counts.set(r.taskStepId, r.n);
+  return counts;
 }
