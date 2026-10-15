@@ -1,10 +1,22 @@
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BitbucketCloudForgeProvider } from '../src/forge/bitbucket-cloud.js';
 import { BitbucketServerForgeProvider } from '../src/forge/bitbucket-server.js';
 import { GiteaForgeProvider } from '../src/forge/gitea.js';
 import { GithubForgeProvider } from '../src/forge/github.js';
 import { GitlabForgeProvider } from '../src/forge/gitlab.js';
-import { ForgeAuthError, type ForgeContext } from '../src/forge/types.js';
+import {
+  ForgeAuthError,
+  type ForgeContext,
+  type ForgeProvider,
+  type ForgeProviderName,
+} from '../src/forge/types.js';
 
 function ctx(over: Partial<ForgeContext> = {}): ForgeContext {
   return {
@@ -124,7 +136,7 @@ describe('gitea adapter', () => {
 });
 
 describe('gitlab adapter', () => {
-  it('uses PRIVATE-TOKEN, an encoded project id, and source/target branch', async () => {
+  it('uses Bearer auth, an encoded project id, and source/target branch', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ iid: 9, web_url: 'https://gitlab.com/g/s/app/-/merge_requests/9' }, 201),
     );
@@ -141,7 +153,8 @@ describe('gitlab adapter', () => {
     expect(res).toEqual({ url: 'https://gitlab.com/g/s/app/-/merge_requests/9', number: '9' });
     const { url, init } = lastCall();
     expect(url).toBe('https://gitlab.com/api/v4/projects/g%2Fs%2Fapp/merge_requests');
-    expect(init.headers['PRIVATE-TOKEN']).toBe('tok');
+    expect(init.headers.Authorization).toBe('Bearer tok');
+    expect(init.headers['PRIVATE-TOKEN']).toBeUndefined();
     expect(JSON.parse(init.body ?? '')).toEqual({
       source_branch: 'feat',
       target_branch: 'main',
@@ -240,4 +253,89 @@ describe('bitbucket server adapter', () => {
       toRef: { id: 'refs/heads/main' },
     });
   });
+});
+
+describe('a forge credential reaches only the origin it was sent to', () => {
+  const ADAPTERS: [ForgeProviderName, () => ForgeProvider][] = [
+    ['github', () => new GithubForgeProvider(5_000)],
+    ['gitea', () => new GiteaForgeProvider(5_000)],
+    ['gitlab', () => new GitlabForgeProvider(5_000)],
+    ['bitbucket_cloud', () => new BitbucketCloudForgeProvider(5_000)],
+    ['bitbucket_server', () => new BitbucketServerForgeProvider(5_000)],
+  ];
+  const TOKEN = 'SECRET-TOKEN';
+  const SECRETS = [TOKEN, Buffer.from(`${ctx().username}:${TOKEN}`).toString('base64')];
+  const servers: Server[] = [];
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    for (const server of servers.splice(0)) {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  async function listen(answer: (url: string, res: ServerResponse) => void) {
+    const seen: { url: string; headers: IncomingHttpHeaders }[] = [];
+    const server = createServer((req, res) => {
+      seen.push({ url: req.url ?? '', headers: req.headers });
+      answer(req.url ?? '', res);
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, seen };
+  }
+
+  const redirectTo = (location: string) => (_url: string, res: ServerResponse) => {
+    res.writeHead(302, { location });
+    res.end();
+  };
+  const answerOpen = (_url: string, res: ServerResponse) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"state":"open"}');
+  };
+  const carrying = (headers: IncomingHttpHeaders) =>
+    Object.entries(headers)
+      .filter(([, value]) => SECRETS.some((secret) => String(value).includes(secret)))
+      .map(([name]) => name);
+  const readPullRequest = (
+    make: () => ForgeProvider,
+    provider: ForgeProviderName,
+    apiBase: string,
+  ) =>
+    make()
+      .getPullRequestState(ctx({ provider, apiBase, token: TOKEN }), '1')
+      .catch(() => undefined);
+
+  it.each(ADAPTERS)(
+    '%s sends nothing a redirect to another origin could carry along',
+    async (provider, make) => {
+      const other = await listen(answerOpen);
+      const forge = await listen(redirectTo(`${other.origin}/elsewhere`));
+
+      await readPullRequest(make, provider, forge.origin);
+
+      expect(carrying(forge.seen[0]!.headers)).not.toEqual([]);
+      expect(other.seen.flatMap((request) => carrying(request.headers))).toEqual([]);
+    },
+    10_000,
+  );
+
+  it.each(ADAPTERS)(
+    '%s keeps its credential across a redirect within the forge',
+    async (provider, make) => {
+      const forge = await listen((url, res) =>
+        url.startsWith('/first') ? redirectTo('/second')(url, res) : answerOpen(url, res),
+      );
+
+      await readPullRequest(make, provider, `${forge.origin}/first`);
+
+      expect(forge.seen.map((request) => request.url.split('/')[1])).toEqual(['first', 'second']);
+      expect(carrying(forge.seen[0]!.headers)).not.toEqual([]);
+      expect(carrying(forge.seen[1]!.headers)).toEqual(carrying(forge.seen[0]!.headers));
+    },
+    10_000,
+  );
 });

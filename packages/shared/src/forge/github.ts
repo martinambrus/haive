@@ -1,4 +1,5 @@
 import { BaseForgeProvider } from './base-forge.js';
+import { assertPrNumber } from './op-args.js';
 import { ForgeConflictError } from './types.js';
 import type {
   ForgeContext,
@@ -53,6 +54,7 @@ export class GithubForgeProvider extends BaseForgeProvider {
   }
 
   async getPullRequestState(ctx: ForgeContext, prNumber: string): Promise<PrStateResult> {
+    assertPrNumber(prNumber);
     const pr = await this.request<GithubPr>(
       ctx,
       'GET',
