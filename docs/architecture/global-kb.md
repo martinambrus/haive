@@ -115,7 +115,11 @@ connection string writes an audit row (`global_kb.connection_string.update`,
 `{connectionStringSet: true}`), never any part of the string. A blank string on a save means
 "keep"; removing the stored one takes an explicit `clearConnectionString: true`, refused with 409
 `connection_string_in_use` while the store the save leaves in place is the external one, refused
-with 400 alongside a new string, and audited as `{connectionStringSet: false}`. The house-rules switch lives in
+with 400 alongside a new string, and audited as `{connectionStringSet: false}`. A save that sets the
+string writes it (and its audit row) after the embedding-width check and before the mode, so no
+process finds the external store without its string, and a refused save writes nothing. Every
+process reads the mode and the string fresh, past the 30 s caches (`resolveGlobalKbSettings`), so a
+switch or a removal reaches the worker at once. The house-rules switch lives in
 the admin console, and an admin who points the KB at an external store trusts every writer of that
 database: a row it marks enforced is honoured. The
 enrich task refuses to re-enrich an enforced entry, since a retry would demote it.
