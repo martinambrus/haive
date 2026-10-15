@@ -125,6 +125,8 @@ const track = (promise: Promise<unknown>) => {
   return state;
 };
 
+const stamp = (moduleId: string, at: number) => new Map([[moduleId, at]]);
+
 describe('startModuleJobs', () => {
   it('starts no job of a deactivated module and every job of an active one', async () => {
     const off = moduleWithJobs('alpha');
@@ -292,9 +294,14 @@ describe('the jobs reconcile', () => {
     await stopAll();
   });
 
-  it('logs a start that fails at runtime, and retries it only after a deactivation and a reactivation', async () => {
+  it('tries a start that fails at runtime three times in all, and again only after a deactivation and a reactivation', async () => {
     const m = moduleWithJobs('broken');
-    m.jobs.mockRejectedValueOnce(new Error('no queue'));
+    const refused = new Error('no queue');
+    m.jobs
+      .mockRejectedValueOnce(refused)
+      .mockRejectedValueOnce(refused)
+      .mockRejectedValueOnce(refused);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const { reconcile, stopAll } = await startModuleJobs(
       [m.loaded],
@@ -305,17 +312,23 @@ describe('the jobs reconcile', () => {
     await expect(reconcile(new Set())).resolves.toBeUndefined();
     expect(m.jobs).toHaveBeenCalledOnce();
     expect(moduleJobsStarted('broken')).toBe(false);
+    expect(error).not.toHaveBeenCalled();
+
+    await reconcile(new Set());
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledTimes(3);
+    expect(moduleJobsStarted('broken')).toBe(false);
     expect(error).toHaveBeenCalledWith(
       expect.objectContaining({ module: 'broken', err: expect.any(Error) }),
       expect.any(String),
     );
 
     await reconcile(new Set());
-    expect(m.jobs).toHaveBeenCalledOnce();
+    expect(m.jobs).toHaveBeenCalledTimes(3);
 
     await reconcile(new Set(['broken']));
     await reconcile(new Set());
-    expect(m.jobs).toHaveBeenCalledTimes(2);
+    expect(m.jobs).toHaveBeenCalledTimes(4);
     expect(moduleJobsStarted('broken')).toBe(true);
 
     await stopAll();
@@ -348,34 +361,255 @@ describe('the jobs reconcile', () => {
     await stopAll();
   });
 
-  it('starts no jobs when the schema of a reactivated module cannot be ensured, and tries again only after another reactivation', async () => {
-    const m = moduleWithSchema('doomed');
-    m.ensure.mockRejectedValueOnce(new Error('ddl refused'));
+  it.each(['ensureSchema', 'jobs'] as const)(
+    'starts the jobs of a reactivated module whose %s hook failed twice, on the third pass',
+    async (which) => {
+      const id = `flaky-${which}`;
+      const m = moduleWithSchema(id);
+      const refused = new Error('refused');
+      if (which === 'ensureSchema') {
+        m.ensure.mockRejectedValueOnce(refused).mockRejectedValueOnce(refused);
+      } else {
+        m.jobs.mockRejectedValueOnce(refused).mockRejectedValueOnce(refused);
+      }
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+      await reconcile(new Set());
+      await reconcile(new Set());
+      expect(m.ensure).toHaveBeenCalledTimes(2);
+      expect(moduleJobsStarted(id)).toBe(false);
+
+      await reconcile(new Set());
+      expect(m.ensure).toHaveBeenCalledTimes(3);
+      expect(m.jobs).toHaveBeenCalledTimes(which === 'jobs' ? 3 : 1);
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      await reconcile(new Set());
+      expect(m.ensure).toHaveBeenCalledTimes(3);
+      expect(error).not.toHaveBeenCalled();
+
+      await stopAll();
+    },
+  );
+
+  it('tries a reactivation that keeps failing three times in all, warning of the first two and logging the error for the third, and three more after a deactivation and a reactivation', async () => {
+    const m = moduleWithSchema('doomed-for-good');
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const { reconcile, stopAll } = await startModuleJobs(
       [m.loaded],
       [m.entry],
-      new Set(['doomed']),
+      new Set(['doomed-for-good']),
     );
 
-    await expect(reconcile(new Set())).resolves.toBeUndefined();
-    expect(m.ensure).toHaveBeenCalledOnce();
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(3);
     expect(m.jobs).not.toHaveBeenCalled();
-    expect(moduleJobsStarted('doomed')).toBe(false);
-    expect(moduleDb.closed).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('doomed-for-good')).toBe(false);
+    expect(moduleDb.closed).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenCalledTimes(2);
+    for (const attempt of [1, 2]) {
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ module: 'doomed-for-good', attempt, err: expect.any(Error) }),
+        expect.any(String),
+      );
+    }
+    expect(error).toHaveBeenCalledOnce();
     const logged = error.mock.calls[0]![0] as unknown as { module: string; err: Error };
-    expect(logged.module).toBe('doomed');
-    expect(logged.err.message).toBe('Module doomed schema bootstrap failed: ddl refused');
+    expect(logged.module).toBe('doomed-for-good');
+    expect(logged.err.message).toBe('Module doomed-for-good schema bootstrap failed: ddl refused');
+
+    await reconcile(new Set(['doomed-for-good']));
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(6);
+    expect(warn).toHaveBeenCalledTimes(4);
+    expect(error).toHaveBeenCalledTimes(2);
+
+    await stopAll();
+  });
+
+  it('counts the attempts of a reactivation afresh once the module has been deactivated and activated again', async () => {
+    const m = moduleWithSchema('restarted');
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['restarted']),
+    );
 
     await reconcile(new Set());
     expect(m.ensure).toHaveBeenCalledOnce();
-    expect(m.jobs).not.toHaveBeenCalled();
 
-    await reconcile(new Set(['doomed']));
+    await reconcile(new Set(['restarted']));
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(4);
+    expect(error).toHaveBeenCalledOnce();
+
+    await stopAll();
+  });
+
+  it('gives a module torn down and activated again between two passes attempts of its own, whatever the reactivation before it used', async () => {
+    const m = moduleWithSchema('torn-after-failing');
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['torn-after-failing']),
+    );
+
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(3);
+
+    beginModuleTeardown('torn-after-failing')();
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(6);
+
+    await stopAll();
+  });
+
+  it('gives a module torn down and activated again mid-retry, between two passes, three attempts of its own', async () => {
+    const m = moduleWithSchema('torn-mid-retry');
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['torn-mid-retry']),
+    );
+
     await reconcile(new Set());
-    expect(m.ensure).toHaveBeenCalledTimes(2);
+    expect(m.ensure).toHaveBeenCalledTimes(1);
+
+    beginModuleTeardown('torn-mid-retry')();
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(4);
+
+    await stopAll();
+  });
+
+  it('tries a reactivation that keeps failing three times in all, and three more once a pass sees the stamp of the still active module change', async () => {
+    const m = moduleWithSchema('restamped');
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['restamped']),
+    );
+
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set(), stamp('restamped', 1));
+    expect(m.ensure).toHaveBeenCalledTimes(3);
+    expect(error).toHaveBeenCalledOnce();
+
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set(), stamp('restamped', 2));
+    expect(m.ensure).toHaveBeenCalledTimes(6);
+    expect(error).toHaveBeenCalledTimes(2);
+
+    await stopAll();
+  });
+
+  it('gives a module that failed once and whose stamp then changed three attempts of its own, not what was left of the earlier activation', async () => {
+    const m = moduleWithSchema('restamped-mid-retry');
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['restamped-mid-retry']),
+    );
+
+    await reconcile(new Set(), stamp('restamped-mid-retry', 1));
+    expect(m.ensure).toHaveBeenCalledTimes(1);
+
+    for (let pass = 0; pass < 5; pass++) {
+      await reconcile(new Set(), stamp('restamped-mid-retry', 2));
+    }
+    expect(m.ensure).toHaveBeenCalledTimes(4);
+
+    await stopAll();
+  });
+
+  it('starts a module whose attempts ran out when its stamp changes, and stops or restarts no module whose jobs run', async () => {
+    const idle = moduleWithSchema('idle-restamped');
+    const busy = moduleWithSchema('busy-restamped');
+    const refused = new Error('ddl refused');
+    idle.ensure
+      .mockRejectedValueOnce(refused)
+      .mockRejectedValueOnce(refused)
+      .mockRejectedValueOnce(refused);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const stamps = (at: number) =>
+      new Map([
+        ['idle-restamped', at],
+        ['busy-restamped', at],
+      ]);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [idle.loaded, busy.loaded],
+      [idle.entry, busy.entry],
+      new Set(['idle-restamped']),
+    );
+
+    for (let pass = 0; pass < 5; pass++) await reconcile(new Set(), stamps(1));
+    expect(idle.ensure).toHaveBeenCalledTimes(3);
+    expect(idle.jobs).not.toHaveBeenCalled();
+    expect(busy.jobs).toHaveBeenCalledOnce();
+
+    await reconcile(new Set(), stamps(2));
+    await reconcile(new Set(), stamps(3));
+    expect(idle.ensure).toHaveBeenCalledTimes(4);
+    expect(idle.jobs).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('idle-restamped')).toBe(true);
+    expect(busy.ensure).not.toHaveBeenCalled();
+    expect(busy.jobs).toHaveBeenCalledOnce();
+    expect(busy.stop).not.toHaveBeenCalled();
+    expect(moduleJobsStarted('busy-restamped')).toBe(true);
+
+    await stopAll();
+    expect(idle.stop).toHaveBeenCalledOnce();
+    expect(busy.stop).toHaveBeenCalledOnce();
+  });
+
+  it('only records the stamps on the first pass, and ensures the schema of an active module without jobs once on the pass that sees its stamp change', async () => {
+    const m = moduleWithSchemaOnly('first-pass-only');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+
+    await reconcile(new Set(), stamp('first-pass-only', 1));
+    await reconcile(new Set(), stamp('first-pass-only', 1));
+    expect(m.ensure).not.toHaveBeenCalled();
+
+    await reconcile(new Set(), stamp('first-pass-only', 2));
+    expect(m.ensure).toHaveBeenCalledOnce();
+
+    await reconcile(new Set(), stamp('first-pass-only', 2));
+    expect(m.ensure).toHaveBeenCalledOnce();
+
+    await stopAll();
+  });
+
+  it('stops the jobs of a module deactivated in the pass that sees its stamp change, and starts them once on the pass that sees it active', async () => {
+    const m = moduleWithJobs('off-restamped');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+
+    await reconcile(new Set(), stamp('off-restamped', 1));
+    await reconcile(new Set(['off-restamped']), stamp('off-restamped', 2));
+    expect(m.stop).toHaveBeenCalledOnce();
     expect(m.jobs).toHaveBeenCalledOnce();
-    expect(moduleJobsStarted('doomed')).toBe(true);
+    expect(moduleJobsStarted('off-restamped')).toBe(false);
+
+    await reconcile(new Set(), stamp('off-restamped', 2));
+    expect(m.jobs).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('off-restamped')).toBe(true);
 
     await stopAll();
   });
@@ -981,36 +1215,32 @@ describe('the jobs reconcile with a start that does not end', () => {
   );
 
   it.each(hooks)(
-    'logs a failure of the %s hook after the wait, leaves the module not started, and tries it again only after another deactivation and activation',
+    'counts a failure of the %s hook after the wait as a failed attempt, leaves the module not started, and tries it again on the next pass',
     async (which) => {
       const id = `failed-late-${which}`;
       const jobsCalls = which === 'jobs' ? 1 : 0;
       const m = moduleWithHungStart(id, which);
-      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
       const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
       const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
 
       const pass = track(reconcile(new Set()));
       await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
       expect(pass.settled).toBe(true);
-      expect(error).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ attempt: expect.anything() }),
+        expect.any(String),
+      );
 
       m.end().reject(new Error('no queue'));
       await vi.advanceTimersByTimeAsync(0);
-      expect(error).toHaveBeenCalledOnce();
-      expect(error).toHaveBeenCalledWith(
-        expect.objectContaining({ module: id, err: expect.any(Error) }),
-        expect.stringMatching(/failed to start/),
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ module: id, attempt: 1, err: expect.any(Error) }),
+        expect.any(String),
       );
+      expect(error).not.toHaveBeenCalled();
       expect(moduleJobsStarted(id)).toBe(false);
 
-      await reconcile(new Set());
-      await reconcile(new Set());
-      expect(m.ensure).toHaveBeenCalledOnce();
-      expect(m.jobs).toHaveBeenCalledTimes(jobsCalls);
-      expect(moduleJobsStarted(id)).toBe(false);
-
-      await reconcile(new Set([id]));
       await reconcile(new Set());
       expect(m.ensure).toHaveBeenCalledTimes(2);
       expect(m.jobs).toHaveBeenCalledTimes(jobsCalls + 1);
@@ -1019,6 +1249,48 @@ describe('the jobs reconcile with a start that does not end', () => {
       await stopAll();
     },
   );
+
+  it('does not count a start that fails after a pass saw its module deactivated against the activation after it', async () => {
+    const id = 'toggled-late';
+    const m = moduleWithHungStart(id, 'ensureSchema');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+    const pass = track(reconcile(new Set()));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(pass.settled).toBe(true);
+    await reconcile(new Set([id]));
+
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    m.end().reject(new Error('ddl refused'));
+    await vi.advanceTimersByTimeAsync(0);
+    for (let next = 0; next < 5; next++) await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(1 + 3);
+
+    await stopAll();
+  });
+
+  it('does not count a start that fails after a pass saw the stamp of its still active module change against the activation after it', async () => {
+    const id = 'restamped-late';
+    const m = moduleWithHungStart(id, 'ensureSchema');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+    const pass = track(reconcile(new Set(), stamp(id, 1)));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(pass.settled).toBe(true);
+    await reconcile(new Set(), stamp(id, 2));
+
+    m.ensure.mockRejectedValue(new Error('ddl refused'));
+    m.end().reject(new Error('ddl refused'));
+    await vi.advanceTimersByTimeAsync(0);
+    for (let next = 0; next < 5; next++) await reconcile(new Set(), stamp(id, 2));
+    expect(m.ensure).toHaveBeenCalledTimes(1 + 3);
+
+    await stopAll();
+  });
 
   it.each(hooks)(
     'starts the jobs of a module once when it is deactivated and activated again while its %s hook still runs',
