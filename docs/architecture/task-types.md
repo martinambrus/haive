@@ -363,7 +363,8 @@ tasks are listed in the task list like any other task (a product decision).
 15. No data field turns agent rules, the MCP surface or tools off (agent rules follow the install's
     switch only).
 16. Custom tool calls: declared on the pinned step, live invocation, own audience, budget claimed under
-    the lock, nothing stored that the agent sent or received.
+    the lock; a row keeps the tool, action, outcome, reason, HTTP status, size and duration, never the
+    arguments or the response body.
 17. Egress: every resolved address checked at connect time, c-ares, no redirect, one deadline.
 18. Drafts: a positive key list, parity with the create route, and no surface, rules, egress or repository
     for the drafter.
