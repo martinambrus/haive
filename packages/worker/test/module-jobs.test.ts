@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared';
 
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 
@@ -22,7 +23,7 @@ describe('startModuleJobs', () => {
   it('starts no job of a deactivated module and every job of an active one', async () => {
     const off = moduleWithJobs('alpha');
     const on = moduleWithJobs('beta');
-    const stopAll = await startModuleJobs(
+    const { stopAll } = await startModuleJobs(
       [off.loaded, on.loaded],
       [off.entry, on.entry],
       new Set(['alpha']),
@@ -44,7 +45,7 @@ describe('startModuleJobs', () => {
     const off = moduleWithJobs('quiet');
     const on = moduleWithJobs('busy');
     const bare = { loaded: { manifest: { id: 'bare' } } as unknown as Loaded, entry: {} as Entry };
-    const stopAll = await startModuleJobs(
+    const { stopAll } = await startModuleJobs(
       [off.loaded, on.loaded, bare.loaded],
       [off.entry, on.entry, bare.entry],
       new Set(['quiet']),
@@ -74,5 +75,153 @@ describe('startModuleJobs', () => {
     );
     expect(ok.stop).toHaveBeenCalledOnce();
     expect(moduleJobsStarted('first')).toBe(false);
+  });
+});
+
+describe('the jobs reconcile', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stops the jobs of a module deactivated while they run, and starts them once it is reactivated', async () => {
+    const m = moduleWithJobs('flip');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+    expect(m.jobs).toHaveBeenCalledOnce();
+
+    await reconcile(new Set(['flip']));
+    expect(m.stop).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('flip')).toBe(false);
+
+    await reconcile(new Set(['flip']));
+    expect(m.stop).toHaveBeenCalledOnce();
+
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('flip')).toBe(true);
+
+    await stopAll();
+    expect(m.stop).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('flip')).toBe(false);
+  });
+
+  it('starts the jobs of a module deactivated at boot once it is reactivated', async () => {
+    const m = moduleWithJobs('late');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set(['late']));
+    expect(m.jobs).not.toHaveBeenCalled();
+
+    await reconcile(new Set(['late']));
+    expect(m.jobs).not.toHaveBeenCalled();
+    expect(moduleJobsStarted('late')).toBe(false);
+
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('late')).toBe(true);
+
+    await stopAll();
+    expect(m.stop).toHaveBeenCalledOnce();
+  });
+
+  it('stops only the module that was deactivated', async () => {
+    const a = moduleWithJobs('pair-a');
+    const b = moduleWithJobs('pair-b');
+    const { reconcile, stopAll } = await startModuleJobs([a.loaded, b.loaded], [a.entry, b.entry]);
+
+    await reconcile(new Set());
+    expect(a.stop).not.toHaveBeenCalled();
+    expect(b.stop).not.toHaveBeenCalled();
+
+    await reconcile(new Set(['pair-a']));
+    expect(a.stop).toHaveBeenCalledOnce();
+    expect(b.stop).not.toHaveBeenCalled();
+    expect([a, b].map((m) => m.jobs.mock.calls.length)).toEqual([1, 1]);
+    expect(moduleJobsStarted('pair-b')).toBe(true);
+
+    await stopAll();
+    expect(b.stop).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a module whose jobs failed to stop marked as started, and stops them on the next pass', async () => {
+    const m = moduleWithJobs('stuck');
+    m.stop.mockRejectedValueOnce(new Error('queue gone'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+
+    await expect(reconcile(new Set(['stuck']))).resolves.toBeUndefined();
+    expect(m.stop).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('stuck')).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'stuck', err: expect.any(Error) }),
+      expect.any(String),
+    );
+
+    await reconcile(new Set(['stuck']));
+    expect(m.stop).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('stuck')).toBe(false);
+
+    await stopAll();
+    expect(m.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts no second set of jobs when a reactivation overtakes a stop that failed', async () => {
+    const m = moduleWithJobs('overtaken');
+    m.stop.mockRejectedValueOnce(new Error('queue gone'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+
+    await reconcile(new Set(['overtaken']));
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('overtaken')).toBe(true);
+
+    await reconcile(new Set(['overtaken']));
+    expect(m.stop).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('overtaken')).toBe(false);
+
+    await stopAll();
+  });
+
+  it('logs a start that fails at runtime, and retries it only after a deactivation and a reactivation', async () => {
+    const m = moduleWithJobs('broken');
+    m.jobs.mockRejectedValueOnce(new Error('no queue'));
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['broken']),
+    );
+
+    await expect(reconcile(new Set())).resolves.toBeUndefined();
+    expect(m.jobs).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('broken')).toBe(false);
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'broken', err: expect.any(Error) }),
+      expect.any(String),
+    );
+
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledOnce();
+
+    await reconcile(new Set(['broken']));
+    await reconcile(new Set());
+    expect(m.jobs).toHaveBeenCalledTimes(2);
+    expect(moduleJobsStarted('broken')).toBe(true);
+
+    await stopAll();
+    expect(m.stop).toHaveBeenCalledOnce();
+  });
+
+  it('never starts or stops a module without jobs', async () => {
+    const bare = { loaded: { manifest: { id: 'plain' } } as unknown as Loaded, entry: {} as Entry };
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([bare.loaded], [bare.entry]);
+
+    await reconcile(new Set(['plain']));
+    await reconcile(new Set());
+    expect(moduleJobsStarted('plain')).toBe(false);
+
+    await stopAll();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
   });
 });

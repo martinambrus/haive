@@ -190,22 +190,43 @@ const jobsStarted = new Set<string>();
 
 export const moduleJobsStarted = (moduleId: string): boolean => jobsStarted.has(moduleId);
 
+export type ModuleJobsHandle = {
+  reconcile: (deactivated: ReadonlySet<string>) => Promise<void>;
+  stopAll: () => Promise<void>;
+};
+
 export async function startModuleJobs(
   loaded: readonly LoadedWorkerModule[],
   entries: readonly WorkerModuleEntry[],
   deactivated: ReadonlySet<string> = new Set(),
-): Promise<() => Promise<void>> {
-  const stops: Array<{ moduleId: string; stop: () => Promise<void> }> = [];
-  const stopAll = async (): Promise<void> => {
-    const results = await Promise.allSettled(stops.map((s) => s.stop()));
+): Promise<ModuleJobsHandle> {
+  const stops = new Map<string, () => Promise<void>>();
+  const start = async (
+    moduleId: string,
+    jobs: NonNullable<WorkerModuleEntry['jobs']>,
+  ): Promise<void> => {
+    const stop = await jobs({
+      moduleId,
+      connection: getBullRedis(),
+      logger: logger.child({ module: moduleId }),
+    });
+    stops.set(moduleId, stop);
+    jobsStarted.add(moduleId);
+  };
+  const stopModules = async (moduleIds: readonly string[]): Promise<void> => {
+    const results = await Promise.allSettled(moduleIds.map(async (id) => stops.get(id)!()));
     results.forEach((r, i) => {
+      const moduleId = moduleIds[i]!;
       if (r.status === 'rejected') {
-        logger.warn({ err: r.reason, module: stops[i]!.moduleId }, 'module jobs failed to stop');
+        logger.warn({ err: r.reason, module: moduleId }, 'module jobs failed to stop');
       } else {
-        jobsStarted.delete(stops[i]!.moduleId);
+        stops.delete(moduleId);
+        jobsStarted.delete(moduleId);
+        logger.info({ module: moduleId }, 'module jobs stopped');
       }
     });
   };
+  const stopAll = (): Promise<void> => stopModules([...stops.keys()]);
   for (const [index, module] of loaded.entries()) {
     const jobs = entries[index]?.jobs;
     if (!jobs) continue;
@@ -215,13 +236,7 @@ export async function startModuleJobs(
       continue;
     }
     try {
-      const stop = await jobs({
-        moduleId,
-        connection: getBullRedis(),
-        logger: logger.child({ module: moduleId }),
-      });
-      stops.push({ moduleId, stop });
-      jobsStarted.add(moduleId);
+      await start(moduleId, jobs);
     } catch (err) {
       await stopAll();
       throw new Error(
@@ -230,7 +245,30 @@ export async function startModuleJobs(
       );
     }
   }
-  return stopAll;
+
+  let wasDeactivated = new Set(deactivated);
+  const reconcile = async (nowDeactivated: ReadonlySet<string>): Promise<void> => {
+    await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
+    for (const [index, module] of loaded.entries()) {
+      const jobs = entries[index]?.jobs;
+      const moduleId = module.manifest.id;
+      if (!jobs || stops.has(moduleId)) continue;
+      // Only a module seen deactivated starts here, so a failed start is not retried every pass.
+      if (!wasDeactivated.has(moduleId) || nowDeactivated.has(moduleId)) continue;
+      try {
+        await start(moduleId, jobs);
+        logger.info({ module: moduleId }, 'module jobs started: the module is active again');
+      } catch (err) {
+        logger.error(
+          { err, module: moduleId },
+          'module jobs failed to start; deactivate and reactivate the module to try again',
+        );
+      }
+    }
+    wasDeactivated = new Set(nowDeactivated);
+  };
+
+  return { reconcile, stopAll };
 }
 
 export async function publishWorkerBootReport(
