@@ -317,3 +317,21 @@ export function deadBanner(
   }
   return { text: sentences.join('\n\n') };
 }
+
+export interface TaskStopRow {
+  reason: string;
+  moduleId: string | null;
+}
+
+/** Words for a task stopped by turning its module off; keyed on the stop record, not the error. */
+export function moduleStopBanner(
+  task: { status: string },
+  stop: TaskStopRow | null | undefined,
+): { text: string } | null {
+  if (task.status !== 'failed' || stop?.reason !== 'module_deactivated' || !stop.moduleId) {
+    return null;
+  }
+  return {
+    text: `Stopped because the module ${stop.moduleId} was turned off by an administrator.`,
+  };
+}

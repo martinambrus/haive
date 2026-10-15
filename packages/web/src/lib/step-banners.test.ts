@@ -7,6 +7,7 @@ import {
   isTaskDead,
   leftMergeBanners,
   modelIdentityBanner,
+  moduleStopBanner,
   parkBanner,
   PAUSED_WAIT_TEXT,
   QUEUED_WAIT_TEXT,
@@ -476,5 +477,59 @@ describe('deadBanner', () => {
   it('shows with dead_at and no dead_reason at all', () => {
     const stampOnly = { status: 'running', deadAt: DEAD_AT, deadReason: null };
     expect(deadBanner(stampOnly, [moduleStep('module.statistics.collect')])).not.toBeNull();
+  });
+});
+
+describe('moduleStopBanner', () => {
+  const stop = { reason: 'module_deactivated', moduleId: 'alpha' };
+
+  it('says an administrator turned the module off, for a failed task whose latest stop was that', () => {
+    expect(moduleStopBanner({ status: 'failed' }, stop)).toEqual({
+      text: 'Stopped because the module alpha was turned off by an administrator.',
+    });
+  });
+
+  it('says nothing for a stop of any other reason', () => {
+    expect(
+      moduleStopBanner({ status: 'failed' }, { reason: 'maintenance', moduleId: null }),
+    ).toBeNull();
+    expect(
+      moduleStopBanner({ status: 'failed' }, { reason: 'maintenance', moduleId: 'alpha' }),
+    ).toBeNull();
+  });
+
+  it('says nothing without a stop record, including from an api that predates it', () => {
+    expect(moduleStopBanner({ status: 'failed' }, null)).toBeNull();
+    expect(moduleStopBanner({ status: 'failed' }, undefined)).toBeNull();
+  });
+
+  it('says nothing for a task that is not failed, whatever the record says', () => {
+    for (const status of [
+      'created',
+      'queued',
+      'running',
+      'waiting_user',
+      'completed',
+      'cancelled',
+    ]) {
+      expect(moduleStopBanner({ status }, stop)).toBeNull();
+    }
+  });
+
+  it('says nothing when the record does not name the module', () => {
+    expect(
+      moduleStopBanner({ status: 'failed' }, { reason: 'module_deactivated', moduleId: null }),
+    ).toBeNull();
+    expect(
+      moduleStopBanner({ status: 'failed' }, { reason: 'module_deactivated', moduleId: '' }),
+    ).toBeNull();
+  });
+
+  it('reads the stop record and never the error text of the task', () => {
+    // NEGATIVE CONTROL: a version keyed on the task's error message instead of the record fails.
+    const reworded = { status: 'failed', errorMessage: 'Halted by an operator' };
+    const unrelated = { status: 'failed', errorMessage: 'Stopped by an administrator' };
+    expect(moduleStopBanner(reworded, stop)).not.toBeNull();
+    expect(moduleStopBanner(unrelated, null)).toBeNull();
   });
 });
