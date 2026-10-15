@@ -22,6 +22,7 @@ const STEP = '06c-dag-execute';
 const app = new Hono<AppEnv>();
 app.use('*', async (c, next) => {
   c.set('userId', USER);
+  c.set('maintenanceState', 'normal');
   await next();
 });
 app.route('/', stepRoutes);

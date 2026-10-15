@@ -675,6 +675,8 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     columns: { id: true, status: true, type: true, repositoryId: true, deadAt: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  // The answer reopens a failed task, which is new work.
+  if (task.status === 'failed') assertNewWorkAllowed(c.get('maintenanceState'));
   refuseDeadTask(task);
   // Answering a failed upgrade's form revives it in the worker, which the index refuses there.
   if (task.status === 'failed' && task.type === 'onboarding_upgrade' && task.repositoryId) {
@@ -754,6 +756,8 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     columns: { id: true, status: true, deadAt: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  // The answer reopens a failed task, which is new work.
+  if (task.status === 'failed') assertNewWorkAllowed(c.get('maintenanceState'));
   refuseDeadTask(task);
 
   const stepRows = await db

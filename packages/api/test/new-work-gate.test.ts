@@ -586,3 +586,83 @@ describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
     });
   });
 });
+
+describe.each([
+  { route: 'submit', body: { values: { choice: 'yes' } }, statusAfter: 'failed' },
+  { route: 'clarify', body: { answer: 'Keep the incoming change.' }, statusAfter: 'running' },
+])('POST /tasks/:id/steps/:stepId/$route', ({ route, body, statusAfter }) => {
+  const TASK = '00000000-0000-4000-8000-0000000000e1';
+  const STEP = '11d-skill-sync';
+  const answer = () => app.request(`/tasks/${TASK}/steps/${STEP}/${route}`, request({ body }));
+  const withParkedForm = (status: string) => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      taskEvents: schema.taskEvents,
+    });
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      type: 'workflow',
+      title: 'a task',
+      status,
+      errorMessage: status === 'failed' ? 'boom' : null,
+      orchestrationEpoch: 3,
+      currentStepId: STEP,
+      currentRound: 0,
+    });
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: STEP,
+      stepIndex: 1,
+      runSeq: 1,
+      round: 0,
+      status: 'waiting_form',
+      idleMs: 0,
+      waitingStartedAt: new Date(0),
+    });
+    h.db = fake.db;
+    h.queued = [];
+    return fake;
+  };
+  const written = (fake: ReturnType<typeof withParkedForm>) =>
+    [schema.tasks, schema.taskSteps, schema.taskEvents].map((table) => fake.rows(table));
+
+  it('queues the answer to a failed task while the system is normal', async () => {
+    const fake = withParkedForm('failed');
+
+    expect((await answer()).status).toBe(200);
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: statusAfter });
+    expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ waitingStartedAt: null });
+    expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+  });
+
+  it.each(['draining', 'maintenance'])(
+    'answers 503 and queues and writes nothing for a failed task while the system is %s',
+    async (state) => {
+      const fake = withParkedForm('failed');
+      const before = written(fake);
+      h.state = state;
+
+      const res = await answer();
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(h.queued).toEqual([]);
+      expect(written(fake)).toEqual(before);
+    },
+  );
+
+  it.each(['waiting_user', 'running'])(
+    'still takes the answer to a %s task while the system drains',
+    async (status) => {
+      const fake = withParkedForm(status);
+      h.state = 'draining';
+
+      expect((await answer()).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status });
+      expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ waitingStartedAt: null });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+    },
+  );
+});
