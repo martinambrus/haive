@@ -354,7 +354,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       });
       expect(await tasks()).toHaveLength(0);
       expect(h.queued).toEqual([]);
-      expect(h.reads).toEqual(['normal', 'draining']);
+      expect(h.reads).toEqual(['normal', 'normal', 'draining']);
     });
   });
 

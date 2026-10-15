@@ -35,9 +35,10 @@ const put = (state: string) =>
     body: JSON.stringify({ state }),
   });
 
-/** `events` lists who asks for the exclusive fence and when the state write lands, in order. */
+/** `events` lists who asks for the exclusive fence, reads the stored state and writes, in order. */
 function setup(
   whileWriting: (fake: ReturnType<typeof createFakeDb>) => Promise<void> = async () => {},
+  stored = 'normal',
 ) {
   const fake = createFakeDb({ auditEvents: schema.auditEvents });
   const events: string[] = [];
@@ -45,6 +46,11 @@ function setup(
     events.push(`asks ${key}`);
   };
   vi.spyOn(configService, 'get').mockResolvedValue('normal');
+  vi.spyOn(configService, 'getFresh').mockImplementation(async (key) => {
+    expect(key).toBe(CONFIG_KEYS.MAINTENANCE_STATE);
+    events.push('reads');
+    return stored;
+  });
   const set = vi.spyOn(configService, 'set').mockImplementation(async (key, value) => {
     expect(key).toBe(CONFIG_KEYS.MAINTENANCE_STATE);
     events.push(`writes ${value}`);
@@ -74,12 +80,23 @@ describe('PUT /admin/maintenance', () => {
     ]);
   });
 
-  it('asks for the exclusive fence before it writes the state', async () => {
+  it('asks for the exclusive fence before it reads the state it replaces and writes the new one', async () => {
     const t = setup();
 
     expect((await put('draining')).status).toBe(200);
 
-    expect(t.events).toEqual([asks, 'writes draining', 'wrote']);
+    expect(t.events).toEqual([asks, 'reads', 'writes draining', 'wrote']);
+  });
+
+  it('records the stored state it replaces, not a cached copy another process has outdated', async () => {
+    const t = setup(undefined, 'draining');
+
+    const res = await put('maintenance');
+
+    expect(await res.json()).toEqual({ state: 'maintenance', previous: 'draining' });
+    expect(t.fake.rows(schema.auditEvents)).toMatchObject([
+      { metadata: { from: 'draining', to: 'maintenance' } },
+    ]);
   });
 
   it('keeps every other taker of the fence waiting until the state is written', async () => {
@@ -95,7 +112,7 @@ describe('PUT /admin/maintenance', () => {
     expect((await put('draining')).status).toBe(200);
     await rival;
 
-    expect(t.events).toEqual([asks, 'writes draining', asks, 'wrote', 'rival holds']);
+    expect(t.events).toEqual([asks, 'reads', 'writes draining', asks, 'wrote', 'rival holds']);
   });
 
   it('answers an error, records nothing and lets go of the fence when the write fails', async () => {
@@ -104,7 +121,7 @@ describe('PUT /admin/maintenance', () => {
 
     expect((await put('maintenance')).status).toBe(500);
 
-    expect(t.events).toEqual([asks]);
+    expect(t.events).toEqual([asks, 'reads']);
     expect(t.fake.rows(schema.auditEvents)).toEqual([]);
     const next = await Promise.race([
       t.fake.db.transaction((tx) => tx.execute(FENCE)).then(() => 'taken'),

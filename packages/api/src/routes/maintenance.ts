@@ -54,10 +54,13 @@ maintenanceRoutes.get('/', async (c) => {
 
 maintenanceRoutes.put('/', async (c) => {
   const { state } = setStateSchema.parse(await c.req.json());
-  const previous = parseMaintenanceState(await configService.get(CONFIG_KEYS.MAINTENANCE_STATE));
-  await getDb().transaction(async (tx) => {
+  const previous = await getDb().transaction(async (tx) => {
     await lockNewWorkFenceExclusive(tx);
+    const replaced = parseMaintenanceState(
+      await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
+    );
     await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+    return replaced;
   });
   await recordAuditEvent(getDb(), {
     actorUserId: c.get('userId'),
