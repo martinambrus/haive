@@ -1,7 +1,21 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
 
+const moduleDb = vi.hoisted(() => ({ opened: vi.fn(), closed: vi.fn(async () => {}) }));
+
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
+vi.mock('../src/db.js', () => ({ getDb: () => ({}) }));
+vi.mock('@haive/shared/module-db', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared/module-db')>()),
+  openModuleDatabase: async (_db: unknown, moduleId: string) => {
+    moduleDb.opened(moduleId);
+    return {
+      sql: {},
+      withSchemaLock: async (run: (tx: unknown) => unknown) => run({}),
+      close: moduleDb.closed,
+    };
+  },
+}));
 
 const { moduleJobsStarted, startModuleJobs } = await import('../src/modules/loader.js');
 
@@ -17,6 +31,12 @@ function moduleWithJobs(id: string) {
     jobs,
     stop,
   };
+}
+
+function moduleWithSchema(id: string) {
+  const base = moduleWithJobs(id);
+  const ensure = vi.fn(async () => {});
+  return { ...base, ensure, entry: { ...base.entry, ensureSchema: ensure } as Entry };
 }
 
 describe('startModuleJobs', () => {
@@ -79,6 +99,11 @@ describe('startModuleJobs', () => {
 });
 
 describe('the jobs reconcile', () => {
+  beforeEach(() => {
+    moduleDb.opened.mockClear();
+    moduleDb.closed.mockClear();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -208,6 +233,64 @@ describe('the jobs reconcile', () => {
 
     await stopAll();
     expect(m.stop).toHaveBeenCalledOnce();
+  });
+
+  it('ensures the schema of a reactivated module once, before its jobs, and not when the jobs start at boot', async () => {
+    const m = moduleWithSchema('revived');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry]);
+    expect(m.jobs).toHaveBeenCalledOnce();
+    expect(m.ensure).not.toHaveBeenCalled();
+
+    await reconcile(new Set(['revived']));
+    expect(m.ensure).not.toHaveBeenCalled();
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+    expect(m.ensure).toHaveBeenCalledWith(expect.objectContaining({ moduleId: 'revived' }));
+    expect(moduleDb.opened).toHaveBeenCalledWith('revived');
+    expect(moduleDb.closed).toHaveBeenCalledOnce();
+    expect(m.jobs).toHaveBeenCalledTimes(2);
+    const [bootStart, restart] = m.jobs.mock.invocationCallOrder;
+    const [ensured] = m.ensure.mock.invocationCallOrder;
+    expect(ensured).toBeGreaterThan(bootStart!);
+    expect(ensured).toBeLessThan(restart!);
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+
+    await stopAll();
+  });
+
+  it('starts no jobs when the schema of a reactivated module cannot be ensured, and tries again only after another reactivation', async () => {
+    const m = moduleWithSchema('doomed');
+    m.ensure.mockRejectedValueOnce(new Error('ddl refused'));
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['doomed']),
+    );
+
+    await expect(reconcile(new Set())).resolves.toBeUndefined();
+    expect(m.ensure).toHaveBeenCalledOnce();
+    expect(m.jobs).not.toHaveBeenCalled();
+    expect(moduleJobsStarted('doomed')).toBe(false);
+    expect(moduleDb.closed).toHaveBeenCalledOnce();
+    const logged = error.mock.calls[0]![0] as unknown as { module: string; err: Error };
+    expect(logged.module).toBe('doomed');
+    expect(logged.err.message).toBe('Module doomed schema bootstrap failed: ddl refused');
+
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+    expect(m.jobs).not.toHaveBeenCalled();
+
+    await reconcile(new Set(['doomed']));
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(2);
+    expect(m.jobs).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('doomed')).toBe(true);
+
+    await stopAll();
   });
 
   it('never starts or stops a module without jobs', async () => {

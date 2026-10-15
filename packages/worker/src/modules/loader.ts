@@ -18,6 +18,7 @@ import {
   type ModuleSchemaContext,
   type ModuleTeardownContext,
 } from '@haive/shared/module-db';
+import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import type { StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
@@ -151,6 +152,30 @@ export function registerModuleSteps(
   });
 }
 
+async function bootstrapModuleSchema(
+  db: Database,
+  moduleId: string,
+  ensureSchema: NonNullable<WorkerModuleEntry['ensureSchema']>,
+): Promise<void> {
+  try {
+    const moduleDb = await openModuleDatabase(db, moduleId);
+    try {
+      await ensureSchema({
+        moduleId,
+        sql: moduleDb.sql,
+        withSchemaLock: moduleDb.withSchemaLock,
+      });
+    } finally {
+      await moduleDb.close();
+    }
+  } catch (err) {
+    throw new Error(
+      `Module ${moduleId} schema bootstrap failed: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
+}
+
 export async function ensureModuleSchemas(
   db: Database,
   loaded: readonly LoadedWorkerModule[],
@@ -164,23 +189,7 @@ export async function ensureModuleSchemas(
       result[moduleId] = 'none';
       continue;
     }
-    try {
-      const moduleDb = await openModuleDatabase(db, moduleId);
-      try {
-        await ensureSchema({
-          moduleId,
-          sql: moduleDb.sql,
-          withSchemaLock: moduleDb.withSchemaLock,
-        });
-      } finally {
-        await moduleDb.close();
-      }
-    } catch (err) {
-      throw new Error(
-        `Module ${moduleId} schema bootstrap failed: ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
-      );
-    }
+    await bootstrapModuleSchema(db, moduleId, ensureSchema);
     result[moduleId] = 'ok';
   }
   return result;
@@ -256,6 +265,8 @@ export async function startModuleJobs(
       // Only a module seen deactivated starts here, so a failed start is not retried every pass.
       if (!wasDeactivated.has(moduleId) || nowDeactivated.has(moduleId)) continue;
       try {
+        const ensureSchema = entries[index]?.ensureSchema;
+        if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
         await start(moduleId, jobs);
         logger.info({ module: moduleId }, 'module jobs started: the module is active again');
       } catch (err) {
