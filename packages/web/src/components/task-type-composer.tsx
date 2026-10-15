@@ -28,6 +28,7 @@ import {
   removeStep,
 } from '@/lib/composition-order';
 import {
+  isToolIssue,
   newPromptStep,
   promptStepIssues,
   promptStepSlugOf,
@@ -376,6 +377,12 @@ export function TaskTypeComposer({
             const promptSlug = typeSlug === undefined ? null : promptStepSlugOf(stepId, typeSlug);
             const promptEntry = promptSlug === null ? undefined : promptSteps[promptSlug];
             const rowPromptIssues = promptByStep.get(stepId) ?? [];
+            const toolRowIssues =
+              prompt && promptEntry && openStepId === stepId
+                ? rowPromptIssues.filter((issue) =>
+                    promptEntry.tools.some((tool) => isToolIssue(issue, tool)),
+                  )
+                : [];
             const limitEditable = !readOnly && entry?.loopBudgetEditable === true;
             return (
               <li
@@ -532,18 +539,21 @@ export function TaskTypeComposer({
                 {promptEntry && prompt && openStepId === stepId && (
                   <PromptStepEditor
                     entry={promptEntry}
+                    issues={toolRowIssues}
                     disabled={disabled}
                     onChange={(next) => prompt.set({ ...promptSteps, [promptEntry.slug]: next })}
                     onRemove={() => remove(index)}
                   />
                 )}
-                {rowPromptIssues.map((issue) => (
-                  <InlineMarkdown
-                    key={promptIssueKey(issue)}
-                    className="mt-2 text-xs text-red-300 [overflow-wrap:anywhere]"
-                    body={describePromptStepIssue(issue)}
-                  />
-                ))}
+                {rowPromptIssues
+                  .filter((issue) => !toolRowIssues.includes(issue))
+                  .map((issue) => (
+                    <InlineMarkdown
+                      key={promptIssueKey(issue)}
+                      className="mt-2 text-xs text-red-300 [overflow-wrap:anywhere]"
+                      body={describePromptStepIssue(issue)}
+                    />
+                  ))}
                 {rowIssues.map((issue) => {
                   const view = describeIssue(issue, {
                     stepIds,

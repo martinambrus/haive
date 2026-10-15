@@ -10,6 +10,7 @@ import type {
   ModuleDiff,
   ModuleIntentRow,
   PromptStepEntry,
+  PromptStepIssue,
   PublicTaskType,
   TaskTypeAvailability,
   TaskTypeUpdate,
@@ -2442,6 +2443,11 @@ export const maintenanceApi = {
     ),
 };
 
+/** A prompt step as the api returns it: a row stored before tools existed has none. */
+export type StoredPromptStep = Omit<PromptStepEntry, 'tools'> & {
+  tools?: PromptStepEntry['tools'];
+};
+
 export interface AdminTaskType {
   slug: string;
   displayName: string;
@@ -2450,7 +2456,7 @@ export interface AdminTaskType {
   stepIds: string[] | null;
   preAnswerDefaults: Record<string, Record<string, unknown>>;
   stepLoopLimitDefaults: Record<string, number>;
-  promptSteps: Record<string, PromptStepEntry>;
+  promptSteps: Record<string, StoredPromptStep>;
   fixLoop: unknown;
   enabled: boolean;
   selectable: boolean;
@@ -2485,6 +2491,7 @@ export const getAdminTaskType = (slug: string) =>
     taskType: AdminTaskType;
     availability: TaskTypeAvailability;
     compositionIssues: CompositionIssue[];
+    promptStepIssues?: PromptStepIssue[];
   }>(`/admin/task-types/${encodeURIComponent(slug)}`);
 
 export const getTaskTypeCatalog = () => api.get<TaskTypeCatalog>('/admin/task-types/catalog');
