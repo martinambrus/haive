@@ -672,12 +672,14 @@ anything else at that name is the person's, kept and reported in the step's warn
 kept, `absent` included, so a Retry after a failed commit still stages a deletion an earlier attempt
 made; 02 lists it in `deletedPaths` only when this task removed it, now or in an earlier attempt
 that recorded the removal as an `upgrade.haive_file_retired` task event, so a Retry after a later
-failure still stages it while a person's own deletion is never claimed. The event is written after
-a read of the file at its own name passes the shape check and before fs-safe parks it for removal, so
-no database wait happens while the file is parked; a file whose event cannot be written is kept and
+failure still stages it while a person's own deletion of a file this task never judged is never
+claimed. The event is written after a read of the file at its own name passes the shape check and
+before fs-safe parks it for removal, so no database wait happens while the file is parked; a file whose event cannot be written is kept and
 reported, and an event whose file is not removed after all (replaced or deleted during that wait, or
-a removal that failed) is taken back by its id, a failed take-back reported as a warning; 03 stages
-it like any removal.
+a removal that failed) is taken back by its id, a failed take-back reported as a warning. A worker
+killed between the event and the removal leaves the event standing, so a Retry that finds the file
+gone, because the person deleted that judged Haive file meanwhile, stages the deletion the removal
+would have made; 03 stages it like any removal.
 04 writes no commit, so a tracked copy is left as an unstaged deletion. A reset still removes the
 file, for installs that hold one.
 
