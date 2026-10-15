@@ -294,6 +294,23 @@ describe('confirming the removal', () => {
     view.choose('cfg-mode', 'internal');
     expect(view.button(REMOVE)).toBeDefined();
   });
+
+  it('also drops a string typed before the removal, so a later save cannot store it again', async () => {
+    const view = await mount();
+    view.choose('cfg-mode', 'external');
+    view.choose('cfg-conn', 'postgres://typed:secret@elsewhere/kb');
+    view.choose('cfg-mode', 'internal');
+    await view.press(REMOVE);
+    await view.pressInDialog(CONFIRM);
+    view.choose('cfg-namespace', 'elsewhere');
+
+    await view.press('Save connection');
+
+    expect(configPuts()).toEqual([
+      [CONFIG_PATH, { clearConnectionString: true }],
+      [CONFIG_PATH, { namespace: 'elsewhere' }],
+    ]);
+  });
 });
 
 describe('dismissing the confirm', () => {

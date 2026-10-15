@@ -671,6 +671,7 @@ export default function GlobalKbPage() {
         clearConnectionString: true,
       });
       setCfgSet(res.connectionStringSet);
+      setCfg((p) => ({ ...p, connectionString: '' }));
       setClearOpen(false);
     } catch (err) {
       setClearError((err as ApiError).message ?? 'Removing the connection string failed');
