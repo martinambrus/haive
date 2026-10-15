@@ -242,6 +242,92 @@ describe('02 and .haive/install.json', () => {
     expect(s.retired()).toEqual([{ taskId: TASK, taskStepId: STEP, payload: { path: INSTALL } }]);
   });
 
+  it('takes its record back, and a retry lists none, when it is deleted during the wait', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.taskEvents) await rm(join(s.root, INSTALL));
+    };
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(out.warnings).toEqual([]);
+    expect.soft(s.retired()).toEqual([]);
+
+    s.fake.hooks.beforeInsert = null;
+    const again = await s.apply();
+
+    expect.soft(again.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(again.warnings).toEqual([]);
+  });
+
+  it('keeps one replaced during the wait, and takes its record back', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.taskEvents) await writeFile(join(s.root, INSTALL), '{"keep":true}');
+    };
+
+    const out = await s.apply();
+
+    expect(await readFile(join(s.root, INSTALL), 'utf8')).toBe('{"keep":true}');
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(out.warnings).toEqual([
+      '.haive/install.json was left in place: it is not a Haive install manifest',
+    ]);
+    expect(s.retired()).toEqual([]);
+  });
+
+  it('takes its record back when the removal itself fails', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table !== schema.taskEvents) return;
+      await rm(join(s.root, '.haive'), { recursive: true });
+      await writeFile(join(s.root, '.haive'), 'not a directory');
+    };
+
+    const out = await s.apply();
+
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(out.warnings).toHaveLength(1);
+    expect(out.warnings[0]).toMatch(/^\.haive\/install\.json was left in place: /);
+    expect(s.retired()).toEqual([]);
+  });
+
+  it('warns once, naming the path, when its record cannot be taken back', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.taskEvents) await rm(join(s.root, INSTALL));
+    };
+    s.fake.hooks.beforeDelete = (table) => {
+      if (table === schema.taskEvents) throw new Error('database refused');
+    };
+
+    const out = await s.apply();
+
+    expect(out.warnings).toEqual([
+      '.haive/install.json: the record of its removal could not be taken back, so the stale record stays: database refused',
+    ]);
+    expect(s.retired()).toEqual([{ taskId: TASK, taskStepId: STEP, payload: { path: INSTALL } }]);
+  });
+
+  it('takes back only its own record, not an earlier attempt’s for the same path', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    const earlier = s.fake.insert(schema.taskEvents, {
+      taskId: TASK,
+      taskStepId: null,
+      eventType: HAIVE_FILE_RETIRED_EVENT,
+      payload: { path: INSTALL },
+    });
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.taskEvents) await rm(join(s.root, INSTALL));
+    };
+
+    await s.apply();
+
+    expect(s.fake.rows(schema.taskEvents).map((event) => event.id)).toEqual([earlier.id]);
+  });
+
   it('does not list one the person deleted, though HEAD still carries it', async () => {
     const s = await setup(HAIVE_SHAPED);
     await commitAll(s.root);
@@ -445,6 +531,32 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
       expect(again.deletedPaths, rel).toContain(rel);
     }
     expect(s.retired()).toHaveLength(2);
+  });
+
+  it('takes their records back, and a retry lists none, when they are deleted during the wait', async () => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
+    const waits = [ENV_LEGACY, GLOBS_LEGACY];
+    s.fake.hooks.beforeInsert = async (table) => {
+      const rel = table === schema.taskEvents ? waits.shift() : undefined;
+      if (rel !== undefined) await rm(join(s.root, rel));
+    };
+
+    const out = await s.apply();
+
+    expect(waits).toEqual([]);
+    expect(out.warnings).toEqual([]);
+    expect.soft(s.retired()).toEqual([]);
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(false);
+      expect(out.deletedPaths ?? [], rel).not.toContain(rel);
+    }
+
+    s.fake.hooks.beforeInsert = null;
+    const again = await s.apply();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect.soft(again.deletedPaths ?? [], rel).not.toContain(rel);
+    }
   });
 
   it('does not list ones the person deleted, though HEAD still carries them', async () => {

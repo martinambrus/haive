@@ -22,8 +22,8 @@ const RETIRE_READ_CAP = 8 * 1024 * 1024;
 
 type Outcome = 'removed' | 'absent' | 'kept';
 type RetireContext = Pick<StepContext, 'repoPath' | 'logger'>;
-/** Awaited with a Haive file's path before it is parked for removal; a throw keeps the file. */
-type OnRetire = (path: string) => Promise<void>;
+/** Awaited before a Haive file is parked: a throw keeps it, a returned undo runs if it is not removed. */
+type OnRetire = (path: string) => Promise<(() => Promise<void>) | void>;
 
 function jsonObject(data: Buffer): Record<string, unknown> | null {
   let parsed: unknown;
@@ -94,6 +94,7 @@ async function retireHaiveFile(
 ): Promise<Outcome> {
   let outcome: Outcome;
   let reason = `it is not a Haive ${target.label}`;
+  let undo: (() => Promise<void>) | undefined;
   try {
     if (target.requires && (await lstatNoFollow(ctx.repoPath, target.requires)) === null) {
       return 'kept';
@@ -104,7 +105,7 @@ async function retireHaiveFile(
     } else {
       if (held !== null) {
         try {
-          await onRetire?.(target.path);
+          undo = (await onRetire?.(target.path)) || undefined;
         } catch (err) {
           const cause = err instanceof Error ? err.message : String(err);
           throw new Error(`its removal could not be recorded: ${cause}`);
@@ -121,6 +122,17 @@ async function retireHaiveFile(
   if (outcome === 'kept') {
     warnings.push(`${target.path} was left in place: ${reason}`);
     ctx.logger.warn({ path: target.path, reason }, `${target.label} kept`);
+  }
+  if (undo && outcome !== 'removed') {
+    try {
+      await undo();
+    } catch (err) {
+      const cause = err instanceof Error ? err.message : String(err);
+      warnings.push(
+        `${target.path}: the record of its removal could not be taken back, so the stale record stays: ${cause}`,
+      );
+      ctx.logger.warn({ path: target.path, err }, 'removal record not taken back');
+    }
   }
   return outcome;
 }

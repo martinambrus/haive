@@ -1828,12 +1828,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         ).map((event) => event.payload?.path),
       );
       const recordRetired = async (path: string) => {
-        await ctx.db.insert(schema.taskEvents).values({
-          taskId: ctx.taskId,
-          taskStepId: ctx.taskStepId,
-          eventType: HAIVE_FILE_RETIRED_EVENT,
-          payload: { path },
-        });
+        const [event] = await ctx.db
+          .insert(schema.taskEvents)
+          .values({
+            taskId: ctx.taskId,
+            taskStepId: ctx.taskStepId,
+            eventType: HAIVE_FILE_RETIRED_EVENT,
+            payload: { path },
+          })
+          .returning({ id: schema.taskEvents.id });
+        return async () => {
+          await ctx.db.delete(schema.taskEvents).where(eq(schema.taskEvents.id, event!.id));
+        };
       };
       const listRetired = (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
         for (const { path, outcome } of retired) {
