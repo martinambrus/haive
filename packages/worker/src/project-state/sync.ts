@@ -556,7 +556,7 @@ export async function syncProjectStateFromCheckout(
   }: {
     repositoryId: string;
     repoPath: string;
-    /** A merge or rebase open in the checkout holds the read, as the sweep refuses to start one. */
+    /** An open merge or rebase holds the read, and so does a checkout that changed since it was read. */
     refuseDuringGitOperation?: boolean;
   },
 ): Promise<ProjectStateSyncResult> {
@@ -572,8 +572,9 @@ export async function syncProjectStateFromCheckout(
 
   return db.transaction(async (tx): Promise<ProjectStateSyncResult> => {
     await lockProjectState(tx, repositoryId);
-    if (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) {
-      return { outcome: 'held' };
+    if (refuseDuringGitOperation) {
+      if (await gitOperationInProgress(repoPath)) return { outcome: 'held' };
+      if (!sameValue(checkout, await readCheckout(repoPath))) return { outcome: 'superseded' };
     }
     // The row lock first: an upgrade's insert holds it, so the live-task read below sees that task.
     const [repo] = await tx

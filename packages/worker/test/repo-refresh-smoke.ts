@@ -46,6 +46,7 @@ import { refreshProjectState, sweepDirtyProjectStates } from '../src/project-sta
 import { writePlanMirror } from '../src/plan/mirror.js';
 import { syncBaseStep } from '../src/step-engine/steps/workflow/00a-sync-base.js';
 import { resolveMergePhase } from '../src/step-engine/merge-resolver.js';
+import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
 import { claimMergeDir } from '../src/step-engine/merge-dir-claim.js';
 import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -3238,6 +3239,73 @@ async function main(): Promise<void> {
       });
     }
 
+    // C11 changes the checkout while the sync waits for the lock: a record it read, then a merge opened and given up.
+    for (const via of ['sweep', 'resync'] as const) {
+      await attempt(`C11: ${via}`, async () => {
+        const c = await committedRecord();
+        const id = c.payload.repositoryId;
+        const versionFile = path.join(
+          c.dest,
+          '.haive-data/state/settings/chrome-devtools-mcp-version.json',
+        );
+        const versionOf = async () =>
+          (
+            await db.query.repositories.findFirst({
+              where: eq(schema.repositories.id, id),
+              columns: { chromeDevtoolsMcpVersion: true },
+            })
+          )?.chromeDevtoolsMcpVersion;
+        await db
+          .delete(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, id));
+        await db
+          .update(schema.repositories)
+          .set({ chromeDevtoolsMcpVersion: '1.0.0' })
+          .where(eq(schema.repositories.id, id));
+        await markProjectStateDirty(db, id);
+        let release!: () => void;
+        let held!: () => void;
+        const locked = new Promise<void>((r) => (held = r));
+        const holder = db.transaction(async (tx) => {
+          await lockProjectState(tx, id);
+          held();
+          await new Promise<void>((r) => (release = r));
+        });
+        await locked;
+        await writeRecord(c.dest, {}, { 'chrome-devtools-mcp-version': '2.0.0' });
+        const syncing =
+          via === 'sweep' ? refreshProjectState(db, id) : resyncHaiveProjections(db, id, c.dest);
+        let queued = false;
+        for (let i = 0; i < 300 && !queued; i++) {
+          const rows = (await db.execute(
+            sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`,
+          )) as unknown as { n: number }[];
+          queued = Number(rows[0]?.n) > 0;
+          if (!queued) await new Promise((r) => setTimeout(r, 100));
+        }
+        git(c.dest, 'checkout', '--', '.haive-data/state');
+        git(c.dest, 'clean', '-fdq', '--', '.haive-data/state');
+        const restored = git(c.dest, 'status', '--porcelain', '--', '.haive-data/state') === '';
+        release();
+        await holder;
+        await syncing;
+        const during = await versionOf();
+        check(
+          `C11: ${via}: a sync that read a record a merge then gave up imports nothing from it`,
+          queued && restored && during === '1.0.0',
+          { queued, restored, version: during },
+        );
+        await refreshProjectState(db, id);
+        const after = await versionOf();
+        check(
+          `C11: ${via}: and the pending change reaches the checkout`,
+          after === '1.0.0' &&
+            (await readFile(versionFile, 'utf8').catch(() => '')).includes('1.0.0'),
+          { version: after },
+        );
+      });
+    }
+
     // C7. Run as root the file is seen to change hands; run as anyone, only a name that is not UTF-8 is reported.
     for (const via of ['refresh', '00a'] as const) {
       await attempt(`C7: ${via}`, async () => {
@@ -3339,6 +3407,9 @@ async function main(): Promise<void> {
       );
       const head = git(c.dest, 'rev-parse', 'HEAD');
       const out = await mergeIn(c);
+      const atHalt = JSON.parse(await readFile(path.join(c.dest, RENDER_REL), 'utf8')) as {
+        lspLanguages: string[];
+      };
       await refreshProjectState(db, id);
       const now = JSON.parse(await readFile(path.join(c.dest, RENDER_REL), 'utf8')) as {
         lspLanguages: string[];
@@ -3353,7 +3424,231 @@ async function main(): Promise<void> {
           isDeepEqual(now.lspLanguages, ['php']),
         { why: haltOf(out), now },
       );
+      check(
+        'C9: and the pending state file is back on disk as the step halts, before any sweep runs',
+        isDeepEqual(atHalt.lspLanguages, ['php']),
+        { atHalt },
+      );
     });
+
+    // C12 parks a merge in one call and ends it in a later one, as the runner does once a fixer has answered.
+    const [fixerProvider] = await db
+      .insert(schema.cliProviders)
+      .values({
+        userId,
+        name: 'claude-code',
+        label: 'repo-refresh smoke',
+        executablePath: '/bin/true',
+        supportsSubagents: true,
+        authMode: 'subscription',
+        enabled: true,
+      })
+      .returning();
+    const modeIn = async (p: string) => {
+      const info = await stat(p).catch(() => null);
+      return info === null ? null : info.mode & 0o7777;
+    };
+    for (const ending of [
+      'finishes',
+      'fatal',
+      'exhausted',
+      'no-provider',
+      'reopen-refused',
+      'pending-refused',
+      'max-rounds',
+      'unaborted',
+    ] as const) {
+      await attempt(`C12: ${ending}`, async () => {
+        // A remote of its own: the shared one's record already holds every directory.
+        const remote = path.join(tmp, `origin-c12-${ending}.git`);
+        git(tmp, 'init', '-q', '--bare', '-b', 'main', remote);
+        const there = path.join(tmp, `seed-c12-${ending}`);
+        git(tmp, 'clone', '-q', `file://${remote}`, there);
+        await commitFile(there, 'README.md', 'seed\n', 'seed');
+        await commitFile(there, 'conflict.txt', 'base\n', 'base');
+        git(there, 'push', '-q', 'origin', 'HEAD:main');
+        const c = await cloned(remote);
+        const id = c.payload.repositoryId;
+        await db
+          .update(schema.repositories)
+          .set({ renderContext: column() })
+          .where(eq(schema.repositories.id, id));
+        await markProjectStateDirty(db, id);
+        await sweepDirtyProjectStates(db);
+        const recordDir = path.join(c.dest, path.dirname(RENDER_REL));
+        await chmod(path.join(c.dest, RENDER_REL), 0o600);
+        await chmod(recordDir, 0o700);
+        const local = await commitFile(c.dest, 'conflict.txt', 'local\n', 'local edit');
+        const upstream = await commitFile(there, 'conflict.txt', 'theirs\n', 'theirs');
+        git(there, 'push', '-q', 'origin', 'HEAD:main');
+        const head = git(c.dest, 'rev-parse', 'HEAD');
+        const untracked = git(c.dest, 'status', '--porcelain', '--', RENDER_REL);
+        const [task] = await db
+          .insert(schema.tasks)
+          .values({
+            userId,
+            repositoryId: id,
+            cliProviderId: fixerProvider!.id,
+            type: 'workflow',
+            title: 'repo-refresh-smoke',
+            status: 'running',
+          })
+          .returning({ id: schema.tasks.id, epoch: schema.tasks.orchestrationEpoch });
+        try {
+          const ctx = { ...(await taskCtx(c.dest, task!.id)), epoch: task!.epoch };
+          const detected = await syncBaseStep.detect!(ctx);
+          const stepRow = () =>
+            db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, ctx.taskStepId) });
+          const call = async (providers: unknown[]) => {
+            const row = (await stepRow())!;
+            const params = {
+              db,
+              taskId: task!.id,
+              userId,
+              repoPath: c.dest,
+              workspacePath: c.dest,
+              cliProviderId: fixerProvider!.id,
+              stepDef: step,
+              epoch: task!.epoch,
+              providers,
+              deps: { enqueueCliInvocation: async () => undefined },
+            };
+            const current = {
+              ...row,
+              detectOutput: detected,
+              formValues: { base: 'main', syncAction: 'merge' },
+            };
+            return resolveMergePhase(db, step, current as never, ctx, params as never);
+          };
+          const first = await call([fixerProvider]);
+          const parked = (await stepRow())!.mergeResolveState!;
+          check(
+            `C12: ${ending}: the first call sets the untracked file aside and parks the merge on a fixer`,
+            untracked.startsWith('??') &&
+              !first.resolved &&
+              first.result.status === 'waiting_cli' &&
+              mergeOpen(c.dest) &&
+              parked.fixInvocationId !== null,
+            { untracked, first: first.resolved ? 'resolved' : first.result.status },
+          );
+          if (ending === 'finishes') {
+            check(
+              'C12: the call that parks the merge keeps the owner and mode of the file it set aside, and not its bytes',
+              parked.keptMetadata?.[RENDER_REL]?.mode === 0o600 &&
+                !/"(bytes|index|indexPatch)"/.test(JSON.stringify(parked.keptMetadata)),
+              { kept: parked.keptMetadata },
+            );
+          }
+          const answered = ending === 'finishes' || ending === 'max-rounds';
+          if (answered || ending === 'fatal') {
+            await db
+              .update(schema.cliInvocations)
+              .set(
+                answered
+                  ? { exitCode: 0, rawOutput: '```json\n{"status":"resolved"}\n```' }
+                  : { exitCode: 1, errorMessage: `${PROVIDER_FATAL_HEADLINES.rate_limit} (smoke)` },
+              )
+              .where(eq(schema.cliInvocations.id, parked.fixInvocationId!));
+            await db
+              .update(schema.cliInvocations)
+              .set({ startedAt: new Date(), endedAt: new Date() })
+              .where(eq(schema.cliInvocations.id, parked.fixInvocationId!));
+          } else {
+            await db
+              .update(schema.taskSteps)
+              .set({
+                mergeResolveState: {
+                  ...parked,
+                  phase:
+                    ending === 'pending-refused' || ending === 'unaborted'
+                      ? 'pending'
+                      : parked.phase,
+                  baseShaBefore: ending === 'pending-refused' ? undefined : parked.baseShaBefore,
+                  fixInvocationId: null,
+                  conflictRetries: ending === 'exhausted' ? 99 : 1,
+                },
+              })
+              .where(eq(schema.taskSteps.id, ctx.taskStepId));
+          }
+          if (answered) await writeFile(path.join(c.dest, 'conflict.txt'), 'resolved\n');
+          if (ending === 'max-rounds') {
+            await db
+              .update(schema.taskSteps)
+              .set({
+                mergeResolveState: { ...parked, pushAfterMerge: true, baseSyncRounds: 99 },
+              })
+              .where(eq(schema.taskSteps.id, ctx.taskStepId));
+            await commitFile(there, 'late.txt', 'late\n', 'late');
+            git(there, 'push', '-q', 'origin', 'HEAD:main');
+          }
+          if (ending === 'reopen-refused' || ending === 'pending-refused') {
+            git(c.dest, 'merge', '--abort');
+            await writeFile(path.join(c.dest, 'conflict.txt'), 'dirty\n');
+          }
+          const lock = path.join(c.dest, '.git', 'index.lock');
+          if (ending === 'unaborted') await writeFile(lock, '');
+          const second = await call(ending === 'no-provider' ? [] : [fixerProvider]);
+          await rm(lock, { force: true });
+          const why = haltOf(second);
+          const reasons = {
+            finishes: '',
+            fatal: PROVIDER_FATAL_HEADLINES.rate_limit,
+            exhausted: 'auto-resolution exhausted',
+            'no-provider': 'No CLI provider available',
+            'reopen-refused': 'git refused to merge',
+            'pending-refused': 'git refused to merge',
+            'max-rounds': 'keeps advancing',
+            unaborted: 'could not be aborted',
+          };
+          const modes = {
+            file: await modeIn(path.join(c.dest, RENDER_REL)),
+            dir: await modeIn(recordDir),
+          };
+          const after = (await stepRow())!.mergeResolveState!;
+          const kept = after.keptMetadata;
+          if (ending === 'unaborted') {
+            check(
+              'C12: unaborted: a halt that leaves the merge open keeps the record of the owner and mode, and writes nothing',
+              !second.resolved &&
+                why.includes(reasons[ending]) &&
+                mergeOpen(c.dest) &&
+                modes.file === null &&
+                isDeepEqual(kept, parked.keptMetadata),
+              { why, file: modes.file?.toString(8) ?? null, kept, parked: parked.keptMetadata },
+            );
+            return;
+          }
+          if (ending === 'pending-refused') {
+            check(
+              'C12: pending-refused: the halt saves nothing but the cleared record, so a retry measures the base tip afresh',
+              after.baseShaBefore === undefined && after.phase === 'pending',
+              { baseShaBefore: after.baseShaBefore, phase: after.phase },
+            );
+          }
+          const landed = isAncestor(c.dest, upstream, 'HEAD') && isAncestor(c.dest, local, 'HEAD');
+          check(
+            `C12: ${ending}: the call that ends the merge leaves the file at the mode it had, in the directory it had, and keeps no record of them`,
+            (ending === 'finishes'
+              ? second.resolved && landed
+              : !second.resolved &&
+                why.includes(reasons[ending]) &&
+                (ending === 'max-rounds' ? landed : git(c.dest, 'rev-parse', 'HEAD') === head)) &&
+              !mergeOpen(c.dest) &&
+              modes.file === 0o600 &&
+              modes.dir === 0o700 &&
+              kept === undefined,
+            {
+              why,
+              file: modes.file?.toString(8) ?? null,
+              dir: modes.dir?.toString(8) ?? null,
+              kept,
+            },
+          );
+        } finally {
+          await db.delete(schema.tasks).where(eq(schema.tasks.id, task!.id));
+        }
+      });
+    }
 
     if (failures > 0) {
       log.error({ failures, checks }, 'smoke FAILED');
