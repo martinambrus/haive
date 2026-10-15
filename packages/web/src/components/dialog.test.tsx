@@ -143,6 +143,9 @@ const tabindexOf = (el: FakeElement) => Number.parseInt(el.getAttribute('tabinde
 class FakeElement extends FakeNode {
   attrs = new Map<string, string>();
   style = {};
+  type = '';
+  name = '';
+  checked = false;
   constructor(
     readonly localName: string,
     doc: FakeDocument,
@@ -172,6 +175,12 @@ class FakeElement extends FakeNode {
   }
   get parentElement(): FakeElement | null {
     return this.parentNode instanceof FakeElement ? this.parentNode : null;
+  }
+  get form(): FakeElement | null {
+    for (let at = this.parentElement; at; at = at.parentElement) {
+      if (at.localName === 'form') return at;
+    }
+    return null;
   }
   get children() {
     return this.childNodes.filter((c): c is FakeElement => c instanceof FakeElement);
@@ -276,6 +285,22 @@ function nameOf(el: FakeElement) {
 const where = () => nameOf(doc.activeElement);
 const panel = (n = 1) => panels()[n - 1]!.children.at(-1)!;
 
+const isRadio = (el: FakeElement) => el.type === 'radio';
+const inGroup = (a: FakeElement, b: FakeElement) =>
+  !!a.name && a.name === b.name && a.form === b.form;
+
+// One stop per radio group: its checked radio, else the first going forward and the last backward.
+function tabStops(from: FakeElement | null) {
+  const order = doc.documentElement.descendants().filter((el) => el.focusable && el.tabIndex >= 0);
+  const radios = order.filter(isRadio);
+  return order.filter(
+    (el) =>
+      !isRadio(el) ||
+      (!(from && isRadio(from) && inGroup(from, el)) &&
+        !radios.some((r) => r !== el && r.checked && inGroup(r, el))),
+  );
+}
+
 function press(key: string, init: { shiftKey?: boolean } = {}) {
   const event = new FakeEvent('keydown', { key, ...init });
   act(() => {
@@ -284,12 +309,11 @@ function press(key: string, init: { shiftKey?: boolean } = {}) {
   if (key === 'Tab' && !event.defaultPrevented) {
     const all = [doc.documentElement, ...doc.documentElement.descendants()];
     const from = all.indexOf(doc.activeElement);
-    const order = doc.documentElement
-      .descendants()
-      .filter((el) => el.focusable && el.tabIndex >= 0);
+    const order = tabStops(doc.activeElement);
+    const wrap = tabStops(null);
     const after = order.filter((el) => all.indexOf(el) > from);
     const before = order.filter((el) => all.indexOf(el) < from);
-    (init.shiftKey ? (before.at(-1) ?? order.at(-1)) : (after[0] ?? order[0]))?.focus();
+    (init.shiftKey ? (before.at(-1) ?? wrap.at(-1)) : (after[0] ?? wrap[0]))?.focus();
   }
   return event;
 }
@@ -455,6 +479,69 @@ const hiddenAtTheEnds = (
     <button id="h2" hidden>
       hidden
     </button>
+  </>
+);
+
+const checkedAtTheEnd = (
+  <>
+    <button id="first">first</button>
+    <input id="r1" type="radio" name="g" defaultChecked />
+    <input id="r2" type="radio" name="g" />
+  </>
+);
+
+const checkedAtTheStart = (
+  <>
+    <input id="r1" type="radio" name="g" />
+    <input id="r2" type="radio" name="g" defaultChecked />
+    <button id="last">last</button>
+  </>
+);
+
+const noneCheckedAtTheEnd = (
+  <>
+    <button id="first">first</button>
+    <input id="r1" type="radio" name="g" />
+    <input id="r2" type="radio" name="g" />
+    <input id="r3" type="radio" name="g" />
+  </>
+);
+
+const noneCheckedAtTheStart = (
+  <>
+    <input id="r1" type="radio" name="g" />
+    <input id="r2" type="radio" name="g" />
+    <input id="r3" type="radio" name="g" />
+    <button id="last">last</button>
+  </>
+);
+
+const nameless = (
+  <>
+    <button id="first">first</button>
+    <input id="r1" type="radio" defaultChecked />
+    <input id="r2" type="radio" />
+  </>
+);
+
+const twoForms = (
+  <>
+    <button id="first">first</button>
+    <form>
+      <input id="r1" type="radio" name="g" defaultChecked />
+      <input id="r2" type="radio" name="g" />
+    </form>
+    <form>
+      <input id="r3" type="radio" name="g" />
+      <input id="r4" type="radio" name="g" />
+    </form>
+  </>
+);
+
+const onlyRadios = (
+  <>
+    <input id="r1" type="radio" name="g" />
+    <input id="r2" type="radio" name="g" defaultChecked />
   </>
 );
 
@@ -780,5 +867,98 @@ describe('Dialog focus', () => {
     expect(where()).toBe('input#name');
     show(<Scene>{withField}</Scene>);
     expect(where()).toBe('button#opener');
+  });
+
+  it('C13 (a) Tab from any radio of a last group with a checked radio wraps to the first stop', () => {
+    openDialog(checkedAtTheEnd);
+    for (const id of ['r1', 'r2']) {
+      byId(id).focus();
+      press('Tab');
+      expect(where(), `from ${id}`).toBe('button#first');
+    }
+  });
+
+  it('C13 (b) Shift+Tab from any radio of a first group with a checked radio wraps to the last stop', () => {
+    openDialog(checkedAtTheStart);
+    for (const id of ['r2', 'r1']) {
+      byId(id).focus();
+      press('Tab', { shiftKey: true });
+      expect(where(), `from ${id}`).toBe('button#last');
+    }
+  });
+
+  it('C13 (c) wrapping onto a group lands on its checked radio', () => {
+    openDialog(checkedAtTheStart);
+    byId('last').focus();
+    press('Tab');
+    expect(where()).toBe('input#r2');
+    openDialog(checkedAtTheEnd);
+    byId('first').focus();
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r1');
+  });
+
+  it('C13 (d) a first group with none checked: wrapping onto it lands on its first radio', () => {
+    openDialog(noneCheckedAtTheStart);
+    byId('last').focus();
+    press('Tab');
+    expect(where()).toBe('input#r1');
+    for (const id of ['r1', 'r2', 'r3']) {
+      byId(id).focus();
+      press('Tab', { shiftKey: true });
+      expect(where(), `from ${id}`).toBe('button#last');
+    }
+  });
+
+  it('C13 (d) a last group with none checked: wrapping onto it lands on its last radio', () => {
+    openDialog(noneCheckedAtTheEnd);
+    byId('first').focus();
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r3');
+    for (const id of ['r1', 'r2', 'r3']) {
+      byId(id).focus();
+      press('Tab');
+      expect(where(), `from ${id}`).toBe('button#first');
+    }
+  });
+
+  it('C13 (e) two nameless radios are two stops', () => {
+    openDialog(nameless);
+    byId('first').focus();
+    press('Tab');
+    expect(where()).toBe('input#r1');
+    press('Tab');
+    expect(where()).toBe('input#r2');
+    press('Tab');
+    expect(where()).toBe('button#first');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r2');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r1');
+  });
+
+  it('C13 (f) radios sharing a name in two forms are two groups', () => {
+    openDialog(twoForms);
+    byId('r1').focus();
+    press('Tab');
+    expect(where()).toBe('input#r3');
+    press('Tab');
+    expect(where()).toBe('button#first');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r4');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r1');
+  });
+
+  it('C13 (g) a dialog holding only a radio group keeps Tab on the group stop', () => {
+    openDialog(onlyRadios);
+    byId('r2').focus();
+    press('Tab');
+    expect(where()).toBe('input#r2');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r2');
+    byId('r1').focus();
+    press('Tab');
+    expect(where()).toBe('input#r2');
   });
 });

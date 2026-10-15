@@ -16,9 +16,21 @@ interface DialogProps {
 const TABBABLE = 'a[href], button, input, select, textarea, [tabindex]';
 const openPanels: { panel: HTMLElement; opener: HTMLElement | null | undefined }[] = [];
 
-function tabbables(panel: HTMLElement) {
-  return Array.from(panel.querySelectorAll<HTMLElement>(TABBABLE)).filter(
+const isRadio = (el: Element): el is HTMLInputElement => (el as HTMLInputElement).type === 'radio';
+const inGroup = (a: HTMLInputElement, b: HTMLInputElement) =>
+  !!a.name && a.name === b.name && a.form === b.form;
+
+// Tab stops as a browser orders them: a radio group is one stop, and `from`'s own group is skipped.
+function tabbables(panel: HTMLElement, from: Element | null) {
+  const items = Array.from(panel.querySelectorAll<HTMLElement>(TABBABLE)).filter(
     (el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.getClientRects().length > 0,
+  );
+  const radios = items.filter(isRadio);
+  return items.filter(
+    (el) =>
+      !isRadio(el) ||
+      (!(from && isRadio(from) && inGroup(from, el)) &&
+        !radios.some((r) => r !== el && r.checked && inGroup(r, el))),
   );
 }
 
@@ -65,12 +77,11 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
     openPanels.push(entry);
     const onTab = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== entry) return;
-      const items = tabbables(panel);
-      const first = items[0];
-      const last = items.at(-1);
-      if (!leavesPanel(panel, e.shiftKey ? first : last, e.shiftKey)) return;
+      const ahead = tabbables(panel, document.activeElement);
+      if (!leavesPanel(panel, e.shiftKey ? ahead[0] : ahead.at(-1), e.shiftKey)) return;
+      const stops = tabbables(panel, null);
       e.preventDefault();
-      ((e.shiftKey ? last : first) ?? panel).focus();
+      ((e.shiftKey ? stops.at(-1) : stops[0]) ?? panel).focus();
     };
     document.addEventListener('keydown', onTab);
     return () => {
