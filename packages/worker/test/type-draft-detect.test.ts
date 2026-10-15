@@ -164,6 +164,37 @@ describe.skipIf(!url)('type draft detect on Postgres', () => {
       });
     });
 
+    it('offers the slug of every task type that exists, built-in and module rows included', async () => {
+      const slugs = ['tdt-builtin', 'tdt-admin', 'tdtmod__report'];
+      const typeRow = (slug: string, source: string) => ({
+        slug,
+        displayName: slug,
+        runListStrategy: 'static' as const,
+        stepIds: [],
+        source,
+      });
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values([
+          typeRow(slugs[0]!, 'builtin'),
+          typeRow(slugs[1]!, 'admin'),
+          typeRow(slugs[2]!, 'module:tdtmod'),
+        ]);
+      try {
+        const d = await detect(await newTask());
+        const stored = await db
+          .select({ slug: schema.taskTypeDefinitions.slug })
+          .from(schema.taskTypeDefinitions);
+        expect([...d.takenSlugs].sort()).toEqual(stored.map((r) => r.slug).sort());
+        for (const slug of slugs) expect(d.takenSlugs).toContain(slug);
+      } finally {
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(inArray(schema.taskTypeDefinitions.slug, slugs));
+      }
+      expect((await detect(await newTask())).takenSlugs).not.toContain('tdt-admin');
+    });
+
     it('reads the seeded opening message as the pending question', async () => {
       const taskId = await newTask();
       await event(taskId, TYPE_DRAFT_MESSAGE_EVENT, { role: 'user', body: 'a TODO audit' });

@@ -94,8 +94,12 @@ export const typeDraftStep: StepDefinition<TypeDraftDetect, TypeDraftApply> = {
   },
 
   async detect(ctx): Promise<TypeDraftDetect> {
-    const [steps, rows] = await Promise.all([
+    const [steps, slugs, rows] = await Promise.all([
       loadDraftCatalog(ctx.db),
+      ctx.db
+        .select({ slug: schema.taskTypeDefinitions.slug })
+        .from(schema.taskTypeDefinitions)
+        .orderBy(asc(schema.taskTypeDefinitions.slug)),
       ctx.db
         .select({ eventType: schema.taskEvents.eventType, payload: schema.taskEvents.payload })
         .from(schema.taskEvents)
@@ -110,7 +114,12 @@ export const typeDraftStep: StepDefinition<TypeDraftDetect, TypeDraftApply> = {
         )
         .orderBy(asc(schema.taskEvents.createdAt)),
     ]);
-    return { steps, personas: collectPersonas(), ...deriveConversation(rows) };
+    return {
+      steps,
+      personas: collectPersonas(),
+      takenSlugs: slugs.map((row) => row.slug),
+      ...deriveConversation(rows),
+    };
   },
 
   llm: {

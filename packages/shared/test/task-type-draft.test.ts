@@ -525,6 +525,59 @@ describe('validateTaskTypeDraft', () => {
       expect(result.warnings).toEqual([]);
     });
   });
+
+  describe('taken slugs', () => {
+    const taken = ['workflow', TYPE];
+    const fresh = draftOf({
+      slug: 'fresh-slug',
+      stepIds: ['ta-a', 'ta-b'],
+      promptSteps: undefined,
+    });
+
+    it('warns about a slug that is taken and never refuses for it', () => {
+      const result = validateTaskTypeDraft(draftOf(), catalog, undefined, taken);
+      expect(result.issues).toEqual([]);
+      expect(result.warnings).toEqual([
+        { kind: 'slug-taken', slug: TYPE, message: expect.stringContaining(TYPE) },
+      ]);
+    });
+
+    it('does not warn about a slug nobody holds', () => {
+      expect(validateTaskTypeDraft(fresh, catalog, undefined, taken)).toEqual({
+        issues: [],
+        warnings: [],
+      });
+    });
+
+    it('counts a built-in type as holding its slug', () => {
+      const builtin = draftOf({
+        slug: 'workflow',
+        stepIds: ['ta-a', 'ta-b'],
+        promptSteps: undefined,
+      });
+      expect(validateTaskTypeDraft(builtin, catalog, undefined, taken).warnings).toMatchObject([
+        { kind: 'slug-taken', slug: 'workflow' },
+      ]);
+    });
+
+    it('takes the slugs as a list or a set', () => {
+      expect(
+        validateTaskTypeDraft(draftOf(), catalog, undefined, new Set(taken)).warnings,
+      ).toHaveLength(1);
+      expect(validateTaskTypeDraft(draftOf(), catalog, undefined, []).warnings).toEqual([]);
+    });
+
+    it('checks nothing when it is given no slugs', () => {
+      expect(validateTaskTypeDraft(draftOf(), catalog)).toEqual({ issues: [], warnings: [] });
+    });
+
+    it('keeps the warning beside an issue of a later stage and beside a persona warning', () => {
+      const both = withStep({ template: 'Be {{agent:ghost}}' }, { stepIds: ['ta-c', CUSTOM_ID] });
+      const result = validateTaskTypeDraft(both, catalog, ['reviewer'], taken);
+      expect(kindsOf(result.issues)).toEqual(['unmet-need']);
+      expect(result.warnings.map((w) => w.kind)).toEqual(['slug-taken', 'persona-not-in-catalog']);
+    });
+  });
 });
 
 describe('the pieces the save path and the draft check share', () => {

@@ -54,6 +54,8 @@ export interface DraftVerdict {
 export interface TypeDraftDetect {
   steps: DraftCatalogStep[];
   personas: DraftPersona[];
+  /** The slug of every task type that exists, built-in ones included. */
+  takenSlugs: string[];
   transcript: { role: 'user' | 'assistant'; body: string }[];
   /** The newest user message with no agent turn after it; null once the conversation is up to date. */
   pendingQuestion: string | null;
@@ -166,7 +168,7 @@ export function catalogSets(steps: readonly DraftCatalogStep[]) {
 
 export function judgeDraftReply(
   parsed: { reply: string; draft: unknown },
-  d: Pick<TypeDraftDetect, 'steps' | 'personas'>,
+  d: Pick<TypeDraftDetect, 'steps' | 'personas' | 'takenSlugs'>,
 ): DraftVerdict {
   if (parsed.draft === null) {
     return { reply: parsed.reply, draft: null, issues: [], warnings: [], dropped: [] };
@@ -176,6 +178,7 @@ export function judgeDraftReply(
     draft,
     catalogSets(d.steps),
     d.personas.map((p) => p.id),
+    d.takenSlugs,
   );
   return { reply: parsed.reply, draft, issues, warnings, dropped };
 }
@@ -341,7 +344,8 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     '',
     '## The draft',
     '- `slug`: lowercase letters, digits and hyphens, at most 64 characters, starting with a letter or',
-    '  a digit. `new` and `catalog` are reserved, and the name of an existing task type is taken.',
+    '  a digit. `new` and `catalog` are reserved, and the name of an existing task type is taken: the',
+    '  taken slugs are listed below.',
     '- `displayName`: the name people see; not empty.',
     '- `description`: optional; one or two sentences.',
     '- `requiresRepository`: true when the type runs on a repository, which its steps may then read;',
@@ -401,6 +405,10 @@ export function buildDraftPrompt(d: TypeDraftDetect): string {
     ...catalogLines(d.steps),
     '## Personas for `{{agent:<id>}}`',
     ...personaLines(d.personas),
+    '',
+    '## Slugs that are taken',
+    'When you propose a slug, it must not be one of these:',
+    quoted(d.takenSlugs.map(safeNote)),
     '',
     '## An example reply (the shape only: do not reuse its content)',
     JSON.stringify(DRAFT_EXAMPLE),
