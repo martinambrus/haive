@@ -35,6 +35,7 @@ import {
 import { getDb, type Database } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
+  INTEGRATION_CALL_BODY_LIMIT_BYTES,
   INTEGRATION_CALL_BUDGET,
   INTEGRATION_CALL_DEADLINE_MS,
 } from '../lib/integration-call-limits.js';
@@ -43,7 +44,7 @@ import {
   claimsFromBearer,
   type TaskCallClaims,
 } from '../lib/task-call-auth.js';
-import { sandboxBodyLimit } from '../middleware/sandbox-body-limit.js';
+import { jsonBodyLimit } from '../middleware/sandbox-body-limit.js';
 
 const log = logger.child({ module: 'integration-mcp-routes' });
 
@@ -232,7 +233,7 @@ function failureOf(
 // Sandbox-facing like /custom-mcp: the bearer is a task token, and the vendor token never leaves the api.
 export const integrationMcpRoutes = new Hono<AppEnv>();
 
-integrationMcpRoutes.use('*', sandboxBodyLimit);
+integrationMcpRoutes.use('*', jsonBodyLimit(INTEGRATION_CALL_BODY_LIMIT_BYTES));
 
 integrationMcpRoutes.post('/tools/list', async (c) => {
   const claims = claimsFromBearer(c.req.header('Authorization'), 'integrations');

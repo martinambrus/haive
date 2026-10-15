@@ -353,8 +353,10 @@ the public host. That gap is still open.
 `POST /integration-mcp/tools/list` and `POST /integration-mcp/call` (`api/src/routes/integration-mcp.ts`)
 take an `integrations` token naming a step and an invocation, read that invocation and its task, and
 answer 401 `invocation-not-live` unless the invocation is the token's, of the token's step, not ended
-and not superseded. Both sit behind the shared 64 KiB sandbox body limit, which answers 413 before the
-token is read.
+and not superseded. Both sit behind their own body limit (`INTEGRATION_CALL_BODY_LIMIT_BYTES`, about
+405 KiB), sized from the longest `open_pull_request` arguments with every character JSON-escaped as
+`\uXXXX`, so every argument the tool schema advertises can arrive; it answers 413 before the token is
+read.
 
 - **tools/list** builds the tools from the invocation's stamp alone, never from grants or the current
   resolution, with `writeAllowed` read now from the owner's switch and a shared connection's own. A

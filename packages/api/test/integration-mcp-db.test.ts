@@ -44,6 +44,7 @@ import {
 import { getConnectionCredential } from '@haive/shared/integrations';
 import { signTaskToken, type TaskTokenClaims } from '@haive/shared/task-token';
 import { createApiApp } from '../src/index.js';
+import { INTEGRATION_CALL_BODY_LIMIT_BYTES } from '../src/lib/integration-call-limits.js';
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
@@ -51,7 +52,7 @@ const KEK = generateEncryptionKey();
 const SECRET = `stub${randomUUID()}`;
 const USER_PREFIX = 'integration-mcp-test-';
 const BUDGET = 50;
-const LIMIT = 64 * 1024;
+const LIMIT = INTEGRATION_CALL_BODY_LIMIT_BYTES;
 const MIB = 1024 * 1024;
 const LIST = '/integration-mcp/tools/list';
 const CALL = '/integration-mcp/call';
@@ -635,7 +636,7 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
       ];
 
       it.each(framings)(
-        'answers 413 one byte past 64 KiB, %s, with a JSON error that names the limit, and writes nothing',
+        'answers 413 one byte past its limit, %s, with a JSON error that names the limit, and writes nothing',
         async (_framing, headers) => {
           const w = await seed({ access: 'write', writeSwitch: true });
           const text = exactly(LIMIT + 1);
@@ -644,7 +645,10 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
 
           expect(Buffer.byteLength(text)).toBe(LIMIT + 1);
           expect(res.status, textOf(res)).toBe(413);
-          expect(bodyOf(res)).toEqual({ error: expect.stringContaining('65536'), code: null });
+          expect(bodyOf(res)).toEqual({
+            error: expect.stringContaining(String(LIMIT)),
+            code: null,
+          });
           await expectNoTrace();
         },
       );
@@ -1229,19 +1233,23 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
       },
     );
 
-    // The whole request is capped at 64 KiB, so a 65537-character body arrives as a 413 unless
-    // the route lifts that cap; either way nothing reaches the vendor.
-    it('refuses a body of 65537 characters, as invalid-arguments or at the body limit, and calls no vendor', async () => {
+    it('refuses a body of 65537 characters as invalid-arguments and calls no vendor', async () => {
       const w = await seed({ access: 'write', writeSwitch: true });
 
       const res = await call(w, OPEN, { ...OPEN_ARGS, body: 'x'.repeat(65_537) });
 
-      expect([400, 413], textOf(res)).toContain(res.status);
-      if (res.status === 400) {
-        await expectRefusal(w, res, 400, 'invalid-arguments', WRITE);
-      } else {
-        await expectNoTrace();
-      }
+      await expectRefusal(w, res, 400, 'invalid-arguments', WRITE);
+    });
+
+    it('carries a body of 65536 characters to the vendor when every character arrives JSON-escaped', async () => {
+      const w = await seed({ access: 'write', writeSwitch: true });
+      const text = `{"tool":"${OPEN}","arguments":{"head":"feature/x","base":"main","title":"Add x","body":"${'\\u0078'.repeat(65_536)}"}}`;
+
+      const res = await send(CALL, text, mint(w));
+
+      expect(Buffer.byteLength(text)).toBeGreaterThan(6 * 65_536);
+      served(res);
+      expect(JSON.parse(vendor.calls[0]!.body!).body).toBe('x'.repeat(65_536));
     });
 
     it('sends a title of exactly 256 characters to the vendor', async () => {
