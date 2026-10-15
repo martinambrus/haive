@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
 
-const moduleDb = vi.hoisted(() => ({ opened: vi.fn(), closed: vi.fn(async () => {}) }));
+const moduleDb = vi.hoisted(() => ({
+  opened: vi.fn(),
+  closed: vi.fn(async () => {}),
+  gate: undefined as Promise<void> | undefined,
+}));
 
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 vi.mock('../src/db.js', () => ({ getDb: () => ({}) }));
@@ -10,6 +14,7 @@ vi.mock('@haive/shared/module-db', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/module-db')>()),
   openModuleDatabase: async (_db: unknown, moduleId: string) => {
     moduleDb.opened(moduleId);
+    await moduleDb.gate;
     return {
       sql: {},
       withSchemaLock: async (run: (tx: unknown) => unknown) => run({}),
@@ -140,6 +145,7 @@ describe('the jobs reconcile', () => {
   beforeEach(() => {
     moduleDb.opened.mockClear();
     moduleDb.closed.mockClear();
+    moduleDb.gate = undefined;
   });
 
   afterEach(() => {
@@ -609,5 +615,49 @@ describe('the jobs reconcile', () => {
     expect(m.jobs).toHaveBeenCalledOnce();
 
     await stopAll();
+  });
+
+  it('rejects a database a hook asks for after its timeout, and opens nothing', async () => {
+    const m = moduleWithJobs('outlasting');
+    let ctx!: Parameters<Hook>[0];
+    let endHook!: () => void;
+    const hook: Hook = (c) =>
+      new Promise<void>((resolve) => {
+        ctx = c;
+        endHook = resolve;
+      });
+
+    await runModuleTeardown(teardownDeps(m, hook, 20), 'outlasting').catch(() => undefined);
+    const late = await ctx.openDatabase().catch((err: unknown) => err);
+
+    expect(late).toBeInstanceOf(Error);
+    expect((late as Error).name).toBe('ModuleTeardownEndedError');
+    expect((late as Error).message).toMatch(/outlasting/);
+    expect(moduleDb.opened).not.toHaveBeenCalled();
+    endHook();
+  });
+
+  it('closes a database a hook was still opening when its timeout fired, and rejects that call', async () => {
+    const m = moduleWithJobs('straddling');
+    let openGate!: () => void;
+    moduleDb.gate = new Promise<void>((resolve) => (openGate = resolve));
+    let opening!: Promise<unknown>;
+    let endHook!: () => void;
+    const hook: Hook = (c) =>
+      new Promise<void>((resolve) => {
+        endHook = resolve;
+        opening = c.openDatabase().catch((err: unknown) => err);
+      });
+
+    await runModuleTeardown(teardownDeps(m, hook, 20), 'straddling').catch(() => undefined);
+    expect(moduleDb.opened).toHaveBeenCalledOnce();
+    expect(moduleDb.closed).not.toHaveBeenCalled();
+
+    openGate();
+    const settled = await opening;
+    expect(settled).toBeInstanceOf(Error);
+    expect((settled as Error).name).toBe('ModuleTeardownEndedError');
+    expect(moduleDb.closed).toHaveBeenCalledOnce();
+    endHook();
   });
 });

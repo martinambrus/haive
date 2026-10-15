@@ -29,6 +29,13 @@ export class ModuleTeardownRefusedError extends Error {
   }
 }
 
+class ModuleTeardownEndedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModuleTeardownEndedError';
+  }
+}
+
 export const TEARDOWN_HOOK_TIMEOUT_MS = 10 * 60_000;
 
 export type ModuleControlDeps = {
@@ -48,6 +55,12 @@ async function runHook(
   release: () => void,
 ): Promise<void> {
   const opened: ModuleDatabase[] = [];
+  // Set when the close pass below begins: a database opened after it would never be closed.
+  let ended = false;
+  const endedError = (): Error =>
+    new ModuleTeardownEndedError(
+      `Module ${moduleId}'s teardown job has ended; its hook can no longer open the module database`,
+    );
   let timer: NodeJS.Timeout | undefined;
   // A hook that never settles would hold the job, so every later Tear down would wait on it.
   const timedOut = new Promise<never>((_, reject) => {
@@ -66,7 +79,12 @@ async function runHook(
       moduleId,
       logger: logger.child({ module: moduleId }),
       openDatabase: async () => {
+        if (ended) throw endedError();
         const moduleDb = await openModuleDatabase(db, moduleId);
+        if (ended) {
+          await moduleDb.close();
+          throw endedError();
+        }
         opened.push(moduleDb);
         return moduleDb;
       },
@@ -79,6 +97,7 @@ async function runHook(
     throw err instanceof Error ? err : new Error(String(err));
   } finally {
     clearTimeout(timer);
+    ended = true;
     await Promise.allSettled(opened.map((moduleDb) => moduleDb.close()));
   }
 }
