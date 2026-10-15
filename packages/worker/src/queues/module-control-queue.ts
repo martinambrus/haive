@@ -131,7 +131,7 @@ export async function runModuleTeardown(
   }
   if (deps.jobsStarted(moduleId)) {
     throw new ModuleTeardownRefusedError(
-      `Module ${moduleId}'s jobs or schema setup are still running on this worker and end within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation; try again shortly`,
+      `Module ${moduleId}'s jobs or schema setup are still running on this worker; try again once they have stopped, normally within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation`,
     );
   }
   if (deps.teardownRunning(moduleId)) {

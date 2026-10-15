@@ -270,7 +270,7 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
       ['alpha'],
       ['alpha'],
       new RegExp(
-        `alpha.*jobs or schema setup.*still running on this worker.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds.*try again shortly`,
+        `alpha.*jobs or schema setup.*still running on this worker.*try again once they have stopped.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds`,
       ),
     ],
   ])(
