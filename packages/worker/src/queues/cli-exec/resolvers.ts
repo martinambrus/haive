@@ -547,15 +547,21 @@ export async function resolveMcpExtraFiles(
   ];
 
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME, userServers);
-  if (!config) return empty;
 
   // Best-effort for every run but one naming custom tools or carrying a stamp, which cannot start without its entry.
-  const requireWritten = (written: boolean): void => {
+  const requireWritten = (
+    written: boolean,
+    cause = "the CLI's MCP configuration could not be written to its task volume",
+  ): void => {
     if (written) return;
-    const cause = "the CLI's MCP configuration could not be written to its task volume";
     if (surface.custom) throw unwired(cause, surface.custom.tools);
     if (integrationsFiles !== null) throw integrationsUnwired(cause);
   };
+
+  if (!config) {
+    requireWritten(false, `${providerName} has no MCP configuration; use another CLI`);
+    return empty;
+  }
 
   // Only a `bind` config may become an extra file. Every other delivery mode names a path INSIDE
   // the CLI's auth-volume mount, where a bind mount is destructive in two ways at once — see the
