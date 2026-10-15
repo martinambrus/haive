@@ -24,7 +24,6 @@ import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
-import { loadLoggedCallCounts } from './_call-log.js';
 
 export const MAX_FILE_CONTENT_BYTES = 512 * 1024;
 export const TEXT_EXTENSIONS = new Set([
@@ -560,7 +559,6 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
 ): Promise<
   (T & {
     cliInvocationCount: number;
-    loggedCallCount: number;
     attemptCount: number;
     tokenUsage: CliTokenUsage | null;
     throughput: ThroughputSummary;
@@ -616,7 +614,6 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.supersededAt)),
     )
     .groupBy(attributedStepId);
-  const loggedCalls = await loadLoggedCallCounts(db, taskId);
 
   const byStep = new Map<
     string,
@@ -662,7 +659,6 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     return {
       ...s,
       cliInvocationCount: stat?.count ?? 0,
-      loggedCallCount: loggedCalls.get(s.id) ?? 0,
       attemptCount: stat?.attemptCount ?? 0,
       tokenUsage: stat?.tokenUsage ?? null,
       throughput: stat?.throughput ?? summarizeThroughput([]),

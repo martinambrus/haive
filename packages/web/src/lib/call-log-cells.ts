@@ -49,9 +49,10 @@ export function toolUsageRows(steps: ToolUsageStep[]): ToolUsageStep[] {
 }
 
 export function showsToolUsage(
-  steps: Pick<TaskStep, 'cliInvocationCount' | 'loggedCallCount'>[],
+  steps: Pick<TaskStep, 'cliInvocationCount'>[],
+  loggedCallCount: number,
 ): boolean {
-  return steps.some((s) => s.cliInvocationCount > 0 || s.loggedCallCount > 0);
+  return loggedCallCount > 0 || steps.some((s) => s.cliInvocationCount > 0);
 }
 
 export function hasNothingToShow(data: Pick<TaskToolUsage, 'coverage' | 'callTotals'>): boolean {

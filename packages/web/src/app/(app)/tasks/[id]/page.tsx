@@ -2,13 +2,7 @@
 
 import Link from 'next/link';
 import { ragUsageStyle } from '@/lib/rag-usage';
-import {
-  customToolsCell,
-  hasNothingToShow,
-  integrationsCell,
-  showsToolUsage,
-  toolUsageRows,
-} from '@/lib/call-log-cells';
+import { hasNothingToShow, showsToolUsage } from '@/lib/call-log-cells';
 import { useParams } from 'next/navigation';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
@@ -34,8 +28,6 @@ import {
   type TaskStatus,
   type TaskStep,
   type TaskToolUsage,
-  type TaskToolUsageCounted,
-  type TaskToolUsageStep,
   type StepStatus,
   type UpcomingCliStep,
   type UsageWindowSnapshot,
@@ -110,6 +102,7 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { TaskLeftMergeBanner } from '@/components/task-left-merge-banner';
 import { PersistedDetails } from '@/components/persisted-details';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
+import { TaskToolUsageTable } from '@/components/task-tool-usage-table';
 import {
   describeCostSource,
   formatCost,
@@ -581,6 +574,8 @@ interface TaskDetailResponse {
   /** CLI steps with no row yet — the CLIs tab's content. Absent on an older server. */
   upcomingCliSteps?: UpcomingCliStep[];
   providerBreakdown: TaskProviderUsage[];
+  /** Custom tool and integration calls logged for the task. Absent on an older server. */
+  loggedCallCount?: number;
   /** Currency + dated FX rate the server resolved for THIS task, so costs render the
    *  same on every later view. Absent on an older server: fall back to USD. */
   costDisplay?: CostDisplay | null;
@@ -694,6 +689,7 @@ export default function TaskDetailPage() {
   const [task, setTask] = useState<Task | null>(null);
   const [costDisplay, setCostDisplay] = useState<CostDisplay>(USD_DISPLAY);
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
+  const [loggedCallCount, setLoggedCallCount] = useState(0);
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
   const [promotedDraftCount, setPromotedDraftCount] = useState(0);
@@ -807,6 +803,7 @@ export default function TaskDetailPage() {
       setStop(data.stop ?? null);
       setUpcomingCliSteps(data.upcomingCliSteps ?? []);
       setProviderBreakdown(data.providerBreakdown ?? []);
+      setLoggedCallCount(data.loggedCallCount ?? 0);
       setCostDisplay(data.costDisplay ?? USD_DISPLAY);
       setParentTask(data.parentTask ?? null);
       setChildTasks(data.childTasks ?? []);
@@ -2172,7 +2169,7 @@ export default function TaskDetailPage() {
           {/* Keyed on runs or logged calls having happened, not on the task clock: the panel is about what the
               runs used, and a task row can carry attributed invocations without a startedAt
               (the e2e fixtures do), while a started task with no run yet has nothing to show. */}
-          {showsToolUsage(steps) && (
+          {showsToolUsage(steps, loggedCallCount) && (
             <PersistedDetails
               lazy
               persistKey={`task-ui:${task.id}:tool-usage`}
@@ -3216,12 +3213,6 @@ function HeaderUsageChip({
   );
 }
 
-/** `id (n)` for a counted list, or a dash for an empty one. */
-function countedList(items: TaskToolUsageCounted[]): string {
-  if (items.length === 0) return '—';
-  return items.map((i) => `${i.id} (${i.n})`).join(', ');
-}
-
 /** What each step's runs USED — personas, skills, MCP tools, sub-agents, native tool calls —
  *  from GET /tasks/:id/tool-usage, which groups by the same fold as the step badges. Fetched
  *  once when the disclosure is first opened and again when the task finishes, since only a
@@ -3258,103 +3249,7 @@ function TaskToolUsagePanel({
     return <p className="text-xs text-neutral-500">No CLI run is attributed to a step yet.</p>;
   }
 
-  const rows = toolUsageRows(data.steps);
-  const runsCell = (u: TaskToolUsageStep) =>
-    u.observable === 0 && u.runs > 0 ? (
-      <span className="text-neutral-500">{u.runs} not observable</span>
-    ) : (
-      `${u.observable}/${u.runs}`
-    );
-  const personasCell = (u: TaskToolUsageStep) =>
-    u.personasAssigned.length === 0 && u.personasRead.length === 0
-      ? '—'
-      : `${countedList(u.personasAssigned)} → ${countedList(u.personasRead)}`;
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="max-h-80 overflow-auto rounded border border-neutral-800">
-        <table className="w-full text-left text-[11px]">
-          <thead className="sticky top-0 bg-neutral-900 text-neutral-400">
-            <tr>
-              <th className="px-2 py-1 font-medium">Step</th>
-              <th className="px-2 py-1 text-right font-medium">observable/runs</th>
-              <th className="px-2 py-1 font-medium">personas assigned → opened</th>
-              <th className="px-2 py-1 font-medium">skills invoked / opened</th>
-              <th className="px-2 py-1 font-medium">MCP</th>
-              <th className="px-2 py-1 font-medium">custom tools</th>
-              <th className="px-2 py-1 font-medium">integrations</th>
-              <th className="px-2 py-1 font-medium">sub-agents</th>
-              <th className="px-2 py-1 text-right font-medium">tool calls</th>
-            </tr>
-          </thead>
-          <tbody className="text-neutral-300">
-            {rows.map((s) => {
-              const u = s.usage;
-              return (
-                <tr key={s.stepRowId} className="border-t border-neutral-800 align-top">
-                  <td className="px-2 py-1 font-mono">
-                    {s.stepId}
-                    {s.round > 0 && <span className="ml-1 text-neutral-500">r{s.round}</span>}
-                  </td>
-                  <td className="px-2 py-1 text-right font-mono">{u ? runsCell(u) : '—'}</td>
-                  <td className="px-2 py-1 text-indigo-300">{u ? personasCell(u) : '—'}</td>
-                  <td className="px-2 py-1 text-emerald-300">
-                    {!u || (u.skillsInvoked.length === 0 && u.skillsRead.length === 0)
-                      ? '—'
-                      : `${countedList(u.skillsInvoked)} / ${countedList(u.skillsRead)}`}
-                  </td>
-                  <td className="px-2 py-1 text-amber-300">
-                    {!u || u.mcp.length === 0
-                      ? '—'
-                      : u.mcp.map((m) => `${m.server}/${m.tool} (${m.calls})`).join(', ')}
-                  </td>
-                  <td className="px-2 py-1 text-violet-300">{customToolsCell(s.customTools)}</td>
-                  <td className="px-2 py-1 text-teal-300">{integrationsCell(s.integrations)}</td>
-                  <td className="px-2 py-1 text-sky-300">{u ? countedList(u.subagents) : '—'}</td>
-                  <td className="px-2 py-1 text-right font-mono">{u ? u.toolCalls : '—'}</td>
-                </tr>
-              );
-            })}
-            <tr className="border-t border-neutral-700 font-medium text-neutral-200">
-              <td className="px-2 py-1">total</td>
-              <td className="px-2 py-1 text-right font-mono">{runsCell(data.totals)}</td>
-              <td className="px-2 py-1 text-indigo-300">{personasCell(data.totals)}</td>
-              <td className="px-2 py-1 text-emerald-300">
-                {data.totals.skillsInvoked.length === 0 && data.totals.skillsRead.length === 0
-                  ? '—'
-                  : `${countedList(data.totals.skillsInvoked)} / ${countedList(data.totals.skillsRead)}`}
-              </td>
-              <td className="px-2 py-1 text-amber-300">
-                {data.totals.mcp.length === 0
-                  ? '—'
-                  : data.totals.mcp.map((m) => `${m.server}/${m.tool} (${m.calls})`).join(', ')}
-              </td>
-              <td className="px-2 py-1 text-violet-300">
-                {customToolsCell(data.callTotals.customTools)}
-              </td>
-              <td className="px-2 py-1 text-teal-300">
-                {integrationsCell(data.callTotals.integrations)}
-              </td>
-              <td className="px-2 py-1 text-sky-300">{countedList(data.totals.subagents)}</td>
-              <td className="px-2 py-1 text-right font-mono">{data.totals.toolCalls}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p className="text-xs text-neutral-400">
-        {data.coverage.observable} of {data.coverage.total} runs observable
-        {data.coverage.partial > 0 && `, ${data.coverage.partial} partial (counts are floors)`}.
-        {data.coverage.unobservable > 0 &&
-          ` ${data.coverage.unobservable} ran on a CLI whose output carries no tool events (amp, gemini, a sequential sub-agent script) and are listed as not observable.`}
-        {data.coverage.unrecorded > 0 &&
-          ` ${data.coverage.unrecorded} ran before this record existed.`}{' '}
-        Personas assigned by Haive are recorded only once the dispatch-side stamping ships; until
-        then only the definition files an agent opened on its own appear. Opened is not applied.
-        Custom tools and integrations count every call Haive logged for this task, refused calls and
-        replaced runs included, so they need not match the MCP column.
-      </p>
-    </div>
-  );
+  return <TaskToolUsageTable data={data} />;
 }
 
 function TaskTotalTime({

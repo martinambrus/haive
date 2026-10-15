@@ -42,6 +42,10 @@ vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => ({
   sumTaskProviderBreakdown: async () => [],
   buildUpcomingCliSteps: async () => [],
 }));
+vi.mock('../src/routes/tasks/_call-log.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/routes/tasks/_call-log.js')>()),
+  loadLoggedCallCount: async () => 0,
+}));
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';

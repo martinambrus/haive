@@ -220,24 +220,25 @@ describe('hasNothingToShow', () => {
 });
 
 describe('showsToolUsage', () => {
-  const counters = (cliInvocationCount: number, loggedCallCount: number) => ({
-    cliInvocationCount,
-    loggedCallCount,
-  });
+  const ran = (cliInvocationCount: number) => ({ cliInvocationCount });
 
   it('is true once a step ran a CLI', () => {
-    expect(showsToolUsage([counters(0, 0), counters(2, 0)])).toBe(true);
+    expect(showsToolUsage([ran(0), ran(2)], 0)).toBe(true);
   });
 
-  it('is true for a step with logged calls but no live run', () => {
-    expect(showsToolUsage([counters(0, 0), counters(0, 3)])).toBe(true);
+  it('is true for a task with logged calls but no live run', () => {
+    expect(showsToolUsage([ran(0), ran(0)], 1)).toBe(true);
   });
 
-  it('is false when no step has a run or a call', () => {
-    expect(showsToolUsage([counters(0, 0), counters(0, 0)])).toBe(false);
+  it('is true for logged calls when the task has no step row left', () => {
+    expect(showsToolUsage([], 3)).toBe(true);
   });
 
-  it('is false for a task with no step', () => {
-    expect(showsToolUsage([])).toBe(false);
+  it('is false when no step has a run and the task logged no call', () => {
+    expect(showsToolUsage([ran(0), ran(0)], 0)).toBe(false);
+  });
+
+  it('is false for a task with no step and no call', () => {
+    expect(showsToolUsage([], 0)).toBe(false);
   });
 });

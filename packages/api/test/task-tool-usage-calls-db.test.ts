@@ -37,6 +37,8 @@ const TASK = '00000000-0000-4000-8000-0000000000f3';
 const DECOY_TASK = '00000000-0000-4000-8000-0000000000f4';
 const FOREIGN_TASK = '00000000-0000-4000-8000-0000000000f5';
 const STOPPED_TASK = '00000000-0000-4000-8000-0000000000f6';
+const DETACHED_TASK = '00000000-0000-4000-8000-0000000000f7';
+const NO_CALLS_TASK = '00000000-0000-4000-8000-0000000000f8';
 
 type Outcome = 'ok' | 'refused' | 'error' | 'running';
 type Access = 'read' | 'write';
@@ -120,18 +122,12 @@ const integrationIdentity = (e: IntegrationEntry) => identity(e.providerId, e.to
 const inAnyOrder = <E>(entries: E[], identityOf: (entry: E) => string) =>
   [...entries].sort((a, b) => identityOf(a).localeCompare(identityOf(b)));
 
-const STEP_ROUTES: Array<[string, (taskId: string) => string]> = [
-  ['GET /tasks/:id', (taskId) => `/tasks/${taskId}`],
-  ['GET /tasks/:id/steps', (taskId) => `/tasks/${taskId}/steps`],
-];
-
 describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () => {
   let db: Database;
   let stepA: string;
   let stepB: string;
   let stepC: string;
   let resetStep: string;
-  let quietStep: string;
 
   const fetchBody = async (): Promise<Body> => {
     const res = await app.request(`/tasks/${TASK}/tool-usage`);
@@ -222,7 +218,13 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     await db
       .delete(schema.integrationCalls)
       .where(
-        inArray(schema.integrationCalls.taskId, [TASK, DECOY_TASK, FOREIGN_TASK, STOPPED_TASK]),
+        inArray(schema.integrationCalls.taskId, [
+          TASK,
+          DECOY_TASK,
+          FOREIGN_TASK,
+          STOPPED_TASK,
+          DETACHED_TASK,
+        ]),
       );
     await db.delete(schema.tasks).where(inArray(schema.tasks.userId, [USER, OTHER_USER]));
     await db.delete(schema.users).where(inArray(schema.users.id, [USER, OTHER_USER]));
@@ -246,6 +248,8 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
         { id: DECOY_TASK, userId: USER },
         { id: FOREIGN_TASK, userId: OTHER_USER },
         { id: STOPPED_TASK, userId: USER },
+        { id: DETACHED_TASK, userId: USER },
+        { id: NO_CALLS_TASK, userId: USER },
       ].map((t) => ({ ...t, type: 'workflow', title: t.id, status: 'running' as const })),
     );
     const steps = await db
@@ -258,6 +262,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
         { taskId: FOREIGN_TASK, stepId: 'tu-one', stepIndex: 1, round: 0, title: 'Foreign' },
         { taskId: STOPPED_TASK, stepId: 'tu-reset', stepIndex: 1, round: 0, title: 'Reset' },
         { taskId: STOPPED_TASK, stepId: 'tu-quiet', stepIndex: 2, round: 0, title: 'Quiet' },
+        { taskId: NO_CALLS_TASK, stepId: 'tu-silent', stepIndex: 1, round: 0, title: 'Silent' },
       ])
       .returning({
         id: schema.taskSteps.id,
@@ -273,7 +278,6 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     const decoyStep = pick(DECOY_TASK, 'tu-one');
     const foreignStep = pick(FOREIGN_TASK, 'tu-one');
     resetStep = pick(STOPPED_TASK, 'tu-reset');
-    quietStep = pick(STOPPED_TASK, 'tu-quiet');
 
     const [live] = await db
       .insert(schema.cliInvocations)
@@ -348,6 +352,14 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     await db
       .insert(schema.integrationCalls)
       .values(integrationRows(1, resetStep, 'github', READ_PR, 'read', 'refused', ofStopped));
+
+    const ofDetached = { taskId: DETACHED_TASK, taskStepId: null };
+    await db
+      .insert(schema.customToolCalls)
+      .values(customRows(2, stepA, 'lookup', 'http-get', 'ok', ofDetached));
+    await db
+      .insert(schema.integrationCalls)
+      .values(integrationRows(1, stepA, 'github', READ_PR, 'read', 'refused', ofDetached));
   });
 
   afterAll(async () => {
@@ -520,39 +532,44 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     expect(res.status).toBe(404);
   });
 
-  describe.each(STEP_ROUTES)('%s step counters', (_route, pathOf) => {
-    const countersOf = async (taskId: string) => {
-      const res = await app.request(pathOf(taskId));
+  describe('GET /tasks/:id loggedCallCount', () => {
+    const detail = async (taskId: string) => {
+      const res = await app.request(`/tasks/${taskId}`);
       expect(res.status).toBe(200);
-      const body = (await res.json()) as {
-        steps: Array<{ id: string; cliInvocationCount: number; loggedCallCount: number }>;
+      return (await res.json()) as {
+        loggedCallCount: number;
+        steps: Array<{ cliInvocationCount: number }>;
       };
-      return new Map(
-        body.steps.map((s) => [s.id, [s.cliInvocationCount, s.loggedCallCount]] as const),
-      );
+    };
+    const heldBy = async (taskId: string) => {
+      const [row] = (await db.execute(
+        sql`select count(*)::int as total, (count(*) filter (where task_step_id is null))::int as detached
+          from (select task_step_id from custom_tool_calls where task_id = ${taskId}
+            union all select task_step_id from integration_calls where task_id = ${taskId}) calls`,
+      )) as unknown as Array<{ total: number; detached: number }>;
+      return row!;
     };
 
-    it('counts the rows of both tables a step owns, a replaced run and a refusal included', async () => {
-      const counters = await countersOf(TASK);
-      expect(counters.get(stepA)).toEqual([1, 18]);
-      expect(counters.get(stepB)).toEqual([0, 0]);
-      expect(counters.get(stepC)).toEqual([0, 8]);
+    it('counts the rows of both tables the task owns, those no step owns among them', async () => {
+      const held = await heldBy(TASK);
+      expect(held).toEqual({ total: 31, detached: 5 });
+      expect((await detail(TASK)).loggedCallCount).toBe(held.total);
     });
 
-    it('counts what the database holds for the step, the rows with no step left out', async () => {
-      const counters = await countersOf(TASK);
-      const groups = [...(await customOracle()), ...(await integrationOracle())];
-      expect(groups.some((g) => g.task_step_id === null)).toBe(true);
-      for (const id of [stepA, stepB, stepC]) {
-        const held = groups.filter((g) => g.task_step_id === id).reduce((sum, g) => sum + g.n, 0);
-        expect(counters.get(id)![1]).toBe(held);
-      }
+    it('counts the calls of a task whose only run was replaced', async () => {
+      const body = await detail(STOPPED_TASK);
+      expect(body.steps.map((s) => s.cliInvocationCount)).toEqual([0, 0]);
+      expect(body.loggedCallCount).toBe(3);
     });
 
-    it('counts the calls of a step whose only run was replaced', async () => {
-      const counters = await countersOf(STOPPED_TASK);
-      expect(counters.get(resetStep)).toEqual([0, 3]);
-      expect(counters.get(quietStep)).toEqual([0, 0]);
+    it('counts the calls of a task whose rows all have no step', async () => {
+      expect(await heldBy(DETACHED_TASK)).toEqual({ total: 3, detached: 3 });
+      expect((await detail(DETACHED_TASK)).loggedCallCount).toBe(3);
+    });
+
+    it('is 0 for a task that logged no call', async () => {
+      expect(await heldBy(NO_CALLS_TASK)).toEqual({ total: 0, detached: 0 });
+      expect((await detail(NO_CALLS_TASK)).loggedCallCount).toBe(0);
     });
   });
 });
