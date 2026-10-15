@@ -823,48 +823,40 @@ export function PlanDetailPanel({
             const folded = !(groupOpen[group.id] ?? group.items.length > 0);
             return (
               <div key={group.id} className="rounded-md border border-neutral-800">
-                <button
-                  type="button"
-                  aria-expanded={!folded}
-                  onClick={() => setGroupOpen((prev) => ({ ...prev, [group.id]: folded }))}
-                  className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
-                >
-                  {folded ? (
-                    <ChevronRight className="h-3.5 w-3.5 text-neutral-500" />
-                  ) : (
-                    <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
-                  )}
-                  {/* White and bold rather than amber: amber already means
-                        "blocked, needs a person" everywhere else in this UI. */}
-                  <span className="text-xs font-semibold text-neutral-100">{group.label}</span>
-                  <span
-                    role="button"
-                    tabIndex={0}
+                <div className="relative flex items-center gap-1.5 px-2 py-1.5">
+                  {/* The ::after stretches the fold button over the header; the + sits above it. */}
+                  <button
+                    type="button"
+                    aria-expanded={!folded}
+                    onClick={() => setGroupOpen((prev) => ({ ...prev, [group.id]: folded }))}
+                    className="flex items-center gap-1.5 text-left after:absolute after:inset-0 after:rounded-md focus-visible:outline-none focus-visible:after:outline-2 focus-visible:after:outline-indigo-400"
+                  >
+                    {folded ? (
+                      <ChevronRight className="h-3.5 w-3.5 text-neutral-500" />
+                    ) : (
+                      <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
+                    )}
+                    {/* White and bold rather than amber: amber already means
+                          "blocked, needs a person" everywhere else in this UI. */}
+                    <span className="text-xs font-semibold text-neutral-100">{group.label}</span>
+                  </button>
+                  <button
+                    type="button"
                     title={`Add to ${group.label.toLowerCase()}`}
                     aria-label={`Add to ${group.label.toLowerCase()}`}
-                    onClick={(e) => {
-                      // Nested in the header button, so the fold must not
-                      // also toggle when the + is what was hit.
-                      e.stopPropagation();
+                    onClick={() => {
                       setLinkTarget('');
                       setAddingLinkTo((cur) => (cur === group.id ? null : group.id));
                       // The row it opens lives in the body, so a folded group
                       // would swallow it.
                       setGroupOpen((prev) => ({ ...prev, [group.id]: true }));
                     }}
-                    onKeyDown={(e) => {
-                      if (e.key !== 'Enter' && e.key !== ' ') return;
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setLinkTarget('');
-                      setAddingLinkTo((cur) => (cur === group.id ? null : group.id));
-                    }}
-                    className="text-emerald-400 hover:text-emerald-300"
+                    className="relative z-10 text-emerald-400 hover:text-emerald-300"
                   >
                     <Plus className="h-3.5 w-3.5" />
-                  </span>
+                  </button>
                   <span className="ml-auto text-[11px] text-neutral-500">{group.items.length}</span>
-                </button>
+                </div>
                 {!folded && (
                   <div className="flex flex-col gap-1 border-t border-neutral-800 px-2 py-1.5">
                     {addingLinkTo === group.id && (

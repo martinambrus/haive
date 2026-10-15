@@ -22,8 +22,8 @@ vi.mock('../queues/cli-exec/app-reach.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../queues/cli-exec/app-reach.js')>()),
   resolveAppReach: (...args: unknown[]) => resolveAppReach(...args),
 }));
-vi.mock('../queues/cli-exec/handlers.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../queues/cli-exec/handlers.js')>()),
+vi.mock('../queues/cli-exec/agent-pool-cap.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../queues/cli-exec/agent-pool-cap.js')>()),
   currentAgentCap: async () => 3,
   agentPoolCap: async () => 7,
 }));
