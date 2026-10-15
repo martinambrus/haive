@@ -15,6 +15,9 @@ import {
 } from './types.js';
 
 export const FORGE_REQUEST_TIMEOUT_MS = 30_000;
+// An open-PR lookup on Gitea or Bitbucket Server reads a whole page of pull requests, bodies included.
+export const FORGE_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
+const ERROR_BODY_MAX_BYTES = 4096;
 
 /** Shared base for the forge adapters. Provides one authenticated JSON request
  *  helper that maps HTTP failures to typed ForgeErrors; subclasses supply their
@@ -44,13 +47,21 @@ export abstract class BaseForgeProvider implements ForgeProvider {
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-    const signal = AbortSignal.timeout(this.timeoutMs);
-    const failure = (err: unknown): ForgeError =>
-      new ForgeError(
-        signal.aborted
-          ? `${this.name} request timed out after ${this.timeoutMs} ms (${method} ${path})`
-          : `${this.name} request failed (${method} ${path}): ${err instanceof Error ? err.message : String(err)}`,
+    const timeout = AbortSignal.timeout(this.timeoutMs);
+    const signal = ctx.signal ? AbortSignal.any([timeout, ctx.signal]) : timeout;
+    const failure = (err: unknown): ForgeError => {
+      if (timeout.aborted) {
+        return new ForgeError(
+          `${this.name} request timed out after ${this.timeoutMs} ms (${method} ${path})`,
+        );
+      }
+      if (signal.aborted) {
+        return new ForgeError(`${this.name} request was cancelled (${method} ${path})`);
+      }
+      return new ForgeError(
+        `${this.name} request failed (${method} ${path}): ${err instanceof Error ? err.message : String(err)}`,
       );
+    };
 
     let res: Response;
     try {
@@ -69,24 +80,52 @@ export abstract class BaseForgeProvider implements ForgeProvider {
     }
 
     if (res.status === 204) return undefined as T;
-    let text: string;
+    let answer: { text: string; truncated: boolean };
     try {
-      text = await res.text();
+      answer = await readBounded(res, FORGE_RESPONSE_MAX_BYTES);
     } catch (err) {
       throw failure(err);
     }
-    if (!text) return undefined as T;
+    if (answer.truncated) {
+      throw new ForgeError(
+        `${this.name} response for ${method} ${path} is larger than ${FORGE_RESPONSE_MAX_BYTES} bytes`,
+      );
+    }
+    if (!answer.text) return undefined as T;
     try {
-      return JSON.parse(text) as T;
+      return JSON.parse(answer.text) as T;
     } catch {
       throw new ForgeError(`${this.name} returned a non-JSON response for ${method} ${path}`);
     }
   }
 }
 
+async function readBounded(
+  res: Response,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  const reader = res.body?.getReader();
+  if (!reader) return { text: '', truncated: false };
+  const decoder = new TextDecoder();
+  let text = '';
+  let read = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return { text: text + decoder.decode(), truncated: false };
+    const room = maxBytes - read;
+    if (value.byteLength > room) {
+      text += decoder.decode(value.subarray(0, room));
+      await reader.cancel();
+      return { text, truncated: true };
+    }
+    read += value.byteLength;
+    text += decoder.decode(value, { stream: true });
+  }
+}
+
 async function readBodyText(res: Response): Promise<string> {
   try {
-    const t = (await res.text()).trim();
+    const t = (await readBounded(res, ERROR_BODY_MAX_BYTES)).text.trim();
     return t.length > 500 ? `${t.slice(0, 500)}…` : t;
   } catch {
     return '';

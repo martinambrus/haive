@@ -20,6 +20,8 @@ export interface ForgeContext {
   token: string;
   /** Credential username, needed only for Basic auth (Bitbucket Cloud app passwords). */
   username: string;
+  /** Aborts every request made with this context, whatever its own timeout says. */
+  signal?: AbortSignal;
 }
 
 export interface OpenPrInput {

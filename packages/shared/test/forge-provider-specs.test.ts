@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { integrationProviderSpecSchema } from '../src/modularity/index.js';
 import { CORE_FORGE_PROVIDER_SPECS } from '../src/forge/provider-specs.js';
+import {
+  BODY_MAX_LENGTH,
+  BRANCH_MAX_LENGTH,
+  PR_NUMBER_PATTERN,
+  TITLE_MAX_LENGTH,
+  validateForgeOpArgs,
+} from '../src/forge/op-args.js';
 
 const SELF_HOSTED = ['gitea', 'gitlab', 'bitbucket_server'];
 
@@ -61,5 +68,57 @@ describe('github sign-in methods', () => {
       s.auth.some((a) => a.kind === 'oauth2'),
     ).map((s) => s.id);
     expect(withOauth).toEqual(['github']);
+  });
+});
+
+describe('the argument limits the input schemas publish', () => {
+  type Property = { type?: string; pattern?: string; maxLength?: number };
+  const propertiesOf = (spec: (typeof CORE_FORGE_PROVIDER_SPECS)[number], opId: string) =>
+    (
+      spec.operations!.find((operation) => operation.opId === opId)!.inputSchema as {
+        properties: Record<string, Property>;
+      }
+    ).properties;
+
+  it('are the numbers the validator enforces', () => {
+    expect(PR_NUMBER_PATTERN).toBe('^[1-9][0-9]{0,9}$');
+    expect([BRANCH_MAX_LENGTH, TITLE_MAX_LENGTH, BODY_MAX_LENGTH]).toEqual([255, 256, 65_536]);
+  });
+
+  it.each(CORE_FORGE_PROVIDER_SPECS.map((spec) => [spec.id, spec] as const))(
+    '%s publishes them from the constants',
+    (_id, spec) => {
+      expect(propertiesOf(spec, 'get_pull_request_state').prNumber).toMatchObject({
+        type: 'string',
+        pattern: PR_NUMBER_PATTERN,
+      });
+      const open = propertiesOf(spec, 'open_pull_request');
+      expect(open.head).toMatchObject({ type: 'string', maxLength: BRANCH_MAX_LENGTH });
+      expect(open.base).toMatchObject({ type: 'string', maxLength: BRANCH_MAX_LENGTH });
+      expect(open.title).toMatchObject({ type: 'string', maxLength: TITLE_MAX_LENGTH });
+      expect(open.body).toMatchObject({ type: 'string', maxLength: BODY_MAX_LENGTH });
+    },
+  );
+
+  it('accept and refuse the same values as the validator, at the edge of every limit', () => {
+    const github = CORE_FORGE_PROVIDER_SPECS[0]!;
+    const number = new RegExp(propertiesOf(github, 'get_pull_request_state').prNumber!.pattern!);
+    for (const prNumber of ['1', '9999999999', '0', '01', '12345678901', '']) {
+      expect(number.test(prNumber), prNumber).toBe(
+        validateForgeOpArgs('get_pull_request_state', { prNumber }).ok,
+      );
+    }
+
+    const open = propertiesOf(github, 'open_pull_request');
+    const valid = { head: 'feat', base: 'main', title: 'T', body: 'B' };
+    for (const key of ['head', 'base', 'title', 'body'] as const) {
+      const limit = open[key]!.maxLength!;
+      expect(
+        validateForgeOpArgs('open_pull_request', { ...valid, [key]: 'x'.repeat(limit) }).ok,
+      ).toBe(true);
+      expect(
+        validateForgeOpArgs('open_pull_request', { ...valid, [key]: 'x'.repeat(limit + 1) }).ok,
+      ).toBe(false);
+    }
   });
 });

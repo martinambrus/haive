@@ -1,10 +1,12 @@
 import { isBranchName } from '../git-args.js';
 import { ForgeError, type OpenPrInput } from './types.js';
 
-const PR_NUMBER = /^[1-9][0-9]{0,9}$/;
-const BRANCH_MAX_LENGTH = 255;
-const TITLE_MAX_LENGTH = 256;
-const BODY_MAX_LENGTH = 65_536;
+export const PR_NUMBER_PATTERN = '^[1-9][0-9]{0,9}$';
+export const BRANCH_MAX_LENGTH = 255;
+export const TITLE_MAX_LENGTH = 256;
+export const BODY_MAX_LENGTH = 65_536;
+
+const PR_NUMBER = new RegExp(PR_NUMBER_PATTERN);
 
 export interface ForgeOpArgs {
   get_pull_request_state: { prNumber: string };
