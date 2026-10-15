@@ -332,6 +332,33 @@ describe('02 and .haive/install.json', () => {
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
 
+  it('voids an earlier record once a retry sees the path, so a later retry does not count it', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    await writeFile(join(s.root, INSTALL), '{"keep":true}');
+    await s.apply();
+    expect(s.retired()).toEqual([]);
+    await rm(join(s.root, INSTALL));
+
+    const out = await s.apply();
+
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+  });
+
+  it('voids it too when a retry whose record write fails finds the path standing', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    await writeFile(join(s.root, INSTALL), '{"keep":true}');
+    refuseRecordWriteOnce(s);
+    await s.apply();
+    expect(s.retired()).toEqual([]);
+    await rm(join(s.root, INSTALL));
+
+    const out = await s.apply();
+
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+  });
+
   it('keeps one replaced during the wait, and takes its record back', async () => {
     const s = await setup(HAIVE_SHAPED);
     s.fake.hooks.beforeInsert = async (table) => {
@@ -381,7 +408,7 @@ describe('02 and .haive/install.json', () => {
     expect(s.retired()).toEqual([{ taskId: TASK, taskStepId: STEP, payload: { path: INSTALL } }]);
   });
 
-  it('takes back only its own record, not an earlier attempt’s for the same path', async () => {
+  it('takes back its own record and voids an earlier one, since this retry saw the file', async () => {
     const s = await setup(HAIVE_SHAPED);
     const earlier = s.fake.insert(schema.taskEvents, {
       taskId: TASK,
@@ -395,7 +422,8 @@ describe('02 and .haive/install.json', () => {
 
     await s.apply();
 
-    expect(s.fake.rows(schema.taskEvents).map((event) => event.id)).toEqual([earlier.id]);
+    expect(earlier.id).toBeTruthy();
+    expect(s.fake.rows(schema.taskEvents)).toEqual([]);
   });
 
   it('does not list one the person deleted, though HEAD still carries it', async () => {

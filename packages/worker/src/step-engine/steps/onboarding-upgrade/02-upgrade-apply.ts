@@ -79,9 +79,9 @@ const RESTORE_RTK_BLOCK_FIELD = 'restoreRtkBlock';
 /** One per Haive file 02 removes, so a retry that finds it gone knows this task removed it. */
 export const HAIVE_FILE_RETIRED_EVENT = 'upgrade.haive_file_retired';
 
-async function retiredByThisTask(db: Database, taskId: string): Promise<Set<string>> {
+async function retiredByThisTask(db: Database, taskId: string): Promise<Map<string, string[]>> {
   const events = await db
-    .select({ payload: schema.taskEvents.payload })
+    .select({ id: schema.taskEvents.id, payload: schema.taskEvents.payload })
     .from(schema.taskEvents)
     .where(
       and(
@@ -89,9 +89,12 @@ async function retiredByThisTask(db: Database, taskId: string): Promise<Set<stri
         eq(schema.taskEvents.eventType, HAIVE_FILE_RETIRED_EVENT),
       ),
     );
-  return new Set(
-    events.flatMap(({ payload }) => (typeof payload?.path === 'string' ? [payload.path] : [])),
-  );
+  const ids = new Map<string, string[]>();
+  for (const { id, payload } of events) {
+    const path = payload?.path;
+    if (typeof path === 'string') ids.set(path, [...(ids.get(path) ?? []), id]);
+  }
+  return ids;
 }
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
@@ -1821,6 +1824,17 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     let recordWritten = false;
     // Any entry this attempt saw there means an earlier record no longer proves this task removed it.
     const seenPresent = new Set<string>();
+    // Voided in the database too, so a retry after a crash does not count those records again.
+    const voidEarlier = async (path: string, ids: readonly string[]) => {
+      try {
+        for (const id of ids) {
+          await ctx.db.delete(schema.taskEvents).where(eq(schema.taskEvents.id, id));
+        }
+      } catch (err) {
+        const cause = err instanceof Error ? err.message : String(err);
+        warnings.push(`${path}: the earlier record of its removal could not be voided: ${cause}`);
+      }
+    };
     try {
       const state = await writeProjectStateRecord(ctx.db, {
         repositoryId: plan.repositoryId,
@@ -1850,7 +1864,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           await ctx.db.delete(schema.taskEvents).where(eq(schema.taskEvents.id, event!.id));
         };
       };
-      const listRetired = (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
+      const listRetired = async (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
         for (const { path, outcome } of retired) {
           if (outcome !== 'absent') seenPresent.add(path);
           if (
@@ -1858,10 +1872,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             (outcome === 'absent' && retiredEarlier.has(path) && !seenPresent.has(path))
           ) {
             deletedPaths.push(path);
+          } else if (seenPresent.has(path) && retiredEarlier.has(path)) {
+            await voidEarlier(path, retiredEarlier.get(path) ?? []);
+            retiredEarlier.delete(path);
           }
         }
       };
-      listRetired([
+      await listRetired([
         {
           path: INSTALL_MANIFEST_PATH,
           outcome: await retireInstallManifest(ctx, warnings, recordRetired),
@@ -1870,7 +1887,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       const keepTooling = (await toolingOutsideRecord(ctx.db, plan.repositoryId))
         ? [HAIVE_DATA_FILES.tooling]
         : [];
-      listRetired(await retireLegacyMirrors(ctx, warnings, keepTooling, recordRetired));
+      await listRetired(await retireLegacyMirrors(ctx, warnings, keepTooling, recordRetired));
     } catch (err) {
       failIfColumnStale(err);
       if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);
@@ -1887,18 +1904,19 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       ctx.logger.warn({ err }, failed);
       // What this task removed, now or in an earlier attempt, is still listed.
       try {
-        for (const path of await retiredByThisTask(ctx.db, ctx.taskId)) {
+        for (const [path, ids] of await retiredByThisTask(ctx.db, ctx.taskId)) {
           if (deletedPaths.includes(path) || seenPresent.has(path)) continue;
           // Strict: only a path proven missing is listed, never one that could not be read.
-          const gone = await lstatNoFollow(ctx.repoPath, path, { strict: true }).then(
-            (entry) => entry === null,
+          const entry = await lstatNoFollow(ctx.repoPath, path, { strict: true }).then(
+            (found) => found,
             (err: unknown) => {
               const cause = err instanceof Error ? err.message : String(err);
               warnings.push(`${path} was not listed as removed: it could not be checked: ${cause}`);
-              return false;
+              return undefined;
             },
           );
-          if (gone) deletedPaths.push(path);
+          if (entry === null) deletedPaths.push(path);
+          else if (entry !== undefined) await voidEarlier(path, ids);
         }
       } catch (lookupErr) {
         const cause = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
