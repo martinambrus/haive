@@ -7,7 +7,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  *  server secret, so a token minted for one audience verifies under no other. Server-only: it
  *  needs the secret, which the sandbox never sees. */
 
-export const TASK_TOKEN_AUDIENCES = ['rag', 'ddev', 'custom-mcp'] as const;
+export const TASK_TOKEN_AUDIENCES = ['rag', 'ddev', 'custom-mcp', 'integrations'] as const;
 export type TaskTokenAudience = (typeof TASK_TOKEN_AUDIENCES)[number];
 
 export const DEFAULT_TASK_TOKEN_TTL_SECONDS = 24 * 60 * 60;

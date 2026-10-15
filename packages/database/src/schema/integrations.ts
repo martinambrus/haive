@@ -4,6 +4,7 @@ import {
   text,
   varchar,
   boolean,
+  integer,
   jsonb,
   timestamp,
   index,
@@ -38,6 +39,7 @@ export const integrationCallOutcomeEnum = pgEnum('integration_call_outcome', [
   'ok',
   'refused',
   'error',
+  'running',
 ]);
 
 export const integrationProviderConfigs = pgTable('integration_provider_configs', {
@@ -189,6 +191,11 @@ export const integrationCalls = pgTable(
     surface: integrationSurfaceEnum('surface').notNull(),
     outcome: integrationCallOutcomeEnum('outcome').notNull(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
+    reason: varchar('reason', { length: 64 }),
+    durationMs: integer('duration_ms'),
   },
-  (table) => [index('integration_calls_task_id_idx').on(table.taskId)],
+  (table) => [
+    index('integration_calls_task_id_idx').on(table.taskId),
+    index('integration_calls_cli_invocation_id_idx').on(table.cliInvocationId),
+  ],
 );

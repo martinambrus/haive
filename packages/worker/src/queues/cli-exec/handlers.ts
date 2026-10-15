@@ -248,7 +248,7 @@ async function runCliExecJob(
     );
     return;
   }
-  // The dead mark supersedes only runs not yet started; one dispatched or requeued since ends here.
+  // The dead mark supersedes every open run; one dispatched or requeued after it ends here.
   if (row.task.deadAt && row.task.status !== 'cancelled' && row.task.status !== 'completed') {
     await db.transaction((tx) => supersedeDeadTaskRuns(tx, eq(schema.cliInvocations.id, row.id)));
     log.info(

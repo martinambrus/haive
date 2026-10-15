@@ -130,6 +130,51 @@ describe('integration tables', () => {
       'surface',
       'outcome',
       'created_at',
+      'reason',
+      'duration_ms',
+    ]);
+  });
+
+  it('records an attempt before its outcome, so a crash leaves it running', () => {
+    expect(schema.integrationCallOutcomeEnum.enumValues).toEqual([
+      'ok',
+      'refused',
+      'error',
+      'running',
+    ]);
+  });
+
+  it('finds the calls of one task and of one invocation by index', () => {
+    const indexes = getTableConfig(schema.integrationCalls).indexes.map((i) => i.config);
+    expect(
+      indexes.map((i) => [i.name, i.columns.map((c) => (c as { name: string }).name)]),
+    ).toEqual([
+      ['integration_calls_task_id_idx', ['task_id']],
+      ['integration_calls_cli_invocation_id_idx', ['cli_invocation_id']],
+    ]);
+  });
+
+  it('declares the reason and the duration of a call last, both optional', () => {
+    const [reason, duration] = getTableConfig(schema.integrationCalls).columns.slice(-2);
+    expect([reason?.name, reason?.columnType, reason?.notNull]).toEqual([
+      'reason',
+      'PgVarchar',
+      false,
+    ]);
+    expect((reason as { length?: number }).length).toBe(64);
+    expect([duration?.name, duration?.columnType, duration?.notNull]).toEqual([
+      'duration_ms',
+      'PgInteger',
+      false,
+    ]);
+  });
+
+  it('declares the integrations a CLI run was given last on the invocation, optional', () => {
+    const last = getTableConfig(schema.cliInvocations).columns.at(-1);
+    expect([last?.name, last?.columnType, last?.notNull]).toEqual([
+      'integrations',
+      'PgJsonb',
+      false,
     ]);
   });
 });
