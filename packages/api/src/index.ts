@@ -48,6 +48,7 @@ import { versionRoutes } from './routes/version.js';
 import { maintenanceGate } from './middleware/maintenance.js';
 import { maintenanceRoutes } from './routes/maintenance.js';
 import { adminTaskTypeRoutes, taskTypeRoutes } from './routes/task-types.js';
+import { taskTypeDraftRoutes } from './routes/task-type-drafts.js';
 import { adminIntegrationRoutes } from './routes/admin-integrations.js';
 import { installModules } from './modules/loader.js';
 
@@ -118,6 +119,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/admin', adminRoutes);
   app.route('/admin/maintenance', maintenanceRoutes);
   app.route('/admin/task-types', adminTaskTypeRoutes);
+  app.route('/admin/task-type-drafts', taskTypeDraftRoutes);
   app.route('/admin/integrations', adminIntegrationRoutes);
   app.route('/task-types', taskTypeRoutes);
   app.route('/tooling', toolingRoutes);
