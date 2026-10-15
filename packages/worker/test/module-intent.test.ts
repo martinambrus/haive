@@ -1,8 +1,9 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import type { LoadedWorkerModule } from '../src/modules/loader.js';
+import { registerModuleSteps, type LoadedWorkerModule } from '../src/modules/loader.js';
 import { syncModuleIntent } from '../src/modules/intent.js';
+import { StepRegistry } from '../src/step-engine/registry.js';
 
 const url = process.env.MODULE_INTENT_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/module_intent_test'))
@@ -10,9 +11,13 @@ if (url && !new URL(url).pathname.startsWith('/module_intent_test'))
     'Use a dedicated module_intent_test database for module intent integration tests',
   );
 
-function mod(id: string, extra: { version?: string; entitlementId?: string } = {}) {
+function mod(
+  id: string,
+  extra: { version?: string; entitlementId?: string; source?: 'local' | 'registry' } = {},
+) {
   return {
-    packageName: `@haive/module-${id}`,
+    packageName: extra.source === 'registry' ? `@haive-module/${id}` : `@haive/module-${id}`,
+    ...(extra.source ? { source: extra.source } : {}),
     manifest: {
       id,
       name: `Module ${id}`,
@@ -108,7 +113,44 @@ describe.skipIf(!url)('module intent sync on Postgres', () => {
     expect((await row('alpha'))!.missingAt).toBeNull();
   });
 
-  it('never overwrites a source another writer set', async () => {
+  it('stores source registry for a registry entry that went through the worker loader', async () => {
+    const loaded = registerModuleSteps(new StepRegistry(), [
+      {
+        packageName: '@haive-module/alpha',
+        source: 'registry',
+        manifest: { id: 'alpha', name: 'Module alpha', version: '1.0.0', schemaVersion: 1 },
+      },
+    ]);
+    await syncModuleIntent(db, loaded);
+    expect(await row('alpha')).toMatchObject({
+      packageName: '@haive-module/alpha',
+      source: 'registry',
+    });
+  });
+
+  it('stores source local for a folder entry', async () => {
+    await syncModuleIntent(db, [mod('alpha', { source: 'local' })]);
+    expect(await row('alpha')).toMatchObject({
+      packageName: '@haive/module-alpha',
+      source: 'local',
+    });
+  });
+
+  it('follows the module when its source changes, and back', async () => {
+    await syncModuleIntent(db, [mod('alpha', { source: 'local' })]);
+    await syncModuleIntent(db, [mod('alpha', { source: 'registry' })]);
+    expect(await row('alpha')).toMatchObject({
+      packageName: '@haive-module/alpha',
+      source: 'registry',
+    });
+    await syncModuleIntent(db, [mod('alpha', { source: 'local' })]);
+    expect(await row('alpha')).toMatchObject({
+      packageName: '@haive/module-alpha',
+      source: 'local',
+    });
+  });
+
+  it('never overwrites a source another writer set when the entry names none', async () => {
     await syncModuleIntent(db, [mod('alpha')]);
     await db
       .update(schema.modules)

@@ -1066,6 +1066,7 @@ function typeDraftFixture(): Record<string, unknown> {
       description: registry.get(entry.stepId)?.metadata.description ?? '',
     })),
     personas: collectPersonas(),
+    takenSlugs: ['onboarding', 'workflow'],
     transcript: [{ role: 'user', body: 'Make a type that lists TODO comments.' }],
     pendingQuestion: 'Make a type that lists TODO comments.',
     currentDraft: null,

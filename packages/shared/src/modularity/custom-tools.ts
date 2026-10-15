@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { collapseToLine } from '../utils/collapse-line.js';
 import { HIDDEN_CHARACTER } from '../utils/hidden-characters.js';
+import { TOOL_NAME_PATTERN } from './contracts.js';
 
 export const CUSTOM_TOOLS_MAX_PER_STEP = 8;
 export const CUSTOM_TOOL_PARAMS_MAX = 10;
@@ -22,7 +23,6 @@ export const RAG_QUERY_TOP_K_MIN = 1;
 export const RAG_QUERY_TOP_K_MAX = 20;
 export const INVALID_TOOLS_SHOWN = 8;
 
-const CUSTOM_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,39}$/;
 const INVALID_TOOL_NAME_SHOWN_LENGTH = 64;
 const CUSTOM_TOOL_TIMEOUT_DEFAULT_MS = 10_000;
 const CUSTOM_TOOL_RESPONSE_DEFAULT_BYTES = 32_768;
@@ -62,7 +62,7 @@ const wholeBetween = (min: number, max: number) => z.number().int().min(min).max
 const inRange = (value: number, min: number, max: number): boolean =>
   Number.isInteger(value) && value >= min && value <= max;
 
-const nameSchema = z.string().regex(CUSTOM_TOOL_NAME_PATTERN);
+const nameSchema = z.string().regex(TOOL_NAME_PATTERN);
 
 const paramBase = {
   name: nameSchema,
@@ -290,7 +290,7 @@ function checkUrl(url: string, add: Add): string[] | null {
 }
 
 function paramProblem(param: CustomToolParam, inPath: boolean): string | null {
-  if (!CUSTOM_TOOL_NAME_PATTERN.test(param.name)) {
+  if (!TOOL_NAME_PATTERN.test(param.name)) {
     return `its name must start with a lowercase letter and use only lowercase letters, digits and underscores, up to ${CUSTOM_TOOL_NAME_MAX_LENGTH} characters`;
   }
   if (!isPlainText(param.description, CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH)) {
@@ -388,7 +388,7 @@ export function validateCustomTool(
   const problems: CustomToolProblem[] = [];
   const add: Add = (kind, message) => problems.push({ kind, tool: tool.name, message });
 
-  if (!CUSTOM_TOOL_NAME_PATTERN.test(tool.name)) {
+  if (!TOOL_NAME_PATTERN.test(tool.name)) {
     add(
       'tool-name-invalid',
       `The tool name ${JSON.stringify(tool.name)} must start with a lowercase letter and use only lowercase letters, digits and underscores, up to ${CUSTOM_TOOL_NAME_MAX_LENGTH} characters.`,

@@ -135,6 +135,10 @@
       "types": "./dist/modularity/index.d.ts",
       "import": "./dist/modularity/index.js"
     },
+    "./modularity-server": {
+      "types": "./dist/modularity-server/index.d.ts",
+      "import": "./dist/modularity-server/index.js"
+    },
     "./merge-left-open": {
       "types": "./dist/merge-left-open.d.ts",
       "import": "./dist/merge-left-open.js"

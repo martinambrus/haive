@@ -11,6 +11,7 @@ import {
 
 const SECRET = 'task-token-test-secret-0123456789';
 const AUDIENCES = [...TASK_TOKEN_AUDIENCES];
+const FOUR_AUDIENCES = ['rag', 'ddev', 'custom-mcp', 'integrations'] as const;
 
 const otherAudience = (aud: TaskTokenAudience): TaskTokenAudience =>
   aud === 'rag' ? 'ddev' : 'rag';
@@ -33,7 +34,36 @@ afterEach(() => {
 
 describe('task token audiences', () => {
   it('are a closed list', () => {
-    expect([...TASK_TOKEN_AUDIENCES]).toEqual(['rag', 'ddev', 'custom-mcp']);
+    expect([...TASK_TOKEN_AUDIENCES]).toEqual(['rag', 'ddev', 'custom-mcp', 'integrations']);
+  });
+
+  it('verify each of the four only under its own audience', () => {
+    for (const minted of FOUR_AUDIENCES) {
+      const token = signTaskToken(
+        { aud: minted, taskId: 'task-abc', taskStepId: 'step-1', cliInvocationId: 'inv-1' },
+        SECRET,
+      );
+      for (const checked of FOUR_AUDIENCES) {
+        expect(verifyTaskToken(token, checked, SECRET) !== null, `${minted} under ${checked}`).toBe(
+          minted === checked,
+        );
+      }
+    }
+  });
+
+  it('give an integrations token the task, step and invocation it was signed for', () => {
+    const token = signTaskToken(
+      { aud: 'integrations', taskId: 'task-abc', taskStepId: 'step-1', cliInvocationId: 'inv-1' },
+      SECRET,
+    );
+
+    expect(verifyTaskToken(token, 'integrations', SECRET)).toEqual({
+      aud: 'integrations',
+      taskId: 'task-abc',
+      taskStepId: 'step-1',
+      cliInvocationId: 'inv-1',
+      exp: expect.any(Number),
+    });
   });
 
   it('keep every token to its own audience', () => {

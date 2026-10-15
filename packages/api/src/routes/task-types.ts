@@ -6,7 +6,6 @@ import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
   COMPOSABLE_STEP_GROUPS,
   checkPromptSteps,
-  composableStepEntrySchema,
   customTaskTypeCreateSchema,
   mergePromptStepCatalog,
   parsePromptSteps,
@@ -15,9 +14,9 @@ import {
   taskTypeUpdateSchema,
   validateComposition,
   validateTaskTypeDefaults,
-  type ComposableStepEntry,
   type TaskTypeModuleState,
 } from '@haive/shared/modularity';
+import { readStepCatalog, type StepCatalogRead } from '@haive/shared/modularity-server';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
 import {
@@ -35,37 +34,12 @@ const BUILTIN_SLUGS: ReadonlySet<string> = new Set(schema.workflowTypeEnum.enumV
 type Db = ReturnType<typeof getDb>;
 type DefinitionRow = typeof schema.taskTypeDefinitions.$inferSelect;
 
-interface Catalog {
-  synced: boolean;
-  stepIds: Set<string>;
-  dispatchesCli: Set<string>;
-  composable: Map<string, ComposableStepEntry>;
-  steps: { stepId: string; source: string; title: string; entry: ComposableStepEntry }[];
-}
+type Catalog = StepCatalogRead;
 
 async function loadCatalog(db: Db): Promise<Catalog> {
-  const rows = await db.select().from(schema.stepCatalog).orderBy(asc(schema.stepCatalog.stepId));
-  const catalog: Catalog = {
-    synced: rows.length > 0,
-    stepIds: new Set(rows.map((r) => r.stepId)),
-    dispatchesCli: new Set(rows.filter((r) => r.dispatchesCli).map((r) => r.stepId)),
-    composable: new Map(),
-    steps: [],
-  };
-  for (const row of rows) {
-    if (!row.composable) continue;
-    const parsed = composableStepEntrySchema.safeParse(row.entry);
-    if (!parsed.success) {
-      log.warn({ stepId: row.stepId, source: row.source }, 'composable catalog entry is invalid');
-      continue;
-    }
-    catalog.composable.set(row.stepId, parsed.data);
-    catalog.steps.push({
-      stepId: row.stepId,
-      source: row.source,
-      title: row.title,
-      entry: parsed.data,
-    });
+  const catalog = await readStepCatalog(db, { ordered: true });
+  for (const { stepId, source } of catalog.invalid) {
+    log.warn({ stepId, source }, 'composable catalog entry is invalid');
   }
   return catalog;
 }

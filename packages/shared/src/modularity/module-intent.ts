@@ -8,6 +8,8 @@ export const MODULE_STATES = [
 ] as const;
 export type ModuleState = (typeof MODULE_STATES)[number];
 
+export type ModuleSource = 'local' | 'registry';
+
 export interface ModuleIntentRow {
   moduleId: string;
   name: string;

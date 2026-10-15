@@ -176,13 +176,15 @@ export function pickTaskTypeDraft(raw: unknown): {
   return { draft, dropped };
 }
 
-export interface TaskTypeDraftWarning {
-  kind: 'persona-not-in-catalog';
-  stepId: string;
-  raw: string;
-  start: number;
-  message: string;
-}
+export type TaskTypeDraftWarning =
+  | {
+      kind: 'persona-not-in-catalog';
+      stepId: string;
+      raw: string;
+      start: number;
+      message: string;
+    }
+  | { kind: 'slug-taken'; slug: string; message: string };
 
 /** A schema failure is {path, message} as the error handler returns it; the rest are the stages' own issues. */
 export type TaskTypeDraftIssue =
@@ -213,11 +215,23 @@ function personaWarnings(
   return warnings;
 }
 
+function slugWarnings(slug: string, takenSlugs: Iterable<string>): TaskTypeDraftWarning[] {
+  if (!new Set(takenSlugs).has(slug)) return [];
+  return [
+    {
+      kind: 'slug-taken',
+      slug,
+      message: `The slug ${slug} belongs to a task type that already exists.`,
+    },
+  ];
+}
+
 /** The checks POST /admin/task-types runs, in its order and stopping at the first stage that finds a problem. */
 export function validateTaskTypeDraft(
   draft: unknown,
   catalog: CatalogSets,
   personaIds?: Iterable<string>,
+  takenSlugs?: Iterable<string>,
 ): { issues: TaskTypeDraftIssue[]; warnings: TaskTypeDraftWarning[] } {
   const parsed = customTaskTypeCreateSchema.safeParse(draft);
   if (!parsed.success) {
@@ -226,8 +240,10 @@ export function validateTaskTypeDraft(
   }
   const body = parsed.data;
   const promptSteps = body.promptSteps ?? {};
-  const warnings =
-    personaIds === undefined ? [] : personaWarnings(body.slug, promptSteps, personaIds);
+  const warnings = [
+    ...(takenSlugs === undefined ? [] : slugWarnings(body.slug, takenSlugs)),
+    ...(personaIds === undefined ? [] : personaWarnings(body.slug, promptSteps, personaIds)),
+  ];
   const promptIssues = checkPromptSteps(body, promptSteps, catalog);
   if (promptIssues.length > 0) return { issues: promptIssues, warnings };
   const { composable } = mergePromptStepCatalog(catalog, {
