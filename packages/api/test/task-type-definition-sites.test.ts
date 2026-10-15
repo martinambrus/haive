@@ -31,6 +31,7 @@ import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { taskRoutes } from '../src/routes/tasks/index.js';
+import { taskTypeDraftRoutes } from '../src/routes/task-type-drafts.js';
 import { upgradeRoutes } from '../src/routes/upgrades.js';
 import { spawnPlanTask } from '../src/lib/spawn-plan-task.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -48,6 +49,7 @@ app.use(async (c, next) => {
 });
 app.route('/tasks', taskRoutes);
 app.route('/repositories', upgradeRoutes);
+app.route('/admin/task-type-drafts', taskTypeDraftRoutes);
 app.onError(errorHandler);
 
 function world() {
@@ -210,5 +212,37 @@ describe('spawnPlanTask pins the run list', () => {
       }),
     ).rejects.toMatchObject({ status: 403 });
     expect(fake.rows(schema.tasks)).toHaveLength(0);
+  });
+});
+
+describe('POST /admin/task-type-drafts pins the run list', () => {
+  const draftWorld = () => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskEvents: schema.taskEvents,
+      auditEvents: schema.auditEvents,
+    });
+    h.db = fake.db;
+    return fake;
+  };
+
+  it('writes the helper snapshot into the row, looked up non-generically', async () => {
+    const fake = draftWorld();
+    const res = await post('/admin/task-type-drafts', { message: 'a TODO audit' });
+    expect(res.status).toBe(201);
+    expect(h.definition).toHaveBeenCalledWith(expect.anything(), 'type_draft', { generic: false });
+    expect(fake.rows(schema.tasks)).toMatchObject([
+      { type: 'type_draft', runListSnapshot: SNAPSHOT, customSteps: PINNED },
+    ]);
+  });
+
+  it('creates nothing when the type is refused', async () => {
+    const fake = draftWorld();
+    h.definition.mockRejectedValueOnce(new HttpError(403, 'Task type type_draft is disabled'));
+    const res = await post('/admin/task-type-drafts', { message: 'a TODO audit' });
+    expect(res.status).toBe(403);
+    expect(fake.rows(schema.tasks)).toHaveLength(0);
+    expect(fake.rows(schema.taskEvents)).toHaveLength(0);
+    expect(h.add).not.toHaveBeenCalled();
   });
 });

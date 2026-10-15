@@ -9,6 +9,7 @@ import {
   lt,
   isNotNull,
   isNull,
+  ne,
   not,
   notInArray,
   or,
@@ -250,6 +251,8 @@ taskRoutes.get('/', async (c) => {
   // the plan page, and its attention signal is the banner there, not a toast that
   // would open the task page instead.
   if (!includeChats) conds.push(notInArray(schema.tasks.type, ['plan_chat', 'plan_merge']));
+  // A type-draft conversation lives in the task type editor, so no list shows it, chats or not.
+  conds.push(ne(schema.tasks.type, 'type_draft'));
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
   const where = and(...conds);
 

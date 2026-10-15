@@ -6,9 +6,11 @@ import {
   isModuleStepId,
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
+  modulePackageId,
   type ComposableStepEntry,
   type CompositionIssue,
   type ModuleManifest,
+  type ModuleSource,
   type TaskTypeDefaultsIssue,
 } from '@haive/shared/modularity';
 import {
@@ -32,6 +34,7 @@ export type ModuleJobContext = {
 
 export type WorkerModuleEntry = {
   packageName: string;
+  source?: ModuleSource;
   manifest: unknown;
   steps?: readonly StepDefinition[];
   ensureSchema?: (ctx: ModuleSchemaContext) => Promise<void>;
@@ -41,6 +44,7 @@ export type WorkerModuleEntry = {
 
 export type LoadedWorkerModule = {
   packageName: string;
+  source?: ModuleSource;
   manifest: ModuleManifest;
   stepIds: string[];
   composable: ComposableStepEntry[];
@@ -69,9 +73,9 @@ export function registerModuleSteps(
           .join('; ')}`,
       );
     }
-    if (entry.packageName !== `@haive/module-${parsed.data.id}`) {
+    if (modulePackageId(entry.packageName) !== parsed.data.id) {
       throw new Error(
-        `Module ${entry.packageName} declares id "${parsed.data.id}"; its package must be named @haive/module-${parsed.data.id}`,
+        `Module ${entry.packageName} declares id "${parsed.data.id}"; its package must be named @haive/module-${parsed.data.id} or @haive-module/${parsed.data.id}`,
       );
     }
     if (seen.has(parsed.data.id)) {
@@ -143,7 +147,7 @@ export function registerModuleSteps(
       }
     }
 
-    return { packageName: entry.packageName, manifest, stepIds, composable };
+    return { packageName: entry.packageName, source: entry.source, manifest, stepIds, composable };
   });
 }
 

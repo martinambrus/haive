@@ -47,8 +47,13 @@ export const EMPTY_SIDEBAR_TREE: SidebarTree = {
  *  `plan_chat` and `plan_merge` are already dropped server-side by GET /tasks unless
  *  `includeChats` is passed, so this only has to remove `plan_build` in practice —
  *  it names `plan_chat` anyway because relying on the absence of a query parameter to
- *  enforce a product rule puts the rule somewhere nobody reading this file can see. */
-export const SIDEBAR_HIDDEN_TYPES: ReadonlySet<string> = new Set(['plan_chat', 'plan_build']);
+ *  enforce a product rule puts the rule somewhere nobody reading this file can see.
+ *  `type_draft` is dropped there always, and named here for the same reason. */
+export const SIDEBAR_HIDDEN_TYPES: ReadonlySet<string> = new Set([
+  'plan_chat',
+  'plan_build',
+  'type_draft',
+]);
 
 /** The group a task with no repository falls into. A real key, so it can be filed like
  *  any other group. */

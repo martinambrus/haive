@@ -7,17 +7,16 @@ import {
   workflowTypeSchema,
 } from '@haive/shared';
 import {
-  composableStepEntrySchema,
   mergePromptStepCatalog,
   moduleIdsOfTaskType,
   parsePromptSteps,
   promptStepId,
   resolveTaskTypeAvailability,
-  type ComposableStepEntry,
   type CompositionIssue,
   type TaskTypeModuleRef,
   type TaskTypeModuleState,
 } from '@haive/shared/modularity';
+import { readStepCatalog } from '@haive/shared/modularity-server';
 import { HttpError } from '../context.js';
 
 const BUILTIN_TASK_TYPES: ReadonlySet<string> = new Set(schema.workflowTypeEnum.enumValues);
@@ -88,28 +87,6 @@ function describeIssue(issue: CompositionIssue): string {
   return 'stepId' in issue ? `${issue.kind} ${issue.stepId}` : issue.kind;
 }
 
-async function readCatalog(handle: Pick<Database, 'select'>) {
-  const rows = await handle
-    .select({
-      stepId: schema.stepCatalog.stepId,
-      dispatchesCli: schema.stepCatalog.dispatchesCli,
-      composable: schema.stepCatalog.composable,
-      entry: schema.stepCatalog.entry,
-    })
-    .from(schema.stepCatalog);
-  if (rows.length === 0) return null;
-  const composable = new Map<string, ComposableStepEntry>();
-  for (const row of rows) {
-    const parsed = row.composable ? composableStepEntrySchema.safeParse(row.entry) : null;
-    if (parsed?.success) composable.set(row.stepId, parsed.data);
-  }
-  return {
-    stepIds: new Set(rows.map((r) => r.stepId)),
-    dispatchesCli: new Set(rows.filter((r) => r.dispatchesCli).map((r) => r.stepId)),
-    composable,
-  };
-}
-
 // FOR KEY SHARE on named rows: a deactivate running meanwhile waits, then counts the new task.
 export async function readModuleStates(
   handle: Pick<Database, 'select'>,
@@ -161,8 +138,8 @@ export async function definitionForCreate(
   }
   const modules = await readModuleStates(handle, moduleIdsOfTaskType(def));
   const storedCatalog =
-    def.runListStrategy === 'static' && def.stepIds !== null ? await readCatalog(handle) : null;
-  const catalog = storedCatalog && mergePromptStepCatalog(storedCatalog, def);
+    def.runListStrategy === 'static' && def.stepIds !== null ? await readStepCatalog(handle) : null;
+  const catalog = storedCatalog?.synced ? mergePromptStepCatalog(storedCatalog, def) : null;
   const availability = resolveTaskTypeAvailability({
     definition: def,
     switches: {
