@@ -452,3 +452,132 @@ describe('the code that creates a task', () => {
     ]);
   });
 });
+
+describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
+  const TASK = '00000000-0000-4000-8000-0000000000e1';
+  const STEP = '11d-skill-sync';
+  const UPCOMING = '08c-code-review';
+  const pick = (body: Record<string, unknown> = {}, stepId = STEP) =>
+    app.request(`/tasks/${TASK}/steps/${stepId}/cli-provider`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cliProviderId: null, round: 0, ...body }),
+    });
+  const withStep = (step: Record<string, unknown>, task: Record<string, unknown> = {}) => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      taskEvents: schema.taskEvents,
+      cliInvocations: schema.cliInvocations,
+      taskStepAgentMinings: schema.taskStepAgentMinings,
+      taskStepCliChoices: schema.taskStepCliChoices,
+      stepCatalog: schema.stepCatalog,
+    });
+    seedStepCatalog(fake);
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      type: 'workflow',
+      title: 'a task',
+      status: 'failed',
+      errorMessage: 'boom',
+      orchestrationEpoch: 3,
+      currentStepId: STEP,
+      currentRound: 0,
+      ...task,
+    });
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: STEP,
+      stepIndex: 1,
+      runSeq: 1,
+      round: 0,
+      iterationCount: 0,
+      idleMs: 0,
+      userActiveMs: 0,
+      carriedWorkMs: 0,
+      carriedIdleMs: 0,
+      carriedUserActiveMs: 0,
+      ...step,
+    });
+    h.db = fake.db;
+    h.queued = [];
+    return fake;
+  };
+  const written = (fake: ReturnType<typeof withStep>) =>
+    [
+      schema.tasks,
+      schema.taskSteps,
+      schema.taskEvents,
+      schema.cliInvocations,
+      schema.taskStepAgentMinings,
+      schema.taskStepCliChoices,
+    ].map((table) => fake.rows(table));
+
+  describe.each([
+    { status: 'failed', task: { status: 'failed' } },
+    { status: 'waiting_form', task: { status: 'waiting_user', errorMessage: null } },
+  ])('on a $status step, which the pick re-runs', ({ status, task }) => {
+    it('re-runs the step on the new CLI while the system is normal', async () => {
+      const fake = withStep({ status }, task);
+
+      expect((await pick()).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
+      expect(fake.rows(schema.taskStepCliChoices)).toHaveLength(1);
+      expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+    });
+
+    it.each(['draining', 'maintenance'])(
+      'answers 503 and changes and queues nothing while the system is %s',
+      async (state) => {
+        const fake = withStep({ status }, task);
+        const before = written(fake);
+        h.state = state;
+
+        const res = await pick();
+
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+        expect(h.queued).toEqual([]);
+        expect(written(fake)).toEqual(before);
+      },
+    );
+  });
+
+  describe('while the system drains, a pick that re-runs nothing', () => {
+    beforeEach(() => {
+      h.state = 'draining';
+    });
+
+    it.each([
+      { name: 'a pending step', step: { status: 'pending' } },
+      {
+        name: 'a failed step in the middle of a loop',
+        step: { status: 'failed', iterationCount: 1 },
+      },
+    ])('is saved on $name', async ({ step }) => {
+      const fake = withStep(step);
+
+      expect((await pick()).status).toBe(200);
+      expect(fake.rows(schema.taskStepCliChoices)).toHaveLength(1);
+      expect(h.queued).toEqual([]);
+    });
+
+    it('is saved for a named role of a failed step', async () => {
+      const fake = withStep({ status: 'failed' });
+
+      expect((await pick({ role: 'fixer' })).status).toBe(200);
+      expect(fake.rows(schema.taskStepCliChoices)).toMatchObject([{ role: 'fixer' }]);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'failed' });
+      expect(h.queued).toEqual([]);
+    });
+
+    it('is saved for a step the run has not reached', async () => {
+      const fake = withStep({ status: 'failed' });
+
+      expect((await pick({ round: undefined }, UPCOMING)).status).toBe(200);
+      expect(fake.rows(schema.taskStepCliChoices)).toMatchObject([{ stepId: UPCOMING }]);
+      expect(h.queued).toEqual([]);
+    });
+  });
+});

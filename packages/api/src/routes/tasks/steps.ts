@@ -1733,6 +1733,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
   }
 
+  const movesTask =
+    step.iterationCount === 0 && (step.status === 'waiting_form' || step.status === 'failed');
+  if (movesTask) assertNewWorkAllowed(c.get('maintenanceState'));
+
   await writeStepCliChoice(db, choice);
 
   // A CLI swap on the model-health canary rewrites the task default so every later
@@ -1760,7 +1764,6 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     // Retry does, so what the task leaves active elsewhere is reset. A pending row is only
     // invalidated: the task has either not reached it, where an advance queued from here would
     // run it out of order, or already queued the advance that claims it.
-    const movesTask = step.status !== 'pending';
     const leftActive = movesTask
       ? rowsLeftActive(
           await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
