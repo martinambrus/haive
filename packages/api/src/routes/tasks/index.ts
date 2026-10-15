@@ -109,6 +109,7 @@ import {
 import { browserAccessRoutes } from './browser-access.js';
 import { attachmentRoutes } from './attachments.js';
 import { mergeRoutes } from './merges.js';
+import { taskIntegrationRoutes } from './integrations.js';
 
 export const taskRoutes = new Hono<AppEnv>();
 
@@ -1769,3 +1770,6 @@ taskRoutes.route('/', mergeRoutes);
 // Task file attachments (/:id/attachments...): user-uploaded reference files the
 // AI CLI agent reads from the task workspace.
 taskRoutes.route('/', attachmentRoutes);
+
+// Integration choices (/:id/integrations...): which connection serves each category for this task.
+taskRoutes.route('/', taskIntegrationRoutes);
