@@ -163,6 +163,16 @@ describe('type draft passes', () => {
     expect(form?.fields.every((f) => f.type === 'textarea' && f.required === false)).toBe(true);
     expect(form?.description).toMatch(/blank to end/i);
   });
+
+  it('keeps the editor state out of sight on the task page, and only that field', () => {
+    const form = formOf(detected());
+    const hidden = (id: string) => {
+      const field = form?.fields.find((f) => f.id === id);
+      return field?.type === 'textarea' ? field.hidden : undefined;
+    };
+    expect(hidden('draft')).toBe(true);
+    expect(hidden('message')).not.toBe(true);
+  });
 });
 
 describe('type draft step wiring', () => {
