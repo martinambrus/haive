@@ -1819,7 +1819,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
     ctx.throwIfCancelled();
     let recordWritten = false;
-    // Seen present by this attempt, so an earlier record no longer proves this task removed it.
+    // Any entry this attempt saw there means an earlier record no longer proves this task removed it.
     const seenPresent = new Set<string>();
     try {
       const state = await writeProjectStateRecord(ctx.db, {
@@ -1852,6 +1852,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       };
       const listRetired = (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
         for (const { path, outcome } of retired) {
+          if (outcome !== 'absent') seenPresent.add(path);
           if (
             outcome === 'removed' ||
             (outcome === 'absent' && retiredEarlier.has(path) && !seenPresent.has(path))

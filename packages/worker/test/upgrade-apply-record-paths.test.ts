@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -308,6 +308,27 @@ describe('02 and .haive/install.json', () => {
     expect(out.warnings).toContain(
       'the record was written, but retiring the files it replaces failed: database refused',
     );
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+  });
+
+  it('does not list a restored file it kept as not Haive, though it vanishes before a later throw', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    await writeFile(join(s.root, INSTALL), '{"keep":true}');
+    const select = s.fake.db.select;
+    s.fake.db.select = (fields) => ({
+      from: (table) => {
+        if (Object.keys(fields ?? {}).join() === 'onboardingTooling') {
+          rmSync(join(s.root, INSTALL));
+          throw new Error('database refused');
+        }
+        return select(fields).from(table);
+      },
+    });
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
 
