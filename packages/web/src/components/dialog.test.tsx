@@ -1,5 +1,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { act, startTransition, StrictMode, use, type ReactNode } from 'react';
+import {
+  act,
+  startTransition,
+  StrictMode,
+  use,
+  useCallback,
+  useState,
+  type ReactNode,
+} from 'react';
 import type { Root } from 'react-dom/client';
 
 // This package has no DOM library, so this is the smallest DOM that react-dom/client and focus need.
@@ -321,6 +329,7 @@ function press(key: string, init: { shiftKey?: boolean } = {}) {
 let root: Root;
 let container: FakeElement;
 let Dialog: typeof import('./dialog').Dialog;
+let flushSync: typeof import('react-dom').flushSync;
 let strict = false;
 
 beforeAll(async () => {
@@ -330,6 +339,7 @@ beforeAll(async () => {
   vi.stubGlobal('Node', { DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4 });
   const { createRoot } = await import('react-dom/client');
   ({ Dialog } = await import('./dialog'));
+  ({ flushSync } = await import('react-dom'));
   container = doc.createElement('div');
   doc.body.appendChild(container);
   root = createRoot(container as unknown as Element);
@@ -854,6 +864,32 @@ describe('Dialog focus', () => {
     show(stack(true));
     press('Escape');
     expect(above).toHaveBeenCalledExactlyOnceWith(false);
+    expect(below).not.toHaveBeenCalled();
+  });
+
+  it('C15 Escape closes only the top dialog when the one below registered its listener later', () => {
+    const below = vi.fn();
+    function Stacked({ onBelow }: { onBelow: () => void }) {
+      const [top, setTop] = useState(true);
+      // A browser flushes this close before the next listener on the same target runs.
+      const closeTop = useCallback(() => flushSync(() => setTop(false)), []);
+      return (
+        <>
+          <Dialog open onOpenChange={onBelow}>
+            <button id="a1">a1</button>
+          </Dialog>
+          <Dialog open={top} onOpenChange={closeTop}>
+            <button id="b1">b1</button>
+          </Dialog>
+        </>
+      );
+    }
+    show(<Stacked onBelow={() => below()} />);
+    // A new handler re-registers the lower dialog's listener after the top one's.
+    show(<Stacked onBelow={() => below()} />);
+    expect(panels()).toHaveLength(2);
+    press('Escape');
+    expect(panels()).toHaveLength(1);
     expect(below).not.toHaveBeenCalled();
   });
 

@@ -62,8 +62,9 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
       // data-haive-dialog marker below is not enough on its own: React flushes
       // this close synchronously on a discrete event, so the portal is already
       // gone by the time a window listener looks for it, and one Escape closed
-      // both the dialog and whatever was behind it.
-      e.stopPropagation();
+      // both the dialog and whatever was behind it. Immediate, so a lower dialog's
+      // listener registered later on this document does not take the same key.
+      e.stopImmediatePropagation();
       onOpenChange(false);
     };
     document.addEventListener('keydown', onKey);

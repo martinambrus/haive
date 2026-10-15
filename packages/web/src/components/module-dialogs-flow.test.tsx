@@ -124,7 +124,10 @@ async function mount(render: () => ReactNode, runDialog = false) {
     },
     text: () => textOf(tree),
     press: async (key: string) => {
-      for (const listener of [...keys.listeners]) listener({ key, stopPropagation: () => {} });
+      const stop = () => {};
+      for (const listener of [...keys.listeners]) {
+        listener({ key, stopPropagation: stop, stopImmediatePropagation: stop });
+      }
       draw();
       await flush();
       draw();

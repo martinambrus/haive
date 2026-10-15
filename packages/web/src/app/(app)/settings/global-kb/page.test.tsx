@@ -7,7 +7,11 @@ import GlobalKbPage from './page';
 // No DOM in this package: the page's hooks run on a plain slot list, as in components/task-type-editor.test.tsx.
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn() }));
-type KeyListener = (event: { key: string; stopPropagation: () => void }) => void;
+type KeyListener = (event: {
+  key: string;
+  stopPropagation: () => void;
+  stopImmediatePropagation: () => void;
+}) => void;
 const keys = vi.hoisted(() => ({ listeners: [] as KeyListener[] }));
 
 vi.mock('react', async (importOriginal) => ({
@@ -192,7 +196,10 @@ async function mount(config: Record<string, unknown> = {}) {
       hooks.mounting = true;
       Dialog(dialog.props as Parameters<typeof Dialog>[0]);
       hooks.mounting = false;
-      for (const listener of keys.listeners) listener({ key: 'Escape', stopPropagation: () => {} });
+      const stop = () => {};
+      for (const listener of keys.listeners) {
+        listener({ key: 'Escape', stopPropagation: stop, stopImmediatePropagation: stop });
+      }
       draw();
     },
   };
