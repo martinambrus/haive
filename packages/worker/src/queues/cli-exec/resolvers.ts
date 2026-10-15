@@ -257,6 +257,9 @@ async function resolveCustomFiles(
   custom: NonNullable<McpSurface['custom']>,
 ): Promise<SandboxExtraFile[]> {
   const names = custom.tools;
+  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+    throw unwired('custom tools are switched off on this install', names);
+  }
   if (!custom.enabled) {
     throw unwired(
       'CONFIG_ENCRYPTION_KEY is not set on the worker, so their token cannot be signed',

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { configService, type CliExecJobPayload } from '@haive/shared';
+import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
 import { verifyTaskToken } from '@haive/shared/task-token';
 import {
   CUSTOM_TOOLS_UNWIRED_REASON,
@@ -161,6 +161,11 @@ async function unwired(provider: Provider, db: Database, forRun: Run): Promise<s
   return message;
 }
 
+const switchOff = () =>
+  vi
+    .mocked(configService.getBoolean)
+    .mockImplementation(async (key) => key !== CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED);
+
 const fileAt = (files: Files, path: string) => files.find((f) => f.containerPath === path)?.content;
 const toolsIn = (files: Files) =>
   JSON.parse(fileAt(files, CUSTOM_MCP_TOOLS_PATH)!) as Array<{ name: string }>;
@@ -271,6 +276,9 @@ describe.each<Provider>(['claude-code', 'codex', 'gemini'])(
         for (const path of CUSTOM_PATHS) expect(fileAt(files, path), path).toBeUndefined();
         expect(files.map((f) => f.content).join('\n')).not.toContain('haive-custom');
       }
+      expect(vi.mocked(configService.getBoolean).mock.calls.map(([key]) => key)).not.toContain(
+        CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED,
+      );
     });
 
     it('wires only the tools the run names', async () => {
@@ -308,6 +316,30 @@ describe.each<Provider>(['claude-code', 'codex', 'gemini'])(
       const message = await unwired(provider, db(), run());
       expect(message).toContain('CONFIG_ENCRYPTION_KEY');
       expect(message).toContain('repo_status, house_rules');
+    });
+
+    it('fails a run, naming the switch and the tools, when custom tools are switched off', async () => {
+      switchOff();
+      const message = await unwired(provider, db(), run());
+      expect(message).toContain('custom tools are switched off on this install');
+      expect(message).toContain('repo_status, house_rules');
+    });
+
+    it('names the switch, not the secret, when both are gone', async () => {
+      switchOff();
+      delete process.env.CONFIG_ENCRYPTION_KEY;
+      const message = await unwired(provider, db(), run());
+      expect(message).toContain('switched off');
+      expect(message).not.toContain('CONFIG_ENCRYPTION_KEY');
+    });
+
+    it('wires a run while the switch is on, reading it as the step runner does', async () => {
+      const { entry } = await entryOf(provider, db(), run());
+      expect(entry).toEqual(ENTRY);
+      expect(configService.getBoolean).toHaveBeenCalledWith(
+        CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED,
+        true,
+      );
     });
   },
 );

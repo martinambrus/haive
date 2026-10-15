@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { configService, type CliExecJobPayload } from '@haive/shared';
+import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
 
 const stubs = vi.hoisted(() => ({
   resumeStepIfLinked: vi.fn(async (..._args: unknown[]) => {}),
@@ -149,6 +149,16 @@ describe('a run that names custom tools it cannot wire, through the job handler'
       },
     ],
     ['the pinned step does not include them', 'none of them pinned', () => pinned(['other_tool'])],
+    [
+      'custom tools are switched off on this install',
+      'custom tools are switched off on this install',
+      () => {
+        vi.mocked(configService.getBoolean).mockImplementation(
+          async (key) => key !== CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED,
+        );
+        return pinned(NAMED);
+      },
+    ],
   ])(
     'ends as a failed invocation with its reason when %s, and is not run again',
     async (_why, cause, setup) => {
