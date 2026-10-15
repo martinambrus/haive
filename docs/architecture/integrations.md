@@ -160,12 +160,12 @@ DELETE.
 The refresh goes out under the client that issued the connection (`oauth_client_id`): if that client
 is gone but another is configured, the connection becomes `needs_reauth` ("was replaced"); if no client
 is configured at all, nothing is written, because a cleared row or an unset variable during a deploy
-can come back. A connection with no recorded client (`oauth_client_id` NULL, e.g. rows from before
-0202) refreshes with whichever client currently ranks first, so replacing a client does not move such a
-row to `needs_reauth`. `invalid_grant` (and GitHub's `bad_refresh_token`) means `needs_reauth`, written inside
-the transaction and thrown after it commits; `invalid_client` keeps the status and the tokens and
-records `last_error`, since fixing the client heals every connection (GitHub's
-`incorrect_client_credentials` likewise); a connection that holds no refresh token becomes
+can come back. A connection with no recorded client (`oauth_client_id` NULL, e.g. rows from
+before 0202) refreshes with whichever client currently ranks first, so replacing a client does not
+move such a row to `needs_reauth`. `invalid_grant` (and GitHub's `bad_refresh_token`) means
+`needs_reauth`, written inside the transaction and thrown after it commits; `invalid_client` keeps
+the status and the tokens and records `last_error`, since fixing the client heals every connection
+(GitHub's `incorrect_client_credentials` likewise); a connection that holds no refresh token becomes
 `needs_reauth`; a network error, a 5xx or a timeout writes nothing. A successful refresh writes both
 tokens under a new DEK, keeps the old refresh token when the vendor does not rotate it, and keeps the
 granted scopes when none are sent.
@@ -177,8 +177,8 @@ Neither function checks ownership: only ids the resolver produced may reach them
 **Vendor answers** (`oauth.ts`): 15 s timeout covering the body, `redirect: 'error'`. A network error,
 a timeout and any 5xx are `OauthUnavailableError` (the 5xx check comes after the body is read and
 before it is parsed); otherwise a JSON body with an `error` field is an `OauthVendorError` whatever the
-status (GitHub refuses with 200), and any other non-2xx is unavailable. A known error code (RFC 6749, 7009, 8628 and GitHub's)
-passes through whole — a short secret inside `invalid_grant` once turned it into `[redacted]` and the
+status (GitHub refuses with 200), and any other non-2xx is unavailable. A known error code (RFC
+6749, 7009, 8628 and GitHub's) passes through whole — a short secret inside `invalid_grant` once turned it into `[redacted]` and the
 refresh missed it; other codes are redacted and cut. Code branches on the `error` code, never on the
 text. `expires_in: 0` means already expired. Over HTTP: vendor error 400, unavailable 502.
 
@@ -326,13 +326,13 @@ the public host. That gap is still open.
 
 ## The call log, the stamp and the token
 
-- **Task token** (`task-token.ts`): `v1.<payload>.<mac>`, payload `{aud, taskId, taskStepId?,
-  cliInvocationId?, exp}`, 24 h by default; the MAC key is derived per audience, so a token verifies
-  under its own audience only. Audiences: `rag`, `ddev`, `custom-mcp`, `integrations`. An
-  `integrations` token is meant to carry the step and the invocation too, tying each call to the run
-  whose bindings it may use; `verifyTaskToken` treats both as optional, so requiring them is the
-  broker's job. The broker must not live under `/integrations`, whose `requireAuth` would answer a
-  sandbox token 401.
+- **Task token** (`task-token.ts`): `v1.<payload>.<mac>`, payload
+  `{aud, taskId, taskStepId?, cliInvocationId?, exp}`, 24 h by default; the MAC key is derived per
+  audience, so a token verifies under its own audience only. Audiences: `rag`, `ddev`, `custom-mcp`,
+  `integrations`. An `integrations` token is meant to carry the step and the invocation too, tying
+  each call to the run whose bindings it may use; `verifyTaskToken` treats both as optional, so
+  requiring them is the broker's job. The broker must not live under `/integrations`, whose
+  `requireAuth` would answer a sandbox token 401.
 - **`integration_calls`**: the provider id (`varchar(256)`, not null, no foreign key), the connection,
   task, step and invocation (each `SET NULL` on delete, so rows outlive a deleted task), tool, access,
   surface (`mcp` or `rest`), outcome (`ok`, `refused`, `error`, `running`), reason, duration, time.
