@@ -1,65 +1,14 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import type { ForgeProviderName } from '@haive/shared';
 import { getDecryptedCredentials } from '../repo/credentials.js';
 import {
   ForgeError,
   credentialForgeProvider,
   hostFromRemote,
+  parseRemote,
   resolveForgeProvider,
   type ForgeContext,
 } from '@haive/shared/forge';
-
-export { hostFromRemote };
-
-/** Parse a git remote URL (https, ssh:// or scp-style git@host:owner/repo) into
- *  { host, owner, repo }. owner is everything between the host and the final path
- *  segment, so a GitLab subgroup path (group/subgroup/project) resolves to
- *  owner=group/subgroup, repo=project. Bitbucket Server clone URLs put the repo under
- *  /scm/{projectKey}/{slug}.git — the /scm prefix is stripped so owner=projectKey. */
-export function parseRemote(
-  remoteUrl: string,
-  provider: ForgeProviderName,
-): { host: string; owner: string; repo: string } {
-  const trimmed = remoteUrl.trim();
-  let host: string;
-  let rawPath: string;
-
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
-    let u: URL;
-    try {
-      u = new URL(trimmed);
-    } catch {
-      throw new ForgeError(`Cannot parse remote URL: ${remoteUrl}`);
-    }
-    host = u.host;
-    rawPath = u.pathname;
-  } else {
-    // scp-like: [user@]host:owner/repo(.git)
-    const m = trimmed.match(/^(?:[^@]+@)?([^:/]+):(.+)$/);
-    if (!m || !m[1] || !m[2]) throw new ForgeError(`Cannot parse remote URL: ${remoteUrl}`);
-    host = m[1];
-    rawPath = `/${m[2]}`;
-  }
-
-  let segments = rawPath
-    .replace(/^\/+/, '')
-    .replace(/\.git$/i, '')
-    .split('/')
-    .filter(Boolean);
-
-  if (provider === 'bitbucket_server' && segments[0] === 'scm') {
-    segments = segments.slice(1);
-  }
-
-  const repo = segments[segments.length - 1];
-  const ownerSegments = segments.slice(0, -1);
-  if (!repo || ownerSegments.length === 0) {
-    throw new ForgeError(`Remote URL has no owner/repo path: ${remoteUrl}`);
-  }
-  const owner = ownerSegments.join('/');
-  return { host, owner, repo };
-}
 
 /** Build a ForgeContext for a repo's PR/MR call: resolve the credential's forge
  *  provider + optional API-base override, parse the remote URL, and decrypt the
