@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -128,6 +128,16 @@ async function setup(installJson?: string) {
         .map(({ taskId, taskStepId, payload }) => ({ taskId, taskStepId, payload })),
     column: () => fake.rows(schema.repositories)[0]!.renderContext ?? null,
     syncRows: () => fake.rows(schema.projectStateSync),
+  };
+}
+
+function refuseRecordWriteOnce(s: Awaited<ReturnType<typeof setup>>) {
+  let refused = false;
+  s.fake.hooks.beforeLock = (key) => {
+    if (key.includes('project-state') && !refused) {
+      refused = true;
+      throw new Error('database refused');
+    }
   };
 }
 
@@ -416,6 +426,93 @@ describe('02 and .haive/install.json', () => {
     expect(existsSync(join(s.root, INSTALL))).toBe(true);
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
+
+  it('lists it when a retry’s record write fails after an earlier attempt removed it', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
+    refuseRecordWriteOnce(s);
+
+    const out = await s.apply();
+
+    expect(out.warnings).toEqual(['project state record write failed: database refused']);
+    expect(out.deletedPaths).toContain(INSTALL);
+  });
+
+  it.each([
+    ['no event at all', null],
+    ['an event of another task', { taskId: OTHER_TASK, eventType: HAIVE_FILE_RETIRED_EVENT }],
+    ['an event of another type', { taskId: TASK, eventType: 'upgrade.other' }],
+  ])('does not list one the person deleted on a refused write, with %s', async (_what, event) => {
+    const s = await setup(HAIVE_SHAPED);
+    await commitAll(s.root);
+    await rm(join(s.root, INSTALL));
+    if (event !== null) {
+      s.fake.insert(schema.taskEvents, { taskStepId: null, payload: { path: INSTALL }, ...event });
+    }
+    refuseRecordWriteOnce(s);
+
+    const out = await s.apply();
+
+    expect(out.warnings).toEqual(['project state record write failed: database refused']);
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+  });
+
+  it.each([
+    ['a file', (path: string) => writeFile(path, '{"keep":true}')],
+    ['a directory', (path: string) => mkdir(path)],
+    ['a link', (path: string) => symlink('elsewhere.json', path)],
+  ])('does not list %s standing again, though this task removed it', async (_what, put) => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    await put(join(s.root, INSTALL));
+    refuseRecordWriteOnce(s);
+
+    const out = await s.apply();
+
+    expect(out.warnings).toEqual(['project state record write failed: database refused']);
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+  });
+
+  it('says so, and still returns, when the earlier removals cannot be looked up', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    await s.apply();
+    refuseRecordWriteOnce(s);
+    const select = s.fake.db.select;
+    s.fake.db.select = (fields) => ({
+      from: (table) => {
+        if (table === schema.taskEvents) throw new Error('database refused');
+        return select(fields).from(table);
+      },
+    });
+
+    const out = await s.apply();
+
+    expect(out.warnings).toEqual([
+      'project state record write failed: database refused',
+      'did not list the files this task removed earlier: database refused',
+    ]);
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+  });
+
+  it('lists it once when the failure comes after its own retirement listed it', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    const select = s.fake.db.select;
+    s.fake.db.select = (fields) => ({
+      from: (table) => {
+        if (Object.keys(fields ?? {}).join() === 'onboardingTooling') {
+          throw new Error('database refused');
+        }
+        return select(fields).from(table);
+      },
+    });
+
+    const out = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
+    expect(out.warnings).toEqual(['project state record write failed: database refused']);
+    expect(out.deletedPaths?.filter((path) => path === INSTALL)).toEqual([INSTALL]);
+  });
 });
 
 describe('02 and the legacy environment and exclusions mirrors', () => {
@@ -652,6 +749,22 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
     for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
       expect(existsSync(join(s.root, rel)), rel).toBe(true);
       expect(out.deletedPaths ?? [], rel).not.toContain(rel);
+    }
+  });
+
+  it('lists them when a retry’s record write fails after an earlier attempt removed them', async () => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
+    await s.apply();
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(false);
+    }
+    refuseRecordWriteOnce(s);
+
+    const out = await s.apply();
+
+    expect(out.warnings).toEqual(['project state record write failed: database refused']);
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(out.deletedPaths, rel).toContain(rel);
     }
   });
 });

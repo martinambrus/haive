@@ -2,6 +2,7 @@ import {
   decodeUtf8Strict,
   errno,
   isPathContainmentError,
+  lstatNoFollow,
   ParkedFileError,
   removeFileIfNoFollow,
   rewriteFileIfNoFollow,
@@ -77,6 +78,21 @@ const RESTORE_RTK_BLOCK_FIELD = 'restoreRtkBlock';
 
 /** One per Haive file 02 removes, so a retry that finds it gone knows this task removed it. */
 export const HAIVE_FILE_RETIRED_EVENT = 'upgrade.haive_file_retired';
+
+async function retiredByThisTask(db: Database, taskId: string): Promise<Set<string>> {
+  const events = await db
+    .select({ payload: schema.taskEvents.payload })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, taskId),
+        eq(schema.taskEvents.eventType, HAIVE_FILE_RETIRED_EVENT),
+      ),
+    );
+  return new Set(
+    events.flatMap(({ payload }) => (typeof payload?.path === 'string' ? [payload.path] : [])),
+  );
+}
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
@@ -1814,19 +1830,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       });
       writtenPaths.push(...state.written);
       deletedPaths.push(...state.removed);
-      const retiredEarlier = new Set(
-        (
-          await ctx.db
-            .select({ payload: schema.taskEvents.payload })
-            .from(schema.taskEvents)
-            .where(
-              and(
-                eq(schema.taskEvents.taskId, ctx.taskId),
-                eq(schema.taskEvents.eventType, HAIVE_FILE_RETIRED_EVENT),
-              ),
-            )
-        ).map((event) => event.payload?.path),
-      );
+      const retiredEarlier = await retiredByThisTask(ctx.db, ctx.taskId);
       const recordRetired = async (path: string) => {
         const [event] = await ctx.db
           .insert(schema.taskEvents)
@@ -1869,6 +1873,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       const message = err instanceof Error ? err.message : String(err);
       warnings.push(`project state record write failed: ${message}`);
       ctx.logger.warn({ err }, 'project state record write failed');
+      // Nothing is retired after a failed write; what an earlier attempt removed is still listed.
+      try {
+        for (const path of await retiredByThisTask(ctx.db, ctx.taskId)) {
+          if (!deletedPaths.includes(path) && (await lstatNoFollow(ctx.repoPath, path)) === null) {
+            deletedPaths.push(path);
+          }
+        }
+      } catch (lookupErr) {
+        const cause = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
+        warnings.push(`did not list the files this task removed earlier: ${cause}`);
+        ctx.logger.warn({ err: lookupErr }, 'earlier removals not listed');
+      }
     }
 
     ctx.logger.info(
