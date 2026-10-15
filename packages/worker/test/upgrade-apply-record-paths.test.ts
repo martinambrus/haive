@@ -510,7 +510,9 @@ describe('02 and .haive/install.json', () => {
     const out = await s.apply();
 
     expect(existsSync(join(s.root, INSTALL))).toBe(false);
-    expect(out.warnings).toEqual(['project state record write failed: database refused']);
+    expect(out.warnings).toEqual([
+      'the record was written, but retiring the files it replaces failed: database refused',
+    ]);
     expect(out.deletedPaths?.filter((path) => path === INSTALL)).toEqual([INSTALL]);
   });
 });

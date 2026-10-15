@@ -1818,6 +1818,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     }
 
     ctx.throwIfCancelled();
+    let recordWritten = false;
     try {
       const state = await writeProjectStateRecord(ctx.db, {
         repositoryId: plan.repositoryId,
@@ -1828,6 +1829,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           ? { expectedColumns: plannedColumns(plan), holdingTaskId: ctx.taskId }
           : {}),
       });
+      recordWritten = true;
       writtenPaths.push(...state.written);
       deletedPaths.push(...state.removed);
       const retiredEarlier = await retiredByThisTask(ctx.db, ctx.taskId);
@@ -1871,9 +1873,12 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         deletedPaths.push(...err.removed);
       }
       const message = err instanceof Error ? err.message : String(err);
-      warnings.push(`project state record write failed: ${message}`);
-      ctx.logger.warn({ err }, 'project state record write failed');
-      // Nothing is retired after a failed write; what an earlier attempt removed is still listed.
+      const failed = recordWritten
+        ? 'the record was written, but retiring the files it replaces failed'
+        : 'project state record write failed';
+      warnings.push(`${failed}: ${message}`);
+      ctx.logger.warn({ err }, failed);
+      // What this task removed, now or in an earlier attempt, is still listed.
       try {
         for (const path of await retiredByThisTask(ctx.db, ctx.taskId)) {
           if (!deletedPaths.includes(path) && (await lstatNoFollow(ctx.repoPath, path)) === null) {
