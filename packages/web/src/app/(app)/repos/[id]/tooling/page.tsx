@@ -282,7 +282,7 @@ export default function RepoToolingPage() {
   }
 
   async function handleSave() {
-    if (saving) return;
+    if (saving || clearCredsBusy) return;
     // Mirrors the API's own guard. Checked here too so unticking the last dimension
     // reads as a form error rather than a failed request.
     if (reviewDimensions.size === 0) {
@@ -342,7 +342,8 @@ export default function RepoToolingPage() {
   }
 
   async function handleClearCredentials() {
-    if (clearCredsBusy) return;
+    // Clear and Save write the same credentials; their PATCHes could settle in either order.
+    if (clearCredsBusy || saving) return;
     setClearCredsBusy(true);
     setClearCredsError(null);
     try {
@@ -798,6 +799,7 @@ export default function RepoToolingPage() {
                   size="sm"
                   variant="secondary"
                   className="mt-3"
+                  disabled={saving}
                   onClick={() => {
                     setClearCredsError(null);
                     setClearCredsOpen(true);
@@ -831,7 +833,7 @@ export default function RepoToolingPage() {
                       <Button
                         variant="destructive"
                         className="h-11"
-                        disabled={clearCredsBusy}
+                        disabled={clearCredsBusy || saving}
                         onClick={() => void handleClearCredentials()}
                       >
                         {clearCredsBusy ? 'Clearing...' : 'Clear credentials'}
@@ -1050,7 +1052,7 @@ export default function RepoToolingPage() {
           </Card>
 
           <div className="flex items-center gap-3">
-            <Button onClick={handleSave} disabled={saving}>
+            <Button onClick={handleSave} disabled={saving || clearCredsBusy}>
               {saving ? 'Saving...' : 'Save tooling'}
             </Button>
             {saved && (

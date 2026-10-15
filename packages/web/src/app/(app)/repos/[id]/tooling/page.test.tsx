@@ -153,7 +153,7 @@ async function mount(config: Record<string, unknown> = {}) {
     press: async (name: string) => {
       const target = button(name);
       if (!target?.props.onClick) throw new Error(`no "${name}" button to press`);
-      target.props.onClick();
+      if (!target.props.disabled) target.props.onClick();
       await flush();
       draw();
     },
@@ -506,5 +506,135 @@ describe('Save tooling and the stored credentials', () => {
     await view.press('Save tooling');
     expect(api.patch).toHaveBeenCalledTimes(1);
     expect(credentialFields(lastBody())).toStrictEqual({});
+  });
+});
+
+describe('Clear stored credentials and Save tooling never run together', () => {
+  type View = Awaited<ReturnType<typeof mount>>;
+
+  function holdNextPatch() {
+    let settle!: (ok: boolean) => void;
+    api.patch.mockReturnValueOnce(
+      new Promise<void>((resolve, reject) => {
+        settle = (ok) => (ok ? resolve() : reject(new Error('The server said no')));
+      }),
+    );
+    return async (ok: boolean) => {
+      settle(ok);
+      await flush();
+    };
+  }
+  const startSave = (view: View) => {
+    view.button('Save tooling')!.props.onClick!();
+    view.draw();
+  };
+  const startClear = async (view: View) => {
+    await view.press(CLEAR);
+    view.button(CONFIRM)!.props.onClick!();
+    view.draw();
+  };
+
+  it('leaves both enabled when nothing is out', async () => {
+    const view = await mount();
+    expect(view.button(CLEAR)!.props.disabled).toBeFalsy();
+    expect(view.button('Save tooling')!.props.disabled).toBeFalsy();
+  });
+
+  it('disables Clear while a save is out', async () => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    startSave(view);
+    expect(view.button(CLEAR)!.props.disabled).toBe(true);
+    await settle(true);
+  });
+
+  it('opens nothing and sends nothing when Clear is pressed while a save is out', async () => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    startSave(view);
+    await view.press(CLEAR);
+    expect(view.dialog()?.props.open).toBe(false);
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    await settle(true);
+  });
+
+  it('disables Save while a clear is out', async () => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    await startClear(view);
+    expect(view.button('Save tooling')!.props.disabled).toBe(true);
+    await settle(true);
+  });
+
+  it('sends nothing when Save is pressed while a clear is out', async () => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    await startClear(view);
+    await view.press('Save tooling');
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    await settle(true);
+  });
+
+  it('disables the confirm in a dialog opened before a save, while the save is out', async () => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    await view.press(CLEAR);
+    startSave(view);
+    expect(view.button(CONFIRM)!.props.disabled).toBe(true);
+    await settle(true);
+    view.draw();
+    expect(view.button(CONFIRM)!.props.disabled).toBeFalsy();
+  });
+
+  it('ignores a confirm pressed in a dialog opened before a save, while the save is out', async () => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    await view.press(CLEAR);
+    startSave(view);
+    view.button(CONFIRM)!.props.onClick!();
+    await flush();
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    expect(lastBody()).toHaveProperty('appAuth');
+    await settle(true);
+  });
+
+  it('ignores a Save that reaches its handler while a clear is out', async () => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    await startClear(view);
+    view.button('Save tooling')!.props.onClick!();
+    await flush();
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    expect(lastBody()).toStrictEqual({ appAuthUsername: '', appAuthPassword: '' });
+    await settle(true);
+  });
+
+  it.each([
+    ['succeeds', true],
+    ['fails', false],
+  ])('enables Clear again once the save %s', async (_how, ok) => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    startSave(view);
+    await settle(ok);
+    view.draw();
+    expect(view.button(CLEAR)!.props.disabled).toBeFalsy();
+    await view.press(CLEAR);
+    expect(view.dialog()?.props.open).toBe(true);
+  });
+
+  it.each([
+    ['succeeds', true],
+    ['fails', false],
+  ])('enables Save again once the clear %s', async (_how, ok) => {
+    const settle = holdNextPatch();
+    const view = await mount();
+    await startClear(view);
+    await settle(ok);
+    view.draw();
+    expect(view.button('Save tooling')!.props.disabled).toBeFalsy();
+    await view.press('Save tooling');
+    expect(api.patch).toHaveBeenCalledTimes(2);
+    expect(lastBody()).toHaveProperty('appAuth');
   });
 });
