@@ -24,7 +24,13 @@ export async function killTaskSandboxesOrThrow(taskId: string): Promise<number> 
   if (listed.failure !== null) throw new Error(`sandbox listing failed: ${listed.failure}`);
   if (listed.ids.length === 0) return 0;
   const removal = await rmForce(listed.ids);
-  if (removal !== null) throw new Error(`sandbox removal failed: ${removal}`);
+  if (removal !== null) {
+    // A `--rm` sandbox that exits by itself fails the removal, so what is still listed decides.
+    const after = await listIds(taskId);
+    if (after.failure !== null || after.ids.some((id) => listed.ids.includes(id))) {
+      throw new Error(`sandbox removal failed: ${removal}`);
+    }
+  }
   return listed.ids.length;
 }
 
