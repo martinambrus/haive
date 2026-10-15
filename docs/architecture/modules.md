@@ -66,7 +66,9 @@ for a folder, `"@haive-module/<id>": "<exact version>"` for a registry module). 
 records its source (`local` or `registry`) and the worker writes it to the `modules` row at boot. The
 same id from a folder and a registry dependency is refused (`gen-modules` exits 1 naming both; keep
 one), and a registry dependency whose package is not on disk yet is left out with a notice until
-`pnpm install` has run; the worker must depend on it even then.
+`pnpm install` has run; the worker must depend on it even then. Every installed package in the
+`@haive-module` scope must export `./manifest`: `gen-modules` refuses one that does not, rather than
+leave out a dependency the api and worker hold.
 `@haive/worker` must depend on exactly the same modules, and `@haive/web` on exactly the installed
 ones that export `./web` or `./dashboard`, so the api and the worker always load the same set. Any
 other combination is a half-installed state: `gen-modules` exits 1, naming the side and the
