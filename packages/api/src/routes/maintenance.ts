@@ -206,11 +206,13 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
-      await db.transaction(async (tx) => {
-        await clearTaskPause(tx, taskId);
+      const resumed = await db.transaction(async (tx) => {
+        // Only the resume that changes the row is recorded.
+        if (!(await clearTaskPause(tx, taskId))) return false;
         await appendTaskEvent(tx, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
+        return true;
       });
-      await audit({});
+      if (resumed) await audit({});
       return c.json({ ok: true, pausedAt: null });
     }
     case 'stop': {

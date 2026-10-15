@@ -49,7 +49,7 @@ const PAUSES = [
   },
 ];
 
-describe.each(PAUSES)('$name', ({ owner, path, recorded, resumed }) => {
+describe.each(PAUSES)('$name', ({ admin, owner, path, recorded, resumed }) => {
   const setup = (over: Record<string, unknown> = {}) => {
     const fake = createFakeDb({
       tasks: schema.tasks,
@@ -172,6 +172,53 @@ describe.each(PAUSES)('$name', ({ owner, path, recorded, resumed }) => {
     expect(fake.rows(schema.taskEvents)).toMatchObject([
       { eventType: 'task.resumed', payload: resumed },
     ]);
+  });
+
+  it("writes the audit row for an administrator's resume and none for the owner's", async () => {
+    const fake = setup({ pausedAt: new Date(0) });
+
+    expect((await resume()).status).toBe(200);
+    expect(fake.rows(schema.auditEvents)).toHaveLength(admin ? 1 : 0);
+  });
+
+  describe('when the other writer resumes between the check and the update', () => {
+    const rival = PAUSES.find((p) => p.path !== path)!;
+    const race = async () => {
+      const fake = setup({ userId: USER, pausedAt: new Date(0) });
+      fake.hooks.beforeUpdate = async (table) => {
+        if (table !== schema.tasks) return;
+        fake.hooks.beforeUpdate = null;
+        await act('resume', rival.path);
+      };
+      return { fake, res: await resume() };
+    };
+
+    it('answers as it does for a task already resumed', async () => {
+      const { res } = await race();
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, pausedAt: null });
+    });
+
+    it('leaves the task unpaused', async () => {
+      const { fake } = await race();
+
+      expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeNull();
+    });
+
+    it("records one event, the other writer's", async () => {
+      const { fake } = await race();
+
+      expect(fake.rows(schema.taskEvents)).toMatchObject([
+        { eventType: 'task.resumed', payload: rival.resumed },
+      ]);
+    });
+
+    it("writes the audit row once for an administrator's winning resume and never for a losing one", async () => {
+      const { fake } = await race();
+
+      expect(fake.rows(schema.auditEvents)).toHaveLength(rival.admin ? 1 : 0);
+    });
   });
 
   it('answers an error and keeps the pause when the resumed event cannot be written', async () => {

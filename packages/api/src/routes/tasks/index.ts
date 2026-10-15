@@ -1329,10 +1329,13 @@ taskRoutes.post('/:id/action', async (c) => {
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
-      await db.transaction(async (tx) => {
-        await clearTaskPause(tx, id);
+      const resumed = await db.transaction(async (tx) => {
+        // Only the resume that changes the row is recorded.
+        if (!(await clearTaskPause(tx, id))) return false;
         await appendTaskEvent(tx, id, null, 'task.resumed', { by: userId });
+        return true;
       });
+      if (!resumed) return c.json({ ok: true, pausedAt: null });
       // No re-drive needed: the pause park re-enqueues its own delayed advance every
       // PAUSE_POLL_MS and the deferred cli-exec jobs re-deliver on their own, so both pick
       // the task back up within ~30s. Enqueuing an extra advance here would race the park
