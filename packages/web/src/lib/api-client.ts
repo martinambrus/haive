@@ -2528,6 +2528,7 @@ export interface ModuleOpenTask {
   title: string;
   status: string;
   ownerId: string;
+  currentStepId: string | null;
 }
 
 export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
@@ -2536,6 +2537,32 @@ export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
     ? (tasks as ModuleOpenTask[])
     : [];
 }
+
+/** True when the refusal's `tasks` list was cut at the api's cap. */
+export function moduleOpenCapped(err: ApiError): boolean {
+  const capped = (err.body as { capped?: unknown } | undefined)?.capped;
+  return err.code === 'module_tasks_open' && capped === true;
+}
+
+export interface ModuleUrgentResponse extends ModuleActiveResponse {
+  stopped: {
+    id: string;
+    title: string;
+    killed: number;
+    cancelled: number;
+    stopped: number;
+    eventError?: string;
+  }[];
+  left: { id: string; title: string; status: string; currentStepId: string | null }[];
+  failed: { id: string; error: string }[];
+  capped: boolean;
+}
+
+export const patchModuleUrgent = (moduleId: string) =>
+  api.patch<ModuleUrgentResponse>(`/modules/${encodeURIComponent(moduleId)}`, {
+    active: false,
+    mode: 'urgent',
+  });
 
 export interface ModuleTeardownDone {
   moduleId: string;
