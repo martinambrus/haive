@@ -578,7 +578,7 @@ describe('TaskTypeEditor loading a draft', () => {
     }
   });
 
-  it('shows it on a saved type as unsaved changes against the saved row, and ignores its slug', async () => {
+  it('shows it on a saved type as unsaved changes against the saved row, under the saved slug', async () => {
     const view = await mount();
     const before = view.form().key;
     view.load(promptDraft('somebody-else'));
@@ -586,6 +586,7 @@ describe('TaskTypeEditor loading a draft', () => {
     expect(view.form().props.initialValues).toMatchObject({ displayName: 'Drafted name' });
     expect(view.form().props.initialValues).not.toHaveProperty('slug');
     expect(view.panel()?.props.editorState).toMatchObject({ slug: 'tt-x' });
+    expect(view.composer().props.stepIds).toEqual(['custom.tt-x.list']);
     expect(guard.dirty.at(-1)).toBe(true);
     expect(api.updateTaskType).not.toHaveBeenCalled();
   });

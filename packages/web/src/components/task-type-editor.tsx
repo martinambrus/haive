@@ -228,6 +228,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   function loadDraft(draft: Record<string, unknown>) {
     const next = loadDraftIntoEditor({ stepIds, loopLimits, promptSteps, values }, draft, {
       creating,
+      slug: typeSlug,
     });
     touch();
     setStepIds(next.stepIds);

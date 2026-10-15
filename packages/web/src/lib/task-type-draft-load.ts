@@ -1,4 +1,8 @@
-import { PROMPT_STEP_DRAFTABLE_KEYS, type PromptStepEntry } from '@haive/shared/modularity';
+import {
+  parseStepId,
+  PROMPT_STEP_DRAFTABLE_KEYS,
+  type PromptStepEntry,
+} from '@haive/shared/modularity';
 import type { FormValues } from '@/components/form-validation';
 import { DEFAULT_PROMPT_STEP_TIMEOUT_MS, type PromptSteps } from './prompt-step-editing';
 
@@ -45,11 +49,19 @@ function draftedStep(
   return { ...base, ...picked } as PromptStepEntry;
 }
 
+/** A saved type keeps its slug, so the steps of a draft that renamed it are named under the saved one. */
+function underSlug(ids: readonly string[], slug: string): string[] {
+  return ids.map((id) => {
+    const parsed = parseStepId(id);
+    return parsed?.kind === 'custom' ? `custom.${slug}.${parsed.stepSlug}` : id;
+  });
+}
+
 /** The draft is the whole task type: an optional part it leaves out is cleared, a required part it gets wrong stays as the editor had it. */
 export function loadDraftIntoEditor(
   editor: DraftEditorState,
   draft: Record<string, unknown>,
-  { creating }: { creating: boolean },
+  { creating, slug }: { creating: boolean; slug: string },
 ): DraftEditorState {
   const values: FormValues = { ...editor.values };
   if (creating && isText(draft.slug)) values.slug = draft.slug;
@@ -66,7 +78,11 @@ export function loadDraftIntoEditor(
     steps.push([slug, draftedStep(slug, raw, saved)]);
   }
   return {
-    stepIds: isTexts(draft.stepIds) ? [...draft.stepIds] : editor.stepIds,
+    stepIds: isTexts(draft.stepIds)
+      ? creating
+        ? [...draft.stepIds]
+        : underSlug(draft.stepIds, slug)
+      : editor.stepIds,
     loopLimits: Object.fromEntries(
       Object.entries(limits).filter(
         (entry): entry is [string, number] => typeof entry[1] === 'number',

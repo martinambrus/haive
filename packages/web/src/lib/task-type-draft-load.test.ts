@@ -69,7 +69,7 @@ const draft = (over: Record<string, unknown> = {}): Record<string, unknown> => (
 
 describe('loadDraftIntoEditor', () => {
   it('replaces the step list, the loop limits, the name, the description and the repository flag', () => {
-    const next = loadDraftIntoEditor(editor(), draft(), { creating: true });
+    const next = loadDraftIntoEditor(editor(), draft(), { creating: true, slug: 't' });
     expect(next.stepIds).toEqual(['custom.drafted.a', 'custom.drafted.b']);
     expect(next.loopLimits).toEqual({ '07b-phase-4-validate': 5 });
     expect(next.values).toMatchObject({
@@ -80,32 +80,35 @@ describe('loadDraftIntoEditor', () => {
   });
 
   it('leaves the fields the draft cannot carry as the editor had them', () => {
-    const { values } = loadDraftIntoEditor(editor(), draft(), { creating: true });
+    const { values } = loadDraftIntoEditor(editor(), draft(), { creating: true, slug: 't' });
     expect(values).toMatchObject({ enabled: false, selectable: false, sortOrder: 7 });
   });
 
   it('takes the slug while creating', () => {
-    const { values } = loadDraftIntoEditor(editor(), draft(), { creating: true });
+    const { values } = loadDraftIntoEditor(editor(), draft(), { creating: true, slug: 't' });
     expect(values.slug).toBe('drafted');
   });
 
   it('ignores the slug when editing a saved type, whether or not the editor holds one', () => {
-    const held = loadDraftIntoEditor(editor(), draft(), { creating: false });
+    const held = loadDraftIntoEditor(editor(), draft(), { creating: false, slug: 't' });
     expect(held.values.slug).toBe('t');
     const { slug: _slug, ...withoutSlug } = editor().values;
-    const bare = loadDraftIntoEditor(editor({ values: withoutSlug }), draft(), { creating: false });
+    const bare = loadDraftIntoEditor(editor({ values: withoutSlug }), draft(), {
+      creating: false,
+      slug: 't',
+    });
     expect('slug' in bare.values).toBe(false);
   });
 
   it('clears an optional part the draft leaves out', () => {
     const { description: _d, stepLoopLimitDefaults: _l, ...bare } = draft();
-    const next = loadDraftIntoEditor(editor(), bare, { creating: true });
+    const next = loadDraftIntoEditor(editor(), bare, { creating: true, slug: 't' });
     expect(next.values.description).toBe('');
     expect(next.loopLimits).toEqual({});
   });
 
   it('takes the draftable keys of an entry that is already in the editor and keeps the rest of it', () => {
-    const { promptSteps } = loadDraftIntoEditor(editor(), draft(), { creating: true });
+    const { promptSteps } = loadDraftIntoEditor(editor(), draft(), { creating: true, slug: 't' });
     expect(promptSteps.a).toEqual(
       entry({
         title: 'New title',
@@ -123,7 +126,7 @@ describe('loadDraftIntoEditor', () => {
   });
 
   it('gives a slug the editor has not seen the draftable keys and no tools', () => {
-    const { promptSteps } = loadDraftIntoEditor(editor(), draft(), { creating: true });
+    const { promptSteps } = loadDraftIntoEditor(editor(), draft(), { creating: true, slug: 't' });
     expect(promptSteps.b).toEqual({
       slug: 'b',
       title: 'B',
@@ -144,7 +147,7 @@ describe('loadDraftIntoEditor', () => {
           b: draftStep({ slug: 'b', tools: [rogue] }),
         },
       }),
-      { creating: true },
+      { creating: true, slug: 't' },
     );
     expect(next.promptSteps.a?.tools).toEqual([tool]);
     expect(next.promptSteps.b?.tools).toEqual([]);
@@ -165,7 +168,7 @@ describe('loadDraftIntoEditor', () => {
           }),
         },
       }),
-      { creating: true },
+      { creating: true, slug: 't' },
     );
     expect(Object.keys(next.promptSteps.b ?? {}).sort()).toEqual(
       [...PROMPT_STEP_DRAFTABLE_KEYS, 'tools'].sort(),
@@ -176,7 +179,7 @@ describe('loadDraftIntoEditor', () => {
     const next = loadDraftIntoEditor(
       editor({ promptSteps: { a: entry(), gone: entry({ slug: 'gone' }) } }),
       draft(),
-      { creating: true },
+      { creating: true, slug: 't' },
     );
     expect(Object.keys(next.promptSteps)).toEqual(['a', 'b']);
   });
@@ -188,7 +191,7 @@ describe('loadDraftIntoEditor', () => {
         '{"slug":"d","displayName":"D","requiresRepository":true,"stepIds":["custom.d.__proto__"],' +
           '"promptSteps":{"__proto__":{"slug":"__proto__","title":"T","template":"x","capabilities":[],"timeoutMs":600000}}}',
       ) as Record<string, unknown>,
-      { creating: true },
+      { creating: true, slug: 't' },
     );
     expect(Object.keys(next.promptSteps)).toEqual(['__proto__']);
     expect(next.promptSteps['__proto__']?.title).toBe('T');
@@ -209,7 +212,7 @@ describe('loadDraftIntoEditor', () => {
           junk: 'not an entry',
         },
       }),
-      { creating: true },
+      { creating: true, slug: 't' },
     );
     expect(next.values).toMatchObject({
       displayName: 'Old name',
@@ -229,7 +232,10 @@ describe('loadDraftIntoEditor', () => {
 
   it('reads no prompt steps from a draft whose promptSteps is not an object', () => {
     for (const promptSteps of [undefined, null, 'x', ['a']]) {
-      const next = loadDraftIntoEditor(editor(), draft({ promptSteps }), { creating: true });
+      const next = loadDraftIntoEditor(editor(), draft({ promptSteps }), {
+        creating: true,
+        slug: 't',
+      });
       expect(next.promptSteps).toEqual({});
     }
   });
@@ -239,11 +245,32 @@ describe('loadDraftIntoEditor', () => {
     const snapshot = structuredClone(before);
     const given = draft();
     const givenSnapshot = structuredClone(given);
-    const next = loadDraftIntoEditor(before, given, { creating: true });
+    const next = loadDraftIntoEditor(before, given, { creating: true, slug: 't' });
     expect(before).toEqual(snapshot);
     expect(given).toEqual(givenSnapshot);
     expect(next.promptSteps.a).not.toBe(before.promptSteps.a);
     expect(next.values).not.toBe(before.values);
+  });
+});
+
+describe('loadDraftIntoEditor on a saved type', () => {
+  it('names the steps of a draft that renamed the type under the saved slug', () => {
+    const renamed = draft({
+      slug: 'renamed',
+      stepIds: ['custom.renamed.a', '07b-phase-4-validate', 'module.stats.collect'],
+    });
+    expect(loadDraftIntoEditor(editor(), renamed, { creating: false, slug: 't' }).stepIds).toEqual([
+      'custom.t.a',
+      '07b-phase-4-validate',
+      'module.stats.collect',
+    ]);
+  });
+
+  it('keeps the drafted names on the create page, where the slug is the draft own', () => {
+    const renamed = draft({ slug: 'renamed', stepIds: ['custom.renamed.a'] });
+    expect(loadDraftIntoEditor(editor(), renamed, { creating: true, slug: 't' }).stepIds).toEqual([
+      'custom.renamed.a',
+    ]);
   });
 });
 
@@ -302,7 +329,7 @@ describe('editorStateForAgent', () => {
   });
 
   it('gives the draft back what it was loaded from', () => {
-    const loaded = loadDraftIntoEditor(editor(), draft(), { creating: true });
+    const loaded = loadDraftIntoEditor(editor(), draft(), { creating: true, slug: 't' });
     const sent = editorStateForAgent(loaded);
     expect(sent).toMatchObject({
       slug: 'drafted',
