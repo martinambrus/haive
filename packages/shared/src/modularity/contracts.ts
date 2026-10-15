@@ -73,6 +73,11 @@ export function parseStepId(id: string): ParsedStepId | null {
   return null;
 }
 
+export function isStepOfModule(stepId: string | null, moduleId: string): boolean {
+  const parsed = stepId === null ? null : parseStepId(stepId);
+  return parsed?.kind === 'module' && parsed.moduleId === moduleId;
+}
+
 function parseScopedId(id: string): ParsedScopedId | null {
   if (CORE_PROVIDER_ID_PATTERN.test(id)) return { kind: 'core' };
   const mod = MODULE_STEP_ID_PATTERN.exec(id);

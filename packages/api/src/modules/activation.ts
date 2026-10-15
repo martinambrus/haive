@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import { MODULE_DEPENDENTS_CAP, parseStepId } from '@haive/shared/modularity';
+import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
 import { recordAuditEvent } from '../lib/audit.js';
 import { stopActiveCliInvocations } from '../lib/task-control.js';
 import { LIVE_TASK_STATES } from '../routes/maintenance.js';
@@ -133,12 +133,7 @@ export function setModuleActive(
   });
 }
 
-const inModuleStep = (stepId: string | null, moduleId: string): boolean => {
-  const parsed = stepId === null ? null : parseStepId(stepId);
-  return parsed?.kind === 'module' && parsed.moduleId === moduleId;
-};
-
-// starts_with only narrows the rows in SQL; inModuleStep is the exact test.
+// starts_with only narrows the rows in SQL; isStepOfModule is the exact test.
 const dependentsInModuleStep = async (db: Reader, moduleId: string): Promise<ModuleDependent[]> => {
   const rows = await dependentRows(
     db,
@@ -146,7 +141,7 @@ const dependentsInModuleStep = async (db: Reader, moduleId: string): Promise<Mod
     false,
     sql`starts_with(${schema.tasks.currentStepId}, ${`module.${moduleId}.`})`,
   );
-  return rows.filter((row) => inModuleStep(row.currentStepId, moduleId));
+  return rows.filter((row) => isStepOfModule(row.currentStepId, moduleId));
 };
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -179,7 +174,7 @@ export async function deactivateUrgently(
 
   const report: UrgentReport = { stopped: [], left: [], failed: [], capped: stamped.capped };
   for (const { id, title, status, ownerId, currentStepId } of stamped.dependents) {
-    if (!inModuleStep(currentStepId, moduleId)) {
+    if (!isStepOfModule(currentStepId, moduleId)) {
       report.left.push({ id, title, status, currentStepId });
       continue;
     }

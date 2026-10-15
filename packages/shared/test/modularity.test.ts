@@ -11,6 +11,7 @@ import {
   isModuleStepId,
   isPersonaId,
   isProviderId,
+  isStepOfModule,
   parseCategoryId,
   parseProviderId,
   parseStepId,
@@ -174,6 +175,19 @@ describe('step id grammar', () => {
 
   it('rejects a dot in the core position', () => {
     expect(isCoreStepId('a.b')).toBe(false);
+  });
+});
+
+describe('isStepOfModule', () => {
+  it.each([
+    ['module.alpha.x', 'alpha', true],
+    ['module.alpha-two.x', 'alpha', false],
+    ['module.beta.x', 'alpha', false],
+    ['07-phase-2-implement', 'alpha', false],
+    ['custom.alpha.x', 'alpha', false],
+    [null, 'alpha', false],
+  ])('%s in module %s is %s', (stepId, moduleId, expected) => {
+    expect(isStepOfModule(stepId, moduleId)).toBe(expected);
   });
 });
 

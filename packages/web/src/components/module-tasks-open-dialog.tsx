@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import Link from 'next/link';
-import { MODULE_DEPENDENTS_CAP, parseStepId } from '@haive/shared/modularity';
+import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
 import {
   patchModuleUrgent,
   type ApiError,
@@ -25,14 +25,9 @@ export interface ModuleTasksBlocked {
 const COPY_TAIL =
   'Module code already running finishes its current call, and its background jobs stop at the next worker restart.';
 
-const inModuleStep = (stepId: string | null, moduleId: string): boolean => {
-  const parsed = stepId === null ? null : parseStepId(stepId);
-  return parsed?.kind === 'module' && parsed.moduleId === moduleId;
-};
-
 function turnOffCopy({ moduleId, name, tasks }: ModuleTasksBlocked): string {
   const lead = `Turns ${inlineCode(name || moduleId)} off now.`;
-  const inStep = tasks.filter((t) => inModuleStep(t.currentStepId, moduleId)).length;
+  const inStep = tasks.filter((t) => isStepOfModule(t.currentStepId, moduleId)).length;
   if (inStep === 0) {
     return `${lead} No listed task is in one of its steps now, so none is stopped; each fails when it next runs one of its steps. ${COPY_TAIL}`;
   }
@@ -144,7 +139,7 @@ export function ModuleTasksOpenDialog({
               {t.currentStepId !== null && (
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-neutral-500">
                   <code className="font-mono [overflow-wrap:anywhere]">{t.currentStepId}</code>
-                  {inModuleStep(t.currentStepId, moduleId) && (
+                  {isStepOfModule(t.currentStepId, moduleId) && (
                     <Badge variant="warning">{`in a ${name} step`}</Badge>
                   )}
                 </div>
