@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { MODULE_DEPENDENTS_CAP } from '@haive/shared/modularity';
 import type { ModuleOpenTask } from '@/lib/api-client';
 import {
   ModuleTaskTitle,
@@ -13,6 +14,11 @@ import {
 vi.mock('react-dom', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react-dom')>()),
   createPortal: (children: unknown) => children,
+}));
+// A cap other than the real one, so a note that spells the number itself fails.
+vi.mock('@haive/shared/modularity', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared/modularity')>()),
+  MODULE_DEPENDENTS_CAP: 7,
 }));
 beforeAll(() => vi.stubGlobal('document', { body: {} }));
 afterAll(() => vi.unstubAllGlobals());
@@ -194,13 +200,16 @@ describe('ModuleTasksOpenDialog step badge', () => {
 });
 
 describe('ModuleTasksOpenDialog cap note', () => {
+  const NOTE = `Showing the first ${MODULE_DEPENDENTS_CAP}.`;
+  const noteOf = (html: string) => /<p[^>]*>(Showing[^<]*)<\/p>/.exec(html)?.[1];
+
   it('says the list was cut only when the api said so', () => {
-    expect(render(blocked({ capped: true }))).toContain('Showing the first 200.');
+    expect(noteOf(render(blocked({ capped: true })))).toBe(NOTE);
     expect(render(blocked({ capped: false }))).not.toContain('Showing the first');
   });
 
-  it('is the same note the purge dialog shows', () => {
-    expect(renderToStaticMarkup(<ModuleTasksCapNote />)).toContain('Showing the first 200.');
+  it('is the same note the purge dialog shows, built from the shared cap', () => {
+    expect(noteOf(renderToStaticMarkup(<ModuleTasksCapNote />))).toBe(NOTE);
   });
 });
 

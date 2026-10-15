@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import Link from 'next/link';
-import { parseStepId } from '@haive/shared/modularity';
+import { MODULE_DEPENDENTS_CAP, parseStepId } from '@haive/shared/modularity';
 import {
   patchModuleUrgent,
   type ApiError,
@@ -77,7 +77,9 @@ export function ModuleTaskTitle({
 }
 
 export function ModuleTasksCapNote() {
-  return <p className="mt-2 text-xs text-amber-300">Showing the first 200.</p>;
+  return (
+    <p className="mt-2 text-xs text-amber-300">{`Showing the first ${MODULE_DEPENDENTS_CAP}.`}</p>
+  );
 }
 
 export function ModuleTasksOpenDialog({

@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import { parseStepId } from '@haive/shared/modularity';
+import { MODULE_DEPENDENTS_CAP, parseStepId } from '@haive/shared/modularity';
 import { recordAuditEvent } from '../lib/audit.js';
 import { stopActiveCliInvocations } from '../lib/task-control.js';
 import { LIVE_TASK_STATES } from '../routes/maintenance.js';
@@ -40,8 +40,6 @@ interface UrgentReport {
 
 export type UrgentDeactivation =
   { kind: 'missing' } | ({ kind: 'ok'; deactivatedAt: Date } & UrgentReport);
-
-const DEPENDENTS_CAP = 200;
 
 export async function deactivatedModuleIds(db: Reader): Promise<Set<string>> {
   const rows = await db
@@ -97,8 +95,11 @@ export async function liveDependents(
   moduleId: string,
   includeDead = false,
 ): Promise<{ tasks: ModuleDependent[]; capped: boolean }> {
-  const rows = await dependentRows(db, moduleId, includeDead).limit(DEPENDENTS_CAP + 1);
-  return { tasks: rows.slice(0, DEPENDENTS_CAP), capped: rows.length > DEPENDENTS_CAP };
+  const rows = await dependentRows(db, moduleId, includeDead).limit(MODULE_DEPENDENTS_CAP + 1);
+  return {
+    tasks: rows.slice(0, MODULE_DEPENDENTS_CAP),
+    capped: rows.length > MODULE_DEPENDENTS_CAP,
+  };
 }
 
 export function setModuleActive(

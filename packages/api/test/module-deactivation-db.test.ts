@@ -69,7 +69,11 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { CONFIG_KEYS } from '@haive/shared';
-import { moduleManifestSchema, type ComposableStepEntry } from '@haive/shared/modularity';
+import {
+  MODULE_DEPENDENTS_CAP,
+  moduleManifestSchema,
+  type ComposableStepEntry,
+} from '@haive/shared/modularity';
 import { definitionForCreate } from '../src/lib/task-type-definition.js';
 import { mountModules, moduleRoutes } from '../src/modules/loader.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -570,9 +574,9 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect((await patchModule('alpha', false)).status).toBe(200);
     });
 
-    it('lists at most 200 tasks', async () => {
+    it('lists at most MODULE_DEPENDENTS_CAP tasks', async () => {
       await db.insert(schema.tasks).values(
-        Array.from({ length: 201 }, (_, i) => ({
+        Array.from({ length: MODULE_DEPENDENTS_CAP + 1 }, (_, i) => ({
           userId,
           type: TYPE,
           title: `Task ${i}`,
@@ -583,15 +587,15 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       const res = await patchModule('alpha', false);
       expect(res.status).toBe(409);
       const body = (await res.json()) as { tasks: unknown[]; capped: boolean };
-      expect(body.tasks).toHaveLength(200);
+      expect(body.tasks).toHaveLength(MODULE_DEPENDENTS_CAP);
       expect(body.capped).toBe(true);
 
-      await db.delete(schema.tasks).where(eq(schema.tasks.title, 'Task 200'));
+      await db.delete(schema.tasks).where(eq(schema.tasks.title, `Task ${MODULE_DEPENDENTS_CAP}`));
       const exact = (await (await patchModule('alpha', false)).json()) as {
         tasks: unknown[];
         capped: boolean;
       };
-      expect(exact.tasks).toHaveLength(200);
+      expect(exact.tasks).toHaveLength(MODULE_DEPENDENTS_CAP);
       expect(exact.capped).toBe(false);
     });
 
