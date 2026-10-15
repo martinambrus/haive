@@ -1455,6 +1455,28 @@ adminRoutes.put('/config/ddev-control', async (c) => {
   return c.json({ enabled });
 });
 
+const customToolsSchema = z.object({ enabled: z.boolean() });
+
+// OFF fails a step that declares custom tools and refuses every tool call.
+adminRoutes.get('/config/custom-tools', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/custom-tools', async (c) => {
+  const { enabled } = customToolsSchema.parse(await c.req.json());
+  const from = await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true);
+  await configService.set(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, enabled ? 'true' : 'false');
+  await recordAuditEvent(getDb(), {
+    actorUserId: c.get('userId'),
+    action: 'config.custom_tools',
+    targetType: 'system',
+    metadata: { from, to: enabled },
+  });
+  log.info({ enabled }, 'custom tools switch updated');
+  return c.json({ enabled });
+});
+
 // 1..999 is rejected rather than clamped: the CLI silently ignores a per-server timeout
 // below 1000ms and falls back to its own ~28h default, so accepting one would store a
 // setting that does nothing. 0 is the explicit "no cap" escape hatch.

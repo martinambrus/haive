@@ -639,3 +639,37 @@ describe('TaskTypeEditor loading a draft', () => {
     expect(view.composer().props.stepIds).toEqual(['custom.second-draft.list']);
   });
 });
+
+describe('TaskTypeEditor stored tool problems', () => {
+  const stale = {
+    kind: 'tool-no-longer-valid',
+    stepId: LISTED,
+    index: 0,
+    raw: 'stale_tool',
+    start: 0,
+    message: 'The tool `stale_tool` no longer passes its checks; fix it or remove it.',
+  };
+  const shown = (view: Awaited<ReturnType<typeof mount>>) =>
+    (view.composer().props as { serverPromptIssues?: unknown }).serverPromptIssues;
+
+  it('W8 hands the composer the problems GET names on a stored tool, before any edit', async () => {
+    api.getAdminTaskType.mockResolvedValue({
+      taskType: WITH_TOOLS,
+      availability: AVAILABLE,
+      compositionIssues: [],
+      promptStepIssues: [stale],
+    });
+    const view = await mount();
+    expect(shown(view)).toEqual([
+      expect.objectContaining({ kind: stale.kind, stepId: LISTED, raw: stale.raw }),
+    ]);
+    expect(guard.dirty.at(-1)).toBe(false);
+
+    api.getAdminTaskType.mockResolvedValue({
+      taskType: WITH_TOOLS,
+      availability: AVAILABLE,
+      compositionIssues: [],
+    });
+    expect(shown(await mount())).toEqual([]);
+  });
+});

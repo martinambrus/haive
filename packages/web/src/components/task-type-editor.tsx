@@ -25,6 +25,7 @@ import {
 } from '@/lib/composition-messages';
 import {
   promptStepIssues,
+  readPromptSteps,
   renamePromptStepIds,
   renamePromptStepTokens,
   withPromptStepEntries,
@@ -122,7 +123,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setChangedRow(null);
     setStepIds(taskType.stepIds ?? []);
     setLoopLimits(taskType.stepLoopLimitDefaults);
-    setPromptSteps(taskType.promptSteps ?? {});
+    setPromptSteps(readPromptSteps(taskType.promptSteps ?? {}));
     setValues(initialValuesOf(taskType));
     setLoadedValues(null);
     setFormRevision((n) => n + 1);
@@ -138,6 +139,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       if (one) {
         applyRow(one.taskType);
         setAvailability(one.availability);
+        setServerPromptIssues(promptStepIssuesOf(one.promptStepIssues));
       }
     } catch (err) {
       setLoadError((err as ApiError).message ?? 'Failed to load the task type');
@@ -243,6 +245,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     try {
       const fresh = await getAdminTaskType(forSlug);
       setAvailability(fresh.availability);
+      setServerPromptIssues(promptStepIssuesOf(fresh.promptStepIssues));
     } catch (err) {
       setRefreshError((err as ApiError).message ?? 'Failed to refresh availability');
     }
