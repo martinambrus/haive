@@ -12,7 +12,10 @@ import {
 import {
   CUSTOM_TOOL_PROBLEM_KINDS,
   CUSTOM_TOOLS_MAX_PER_STEP,
+  INVALID_TOOLS_SHOWN,
   customToolSchema,
+  describeInvalidTools,
+  shownToolName,
   validateCustomTools,
   type CustomTool,
 } from './custom-tools.js';
@@ -278,6 +281,7 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'step-token-not-quotable',
   'step-token-not-own-line',
   ...CUSTOM_TOOL_PROBLEM_KINDS,
+  'tool-no-longer-valid',
   'tools-not-supported-yet',
 ] as const;
 export type PromptStepProblemKind = (typeof PROMPT_STEP_PROBLEM_KINDS)[number];
@@ -289,7 +293,12 @@ export interface PromptStepProblem extends PromptTemplateProblem {
 export type PromptStepValidationInput = Pick<
   PromptStepEntry,
   'template' | 'paramFormSchema' | 'timeoutMs'
-> & { capabilities: readonly string[]; slug?: string; tools?: readonly CustomTool[] };
+> & {
+  capabilities: readonly string[];
+  slug?: string;
+  tools?: readonly CustomTool[];
+  invalidTools?: readonly string[];
+};
 
 /** The width of every step_id column a custom step id is stored in (task_steps, task_step_cli_choices). */
 export const STEP_ID_MAX_LENGTH = 128;
@@ -420,12 +429,23 @@ export function validatePromptStep(
       'A prompt step can write files only in a task type that requires a repository.',
     );
   }
-  const tools = entry.tools ?? [];
-  for (const problem of validateCustomTools(tools, ctx)) {
+  for (const problem of validateCustomTools(entry.tools ?? [], ctx)) {
     add(problem.kind, problem.message, { raw: problem.tool, start: 0 });
   }
-  if (tools.length > 0)
-    add('tools-not-supported-yet', 'Tools on a prompt step are not supported yet.');
+  const invalid = entry.invalidTools ?? [];
+  for (const name of invalid.slice(0, INVALID_TOOLS_SHOWN)) {
+    add(
+      'tool-no-longer-valid',
+      `The tool ${describeInvalidTools([name])} no longer passes its checks; fix it or remove it.`,
+      { raw: shownToolName(name), start: 0 },
+    );
+  }
+  if (invalid.length > INVALID_TOOLS_SHOWN) {
+    add(
+      'tool-no-longer-valid',
+      `${invalid.length - INVALID_TOOLS_SHOWN} more tools no longer pass their checks.`,
+    );
+  }
   return problems;
 }
 

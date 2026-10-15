@@ -71,7 +71,7 @@ export interface PromptStepIssue {
 /** Every custom id in the step list has an entry of this type, every entry is used, and each validates where it stands. */
 export function checkPromptSteps(
   def: { slug: string; stepIds: readonly string[]; requiresRepository: boolean },
-  promptSteps: Record<string, PromptStepEntry>,
+  promptSteps: Record<string, ParsedPromptStepEntry>,
   catalog: { composable: ReadonlyMap<string, ComposableStepEntry> },
 ): PromptStepIssue[] {
   const issues: PromptStepIssue[] = [];

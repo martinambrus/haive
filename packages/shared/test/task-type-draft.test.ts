@@ -99,7 +99,13 @@ const withHttp = (over: Record<string, unknown>, draft: Record<string, unknown> 
   withTools([{ ...httpTool, ...over }], draft);
 
 type KindOf = PromptStepIssueKind | CompositionIssue['kind'] | TaskTypeDefaultsIssue['kind'];
-type Reach = { reaches: () => unknown } | { schemaPath: string; refuses: () => unknown };
+type Reach =
+  | { reaches: () => unknown }
+  | { schemaPath: string; refuses: () => unknown }
+  // Raised for a stored step read back with a tool that no longer parses: no draft carries that.
+  | { stored: () => Record<string, unknown> }
+  // Still listed, because the web words it, and no longer raised.
+  | { retired: () => unknown };
 
 // Every kind the save path can answer is a key here: a kind added later without a row fails to compile.
 const KINDS: Record<KindOf, Reach> = {
@@ -129,7 +135,14 @@ const KINDS: Record<KindOf, Reach> = {
   'step-token-not-earlier': { reaches: () => withStep({ template: 'Use\n{{step:ta-nope}}\n' }) },
   'step-token-not-quotable': { reaches: () => withStep({ template: 'Use\n{{step:ta-b}}\n' }) },
   'step-token-not-own-line': { reaches: () => withStep({ template: 'Use {{step:ta-a}} now' }) },
-  'tools-not-supported-yet': { reaches: () => withTools([httpTool]) },
+  'tools-not-supported-yet': { retired: () => withTools([httpTool]) },
+  'tool-no-longer-valid': {
+    stored: () => ({
+      review: parsePromptSteps({
+        review: step('review', { tools: [{ ...httpTool, description: 'd'.repeat(1025) }] }),
+      }).review,
+    }),
+  },
   'tool-name-reserved': { reaches: () => withHttp({ name: 'rag_search' }) },
   'tool-name-duplicate': { reaches: () => withTools([httpTool, httpTool]) },
   'tool-url-invalid': { reaches: () => withHttp({ url: 'https://api.example.com/a b' }) },
@@ -339,7 +352,11 @@ describe('pickTaskTypeDraft', () => {
 
   it('hands the validator a draft the save path would take', () => {
     const junk = {
-      ...withStep({ tools: [httpTool], agentPool: '*', description: 'd' }),
+      ...withStep({
+        tools: [{ ...httpTool, url: 'http://api.example.com/v1' }],
+        agentPool: '*',
+        description: 'd',
+      }),
       enabled: false,
       preAnswerDefaults: { 'ta-a': {} },
     };
@@ -382,6 +399,18 @@ describe('validateTaskTypeDraft', () => {
         const result = validateTaskTypeDraft(how.reaches(), catalog);
         expect(kindsOf(result.issues)).toContain(kind);
         expect(result.warnings).toEqual([]);
+      });
+    } else if ('stored' in how) {
+      it('is raised for a stored step, and no draft can carry it', () => {
+        const def = { slug: TYPE, stepIds: ['ta-a', 'ta-b', CUSTOM_ID], requiresRepository: true };
+        const issues = checkPromptSteps(def, how.stored() as never, catalog);
+        expect(issues.map((i) => [i.kind, i.stepId, i.index])).toEqual([[kind, CUSTOM_ID, 2]]);
+        const forged = withStep({ invalidTools: ['forged'] });
+        expect(kindsOf(validateTaskTypeDraft(forged, catalog).issues)).not.toContain(kind);
+      });
+    } else if ('retired' in how) {
+      it('is not raised any more: the draft saves clean', () => {
+        expect(validateTaskTypeDraft(how.retired(), catalog)).toEqual({ issues: [], warnings: [] });
       });
     } else {
       it('is refused by the schema first, as on the save path', () => {
@@ -588,5 +617,34 @@ describe('the pieces the save path and the draft check share', () => {
     expect(checkPromptSteps(def, { review: late }, catalog)).toEqual([
       expect.objectContaining({ kind: 'step-token-not-earlier', stepId: CUSTOM_ID, index: 1 }),
     ]);
+  });
+
+  it('checkPromptSteps names each tool a stored step could not keep, with the step it sits on', () => {
+    const def = { slug: TYPE, stepIds: ['ta-a', CUSTOM_ID], requiresRepository: true };
+    const stale = (name: string) => ({ ...httpTool, name, description: 'd'.repeat(1025) });
+    const stored = parsePromptSteps({
+      review: step('review', { tools: [httpTool, stale('stale_one'), stale('stale_two')] }),
+    });
+    expect(stored.review?.invalidTools).toEqual(['stale_one', 'stale_two']);
+    expect(
+      checkPromptSteps(def, stored, catalog).map((i) => [i.kind, i.stepId, i.index, i.raw]),
+    ).toEqual([
+      ['tool-no-longer-valid', CUSTOM_ID, 1, 'stale_one'],
+      ['tool-no-longer-valid', CUSTOM_ID, 1, 'stale_two'],
+    ]);
+  });
+
+  it('checkPromptSteps accepts a stored step whose tools all parse', () => {
+    const def = { slug: TYPE, stepIds: ['ta-a', CUSTOM_ID], requiresRepository: true };
+    const stored = parsePromptSteps({ review: step('review', { tools: [httpTool] }) });
+    expect(stored.review).not.toHaveProperty('invalidTools');
+    expect(checkPromptSteps(def, stored, catalog)).toEqual([]);
+  });
+
+  it('validateTaskTypeDraft accepts a draft whose step carries a valid tool', () => {
+    expect(validateTaskTypeDraft(withTools([httpTool, ragTool]), catalog)).toEqual({
+      issues: [],
+      warnings: [],
+    });
   });
 });

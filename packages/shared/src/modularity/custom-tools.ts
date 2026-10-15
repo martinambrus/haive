@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { collapseToLine } from '../utils/collapse-line.js';
 import { HIDDEN_CHARACTER } from '../utils/hidden-characters.js';
 
 export const CUSTOM_TOOLS_MAX_PER_STEP = 8;
@@ -19,8 +20,10 @@ export const CUSTOM_TOOL_RESPONSE_MIN_BYTES = 1_024;
 export const CUSTOM_TOOL_RESPONSE_MAX_BYTES = 65_536;
 export const RAG_QUERY_TOP_K_MIN = 1;
 export const RAG_QUERY_TOP_K_MAX = 20;
+export const INVALID_TOOLS_SHOWN = 8;
 
 const CUSTOM_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,39}$/;
+const INVALID_TOOL_NAME_SHOWN_LENGTH = 64;
 const CUSTOM_TOOL_TIMEOUT_DEFAULT_MS = 10_000;
 const CUSTOM_TOOL_RESPONSE_DEFAULT_BYTES = 32_768;
 const CUSTOM_TOOL_STRING_MAX_LENGTH = 512;
@@ -149,6 +152,28 @@ export const CUSTOM_TOOL_PROBLEM_KINDS = [
   'tool-scope-needs-repository',
 ] as const;
 export type CustomToolProblemKind = (typeof CUSTOM_TOOL_PROBLEM_KINDS)[number];
+
+/** A stored tool name that failed to parse, as a message may carry it: on one line, at most 64 characters. */
+export function shownToolName(raw: string): string {
+  const cut = raw.length > INVALID_TOOL_NAME_SHOWN_LENGTH;
+  const head = cut ? raw.slice(0, INVALID_TOOL_NAME_SHOWN_LENGTH - 1) : raw;
+  const line = collapseToLine(head.replace(/[\uD800-\uDBFF]$/, ''));
+  if (line === '') return '(unnamed)';
+  return cut ? `${line}…` : line;
+}
+
+function inlineCode(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
+}
+
+/** The names of tools that no longer parse, for a message: at most 8 as inline code, then how many more. */
+export function describeInvalidTools(names: readonly string[]): string {
+  const shown = names.slice(0, INVALID_TOOLS_SHOWN).map((name) => inlineCode(shownToolName(name)));
+  const more = names.length - shown.length;
+  return `${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
+}
 
 export interface CustomToolProblem {
   kind: CustomToolProblemKind;
