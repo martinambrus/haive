@@ -30,19 +30,14 @@ const inModuleStep = (stepId: string | null, moduleId: string): boolean => {
   return parsed?.kind === 'module' && parsed.moduleId === moduleId;
 };
 
-function turnOffCopy({ moduleId, name, tasks, capped }: ModuleTasksBlocked): string {
+function turnOffCopy({ moduleId, name, tasks }: ModuleTasksBlocked): string {
   const lead = `Turns ${inlineCode(name || moduleId)} off now.`;
   const inStep = tasks.filter((t) => inModuleStep(t.currentStepId, moduleId)).length;
   if (inStep === 0) {
-    return `${lead} No task is in one of its steps, so none is stopped; they fail when they reach one of its steps. ${COPY_TAIL}`;
+    return `${lead} No listed task is in one of its steps now, so none is stopped; each fails when it next runs one of its steps. ${COPY_TAIL}`;
   }
-  const stopped =
-    inStep === 1
-      ? 'The 1 task in one of its steps is stopped (Retry it once it is on again)'
-      : `The ${inStep} tasks in one of its steps are stopped (Retry them once it is on again)`;
-  const others =
-    inStep < tasks.length || capped ? '; the others fail when they reach one of its steps' : '';
-  return `${lead} ${stopped}${others}. ${COPY_TAIL}`;
+  const count = inStep === 1 ? '1 listed task is' : `${inStep} listed tasks are`;
+  return `${lead} A task whose agent is running in one of its steps is stopped (Retry it once the module is on again); every other task fails when it next runs one of its steps. ${count} in one of its steps now. ${COPY_TAIL}`;
 }
 
 export function moduleOffNotice(

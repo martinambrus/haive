@@ -212,34 +212,31 @@ describe('ModuleTasksOpenDialog copy', () => {
   const inStep = (id: string) => task(id, `Task ${id}`, 'running', 'module.alpha.x');
   const elsewhere = (id: string) => task(id, `Task ${id}`, 'running', '07-phase-2-implement');
 
-  it('says what turning the module off does to the tasks in one of its steps and to the others', () => {
-    expect(copyOf({ tasks: [inStep('a'), inStep('b'), elsewhere('c')] })).toBe(
-      'Turns `Alpha Search` off now. The 2 tasks in one of its steps are stopped (Retry them once it is on again); the others fail when they reach one of its steps. ' +
-        COPY_TAIL,
+  const LEAD = 'Turns `Alpha Search` off now. ';
+  const RULE =
+    'A task whose agent is running in one of its steps is stopped (Retry it once the module is on again); every other task fails when it next runs one of its steps. ';
+  const NONE =
+    'No listed task is in one of its steps now, so none is stopped; each fails when it next runs one of its steps. ';
+  const TWO = LEAD + RULE + '2 listed tasks are in one of its steps now. ' + COPY_TAIL;
+
+  it('says that only a task with an agent running is stopped, and counts the listed tasks in a step: 2', () => {
+    expect(copyOf({ tasks: [inStep('a'), inStep('b'), elsewhere('c')] })).toBe(TWO);
+  });
+
+  it('counts the listed tasks in a step of this module and no other: 1', () => {
+    const beta = task('b', 'Task b', 'running', 'module.beta.x');
+    expect(copyOf({ tasks: [inStep('a'), beta, elsewhere('c')] })).toBe(
+      LEAD + RULE + '1 listed task is in one of its steps now. ' + COPY_TAIL,
     );
   });
 
-  it('reads right for one task in a step', () => {
-    expect(copyOf({ tasks: [inStep('a'), elsewhere('c')] })).toBe(
-      'Turns `Alpha Search` off now. The 1 task in one of its steps is stopped (Retry it once it is on again); the others fail when they reach one of its steps. ' +
-        COPY_TAIL,
-    );
+  it('says none is stopped when no listed task is in a step of the module: 0', () => {
+    expect(copyOf({ tasks: [elsewhere('c'), elsewhere('d')] })).toBe(LEAD + NONE + COPY_TAIL);
   });
 
-  it('reads right when no task is in a step of the module', () => {
-    expect(copyOf({ tasks: [elsewhere('c'), elsewhere('d')] })).toBe(
-      'Turns `Alpha Search` off now. No task is in one of its steps, so none is stopped; they fail when they reach one of its steps. ' +
-        COPY_TAIL,
-    );
-  });
-
-  it('leaves out the others when every task is in a step, unless the list was cut', () => {
-    const all = [inStep('a'), inStep('b')];
-    expect(copyOf({ tasks: all })).toBe(
-      'Turns `Alpha Search` off now. The 2 tasks in one of its steps are stopped (Retry them once it is on again). ' +
-        COPY_TAIL,
-    );
-    expect(copyOf({ tasks: all, capped: true })).toContain('; the others fail when they reach');
+  it('reads the same when the list was cut, which the cap note says', () => {
+    expect(copyOf({ tasks: [inStep('a'), inStep('b')], capped: true })).toBe(TWO);
+    expect(copyOf({ tasks: [elsewhere('c')], capped: true })).toBe(LEAD + NONE + COPY_TAIL);
   });
 
   it('shows a name as text, never as markup', () => {
