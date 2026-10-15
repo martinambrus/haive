@@ -263,9 +263,12 @@ A prompt step may declare up to 8 tools — `http-get` and `rag-query` — store
 with it.
 
 - **Wiring** (worker). Before a prompt step with tools dispatches, the runner (`resolveCustomTools`)
-  re-checks the pinned tools against today's save rules (`pinnedToolsFailure`: a release that tightened
-  a bound fails the step as `custom-tool-invalid`, naming the tool), then the install switch
-  `CUSTOM_MCP_TOOLS_ENABLED` and `CONFIG_ENCRYPTION_KEY`; each failure names its fix. The dispatch
+  re-checks the pinned tools against today's save rules that do not depend on the task type
+  (`pinnedToolsFailure`: a release that tightened a bound fails the step as `custom-tool-invalid`, naming
+  the tool). It validates with `requiresRepository: true` because the type's trait is not known there,
+  so a `rag-query` scope a repository-less type could not save is not re-checked; nor is it at the call
+  route. The runner then checks the install switch `CUSTOM_MCP_TOOLS_ENABLED` and
+  `CONFIG_ENCRYPTION_KEY`; each failure names its fix. The dispatch
   requires a CLI that can host MCP servers (`requiresMcp`), and fails by name when no enabled one can.
   The cli-exec resolver repeats the pinned-tool check for a run executed later, signs a `custom-mcp`
   token for that task, step and invocation (valid for the run's timeout plus a grace) and mounts three
