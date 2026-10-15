@@ -730,6 +730,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         cancelled: number;
         stopped: number;
         eventError?: string;
+        killError?: string;
       }[];
       left: { id: string; title: string; status: string; currentStepId: string | null }[];
       failed: { id: string; title: string; error: string }[];
@@ -991,25 +992,79 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       },
     );
 
-    it('collects the tasks it could not stop, and still tries each one', async () => {
+    it('collects the tasks whose stop transaction throws, leaves each as it was, kills nothing for them and still tries each one', async () => {
+      const refusing = () =>
+        working({ title: 'Refused stop', runListSnapshot: ['module.alpha.x'] }, 'module.alpha.x');
+      const refused = [await refusing(), await refusing()];
+      const ids = refused.map((t) => t.id);
+      const before = await observe(ids);
+      try {
+        await db.execute(
+          sql`CREATE OR REPLACE FUNCTION module_deactivation_test_refuse() RETURNS trigger LANGUAGE plpgsql AS $body$ BEGIN RAISE EXCEPTION 'refused by the test'; END $body$`,
+        );
+        await db.execute(
+          sql`CREATE TRIGGER module_deactivation_test_refuse BEFORE UPDATE ON tasks FOR EACH ROW WHEN (NEW.title = 'Refused stop' AND NEW.status = 'failed') EXECUTE FUNCTION module_deactivation_test_refuse()`,
+        );
+        const res = await patchUrgent('alpha');
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as Body;
+        expect(idsOf(body.failed)).toEqual(sorted(ids));
+        expect(
+          body.failed.every(({ title, error }) => title === 'Refused stop' && error !== ''),
+        ).toBe(true);
+        expect(body.stopped).toEqual([
+          { id: a.id, title: 'A', killed: 1, cancelled: 1, stopped: 1 },
+        ]);
+        expect(idsOf(body.left)).toEqual(sorted([b.id, c.id, d.id]));
+        expect(await observe(ids)).toEqual(before);
+        expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
+        expect(await stampOf('alpha')).toBeInstanceOf(Date);
+        expect(await stoppedEvents()).toHaveLength(1);
+      } finally {
+        await db.execute(sql`DROP TRIGGER IF EXISTS module_deactivation_test_refuse ON tasks`);
+        await db.execute(sql`DROP FUNCTION IF EXISTS module_deactivation_test_refuse()`);
+      }
+    });
+
+    it('keeps a task whose stop committed under stopped when its sandbox kill throws, and says why', async () => {
       h.onKill = async (taskId) => {
         throw new Error(`refused ${taskId}`);
       };
       const res = await patchUrgent('alpha');
       expect(res.status).toBe(200);
       const body = (await res.json()) as Body;
-      expect(
-        body.failed
-          .sort((x, y) => x.id.localeCompare(y.id))
-          .map(({ id, error }) => ({ id, error })),
-      ).toEqual([a.id, c.id].sort().map((id) => ({ id, error: `refused ${id}` })));
-      expect(body.failed.every(({ title }) => typeof title === 'string' && title !== '')).toBe(
-        true,
-      );
-      expect(body.stopped).toEqual([]);
-      expect(idsOf(body.left)).toEqual(sorted([b.id, d.id]));
+      expect(body.failed).toEqual([]);
+      expect(body.stopped).toEqual([
+        { id: a.id, title: 'A', killed: 0, cancelled: 1, stopped: 1, killError: `refused ${a.id}` },
+      ]);
+      expect(idsOf(body.left)).toEqual(sorted([b.id, c.id, d.id]));
+      expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
       expect(await stampOf('alpha')).toBeInstanceOf(Date);
-      expect(await stoppedEvents()).toHaveLength(0);
+      const [after] = await observe([a.id]);
+      expect(after!.task).toMatchObject({
+        status: 'failed',
+        errorMessage: 'Stopped by an administrator',
+      });
+      expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toEqual([
+        [
+          'task.stopped',
+          {
+            by: ACTOR,
+            byAdmin: true,
+            reason: 'module_deactivated',
+            moduleId: 'alpha',
+            killed: 0,
+            cancelled: 1,
+            stopped: 1,
+          },
+        ],
+      ]);
+      expect((await audits()).map((r) => r.metadata)).toEqual([
+        { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+      ]);
+      expect((await taskAudits()).map((r) => [r.action, r.targetId])).toEqual([
+        ['task.admin_stop', a.id],
+      ]);
     });
 
     it('keeps a task whose stop committed under stopped when the write of its event throws, and says why', async () => {

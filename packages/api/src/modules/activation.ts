@@ -3,7 +3,8 @@ import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
 import { recordAuditEvent } from '../lib/audit.js';
-import { stopActiveCliInvocations } from '../lib/task-control.js';
+import { killTaskSandboxes } from '../lib/sandbox-kill.js';
+import { supersedeLiveRuns } from '../lib/task-control.js';
 import { LIVE_TASK_STATES } from '../routes/maintenance.js';
 import { appendTaskEvent } from '../routes/tasks/_helpers.js';
 
@@ -32,6 +33,7 @@ interface UrgentReport {
     cancelled: number;
     stopped: number;
     eventError?: string;
+    killError?: string;
   }[];
   left: Pick<ModuleDependent, 'id' | 'title' | 'status' | 'currentStepId'>[];
   failed: { id: string; title: string; error: string }[];
@@ -146,6 +148,22 @@ const dependentsInModuleStep = async (db: Reader, moduleId: string): Promise<Mod
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+// The stop commits before the kill, so a kill that throws is noted on the result, never thrown.
+const stopTask = async (
+  db: Database,
+  taskId: string,
+): Promise<{ killed: number; cancelled: number; stopped: number; killError?: string }> => {
+  const counts = await db.transaction((tx) =>
+    supersedeLiveRuns(tx, taskId, { failTask: true, actor: 'admin' }),
+  );
+  try {
+    return { ...counts, killed: await killTaskSandboxes(taskId) };
+  } catch (err) {
+    log.error({ err, taskId }, 'sandbox kill for an urgent stop failed');
+    return { ...counts, killed: 0, killError: errorText(err) };
+  }
+};
+
 export async function deactivateUrgently(
   db: Database,
   moduleId: string,
@@ -179,12 +197,13 @@ export async function deactivateUrgently(
       continue;
     }
     try {
-      const result = await stopActiveCliInvocations(db, id, { failTask: true, actor: 'admin' });
+      const { killError, ...result } = await stopTask(db, id);
       if (result.cancelled === 0 && result.stopped === 0) {
         report.left.push({ id, title, status, currentStepId });
         continue;
       }
       const entry: UrgentReport['stopped'][number] = { id, title, ...result };
+      if (killError !== undefined) entry.killError = killError;
       report.stopped.push(entry);
       // The stop is committed: a failed record is noted on the entry, not as a failed stop.
       try {

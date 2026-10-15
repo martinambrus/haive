@@ -2552,6 +2552,7 @@ export interface ModuleUrgentResponse extends ModuleActiveResponse {
     cancelled: number;
     stopped: number;
     eventError?: string;
+    killError?: string;
   }[];
   left: { id: string; title: string; status: string; currentStepId: string | null }[];
   failed: { id: string; title: string; error: string }[];
