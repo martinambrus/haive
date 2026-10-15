@@ -189,11 +189,11 @@ that provider and never set per task or per step. `PUT /integrations/providers/:
 audits `integration.write_switch`. It is in Postgres, with no ConfigService cache, so a flip is
 visible to the next read. `integrationTools` lists a binding's read operations always and its write
 operations only when the binding asked for write access and the caller's `writeAllowed` says yes —
-the broker answers it from the task owner's switch and, for a shared connection, the admin's too;
-anything that is not `read` counts as write. Tool names are computed from what
-the bindings declare before the switch filters them, so a flip never renames a listed tool.
-`integration_connections.write_enabled` is the admin's switch for a shared connection (a write through
-one needs both); the broker is its only reader.
+the broker answers it from the task owner's switch; anything that is not `read` counts as write. Tool
+names are computed from what the bindings declare before the switch filters them, so a flip never
+renames a listed tool. `integration_connections.write_enabled` is reserved as the admin's switch for
+a shared connection (a write through one is to need both); nothing reads it yet, since the broker
+refuses every shared connection.
 
 ## Choosing an account
 
@@ -360,13 +360,13 @@ the token is read. Lengths are counted in code points, as JSON Schema's `maxLeng
 title's `minLength: 1` is published too.
 
 - **tools/list** builds the tools from the invocation's stamp alone, never from grants or the current
-  resolution, with `writeAllowed` read now from the owner's switch and a shared connection's own. A
-  name clash answers 409 `tools-unlistable`. It writes no rows and logs the tool names.
+  resolution, with `writeAllowed` read now from the owner's switch. A name clash answers 409
+  `tools-unlistable`. It writes no rows and logs the tool names.
 - **call** matches the tool name against the stamp with every write tool included, so a write the
   switch has turned off is refused as `write-switched-off` with a row rather than as unknown; a name
   the stamp never declared answers 403 `undeclared-tool` and writes nothing. Each later refusal is a
   row with its reason: `provider-unavailable` (no spec or disabled), `connection-unavailable` (gone,
-  not `connected`, another provider, another user's, or its credential cannot be read),
+  not `connected`, another provider, shared, another user's, or its credential cannot be read),
   `write-switched-off`, `invalid-arguments` (400), `no-remote` (409), `connection-not-for-repository`
   (the credential's host is not the task's remote, or it has none), `unsafe-api-base` (`apiBaseFits`,
   so older credentials saved before the rule are refused here rather than sent as is).

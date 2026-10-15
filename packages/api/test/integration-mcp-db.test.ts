@@ -365,12 +365,6 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
         set: { writeEnabled },
       });
 
-  const asShared = (w: World, writeEnabled: boolean) =>
-    db
-      .update(schema.integrationConnections)
-      .set({ scope: 'shared', writeEnabled })
-      .where(eq(schema.integrationConnections.id, w.connectionId));
-
   async function seed(
     opts: { access?: Access; writeSwitch?: boolean; remoteUrl?: string | null } = {},
   ): Promise<World> {
@@ -977,17 +971,6 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
       ]);
       await expectNoTrace();
     });
-
-    it('leaves the write operation out of a shared connection whose own write_enabled is false, even with the owner switch on, and lists it once that is true', async () => {
-      const w = await seed({ access: 'write', writeSwitch: true });
-
-      await asShared(w, false);
-      expect(namesOf(await list(w))).toEqual([GET]);
-
-      await asShared(w, true);
-      expect(namesOf(await list(w))).toEqual([GET, OPEN]);
-      await expectNoTrace();
-    });
   });
 
   describe('C5 the write switch is read on every call', () => {
@@ -1014,17 +997,6 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
         await expectRefusal(w, res, 403, 'write-switched-off', WRITE);
       },
     );
-
-    it('answers 403 write-switched-off after the own write_enabled of a shared connection is switched off, records one refused row, and calls no vendor', async () => {
-      const w = await seed({ access: 'write', writeSwitch: true });
-      await asShared(w, true);
-      expect(namesOf(await list(w))).toEqual([GET, OPEN]);
-      await asShared(w, false);
-
-      const res = await call(w, OPEN, OPEN_ARGS);
-
-      await expectRefusal(w, res, 403, 'write-switched-off', WRITE);
-    });
 
     it('serves the same call again once the switch is back on', async () => {
       const w = await seed({ access: 'write', writeSwitch: true });
@@ -1057,13 +1029,6 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
       ['an owner with no switch row', () => undefined],
       ['an owner whose switch is off', () => setSwitch(ownerId, false)],
       ['a switch that belongs to another user', () => setSwitch(otherId, true)],
-      [
-        'a shared connection whose own write_enabled is false, with the owner switch on',
-        async (w) => {
-          await setSwitch(ownerId, true);
-          await asShared(w, false);
-        },
-      ],
     ];
 
     it.each(arrangements)(
@@ -1444,6 +1409,33 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
         connection_id: theirConnection,
       });
     });
+
+    it.each([
+      ["the task owner's", () => ownerId],
+      ["another user's", () => otherId],
+    ])(
+      'answers 403 connection-unavailable for a shared connection that is %s, with every write switch on',
+      async (_name, ownerOf) => {
+        const w = await seed({ access: 'write', writeSwitch: true });
+        const credential = await createCredential(ownerOf());
+        const shared = await createConnection(ownerOf(), credential.id, {
+          scope: 'shared',
+          writeEnabled: true,
+        });
+        await setStamp(w, [binding(shared, 'write')]);
+
+        for (const [tool, args, op] of [
+          [GET, { prNumber: '42' }, READ],
+          [OPEN, OPEN_ARGS, WRITE],
+        ] as const) {
+          await db.delete(schema.integrationCalls);
+          await expectRefusal(w, await call(w, tool, args), 403, 'connection-unavailable', {
+            ...op,
+            connection_id: shared,
+          });
+        }
+      },
+    );
 
     it.each([
       ['its provider pinned to another forge', { provider: 'gitea' }],

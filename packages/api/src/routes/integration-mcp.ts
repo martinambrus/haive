@@ -73,7 +73,6 @@ type Connection = {
   scope: 'user' | 'shared';
   ownerUserId: string;
   status: string;
-  writeEnabled: boolean;
 };
 
 type BoundOperation =
@@ -111,7 +110,6 @@ async function loadConnections(
       scope: schema.integrationConnections.scope,
       ownerUserId: schema.integrationConnections.ownerUserId,
       status: schema.integrationConnections.status,
-      writeEnabled: schema.integrationConnections.writeEnabled,
     })
     .from(schema.integrationConnections)
     .where(
@@ -123,7 +121,7 @@ async function loadConnections(
   return new Map(rows.map((row) => [row.id, row]));
 }
 
-/** A write operation is open when the owner's switch for the provider is on and a shared connection's own is too. */
+/** A write operation is open when the task owner's switch for the provider is on. */
 async function writeAllowedBy(
   db: Database,
   ownerId: string,
@@ -137,14 +135,8 @@ async function writeAllowedBy(
     .from(schema.integrationUserSettings)
     .where(eq(schema.integrationUserSettings.userId, ownerId));
   const switches = new Map(rows.map((row) => [row.providerId, row.writeEnabled]));
-  return (binding) => {
-    const connection = connections.get(binding.connectionId);
-    return (
-      switches.get(binding.providerId) === true &&
-      connection !== undefined &&
-      (connection.scope === 'user' || connection.writeEnabled)
-    );
-  };
+  return (binding) =>
+    switches.get(binding.providerId) === true && connections.has(binding.connectionId);
 }
 
 function declaredTools(
@@ -342,7 +334,8 @@ integrationMcpRoutes.post('/call', async (c) => {
     !connection ||
     connection.status !== 'connected' ||
     connection.providerId !== binding.providerId ||
-    (connection.scope === 'user' && connection.ownerUserId !== invocation.ownerId)
+    connection.scope !== 'user' ||
+    connection.ownerUserId !== invocation.ownerId
   ) {
     return refuse(
       403,
