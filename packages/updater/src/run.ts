@@ -1,7 +1,12 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Sql } from 'postgres';
-import { CONFIG_KEYS, configService } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  NEW_WORK_FENCE_KEY,
+  type MaintenanceState,
+} from '@haive/shared';
 import type { ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 import { enterPhase, finishRun, mergeMetadata, type RunMetadata } from './journal.js';
@@ -125,9 +130,24 @@ export async function liveTaskCount(sql: Sql): Promise<number> {
   return Number(rows[0]?.n ?? 0);
 }
 
+/** A session lock belongs to one connection, so lock and unlock share a reserved one. */
+async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<void> {
+  const fence = await sql.reserve();
+  try {
+    await fence`SELECT pg_advisory_lock(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`;
+    try {
+      await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+    } finally {
+      await fence`SELECT pg_advisory_unlock(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`;
+    }
+  } finally {
+    fence.release();
+  }
+}
+
 export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'draining');
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
+  await setMaintenanceState(ctx.sql, 'draining');
   ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs });
 
   const deadline = Date.now() + ctx.drainDeadlineMs;
@@ -155,7 +175,7 @@ export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
 
 export async function phaseMaintenance(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'maintenance');
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'maintenance');
+  await setMaintenanceState(ctx.sql, 'maintenance');
   ctx.log('maintenance');
 }
 
