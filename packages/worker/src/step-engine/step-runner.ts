@@ -554,6 +554,7 @@ async function insertInvocationOrNull<T>(insert: () => Promise<T>): Promise<T | 
 
 export const CUSTOM_TOOL_INVALID_REASON = 'custom-tool-invalid';
 export const CUSTOM_TOOLS_SWITCHED_OFF_REASON = 'custom-tools-switched-off';
+export const CUSTOM_TOOLS_NO_SIGNING_KEY_REASON = 'custom-tools-no-signing-key';
 
 /** The tool names a prompt step's dispatch carries, or the failure that stops it; null for a step with none. */
 async function resolveCustomTools(
@@ -570,6 +571,11 @@ async function resolveCustomTools(
   if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
     return {
       failure: `${CUSTOM_TOOLS_SWITCHED_OFF_REASON}: custom tools are switched off on this install, so this step cannot run. Switch them on, then retry the step.`,
+    };
+  }
+  if (!process.env.CONFIG_ENCRYPTION_KEY) {
+    return {
+      failure: `${CUSTOM_TOOLS_NO_SIGNING_KEY_REASON}: CONFIG_ENCRYPTION_KEY is not set, so this step's custom tools cannot be given their token. Set it for the api and the worker, then retry the step.`,
     };
   }
   return { names: tools.names };

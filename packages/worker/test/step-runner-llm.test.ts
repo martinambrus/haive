@@ -13,6 +13,7 @@ vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
 import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
 import { parsePinnedCustomSteps } from '@haive/shared/modularity';
 import {
+  CUSTOM_TOOLS_NO_SIGNING_KEY_REASON,
   CUSTOM_TOOLS_SWITCHED_OFF_REASON,
   CUSTOM_TOOL_INVALID_REASON,
   advanceStep,
@@ -1736,6 +1737,15 @@ describe('advanceStep and the custom tools of a prompt step', () => {
     expect(result.status).toBe('failed');
     expect(failure(result)).toContain(CUSTOM_TOOLS_SWITCHED_OFF_REASON);
     expect(failure(result)).not.toContain(CUSTOM_TOOL_INVALID_REASON);
+    expect(rows).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
+
+  it('fails a step with tools when no signing key is set, with its reason, before any invocation row', async () => {
+    delete process.env.CONFIG_ENCRYPTION_KEY;
+    const { result, rows, enqueued } = await run(promptStep([httpTool]));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain(CUSTOM_TOOLS_NO_SIGNING_KEY_REASON);
     expect(rows).toEqual([]);
     expect(enqueued).toEqual([]);
   });
