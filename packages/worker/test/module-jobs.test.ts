@@ -18,7 +18,7 @@ vi.mock('@haive/shared/module-db', async (importOriginal) => ({
   },
 }));
 
-const { beginModuleTeardown, moduleJobsStarted, startModuleJobs } =
+const { beginModuleTeardown, moduleJobsStarted, moduleTeardownRunning, startModuleJobs } =
   await import('../src/modules/loader.js');
 const { ModuleTeardownRefusedError, runModuleTeardown } =
   await import('../src/queues/module-control-queue.js');
@@ -47,6 +47,7 @@ const teardownDeps = (
   loaded: [m.loaded],
   entries: [{ ...m.entry, teardown }],
   jobsStarted: moduleJobsStarted,
+  teardownRunning: moduleTeardownRunning,
   hookTimeoutMs,
 });
 
@@ -565,21 +566,29 @@ describe('the jobs reconcile', () => {
     },
   );
 
-  it('holds a module back until every teardown running for it has ended', async () => {
+  it('refuses a teardown of a module while the hook of an earlier teardown of it still runs, and allows one once that hook has ended', async () => {
     const m = moduleWithJobs('twice');
-    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set(['twice']));
+    let endFirst!: () => void;
+    const first: Hook = () => new Promise<void>((resolve) => (endFirst = resolve));
+    const second = vi.fn<Hook>(async () => {});
 
-    const endFirst = beginModuleTeardown('twice');
-    const endSecond = beginModuleTeardown('twice');
+    const timedOut = await runModuleTeardown(teardownDeps(m, first, 20), 'twice').catch(
+      (err: unknown) => err,
+    );
+    expect(timedOut).toBeInstanceOf(Error);
+    expect(timedOut).not.toBeInstanceOf(ModuleTeardownRefusedError);
+
+    const refusal = (await runModuleTeardown(teardownDeps(m, second), 'twice').catch(
+      (err: unknown) => err,
+    )) as Error;
+    expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
+    expect(refusal.message).toMatch(/twice.*earlier teardown.*still running on this worker/);
+    expect(second).not.toHaveBeenCalled();
+
     endFirst();
-    await reconcile(new Set());
-    expect(m.jobs).not.toHaveBeenCalled();
-
-    endSecond();
-    await reconcile(new Set());
-    expect(m.jobs).toHaveBeenCalledOnce();
-
-    await stopAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    await runModuleTeardown(teardownDeps(m, second), 'twice');
+    expect(second).toHaveBeenCalledOnce();
   });
 
   it('frees a module whose teardown hook throws before it returns a promise', async () => {

@@ -4,6 +4,7 @@ import { createDatabase, schema, type Database } from '@haive/database';
 import { moduleDatabaseName } from '@haive/shared/module-db';
 import {
   MODULE_JOBS_RECONCILE_MS,
+  moduleTeardownRunning,
   startModuleJobs,
   type LoadedWorkerModule,
   type WorkerModuleEntry,
@@ -49,6 +50,7 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
     loaded: ids.map(loadedOf),
     entries: ids.map((id) => entryOf(id, hooks[id])),
     jobsStarted: (id: string) => jobsRunning.includes(id),
+    teardownRunning: moduleTeardownRunning,
   });
   const setModule = (moduleId: string, over: Partial<typeof schema.modules.$inferInsert> = {}) =>
     db.insert(schema.modules).values({

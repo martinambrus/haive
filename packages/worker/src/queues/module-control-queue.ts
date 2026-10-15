@@ -15,6 +15,7 @@ import {
   MODULE_JOBS_RECONCILE_MS,
   beginModuleTeardown,
   moduleJobsStarted,
+  moduleTeardownRunning,
   type LoadedWorkerModule,
   type WorkerModuleEntry,
 } from '../modules/loader.js';
@@ -35,6 +36,7 @@ export type ModuleControlDeps = {
   loaded: readonly LoadedWorkerModule[];
   entries: readonly WorkerModuleEntry[];
   jobsStarted: (moduleId: string) => boolean;
+  teardownRunning: (moduleId: string) => boolean;
   hookTimeoutMs?: number;
 };
 
@@ -113,6 +115,11 @@ export async function runModuleTeardown(
       `Module ${moduleId}'s jobs are still running on this worker and stop within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation; try again shortly`,
     );
   }
+  if (deps.teardownRunning(moduleId)) {
+    throw new ModuleTeardownRefusedError(
+      `Module ${moduleId}'s earlier teardown is still running on this worker; try again once it has ended`,
+    );
+  }
 
   const teardown = deps.entries[index]?.teardown;
   if (teardown) {
@@ -162,7 +169,15 @@ export function startModuleControlWorker(
   const worker = new Worker<ModuleTeardownPayload, ModuleTeardownResult>(
     QUEUE_NAMES.MODULE_CONTROL,
     (job) =>
-      processModuleControlJob({ ...modules, db: getDb(), jobsStarted: moduleJobsStarted }, job),
+      processModuleControlJob(
+        {
+          ...modules,
+          db: getDb(),
+          jobsStarted: moduleJobsStarted,
+          teardownRunning: moduleTeardownRunning,
+        },
+        job,
+      ),
     // A worker that dies mid-hook fails the job instead of running the hook again unasked.
     { connection: getBullRedis(), concurrency: 1, maxStalledCount: 0 },
   );
