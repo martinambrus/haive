@@ -793,6 +793,23 @@ describe.skipIf(!url)('integration choice routes on Postgres', () => {
     });
   });
 
+  describe('C3g the repository allow-list', () => {
+    it("answers 400 to an account the task's repository leaves off its allow-list and writes nothing", async () => {
+      const ghA2 = await createAccount(a.id);
+      expectOk(await putAllowList(true, [ghA2]));
+      await unchanged(async () => {
+        expectStatus(
+          await putChoice({ providerId: 'github', connectionId: ghA, remember: true }),
+          400,
+        );
+      });
+      expectOk(await putChoice({ providerId: 'github', connectionId: ghA2, remember: true }));
+
+      expectOk(await putAllowList(false, []));
+      expectOk(await putChoice({ providerId: 'github', connectionId: ghA }));
+    });
+  });
+
   describe('C4 remember, and what a DELETE takes back', () => {
     it('C4a writes the task choice and nothing else when remember is off or absent', async () => {
       const ghA2 = await createAccount(a.id);

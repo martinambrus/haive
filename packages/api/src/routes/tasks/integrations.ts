@@ -6,6 +6,7 @@ import { listIntegrationProviders, resolveTaskCategories } from '@haive/shared/i
 import { getDb, type Database } from '../../db.js';
 import {
   removePreference,
+  requireAllowedByRepository,
   requireFitsRepository,
   requireValidChoice,
   upsertPreference,
@@ -72,6 +73,7 @@ taskIntegrationRoutes.put('/:id/integrations/:categoryId', async (c) => {
   const task = await requireChangeableTask(db, c.req.param('id'), userId);
   const connection = await requireValidChoice(db, userId, pick);
   await requireFitsRepository(db, categoryId, connection, task.repositoryId);
+  await requireAllowedByRepository(db, connection, task.repositoryId);
 
   await db.transaction(async (tx) => {
     await tx

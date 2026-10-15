@@ -122,6 +122,33 @@ export async function requireFitsRepository(
   }
 }
 
+/** An account the task's repository leaves off its allow-list could never be resolved for the task. */
+export async function requireAllowedByRepository(
+  db: Database,
+  connection: OwnConnection | null,
+  repositoryId: string | null,
+): Promise<void> {
+  if (connection === null || repositoryId === null) return;
+  const [repository] = await db
+    .select({ restricted: schema.repositories.integrationsRestricted })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId));
+  if (!repository?.restricted) return;
+  const [grant] = await db
+    .select({ id: schema.integrationGrants.id })
+    .from(schema.integrationGrants)
+    .where(
+      and(
+        eq(schema.integrationGrants.targetKind, 'repository'),
+        eq(schema.integrationGrants.repositoryId, repositoryId),
+        isNull(schema.integrationGrants.categoryId),
+        eq(schema.integrationGrants.connectionId, connection.id),
+      ),
+    )
+    .limit(1);
+  if (!grant) throw new HttpError(400, "That account is not on this repository's allow-list");
+}
+
 /** A null user is the admin default; the row is replaced whole, so an omitted account becomes none. */
 export function upsertPreference(db: Database | DbTx, row: PreferenceRow) {
   return db
