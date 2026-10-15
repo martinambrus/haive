@@ -12,9 +12,12 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 
 import { Hono } from 'hono';
+import { getTableName } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
+  decrypt,
+  decryptDek,
   encrypt,
   encryptDek,
   generateDek,
@@ -527,4 +530,119 @@ describe('the host of a credential', () => {
       expect(rowOf(fake).host).toBe(stored);
     },
   );
+});
+
+type Handle = ReturnType<typeof setup>['db'];
+
+// The fake's for() records nothing, so the handle is wrapped to log what the route asks of it.
+function recorded(handle: Handle, events: string[], scope: 'db' | 'tx' = 'db'): Handle {
+  const credentials = handle.query.repoCredentials;
+  return {
+    ...handle,
+    query: {
+      ...handle.query,
+      repoCredentials: {
+        findFirst: (opts) => {
+          events.push(`${scope} reads repo_credentials`);
+          return credentials.findFirst(opts);
+        },
+        findMany: (opts) => {
+          events.push(`${scope} reads repo_credentials`);
+          return credentials.findMany(opts);
+        },
+      },
+    },
+    select: (fields) => ({
+      from: (table) => {
+        const query = handle.select(fields).from(table);
+        const { for: lockRows, then: run } = query;
+        let lock = '';
+        query.for = (strength, config) => {
+          lock = ` for ${strength}`;
+          return lockRows(strength, config);
+        };
+        query.then = (ok, bad) => {
+          events.push(`${scope} selects ${getTableName(table)}${lock}`);
+          return run(ok, bad);
+        };
+        return query;
+      },
+    }),
+    update: (table) => {
+      events.push(`${scope} updates ${getTableName(table)}`);
+      return handle.update(table);
+    },
+    transaction: async (fn) => {
+      events.push('begin');
+      try {
+        const result = await handle.transaction((tx) => fn(recorded(tx, events, 'tx')));
+        events.push('commit');
+        return result;
+      } catch (err) {
+        events.push('rollback');
+        throw err;
+      }
+    },
+  };
+}
+
+describe('the row an edit reads, judges and updates', () => {
+  it('is read FOR UPDATE inside the transaction that updates it, and nowhere else', async () => {
+    const fake = setup();
+    const events: string[] = [];
+    h.db = recorded(fake.db, events);
+
+    const res = await update({ label: 'renamed' });
+
+    expect(res.status).toBe(200);
+    expect(rowOf(fake)).toMatchObject({ label: 'renamed' });
+    expect(events).toEqual([
+      'begin',
+      'tx selects repo_credentials for update',
+      'tx updates repo_credentials',
+      'commit',
+    ]);
+  });
+
+  it.each([
+    [{ username: 'new-ci' }, 'new-ci', 'tok'],
+    [{ secret: 'new-tok' }, 'ci', 'new-tok'],
+    [{ username: 'new-ci', secret: 'new-tok' }, 'new-ci', 'new-tok'],
+  ])('writes a new username or secret, %j, under the same lock', async (body, username, secret) => {
+    const fake = setup();
+    const events: string[] = [];
+    h.db = recorded(fake.db, events);
+
+    const res = await update(body);
+
+    expect(res.status).toBe(200);
+    const row = rowOf(fake);
+    const dek = decryptDek(row.encryptedDek as string, KEK);
+    expect(decrypt(row.usernameEncrypted as string, dek)).toBe(username);
+    expect(decrypt(row.secretEncrypted as string, dek)).toBe(secret);
+    expect(events).toEqual([
+      'begin',
+      'tx selects repo_credentials for update',
+      'tx updates repo_credentials',
+      'commit',
+    ]);
+  });
+
+  it.each([
+    ['a stored URL the new host does not fit', CREDENTIAL, { host: 'other.example.com' }, 400],
+    ['a credential that does not exist', '00000000-0000-4000-8000-0000000000c9', {}, 404],
+  ])('judges %s against the locked row and rolls back', async (_name, id, body, status) => {
+    const fake = setup();
+    const events: string[] = [];
+    h.db = recorded(fake.db, events);
+
+    const res = await app.request(`/${id}`, {
+      method: 'PUT',
+      ...json({ label: 'renamed', host: HOST, ...body }),
+    });
+
+    expect(res.status).toBe(status);
+    expect(rowOf(fake)).toMatchObject({ label: 'work', host: HOST, apiBaseUrl: STORED });
+    expect(events).toEqual(['begin', 'tx selects repo_credentials for update', 'rollback']);
+  });
 });

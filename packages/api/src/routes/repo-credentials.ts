@@ -219,17 +219,6 @@ repoCredentialsRoutes.put('/:id', async (c) => {
   const body = updateCredentialSchema.parse(await c.req.json());
   const db = getDb();
 
-  const existing = await db.query.repoCredentials.findFirst({
-    where: and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)),
-    columns: { id: true, encryptedDek: true, provider: true, apiBaseUrl: true },
-  });
-  if (!existing) throw new HttpError(404, 'Credential not found');
-  apiBaseTargetSchema.parse({
-    host: body.host,
-    provider: body.provider ?? existing.provider,
-    apiBaseUrl: body.apiBaseUrl ?? existing.apiBaseUrl,
-  });
-
   const update: {
     label: string;
     host: string;
@@ -258,28 +247,48 @@ repoCredentialsRoutes.put('/:id', async (c) => {
   // per-credential DEK so the stored secret never round-trips to the client.
   const newUsername = body.username?.trim();
   const newSecret = typeof body.secret === 'string' && body.secret.length > 0 ? body.secret : null;
-  if (newUsername || newSecret !== null) {
-    const masterKek = await secretsService.getMasterKek();
-    const dekHex = decryptDek(existing.encryptedDek, masterKek);
-    if (newUsername) update.usernameEncrypted = encrypt(newUsername, dekHex);
-    if (newSecret !== null) update.secretEncrypted = encrypt(newSecret, dekHex);
-  }
+  const masterKek = newUsername || newSecret !== null ? await secretsService.getMasterKek() : null;
 
-  const updated = await db
-    .update(schema.repoCredentials)
-    .set(update)
-    .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
-    .returning({
-      id: schema.repoCredentials.id,
-      label: schema.repoCredentials.label,
-      host: schema.repoCredentials.host,
-      provider: schema.repoCredentials.provider,
-      apiBaseUrl: schema.repoCredentials.apiBaseUrl,
-      gitName: schema.repoCredentials.gitName,
-      gitEmail: schema.repoCredentials.gitEmail,
-      createdAt: schema.repoCredentials.createdAt,
-      updatedAt: schema.repoCredentials.updatedAt,
+  // One lock from read to write, so an overlapping edit cannot change the row the check judged.
+  const updated = await db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select({
+        encryptedDek: schema.repoCredentials.encryptedDek,
+        provider: schema.repoCredentials.provider,
+        apiBaseUrl: schema.repoCredentials.apiBaseUrl,
+      })
+      .from(schema.repoCredentials)
+      .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
+      .for('update');
+    if (!existing) throw new HttpError(404, 'Credential not found');
+    apiBaseTargetSchema.parse({
+      host: body.host,
+      provider: body.provider ?? existing.provider,
+      apiBaseUrl: body.apiBaseUrl ?? existing.apiBaseUrl,
     });
+
+    if (masterKek !== null) {
+      const dekHex = decryptDek(existing.encryptedDek, masterKek);
+      if (newUsername) update.usernameEncrypted = encrypt(newUsername, dekHex);
+      if (newSecret !== null) update.secretEncrypted = encrypt(newSecret, dekHex);
+    }
+
+    return tx
+      .update(schema.repoCredentials)
+      .set(update)
+      .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
+      .returning({
+        id: schema.repoCredentials.id,
+        label: schema.repoCredentials.label,
+        host: schema.repoCredentials.host,
+        provider: schema.repoCredentials.provider,
+        apiBaseUrl: schema.repoCredentials.apiBaseUrl,
+        gitName: schema.repoCredentials.gitName,
+        gitEmail: schema.repoCredentials.gitEmail,
+        createdAt: schema.repoCredentials.createdAt,
+        updatedAt: schema.repoCredentials.updatedAt,
+      });
+  });
 
   await recordAuditEvent(db, {
     actorUserId: userId,
