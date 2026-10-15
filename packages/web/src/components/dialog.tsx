@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, type HTMLAttributes } from 'react';
+import { useEffect, useRef, type HTMLAttributes } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '@/lib/cn';
 
@@ -13,7 +13,31 @@ interface DialogProps {
   className?: string;
 }
 
+const TABBABLE = 'a[href], button, input, select, textarea, [tabindex]';
+const openPanels: HTMLElement[] = [];
+
+function tabbables(panel: HTMLElement) {
+  return Array.from(panel.querySelectorAll<HTMLElement>(TABBABLE)).filter(
+    (el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.getClientRects().length > 0,
+  );
+}
+
+function leavesPanel(panel: HTMLElement, edge: HTMLElement | undefined, backwards: boolean) {
+  const active = document.activeElement;
+  if (!edge || !active || active === edge || active === panel) return true;
+  if (!panel.contains(active)) return true;
+  const beyond = backwards ? Node.DOCUMENT_POSITION_PRECEDING : Node.DOCUMENT_POSITION_FOLLOWING;
+  return (edge.compareDocumentPosition(active) & beyond) !== 0;
+}
+
 export function Dialog({ open, onOpenChange, children, className }: DialogProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const openerRef = useRef<HTMLElement | null | undefined>(undefined);
+  // Read while rendering: a child with autoFocus takes focus before any effect runs.
+  if (open && openerRef.current === undefined) {
+    openerRef.current = document.activeElement as HTMLElement | null;
+  }
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -30,6 +54,32 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
     return () => document.removeEventListener('keydown', onKey);
   }, [open, onOpenChange]);
 
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!open || !panel) return;
+    const opener = openerRef.current;
+    if (!panel.contains(document.activeElement)) panel.focus();
+    openPanels.push(panel);
+    const onTab = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== panel) return;
+      const items = tabbables(panel);
+      const first = items[0];
+      const last = items.at(-1);
+      if (!leavesPanel(panel, e.shiftKey ? first : last, e.shiftKey)) return;
+      e.preventDefault();
+      ((e.shiftKey ? last : first) ?? panel).focus();
+    };
+    document.addEventListener('keydown', onTab);
+    return () => {
+      document.removeEventListener('keydown', onTab);
+      openPanels.splice(openPanels.indexOf(panel), 1);
+      // Still attached means Strict Mode's rehearsal, not a close.
+      if (panel.isConnected) return;
+      openerRef.current = undefined;
+      if (opener?.isConnected) opener.focus();
+    };
+  }, [open]);
+
   if (!open) return null;
   return createPortal(
     // Marked so page-level Escape handlers can tell a dialog is on top and
@@ -40,7 +90,13 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
         className="fixed inset-0 bg-black/60 backdrop-blur-sm"
         onClick={() => onOpenChange(false)}
       />
-      <div className={cn('relative z-10 w-full max-w-lg', className)}>{children}</div>
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className={cn('relative z-10 w-full max-w-lg outline-none', className)}
+      >
+        {children}
+      </div>
     </div>,
     document.body,
   );
