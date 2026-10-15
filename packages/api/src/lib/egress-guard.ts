@@ -139,6 +139,12 @@ export function dnsResolver(servers?: readonly string[]): NameResolverFactory {
   };
 }
 
+// dnsResolver hands a timed-out query on as the cause of its ENOTFOUND.
+function lookupTimedOut(err: unknown): boolean {
+  const { code, cause } = (err ?? {}) as NodeJS.ErrnoException;
+  return code === dns.TIMEOUT || (cause as NodeJS.ErrnoException | undefined)?.code === dns.TIMEOUT;
+}
+
 /** The lookup the socket connects with: it refuses the whole answer when any address in it is blocked. */
 export function guardedLookup(resolve: Resolver, isBlocked: Classifier): net.LookupFunction {
   return (hostname, options, callback) => {
@@ -228,7 +234,9 @@ function guardedRequest(
       settle(
         err instanceof EgressGuardError
           ? err
-          : new EgressGuardError('request-failed', null, { cause: err }),
+          : new EgressGuardError(lookupTimedOut(err) ? 'request-timeout' : 'request-failed', null, {
+              cause: err,
+            }),
       );
     }
 
