@@ -37,11 +37,13 @@ import {
   slugProblem,
   taskTypeFormSchema,
 } from '@/lib/task-type-form';
+import { editorStateForAgent, loadDraftIntoEditor } from '@/lib/task-type-draft-load';
 import { usePageTitle } from '@/lib/use-page-title';
 import { useUnsavedChangesGuard } from '@/lib/use-unsaved-changes-guard';
 import type { TaskTypeAvailability } from '@haive/shared/modularity';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { TaskTypeComposer } from '@/components/task-type-composer';
+import { TaskTypeCreatorPanel } from '@/components/task-type-creator-panel';
 import { TaskTypeDeleteDialog } from '@/components/task-type-delete-dialog';
 import { Badge, Button, Card, FormError } from '@/components/ui';
 
@@ -108,6 +110,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [formRevision, setFormRevision] = useState(0);
+  const [loadedValues, setLoadedValues] = useState<FormValues | null>(null);
   const [changedRow, setChangedRow] = useState<AdminTaskType | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
@@ -118,6 +121,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setLoopLimits(taskType.stepLoopLimitDefaults);
     setPromptSteps(taskType.promptSteps ?? {});
     setValues(initialValuesOf(taskType));
+    setLoadedValues(null);
     setFormRevision((n) => n + 1);
   }, []);
 
@@ -216,6 +220,19 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setSaveError(null);
     setServerIssues([]);
     setServerPromptIssues([]);
+  }
+
+  function loadDraft(draft: Record<string, unknown>) {
+    const next = loadDraftIntoEditor({ stepIds, loopLimits, promptSteps, values }, draft, {
+      creating,
+    });
+    touch();
+    setStepIds(next.stepIds);
+    setLoopLimits(next.loopLimits);
+    setPromptSteps(next.promptSteps);
+    setValues(next.values);
+    setLoadedValues(next.values);
+    setFormRevision((n) => n + 1);
   }
 
   async function refreshAvailability(forSlug: string) {
@@ -367,12 +384,24 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
           </p>
         )}
       </div>
+      {(creating || row?.source === 'admin') && (
+        <TaskTypeCreatorPanel
+          slug={creating ? null : row!.slug}
+          editorState={editorStateForAgent({
+            stepIds,
+            loopLimits,
+            promptSteps,
+            values: { ...values, slug: typeSlug },
+          })}
+          onLoad={loadDraft}
+        />
+      )}
       <Card>
         <FormRenderer
           key={`${row?.slug ?? 'new'}:${formRevision}`}
           schema={schema}
           hideTitle
-          initialValues={initialValues}
+          initialValues={loadedValues ?? initialValues}
           submitting={saving}
           submitDisabled={blocked || changedRow !== null}
           errorMessage={saveError}
