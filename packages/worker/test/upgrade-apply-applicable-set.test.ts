@@ -9,6 +9,7 @@ import type { UpgradePlanOutput } from '../src/step-engine/steps/onboarding-upgr
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { renderContextColumnFor } from '../src/project-state/write.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -46,8 +47,7 @@ async function run(withColumn: boolean) {
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
-    projectStateSync: schema.projectStateSync,
-    projectStateConflicts: schema.projectStateConflicts,
+    ...RECORD_WRITE_TABLES,
   });
   const column = renderContextColumnFor(REFERENCE_CONTEXT, false);
   fake.insert(schema.repositories, {
@@ -57,6 +57,14 @@ async function run(withColumn: boolean) {
     source: 'blank',
     renderContext: withColumn ? column : null,
     applicableTemplateIds: null,
+  });
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    repositoryId: REPO,
+    type: 'onboarding_upgrade',
+    status: 'running',
+    title: 'upgrade',
   });
   fake.insert(schema.cliProviders, {
     userId: USER,
@@ -111,12 +119,14 @@ async function run(withColumn: boolean) {
     throwIfCancelled: () => {},
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
-  await upgradeApplyStep.apply(ctx, {
-    detected: plan,
-    formValues: {},
-    iteration: 0,
-    previousIterations: [],
-  });
+  await recordWritten(
+    upgradeApplyStep.apply(ctx, {
+      detected: plan,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    }),
+  );
   return fake.rows(schema.repositories)[0]!.applicableTemplateIds as string[];
 }
 

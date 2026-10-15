@@ -62,7 +62,7 @@ import {
 } from './sandbox/runtime-admission.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
-import { startModuleJobs } from './modules/loader.js';
+import { MODULE_JOBS_RECONCILE_MS, startModuleJobs } from './modules/loader.js';
 import { startModuleControlWorker } from './queues/module-control-queue.js';
 import { deactivatedModuleIds } from './modules/activation.js';
 
@@ -261,7 +261,7 @@ async function main(): Promise<void> {
   const cliStreamLogReaper = new CliStreamLogReaper({ db: getDb() });
   cliStreamLogReaper.start();
 
-  const stopModuleJobs = await startModuleJobs(
+  const moduleJobs = await startModuleJobs(
     loadedModules,
     moduleEntries,
     await deactivatedModuleIds(getDb()),
@@ -271,6 +271,21 @@ async function main(): Promise<void> {
     loaded: loadedModules,
     entries: moduleEntries,
   });
+  let moduleJobsPass: Promise<void> | null = null;
+  const reconcileModuleJobs = async (): Promise<void> => {
+    try {
+      await moduleJobs.reconcile(await deactivatedModuleIds(getDb()));
+    } catch (err) {
+      logger.warn({ err }, 'module jobs reconcile skipped');
+    }
+  };
+  const moduleJobsTimer = setInterval(() => {
+    if (moduleJobsPass) return;
+    moduleJobsPass = reconcileModuleJobs().finally(() => {
+      moduleJobsPass = null;
+    });
+  }, MODULE_JOBS_RECONCILE_MS);
+  moduleJobsTimer.unref();
 
   logger.info('haive-worker ready');
 
@@ -289,7 +304,9 @@ async function main(): Promise<void> {
     stalledTaskSweeper.stop();
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
-    await stopModuleJobs();
+    clearInterval(moduleJobsTimer);
+    await moduleJobsPass;
+    await moduleJobs.stopAll();
     await terminalManager.stop().catch((err) => {
       logger.warn({ err }, 'terminal manager stop failed');
     });

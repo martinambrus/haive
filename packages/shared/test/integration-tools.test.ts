@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { schema } from '@haive/database';
 import { CORE_FORGE_PROVIDER_SPECS } from '../src/forge/provider-specs.js';
 import {
+  IntegrationToolNameError,
   integrationTools,
   parseIntegrationBindings,
   type IntegrationBinding,
@@ -305,6 +306,30 @@ describe('integrationTools', () => {
     const error = thrown(() => integrationTools(bindings, specs, switchIs(false)));
 
     for (const part of ['gamma', 'alpha_x_y']) expect(error.message).toContain(part);
+  });
+
+  it.each([
+    [
+      'a name that breaks the grammar',
+      [bind('docs', 'p', 'read')],
+      specsOf({ p: [op('Get_page', 'read')] }),
+    ],
+    [
+      'a prefixed name that is too long',
+      [bind('mirror', 'github', 'read', 0), bind('source-repository2', 'gitlab', 'read', 1)],
+      coreSpecOf,
+    ],
+    [
+      'a name another operation already has',
+      [bind('alpha', 'p', 'read', 0), bind('beta', 'p', 'read', 1), bind('gamma', 'q', 'read', 2)],
+      specsOf({ p: [op('x_y', 'read')], q: [op('alpha_x_y', 'read')] }),
+    ],
+  ])('throws the named error for %s', (_name, bindings, specs) => {
+    const error = thrown(() => integrationTools(bindings, specs, switchIs(false)));
+
+    expect(error).toBeInstanceOf(IntegrationToolNameError);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe('IntegrationToolNameError');
   });
 
   it('offers nothing for a provider with no spec, or a spec with no operations', () => {

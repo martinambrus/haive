@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
+  ensureDirNoFollow,
+  lstatNoFollow,
   readdirNoFollow,
   readTextNoFollow,
   removeNoFollow,
@@ -98,6 +100,9 @@ interface LearningDetect {
   /** Stable `.haive/` path the form's knowledge-diff viewer fetches; the file is
    *  written by prepareForm post-llm. null when the worktree has no git repo. */
   knowledgeDiffArtifactPath: string | null;
+  /** Why the agent is not asked to sync the knowledge base: the sandbox mounts `knowledge_base/`
+   *  writable only where it is a directory. Absent on a payload persisted before this existed. */
+  kbSyncSkipped?: string | null;
 }
 
 interface LearningEntry {
@@ -159,6 +164,8 @@ interface LearningApply {
   /** Feature KB Sync result: the classification + the structured-KB files the agent
    *  edited in the worktree. null when the agent reported none. */
   kbSync: KbSync | null;
+  /** Why the KB-sync half did not run (see `LearningDetect.kbSyncSkipped`); null when it did. */
+  kbSyncSkipped: string | null;
   /** True when the user unticked "keep KB sync" and apply reverted the agent's
    *  knowledge_base edits before commit. */
   kbReverted: boolean;
@@ -933,6 +940,29 @@ async function investigationDiffFile(
   };
 }
 
+/** A task worktree missing `knowledge_base/` is not skipped: `prepare` makes it. */
+async function kbSyncSkipReason(workspace: string): Promise<string | null> {
+  const wa = workspaceAnchor(workspace);
+  const kb = await lstatNoFollow(wa.anchor, `${wa.prefix}${KB_DIR}`);
+  if (kb?.kind === 'directory') return null;
+  if (kb === null) {
+    return wa.prefix === ''
+      ? `${KB_DIR} does not exist in the repository root, and this step never creates it there`
+      : null;
+  }
+  return `${KB_DIR} is not a directory`;
+}
+
+async function ensureWorktreeKb(workspace: string): Promise<void> {
+  const wa = workspaceAnchor(workspace);
+  if (wa.prefix === '') return;
+  const root = await lstatNoFollow(wa.anchor, wa.prefix);
+  if (root?.kind !== 'directory') return;
+  await ensureDirNoFollow(wa.anchor, `${wa.prefix}${KB_DIR}`, {
+    owner: { uid: root.stats.uid, gid: root.stats.gid },
+  });
+}
+
 export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> = {
   metadata: {
     id: '11-phase-8-learning',
@@ -1034,6 +1064,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       knowledgeDiffArtifactPath: hasGit
         ? path.join(worktreePath, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME)
         : null,
+      kbSyncSkipped: await kbSyncSkipReason(worktreePath),
     };
   },
 
@@ -1080,6 +1111,10 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     // Draft BEFORE the form so the user validates the agent's output (their
     // steer: human role = validation / comments, not authoring).
     preForm: true,
+    prepare: async (args) => {
+      const detected = args.detected as LearningDetect;
+      if (!detected.kbSyncSkipped) await ensureWorktreeKb(detected.worktreePath);
+    },
     buildPrompt: (args) => {
       const detected = args.detected as LearningDetect;
       return [
@@ -1116,12 +1151,18 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         '- "delete" with `targetId` = an existing learning id when this run proved that lesson WRONG or obsolete.',
         'Only use a `targetId` that EXACTLY matches an id in the existing list (an unknown target is treated as an insert, or dropped for delete). Do not duplicate a lesson that already exists — update it instead.',
         '',
-        'KNOWLEDGE BASE SYNC — before emitting the JSON, keep the project knowledge base in sync with what this task changed:',
+        detected.kbSyncSkipped
+          ? `KNOWLEDGE BASE SYNC — skipped for this task (${detected.kbSyncSkipped}). Do NOT create or edit any file under \`${KB_DIR}/\`. Classify the task anyway, because SKILL SYNC below uses it:`
+          : 'KNOWLEDGE BASE SYNC — before emitting the JSON, keep the project knowledge base in sync with what this task changed:',
         '1. CLASSIFY the task: new_feature (adds capability) | feature_update (changes existing behavior) | feature_removal (removes capability) | bug_fix | refactor.',
-        '2. bug_fix / refactor → SKIP KB edits (documented behavior is unchanged); set "changes": []. (A bug fix is still captured by the investigation below.)',
-        `3. new_feature / feature_update / feature_removal → LOCATE where the feature belongs (search \`rag_search\` FIRST, then \`${KB_DIR}/INDEX.md\`), then READ the target file from disk before you change it. \`rag_search\` returns a SNIPPET of that file as it was indexed at the START of this run — the index is not rewritten until after the commit gate — so editing from what it returned drops whatever the snippet left out, the same way a TRUNCATED global article does below. Then EDIT the structured \`${KB_DIR}/*.md\` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep \`INDEX.md\` in sync when you add or remove a file.`,
-        '4. KB GAP DETECTION: if the run surfaced domain knowledge that was MISSING from the KB (a rule discovered from code, a constraint, an edge case), append it to the right KB file.',
-        `5. Report EVERY knowledge_base file you changed in \`kbSync.changes\`. Do NOT edit \`${INVESTIGATIONS_DIR}/\` — that is recorded separately below.`,
+        ...(detected.kbSyncSkipped
+          ? ['2. Set "kbSync" to your classification with "changes": [] — no KB file is edited.']
+          : [
+              '2. bug_fix / refactor → SKIP KB edits (documented behavior is unchanged); set "changes": []. (A bug fix is still captured by the investigation below.)',
+              `3. new_feature / feature_update / feature_removal → LOCATE where the feature belongs (search \`rag_search\` FIRST, then \`${KB_DIR}/INDEX.md\`), then READ the target file from disk before you change it. \`rag_search\` returns a SNIPPET of that file as it was indexed at the START of this run — the index is not rewritten until after the commit gate — so editing from what it returned drops whatever the snippet left out, the same way a TRUNCATED global article does below. Then EDIT the structured \`${KB_DIR}/*.md\` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep \`INDEX.md\` in sync when you add or remove a file.`,
+              '4. KB GAP DETECTION: if the run surfaced domain knowledge that was MISSING from the KB (a rule discovered from code, a constraint, an edge case), append it to the right KB file.',
+              `5. Report EVERY knowledge_base file you changed in \`kbSync.changes\`. Do NOT edit \`${INVESTIGATIONS_DIR}/\` — that is recorded separately below.`,
+            ]),
         '',
         'SKILL SYNC — after classifying the task above, keep the project SKILLS (capability guides under `.claude/skills/`) in sync with what this task changed. DECIDE ONLY here: do NOT create, edit, or write any skill file and do NOT emit skill bodies — a later step regenerates the affected skill from your decision. Add a `"skillSync": { "ops": [ ... ] }` field to the JSON:',
         '- new_feature (the task ADDED a capability that no existing skill covers) → { "op": "new_feature", "capability": "<the capability name>", "rationale": "<one line: what it does>" }.',
@@ -1185,7 +1226,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
               '=== REVISION REQUESTED — this is a RE-RUN of the learning capture ===',
               'A human reviewed your PRIOR drafts (shown below) and asks for a specific change. This OVERRIDES the defaults above wherever they conflict.',
               `REVIEWER INSTRUCTION: ${detected.refineInstruction}`,
-              `Apply it to whatever artifact it concerns — a learning entry, the investigation, a \`${KB_DIR}\` file (edit it on disk with your tools), or a global-candidate body (e.g. scope an article to a specific version). Treat a clear command as a directive; if the reviewer gives literal text to add, fold it into the most relevant artifact. Re-emit the FULL JSON and leave every draft the instruction does NOT touch byte-for-byte as below.`,
+              `Apply it to whatever artifact it concerns — a learning entry, the investigation, ${detected.kbSyncSkipped ? '' : `a \`${KB_DIR}\` file (edit it on disk with your tools), `}or a global-candidate body (e.g. scope an article to a specific version). Treat a clear command as a directive; if the reviewer gives literal text to add, fold it into the most relevant artifact. Re-emit the FULL JSON and leave every draft the instruction does NOT touch byte-for-byte as below.`,
               detected.priorDrafts ? '--- YOUR PRIOR DRAFTS (revise these) ---' : '',
               detected.priorDrafts ?? '',
             ]
@@ -1229,7 +1270,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
   form(_ctx, detected, llmOutput): FormSchema {
     const entries = parseLearningOutput(llmOutput ?? null) ?? [];
     const investigation = detected.isBugFix ? parseInvestigation(llmOutput ?? null) : null;
-    const kbSync = parseKbSync(llmOutput ?? null);
+    const kbSync = detected.kbSyncSkipped ? null : parseKbSync(llmOutput ?? null);
     const kbChanged = (kbSync?.changes.length ?? 0) > 0;
     const globalCandidates = parseGlobalCandidates(llmOutput ?? null);
     const skillOps = parseSkillSync(
@@ -1379,17 +1420,22 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           : []),
         ...(investigation
           ? [
-              {
-                type: 'checkbox' as const,
-                id: 'writeInvestigation',
-                label: `Write the bug investigation to ${INVESTIGATIONS_DIR}/`,
-                default: true,
-              },
+              ...(detected.kbSyncSkipped
+                ? []
+                : [
+                    {
+                      type: 'checkbox' as const,
+                      id: 'writeInvestigation',
+                      label: `Write the bug investigation to ${INVESTIGATIONS_DIR}/`,
+                      default: true,
+                    },
+                  ]),
               {
                 type: 'checkbox' as const,
                 id: 'promoteInvestigationGlobal',
-                label:
-                  'Promote it to the GLOBAL KB (cross-repo house standard) instead of this repo',
+                label: detected.kbSyncSkipped
+                  ? `Promote it to the GLOBAL KB (cross-repo house standard); this repo cannot hold it: ${detected.kbSyncSkipped}`
+                  : 'Promote it to the GLOBAL KB (cross-repo house standard) instead of this repo',
                 default: investigation.scope === 'global',
               },
             ]
@@ -1454,6 +1500,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         deleted: [],
         investigationWritten: null,
         kbSync: null,
+        kbSyncSkipped: null,
         kbReverted: false,
         skillSync: null,
         promotedCandidates: [],
@@ -1477,7 +1524,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     // the LLM phase. Revert those edits when the reviewer unticked "keep KB sync". Done
     // BEFORE writing the investigation (which lands under knowledge_base/investigations/),
     // so a kept investigation survives the revert.
-    const kbSync = parseKbSync(args.llmOutput ?? null);
+    const kbSync = args.detected.kbSyncSkipped ? null : parseKbSync(args.llmOutput ?? null);
     const kbHasChanges = (kbSync?.changes.length ?? 0) > 0;
     let kbReverted = false;
     if (kbHasChanges && values.keepKbSync === false) {
@@ -1540,7 +1587,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           ctx.logger,
         );
         investigationWritten = promo ? `global-kb:${promo.id}` : null;
-      } else {
+      } else if (!args.detected.kbSyncSkipped) {
         investigationWritten = await writeInvestigation(
           worktreePath,
           investigation,
@@ -1608,6 +1655,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         investigationWritten,
         kbClassification: kbSync?.classification ?? null,
         kbChanged: kbHasChanges,
+        kbSyncSkipped: args.detected.kbSyncSkipped ?? null,
         kbReverted,
         skillSyncOps: (skillSync?.newUpdate.length ?? 0) + (skillSync?.remove.length ?? 0),
         promotedCandidates: promotedCandidates.length,
@@ -1621,6 +1669,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       deleted,
       investigationWritten,
       kbSync,
+      kbSyncSkipped: args.detected.kbSyncSkipped ?? null,
       kbReverted,
       skillSync,
       promotedCandidates,

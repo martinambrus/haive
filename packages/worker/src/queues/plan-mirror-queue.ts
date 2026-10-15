@@ -575,17 +575,20 @@ export async function schedulePlanMirrorSweep(): Promise<void> {
     logger.warn({ err }, 'project states not marked dirty at boot');
   });
   const queue = new Queue(QUEUE_NAMES.PLAN_MIRROR, { connection: getBullRedis() });
-  await queue.upsertJobScheduler(
-    SWEEP_JOB_ID,
-    { every: SWEEP_EVERY_MS },
-    {
-      name: PLAN_MIRROR_JOB_NAMES.SWEEP,
-      data: {},
-      opts: { removeOnComplete: true, removeOnFail: 10 },
-    },
-  );
-  await pruneJobSchedulers(queue, [SWEEP_JOB_ID]);
-  await queue.close();
+  try {
+    await queue.upsertJobScheduler(
+      SWEEP_JOB_ID,
+      { every: SWEEP_EVERY_MS },
+      {
+        name: PLAN_MIRROR_JOB_NAMES.SWEEP,
+        data: {},
+        opts: { removeOnComplete: true, removeOnFail: 10 },
+      },
+    );
+    await pruneJobSchedulers(queue, [SWEEP_JOB_ID]);
+  } finally {
+    await queue.close().catch(() => {});
+  }
 }
 
 export function startPlanMirrorWorker(): Worker<

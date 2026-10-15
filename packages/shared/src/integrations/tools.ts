@@ -6,6 +6,7 @@ import {
   isProviderId,
 } from '../modularity/contracts.js';
 import type { IntegrationOperation } from '../modularity/integrations.js';
+import { IntegrationToolNameError } from './errors.js';
 
 export const integrationBindingSchema = z.object({
   requirementId: integrationRequirementSchema.shape.id,
@@ -56,7 +57,7 @@ export function integrationTools(
   const taken = new Set<string>();
   for (const { binding, op, name } of named) {
     if (!TOOL_NAME_PATTERN.test(name) || taken.has(name)) {
-      throw new Error(
+      throw new IntegrationToolNameError(
         `integration operation ${op.opId} of requirement ${binding.requirementId} cannot be listed as ${JSON.stringify(name)}: a tool name must match ${TOOL_NAME_PATTERN} and be unique`,
       );
     }

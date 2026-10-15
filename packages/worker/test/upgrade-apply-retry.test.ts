@@ -20,6 +20,7 @@ import type {
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
 
 const beforeRewrite = vi.hoisted(() => ({
   run: null as null | (() => Promise<void>),
@@ -111,6 +112,7 @@ async function setup({
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
+    ...RECORD_WRITE_TABLES,
   });
   const live = (diskPath: string, content: string, templateKind = 'agent') =>
     fake.insert(schema.onboardingArtifacts, {
@@ -218,12 +220,14 @@ async function setup({
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
   const apply = () =>
-    upgradeApplyStep.apply(ctx, {
-      detected: plan,
-      formValues,
-      iteration: 0,
-      previousIterations: [],
-    });
+    recordWritten(
+      upgradeApplyStep.apply(ctx, {
+        detected: plan,
+        formValues,
+        iteration: 0,
+        previousIterations: [],
+      }),
+    );
   const byId = (ids: readonly string[]) =>
     fake.rows(schema.onboardingArtifacts).filter((r) => ids.includes(r.id as string));
   const answerConflicts = (choice: string) => {

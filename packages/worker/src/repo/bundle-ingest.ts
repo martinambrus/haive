@@ -147,11 +147,11 @@ export async function handleIngestZip(
   bundleStorageRoot: string,
 ): Promise<void> {
   const bundle = await loadBundle(db, payload.bundleId);
-  if (!bundle.archivePath || !bundle.archiveFormat) {
-    throw new Error('zip-source bundle missing archivePath / archiveFormat');
-  }
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
   try {
+    if (!bundle.archivePath || !bundle.archiveFormat) {
+      throw new Error('zip-source bundle missing archivePath / archiveFormat');
+    }
     const archiveRel = bundleArchiveRel(
       bundleStorageRoot,
       bundle.archivePath,
@@ -214,20 +214,20 @@ export async function handleIngestGit(
   bundleStorageRoot: string,
 ): Promise<void> {
   const bundle = await loadBundle(db, payload.bundleId);
-  if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
-
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
   const dirRel = bundleDirRel(payload.userId, bundle.id);
-  await ensureDirNoFollow(bundleStorageRoot, dirRel, { mode: 0o755 });
-  await removeNoFollow(bundleStorageRoot, `${dirRel}/extracted`, { recursive: true });
-
-  let cloneUrl = bundle.gitUrl;
-  if (bundle.gitCredentialsId) {
-    const creds = await getDecryptedCredentials(db, bundle.gitCredentialsId, payload.userId);
-    cloneUrl = buildAuthenticatedUrl(bundle.gitUrl, creds.username, creds.secret);
-  }
 
   try {
+    if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
+    await ensureDirNoFollow(bundleStorageRoot, dirRel, { mode: 0o755 });
+    await removeNoFollow(bundleStorageRoot, `${dirRel}/extracted`, { recursive: true });
+
+    let cloneUrl = bundle.gitUrl;
+    if (bundle.gitCredentialsId) {
+      const creds = await getDecryptedCredentials(db, bundle.gitCredentialsId, payload.userId);
+      cloneUrl = buildAuthenticatedUrl(bundle.gitUrl, creds.username, creds.secret);
+    }
+
     await gitClone(cloneUrl, dest, bundle.gitBranch ?? undefined);
     const head = await gitRevParseHead(dest);
     await db
@@ -270,27 +270,28 @@ export async function handleResyncGit(
   bundleStorageRoot: string,
 ): Promise<void> {
   const bundle = await loadBundle(db, payload.bundleId);
-  if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
 
-  // Whether the working tree is really there — which is what this check has always MEANT, and
-  // never did. It was `rm(<dest>/.git, { recursive: false })` read as a probe, and that cannot
-  // answer correctly in either direction: for a real `.git` DIRECTORY `rm` rejects with EISDIR, so
-  // `exists` was false and EVERY resync fell through to a full re-clone; for a `.git` GITFILE it
-  // SUCCEEDED and deleted it, then fetched against the checkout it had just broken. The comment it
-  // replaces ("rm above silently failed") recorded the symptom without naming the cause.
-  //
-  // An `lstat` answers the question the name asks, so a healthy clone now takes the FETCH path —
-  // which is what this function's own contract says it does.
-  const dirRel = bundleDirRel(payload.userId, bundle.id);
-  const exists = (await lstatNoFollow(bundleStorageRoot, `${dirRel}/extracted/.git`)) !== null;
-  if (!exists) {
-    // Working tree missing — re-clone instead of pull; handleIngestGit owns the dir wipe.
-    await handleIngestGit(payload, db, bundleStorageRoot);
-    return;
-  }
-
   try {
+    if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
+
+    // Whether the working tree is really there — which is what this check has always MEANT, and
+    // never did. It was `rm(<dest>/.git, { recursive: false })` read as a probe, and that cannot
+    // answer correctly in either direction: for a real `.git` DIRECTORY `rm` rejects with EISDIR, so
+    // `exists` was false and EVERY resync fell through to a full re-clone; for a `.git` GITFILE it
+    // SUCCEEDED and deleted it, then fetched against the checkout it had just broken. The comment it
+    // replaces ("rm above silently failed") recorded the symptom without naming the cause.
+    //
+    // An `lstat` answers the question the name asks, so a healthy clone now takes the FETCH path —
+    // which is what this function's own contract says it does.
+    const dirRel = bundleDirRel(payload.userId, bundle.id);
+    const exists = (await lstatNoFollow(bundleStorageRoot, `${dirRel}/extracted/.git`)) !== null;
+    if (!exists) {
+      // Working tree missing — re-clone instead of pull; handleIngestGit owns the dir wipe.
+      await handleIngestGit(payload, db, bundleStorageRoot);
+      return;
+    }
+
     await gitFetchAndCheckout(dest, bundle.gitBranch ?? undefined);
     const head = await gitRevParseHead(dest);
     const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);

@@ -139,6 +139,20 @@ describe('validateForgeOpArgs: open_pull_request', () => {
     expect(refused('open_pull_request', { ...valid, title: 'x'.repeat(257) })).toContain('title');
   });
 
+  it('counts a character outside the BMP once, as the schema maxLength does', () => {
+    const emoji = String.fromCodePoint(0x1f600);
+    expect(
+      validateForgeOpArgs('open_pull_request', { ...valid, body: emoji.repeat(65_536) }).ok,
+    ).toBe(true);
+    expect(
+      validateForgeOpArgs('open_pull_request', { ...valid, title: emoji.repeat(256) }).ok,
+    ).toBe(true);
+    expect(refused('open_pull_request', { ...valid, body: emoji.repeat(65_537) })).toContain(
+      'body',
+    );
+    expect(refused('open_pull_request', { ...valid, title: emoji.repeat(257) })).toContain('title');
+  });
+
   it('refuses a body longer than 65536 characters', () => {
     expect(refused('open_pull_request', { ...valid, body: 'x'.repeat(65_537) })).toContain('body');
   });

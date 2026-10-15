@@ -272,6 +272,37 @@ async function deleteBundleRow(bundleId: string, repositoryId: string): Promise<
   });
 }
 
+async function addBundleJobOrMarkFailed(
+  db: ReturnType<typeof getDb>,
+  bundleId: string,
+  add: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await add();
+  } catch (err) {
+    await db
+      .update(schema.customBundles)
+      .set({
+        status: 'failed',
+        lastSyncError:
+          'Could not queue the job that imports this bundle. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.customBundles.id, bundleId), eq(schema.customBundles.status, 'syncing')))
+      .catch(() => undefined);
+    throw err;
+  }
+}
+
+async function completedUploadBody(userId: string, sessionId: string) {
+  const bundle = await loadBundle(userId, sessionId);
+  const counts = await loadItemCounts([bundle.id]);
+  return {
+    bundle: bundleSummaryFromRow(bundle, counts.get(bundle.id)),
+    session: { id: sessionId, status: 'complete' as const },
+  };
+}
+
 bundleRoutes.post('/', async (c) => {
   const userId = c.get('userId');
   const body = createGitBundleRequestSchema.parse(await c.req.json());
@@ -306,11 +337,13 @@ bundleRoutes.post('/', async (c) => {
 
   const queue = getBundleQueue();
   const payload: BundleJobPayload = { bundleId: bundle.id, userId };
-  await queue.add(BUNDLE_JOB_NAMES.INGEST_GIT, payload, {
-    attempts: 1,
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  await addBundleJobOrMarkFailed(db, bundle.id, () =>
+    queue.add(BUNDLE_JOB_NAMES.INGEST_GIT, payload, {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    }),
+  );
 
   const counts = await loadItemCounts([bundle.id]);
   return c.json({ bundle: bundleSummaryFromRow(bundle, counts.get(bundle.id)) }, 201);
@@ -466,8 +499,11 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
+  if (row.bundleId !== null && row.bundleId !== row.id) {
+    throw new HttpError(400, 'upload session replaces the archive of a bundle');
+  }
   if (row.status === 'complete') {
-    throw new HttpError(409, 'session already completed');
+    return c.json(await completedUploadBody(userId, row.id));
   }
   if (row.status === 'cancelled') {
     throw new HttpError(409, 'session cancelled');
@@ -478,88 +514,98 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
 
   const anchor = bundleStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
-  // A link at that name now fails this check rather than reporting its target's size.
-  const onDisk = await lstatNoFollow(anchor, archiveRel);
-  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
+  const finalRel = bundleRel(
+    userId,
+    row.id,
+    `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`,
+  );
+  const finalArchive = path.join(anchor, finalRel);
+  // A link at either name now fails these checks rather than reporting its target's size.
+  const wholeFileAt = async (rel: string) => {
+    const info = await lstatNoFollow(anchor, rel);
+    return info?.kind === 'file' && info.stats.size === Number(row.totalSize);
+  };
+  const staged = await wholeFileAt(archiveRel);
+  if (!staged && !(await wholeFileAt(finalRel))) {
     throw new HttpError(409, 'archive size mismatch on disk');
   }
 
-  // Create the bundle row first, under an id chosen here so it is inserted with its storage_root;
-  // then move the staged archive into the bundle's per-bundle directory.
-  const bundleId = randomUUID();
-  const storageRoot = path.join(bundleDirFor(userId, bundleId), 'extracted');
-  const bundle = await db.transaction(async (tx) => {
+  // Create the bundle row first, under the upload's id so a repeated complete finds it, with its
+  // storage_root and archive_path; then move the staged archive into the bundle's directory.
+  const inserted = await db.transaction(async (tx) => {
     const [created] = await tx
       .insert(schema.customBundles)
       .values({
-        id: bundleId,
+        id: row.id,
         userId,
         repositoryId: row.repositoryId,
         name: row.name,
         sourceType: 'zip',
         archiveFilename: row.filename,
         archiveFormat: row.archiveFormat,
-        storageRoot,
+        archivePath: finalArchive,
+        storageRoot: path.join(bundleDirFor(userId, row.id), 'extracted'),
         enabledKinds: row.enabledKinds,
         status: 'syncing',
       })
+      .onConflictDoNothing({ target: schema.customBundles.id })
       .returning();
-    await markProjectStateDirty(tx, row.repositoryId);
-    return created!;
+    await tx
+      .update(schema.customBundleUploads)
+      .set({ bundleId: row.id, updatedAt: new Date() })
+      .where(eq(schema.customBundleUploads.id, row.id));
+    if (created) await markProjectStateDirty(tx, row.repositoryId);
+    return created;
   });
 
-  const finalRel = bundleRel(
-    userId,
-    bundle.id,
-    `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`,
-  );
-  const finalArchive = path.join(anchor, finalRel);
+  if (staged) {
+    try {
+      // `createParents` walks the bundle directory into place, which is what the separate `mkdir`
+      // did — and both rels sit under the same anchor, so this move cannot cross a filesystem.
+      await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
+    } catch (err) {
+      if (!(await wholeFileAt(finalRel))) {
+        throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
+      }
+    }
+  }
 
-  try {
-    // `createParents` walks the bundle directory into place, which is what the separate `mkdir`
-    // did — and both rels sit under the same anchor, so this move cannot cross a filesystem.
-    await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
-  } catch (err) {
-    await deleteBundleRow(bundle.id, bundle.repositoryId);
-    throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
+  const queue = getBundleQueue();
+  const jobId = `ingest-zip-${row.id}`;
+  if (inserted || !(await queue.getJob(jobId))) {
+    if (!inserted) {
+      await db
+        .update(schema.customBundles)
+        .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.customBundles.id, row.id),
+            inArray(schema.customBundles.status, ['syncing', 'failed']),
+          ),
+        );
+    }
+    const payload: BundleJobPayload = {
+      bundleId: row.id,
+      userId,
+      archivePath: finalArchive,
+      archiveFormat: row.archiveFormat as ArchiveFormat,
+    };
+    await addBundleJobOrMarkFailed(db, row.id, () =>
+      queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
+        jobId,
+        attempts: 1,
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      }),
+    );
   }
 
   await db
-    .update(schema.customBundles)
-    .set({ archivePath: finalArchive, updatedAt: new Date() })
-    .where(eq(schema.customBundles.id, bundle.id));
-
-  await db
     .update(schema.customBundleUploads)
-    .set({
-      status: 'complete',
-      bundleId: bundle.id,
-      archivePath: finalArchive,
-      updatedAt: new Date(),
-    })
+    .set({ status: 'complete', archivePath: finalArchive, updatedAt: new Date() })
     .where(eq(schema.customBundleUploads.id, row.id));
 
-  const queue = getBundleQueue();
-  const payload: BundleJobPayload = {
-    bundleId: bundle.id,
-    userId,
-    archivePath: finalArchive,
-    archiveFormat: row.archiveFormat as ArchiveFormat,
-  };
-  await queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
-    attempts: 1,
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
-
-  const counts = await loadItemCounts([bundle.id]);
-  return c.json(
-    {
-      bundle: bundleSummaryFromRow({ ...bundle, archivePath: finalArchive }, counts.get(bundle.id)),
-      session: { id: row.id, status: 'complete' as const },
-    },
-    201,
-  );
+  return c.json(await completedUploadBody(userId, row.id), 201);
 });
 
 bundleRoutes.delete('/uploads/:id', async (c) => {
@@ -690,12 +736,11 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
   const finalArchive = path.join(anchor, finalRel);
   const newExtracted = path.join(dir, 'extracted');
 
-  // Wipe the prior extracted/ tree and overwrite source.<ext>. Keeping the
-  // bundle row + items table intact during the swap means the UI can keep
-  // displaying the previous state until the worker re-parses.
-  await removeNoFollow(anchor, extractedRel, { recursive: true });
-  await removeNoFollow(anchor, finalRel).catch(() => {});
+  // Overwrite source.<ext> before wiping the prior extracted/ tree, so a death between the two
+  // leaves a complete archive. Keeping the bundle row + items table intact during the swap means
+  // the UI can keep displaying the previous state until the worker re-parses.
   await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
+  await removeNoFollow(anchor, extractedRel, { recursive: true });
 
   await db
     .update(schema.customBundles)
@@ -726,11 +771,13 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
     archivePath: finalArchive,
     archiveFormat: row.archiveFormat as ArchiveFormat,
   };
-  await queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
-    attempts: 1,
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  await addBundleJobOrMarkFailed(db, bundleId, () =>
+    queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    }),
+  );
 
   const counts = await loadItemCounts([bundleId]);
   return c.json({
@@ -758,11 +805,13 @@ bundleRoutes.post('/:id/sync', async (c) => {
 
   const queue = getBundleQueue();
   const payload: BundleJobPayload = { bundleId, userId };
-  await queue.add(BUNDLE_JOB_NAMES.RESYNC_GIT, payload, {
-    attempts: 1,
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  await addBundleJobOrMarkFailed(db, bundleId, () =>
+    queue.add(BUNDLE_JOB_NAMES.RESYNC_GIT, payload, {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    }),
+  );
   return c.json({ ok: true, bundleId });
 });
 
