@@ -195,8 +195,10 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
-      await clearTaskPause(db, taskId);
-      await appendTaskEvent(db, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
+      await db.transaction(async (tx) => {
+        await clearTaskPause(tx, taskId);
+        await appendTaskEvent(tx, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
+      });
       await audit({});
       return c.json({ ok: true, pausedAt: null });
     }

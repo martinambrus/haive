@@ -35,17 +35,19 @@ const PAUSES = [
     owner: USER,
     path: `/tasks/${TASK}/action`,
     recorded: { by: USER },
+    resumed: { by: USER },
   },
   {
     name: "an administrator's pause",
     owner: OWNER,
     path: `/admin/maintenance/tasks/${TASK}/action`,
     recorded: { by: USER, byAdmin: true, reason: 'maintenance' },
+    resumed: { by: USER, byAdmin: true },
   },
 ];
 
-describe.each(PAUSES)('$name', ({ owner, path, recorded }) => {
-  const setup = () => {
+describe.each(PAUSES)('$name', ({ owner, path, recorded, resumed }) => {
+  const setup = (over: Record<string, unknown> = {}) => {
     const fake = createFakeDb({
       tasks: schema.tasks,
       taskEvents: schema.taskEvents,
@@ -57,16 +59,19 @@ describe.each(PAUSES)('$name', ({ owner, path, recorded }) => {
       type: 'workflow',
       title: 'a task',
       status: 'running',
+      ...over,
     });
     h.db = fake.db;
     return fake;
   };
-  const pause = () =>
+  const act = (action: string) =>
     app.request(path, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'pause' }),
+      body: JSON.stringify({ action }),
     });
+  const pause = () => act('pause');
+  const resume = () => act('resume');
 
   it('sets pausedAt and records who paused', async () => {
     const fake = setup();
@@ -86,6 +91,28 @@ describe.each(PAUSES)('$name', ({ owner, path, recorded }) => {
 
     expect((await pause()).status).toBe(500);
     expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeNull();
+    expect(fake.rows(schema.taskEvents)).toEqual([]);
+  });
+
+  it('clears pausedAt and records who resumed', async () => {
+    const fake = setup({ pausedAt: new Date(0) });
+
+    expect((await resume()).status).toBe(200);
+    expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeNull();
+    expect(fake.rows(schema.taskEvents)).toMatchObject([
+      { eventType: 'task.resumed', payload: resumed },
+    ]);
+  });
+
+  it('answers an error and keeps the pause when the resumed event cannot be written', async () => {
+    const pausedAt = new Date(0);
+    const fake = setup({ pausedAt });
+    fake.hooks.beforeInsert = (table) => {
+      if (table === schema.taskEvents) throw new Error('task_events refused the insert');
+    };
+
+    expect((await resume()).status).toBe(500);
+    expect(fake.rows(schema.tasks)[0]?.pausedAt).toEqual(pausedAt);
     expect(fake.rows(schema.taskEvents)).toEqual([]);
   });
 });

@@ -223,7 +223,10 @@ function failStuckSteps(
 /** Release a per-task pause. Clearing the column is the whole operation — the worker's
  *  park loop and the deferred cli-exec jobs re-check it on their own schedule, so there is
  *  no queue state to unwind here. */
-export async function clearTaskPause(db: ReturnType<typeof getDb>, taskId: string): Promise<void> {
+export async function clearTaskPause(
+  db: ReturnType<typeof getDb> | DbHandle,
+  taskId: string,
+): Promise<void> {
   await db
     .update(schema.tasks)
     .set({ pausedAt: null, updatedAt: new Date() })
