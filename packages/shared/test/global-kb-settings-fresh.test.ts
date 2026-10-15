@@ -3,7 +3,7 @@ import type { Database } from '@haive/database';
 import { CONFIG_KEYS, ConfigService, configService } from '../src/config/config.service.js';
 import { SECRET_KEYS, SecretsService, secretsService } from '../src/config/secrets.service.js';
 import { encrypt, generateEncryptionKey } from '../src/crypto/index.js';
-import { resolveGlobalKbSettings } from '../src/global-kb/connection.js';
+import { resolveGlobalKbConnection, resolveGlobalKbSettings } from '../src/global-kb/connection.js';
 
 const CONNECTION_STRING = 'postgres://kb.example/old';
 const CACHED_SETTINGS = [
@@ -31,10 +31,14 @@ const redis = {
   },
 };
 let storedSecret: string | null = null;
+let beforeSecretRead: (() => Promise<void>) | null = null;
 const db = {
   query: {
     systemSecrets: {
-      findFirst: async () => (storedSecret === null ? undefined : { encryptedValue: storedSecret }),
+      findFirst: async () => {
+        await beforeSecretRead?.();
+        return storedSecret === null ? undefined : { encryptedValue: storedSecret };
+      },
     },
   },
   delete: () => ({
@@ -66,6 +70,7 @@ beforeEach(() => {
   otherSecrets.clearCache();
   redisValues.set(CONFIG_KEYS.GLOBAL_KB_MODE, 'external');
   storedSecret = encrypt(CONNECTION_STRING, encryptionKey);
+  beforeSecretRead = null;
   redisReads.clear();
 });
 
@@ -92,5 +97,46 @@ describe('resolveGlobalKbSettings in a process whose caches are warm', () => {
     expect(CACHED_SETTINGS.map((name) => redisReads.get(name))).toEqual(
       CACHED_SETTINGS.map(() => 1),
     );
+  });
+});
+
+describe('resolveGlobalKbSettings when the mode and the string are read either side of a clear', () => {
+  const modeReads = () => redisReads.get(CONFIG_KEYS.GLOBAL_KB_MODE);
+
+  it('resolves the built-in store when a switch and a removal land between the two reads', async () => {
+    beforeSecretRead = async () => {
+      await otherConfig.set(CONFIG_KEYS.GLOBAL_KB_MODE, 'internal');
+      await otherSecrets.delete(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
+    };
+
+    expect(await resolveGlobalKbSettings()).toMatchObject({
+      mode: 'internal',
+      connectionString: null,
+    });
+    expect(modeReads()).toBe(2);
+  });
+
+  it('keeps the missing-string error when the mode still reads external', async () => {
+    storedSecret = null;
+
+    const settings = await resolveGlobalKbSettings();
+
+    expect(settings).toMatchObject({ mode: 'external', connectionString: null });
+    await expect(resolveGlobalKbConnection(settings, db)).rejects.toThrow(
+      'external globalKbMode requires the GLOBAL_KB_CONNECTION_STRING secret',
+    );
+    expect(modeReads()).toBe(2);
+  });
+
+  it.each([
+    ['external with a stored string', 'external', true],
+    ['internal with none', 'internal', false],
+  ])('reads the mode once for %s', async (_what, mode, stored) => {
+    redisValues.set(CONFIG_KEYS.GLOBAL_KB_MODE, mode);
+    if (!stored) storedSecret = null;
+
+    await resolveGlobalKbSettings();
+
+    expect(modeReads()).toBe(1);
   });
 });
