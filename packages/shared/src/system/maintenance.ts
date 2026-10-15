@@ -1,3 +1,4 @@
+import { sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 
 /**
@@ -37,6 +38,20 @@ export function parseMaintenanceState(value: string | null | undefined): Mainten
 
 /** The advisory lock admission and a state write both take: `hashtextextended(<key>, 0)`. */
 export const NEW_WORK_FENCE_KEY = 'haive-new-work-fence';
+
+type FenceTx = { execute: (query: SQL) => Promise<unknown> };
+
+/** Admission's side: first in the transaction that starts work, so a state write waits for it. */
+export async function lockNewWorkFenceShared(tx: FenceTx): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock_shared(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`,
+  );
+}
+
+/** A state write's side: it waits for admissions in flight, and later ones wait for its commit. */
+export async function lockNewWorkFenceExclusive(tx: FenceTx): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`);
+}
 
 /** True when new work must be refused: both of the non-normal states hold task creation. */
 export function refusesNewWork(state: MaintenanceState): boolean {

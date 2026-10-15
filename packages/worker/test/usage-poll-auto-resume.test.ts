@@ -33,6 +33,18 @@ function config(mode: string, stored: string) {
   );
 }
 
+/** The stored state, read past the cache once per check: each value answers one read, then normal. */
+function storedStates(...values: string[]) {
+  const queue = [...values];
+  vi.spyOn(configService, 'get').mockImplementation(async (key) => {
+    if (key === CONFIG_KEYS.ALLOWANCE_WATCH_MODE) return 'auto';
+    return key === CONFIG_KEYS.MAINTENANCE_STATE ? 'normal' : null;
+  });
+  vi.spyOn(configService, 'getFresh').mockImplementation(async (key) =>
+    key === CONFIG_KEYS.MAINTENANCE_STATE ? (queue.shift() ?? 'normal') : null,
+  );
+}
+
 /** A task armed after a rate limit whose reset has passed; the poller's join read answers it. */
 function setup() {
   const fake = createFakeDb({
@@ -157,3 +169,37 @@ describe('the allowance auto-resume of a task whose provider is back', () => {
     });
   });
 });
+
+describe.each(['draining', 'maintenance'])(
+  'the allowance auto-resume when the system turns %s after the early check',
+  (state) => {
+    it('changes nothing, queues nothing and spends no attempt', async () => {
+      storedStates('normal', state);
+      const t = setup();
+
+      await checkProviderRecovery(t.db);
+
+      expect(t.writes).toEqual([]);
+      expect(h.queued).toEqual([]);
+      expect(t.task()).toMatchObject({
+        status: 'failed',
+        allowanceAutoResumeCount: 0,
+        awaitingAllowanceProviderId: PROVIDER,
+        allowanceReplenishedAt: null,
+      });
+      expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+    });
+
+    it('resumes it on a later poll once the system is normal again', async () => {
+      storedStates('normal', state, 'normal', 'normal');
+      const t = setup();
+      await checkProviderRecovery(t.db);
+      expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
+
+      await checkProviderRecovery(t.db);
+
+      expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+      expect(h.queued).toHaveLength(1);
+    });
+  },
+);

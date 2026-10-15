@@ -218,6 +218,9 @@ const db = {
               if (fields && 'pausedAt' in fields) {
                 return h.state.pausedAt ? [{ pausedAt: h.state.pausedAt }] : [];
               }
+              if (fields && 'status' in fields && name === 'tasks') {
+                return [{ status: h.state.taskStatus }];
+              }
               if (!fields && name === 'task_steps' && h.state.existingRow) {
                 return [h.state.existingRow];
               }
@@ -285,6 +288,7 @@ const db = {
       };
     },
   }),
+  execute: async () => undefined,
   // A throw rolls back the hints the transaction wrote.
   transaction: async (fn: (tx: unknown) => unknown) => {
     const written = h.state.hints.length;
@@ -1277,6 +1281,28 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
       expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
       expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: '07-phase-2-implement' });
     });
+
+    it.each(['draining', 'maintenance'])(
+      'reopens nothing, and writes nothing, for a task that failed while its gate waited when the system is %s under the transaction',
+      async (state) => {
+        h.state.readsAnswer = true;
+        h.state.taskStatus = 'failed';
+        vi.spyOn(configService, 'getFresh').mockResolvedValue(state);
+        const failedCtx = { ...ctx(), status: 'failed' };
+
+        for (const [action, target] of [
+          ['accept', failedCtx],
+          ['continue', withFixTarget(failedCtx)],
+        ] as const) {
+          await expect(
+            resolveFixLoopGate(db as never, target as never, gate as never, action, 1, ''),
+          ).rejects.toMatchObject({ name: 'NewWorkHeld' });
+        }
+
+        expect(h.state.taskWrites).toEqual([]);
+        expect(h.state.add).not.toHaveBeenCalled();
+      },
+    );
 
     it('completes a task that failed while its last gate waited, answering accept', async () => {
       h.state.readsAnswer = true;

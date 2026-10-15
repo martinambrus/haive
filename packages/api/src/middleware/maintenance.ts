@@ -1,11 +1,11 @@
 import type { MiddlewareHandler } from 'hono';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
+  lockNewWorkFenceShared,
   locksOutNonAdmins,
-  NEW_WORK_FENCE_KEY,
   parseMaintenanceState,
   refusesNewWork,
   type MaintenanceState,
@@ -98,9 +98,7 @@ export async function assertNewWorkAllowed(): Promise<void> {
 
 /** Call first in the transaction that writes the task: a state write waits for its commit. */
 export async function admitNewWork(tx: DbTx): Promise<void> {
-  await tx.execute(
-    sql`select pg_advisory_xact_lock_shared(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`,
-  );
+  await lockNewWorkFenceShared(tx);
   await assertNewWorkAllowed();
 }
 

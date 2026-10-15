@@ -1,6 +1,6 @@
 import type { Job } from 'bullmq';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { CONFIG_KEYS, TASK_JOB_NAMES, configService } from '@haive/shared';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CONFIG_KEYS, TASK_JOB_NAMES, configService, logger } from '@haive/shared';
 import { processTaskJob } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
@@ -15,7 +15,26 @@ const h = vi.hoisted(() => {
     reads: 0,
     writes: [] as string[],
   };
+  /** What the transaction that reopens the task reads of it: its type, repository and status. */
+  const taskRow = () => [{ type: 'workflow', repositoryId: null, status: state.taskStatus }];
+  const tx = {
+    execute: async () => undefined,
+    select: () => ({
+      from: () => ({
+        where: () => Object.assign(Promise.resolve(taskRow()), { limit: async () => taskRow() }),
+      }),
+    }),
+    update: () => {
+      state.writes.push('update');
+      throw new Error('an advance kept out writes nothing');
+    },
+    insert: () => {
+      state.writes.push('insert');
+      throw new Error('an advance kept out writes nothing');
+    },
+  };
   const db = {
+    transaction: async (fn: (handle: typeof tx) => unknown) => fn(tx),
     query: {
       tasks: {
         findFirst: async () => ({
@@ -171,4 +190,55 @@ describe('an answer to a form still parked, while the system is held', () => {
       expect(h.state.writes).not.toEqual([]);
     },
   );
+});
+
+describe('an answer to a form still parked, when the system turns held after the early check', () => {
+  const answer = () => advanceJob({ formValues: { answer: 'yes' } });
+  /** The first read, the early check's, says normal; the next says `state`. */
+  const turnsHeld = (state: string) => {
+    vi.spyOn(configService, 'get').mockResolvedValue('normal');
+    return vi
+      .spyOn(configService, 'getFresh')
+      .mockClear()
+      .mockResolvedValueOnce('normal')
+      .mockResolvedValue(state);
+  };
+
+  beforeEach(() => {
+    h.state.taskStatus = 'failed';
+    h.state.rowStatus = 'waiting_form';
+    h.state.reads = 0;
+    h.state.writes = [];
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(['draining', 'maintenance'])(
+    'is dropped by the transaction that would reopen the failed task, as at the early check, while the system is %s',
+    async (state) => {
+      const read = turnsHeld(state);
+      const info = vi.spyOn(logger, 'info');
+
+      await expect(processTaskJob(answer(), 'tok')).resolves.toBeUndefined();
+
+      expect(h.state.writes).toEqual([]);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskId: 'task-1',
+          stepId: 'failed-advance-step',
+          newWorkHeld: true,
+        }),
+        'advance-step skipped: the task failed and nothing has reopened it',
+      );
+    },
+  );
+
+  it('reopens the task when the system is still normal under it', async () => {
+    vi.spyOn(configService, 'get').mockResolvedValue('normal');
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+
+    await processTaskJob(answer(), 'tok').catch(() => {});
+
+    expect(h.state.writes).not.toEqual([]);
+  });
 });

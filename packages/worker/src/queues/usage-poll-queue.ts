@@ -37,6 +37,7 @@ import { refreshExpiringCliCredentials } from '../usage-window/credential-refres
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue } from './task-queue.js';
+import { NewWorkHeld } from './_revive-check.js';
 import { autoResumeFailedStep } from './_step-reset.js';
 
 /** Max consecutive auto-resumes the poller performs before falling back to notify-only
@@ -44,6 +45,9 @@ import { autoResumeFailedStep } from './_step-reset.js';
 const ALLOWANCE_AUTO_RESUME_CAP = 3;
 
 const log = logger.child({ module: 'usage-poll' });
+
+const AUTO_RESUME_HELD =
+  'provider recovered; auto-resume held while the system drains or is in maintenance';
 
 // Gentle by design: a 5-hour/weekly window barely moves minute-to-minute, and the
 // claude endpoint 429s aggressive callers. ~5 min base + jitter, with per-provider
@@ -574,20 +578,27 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
         await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
       );
       if (refusesNewWork(state)) {
+        log.info({ taskId: task.id, providerId: task.providerId, state }, AUTO_RESUME_HELD);
+        continue;
+      }
+      let resumed: boolean;
+      try {
+        resumed = await autoResumeFailedStep(db, {
+          taskId: task.id,
+          stepId: task.currentStepId,
+          round: task.currentRound ?? 0,
+          providerId: task.providerId,
+          via,
+          watchSince: task.since ?? null,
+        });
+      } catch (err) {
+        if (!(err instanceof NewWorkHeld)) throw err;
         log.info(
-          { taskId: task.id, providerId: task.providerId, state },
-          'provider recovered; auto-resume held while the system drains or is in maintenance',
+          { taskId: task.id, providerId: task.providerId, state: err.state },
+          AUTO_RESUME_HELD,
         );
         continue;
       }
-      const resumed = await autoResumeFailedStep(db, {
-        taskId: task.id,
-        stepId: task.currentStepId,
-        round: task.currentRound ?? 0,
-        providerId: task.providerId,
-        via,
-        watchSince: task.since ?? null,
-      });
       if (resumed) {
         await getTaskQueue().add(
           TASK_JOB_NAMES.ADVANCE_STEP,
