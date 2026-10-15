@@ -312,7 +312,11 @@ tasks are listed in the task list like any other task (a product decision).
 
 - **The step** reads the composable catalog without deactivated modules' steps, Haive's own persona
   specs, every taken slug except the one being edited, and the conversation from its task events. It
-  runs with no MCP surface, no tools, no agent rules and no egress; the admin's messages are never
+  runs with no MCP surface, no agent rules, no repository and no egress, and asks for no built-in tools
+  (`disableTools`). Only the adapters that set `supportsDisableTools` (claude-code, grok, openrouter,
+  muse, zai and ollama) drop them; codex, gemini, amp and antigravity keep their file, search and shell
+  tools inside that empty sandbox, and the dispatcher's no-tools line is withheld from their prompt
+  (`dispatcher.ts`, `noBuiltInTools`). The admin's messages are never
   fenced, the drafts and its own earlier replies are. A blank message ends the conversation; an invalid
   draft gets one automatic repair pass. Its only database write is task events — nothing is saved to
   `task_type_definitions` until an admin presses Save in the editor.
