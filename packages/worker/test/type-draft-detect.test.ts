@@ -12,7 +12,12 @@ import {
   loadDraftCatalog,
   typeDraftStep,
 } from '../src/step-engine/steps/type-draft/01-type-draft.js';
-import { TYPE_DRAFT_REPAIR_EVENT } from '../src/step-engine/steps/type-draft/_type-draft.js';
+import {
+  TYPE_DRAFT_REPAIR_EVENT,
+  buildDraftPrompt,
+  judgeDraftReply,
+  type TypeDraftDetect,
+} from '../src/step-engine/steps/type-draft/_type-draft.js';
 
 const url = process.env.TYPE_DRAFT_DETECT_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/type_draft_detect_test'))
@@ -36,7 +41,7 @@ describe.skipIf(!url)('type draft detect on Postgres', () => {
   const userId = randomUUID();
   const taskIds: string[] = [];
 
-  const newTask = async (): Promise<string> => {
+  const newTask = async (metadata: Record<string, unknown> = {}): Promise<string> => {
     const [task] = await db
       .insert(schema.tasks)
       .values({
@@ -44,7 +49,7 @@ describe.skipIf(!url)('type draft detect on Postgres', () => {
         type: 'type_draft',
         title: 'Draft a task type',
         repositoryId: null,
-        metadata: { anchorRepositoryId: null },
+        metadata: { anchorRepositoryId: null, ...metadata },
         runListSnapshot: ['01-type-draft'],
         status: 'created',
       })
@@ -161,6 +166,88 @@ describe.skipIf(!url)('type draft detect on Postgres', () => {
         pendingQuestion: null,
         currentDraft: null,
         repairPending: null,
+      });
+    });
+
+    it('offers the slug of every task type that exists, built-in and module rows included', async () => {
+      const slugs = ['tdt-builtin', 'tdt-admin', 'tdtmod__report'];
+      const typeRow = (slug: string, source: string) => ({
+        slug,
+        displayName: slug,
+        runListStrategy: 'static' as const,
+        stepIds: [],
+        source,
+      });
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values([
+          typeRow(slugs[0]!, 'builtin'),
+          typeRow(slugs[1]!, 'admin'),
+          typeRow(slugs[2]!, 'module:tdtmod'),
+        ]);
+      try {
+        const d = await detect(await newTask());
+        const stored = await db
+          .select({ slug: schema.taskTypeDefinitions.slug })
+          .from(schema.taskTypeDefinitions);
+        expect([...d.takenSlugs].sort()).toEqual(stored.map((r) => r.slug).sort());
+        for (const slug of slugs) expect(d.takenSlugs).toContain(slug);
+      } finally {
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(inArray(schema.taskTypeDefinitions.slug, slugs));
+      }
+      expect((await detect(await newTask())).takenSlugs).not.toContain('tdt-admin');
+    });
+
+    describe('the type being edited', () => {
+      const EDITED = 'tdt-edited';
+      const OTHER = 'tdt-other';
+      const proposal = (slug: string) => ({
+        slug,
+        displayName: 'Proposed',
+        requiresRepository: false,
+        stepIds: ['no-such-step'],
+      });
+      const warningsFor = (d: TypeDraftDetect, slug: string) =>
+        judgeDraftReply({ reply: 'r', draft: proposal(slug) }, d).warnings;
+
+      beforeAll(async () => {
+        await db.insert(schema.taskTypeDefinitions).values(
+          [EDITED, OTHER].map((slug) => ({
+            slug,
+            displayName: slug,
+            runListStrategy: 'static' as const,
+            stepIds: [],
+            source: 'admin',
+          })),
+        );
+      });
+
+      afterAll(async () => {
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(inArray(schema.taskTypeDefinitions.slug, [EDITED, OTHER]));
+      });
+
+      it('is not taken by its own draft, for the validator or the prompt', async () => {
+        const d = await detect(await newTask({ editingSlug: EDITED }));
+        expect(warningsFor(d, EDITED)).toEqual([]);
+        expect(buildDraftPrompt(d)).not.toContain(`\`${EDITED}\``);
+        expect(buildDraftPrompt(d)).toContain(`\`${OTHER}\``);
+      });
+
+      it('stays taken for a new type that proposes the same slug', async () => {
+        const d = await detect(await newTask());
+        expect(warningsFor(d, EDITED)).toMatchObject([{ kind: 'slug-taken', slug: EDITED }]);
+        expect(buildDraftPrompt(d)).toContain(`\`${EDITED}\``);
+      });
+
+      it('leaves the slug of every other type taken', async () => {
+        const d = await detect(await newTask({ editingSlug: OTHER }));
+        expect(warningsFor(d, EDITED)).toMatchObject([{ kind: 'slug-taken', slug: EDITED }]);
+        expect(buildDraftPrompt(d)).toContain(`\`${EDITED}\``);
+        expect(buildDraftPrompt(d)).not.toContain(`\`${OTHER}\``);
       });
     });
 

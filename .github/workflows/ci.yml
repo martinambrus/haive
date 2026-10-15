@@ -235,6 +235,7 @@ jobs:
           worker test/dead-task-boot.test.ts DEAD_TASK_BOOT_TEST_URL dead_task_boot_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
+          api test/task-type-drafts-db.test.ts TASK_TYPE_DRAFTS_TEST_URL task_type_drafts_test pg
           api test/task-custom-steps-db.test.ts TASK_CUSTOM_STEPS_TEST_URL task_custom_steps_test pg
           api test/module-deactivation-db.test.ts MODULE_DEACTIVATION_API_TEST_URL module_deactivation_api_test pg
           api test/module-missing-db.test.ts MODULE_MISSING_API_TEST_URL module_missing_api_test pg
