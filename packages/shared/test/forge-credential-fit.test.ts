@@ -50,7 +50,9 @@ describe('hostFromRemote', () => {
     ['https://gitlab.com/martin/rs_test.git', 'gitlab.com'],
     ['git@github.com:acme/app.git', 'github.com'],
     ['ssh://git@github.com/acme/app.git', 'github.com'],
-    ['ssh://git@git.example.com:2222/acme/app.git', 'git.example.com:2222'],
+    ['ssh://git@github.com:22/acme/app.git', 'github.com'],
+    ['ssh://git@git.example.com:2222/acme/app.git', 'git.example.com'],
+    ['https://git.example.com:8443/acme/app.git', 'git.example.com:8443'],
     ['https://GIT.EXAMPLE.COM/acme/app.git', 'git.example.com'],
     ['  git@bitbucket.org:acme/app.git ', 'bitbucket.org'],
     ['file:///srv/git/app.git', ''],
@@ -61,11 +63,11 @@ describe('hostFromRemote', () => {
     expect(hostFromRemote(remote)).toBe(host);
   });
 
-  it('answers as the worker did for every remote of the grid', () => {
+  it('answers as the worker did for every remote of the grid, but for an ssh port', () => {
     const text = REMOTES.filter((remote) => remote !== null)
       .map((remote) => `${JSON.stringify(remote)}=>${JSON.stringify(hostFromRemote(remote))}\n`)
       .join('');
-    expect(sha(text)).toBe('2f812418cdd73a66272566239d173476ee203f938f44957564c12bd842f7c128');
+    expect(sha(text)).toBe('838c533e77a866c15cf4dab31a1c8a379be4ad7091d5327e106feff43ad093d1');
   });
 });
 
@@ -74,6 +76,7 @@ describe('credentialUsableForPr', () => {
     ['https://github.com/acme/app.git'],
     ['git@github.com:acme/app.git'],
     ['ssh://git@github.com/acme/app.git'],
+    ['ssh://git@github.com:22/acme/app.git'],
   ])('takes an auto-detect github.com credential for the github.com remote %s', (remote) => {
     expect(fits(null, 'github.com', remote)).toBe(true);
     expect(fits('', 'github.com', remote)).toBe(true);
@@ -108,9 +111,15 @@ describe('credentialUsableForPr', () => {
     },
   );
 
-  it('compares a self-hosted host as the remote spells it, port included', () => {
+  it('compares a self-hosted host as the remote spells it, an ssh port aside', () => {
     expect(fits('gitea', 'git.example.com', 'ssh://git@git.example.com:2222/acme/app.git')).toBe(
+      true,
+    );
+    expect(fits('gitea', 'git.example.com', 'https://git.example.com:8443/acme/app.git')).toBe(
       false,
+    );
+    expect(fits('gitea', 'git.example.com:8443', 'https://git.example.com:8443/acme/app.git')).toBe(
+      true,
     );
     expect(fits('gitea', 'git.example.com', 'https://GIT.EXAMPLE.COM/acme/app.git')).toBe(true);
   });
@@ -127,7 +136,7 @@ describe('credentialUsableForPr', () => {
     expect(fits('gitea', 'git.example.com', remote)).toBe(false);
   });
 
-  it('answers as the worker did for every credential and remote of the grid', () => {
+  it('answers as the worker did for every credential and remote of the grid, but for an ssh port', () => {
     let bits = '';
     for (const provider of PROVIDERS) {
       for (const host of HOSTS) {
@@ -135,7 +144,7 @@ describe('credentialUsableForPr', () => {
       }
     }
     expect(bits).toHaveLength(952);
-    expect([...bits].filter((bit) => bit === '1')).toHaveLength(94);
-    expect(sha(bits)).toBe('657d3cd66e2a72df754e3b336560b995b53805efeea0617e967156f9008bfcca');
+    expect([...bits].filter((bit) => bit === '1')).toHaveLength(99);
+    expect(sha(bits)).toBe('ebdab5c8c4cfd63b04bea91dfe612504f7fa21eac1661092a070b8980bb6c801');
   });
 });

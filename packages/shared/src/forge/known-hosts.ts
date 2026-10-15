@@ -24,13 +24,18 @@ export function credentialForgeProvider(
   return explicit.success ? explicit.data : inferForgeProviderFromHost(host);
 }
 
+/** Only an http(s) port is the forge's own; an ssh or git remote's port belongs to that transport. */
+function hostOf(url: URL): string {
+  return url.protocol === 'https:' || url.protocol === 'http:' ? url.host : url.hostname;
+}
+
 /** Host portion of a git remote (https, ssh:// or scp-style), provider-independent —
  *  used to infer the forge for a well-known public host before the provider is known. */
 export function hostFromRemote(remoteUrl: string): string {
   const trimmed = remoteUrl.trim();
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
     try {
-      return new URL(trimmed).host;
+      return hostOf(new URL(trimmed));
     } catch {
       return '';
     }
@@ -58,7 +63,7 @@ export function parseRemote(
     } catch {
       throw new ForgeError(`Cannot parse remote URL: ${remoteUrl}`);
     }
-    host = u.host;
+    host = hostOf(u);
     rawPath = u.pathname;
   } else {
     // scp-like: [user@]host:owner/repo(.git)
