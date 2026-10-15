@@ -7,7 +7,6 @@ import {
   configService,
   logger,
   parseAllowanceWatchMode,
-  parseMaintenanceState,
   refusesNewWork,
   type AuthMode,
   type CliProviderName,
@@ -37,7 +36,7 @@ import { refreshExpiringCliCredentials } from '../usage-window/credential-refres
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue } from './task-queue.js';
-import { NewWorkHeld } from './_revive-check.js';
+import { NewWorkHeld, readMaintenanceState } from './_revive-check.js';
 import { autoResumeFailedStep } from './_step-reset.js';
 
 /** Max consecutive auto-resumes the poller performs before falling back to notify-only
@@ -574,9 +573,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
       task.autoResumeCount < ALLOWANCE_AUTO_RESUME_CAP
     ) {
       // Past the config cache: the api that sets the state is another process.
-      const state = parseMaintenanceState(
-        await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
-      );
+      const state = await readMaintenanceState(task.id);
       if (refusesNewWork(state)) {
         log.info({ taskId: task.id, providerId: task.providerId, state }, AUTO_RESUME_HELD);
         continue;
