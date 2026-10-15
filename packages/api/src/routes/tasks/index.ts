@@ -1086,6 +1086,7 @@ taskRoutes.get('/:id', async (c) => {
     task.ignoreSavedStepClis,
     task.runListSnapshot,
   );
+  const callCounts = await loadLoggedCallCount(db, id);
   return c.json({
     task: taskWithActive,
     dead: await loadTaskDead(db, task),
@@ -1093,7 +1094,8 @@ taskRoutes.get('/:id', async (c) => {
     steps,
     upcomingCliSteps,
     providerBreakdown,
-    loggedCallCount: await loadLoggedCallCount(db, id),
+    loggedCallCount: callCounts.logged,
+    runningCallCount: callCounts.running,
     costDisplay,
     parentTask,
     childTasks,

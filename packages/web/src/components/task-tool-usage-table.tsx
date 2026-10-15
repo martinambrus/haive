@@ -1,5 +1,18 @@
-import { customToolsCell, integrationsCell, toolUsageRows } from '@/lib/call-log-cells';
-import type { TaskToolUsage, TaskToolUsageCounted, TaskToolUsageStep } from '@/lib/api-client';
+'use client';
+
+import { useEffect, useState } from 'react';
+import {
+  customToolsCell,
+  hasNothingToShow,
+  integrationsCell,
+  toolUsageRows,
+} from '@/lib/call-log-cells';
+import {
+  getTaskToolUsage,
+  type TaskToolUsage,
+  type TaskToolUsageCounted,
+  type TaskToolUsageStep,
+} from '@/lib/api-client';
 
 /** `id (n)` for a counted list, or a dash for an empty one. */
 function countedList(items: TaskToolUsageCounted[]): string {
@@ -115,4 +128,44 @@ export function TaskToolUsageTable({ data }: { data: TaskToolUsage }) {
       </p>
     </div>
   );
+}
+
+/** Read on mount, then again when the task ends or its logged or running call count changes. */
+export function TaskToolUsagePanel({
+  taskId,
+  taskCompletedAt,
+  loggedCallCount,
+  runningCallCount,
+}: {
+  taskId: string;
+  taskCompletedAt: string | null;
+  loggedCallCount: number;
+  runningCallCount: number;
+}) {
+  const [data, setData] = useState<TaskToolUsage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getTaskToolUsage(taskId)
+      .then((d) => {
+        if (cancelled) return;
+        setData(d);
+        setError(null);
+      })
+      .catch((e) => {
+        if (!cancelled) setError((e as Error).message ?? 'Failed to load tool usage');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, taskCompletedAt, loggedCallCount, runningCallCount]);
+
+  if (error && !data) return <p className="text-xs text-red-400">{error}</p>;
+  if (!data) return <p className="text-xs text-neutral-500">Loading tool usage…</p>;
+  if (hasNothingToShow(data)) {
+    return <p className="text-xs text-neutral-500">No CLI run is attributed to a step yet.</p>;
+  }
+
+  return <TaskToolUsageTable data={data} />;
 }

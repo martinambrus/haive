@@ -44,7 +44,7 @@ vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => ({
 }));
 vi.mock('../src/routes/tasks/_call-log.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/routes/tasks/_call-log.js')>()),
-  loadLoggedCallCount: async () => 0,
+  loadLoggedCallCount: async () => ({ logged: 0, running: 0 }),
 }));
 
 import { Hono } from 'hono';

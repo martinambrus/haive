@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { ragUsageStyle } from '@/lib/rag-usage';
-import { hasNothingToShow, showsToolUsage } from '@/lib/call-log-cells';
+import { showsToolUsage } from '@/lib/call-log-cells';
 import { useParams } from 'next/navigation';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
@@ -13,7 +13,6 @@ import { computeStepContribution, computeTaskTiming } from '@haive/shared/timing
 import {
   api,
   getPlanOverview,
-  getTaskToolUsage,
   postUserActive,
   type CliProvider,
   type CliProviderName,
@@ -27,7 +26,6 @@ import {
   type TaskEvent,
   type TaskStatus,
   type TaskStep,
-  type TaskToolUsage,
   type StepStatus,
   type UpcomingCliStep,
   type UsageWindowSnapshot,
@@ -102,7 +100,7 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { TaskLeftMergeBanner } from '@/components/task-left-merge-banner';
 import { PersistedDetails } from '@/components/persisted-details';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
-import { TaskToolUsageTable } from '@/components/task-tool-usage-table';
+import { TaskToolUsagePanel } from '@/components/task-tool-usage-table';
 import {
   describeCostSource,
   formatCost,
@@ -576,6 +574,8 @@ interface TaskDetailResponse {
   providerBreakdown: TaskProviderUsage[];
   /** Custom tool and integration calls logged for the task. Absent on an older server. */
   loggedCallCount?: number;
+  /** Those of them still running. Absent on an older server. */
+  runningCallCount?: number;
   /** Currency + dated FX rate the server resolved for THIS task, so costs render the
    *  same on every later view. Absent on an older server: fall back to USD. */
   costDisplay?: CostDisplay | null;
@@ -690,6 +690,7 @@ export default function TaskDetailPage() {
   const [costDisplay, setCostDisplay] = useState<CostDisplay>(USD_DISPLAY);
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
   const [loggedCallCount, setLoggedCallCount] = useState(0);
+  const [runningCallCount, setRunningCallCount] = useState(0);
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
   const [promotedDraftCount, setPromotedDraftCount] = useState(0);
@@ -804,6 +805,7 @@ export default function TaskDetailPage() {
       setUpcomingCliSteps(data.upcomingCliSteps ?? []);
       setProviderBreakdown(data.providerBreakdown ?? []);
       setLoggedCallCount(data.loggedCallCount ?? 0);
+      setRunningCallCount(data.runningCallCount ?? 0);
       setCostDisplay(data.costDisplay ?? USD_DISPLAY);
       setParentTask(data.parentTask ?? null);
       setChildTasks(data.childTasks ?? []);
@@ -2178,7 +2180,12 @@ export default function TaskDetailPage() {
               summary={<span className="font-medium">Agents, skills and tools used</span>}
             >
               <div className="border-t border-neutral-800 p-3">
-                <TaskToolUsagePanel taskId={task.id} taskCompletedAt={task.completedAt ?? null} />
+                <TaskToolUsagePanel
+                  taskId={task.id}
+                  taskCompletedAt={task.completedAt ?? null}
+                  loggedCallCount={loggedCallCount}
+                  runningCallCount={runningCallCount}
+                />
               </div>
             </PersistedDetails>
           )}
@@ -3211,45 +3218,6 @@ function HeaderUsageChip({
       )}
     </span>
   );
-}
-
-/** What each step's runs USED — personas, skills, MCP tools, sub-agents, native tool calls —
- *  from GET /tasks/:id/tool-usage, which groups by the same fold as the step badges. Fetched
- *  once when the disclosure is first opened and again when the task finishes, since only a
- *  running task can gain rows. A failed refetch never blanks data already shown. */
-function TaskToolUsagePanel({
-  taskId,
-  taskCompletedAt,
-}: {
-  taskId: string;
-  taskCompletedAt: string | null;
-}) {
-  const [data, setData] = useState<TaskToolUsage | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getTaskToolUsage(taskId)
-      .then((d) => {
-        if (cancelled) return;
-        setData(d);
-        setError(null);
-      })
-      .catch((e) => {
-        if (!cancelled) setError((e as Error).message ?? 'Failed to load tool usage');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [taskId, taskCompletedAt]);
-
-  if (error && !data) return <p className="text-xs text-red-400">{error}</p>;
-  if (!data) return <p className="text-xs text-neutral-500">Loading tool usage…</p>;
-  if (hasNothingToShow(data)) {
-    return <p className="text-xs text-neutral-500">No CLI run is attributed to a step yet.</p>;
-  }
-
-  return <TaskToolUsageTable data={data} />;
 }
 
 function TaskTotalTime({

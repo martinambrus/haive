@@ -39,6 +39,7 @@ const FOREIGN_TASK = '00000000-0000-4000-8000-0000000000f5';
 const STOPPED_TASK = '00000000-0000-4000-8000-0000000000f6';
 const DETACHED_TASK = '00000000-0000-4000-8000-0000000000f7';
 const NO_CALLS_TASK = '00000000-0000-4000-8000-0000000000f8';
+const LIVE_TASK = '00000000-0000-4000-8000-0000000000f9';
 
 type Outcome = 'ok' | 'refused' | 'error' | 'running';
 type Access = 'read' | 'write';
@@ -224,6 +225,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
           FOREIGN_TASK,
           STOPPED_TASK,
           DETACHED_TASK,
+          LIVE_TASK,
         ]),
       );
     await db.delete(schema.tasks).where(inArray(schema.tasks.userId, [USER, OTHER_USER]));
@@ -250,6 +252,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
         { id: STOPPED_TASK, userId: USER },
         { id: DETACHED_TASK, userId: USER },
         { id: NO_CALLS_TASK, userId: USER },
+        { id: LIVE_TASK, userId: USER },
       ].map((t) => ({ ...t, type: 'workflow', title: t.id, status: 'running' as const })),
     );
     const steps = await db
@@ -310,6 +313,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
         ...customRows(2, stepA, 'lookup', 'http-get', 'refused', { taskStepId: null }),
         ...customRows(50, decoyStep, 'lookup', 'http-get', 'ok', { taskId: DECOY_TASK }),
         ...customRows(40, foreignStep, 'lookup', 'http-get', 'ok', { taskId: FOREIGN_TASK }),
+        ...customRows(2, decoyStep, 'lookup', 'http-get', 'running', { taskId: DECOY_TASK }),
       ]);
 
     const READ_PR = 'get_pull_request_state';
@@ -331,6 +335,9 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
       ...integrationRows(50, decoyStep, 'github', READ_PR, 'read', 'ok', { taskId: DECOY_TASK }),
       ...integrationRows(40, foreignStep, 'github', READ_PR, 'read', 'ok', {
         taskId: FOREIGN_TASK,
+      }),
+      ...integrationRows(2, decoyStep, 'github', READ_PR, 'read', 'running', {
+        taskId: DECOY_TASK,
       }),
     ]);
 
@@ -532,14 +539,23 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     expect(res.status).toBe(404);
   });
 
-  describe('GET /tasks/:id loggedCallCount', () => {
+  describe('GET /tasks/:id call counts', () => {
     const detail = async (taskId: string) => {
       const res = await app.request(`/tasks/${taskId}`);
       expect(res.status).toBe(200);
       return (await res.json()) as {
         loggedCallCount: number;
+        runningCallCount: number;
         steps: Array<{ cliInvocationCount: number }>;
       };
+    };
+    const runningHeldBy = async (taskId: string) => {
+      const [row] = (await db.execute(
+        sql`select
+          (select count(*)::int from custom_tool_calls where task_id = ${taskId} and outcome = 'running') as custom,
+          (select count(*)::int from integration_calls where task_id = ${taskId} and outcome = 'running') as integration`,
+      )) as unknown as Array<{ custom: number; integration: number }>;
+      return row!;
     };
     const heldBy = async (taskId: string) => {
       const [row] = (await db.execute(
@@ -570,6 +586,60 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     it('is 0 for a task that logged no call', async () => {
       expect(await heldBy(NO_CALLS_TASK)).toEqual({ total: 0, detached: 0 });
       expect((await detail(NO_CALLS_TASK)).loggedCallCount).toBe(0);
+    });
+
+    it('counts the running rows of both tables the task owns, and those of no other task', async () => {
+      expect(await runningHeldBy(DECOY_TASK)).toEqual({ custom: 2, integration: 2 });
+      expect(await runningHeldBy(TASK)).toEqual({ custom: 1, integration: 1 });
+      expect((await detail(TASK)).runningCallCount).toBe(2);
+    });
+
+    it.each([
+      ['rows that all settled', STOPPED_TASK, 3],
+      ['settled rows no step owns', DETACHED_TASK, 3],
+      ['no row at all', NO_CALLS_TASK, 0],
+    ])('counts no running row for a task with %s', async (_name, taskId, logged) => {
+      expect(await runningHeldBy(taskId)).toEqual({ custom: 0, integration: 0 });
+      const body = await detail(taskId);
+      expect([body.loggedCallCount, body.runningCallCount]).toEqual([logged, 0]);
+    });
+
+    it('follows a call no step owns from running to its outcome, in either table', async () => {
+      const answer = async () => {
+        const body = await detail(LIVE_TASK);
+        return [body.loggedCallCount, body.runningCallCount];
+      };
+      const ofLive = { taskId: LIVE_TASK, taskStepId: null };
+      expect(await answer()).toEqual([0, 0]);
+
+      const [custom] = await db
+        .insert(schema.customToolCalls)
+        .values(customRows(1, stepA, 'lookup', 'http-get', 'running', ofLive))
+        .returning({ id: schema.customToolCalls.id });
+      const [integration] = await db
+        .insert(schema.integrationCalls)
+        .values(
+          integrationRows(1, stepA, 'github', 'open_pull_request', 'write', 'running', ofLive),
+        )
+        .returning({ id: schema.integrationCalls.id });
+      expect(await answer()).toEqual([2, 2]);
+
+      await db
+        .update(schema.customToolCalls)
+        .set({ outcome: 'ok' })
+        .where(eq(schema.customToolCalls.id, custom!.id));
+      expect(await answer()).toEqual([2, 1]);
+
+      await db
+        .update(schema.integrationCalls)
+        .set({ outcome: 'error' })
+        .where(eq(schema.integrationCalls.id, integration!.id));
+      expect(await answer()).toEqual([2, 0]);
+
+      await db
+        .insert(schema.customToolCalls)
+        .values(customRows(1, stepA, 'lookup', 'http-get', 'refused', ofLive));
+      expect(await answer()).toEqual([3, 0]);
     });
   });
 });

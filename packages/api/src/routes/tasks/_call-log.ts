@@ -97,13 +97,31 @@ export async function loadIntegrationCalls(
 }
 
 /** Call rows both brokers logged for the task, those with no step and replaced runs included. */
-export async function loadLoggedCallCount(db: Database, taskId: string): Promise<number> {
+export async function loadLoggedCallCount(
+  db: Database,
+  taskId: string,
+): Promise<{ logged: number; running: number }> {
   const custom = schema.customToolCalls;
   const integration = schema.integrationCalls;
+  // The two outcome enums are different types, which a union cannot match.
   const calls = unionAll(
-    db.select({ id: custom.id }).from(custom).where(eq(custom.taskId, taskId)),
-    db.select({ id: integration.id }).from(integration).where(eq(integration.taskId, taskId)),
+    db
+      .select({ id: custom.id, outcome: sql<string>`${custom.outcome}::text`.as('outcome') })
+      .from(custom)
+      .where(eq(custom.taskId, taskId)),
+    db
+      .select({
+        id: integration.id,
+        outcome: sql<string>`${integration.outcome}::text`.as('outcome'),
+      })
+      .from(integration)
+      .where(eq(integration.taskId, taskId)),
   ).as('calls');
-  const [row] = await db.select({ n: sql<number>`count(*)::int` }).from(calls);
-  return row?.n ?? 0;
+  const [row] = await db
+    .select({
+      logged: sql<number>`count(*)::int`,
+      running: sql<number>`(count(*) filter (where ${calls.outcome} = 'running'))::int`,
+    })
+    .from(calls);
+  return { logged: row?.logged ?? 0, running: row?.running ?? 0 };
 }
