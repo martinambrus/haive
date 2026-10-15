@@ -74,9 +74,10 @@ module's own step id is not checked when it registers (`step_catalog.step_id` is
 3. register module steps — after the static asserts, so the shared static lists stay authoritative for
    core ids only;
 4. `syncStepCatalog`;
-5. `ensureModuleSchemas`, then `syncModuleIntent` — before the seed, so a freshly installed module's
-   types do not read `module-missing` during boot, and after the schemas, so a failed schema bootstrap
-   is never recorded as loaded;
+5. `ensureModuleSchemas` (skipping, and reporting as `deactivated`, every module deactivated at boot),
+   then `syncModuleIntent` — before the seed, so a freshly installed module's types do not read
+   `module-missing` during boot, and after the schemas, so a failed schema bootstrap is never
+   recorded as loaded;
 6. `syncTaskTypeDefinitions`: built-ins, then module seeds, in one transaction;
 7. publish the worker's boot report (including each module's seeded, conflicting and invalid types).
 
@@ -281,7 +282,8 @@ with it.
   sandbox files: the `haive-custom` server script (`/haive/haive-custom-mcp.mjs`), the tool list
   (`/haive/haive-custom.tools.json`: name, description and the input schema the api also checks) and
   the token (`/haive/haive-custom.token`) — never an environment variable. A run naming custom tools
-  fails (`custom-tools-unwired`) when their server could not be added to the CLI; a best-effort server
+  fails (`custom-tools-unwired`) when their server could not be added to the CLI, a CLI with no MCP
+  configuration included; a best-effort server
   failure elsewhere lets the run carry on.
 
 - **Authoring and the switch.** An administrator adds tools in the prompt-step editor's Custom tools

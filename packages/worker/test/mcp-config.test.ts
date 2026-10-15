@@ -748,6 +748,9 @@ describe('HAIVE_MCP_SERVER_NAMES', () => {
       includeCustomTools: true,
       customServerPath: '/haive/haive-custom-mcp.mjs',
       customApiUrl: 'http://api:3001',
+      includeIntegrations: true,
+      integrationsServerPath: '/haive/haive-integrations-mcp.mjs',
+      integrationsApiUrl: 'http://api:3001',
     });
     expect(everything.map((s) => s.name).sort()).toEqual([...HAIVE_MCP_SERVER_NAMES].sort());
   });

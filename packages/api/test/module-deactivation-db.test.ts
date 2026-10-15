@@ -621,6 +621,42 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect((await patchModule('alpha', true)).status).toBe(200);
     });
 
+    it('moves updated_at forward on a deactivate, an urgent deactivate and an activate, and leaves it on a repeated deactivate', async () => {
+      const long = new Date('2026-01-01T00:00:00.000Z');
+      const updatedAt = async (moduleId: string) =>
+        (
+          await db
+            .select({ at: schema.modules.updatedAt })
+            .from(schema.modules)
+            .where(eq(schema.modules.moduleId, moduleId))
+        )[0]!.at;
+      const age = () =>
+        db
+          .update(schema.modules)
+          .set({ updatedAt: long })
+          .where(inArray(schema.modules.moduleId, ['alpha', 'beta']));
+      await age();
+
+      expect((await patchModule('alpha', false)).status).toBe(200);
+      expect((await updatedAt('alpha')).getTime()).toBeGreaterThan(long.getTime());
+      expect(await updatedAt('beta')).toEqual(long);
+
+      await age();
+      expect((await patchModule('alpha', false)).status).toBe(200);
+      expect(await updatedAt('alpha')).toEqual(long);
+
+      expect((await patchModule('alpha', true)).status).toBe(200);
+      expect((await updatedAt('alpha')).getTime()).toBeGreaterThan(long.getTime());
+      expect(await updatedAt('beta')).toEqual(long);
+
+      expect((await patchUrgent('beta')).status).toBe(200);
+      expect((await updatedAt('beta')).getTime()).toBeGreaterThan(long.getTime());
+
+      await age();
+      expect((await patchUrgent('beta')).status).toBe(200);
+      expect(await updatedAt('beta')).toEqual(long);
+    });
+
     it('clears the teardown record on activate and keeps it on a repeated deactivate', async () => {
       const down = new Date('2026-10-14T09:30:00.000Z');
       const record = async (moduleId: string) =>

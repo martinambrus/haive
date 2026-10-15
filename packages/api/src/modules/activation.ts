@@ -120,7 +120,7 @@ export function setModuleActive(
     if (active) {
       await tx
         .update(schema.modules)
-        .set({ deactivatedAt: null, tornDownAt: null })
+        .set({ deactivatedAt: null, tornDownAt: null, updatedAt: new Date() })
         .where(eq(schema.modules.moduleId, moduleId));
       return { kind: 'ok', deactivatedAt: null };
     }
@@ -130,7 +130,7 @@ export function setModuleActive(
     const deactivatedAt = new Date();
     await tx
       .update(schema.modules)
-      .set({ deactivatedAt })
+      .set({ deactivatedAt, updatedAt: deactivatedAt })
       .where(eq(schema.modules.moduleId, moduleId));
     return { kind: 'ok', deactivatedAt };
   });
@@ -187,7 +187,7 @@ export async function deactivateUrgently(
     if (!row.deactivatedAt) {
       await tx
         .update(schema.modules)
-        .set({ deactivatedAt })
+        .set({ deactivatedAt, updatedAt: deactivatedAt })
         .where(eq(schema.modules.moduleId, moduleId));
     }
     const { tasks, capped } = await liveDependents(tx, moduleId);

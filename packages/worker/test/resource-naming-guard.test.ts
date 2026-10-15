@@ -55,7 +55,7 @@ const NOT_A_RESOURCE = [
   // resource namespace; their task UUID supplies the isolation.
   /haive-(?:task|rag|mcp|chrome-mcp-proxy|price-sync|runtime-tools|worker|data|ide-ensure|api-|access-|migrated-|import-|pre-migrate|pre-rename)/,
   // An MCP server name, and the files beside its script: a CLI and the stats module read them.
-  /haive-custom\b/,
+  /haive-(?:custom|integrations)\b/,
   // The advisory lock key admission and a state write meet on: scoped to the install's own Postgres.
   /haive-new-work-fence\b/,
 ];
@@ -106,6 +106,19 @@ describe('resource names are never typed at a call site', () => {
       }
     }
     expect(offenders, `typed resource names found:\n${offenders.join('\n')}`).toEqual([]);
+  });
+});
+
+describe('the MCP server names Haive wires', () => {
+  const flagged = (names: string[]) =>
+    names.filter((name) => !NOT_A_RESOURCE.some((re) => re.test(name)));
+
+  it('[W6] are on the allow-list, haive-integrations and the files beside its script among them', () => {
+    expect(flagged(['haive-custom', 'haive-integrations', 'haive-integrations-mcp'])).toEqual([]);
+  });
+
+  it('[W6] are not a blanket pass: a name on no list is flagged', () => {
+    expect(flagged(['haive-not-on-any-list'])).toEqual(['haive-not-on-any-list']);
   });
 });
 

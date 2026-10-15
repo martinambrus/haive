@@ -19,6 +19,9 @@ vi.mock('../src/step-engine/task-type-seed.js', () => ({
     return taskTypes;
   },
 }));
+vi.mock('../src/modules/activation.js', () => ({
+  deactivatedModuleIds: async () => new Set<string>(),
+}));
 vi.mock('../src/modules/intent.js', () => ({
   syncModuleIntent: async (_db: unknown, l: unknown) => {
     calls.push('intent');
