@@ -119,8 +119,10 @@ provider be called `oauth` or `connections`.
 - **Device flow.** `POST /providers/:id/device/start|poll`. The browser gets a 32-byte opaque handle;
   the vendor's device code stays in Redis (`integration-device:<user>:<provider>`, TTL the vendor's
   `expires_in` bounded to 1–1800 s). A poll claims the record by moving `nextPollAt`, so an early or
-  concurrent poll answers `pending` without calling the vendor; `slow_down` adds 5 s from now. A vendor
-  refusal drops the record (400); an unavailable vendor keeps it (502). The legacy
+  concurrent poll answers `pending` without calling the vendor; `slow_down` adds 5 s from now. While
+  the token endpoint is polled, a vendor refusal drops the record (400) and an unavailable vendor keeps
+  it (502); once the token poll succeeds the record is consumed whatever the account lookup and the
+  sign-in then answer. The legacy
   `/github-oauth/device-code|poll` routes run the same path and hand out the handle as `deviceCode`,
   which binds the device code to the user who started it.
 - Sign-in asks for write scopes only while the user's write switch is on. The settings page offers
@@ -161,10 +163,10 @@ token when the vendor does not rotate it, and keeps the granted scopes when none
 Cloud app passwords need Basic auth); an OAuth connection answers `username` and `apiBaseUrl` null.
 Neither function checks ownership: only ids the resolver produced may reach them.
 
-**Vendor answers** (`oauth.ts`): 15 s timeout, `redirect: 'error'`. A network error and any 5xx are
-`OauthUnavailableError` before the body is read; otherwise a JSON body with an `error` field is an
-`OauthVendorError` whatever the status (GitHub refuses with 200), and any other non-2xx is
-unavailable. A known error code (RFC 6749, 7009, 8628 and GitHub's)
+**Vendor answers** (`oauth.ts`): 15 s timeout covering the body, `redirect: 'error'`. A network error,
+a timeout and any 5xx are `OauthUnavailableError` (the 5xx check comes after the body is read and
+before it is parsed); otherwise a JSON body with an `error` field is an `OauthVendorError` whatever the
+status (GitHub refuses with 200), and any other non-2xx is unavailable. A known error code (RFC 6749, 7009, 8628 and GitHub's)
 passes through whole — a short secret inside `invalid_grant` once turned it into `[redacted]` and the
 refresh missed it; other codes are redacted and cut. Code branches on the `error` code, never on the
 text. `expires_in: 0` means already expired. Over HTTP: vendor error 400, unavailable 502.
@@ -351,7 +353,9 @@ constraint.
 8. The OAuth attempt is consumed before any vendor call or write; the exchange uses the starting client;
    no state-changing GET.
 9. Agent-reachable forge input is validated before a URL is built, and adapters re-check the PR number.
-10. A secret goes only over https to its own host or its forge's API host.
+10. A secret goes only over https to its own host or its forge's API host — for every credential
+    created or edited since the rule (9295cd3b3); older rows are not revalidated, and the worker sends
+    their stored base as is.
 11. GitLab authenticates with `Authorization: Bearer`.
 12. A forge request has its own deadline; a stalled error body keeps its HTTP status.
 13. Only scope-user, owner-matched connections resolve or are accepted; an install default names a
