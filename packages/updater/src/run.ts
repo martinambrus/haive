@@ -96,7 +96,6 @@ async function awaitVersion(
   return { ok: false, saw, head };
 }
 
-/** Live work that still holds a maintenance window open. */
 /** Wait for Postgres to accept queries again.
  *
  *  The snapshot STOPS Postgres, which severs this process's own connection — and the journal lives
@@ -116,6 +115,7 @@ async function awaitDatabase(sql: Sql, timeoutMs = 120_000): Promise<void> {
   }
 }
 
+/** Live work that still holds a maintenance window open. */
 export async function liveTaskCount(sql: Sql): Promise<number> {
   // A dead task and a draft that never started run nothing; /admin/maintenance leaves both out too.
   const rows = await sql<{ n: string }[]>`
