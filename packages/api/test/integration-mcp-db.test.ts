@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { eq, like, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -42,7 +42,6 @@ import {
   secretsService,
 } from '@haive/shared';
 import { getConnectionCredential } from '@haive/shared/integrations';
-import { signRagToken } from '@haive/shared/rag';
 import { signTaskToken, type TaskTokenClaims } from '@haive/shared/task-token';
 import { createApiApp } from '../src/index.js';
 
@@ -402,6 +401,14 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
     };
   }
 
+  // The audience-less two-part format: base64url({taskId, exp}).base64url(hmac).
+  const legacyRagToken = (taskId: string): string => {
+    const payload = Buffer.from(
+      JSON.stringify({ taskId, exp: Math.floor(Date.now() / 1000) + 3600 }),
+    ).toString('base64url');
+    return `${payload}.${createHmac('sha256', SECRET).update(payload).digest('base64url')}`;
+  };
+
   const mint = (w: World, claims: Partial<TaskTokenClaims> = {}, secret = SECRET): string =>
     signTaskToken(
       {
@@ -720,7 +727,7 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
       ['a rag-audience token with the same claims', (w) => mint(w, { aud: 'rag' })],
       ['a ddev-audience token with the same claims', (w) => mint(w, { aud: 'ddev' })],
       ['a custom-mcp-audience token with the same claims', (w) => mint(w, { aud: 'custom-mcp' })],
-      ['the legacy two-part rag token', (w) => signRagToken(w.taskId, SECRET)],
+      ['the legacy two-part rag token', (w) => legacyRagToken(w.taskId)],
       ['an integrations token with no taskStepId', (w) => mint(w, { taskStepId: undefined })],
       [
         'an integrations token with no cliInvocationId',

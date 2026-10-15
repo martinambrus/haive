@@ -13,6 +13,7 @@ import type {
   PublicTaskType,
   TaskTypeAvailability,
   TaskTypeUpdate,
+  TypeDraftTurn,
 } from '@haive/shared/modularity';
 import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 
@@ -2506,6 +2507,34 @@ export function changedTaskType(err: ApiError): AdminTaskType | null {
 export const deleteTaskType = (slug: string) =>
   api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);
 
+/** The step every type_draft task cycles on; its revise loop re-targets itself, so submitting by step id is unambiguous. */
+export const TYPE_DRAFT_STEP_ID = '01-type-draft';
+
+export interface TypeDraftConversation {
+  status: TaskStatus;
+  awaitingMessage: boolean;
+  turns: TypeDraftTurn[];
+  latestDraft: Record<string, unknown> | null;
+}
+
+export const startTypeDraft = (body: {
+  message: string;
+  current?: Record<string, unknown>;
+  editingSlug?: string;
+}) => api.post<{ taskId: string }>('/admin/task-type-drafts', body);
+
+export const getTypeDraft = (taskId: string) =>
+  api.get<TypeDraftConversation>(`/admin/task-type-drafts/${taskId}`);
+
+/** A follow-up turn is the step form, as `submitPlanChatTurn` does it; `draft` is the editor state as JSON. */
+export const submitTypeDraftTurn = (taskId: string, message: string, draft?: string) =>
+  api.post(`/tasks/${taskId}/steps/${TYPE_DRAFT_STEP_ID}/submit`, {
+    values: draft === undefined ? { message } : { message, draft },
+  });
+
+/** A blank message is what the step reads as "no further turn". */
+export const endTypeDraft = (taskId: string) => submitTypeDraftTurn(taskId, '');
+
 export interface ModulesLoadedResponse {
   intent: ModuleIntentRow[];
   modules: ModuleDiff;
@@ -2529,6 +2558,7 @@ export interface ModuleOpenTask {
   title: string;
   status: string;
   ownerId: string;
+  currentStepId: string | null;
 }
 
 export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
@@ -2537,6 +2567,34 @@ export function moduleOpenTasks(err: ApiError): ModuleOpenTask[] {
     ? (tasks as ModuleOpenTask[])
     : [];
 }
+
+/** True when the refusal's `tasks` list was cut at the api's cap. */
+export function moduleOpenCapped(err: ApiError): boolean {
+  const capped = (err.body as { capped?: unknown } | undefined)?.capped;
+  return err.code === 'module_tasks_open' && capped === true;
+}
+
+export interface ModuleUrgentResponse extends ModuleActiveResponse {
+  stopped: {
+    id: string;
+    title: string;
+    killed: number;
+    cancelled: number;
+    stopped: number;
+    failedAt?: string | null;
+    eventError?: string;
+    killError?: string;
+  }[];
+  left: { id: string; title: string; status: string; currentStepId: string | null }[];
+  failed: { id: string; title: string; error: string }[];
+  capped: boolean;
+}
+
+export const patchModuleUrgent = (moduleId: string) =>
+  api.patch<ModuleUrgentResponse>(`/modules/${encodeURIComponent(moduleId)}`, {
+    active: false,
+    mode: 'urgent',
+  });
 
 export interface ModuleTeardownDone {
   moduleId: string;

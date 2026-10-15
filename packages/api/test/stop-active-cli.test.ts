@@ -9,14 +9,15 @@ import { createFakeDb } from '@haive/database/testing';
 import { stopActiveCliInvocations } from '../src/lib/task-control.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
+const EARLIER = new Date('2026-10-15T09:00:00.000Z');
 
-function setup() {
+function setup(task: Record<string, unknown> = {}) {
   const fake = createFakeDb({
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     cliInvocations: schema.cliInvocations,
   });
-  fake.insert(schema.tasks, { id: TASK, status: 'running' });
+  fake.insert(schema.tasks, { id: TASK, status: 'running', ...task });
   const step = fake.insert(schema.taskSteps, {
     taskId: TASK,
     stepId: '07-phase-2-implement',
@@ -72,5 +73,31 @@ describe('stopping a task', () => {
     expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'failed' });
     expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'failed' });
     expect(kill).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the instant it failed the task, the very stamp the task carries', async () => {
+    const { fake } = setup();
+    const result = await stopActiveCliInvocations(fake.db as never, TASK, { failTask: true });
+    const { completedAt } = fake.rows(schema.tasks)[0]!;
+    expect(completedAt).toBeInstanceOf(Date);
+    expect(result.failedAt).toBe((completedAt as Date).toISOString());
+  });
+
+  it.each([
+    [
+      'a task that had already failed',
+      { failTask: true },
+      { status: 'failed', completedAt: EARLIER },
+    ],
+    [
+      'a stop that does not fail the task',
+      { failTask: false },
+      { status: 'running', completedAt: null },
+    ],
+  ])('names no instant for %s', async (_name, opts, task) => {
+    const { fake } = setup(task);
+    const result = await stopActiveCliInvocations(fake.db as never, TASK, opts);
+    expect(result).toMatchObject({ cancelled: 1, stopped: 1, failedAt: null });
+    expect(fake.rows(schema.tasks)[0]).toMatchObject(task);
   });
 });

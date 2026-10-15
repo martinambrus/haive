@@ -8,8 +8,10 @@ import {
   getTaskTypeCatalog,
   listAdminTaskTypes,
   listTaskTypes,
+  moduleOpenCapped,
   moduleOpenTasks,
   patchModuleActive,
+  patchModuleUrgent,
   postModuleTeardown,
   updateTaskType,
   type ApiError,
@@ -168,7 +170,16 @@ describe('task type update precondition', () => {
 describe('module activation helpers', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  const blockedBy = [{ id: 'task-1', title: 'Fix it', status: 'running', ownerId: 'user-1' }];
+  const blockedBy = [
+    {
+      id: 'task-1',
+      title: 'Fix it',
+      status: 'running',
+      ownerId: 'user-1',
+      currentStepId: 'module.statistics.collect',
+    },
+    { id: 'task-2', title: 'Queued', status: 'queued', ownerId: 'user-1', currentStepId: null },
+  ];
   const refusal = async (status: number, body: unknown): Promise<ApiError> => {
     failWith(status, body);
     try {
@@ -228,6 +239,46 @@ describe('module activation helpers', () => {
     expect(
       moduleOpenTasks(await refusal(409, { error: 'x', code: 'module_tasks_open', tasks: [] })),
     ).toEqual([]);
+  });
+
+  it('reads whether the api cut the list off the 409, and only a true says so', async () => {
+    const open = { error: 'x', code: 'module_tasks_open', tasks: blockedBy };
+    expect(moduleOpenCapped(await refusal(409, { ...open, capped: true }))).toBe(true);
+    expect(moduleOpenCapped(await refusal(409, { ...open, capped: false }))).toBe(false);
+    expect(moduleOpenCapped(await refusal(409, open))).toBe(false);
+    expect(moduleOpenCapped(await refusal(409, { ...open, capped: 'true' }))).toBe(false);
+    expect(moduleOpenCapped(await refusal(409, { ...open, capped: 1 }))).toBe(false);
+  });
+
+  it('reads no cut off a failure that is not the refusal', async () => {
+    expect(
+      moduleOpenCapped(await refusal(409, { error: 'x', code: 'plan_tasks_open', capped: true })),
+    ).toBe(false);
+    expect(moduleOpenCapped(await refusal(404, { error: 'x', capped: true }))).toBe(false);
+  });
+
+  it('turns a module off now with exactly the urgent body, and returns the report', async () => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    const answer = {
+      moduleId: 'statistics',
+      active: false,
+      deactivatedAt: '2026-10-15T09:00:00Z',
+      stopped: [{ id: 'task-1', title: 'Fix it', killed: 1, cancelled: 1, stopped: 1 }],
+      left: [{ id: 'task-2', title: 'Queued', status: 'queued', currentStepId: null }],
+      failed: [],
+      capped: false,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body as string | undefined });
+        return new Response(JSON.stringify(answer), { status: 200 });
+      }),
+    );
+    expect(await patchModuleUrgent('statistics')).toEqual(answer);
+    expect(calls.map((c) => [c.method, new URL(c.url).pathname, c.body])).toEqual([
+      ['PATCH', '/modules/statistics', '{"active":false,"mode":"urgent"}'],
+    ]);
   });
 });
 
