@@ -329,8 +329,11 @@ tasks are listed in the task list like any other task (a product decision).
 - **What a draft may carry** is a positive list: `PROMPT_STEP_DRAFTABLE_KEYS` (slug, title, template,
   capabilities, timeoutMs) and the top-level keys slug, display name, description, requires repository,
   step ids, prompt steps and loop limits. So tools, agent pool, param forms, integrations, switches and
-  presets never come from a draft. `validateTaskTypeDraft` runs the create route's stages in its order
-  and returns the same issues; a parity test drives both over the same fixtures.
+  presets never come from a draft. `validateTaskTypeDraft` runs the create route's shared validation
+  stages in its order and returns the same issues; a parity test drives the drafter and the shared
+  validator over the same fixtures. A taken slug, a built-in's included, is only a `slug-taken` warning
+  on a draft, while `POST /admin/task-types` refuses it with 409 before those stages, so a warned
+  draft does not save under that slug.
 - **Routes:** `POST /admin/task-type-drafts` inserts the task, writes the opening message and marks it
   queued in one transaction, then enqueues the start (a crash in between used to leave it `created`
   forever); `GET /admin/task-type-drafts/:taskId` answers its owner only, with `awaitingMessage` true
@@ -352,7 +355,8 @@ tasks are listed in the task list like any other task (a product decision).
 ## Do not change
 
 1. A missing step marks the task dead; never filter it out of a run list.
-2. The run list and prompt steps are pinned at create; only INSERTs write them.
+2. A static type's run list and the prompt steps it uses are pinned at create, and only INSERTs write
+   them; `workflow` and `run_app` keep a null snapshot and assemble their list per path and mode.
 3. `custom_steps` is pinned raw and parsed per tool.
 4. Prompt steps are never registered; the worker synthesises them per task.
 5. The seeder writes only its own columns and rows, skips unchanged rows and never deletes.
@@ -376,5 +380,5 @@ tasks are listed in the task list like any other task (a product decision).
     the lock; a row keeps the tool, action, outcome, reason, HTTP status, size and duration, never the
     arguments or the response body.
 17. Egress: every resolved address checked at connect time, c-ares, no redirect, one deadline.
-18. Drafts: a positive key list, parity with the create route, and no surface, rules, egress or repository
-    for the drafter.
+18. Drafts: a positive key list, parity with the create route's shared validation stages (a taken slug
+    is a draft warning, a 409 at create), and no surface, rules, egress or repository for the drafter.
