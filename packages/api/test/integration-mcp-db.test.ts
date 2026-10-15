@@ -168,12 +168,12 @@ const padded = (bytes: number): string => JSON.stringify({ ...PR_OPEN, pad: 'x'.
 const BIG_REPLIES: Array<[string, () => Response]> = [
   [
     'in one chunk, with no Content-Length',
-    () => new Response(padded(2 * MIB), { headers: { 'content-type': 'application/json' } }),
+    () => new Response(padded(9 * MIB), { headers: { 'content-type': 'application/json' } }),
   ],
   [
     'in one chunk, with a Content-Length',
     () => {
-      const text = padded(2 * MIB);
+      const text = padded(9 * MIB);
       return new Response(text, {
         headers: {
           'content-type': 'application/json',
@@ -185,7 +185,7 @@ const BIG_REPLIES: Array<[string, () => Response]> = [
   [
     'in 64 KiB chunks, with no Content-Length',
     () => {
-      const bytes = Buffer.from(padded(2 * MIB));
+      const bytes = Buffer.from(padded(9 * MIB));
       let offset = 0;
       const stream = new ReadableStream<Uint8Array>({
         pull(controller) {
@@ -389,6 +389,7 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
       username: 'octocat',
       provider: 'github',
       apiBaseUrl: null,
+      host: 'github.com',
     });
     return {
       repositoryId,
@@ -1369,7 +1370,7 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
     );
 
     it.each(BIG_REPLIES)(
-      'answers 502 vendor-error, not a 200, for a 2 MiB vendor body %s',
+      'answers 502 vendor-error, not a 200, for a 9 MiB vendor body %s',
       async (_name, big) => {
         const w = await seed();
         vendor.respond = () => big();
@@ -1657,6 +1658,43 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
         'the log capture must see the request log',
       ).toBe(true);
       expect(await leakSites(w.secret)).toEqual([]);
+    });
+
+    it('keeps the Basic form a Bitbucket Cloud token travels in out of everything the vendor echoes', async () => {
+      const credential = await createCredential(ownerId, {
+        host: 'bitbucket.org',
+        provider: 'bitbucket_cloud',
+      });
+      const basic = Buffer.from(`octocat:${credential.secret}`).toString('base64');
+      secrets.push(basic);
+      const connectionId = await createConnection(ownerId, credential.id, {
+        providerId: 'bitbucket_cloud',
+      });
+      const repositoryId = await createRepository(
+        ownerId,
+        'https://bitbucket.org/acme/widgets.git',
+      );
+      const taskId = await createTask(ownerId, repositoryId);
+      const stepId = await createStep(taskId);
+      const invocationId = await createInvocation(taskId, stepId, [
+        binding(connectionId, 'read', { providerId: 'bitbucket_cloud' }),
+      ]);
+      const w: World = {
+        repositoryId,
+        credentialId: credential.id,
+        connectionId,
+        taskId,
+        stepId,
+        invocationId,
+        secret: credential.secret,
+      };
+      vendor.respond = (made) =>
+        vendorJson(401, { message: 'Bad credentials', received: made.headers.authorization });
+
+      expectError(await call(w, GET, { prNumber: '42' }), 502, 'vendor-auth');
+
+      expect(vendor.calls.map((made) => made.headers.authorization)).toEqual([`Basic ${basic}`]);
+      expect(await leakSites(basic)).toEqual([]);
     });
   });
 });
