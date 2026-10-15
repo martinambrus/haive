@@ -285,6 +285,16 @@ describe('integrationTools', () => {
     ]);
   });
 
+  it("checks a write operation's name even while the write switch is off", () => {
+    const write = op('w'.repeat(30), 'write');
+    const bindings = [bind('long-requirement', 'p', 'write', 0), bind('other', 'q', 'write', 1)];
+    const specs = specsOf({ p: [write], q: [write] });
+
+    expect(thrown(() => integrationTools(bindings, specs, switchIs(false))).message).toContain(
+      'long-requirement',
+    );
+  });
+
   it('throws when an operation would take a name another operation already has', () => {
     const specs = specsOf({ p: [op('x_y', 'read')], q: [op('alpha_x_y', 'read')] });
     const bindings = [

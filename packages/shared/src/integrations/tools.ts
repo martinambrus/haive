@@ -49,15 +49,24 @@ export function integrationTools(
   const uses = new Map<string, number>();
   for (const { base } of declared) uses.set(base, (uses.get(base) ?? 0) + 1);
 
-  const tools = new Map<string, IntegrationTool>();
-  for (const { binding, op, base } of declared) {
-    if (op.access !== 'read' && !options.writeAllowed(binding)) continue;
-    const name = (uses.get(base) ?? 0) > 1 ? toolName(`${binding.requirementId}_${op.opId}`) : base;
-    if (!TOOL_NAME.test(name) || tools.has(name)) {
+  const named = declared.map(({ binding, op, base }) => ({
+    binding,
+    op,
+    name: (uses.get(base) ?? 0) > 1 ? toolName(`${binding.requirementId}_${op.opId}`) : base,
+  }));
+  const taken = new Set<string>();
+  for (const { binding, op, name } of named) {
+    if (!TOOL_NAME.test(name) || taken.has(name)) {
       throw new Error(
         `integration operation ${op.opId} of requirement ${binding.requirementId} cannot be listed as ${JSON.stringify(name)}: a tool name must match ${TOOL_NAME} and be unique`,
       );
     }
+    taken.add(name);
+  }
+
+  const tools = new Map<string, IntegrationTool>();
+  for (const { binding, op, name } of named) {
+    if (op.access !== 'read' && !options.writeAllowed(binding)) continue;
     tools.set(name, { binding, op });
   }
   return tools;
