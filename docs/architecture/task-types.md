@@ -181,8 +181,11 @@ before, a run list without 07 ran 07 off-list and then completed the task.
 `unknown-step`, `unmet-need` (no EARLIER step provides it), `too-late`, `unfulfilled`,
 `missing-loop-target`, `duplicate-step`, `loop-after-closing` and `empty`. `repository` is implicit: no
 step can provide or remove it, so a module step cannot fake a repository. Built-in seeded lists are not
-composition-checked at boot; a guard test asserts the shipped environment + workflow order raises no
-issue at all, so a rule can never contradict the shipped workflow. There is no `STEP_LOOP_TARGETS`
+composition-checked at boot; a guard test (`worker/test/composable-core.test.ts`) asserts that the
+composable steps of the shipped environment and workflow orders raise no ordering issue (`too-late`,
+`loop-after-closing`, `missing-loop-target`, `duplicate-step`), so an ordering rule cannot contradict
+the shipped workflow. Needs and provides are not guarded that way: a need a non-composable step
+provides would read as `unmet-need` once that step is filtered out. There is no `STEP_LOOP_TARGETS`
 table: loop targets live on each entry. `validateTaskTypeDefaults`: every preset or loop-limit key must
 be a step of the type, and a loop limit only on a `loopBudgetEditable` step (1–50).
 
@@ -363,7 +366,7 @@ tasks are listed in the task list like any other task (a product decision).
    `FOR KEY SHARE`.
 10. The availability order is fixed and the create switch is exhaustive.
 11. Only `07-phase-2-implement` is a fix-loop target; an unroutable target fails by name before any reset.
-12. Composition rules never contradict the shipped built-in order.
+12. Composition ordering rules never contradict the shipped built-in order (the guard test above).
 13. Module steps are namespaced and register after the static-list asserts.
 14. A quote comes only from agent-authored output; persona markers resolve only from the step's own
     template.
