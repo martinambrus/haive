@@ -2,12 +2,18 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { moduleDatabaseName } from '@haive/shared/module-db';
-import type { LoadedWorkerModule, WorkerModuleEntry } from '../src/modules/loader.js';
+import {
+  startModuleJobs,
+  type LoadedWorkerModule,
+  type WorkerModuleEntry,
+} from '../src/modules/loader.js';
 import {
   ModuleTeardownRefusedError,
   processModuleControlJob,
   runModuleTeardown,
 } from '../src/queues/module-control-queue.js';
+
+vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 
 const url = process.env.MODULE_TEARDOWN_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/module_teardown_test'))
@@ -197,6 +203,44 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
     expect(result).toEqual({ moduleId: 'alpha', tornDownAt: null });
     expect((await row('alpha'))?.tornDownAt).toBeNull();
   });
+
+  it.each<[string, () => Promise<void>]>([
+    ['finishes', async () => {}],
+    [
+      'fails',
+      async () => {
+        throw new Error('drop failed');
+      },
+    ],
+  ])(
+    'keeps the jobs of a module activated again while its hook runs from starting until the hook %s',
+    async (_how, finish) => {
+      await setModule('alpha', { deactivatedAt: OFF });
+      const jobs = vi.fn(async () => async () => {});
+      const { reconcile, stopAll } = await startModuleJobs(
+        [loadedOf('alpha')],
+        [{ ...entryOf('alpha'), jobs }],
+        new Set(['alpha']),
+      );
+      let startedDuringHook = -1;
+      const hook: Hook = async () => {
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: null })
+          .where(eq(schema.modules.moduleId, 'alpha'));
+        await reconcile(new Set());
+        startedDuringHook = jobs.mock.calls.length;
+        await finish();
+      };
+
+      await runModuleTeardown(deps(['alpha'], { alpha: hook }), 'alpha').catch(() => undefined);
+      expect(startedDuringHook).toBe(0);
+
+      await reconcile(new Set());
+      expect(jobs).toHaveBeenCalledOnce();
+      await stopAll();
+    },
+  );
 
   it.each<[string, () => Promise<unknown>, string[], string[], RegExp]>([
     [

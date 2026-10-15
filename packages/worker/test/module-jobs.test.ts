@@ -17,7 +17,8 @@ vi.mock('@haive/shared/module-db', async (importOriginal) => ({
   },
 }));
 
-const { moduleJobsStarted, startModuleJobs } = await import('../src/modules/loader.js');
+const { beginModuleTeardown, moduleJobsStarted, startModuleJobs } =
+  await import('../src/modules/loader.js');
 
 type Loaded = Parameters<typeof startModuleJobs>[0][number];
 type Entry = Parameters<typeof startModuleJobs>[1][number];
@@ -289,6 +290,49 @@ describe('the jobs reconcile', () => {
     expect(m.ensure).toHaveBeenCalledTimes(2);
     expect(m.jobs).toHaveBeenCalledOnce();
     expect(moduleJobsStarted('doomed')).toBe(true);
+
+    await stopAll();
+  });
+
+  it('starts no jobs, and ensures no schema, of a module while its teardown runs, and starts them on the first pass after it ends', async () => {
+    const m = moduleWithSchema('torn');
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set(['torn']));
+
+    const endTeardown = beginModuleTeardown('torn');
+    await reconcile(new Set());
+    await reconcile(new Set());
+    expect(m.ensure).not.toHaveBeenCalled();
+    expect(m.jobs).not.toHaveBeenCalled();
+    expect(moduleJobsStarted('torn')).toBe(false);
+
+    endTeardown();
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+    expect(m.jobs).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('torn')).toBe(true);
+
+    await stopAll();
+  });
+
+  it('holds back only the module whose teardown runs', async () => {
+    const a = moduleWithSchema('tear-a');
+    const b = moduleWithSchema('tear-b');
+    const { reconcile, stopAll } = await startModuleJobs(
+      [a.loaded, b.loaded],
+      [a.entry, b.entry],
+      new Set(['tear-a', 'tear-b']),
+    );
+
+    const endTeardown = beginModuleTeardown('tear-a');
+    await reconcile(new Set());
+    expect(a.jobs).not.toHaveBeenCalled();
+    expect(b.jobs).toHaveBeenCalledOnce();
+    expect(moduleJobsStarted('tear-b')).toBe(true);
+
+    endTeardown();
+    await reconcile(new Set());
+    expect(a.jobs).toHaveBeenCalledOnce();
+    expect(b.jobs).toHaveBeenCalledOnce();
 
     await stopAll();
   });

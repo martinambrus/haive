@@ -12,6 +12,7 @@ import { openModuleDatabase, type ModuleDatabase } from '@haive/shared/module-db
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
+  beginModuleTeardown,
   moduleJobsStarted,
   type LoadedWorkerModule,
   type WorkerModuleEntry,
@@ -112,7 +113,13 @@ export async function runModuleTeardown(
 
   const teardown = deps.entries[index]?.teardown;
   if (teardown) {
-    await runHook(db, moduleId, teardown, deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS);
+    // The jobs reconcile starts nothing of this module while its hook drops data.
+    const endTeardown = beginModuleTeardown(moduleId);
+    try {
+      await runHook(db, moduleId, teardown, deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS);
+    } finally {
+      endTeardown();
+    }
   }
 
   // Conditional: a module activated again while the hook ran must not read as torn down.

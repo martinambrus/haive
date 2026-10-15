@@ -196,8 +196,16 @@ export async function ensureModuleSchemas(
 }
 
 const jobsStarted = new Set<string>();
+const teardownsRunning = new Set<string>();
 
 export const moduleJobsStarted = (moduleId: string): boolean => jobsStarted.has(moduleId);
+
+export function beginModuleTeardown(moduleId: string): () => void {
+  teardownsRunning.add(moduleId);
+  return () => {
+    teardownsRunning.delete(moduleId);
+  };
+}
 
 export type ModuleJobsHandle = {
   reconcile: (deactivated: ReadonlySet<string>) => Promise<void>;
@@ -255,15 +263,20 @@ export async function startModuleJobs(
     }
   }
 
-  let wasDeactivated = new Set(deactivated);
+  const pending = new Set(deactivated);
   const reconcile = async (nowDeactivated: ReadonlySet<string>): Promise<void> => {
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
       const jobs = entries[index]?.jobs;
       const moduleId = module.manifest.id;
       if (!jobs || stops.has(moduleId)) continue;
-      // Only a module seen deactivated starts here, so a failed start is not retried every pass.
-      if (!wasDeactivated.has(moduleId) || nowDeactivated.has(moduleId)) continue;
+      if (nowDeactivated.has(moduleId)) {
+        pending.add(moduleId);
+        continue;
+      }
+      // A module starts once per reactivation, and not while its teardown runs.
+      if (!pending.has(moduleId) || teardownsRunning.has(moduleId)) continue;
+      pending.delete(moduleId);
       try {
         const ensureSchema = entries[index]?.ensureSchema;
         if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
@@ -276,7 +289,6 @@ export async function startModuleJobs(
         );
       }
     }
-    wasDeactivated = new Set(nowDeactivated);
   };
 
   return { reconcile, stopAll };
