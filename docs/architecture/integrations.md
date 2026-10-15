@@ -161,9 +161,10 @@ token when the vendor does not rotate it, and keeps the granted scopes when none
 Cloud app passwords need Basic auth); an OAuth connection answers `username` and `apiBaseUrl` null.
 Neither function checks ownership: only ids the resolver produced may reach them.
 
-**Vendor answers** (`oauth.ts`): 15 s timeout, `redirect: 'error'`. A JSON body with an `error` field is
-an `OauthVendorError` whatever the HTTP status (GitHub refuses with 200); 5xx, network errors and
-non-OAuth bodies are `OauthUnavailableError`. A known error code (RFC 6749, 7009, 8628 and GitHub's)
+**Vendor answers** (`oauth.ts`): 15 s timeout, `redirect: 'error'`. A network error and any 5xx are
+`OauthUnavailableError` before the body is read; otherwise a JSON body with an `error` field is an
+`OauthVendorError` whatever the status (GitHub refuses with 200), and any other non-2xx is
+unavailable. A known error code (RFC 6749, 7009, 8628 and GitHub's)
 passes through whole — a short secret inside `invalid_grant` once turned it into `[redacted]` and the
 refresh missed it; other codes are redacted and cut. Code branches on the `error` code, never on the
 text. `expires_in: 0` means already expired. Over HTTP: vendor error 400, unavailable 502.
@@ -204,11 +205,12 @@ The rules that look odd and are deliberate:
 - **Status is checked only on the account the tiers picked, never used to filter candidates.** A
   picked account that is not connected answers `connection-unavailable` with its id, so an expired
   token fails by name instead of quietly switching to another vendor.
-- **Explicit beats soft.** A task choice or grant whose account is disabled, not allowed or does not
-  fit stops there with that reason. A choice whose account is gone asks again (`needs-choice`); a
-  grant whose account is gone falls through to the next tier. The preference and the install default
-  skip a provider that is disabled, not connected, not allowed or not for this repository, and record
-  why.
+- **Explicit beats soft.** A task choice or grant whose provider is disabled, whose account the
+  repository's allow-list excludes, or (forge) whose task has no repository or remote stops there with
+  that reason. An account that is gone, foreign or no longer fits the repository counts as absent: a
+  choice then asks again (`needs-choice`), a grant falls through to the next tier. The preference and
+  the install default skip a provider that is disabled, not connected, not allowed or not for this
+  repository, and record why.
 - A forge connection with no linked credential never fits; every forge connection has one today.
 - One resolution per target per call: two requirements naming the same category get the same account.
 - Choices are the desired state the api writes; grants are the applied state written where resolution
@@ -337,8 +339,8 @@ constraint.
 ## Do not change
 
 1. Status is checked on the selected account only; never filter candidates by status.
-2. A blocked choice or grant stops; soft tiers skip and say why; a gone grant falls through, a gone
-   choice asks again.
+2. A blocked choice or grant stops; soft tiers skip and say why; an absent account (gone, foreign or
+   no longer fitting) makes a grant fall through and a choice ask again.
 3. The allow-list fails closed on `integrations_restricted`, never on entry existence.
 4. Refresh: row lock, re-check, single flight, under the issuing client; a client refusal keeps the
    status; a missing client writes nothing.
