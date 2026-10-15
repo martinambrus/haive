@@ -28,6 +28,10 @@ const TASK = '00000000-0000-4000-8000-000000000001';
 const PROVIDER = '00000000-0000-4000-8000-0000000000b1';
 
 const app = new Hono<AppEnv>();
+app.use(async (c, next) => {
+  c.set('maintenanceState', 'normal');
+  await next();
+});
 app.route('/', taskRoutes);
 app.onError(errorHandler);
 

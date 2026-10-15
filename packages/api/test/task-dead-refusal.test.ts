@@ -35,6 +35,10 @@ const STEP = '11d-skill-sync';
 const UPCOMING_STEP = '08c-code-review';
 
 const app = new Hono<AppEnv>();
+app.use(async (c, next) => {
+  c.set('maintenanceState', 'normal');
+  await next();
+});
 app.route('/', taskRoutes);
 app.onError(errorHandler);
 

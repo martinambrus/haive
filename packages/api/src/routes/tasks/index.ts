@@ -65,7 +65,7 @@ import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
 import { requireAuth } from '../../middleware/auth.js';
-import { requireNewWorkAllowed } from '../../middleware/maintenance.js';
+import { assertNewWorkAllowed, requireNewWorkAllowed } from '../../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import {
@@ -1156,6 +1156,7 @@ taskRoutes.post('/:id/action', async (c) => {
 
   switch (body.action) {
     case 'start': {
+      assertNewWorkAllowed(c.get('maintenanceState'));
       refuseDeadTask(task);
       // The second half of a two-phase create (POST /plan/build with
       // `deferStart`): the row was made unstarted so the caller could upload
@@ -1189,6 +1190,7 @@ taskRoutes.post('/:id/action', async (c) => {
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
     case 'retry': {
+      assertNewWorkAllowed(c.get('maintenanceState'));
       refuseDeadTask(task);
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);

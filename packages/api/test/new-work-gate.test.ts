@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   gdb: undefined as unknown,
   state: 'normal',
   dbCalls: 0,
+  queued: [] as string[],
   insertTask: (_args: Record<string, unknown>): string => '',
 }));
 
@@ -16,9 +17,14 @@ vi.mock('../src/db.js', () => ({
   },
 }));
 vi.mock('../src/queues.js', () => ({
-  getTaskQueue: () => ({ add: async () => undefined }),
+  getTaskQueue: () => ({
+    add: async (name: string) => {
+      h.queued.push(name);
+    },
+  }),
   getGlobalKbSyncQueue: () => ({ add: async () => undefined }),
 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
 vi.mock('../src/lib/plan-mirror.js', () => ({
   enqueuePlanMirrorRefresh: vi.fn(),
   pullPlanMirror: vi.fn(),
@@ -67,7 +73,7 @@ import { join } from 'node:path';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { configService } from '@haive/shared';
+import { configService, TASK_JOB_NAMES } from '@haive/shared';
 import { globalKbEntries } from '@haive/shared/global-kb';
 import { globalKbRoutes } from '../src/routes/global-kb.js';
 import { planRoutes } from '../src/routes/plan.js';
@@ -234,6 +240,94 @@ describe('with the real maintenance gate in front', () => {
 
     vi.spyOn(configService, 'get').mockResolvedValue('normal');
     expect((await gated.request('/tasks', request(ROUTES[0]!))).status).toBe(201);
+  });
+});
+
+describe('POST /tasks/:id/action', () => {
+  const TASK = '00000000-0000-4000-8000-0000000000e1';
+  const act = (action: string) =>
+    app.request(`/tasks/${TASK}/action`, request({ body: { action } }));
+  const withTask = (row: Record<string, unknown>) => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      taskEvents: schema.taskEvents,
+      cliInvocations: schema.cliInvocations,
+    });
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      type: 'workflow',
+      title: 'a task',
+      orchestrationEpoch: 1,
+      currentRound: 0,
+      ...row,
+    });
+    h.db = fake.db;
+    h.queued = [];
+    return fake;
+  };
+  const written = (fake: ReturnType<typeof withTask>) => [
+    fake.rows(schema.tasks),
+    fake.rows(schema.taskEvents),
+  ];
+
+  describe.each([
+    { action: 'start', row: { status: 'created' } },
+    { action: 'retry', row: { status: 'failed', errorMessage: 'boom', completedAt: new Date(0) } },
+  ])('$action', ({ action, row }) => {
+    it('queues the task while the system is normal', async () => {
+      withTask(row);
+
+      expect((await act(action)).status).toBe(200);
+      expect(h.queued).toEqual([TASK_JOB_NAMES.START]);
+    });
+
+    it.each(['draining', 'maintenance'])(
+      'answers 503 and queues and writes nothing while the system is %s',
+      async (state) => {
+        const fake = withTask(row);
+        const before = written(fake);
+        h.state = state;
+
+        const res = await act(action);
+
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+        expect(h.queued).toEqual([]);
+        expect(written(fake)).toEqual(before);
+      },
+    );
+  });
+
+  describe('while the system drains', () => {
+    beforeEach(() => {
+      h.state = 'draining';
+    });
+
+    it('still pauses a task', async () => {
+      const fake = withTask({ status: 'running' });
+
+      expect((await act('pause')).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeInstanceOf(Date);
+      expect(h.queued).toEqual([]);
+    });
+
+    it('still resumes a paused task', async () => {
+      const fake = withTask({ status: 'running', pausedAt: new Date(0) });
+
+      expect((await act('resume')).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeNull();
+      expect(h.queued).toEqual([]);
+    });
+
+    it('still cancels a task and queues its teardown', async () => {
+      const fake = withTask({ status: 'running' });
+
+      expect((await act('cancel')).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled' });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.CANCEL]);
+    });
   });
 });
 

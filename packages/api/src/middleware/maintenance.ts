@@ -79,14 +79,19 @@ export const maintenanceGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   );
 };
 
-/** A route that creates a task answers 503 once the system drains or is in maintenance. */
-export const requireNewWorkAllowed: MiddlewareHandler<AppEnv> = async (c, next) => {
-  if (refusesNewWork(c.get('maintenanceState'))) {
+/** Throws the 503 a route that starts work answers once the system drains or is in maintenance. */
+export function assertNewWorkAllowed(state: MaintenanceState): void {
+  if (refusesNewWork(state)) {
     throw new HttpError(
       503,
       'Haive is preparing for maintenance, so new tasks are not being started. Work already ' +
         'running will finish.',
     );
   }
+}
+
+/** A route that creates a task answers 503 once the system drains or is in maintenance. */
+export const requireNewWorkAllowed: MiddlewareHandler<AppEnv> = async (c, next) => {
+  assertNewWorkAllowed(c.get('maintenanceState'));
   await next();
 };
