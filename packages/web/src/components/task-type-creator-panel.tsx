@@ -40,6 +40,10 @@ function remember(key: string, taskId: string | null): void {
   }
 }
 
+/** Stops the page from resuming the conversation; the task itself stays in the task list. */
+export const forgetDraftConversation = (slug: string | null): void =>
+  remember(draftStorageKey(slug), null);
+
 const errorText = (err: unknown, fallback: string): string =>
   err instanceof Error ? err.message : fallback;
 

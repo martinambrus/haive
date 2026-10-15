@@ -43,7 +43,10 @@ import { useUnsavedChangesGuard } from '@/lib/use-unsaved-changes-guard';
 import type { TaskTypeAvailability } from '@haive/shared/modularity';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { TaskTypeComposer } from '@/components/task-type-composer';
-import { TaskTypeCreatorPanel } from '@/components/task-type-creator-panel';
+import {
+  forgetDraftConversation,
+  TaskTypeCreatorPanel,
+} from '@/components/task-type-creator-panel';
 import { TaskTypeDeleteDialog } from '@/components/task-type-delete-dialog';
 import { Badge, Button, Card, FormError } from '@/components/ui';
 
@@ -260,6 +263,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         }
         const body = buildCreateBody(submitted, { stepIds, loopLimits, promptSteps });
         await createTaskType(body);
+        forgetDraftConversation(null);
         router.push(`/admin/task-types/${encodeURIComponent(body.slug)}`);
         return;
       }

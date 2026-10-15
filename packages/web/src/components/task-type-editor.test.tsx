@@ -5,7 +5,7 @@ import type { AdminTaskType } from '@/lib/api-client';
 import { FormRenderer } from '@/components/form-renderer';
 import { TaskTypeComposer } from '@/components/task-type-composer';
 import { Button, FormError } from '@/components/ui';
-import { TaskTypeCreatorPanel } from './task-type-creator-panel';
+import { draftStorageKey, TaskTypeCreatorPanel } from './task-type-creator-panel';
 import { TaskTypeEditor } from './task-type-editor';
 
 // No DOM environment in this package, and the editor's save path has to change state: its hooks
@@ -536,6 +536,46 @@ describe('TaskTypeEditor loading a draft', () => {
       enabled: true,
       sortOrder: 0,
     });
+  });
+
+  it('stops the create page resuming its conversation once the type is created, and only then', async () => {
+    const store = new Map([
+      [draftStorageKey(null), 'task-new'],
+      [draftStorageKey('other'), 'task-other'],
+    ]);
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      },
+    });
+    const values = {
+      slug: 'todo-audit',
+      displayName: 'Drafted name',
+      description: 'Drafted description',
+      requiresRepository: true,
+      enabled: true,
+      selectable: true,
+      sortOrder: 0,
+    };
+    try {
+      api.createTaskType.mockRejectedValueOnce(new Error('Slug taken'));
+      const failed = await mount(null);
+      failed.load(promptDraft('todo-audit'));
+      await failed.save(values);
+      expect(store.get(draftStorageKey(null))).toBe('task-new');
+
+      api.createTaskType.mockResolvedValueOnce({ taskType: ROW });
+      const view = await mount(null);
+      view.load(promptDraft('todo-audit'));
+      await view.save(values);
+      expect(api.createTaskType).toHaveBeenCalledTimes(2);
+      expect(store.has(draftStorageKey(null))).toBe(false);
+      expect(store.get(draftStorageKey('other'))).toBe('task-other');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('shows it on a saved type as unsaved changes against the saved row, and ignores its slug', async () => {
