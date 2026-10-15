@@ -22,6 +22,8 @@ const RETIRE_READ_CAP = 8 * 1024 * 1024;
 
 type Outcome = 'removed' | 'absent' | 'kept';
 type RetireContext = Pick<StepContext, 'repoPath' | 'logger'>;
+/** Awaited with the path of a Haive file just before it is unlinked; a throw keeps the file. */
+type OnRetire = (path: string) => Promise<void>;
 
 function jsonObject(data: Buffer): Record<string, unknown> | null {
   let parsed: unknown;
@@ -88,6 +90,7 @@ async function retireHaiveFile(
     requires?: string;
   },
   warnings: string[],
+  onRetire?: OnRetire,
 ): Promise<Outcome> {
   let outcome: Outcome;
   let reason = `it is not a Haive ${target.label}`;
@@ -95,9 +98,22 @@ async function retireHaiveFile(
     if (target.requires && (await lstatNoFollow(ctx.repoPath, target.requires)) === null) {
       return 'kept';
     }
-    outcome = await removeFileIfNoFollow(ctx.repoPath, target.path, target.accept, {
-      maxBytes: RETIRE_READ_CAP,
-    });
+    outcome = await removeFileIfNoFollow(
+      ctx.repoPath,
+      target.path,
+      async (data) => {
+        if (!target.accept(data)) return false;
+        try {
+          await onRetire?.(target.path);
+        } catch (err) {
+          const cause = err instanceof Error ? err.message : String(err);
+          reason = `its removal could not be recorded: ${cause}`;
+          return false;
+        }
+        return true;
+      },
+      { maxBytes: RETIRE_READ_CAP },
+    );
   } catch (err) {
     outcome = 'kept';
     reason = err instanceof Error ? err.message : String(err);
@@ -112,11 +128,16 @@ async function retireHaiveFile(
 /** Delete `.haive/install.json` while it still has the shape Haive wrote it in: nothing reads it, and
  *  the project state record carries what it held. Any other file at that name is the person's. Never
  *  throws; a file it could not judge is reported as kept. */
-export function retireInstallManifest(ctx: RetireContext, warnings: string[]): Promise<Outcome> {
+export function retireInstallManifest(
+  ctx: RetireContext,
+  warnings: string[],
+  onRetire?: OnRetire,
+): Promise<Outcome> {
   return retireHaiveFile(
     ctx,
     { path: INSTALL_MANIFEST_PATH, label: 'install manifest', accept: isHaiveInstallManifest },
     warnings,
+    onRetire,
   );
 }
 
@@ -139,6 +160,7 @@ export async function retireLegacyMirrors(
   ctx: RetireContext,
   warnings: string[],
   keep: readonly string[] = [],
+  onRetire?: OnRetire,
 ): Promise<Array<{ path: string; outcome: Outcome }>> {
   const targets = [
     {
@@ -164,7 +186,9 @@ export async function retireLegacyMirrors(
   for (const target of targets) {
     results.push({
       path: target.path,
-      outcome: keep.includes(target.path) ? 'kept' : await retireHaiveFile(ctx, target, warnings),
+      outcome: keep.includes(target.path)
+        ? 'kept'
+        : await retireHaiveFile(ctx, target, warnings, onRetire),
     });
   }
   return results;

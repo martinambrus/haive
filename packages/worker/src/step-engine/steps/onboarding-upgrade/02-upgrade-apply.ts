@@ -1827,30 +1827,31 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             )
         ).map((event) => event.payload?.path),
       );
-      const listRetired = async (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
+      const recordRetired = async (path: string) => {
+        await ctx.db.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: ctx.taskStepId,
+          eventType: HAIVE_FILE_RETIRED_EVENT,
+          payload: { path },
+        });
+      };
+      const listRetired = (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
         for (const { path, outcome } of retired) {
           if (outcome === 'removed' || (outcome === 'absent' && retiredEarlier.has(path))) {
             deletedPaths.push(path);
           }
         }
-        const removed = retired.filter(({ outcome }) => outcome === 'removed');
-        if (removed.length === 0) return;
-        await ctx.db.insert(schema.taskEvents).values(
-          removed.map(({ path }) => ({
-            taskId: ctx.taskId,
-            taskStepId: ctx.taskStepId,
-            eventType: HAIVE_FILE_RETIRED_EVENT,
-            payload: { path },
-          })),
-        );
       };
-      await listRetired([
-        { path: INSTALL_MANIFEST_PATH, outcome: await retireInstallManifest(ctx, warnings) },
+      listRetired([
+        {
+          path: INSTALL_MANIFEST_PATH,
+          outcome: await retireInstallManifest(ctx, warnings, recordRetired),
+        },
       ]);
       const keepTooling = (await toolingOutsideRecord(ctx.db, plan.repositoryId))
         ? [HAIVE_DATA_FILES.tooling]
         : [];
-      await listRetired(await retireLegacyMirrors(ctx, warnings, keepTooling));
+      listRetired(await retireLegacyMirrors(ctx, warnings, keepTooling, recordRetired));
     } catch (err) {
       failIfColumnStale(err);
       if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);

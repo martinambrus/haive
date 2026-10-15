@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -39,6 +39,13 @@ async function commitAll(root: string) {
   await git('config', 'gc.auto', '0');
   await git('add', '-A');
   await git('commit', '-q', '--allow-empty', '-m', 'before the upgrade');
+}
+
+async function bytesInDir(dir: string, content: string): Promise<boolean> {
+  for (const name of await readdir(dir)) {
+    if ((await readFile(join(dir, name), 'utf8').catch(() => null)) === content) return true;
+  }
+  return false;
 }
 
 /** An upgrade with nothing to change, so that what 02 reports is what it did about the record. */
@@ -198,6 +205,45 @@ describe('02 and .haive/install.json', () => {
     expect(s.retired()).toEqual([{ taskId: TASK, taskStepId: STEP, payload: { path: INSTALL } }]);
   });
 
+  it('records the removal while the file is still on disk', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    const onDisk: boolean[] = [];
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.taskEvents) {
+        onDisk.push(await bytesInDir(join(s.root, '.haive'), HAIVE_SHAPED));
+      }
+    };
+
+    await s.apply();
+
+    expect(onDisk).toEqual([true]);
+    expect(await bytesInDir(join(s.root, '.haive'), HAIVE_SHAPED)).toBe(false);
+  });
+
+  it('keeps it, lists none and says so when the removal cannot be recorded', async () => {
+    const s = await setup(HAIVE_SHAPED);
+    s.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.taskEvents) throw new Error('database refused');
+    };
+
+    const out = await s.apply();
+
+    expect(await readdir(join(s.root, '.haive'))).toEqual(['install.json']);
+    expect(await readFile(join(s.root, INSTALL), 'utf8')).toBe(HAIVE_SHAPED);
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(s.retired()).toEqual([]);
+    expect(out.warnings).toEqual([
+      '.haive/install.json was left in place: its removal could not be recorded: database refused',
+    ]);
+
+    s.fake.hooks.beforeInsert = null;
+    const again = await s.apply();
+
+    expect(existsSync(join(s.root, INSTALL))).toBe(false);
+    expect(again.deletedPaths).toContain(INSTALL);
+    expect(s.retired()).toEqual([{ taskId: TASK, taskStepId: STEP, payload: { path: INSTALL } }]);
+  });
+
   it('does not list one the person deleted, though HEAD still carries it', async () => {
     const s = await setup(HAIVE_SHAPED);
     await commitAll(s.root);
@@ -345,6 +391,62 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
         { taskId: TASK, taskStepId: STEP, payload: { path: GLOBS_LEGACY } },
       ]),
     );
+  });
+
+  it('records each removal while its file is still on disk', async () => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
+    const dir = join(s.root, '.haive-data');
+    const onDisk: Array<{ env: boolean; globs: boolean }> = [];
+    s.fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.taskEvents) {
+        onDisk.push({
+          env: await bytesInDir(dir, HAIVE_ENV),
+          globs: await bytesInDir(dir, HAIVE_GLOBS),
+        });
+      }
+    };
+
+    await s.apply();
+
+    expect(onDisk).toEqual([
+      { env: true, globs: true },
+      { env: false, globs: true },
+    ]);
+    expect(await bytesInDir(dir, HAIVE_GLOBS)).toBe(false);
+  });
+
+  it('keeps them, lists none and says so when the removals cannot be recorded', async () => {
+    const files = { [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS };
+    const s = await withLegacy(files, true);
+    s.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.taskEvents) throw new Error('database refused');
+    };
+
+    const out = await s.apply();
+
+    expect((await readdir(join(s.root, '.haive-data'))).sort()).toEqual([
+      'environment.json',
+      'exclusions.json',
+      'state',
+    ]);
+    for (const [rel, content] of Object.entries(files)) {
+      expect(await readFile(join(s.root, rel), 'utf8'), rel).toBe(content);
+      expect(out.deletedPaths ?? [], rel).not.toContain(rel);
+    }
+    expect(s.retired()).toEqual([]);
+    expect(out.warnings).toEqual([
+      `${ENV_LEGACY} was left in place: its removal could not be recorded: database refused`,
+      `${GLOBS_LEGACY} was left in place: its removal could not be recorded: database refused`,
+    ]);
+
+    s.fake.hooks.beforeInsert = null;
+    const again = await s.apply();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(existsSync(join(s.root, rel)), rel).toBe(false);
+      expect(again.deletedPaths, rel).toContain(rel);
+    }
+    expect(s.retired()).toHaveLength(2);
   });
 
   it('does not list ones the person deleted, though HEAD still carries them', async () => {
