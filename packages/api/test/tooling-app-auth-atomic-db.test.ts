@@ -9,7 +9,7 @@ if (url && !new URL(url).pathname.startsWith('/tooling_app_auth_test'))
 
 const h = vi.hoisted(() => {
   process.env.LOG_LEVEL ??= 'error';
-  return { db: undefined as unknown };
+  return { db: undefined as unknown, outbox: { fails: false, calls: 0 } };
 });
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -20,6 +20,17 @@ vi.mock('@haive/shared', async (importOriginal) => ({
     getBoolean: async (_key: string, fallback: boolean) => fallback,
   },
 }));
+vi.mock('@haive/shared/project-state-outbox', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/project-state-outbox')>();
+  return {
+    ...actual,
+    markProjectStateDirty: async (...args: Parameters<typeof actual.markProjectStateDirty>) => {
+      h.outbox.calls += 1;
+      if (h.outbox.fails) throw new Error('project state outbox unavailable');
+      return actual.markProjectStateDirty(...args);
+    },
+  };
+});
 
 import { secretsService, userSecretsService } from '@haive/shared';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
@@ -59,6 +70,14 @@ describe.skipIf(!url)('PATCH /repositories/:id/tooling app-login credentials, on
       .where(
         and(eq(schema.auditEvents.actorUserId, userId), eq(schema.auditEvents.action, ACTION)),
       );
+
+  const storedRtkVersion = async () => {
+    const [row] = await db
+      .select({ rtkVersion: schema.repositories.rtkVersion })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId));
+    return row!.rtkVersion;
+  };
 
   function failPasswordWrite() {
     const write = userSecretsService.set.bind(userSecretsService);
@@ -106,6 +125,8 @@ describe.skipIf(!url)('PATCH /repositories/:id/tooling app-login credentials, on
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    h.outbox.fails = false;
+    h.outbox.calls = 0;
     await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, userId));
     await db.delete(schema.users).where(eq(schema.users.id, userId));
   });
@@ -150,6 +171,53 @@ describe.skipIf(!url)('PATCH /repositories/:id/tooling app-login credentials, on
 
     it('leaves the stored pair as it was', async () => {
       expect(await stored()).toEqual(OLD);
+    });
+
+    it('records no event', async () => {
+      expect(await audited()).toEqual([]);
+    });
+  });
+
+  it('stores the setting and both credentials, and records one event, when nothing fails', async () => {
+    const res = await patch({
+      rtkVersion: '1.2.3',
+      appAuthUsername: NEXT.username,
+      appAuthPassword: NEXT.password,
+    });
+
+    expect(res.status).toBe(200);
+    expect(h.outbox.calls).toBe(1);
+    expect(await storedRtkVersion()).toBe('1.2.3');
+    expect(await stored()).toEqual(NEXT);
+    expect((await audited()).map((row) => row.metadata)).toStrictEqual([
+      { username: 'set', password: 'set' },
+    ]);
+  });
+
+  describe('when a later write of the same request throws after both credentials were written', () => {
+    let written: unknown[];
+    let res: Response;
+
+    beforeEach(async () => {
+      const write = vi.spyOn(userSecretsService, 'set');
+      h.outbox.fails = true;
+      res = await patch({
+        rtkVersion: '1.2.3',
+        appAuthUsername: NEXT.username,
+        appAuthPassword: NEXT.password,
+      });
+      written = write.mock.calls.map(([, key]) => key);
+    });
+
+    it('fails the request at the project state write, after both credential writes', () => {
+      expect(res.status).toBe(500);
+      expect(written).toEqual([keyOf('username'), keyOf('password')]);
+      expect(h.outbox.calls).toBe(1);
+    });
+
+    it('leaves the stored pair and the setting as they were', async () => {
+      expect(await stored()).toEqual(OLD);
+      expect(await storedRtkVersion()).toBeNull();
     });
 
     it('records no event', async () => {
