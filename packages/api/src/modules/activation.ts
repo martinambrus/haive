@@ -3,7 +3,7 @@ import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
 import { recordAuditEvent } from '../lib/audit.js';
-import { killTaskSandboxes } from '../lib/sandbox-kill.js';
+import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
 import { supersedeLiveRuns } from '../lib/task-control.js';
 import { LIVE_TASK_STATES } from '../routes/maintenance.js';
 import { appendTaskEvent } from '../routes/tasks/_helpers.js';
@@ -164,7 +164,7 @@ const stopTask = async (
     supersedeLiveRuns(tx, taskId, { failTask: true, actor: 'admin' }),
   );
   try {
-    return { ...counts, killed: await killTaskSandboxes(taskId) };
+    return { ...counts, killed: await killTaskSandboxesOrThrow(taskId) };
   } catch (err) {
     log.error({ err, taskId }, 'sandbox kill for an urgent stop failed');
     return { ...counts, killed: 0, killError: errorText(err) };

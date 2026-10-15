@@ -12,45 +12,72 @@ import { CONTAINER_FAMILY, containerPrefix } from '@haive/shared';
  *  socket (see docker-compose.yml), so it can shell out to `docker rm -f`
  *  directly. Returns the count of containers killed. */
 export async function killTaskSandboxes(taskId: string): Promise<number> {
-  const ids = await listIds(taskId);
+  const { ids } = await listIds(taskId);
   if (ids.length === 0) return 0;
   await rmForce(ids);
   return ids.length;
 }
 
-function listIds(taskId: string): Promise<string[]> {
-  return new Promise((resolve) => {
-    let stdout = '';
-    const child = spawn('docker', [
+/** The strict twin of `killTaskSandboxes`: it rejects, naming the step that failed and why. */
+export async function killTaskSandboxesOrThrow(taskId: string): Promise<number> {
+  const listed = await listIds(taskId);
+  if (listed.failure !== null) throw new Error(`sandbox listing failed: ${listed.failure}`);
+  if (listed.ids.length === 0) return 0;
+  const removal = await rmForce(listed.ids);
+  if (removal !== null) throw new Error(`sandbox removal failed: ${removal}`);
+  return listed.ids.length;
+}
+
+interface DockerRun {
+  stdout: string;
+  failure: string | null;
+}
+
+async function listIds(taskId: string): Promise<{ ids: string[]; failure: string | null }> {
+  const { stdout, failure } = await runDocker(
+    [
       'ps',
       '-q',
       '--filter',
       `label=haive.task.id=${taskId}`,
       '--filter',
       `name=^${containerPrefix(CONTAINER_FAMILY.cli)}`,
-    ]);
-    child.stdout.on('data', (b: Buffer) => {
-      stdout += b.toString('utf8');
-    });
-    child.on('close', () => {
-      resolve(stdout.split(/\s+/).filter((s) => s.length > 0));
-    });
-    child.on('error', () => resolve([]));
-    setTimeout(() => {
-      child.kill('SIGKILL');
-      resolve([]);
-    }, 10_000);
-  });
+    ],
+    10_000,
+  );
+  return { ids: stdout.split(/\s+/).filter((s) => s.length > 0), failure };
 }
 
-function rmForce(ids: string[]): Promise<void> {
-  return new Promise((resolve) => {
-    const child = spawn('docker', ['rm', '-f', ...ids]);
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
-    setTimeout(() => {
-      child.kill('SIGKILL');
-      resolve();
-    }, 30_000);
-  });
+async function rmForce(ids: string[]): Promise<string | null> {
+  return (await runDocker(['rm', '-f', ...ids], 30_000)).failure;
+}
+
+async function runDocker(args: string[], timeoutMs: number): Promise<DockerRun> {
+  try {
+    return await new Promise<DockerRun>((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      const child = spawn('docker', args);
+      child.stdout.on('data', (b: Buffer) => {
+        stdout += b.toString('utf8');
+      });
+      child.stderr.on('data', (b: Buffer) => {
+        stderr += b.toString('utf8');
+      });
+      child.on('close', (code, signal) => {
+        const line = stderr.trim().split('\n').pop()?.trim();
+        resolve({
+          stdout,
+          failure: code === 0 ? null : `exit ${code ?? signal}${line ? `: ${line}` : ''}`,
+        });
+      });
+      child.on('error', (err) => resolve({ stdout: '', failure: err.message }));
+      setTimeout(() => {
+        resolve({ stdout: '', failure: 'timed out' });
+        child.kill('SIGKILL');
+      }, timeoutMs);
+    });
+  } catch (err) {
+    return { stdout: '', failure: err instanceof Error ? err.message : String(err) };
+  }
 }

@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   stored: new Map<string, string>(),
   flags: new Map<string, boolean>(),
   kills: [] as string[],
+  bestEffortKills: [] as string[],
   killable: '',
   onKill: undefined as ((taskId: string) => Promise<void>) | undefined,
   eventFails: false,
@@ -31,6 +32,10 @@ vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => {
 });
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: async (taskId: string) => {
+    h.bestEffortKills.push(taskId);
+    return 0;
+  },
+  killTaskSandboxesOrThrow: async (taskId: string) => {
     h.kills.push(taskId);
     await h.onKill?.(taskId);
     return taskId === h.killable ? 1 : 0;
@@ -260,6 +265,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     h.stored = new Map();
     h.flags = new Map();
     h.kills = [];
+    h.bestEffortKills = [];
     h.killable = '';
     h.onKill = undefined;
     h.eventFails = false;
@@ -1112,6 +1118,12 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         await db.execute(sql`DROP TRIGGER IF EXISTS module_deactivation_test_refuse ON tasks`);
         await db.execute(sql`DROP FUNCTION IF EXISTS module_deactivation_test_refuse()`);
       }
+    });
+
+    it('kills through the strict variant and never the best-effort one', async () => {
+      expect((await patchUrgent('alpha')).status).toBe(200);
+      expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
+      expect(h.bestEffortKills).toEqual([]);
     });
 
     it('keeps a task whose stop committed under stopped when its sandbox kill throws, and says why', async () => {
