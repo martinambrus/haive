@@ -36,7 +36,7 @@ import { refreshExpiringCliCredentials } from '../usage-window/credential-refres
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue } from './task-queue.js';
-import { NewWorkHeld, readMaintenanceState } from './_revive-check.js';
+import { MaintenanceStateUnreadable, NewWorkHeld, readMaintenanceState } from './_revive-check.js';
 import { autoResumeFailedStep } from './_step-reset.js';
 import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
@@ -589,11 +589,23 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
           watchSince: task.since ?? null,
         });
       } catch (err) {
-        if (!(err instanceof NewWorkHeld)) throw err;
-        log.info(
-          { taskId: task.id, providerId: task.providerId, state: err.state },
-          AUTO_RESUME_HELD,
-        );
+        // One task's failed resume must not hold the armed tasks after it back until the next tick.
+        if (err instanceof NewWorkHeld) {
+          log.info(
+            { taskId: task.id, providerId: task.providerId, state: err.state },
+            AUTO_RESUME_HELD,
+          );
+        } else if (err instanceof MaintenanceStateUnreadable) {
+          log.warn(
+            { taskId: task.id, providerId: task.providerId, err },
+            'provider recovered; auto-resume skipped, the maintenance state could not be read',
+          );
+        } else {
+          log.error(
+            { taskId: task.id, providerId: task.providerId, err },
+            'provider recovered; auto-resume failed',
+          );
+        }
         continue;
       }
       if (resumed) {

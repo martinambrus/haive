@@ -243,36 +243,104 @@ describe('the allowance auto-resume when the stored state cannot be read', () =>
   });
 
   describe('under the fence', () => {
-    it('fails the tick, changing nothing, queueing nothing and spending no attempt', async () => {
-      storedStates('normal', down);
+    it('leaves the task failed with its watch armed and goes on to resume the next armed task', async () => {
+      storedStates('normal', down, 'normal', 'normal');
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
       const t = setup();
-
-      await expect(checkProviderRecovery(t.db)).rejects.toMatchObject({
-        name: 'MaintenanceStateUnreadable',
+      t.fake.insert(schema.tasks, { ...t.task(), id: NEXT_TASK });
+      t.fake.insert(schema.taskSteps, {
+        id: NEXT_ROW,
+        taskId: NEXT_TASK,
+        stepId: 'fan-out',
+        round: 0,
+        status: 'failed',
       });
+      t.next.push({ ...t.armed, id: NEXT_TASK });
 
-      expect(t.writes).toEqual([]);
-      expect(h.queued).toEqual([]);
+      await checkProviderRecovery(t.db);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskId: TASK,
+          providerId: PROVIDER,
+          err: expect.objectContaining({ name: 'MaintenanceStateUnreadable' }),
+        }),
+        expect.any(String),
+      );
       expect(t.task()).toMatchObject({
         status: 'failed',
         allowanceAutoResumeCount: 0,
         awaitingAllowanceProviderId: PROVIDER,
         allowanceReplenishedAt: null,
       });
-      expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+      expect(t.task(NEXT_TASK)).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+      expect(h.queued).toMatchObject([
+        { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: NEXT_TASK } },
+      ]);
+      expect(t.fake.rows(schema.taskEvents)).toMatchObject([
+        { taskId: NEXT_TASK, eventType: 'task.auto_resumed' },
+      ]);
     });
 
     it('resumes it on a later poll once the state can be read again', async () => {
       storedStates('normal', down, 'normal', 'normal');
       const t = setup();
-      await expect(checkProviderRecovery(t.db)).rejects.toMatchObject({
-        name: 'MaintenanceStateUnreadable',
-      });
+      await checkProviderRecovery(t.db);
+      expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
 
       await checkProviderRecovery(t.db);
 
       expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
       expect(h.queued).toHaveLength(1);
     });
+  });
+});
+
+describe('the allowance auto-resume when resuming one task throws', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('leaves the task failed with its watch armed and goes on to resume the next armed task', async () => {
+    config('auto', 'normal');
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const t = setup();
+    t.fake.insert(schema.tasks, { ...t.task(), id: NEXT_TASK });
+    t.fake.insert(schema.taskSteps, {
+      id: NEXT_ROW,
+      taskId: NEXT_TASK,
+      stepId: 'fan-out',
+      round: 0,
+      status: 'failed',
+    });
+    t.next.push({ ...t.armed, id: NEXT_TASK });
+    const dropped = new Error('connection terminated unexpectedly');
+    let broken = true;
+    t.fake.hooks.beforeUpdate = (table) => {
+      if (broken && table === schema.taskSteps) {
+        broken = false;
+        throw dropped;
+      }
+    };
+
+    await checkProviderRecovery(t.db);
+
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: TASK, providerId: PROVIDER, err: dropped }),
+      expect.any(String),
+    );
+    expect(t.task()).toMatchObject({
+      status: 'failed',
+      allowanceAutoResumeCount: 0,
+      awaitingAllowanceProviderId: PROVIDER,
+      allowanceReplenishedAt: null,
+    });
+    expect(t.task(NEXT_TASK)).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+    expect(h.queued).toMatchObject([
+      { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: NEXT_TASK } },
+    ]);
+    expect(t.fake.rows(schema.taskEvents)).toMatchObject([
+      { taskId: NEXT_TASK, eventType: 'task.auto_resumed' },
+    ]);
   });
 });
