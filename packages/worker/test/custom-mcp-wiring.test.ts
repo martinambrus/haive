@@ -34,16 +34,34 @@ const merged = vi.hoisted(() => ({
   cli: [] as unknown[][],
   gemini: [] as unknown[][],
 }));
+const writers = vi.hoisted(() => ({ landed: true, file: [] as unknown[][] }));
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   mergeCliMcpIntoTaskVolume: async (...args: unknown[]) => {
     merged.cli.push(args);
+    return writers.landed;
   },
   mergeGeminiMcpIntoSettings: async (...args: unknown[]) => {
     merged.gemini.push(args);
+    return writers.landed;
   },
-  writeMcpFileIntoTaskVolume: async () => {},
+  writeMcpFileIntoTaskVolume: async (...args: unknown[]) => {
+    writers.file.push(args);
+    return writers.landed;
+  },
 }));
+
+const forced = vi.hoisted(() => ({ delivery: undefined as 'volume-write' | undefined }));
+vi.mock('../src/sandbox/mcp-config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/sandbox/mcp-config.js')>();
+  return {
+    ...actual,
+    buildMcpConfigForCli: (...args: Parameters<typeof actual.buildMcpConfigForCli>) => {
+      const config = actual.buildMcpConfigForCli(...args);
+      return config && forced.delivery ? { ...config, delivery: forced.delivery } : config;
+    },
+  };
+});
 
 const SECRET = 'custom-mcp-wiring-test-secret';
 const NOW_MS = 1_800_000_000_000;
@@ -95,7 +113,7 @@ const run = (over: Partial<CliExecJobPayload> = {}): Run => ({
   ...over,
 });
 
-type Provider = 'claude-code' | 'codex' | 'gemini';
+type Provider = 'claude-code' | 'codex' | 'gemini' | 'antigravity';
 type Files = Array<{ containerPath: string; content: string }>;
 type Entry = { command: string; args: string[]; env?: Record<string, string> };
 
@@ -161,6 +179,18 @@ async function unwired(provider: Provider, db: Database, forRun: Run): Promise<s
   return message;
 }
 
+/** The message a run fails with when its CLI's configuration did not land in the task volume. */
+async function notWritten(provider: Provider, db: Database, forRun: Run): Promise<string> {
+  merged.cli.length = 0;
+  merged.gemini.length = 0;
+  const failure = await extra(provider, db, forRun).catch((err: unknown) => err);
+  expect(failure).toBeInstanceOf(Error);
+  const message = (failure as Error).message;
+  expect(message.startsWith(`${CUSTOM_TOOLS_UNWIRED_REASON}: `)).toBe(true);
+  expect(isTransientCliFailure({ exitCode: -1, errorMessage: message })).toBe(false);
+  return message;
+}
+
 const switchOff = () =>
   vi
     .mocked(configService.getBoolean)
@@ -177,6 +207,8 @@ const CUSTOM_PATHS = [CUSTOM_MCP_SERVER_PATH, CUSTOM_MCP_TOOLS_PATH, CUSTOM_MCP_
 beforeEach(() => {
   process.env.CONFIG_ENCRYPTION_KEY = SECRET;
   delete process.env.RAG_API_INTERNAL_URL;
+  writers.landed = true;
+  writers.file.length = 0;
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
   vi.spyOn(configService, 'getNumber').mockImplementation(async (_key, fallback = 0) => fallback);
   vi.spyOn(Date, 'now').mockReturnValue(NOW_MS);
@@ -185,6 +217,7 @@ beforeEach(() => {
 afterEach(async () => {
   await runCleanups();
   afterSurface.run = undefined;
+  forced.delivery = undefined;
   vi.restoreAllMocks();
   delete process.env.CONFIG_ENCRYPTION_KEY;
   delete process.env.RAG_API_INTERNAL_URL;
@@ -343,6 +376,71 @@ describe.each<Provider>(['claude-code', 'codex', 'gemini'])(
     });
   },
 );
+
+describe.each<Provider>(['codex', 'gemini'])(
+  'the CLI configuration of a step with tools, for %s, in a task volume that does not take it',
+  (provider) => {
+    const db = () => dbFor(pinned([repoStatus, houseRules]));
+
+    it('fails a run that names tools, naming the cause and the tools', async () => {
+      writers.landed = false;
+      const message = await notWritten(provider, db(), run());
+      expect(message).toContain(
+        "the CLI's MCP configuration could not be written to its task volume",
+      );
+      expect(message).toContain('repo_status, house_rules');
+    });
+
+    it('lets a run that names no tools go on, as the other servers always could', async () => {
+      writers.landed = false;
+      for (const forRun of [undefined, run({ customTools: undefined }), run({ customTools: [] })]) {
+        merged.cli.length = 0;
+        merged.gemini.length = 0;
+        const { files } = await extra(provider, db(), forRun);
+        expect(merged.cli.length + merged.gemini.length).toBe(1);
+        for (const path of CUSTOM_PATHS) expect(fileAt(files, path), path).toBeUndefined();
+      }
+    });
+  },
+);
+
+describe('a CLI whose configuration is bound into each invocation', () => {
+  it('wires a run whatever the volume writers report', async () => {
+    writers.landed = false;
+    const { entry } = await entryOf('claude-code', dbFor(pinned([repoStatus, houseRules])), run());
+    expect(entry).toEqual(ENTRY);
+  });
+});
+
+describe('a CLI whose configuration file is written whole into its task volume', () => {
+  const db = () => dbFor(pinned([repoStatus, houseRules]));
+
+  it('fails a run whose file did not land, naming the cause and the tools', async () => {
+    forced.delivery = 'volume-write';
+    writers.landed = false;
+    const message = await notWritten('antigravity', db(), run());
+    expect(writers.file).toHaveLength(1);
+    expect(message).toContain(
+      "the CLI's MCP configuration could not be written to its task volume",
+    );
+    expect(message).toContain('repo_status, house_rules');
+  });
+
+  it('wires a run whose file landed', async () => {
+    forced.delivery = 'volume-write';
+    const { files } = await extra('antigravity', db(), run());
+    expect(writers.file).toHaveLength(1);
+    expect(toolsIn(files).map((t) => t.name)).toEqual(['repo_status', 'house_rules']);
+  });
+
+  it('lets a run that names no tools go on when its file did not land', async () => {
+    forced.delivery = 'volume-write';
+    writers.landed = false;
+    const { files } = await extra('antigravity', db(), run({ customTools: undefined }));
+    expect(writers.file).toHaveLength(1);
+    for (const path of CUSTOM_PATHS) expect(fileAt(files, path), path).toBeUndefined();
+  });
+});
 
 describe('the files of a step with tools, served as the sandbox serves them', () => {
   it('lists the tools it was given and calls the API with the token it was given', async () => {

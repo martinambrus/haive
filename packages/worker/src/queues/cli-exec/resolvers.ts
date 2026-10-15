@@ -485,6 +485,16 @@ export async function resolveMcpExtraFiles(
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME, userServers);
   if (!config) return empty;
 
+  // Best-effort for every run but one naming custom tools, which cannot start without its entry.
+  const requireWritten = (written: boolean): void => {
+    if (!written && surface.custom) {
+      throw unwired(
+        "the CLI's MCP configuration could not be written to its task volume",
+        surface.custom.tools,
+      );
+    }
+  };
+
   // Only a `bind` config may become an extra file. Every other delivery mode names a path INSIDE
   // the CLI's auth-volume mount, where a bind mount is destructive in two ways at once — see the
   // McpDelivery docs and mergeCliMcpIntoTaskVolume. Each of these writes into the volume instead
@@ -493,18 +503,24 @@ export async function resolveMcpExtraFiles(
     case 'volume-merge':
       // Gemini reads MCP servers from the SAME settings.json that holds `selectedAuthType`, so
       // the merge has to preserve the fields it does not own.
-      await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers));
+      requireWritten(
+        await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers)),
+      );
       return { files: serverFiles, extraArgs: [] };
     case 'cli-merge':
-      await mergeCliMcpIntoTaskVolume(
-        taskId,
-        providerName,
-        sandboxImage,
-        resolveStdioMcpServers(servers, userServers),
+      requireWritten(
+        await mergeCliMcpIntoTaskVolume(
+          taskId,
+          providerName,
+          sandboxImage,
+          resolveStdioMcpServers(servers, userServers),
+        ),
       );
       return { files: serverFiles, extraArgs: [] };
     case 'volume-write':
-      await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content);
+      requireWritten(
+        await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content),
+      );
       return { files: serverFiles, extraArgs: [] };
     case 'bind':
       return {
