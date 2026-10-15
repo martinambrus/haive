@@ -246,12 +246,13 @@ describe('a bundle row is inserted with its storage_root', () => {
       expect(bundleWrites('insert').map((w) => w.values.storageRoot)).toEqual([rootOf(id)]);
     });
 
-    it('and the later update sets only the archive path', async () => {
+    it('and with the archive path, so no later update touches the bundle', async () => {
       const id = await completeUpload();
 
-      expect(bundleWrites('update').map((w) => w.values)).toEqual([
-        { archivePath: path.join(storage, USER, id, 'source.zip'), updatedAt: expect.any(Date) },
+      expect(bundleWrites('insert').map((w) => w.values.archivePath)).toEqual([
+        path.join(storage, USER, id, 'source.zip'),
       ]);
+      expect(bundleWrites('update')).toEqual([]);
     });
   });
 });
