@@ -17,8 +17,8 @@ interface GitlabMr {
 }
 
 /** GitLab.com and self-hosted GitLab. The outlier: merge_requests (not pulls),
- *  project id = URL-encoded owner/repo path, PRIVATE-TOKEN header, and MR creation
- *  needs the token's `api` scope (a clone-only token 403s). */
+ *  project id = URL-encoded owner/repo path, Bearer auth (PRIVATE-TOKEN would cross origins
+ *  on a redirect), and MR creation needs the token's `api` scope (a clone-only token 403s). */
 export class GitlabForgeProvider extends BaseForgeProvider {
   readonly name: ForgeProviderName = 'gitlab';
 
@@ -27,7 +27,7 @@ export class GitlabForgeProvider extends BaseForgeProvider {
   }
 
   protected authHeaders(ctx: ForgeContext): Record<string, string> {
-    return { 'PRIVATE-TOKEN': ctx.token };
+    return { Authorization: `Bearer ${ctx.token}` };
   }
 
   private projectId(ctx: ForgeContext): string {
