@@ -280,6 +280,7 @@ const configSchema = z
     embedDimensions: z.number().int().positive().max(8192).optional(),
     archiveRetentionDays: z.number().int().min(0).max(3650).optional(),
     connectionString: z.string().optional(),
+    clearConnectionString: z.boolean().optional(),
   })
   .strict();
 
@@ -358,6 +359,7 @@ async function putConfig(c: Context<AppEnv>) {
   const isAdmin = c.get('userRole') === 'admin';
   const saved = await resolveGlobalKbSettings();
   const given = d.connectionString?.trim() ?? '';
+  const clearing = d.clearConnectionString === true;
   // The page sends every field on every save, so only a CHANGED value is refused.
   // An unchanged one is accepted and not written, so it cannot undo a concurrent admin change.
   if (!isAdmin) {
@@ -365,13 +367,27 @@ async function putConfig(c: Context<AppEnv>) {
       enabled: d.enabled !== undefined && d.enabled !== saved.enabled,
       namespace: d.namespace !== undefined && d.namespace !== saved.namespace,
       mode: d.mode !== undefined && d.mode !== saved.mode,
-      connectionString: given !== '' && given !== saved.connectionString,
+      connectionString: (given !== '' && given !== saved.connectionString) || clearing,
     })
       .filter(([, differs]) => differs)
       .map(([field]) => field);
     if (changed.length > 0) {
       throw new HttpError(403, `only an admin can change ${changed.join(', ')}`, 'admin_required');
     }
+  }
+  if (clearing && given !== '') {
+    throw new HttpError(
+      400,
+      'send a new connection string or clear the stored one, not both',
+      'connection_string_set_and_clear',
+    );
+  }
+  if (clearing && (d.mode ?? saved.mode) === 'external') {
+    throw new HttpError(
+      409,
+      'the external store needs its connection string; switch the store to the built-in one first',
+      'connection_string_in_use',
+    );
   }
   if ((d.mode ?? saved.mode) === 'external' && given === '' && !saved.connectionString) {
     throw new HttpError(
@@ -428,6 +444,15 @@ async function putConfig(c: Context<AppEnv>) {
       action: 'global_kb.connection_string.update',
       targetType: 'global_kb',
       metadata: { connectionStringSet: true },
+    });
+  }
+  if (isAdmin && clearing) {
+    await secretsService.delete(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
+    await recordAuditEvent(getDb(), {
+      actorUserId: c.get('userId'),
+      action: 'global_kb.connection_string.update',
+      targetType: 'global_kb',
+      metadata: { connectionStringSet: false },
     });
   }
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
