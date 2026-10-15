@@ -540,7 +540,9 @@ row clean and a mutation that lands during a write stays dirty. The 10 s plan-mi
 sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, and looks again once it
 holds the project-state lock, for the sync and for the write (`refuseDuringGitOperation`), since a
 merge can open while it waits there: the sync then answers `held`, imports nothing it read and leaves
-`last_error` alone, as the first check does, and the write refuses. It runs the sync first, writes
+`last_error` alone, as the first check does, and the write refuses. The sync also reads the checkout
+again under the lock and answers `superseded` when the two reads differ, so a merge that opened and
+was given up while it waited cannot pass its intermediate record in. It runs the sync first, writes
 nothing and keeps the row dirty with `last_error` when the sync was refused (a record in a
 newer format included), deferred (a live onboarding task) or superseded, and otherwise writes with
 `expectedColumns` set to the column it read, a column that moved waiting for the next tick. It
@@ -604,8 +606,11 @@ untracked file under `.haive-data/state/` that Haive did not write. A merge the 
 checkout itself (00a's merge, 12 when the parent checkout is on the base branch, 13) sets aside after
 it seeds the plan base and checks again under the projection locks right before `openMerge`, where a
 file Haive rewrote since the set-aside sends it round again, up to `MOVE_ATTEMPTS`. Every outcome that
-did not merge puts the files back, a throw from the merge section recovers them before it reaches
-the caller, and reaching done re-syncs. It reads no checkout-holding count, and a state file edited by
+did not merge puts the files back and, once no merge or rebase is open, re-syncs them, a throw from
+the merge section recovers them before it reaches the caller, and reaching done re-syncs. The owner
+and mode a set-aside captured ride in the merge state (`keptMetadata`, never the bytes), so the
+call that ends a merge restores them even when an earlier call set the files aside; a merge left
+open keeps them for its end. It reads no checkout-holding count, and a state file edited by
 hand halts it by name even when the incoming commit leaves that file alone, as it halts a refresh or
 a Pull. An onboarding or upgrade that ends re-syncs at once
 (`resyncAfterTaskEnd`): the sync defers while such a task holds the checkout, so a change pending in
