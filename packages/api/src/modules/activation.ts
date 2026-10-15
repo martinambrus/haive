@@ -32,6 +32,7 @@ interface UrgentReport {
     killed: number;
     cancelled: number;
     stopped: number;
+    failedAt: string | null;
     eventError?: string;
     killError?: string;
   }[];
@@ -152,7 +153,13 @@ const errorText = (err: unknown): string => (err instanceof Error ? err.message 
 const stopTask = async (
   db: Database,
   taskId: string,
-): Promise<{ killed: number; cancelled: number; stopped: number; killError?: string }> => {
+): Promise<{
+  killed: number;
+  cancelled: number;
+  stopped: number;
+  failedAt: string | null;
+  killError?: string;
+}> => {
   const counts = await db.transaction((tx) =>
     supersedeLiveRuns(tx, taskId, { failTask: true, actor: 'admin' }),
   );

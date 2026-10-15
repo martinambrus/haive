@@ -12,7 +12,7 @@ interface StopFields {
   completedAt: Date | null;
 }
 
-/** A failed task's latest `task.stopped`, unless the task failed again after it (a Retry between). */
+/** A failed task's latest `task.stopped`, when it failed the task: its `failedAt` is `completedAt`. */
 export async function loadTaskStop(
   db: Pick<Database, 'select'>,
   task: StopFields,
@@ -26,8 +26,16 @@ export async function loadTaskStop(
     )
     .orderBy(desc(schema.taskEvents.createdAt))
     .limit(1);
-  if (!event || (task.completedAt !== null && event.createdAt < task.completedAt)) return null;
-  const { reason, moduleId } = event.payload ?? {};
+  if (!event) return null;
+  const { reason, moduleId, failedAt } = event.payload ?? {};
   if (typeof reason !== 'string') return null;
+  const { completedAt } = task;
+  const isCause =
+    failedAt === undefined
+      ? completedAt === null || event.createdAt >= completedAt
+      : typeof failedAt === 'string' &&
+        completedAt !== null &&
+        Date.parse(failedAt) === completedAt.getTime();
+  if (!isCause) return null;
   return { reason, moduleId: typeof moduleId === 'string' ? moduleId : null };
 }

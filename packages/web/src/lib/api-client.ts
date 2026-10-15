@@ -2551,6 +2551,7 @@ export interface ModuleUrgentResponse extends ModuleActiveResponse {
     killed: number;
     cancelled: number;
     stopped: number;
+    failedAt?: string | null;
     eventError?: string;
     killError?: string;
   }[];

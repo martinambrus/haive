@@ -184,6 +184,38 @@ describe('GET /tasks/:id on a task an administrator stopped', () => {
     expect(await stopOf()).toEqual({ reason: 'module_deactivated', moduleId: 'alpha' });
   });
 
+  describe('an event that carries the instant its stop failed the task', () => {
+    const failedAtEvent = (failedAt: unknown, createdAt: Date) =>
+      stopEvent({ ...MODULE_STOP, failedAt }, createdAt);
+
+    it.each([
+      ['after', AFTER_FAILURE],
+      ['before', BEFORE_FAILURE],
+    ])(
+      'names the stop whose failedAt is the stamp the task failed with, recorded %s it',
+      async (_when, createdAt) => {
+        setup({}, [failedAtEvent(FAILED_AT.toISOString(), createdAt)]);
+        expect(await stopOf()).toEqual({ reason: 'module_deactivated', moduleId: 'alpha' });
+      },
+    );
+
+    it('has no stop when a retry failed in between, though the event was recorded after that failure', async () => {
+      setup({ errorMessage: 'It broke', completedAt: AFTER_FAILURE }, [
+        failedAtEvent(FAILED_AT.toISOString(), new Date('2026-10-15T09:00:02.000Z')),
+      ]);
+      expect(await stopOf()).toBeNull();
+    });
+
+    it.each([
+      ['a stop that did not fail the task', null, FAILED_AT],
+      ['a failure that carries no completion stamp', FAILED_AT.toISOString(), null],
+      ['a failedAt that is not a date', 'yesterday', FAILED_AT],
+    ])('has no stop for %s', async (_name, failedAt, completedAt) => {
+      setup({ completedAt }, [failedAtEvent(failedAt, AFTER_FAILURE)]);
+      expect(await stopOf()).toBeNull();
+    });
+  });
+
   it('never reads the error text of the task', async () => {
     setup({ errorMessage: 'Halted by an operator' }, [stopEvent(MODULE_STOP)]);
     expect(await stopOf()).toEqual({ reason: 'module_deactivated', moduleId: 'alpha' });
