@@ -7,7 +7,7 @@ import {
 } from '../project-state/set-aside.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 
-type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
+export type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
 
 export function keptMetadataOf(kept: KeptFiles): KeptMetadata {
   const metadata: KeptMetadata = {};
@@ -38,14 +38,22 @@ export async function restoreKeptMetadataOf(state: MergeResolveState): Promise<M
   return { ...state, keptMetadata: undefined };
 }
 
+/** `from` with what another task's set-aside kept: captured before this one's, so it wins. */
+export function adoptKept(from: MergeResolveState, adopted: KeptMetadata): MergeResolveState {
+  return Object.keys(adopted).length > 0
+    ? { ...from, keptMetadata: { ...from.keptMetadata, ...adopted } }
+    : from;
+}
+
 /** Once a same-branch merge is over: re-syncs, restores `keptMetadata`, saves the state cleared. */
 export async function settleProjections(
   db: Database,
   repositoryId: string,
   given: MergeResolveState,
   save: (cleared: MergeResolveState) => Promise<unknown>,
-): Promise<void> {
-  if (await gitOperationInProgress(given.mergeDir)) return;
+): Promise<boolean> {
+  if (await gitOperationInProgress(given.mergeDir)) return false;
   await resyncHaiveProjections(db, repositoryId, given.mergeDir);
   if (given.keptMetadata) await save(await restoreKeptMetadataOf(given));
+  return true;
 }

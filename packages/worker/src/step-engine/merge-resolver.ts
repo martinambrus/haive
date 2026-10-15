@@ -51,8 +51,20 @@ import {
   withMergeDirSection,
   type DbHandle,
 } from './merge-dir-claim.js';
-import { noteAbortedByNext, peekOpenMerge, relocateLeftOpenFixers } from './left-open-merge.js';
-import { keptMetadataOf, restoreKeptMetadataOf, settleProjections } from './merge-projections.js';
+import {
+  noteAbortedByNext,
+  peekOpenMerge,
+  relocateLeftOpenFixers,
+  takeLeftOpenKept,
+  type OpenMerge,
+} from './left-open-merge.js';
+import {
+  adoptKept,
+  keptMetadataOf,
+  restoreKeptMetadataOf,
+  settleProjections,
+  type KeptMetadata,
+} from './merge-projections.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import {
   addStepWarning,
@@ -912,6 +924,18 @@ export async function resolveMergePhase(
     const metadata = { ...keptMetadataOf(kept), ...from.keptMetadata };
     return Object.keys(metadata).length > 0 ? { ...from, keptMetadata: metadata } : from;
   };
+  /** A cancelled task's merge was cleared: what its set-aside kept is saved into this step first. */
+  const clearedStale = async (dir: string, stale: OpenMerge): Promise<KeptMetadata> => {
+    const adopted = await takeLeftOpenKept(db, params.taskId, dir, stale, async (kept) => {
+      const row = await db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, current.id),
+        columns: { mergeResolveState: true },
+      });
+      await saveMergeState(db, current.id, adoptKept(row!.mergeResolveState!, kept));
+    });
+    current = await noteAbortedByNext(db, current, params.taskId, dir, stale);
+    return adopted;
+  };
 
   // --- init: snapshot the merge target + mode from the detect output ---
   if (!state) {
@@ -980,7 +1004,7 @@ export async function resolveMergePhase(
 
   // --- pending: attempt the merge; clean -> done, conflict -> resolving (live) ---
   if (state.phase === 'pending') {
-    const pending = state;
+    let pending = state;
     // Taken before the first git write in the dir and kept until this merge is done, so no other
     // task opens there between this one's sections.
     const claim = await claimMergeDir(db, {
@@ -1081,13 +1105,7 @@ export async function resolveMergePhase(
       round++
     ) {
       if (attempt.staleOpen) {
-        current = await noteAbortedByNext(
-          db,
-          current,
-          params.taskId,
-          pending.mergeDir,
-          attempt.staleOpen,
-        );
+        pending = adoptKept(pending, await clearedStale(pending.mergeDir, attempt.staleOpen));
       }
       const refused = await setAside(repositoryId, pending.mergeDir);
       if (refused !== null) {
@@ -1110,13 +1128,9 @@ export async function resolveMergePhase(
       return haltFailed(db, current, attempt.held, 'merge index held');
     }
     if (attempt.staleOpen) {
-      current = await noteAbortedByNext(
-        db,
-        current,
-        params.taskId,
-        state.mergeDir,
-        attempt.staleOpen,
-      );
+      const adopted = await clearedStale(state.mergeDir, attempt.staleOpen);
+      pending = adoptKept(pending, adopted);
+      state = adoptKept(state, adopted);
     }
     if (attempt.kind === 'aside') {
       await putBack(repositoryId, state.mergeDir);
@@ -1354,7 +1368,7 @@ export async function resolveMergePhase(
       round++
     ) {
       if (reopened.staleOpen) {
-        current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
+        state = adoptKept(state, await clearedStale(dir, reopened.staleOpen));
       }
       const refused = await setAside(repositoryId, dir);
       if (refused !== null) {
@@ -1376,7 +1390,7 @@ export async function resolveMergePhase(
       return haltFailed(db, current, reopened.held, 'merge index held');
     }
     if (reopened.staleOpen) {
-      current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
+      state = adoptKept(state, await clearedStale(dir, reopened.staleOpen));
     }
     if (reopened.kind === 'aside') {
       await putBack(repositoryId, dir);

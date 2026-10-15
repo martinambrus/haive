@@ -27,6 +27,7 @@ import { schema, type MergeResolveState } from '@haive/database';
 import {
   HAIVE_DATA_FILES,
   logger,
+  MERGE_LEFT_OPEN_EVENT,
   MERGE_LEFT_OPEN_SETTLED_EVENT,
   type RepoJobPayload,
 } from '@haive/shared';
@@ -3472,6 +3473,58 @@ async function main(): Promise<void> {
         .insert(schema.taskEvents)
         .values({ taskId, taskStepId: null, eventType: 'task.cancel_finished', payload: {} });
     };
+    const settledOf = async (taskId: string) =>
+      (
+        await db
+          .select({ payload: schema.taskEvents.payload })
+          .from(schema.taskEvents)
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, taskId),
+              eq(schema.taskEvents.eventType, MERGE_LEFT_OPEN_SETTLED_EVENT),
+            ),
+          )
+      ).map((e) => e.payload as { outcome: string; reason: string });
+    /** A running workflow task on the repository, with its 00a step row and a call that advances that step's merge phase. */
+    const syncTask = async (c: Awaited<ReturnType<typeof cloned>>) => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: c.payload.repositoryId,
+          cliProviderId: fixerProvider!.id,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id, epoch: schema.tasks.orchestrationEpoch });
+      const ctx = { ...(await taskCtx(c.dest, task!.id)), epoch: task!.epoch };
+      const detected = await syncBaseStep.detect!(ctx);
+      const stepRow = () =>
+        db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, ctx.taskStepId) });
+      const call = async (providers: unknown[]) => {
+        const row = (await stepRow())!;
+        const params = {
+          db,
+          taskId: task!.id,
+          userId,
+          repoPath: c.dest,
+          workspacePath: c.dest,
+          cliProviderId: fixerProvider!.id,
+          stepDef: step,
+          epoch: task!.epoch,
+          providers,
+          deps: { enqueueCliInvocation: async () => undefined },
+        };
+        const current = {
+          ...row,
+          detectOutput: detected,
+          formValues: { base: 'main', syncAction: 'merge' },
+        };
+        return resolveMergePhase(db, step, current as never, ctx, params as never);
+      };
+      return { task, ctx, stepRow, call };
+    };
     for (const ending of [
       'finishes',
       'fatal',
@@ -3483,6 +3536,10 @@ async function main(): Promise<void> {
       'unaborted',
       'cancel-abort',
       'cancel-by-hand',
+      'cancel-gone',
+      'cancel-retried',
+      'next-aborts',
+      'next-retries',
     ] as const) {
       await attempt(`C12: ${ending}`, async () => {
         // A remote of its own: the shared one's record already holds every directory.
@@ -3509,43 +3566,8 @@ async function main(): Promise<void> {
         git(there, 'push', '-q', 'origin', 'HEAD:main');
         const head = git(c.dest, 'rev-parse', 'HEAD');
         const untracked = git(c.dest, 'status', '--porcelain', '--', RENDER_REL);
-        const [task] = await db
-          .insert(schema.tasks)
-          .values({
-            userId,
-            repositoryId: id,
-            cliProviderId: fixerProvider!.id,
-            type: 'workflow',
-            title: 'repo-refresh-smoke',
-            status: 'running',
-          })
-          .returning({ id: schema.tasks.id, epoch: schema.tasks.orchestrationEpoch });
+        const { task, ctx, stepRow, call } = await syncTask(c);
         try {
-          const ctx = { ...(await taskCtx(c.dest, task!.id)), epoch: task!.epoch };
-          const detected = await syncBaseStep.detect!(ctx);
-          const stepRow = () =>
-            db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, ctx.taskStepId) });
-          const call = async (providers: unknown[]) => {
-            const row = (await stepRow())!;
-            const params = {
-              db,
-              taskId: task!.id,
-              userId,
-              repoPath: c.dest,
-              workspacePath: c.dest,
-              cliProviderId: fixerProvider!.id,
-              stepDef: step,
-              epoch: task!.epoch,
-              providers,
-              deps: { enqueueCliInvocation: async () => undefined },
-            };
-            const current = {
-              ...row,
-              detectOutput: detected,
-              formValues: { base: 'main', syncAction: 'merge' },
-            };
-            return resolveMergePhase(db, step, current as never, ctx, params as never);
-          };
           const first = await call([fixerProvider]);
           const parked = (await stepRow())!.mergeResolveState!;
           check(
@@ -3565,22 +3587,77 @@ async function main(): Promise<void> {
               { kept: parked.keptMetadata },
             );
           }
-          if (ending === 'cancel-abort' || ending === 'cancel-by-hand') {
-            const mergeHead = git(c.dest, 'rev-parse', 'MERGE_HEAD');
-            const before = await modeIn(path.join(c.dest, RENDER_REL));
+          if (ending === 'cancel-gone') {
+            git(c.dest, 'merge', '--abort');
             await cancelTask(task!.id);
-            if (ending === 'cancel-by-hand') git(c.dest, 'merge', '--abort');
-            await abortLeftMerge(db, { taskId: task!.id, userId, dir: c.dest, mergeHead });
-            const settled = await db
-              .select({ payload: schema.taskEvents.payload })
+            const reported = await db
+              .select({ id: schema.taskEvents.id })
               .from(schema.taskEvents)
               .where(
                 and(
                   eq(schema.taskEvents.taskId, task!.id),
-                  eq(schema.taskEvents.eventType, MERGE_LEFT_OPEN_SETTLED_EVENT),
+                  eq(schema.taskEvents.eventType, MERGE_LEFT_OPEN_EVENT),
                 ),
               );
-            const outcomes = settled.map((e) => (e.payload as { outcome: string }).outcome);
+            const kept = (await stepRow())!.mergeResolveState!.keptMetadata;
+            const modes = {
+              file: await modeIn(path.join(c.dest, RENDER_REL)),
+              dir: await modeIn(recordDir),
+            };
+            check(
+              `C12: ${ending}: a cancel that finds the merge already aborted gives the file back at the mode it had, in the directory it had, before any sweep, reports nothing, and keeps no record of them`,
+              reported.length === 0 &&
+                !mergeOpen(c.dest) &&
+                git(c.dest, 'rev-parse', 'HEAD') === head &&
+                modes.file === 0o600 &&
+                modes.dir === 0o700 &&
+                kept === undefined,
+              {
+                reported: reported.length,
+                file: modes.file?.toString(8) ?? null,
+                dir: modes.dir?.toString(8) ?? null,
+                kept,
+              },
+            );
+            return;
+          }
+          if (
+            ending === 'cancel-abort' ||
+            ending === 'cancel-by-hand' ||
+            ending === 'cancel-retried'
+          ) {
+            const mergeHead = git(c.dest, 'rev-parse', 'MERGE_HEAD');
+            const before = await modeIn(path.join(c.dest, RENDER_REL));
+            await cancelTask(task!.id);
+            if (ending !== 'cancel-abort') git(c.dest, 'merge', '--abort');
+            const job = { taskId: task!.id, userId, dir: c.dest, mergeHead };
+            if (ending === 'cancel-retried') {
+              restoreFaults.beforeKeptMetadata = () => {
+                delete restoreFaults.beforeKeptMetadata;
+                throw new Error('smoke: the put-back fails once');
+              };
+              let thrown: unknown = null;
+              try {
+                await abortLeftMerge(db, job);
+              } catch (err) {
+                thrown = err;
+              } finally {
+                delete restoreFaults.beforeKeptMetadata;
+              }
+              const early = await settledOf(task!.id);
+              const keptAfter = (await stepRow())!.mergeResolveState!.keptMetadata;
+              check(
+                `C12: ${ending}: a put-back that throws fails the job and settles nothing, so the retry still has the merge and the record to settle`,
+                thrown instanceof Error &&
+                  thrown.message.includes('the put-back fails once') &&
+                  early.length === 0 &&
+                  keptAfter !== undefined,
+                { thrown: String(thrown), early, keptAfter },
+              );
+            }
+            await abortLeftMerge(db, job);
+            const settled = await settledOf(task!.id);
+            const outcomes = settled.map((e) => e.outcome);
             const kept = (await stepRow())!.mergeResolveState!.keptMetadata;
             const modes = {
               file: await modeIn(path.join(c.dest, RENDER_REL)),
@@ -3603,6 +3680,96 @@ async function main(): Promise<void> {
                 kept,
               },
             );
+            if (ending === 'cancel-retried') {
+              const reason = settled[0]?.reason ?? '';
+              check(
+                `C12: ${ending}: the reason it settles with names the put-back and does not say nothing was changed`,
+                /put its own project files back/.test(reason) &&
+                  !/nothing was changed/.test(reason),
+                { reason },
+              );
+            }
+            return;
+          }
+          if (ending === 'next-aborts' || ending === 'next-retries') {
+            await cancelTask(task!.id);
+            // Rewritten after the cancelled task's set-aside, so the next task's in-section check goes round.
+            if (ending === 'next-retries') {
+              await writeProjectStateColumn(db, {
+                repositoryId: id,
+                repoPath: c.dest,
+                column: column(),
+              });
+            }
+            const next = await syncTask(c);
+            try {
+              let restores = 0;
+              restoreFaults.beforeRestore = () => {
+                restores += 1;
+              };
+              let nextFirst;
+              try {
+                nextFirst = await next.call([fixerProvider]);
+              } finally {
+                delete restoreFaults.beforeRestore;
+              }
+              const nextParked = (await next.stepRow())!.mergeResolveState!;
+              const cancelledKept = (await stepRow())!.mergeResolveState!.keptMetadata;
+              const reports = (await settledOf(task!.id)).map((e) => e.outcome);
+              check(
+                `C12: ${ending}: the next task clears the cancelled task's merge, parks on its own, and takes over the owner and mode that task's set-aside kept`,
+                !nextFirst.resolved &&
+                  nextFirst.result.status === 'waiting_cli' &&
+                  (ending === 'next-retries' ? restores > 0 : restores === 0) &&
+                  isDeepEqual(reports, ['aborted-by-next']) &&
+                  nextParked.keptMetadata?.[RENDER_REL]?.mode === 0o600 &&
+                  cancelledKept === undefined,
+                {
+                  first: nextFirst.resolved ? 'resolved' : nextFirst.result.status,
+                  restores,
+                  reports,
+                  next: nextParked.keptMetadata,
+                  cancelled: cancelledKept,
+                },
+              );
+              await db
+                .update(schema.cliInvocations)
+                .set({
+                  exitCode: 0,
+                  rawOutput: '```json\n{"status":"resolved"}\n```',
+                  startedAt: new Date(),
+                  endedAt: new Date(),
+                })
+                .where(eq(schema.cliInvocations.id, nextParked.fixInvocationId!));
+              await writeFile(path.join(c.dest, 'conflict.txt'), 'resolved\n');
+              const nextSecond = await next.call([fixerProvider]);
+              const nextKept = (await next.stepRow())!.mergeResolveState!.keptMetadata;
+              const modes = {
+                file: await modeIn(path.join(c.dest, RENDER_REL)),
+                dir: await modeIn(recordDir),
+              };
+              const stillKept = (await stepRow())!.mergeResolveState!.keptMetadata;
+              check(
+                `C12: ${ending}: when the next task's merge ends the file is at the mode it had, in the directory it had, and neither step keeps a record of them`,
+                nextSecond.resolved &&
+                  isAncestor(c.dest, upstream, 'HEAD') &&
+                  isAncestor(c.dest, local, 'HEAD') &&
+                  !mergeOpen(c.dest) &&
+                  modes.file === 0o600 &&
+                  modes.dir === 0o700 &&
+                  nextKept === undefined &&
+                  stillKept === undefined,
+                {
+                  second: nextSecond.resolved ? 'resolved' : nextSecond.result.status,
+                  file: modes.file?.toString(8) ?? null,
+                  dir: modes.dir?.toString(8) ?? null,
+                  nextKept,
+                  stillKept,
+                },
+              );
+            } finally {
+              await db.delete(schema.tasks).where(eq(schema.tasks.id, next.task!.id));
+            }
             return;
           }
           const answered = ending === 'finishes' || ending === 'max-rounds';
