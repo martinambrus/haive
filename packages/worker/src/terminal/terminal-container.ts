@@ -9,6 +9,7 @@ import {
   serversToJsonObject,
   type McpServerSpec,
 } from '../sandbox/mcp-config.js';
+import { internalApiUrl } from '../sandbox/mcp-surface.js';
 import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
 import type { DockerVolumeMount } from '../sandbox/docker-runner.js';
 import { resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
@@ -335,7 +336,7 @@ export async function ensureShellContainer(
   // pushes server-side). The token is written to a file once the container
   // runs: an env var cannot change, and the token expires.
   if (scope === 'repo' && gitCredSecret) {
-    const apiBase = process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
+    const apiBase = internalApiUrl();
     envList.push(`HAIVE_GIT_CRED_URL=${apiBase}/internal/git-credential`);
   }
   let shellContainer: Docker.Container;

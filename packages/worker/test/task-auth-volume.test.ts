@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupTaskAuthVolumes,
   clearTaskAuthPreparationState,
@@ -925,6 +929,114 @@ describe('mergeCliMcpIntoTaskVolume', () => {
   });
 });
 
+// The helper script under a real sh, the sandbox home on a temp dir, a stub grok failing one add.
+describe('mergeCliMcpIntoTaskVolume when an mcp add fails', () => {
+  const TASK = 'task-mcp-shell';
+  const taskVol = 'haive_cli_auth_task_taskmcpshell_grok_0';
+  const RAG: McpServerSpec = { name: 'haive-rag', command: 'node', args: ['/haive/rag.mjs'] };
+  const CUSTOM: McpServerSpec = {
+    name: 'haive-custom',
+    command: 'node',
+    args: ['/haive/custom.mjs'],
+  };
+  let root: string;
+  let failing: string;
+  let results: DockerRunResult[];
+
+  const stub = (name: string, lines: string[]): void => {
+    const file = join(root, 'bin', name);
+    writeFileSync(file, `#!/bin/sh\n${lines.join('\n')}\n`);
+    chmodSync(file, 0o755);
+  };
+  const logged = (name: string): string[] =>
+    readFileSync(join(root, name), 'utf8').split('\n').filter(Boolean);
+  const marker = (): string => join(root, 'home', '.grok', '.haive-mcp-managed');
+
+  const shellRunner = (): ReturnType<typeof makeRunner> =>
+    makeRunner({
+      preExistingVolumes: [taskVol],
+      runHandler: (call) => {
+        const done = spawnSync(
+          'sh',
+          ['-c', call.cmd[2]!.replaceAll('/home/node', join(root, 'home'))],
+          {
+            env: { PATH: `${join(root, 'bin')}:/usr/bin:/bin`, STUB_DIR: root, STUB_FAIL: failing },
+            encoding: 'utf8',
+          },
+        );
+        const result = {
+          exitCode: done.status ?? 1,
+          stdout: done.stdout,
+          stderr: done.stderr,
+          durationMs: 1,
+          timedOut: false,
+        };
+        results.push(result);
+        return result;
+      },
+    });
+  const merge = (runner: DockerRunner): Promise<boolean> =>
+    mergeCliMcpIntoTaskVolume(TASK, 'grok', 'img:tag', [RAG, CUSTOM], runner);
+
+  beforeEach(() => {
+    clearTaskAuthPreparationState(TASK);
+    root = mkdtempSync(join(tmpdir(), 'haive-mcp-merge-'));
+    mkdirSync(join(root, 'bin'));
+    mkdirSync(join(root, 'home', '.grok'), { recursive: true });
+    stub('runuser', ['shift 3', 'exec "$@"']);
+    stub('chown', ['echo "$@" >> "$STUB_DIR/chown.log"']);
+    stub('grok', [
+      'echo "$@" >> "$STUB_DIR/grok.log"',
+      'if [ "$2" = add ]; then',
+      '  for arg in "$@"; do',
+      '    [ "$arg" = "$STUB_FAIL" ] && exit 1',
+      '  done',
+      'fi',
+      'exit 0',
+    ]);
+    failing = '';
+    results = [];
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it.each([RAG, CUSTOM])(
+    'answers false when the add of $name fails, and records the slot only once the retry lands',
+    async (broken) => {
+      failing = broken.name;
+      const runner = shellRunner();
+      expect(await merge(runner)).toBe(false);
+      expect(results[0]!.exitCode).not.toBe(0);
+      expect(results[0]!.stderr).toContain(`haive-mcp: add ${broken.name} failed`);
+      // Both adds were tried, the marker lists both, and the closing ownership repair ran.
+      expect(logged('grok.log').filter((line) => line.startsWith('mcp add'))).toHaveLength(2);
+      expect(readFileSync(marker(), 'utf8')).toBe('haive-rag\nhaive-custom\n');
+      expect(logged('chown.log')).toHaveLength(2);
+
+      failing = '';
+      expect(await merge(runner)).toBe(true);
+      expect(results[1]!.exitCode).toBe(0);
+      expect(runner.runCalls).toHaveLength(2);
+    },
+  );
+
+  it('answers true, and skips a repeat, when every add lands', async () => {
+    const runner = shellRunner();
+    expect(await merge(runner)).toBe(true);
+    expect(results[0]!.exitCode).toBe(0);
+    expect(readFileSync(marker(), 'utf8')).toBe('haive-rag\nhaive-custom\n');
+    expect(await merge(runner)).toBe(true);
+    expect(runner.runCalls).toHaveLength(1);
+  });
+
+  it('exits zero for an empty surface, which has no add to fail', async () => {
+    failing = 'haive-rag';
+    const runner = shellRunner();
+    expect(await mergeCliMcpIntoTaskVolume(TASK, 'grok', 'img:tag', [], runner)).toBe(true);
+    expect(results[0]!.exitCode).toBe(0);
+    expect(readFileSync(marker(), 'utf8')).toBe('');
+  });
+});
+
 describe('mergeGeminiMcpIntoSettings', () => {
   const taskVol = 'haive_cli_auth_task_taskgem0000_gemini_1';
   const servers = { 'haive-rag': { command: 'node', args: ['/haive/haive-rag-mcp.mjs'] } };
@@ -1059,5 +1171,102 @@ describe('writeMcpFileIntoTaskVolume', () => {
       runner,
     );
     expect(runner.runCalls).toHaveLength(0);
+  });
+});
+
+// Each writer reports whether its preparation is in place; a caller that needs it checks.
+describe('whether an MCP preparation is in place', () => {
+  const RAG_SERVER: McpServerSpec = {
+    name: 'haive-rag',
+    command: 'node',
+    args: ['/haive/haive-rag-mcp.mjs'],
+  };
+  const AGY_CONFIG = '/home/node/.gemini/antigravity-cli/mcp_config.json';
+  const writers = [
+    {
+      name: 'mergeCliMcpIntoTaskVolume',
+      volume: (task: string) => resolveTaskAuthMounts('grok', task)[0]!.source,
+      call: (task: string, runner: DockerRunner) =>
+        mergeCliMcpIntoTaskVolume(task, 'grok', 'img:tag', [RAG_SERVER], runner),
+    },
+    {
+      name: 'mergeGeminiMcpIntoSettings',
+      volume: (task: string) => resolveTaskAuthMounts('gemini', task)[1]!.source,
+      call: (task: string, runner: DockerRunner) =>
+        mergeGeminiMcpIntoSettings(task, { 'haive-rag': { command: 'node' } }, runner),
+    },
+    {
+      name: 'writeMcpFileIntoTaskVolume',
+      volume: (task: string) => resolveTaskAuthMounts('antigravity', task)[0]!.source,
+      call: (task: string, runner: DockerRunner) =>
+        writeMcpFileIntoTaskVolume(task, 'antigravity', AGY_CONFIG, '{"a":1}', runner),
+    },
+  ];
+  const helperExit = (exitCode: number): DockerRunResult => ({
+    exitCode,
+    stdout: '',
+    stderr: exitCode === 0 ? '' : 'boom',
+    durationMs: 1,
+    timedOut: false,
+  });
+
+  describe.each(writers)('$name', ({ volume, call }) => {
+    const task = 'task-in-place';
+    beforeEach(() => clearTaskAuthPreparationState(task));
+
+    it('resolves true once its helper has run and succeeded', async () => {
+      const runner = makeRunner({ preExistingVolumes: [volume(task)] });
+      expect(await call(task, runner)).toBe(true);
+      expect(runner.runCalls).toHaveLength(1);
+    });
+
+    it('resolves true for a repeat of the preparation already applied, which runs nothing', async () => {
+      const runner = makeRunner({ preExistingVolumes: [volume(task)] });
+      expect(await call(task, runner)).toBe(true);
+      expect(await call(task, runner)).toBe(true);
+      expect(runner.runCalls).toHaveLength(1);
+    });
+
+    it('resolves false when its helper fails, and true once a retry lands', async () => {
+      let exitCode = 1;
+      const runner = makeRunner({
+        preExistingVolumes: [volume(task)],
+        runHandler: () => helperExit(exitCode),
+      });
+      expect(await call(task, runner)).toBe(false);
+      exitCode = 0;
+      expect(await call(task, runner)).toBe(true);
+      expect(runner.runCalls).toHaveLength(2);
+    });
+
+    it('resolves false when the task volume is not there to write into', async () => {
+      const runner = makeRunner();
+      expect(await call(task, runner)).toBe(false);
+      expect(runner.runCalls).toHaveLength(0);
+    });
+
+    it('gives every caller coalesced onto one helper run the answer of that run', async () => {
+      const landed = makeRunner({ preExistingVolumes: [volume(task)] });
+      const together = await Promise.all([
+        call(task, landed),
+        call(task, landed),
+        call(task, landed),
+      ]);
+      expect(together).toEqual([true, true, true]);
+      expect(landed.runCalls).toHaveLength(1);
+
+      clearTaskAuthPreparationState(task);
+      const failing = makeRunner({
+        preExistingVolumes: [volume(task)],
+        runHandler: () => helperExit(1),
+      });
+      const apart = await Promise.all([
+        call(task, failing),
+        call(task, failing),
+        call(task, failing),
+      ]);
+      expect(apart).toEqual([false, false, false]);
+      expect(failing.runCalls).toHaveLength(1);
+    });
   });
 });

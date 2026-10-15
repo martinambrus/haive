@@ -34,9 +34,15 @@ import {
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
+import {
+  CUSTOM_MCP_SERVER_JS,
+  CUSTOM_MCP_SERVER_PATH,
+  CUSTOM_MCP_TOKEN_PATH,
+  CUSTOM_MCP_TOOLS_PATH,
+} from '../../sandbox/custom-mcp-server.js';
 import { CHROME_MCP_PROXY_JS, CHROME_MCP_PROXY_PATH } from '../../sandbox/chrome-mcp-proxy.js';
 import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
-import { resolveMcpSurface, type McpProfile } from '../../sandbox/mcp-surface.js';
+import { resolveMcpSurface, type McpProfile, type McpSurface } from '../../sandbox/mcp-surface.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
 import { appRunnerBrowserCdpUrl } from '../../sandbox/app-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
@@ -57,6 +63,9 @@ import { sandboxWorktreePath, splitRepoSubpath } from '../../repo/worktree-paths
 import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { customToolInputSchema, parsePinnedCustomSteps } from '@haive/shared/modularity';
+import { pinnedToolsFailure } from '../../step-engine/steps/custom/pinned-tools.js';
+import { signTaskToken } from '@haive/shared/task-token';
 import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
 import {
   HOST_REPO_ROOT,
@@ -227,6 +236,82 @@ export function networkPolicyReachesPackageRegistries(policy: CliNetworkPolicy |
   return !policy || policy.mode === 'full';
 }
 
+const CUSTOM_TOKEN_GRACE_SECONDS = 15 * 60;
+
+type CustomRun = Pick<
+  CliExecJobPayload,
+  'customTools' | 'invocationId' | 'taskStepId' | 'timeoutMs'
+>;
+
+export const CUSTOM_TOOLS_UNWIRED_REASON = 'custom-tools-unwired';
+
+const unwired = (cause: string, names: readonly string[]): Error =>
+  new Error(
+    `${CUSTOM_TOOLS_UNWIRED_REASON}: the tools of this run (${names.join(', ')}) cannot be wired because ${cause}. The CLI was not started; fix that, then retry the step.`,
+  );
+
+/** The haive-custom script, tool list and this run's token as sandbox files; throws when the tools the prompt advertises cannot be wired. */
+async function resolveCustomFiles(
+  db: Database,
+  taskId: string,
+  run: CustomRun,
+  custom: NonNullable<McpSurface['custom']>,
+): Promise<SandboxExtraFile[]> {
+  const names = custom.tools;
+  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+    throw unwired('custom tools are switched off on this install', names);
+  }
+  if (!custom.enabled) {
+    throw unwired(
+      'CONFIG_ENCRYPTION_KEY is not set on the worker, so their token cannot be signed',
+      names,
+    );
+  }
+  if (run.taskStepId === null) throw unwired('the run is not tied to a step', names);
+  const step = await db.query.taskSteps.findFirst({
+    where: and(eq(schema.taskSteps.id, run.taskStepId), eq(schema.taskSteps.taskId, taskId)),
+    columns: { stepId: true },
+  });
+  if (!step) throw unwired('the step of the run no longer exists', names);
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { customSteps: true },
+  });
+  const pinnedTools = parsePinnedCustomSteps(task?.customSteps)[step.stepId]?.tools ?? [];
+  const invalid = pinnedToolsFailure(pinnedTools);
+  if (invalid !== null) throw new Error(invalid);
+  const tools = pinnedTools.filter((tool) => names.includes(tool.name));
+  if (tools.length === 0) throw unwired('the step has none of them pinned', names);
+  const missing = names.filter((name) => !tools.some((tool) => tool.name === name));
+  if (missing.length > 0) throw unwired(`the step does not pin ${missing.join(', ')}`, names);
+  const token = signTaskToken(
+    {
+      aud: 'custom-mcp',
+      taskId,
+      taskStepId: run.taskStepId,
+      cliInvocationId: run.invocationId,
+      ...(run.timeoutMs === undefined
+        ? {}
+        : { ttlSeconds: Math.ceil(run.timeoutMs / 1000) + CUSTOM_TOKEN_GRACE_SECONDS }),
+    },
+    process.env.CONFIG_ENCRYPTION_KEY as string,
+  );
+  return [
+    { containerPath: CUSTOM_MCP_SERVER_PATH, content: CUSTOM_MCP_SERVER_JS },
+    {
+      containerPath: CUSTOM_MCP_TOOLS_PATH,
+      content: JSON.stringify(
+        tools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: customToolInputSchema(tool),
+        })),
+      ),
+    },
+    { containerPath: CUSTOM_MCP_TOKEN_PATH, content: token },
+  ];
+}
+
 export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
@@ -259,6 +344,8 @@ export async function resolveMcpExtraFiles(
   /** The invocation's effective egress. Required, like the two flags above: a default would let
    *  a new call site declare a server the sandbox cannot fetch. */
   networkPolicy: CliNetworkPolicy | null,
+  /** The run these files are for; only a prompt step's own run names custom tools. */
+  run?: CustomRun,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
@@ -270,7 +357,9 @@ export async function resolveMcpExtraFiles(
   // THE decision — shared with the dispatcher, which renders the same object into the
   // prompt. Materialization below must read it rather than re-deriving any part, or a
   // prompt can advertise a server this mount does not wire.
-  const surface = await resolveMcpSurface(db, taskId, ragOnly);
+  const surface = await resolveMcpSurface(db, taskId, ragOnly, run?.customTools);
+  const customFiles =
+    run && surface.custom ? await resolveCustomFiles(db, taskId, run, surface.custom) : null;
 
   const ragLspAvailable =
     cliAdapterRegistry.has(providerName) &&
@@ -358,6 +447,9 @@ export async function resolveMcpExtraFiles(
     ddevControlServerPath: DDEV_MCP_SERVER_PATH,
     ddevApiUrl: surface.ddevControl.apiUrl,
     ddevToken: surface.ddevControl.token,
+    includeCustomTools: customFiles !== null,
+    customServerPath: CUSTOM_MCP_SERVER_PATH,
+    customApiUrl: surface.custom?.apiUrl,
   });
 
   // User's custom MCP servers (.claude/mcp_settings.json) merged additively so
@@ -385,10 +477,25 @@ export async function resolveMcpExtraFiles(
   // ONE list, spread at every return below. Each delivery mode returns its own `files`, so
   // three separate arrays combined per-site is where a newly added server quietly misses a
   // branch -- and a missing script file means its MCP server does not start at all.
-  const serverFiles: SandboxExtraFile[] = [...ragFiles, ...ddevFiles, ...chromeFiles];
+  const serverFiles: SandboxExtraFile[] = [
+    ...ragFiles,
+    ...ddevFiles,
+    ...chromeFiles,
+    ...(customFiles ?? []),
+  ];
 
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME, userServers);
   if (!config) return empty;
+
+  // Best-effort for every run but one naming custom tools, which cannot start without its entry.
+  const requireWritten = (written: boolean): void => {
+    if (!written && surface.custom) {
+      throw unwired(
+        "the CLI's MCP configuration could not be written to its task volume",
+        surface.custom.tools,
+      );
+    }
+  };
 
   // Only a `bind` config may become an extra file. Every other delivery mode names a path INSIDE
   // the CLI's auth-volume mount, where a bind mount is destructive in two ways at once — see the
@@ -398,18 +505,24 @@ export async function resolveMcpExtraFiles(
     case 'volume-merge':
       // Gemini reads MCP servers from the SAME settings.json that holds `selectedAuthType`, so
       // the merge has to preserve the fields it does not own.
-      await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers));
+      requireWritten(
+        await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers)),
+      );
       return { files: serverFiles, extraArgs: [] };
     case 'cli-merge':
-      await mergeCliMcpIntoTaskVolume(
-        taskId,
-        providerName,
-        sandboxImage,
-        resolveStdioMcpServers(servers, userServers),
+      requireWritten(
+        await mergeCliMcpIntoTaskVolume(
+          taskId,
+          providerName,
+          sandboxImage,
+          resolveStdioMcpServers(servers, userServers),
+        ),
       );
       return { files: serverFiles, extraArgs: [] };
     case 'volume-write':
-      await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content);
+      requireWritten(
+        await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content),
+      );
       return { files: serverFiles, extraArgs: [] };
     case 'bind':
       return {

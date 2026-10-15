@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   CUSTOM_TOOL_PROBLEM_KINDS,
+  INVALID_TOOLS_SHOWN,
   customToolArgsSchema,
   customToolInputSchema,
   customToolSchema,
   customToolUrl,
+  describeInvalidTools,
+  shownToolName,
   validateCustomTool,
   validateCustomTools,
   type CustomTool,
@@ -1446,5 +1449,71 @@ describe('customToolUrl', () => {
 
   it('refuses a template it cannot read, rather than guessing a URL', () => {
     expect(refused(http({ url: 'not a url' }), { repo: 'haive' })).toMatch(/URL/i);
+  });
+});
+
+describe('shownToolName', () => {
+  it('leaves a short single-line name as it is', () => {
+    expect(shownToolName('repo_status')).toBe('repo_status');
+    expect(shownToolName('x'.repeat(64))).toBe('x'.repeat(64));
+  });
+
+  it('cuts a longer name to 64 characters, ending in an ellipsis', () => {
+    const shown = shownToolName('x'.repeat(65));
+    expect(shown).toHaveLength(64);
+    expect(shown).toBe(`${'x'.repeat(63)}…`);
+    expect(shownToolName('y'.repeat(2_000_000))).toHaveLength(64);
+  });
+
+  it('never ends in half of a surrogate pair', () => {
+    const shown = shownToolName(`${'x'.repeat(62)}😀😀`);
+    expect(shown.isWellFormed()).toBe(true);
+    expect(shown.length).toBeLessThanOrEqual(64);
+  });
+
+  it('puts a name on one line, whatever whitespace or control characters it holds', () => {
+    expect(shownToolName(`a${LF}b${TAB}${BEL}c`)).toBe('a b c');
+    expect(shownToolName(`${NEL}x${LAST_C1}`)).toBe('x');
+  });
+
+  it('gives a name with nothing in it a name to show', () => {
+    expect(shownToolName('')).toBe('(unnamed)');
+    expect(shownToolName(`  ${LF} `)).toBe('(unnamed)');
+  });
+});
+
+describe('describeInvalidTools', () => {
+  it('lists each name as inline code', () => {
+    expect(describeInvalidTools(['a'])).toBe('`a`');
+    expect(describeInvalidTools(['a', '#1', 'b'])).toBe('`a`, `#1`, `b`');
+  });
+
+  it('lists at most 8 names and counts the rest', () => {
+    const names = Array.from({ length: INVALID_TOOLS_SHOWN + 3 }, (_, i) => `t${i}`);
+    expect(describeInvalidTools(names.slice(0, INVALID_TOOLS_SHOWN))).toBe(
+      names
+        .slice(0, INVALID_TOOLS_SHOWN)
+        .map((n) => `\`${n}\``)
+        .join(', '),
+    );
+    const text = describeInvalidTools(names);
+    expect(text.endsWith(' and 3 more')).toBe(true);
+    expect(text).toContain('`t7`');
+    expect(text).not.toContain('`t8`');
+  });
+
+  it('keeps the message short however many names or characters it is given', () => {
+    const text = describeInvalidTools(Array.from({ length: 5000 }, () => 'n'.repeat(5000)));
+    expect(text.length).toBeLessThan(1000);
+    expect(text.endsWith(' and 4992 more')).toBe(true);
+  });
+
+  it('keeps a backtick in a name from closing its span', () => {
+    expect(describeInvalidTools(['a`b'])).toBe('`` a`b ``');
+    expect(describeInvalidTools(['a``b'])).toBe('``` a``b ```');
+  });
+
+  it('is empty for no names', () => {
+    expect(describeInvalidTools([])).toBe('');
   });
 });
