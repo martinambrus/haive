@@ -961,6 +961,7 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
   const script = [
     'set -u',
     SANDBOX_USER_PREFIX_INIT,
+    'add_failed=0',
     repairOwnership(home),
     // `mcp remove <name>` is the same on grok and codex (measured against 1.0.3 / 0.147.0);
     // only `mcp add` differs, which is why that one goes through buildMcpAddArgv.
@@ -975,7 +976,7 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
     ...servers.map((server) => {
       const argv = buildMcpAddArgv(providerName, server).map(shellQuote).join(' ');
       const failure = shellQuote(`haive-mcp: add ${server.name} failed`);
-      return `${runCli} ${argv} >/dev/null || echo ${failure} >&2`;
+      return `${runCli} ${argv} >/dev/null || { echo ${failure} >&2; add_failed=1; }`;
     }),
     // Written by the root shell (the redirection is the shell's, not the CLI's) and owned
     // back by the trailing repair. Nothing but this module reads it, so the sub-second
@@ -984,6 +985,8 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
       ? `printf '%s\\n' ${servers.map((s) => shellQuote(s.name)).join(' ')} > ${quotedMarker}`
       : `: > ${quotedMarker}`,
     repairOwnership(home),
+    // Exits last, so the marker and the repair above still run when an add failed.
+    'exit "$add_failed"',
   ].join('\n');
 
   const result = await runner.run({
