@@ -29,6 +29,7 @@ import { ragRoutes } from './routes/rag.js';
 import { ragPlaygroundRoutes } from './routes/rag-playground.js';
 import { ddevControlRoutes } from './routes/ddev-control.js';
 import { customMcpRoutes } from './routes/custom-mcp.js';
+import { integrationMcpRoutes } from './routes/integration-mcp.js';
 import { systemRoutes } from './routes/system.js';
 import { taskRoutes } from './routes/tasks.js';
 import { usageWindowRoutes } from './routes/usage-window.js';
@@ -114,6 +115,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/rag/playground', ragPlaygroundRoutes);
   app.route('/ddev', ddevControlRoutes);
   app.route('/custom-mcp', customMcpRoutes);
+  app.route('/integration-mcp', integrationMcpRoutes);
   app.route('/internal', internalRoutes);
   app.route('/global-kb', globalKbRoutes);
   app.route('/terminal-sessions', terminalSessionRoutes);

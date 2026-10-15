@@ -12,6 +12,7 @@ import { schema, type Database } from '@haive/database';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { ForgeRateLimitError, resolveForgeContext, resolveForgeProvider } from '../forge/index.js';
+import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
 const log = logger.child({ module: 'pr-poll' });
 
@@ -61,9 +62,7 @@ function getTaskQueue(): Queue<TaskJobPayload> {
 }
 
 /** Idempotent: upsertJobScheduler keys on POLL_JOB_ID so a restart updates the one
- *  scheduler. The legacy-repeatable pre-sweep this used to carry is gone — bullmq 6
- *  removed getRepeatableJobs/removeRepeatableByKey, and 38e13a2 already cleared the
- *  backlog while those APIs still existed. */
+ *  scheduler. pruneJobSchedulers (job-scheduler-prune.ts) removes any legacy repeatable left. */
 export async function schedulePrPollTick(): Promise<void> {
   const queue = getPrPollQueue();
   await queue.upsertJobScheduler(
@@ -71,6 +70,7 @@ export async function schedulePrPollTick(): Promise<void> {
     { every: POLL_INTERVAL_MS },
     { name: POLL_JOB_NAME, opts: { removeOnComplete: true, removeOnFail: 10 } },
   );
+  await pruneJobSchedulers(queue, [POLL_JOB_ID]);
 }
 
 export function startPrPollWorker(): Worker {

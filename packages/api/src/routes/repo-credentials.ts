@@ -11,7 +11,7 @@ import {
   forgeProviderSchema,
   secretsService,
 } from '@haive/shared';
-import { credentialForgeProvider, resolveForgeProvider } from '@haive/shared/forge';
+import { apiBaseFits } from '@haive/shared/forge';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -59,43 +59,10 @@ const hostField = z
 const API_BASE_ON_HOST =
   "apiBaseUrl must be an https URL on the credential's host or its forge's API host, with no user, query or fragment";
 
-type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };
-
-/** The host of the forge's default API base, which for github.com and bitbucket.org is not the web host. */
-function forgeApiHost(provider: string | null | undefined, host: string): string | null {
-  const forge = credentialForgeProvider(provider, host);
-  if (!forge) return null;
-  try {
-    return new URL(resolveForgeProvider(forge).defaultApiBase(host)).host;
-  } catch {
-    return null;
-  }
-}
-
-/** A blank API base falls back to the provider's own; a set one must be https on the credential's or the forge's host.
- *  Endpoint paths are appended to the stored text, so a `?` or `#` in it would swallow them. */
-const apiBaseOnHost = (b: ApiBaseTarget) => {
-  const base = b.apiBaseUrl?.trim();
-  if (!base) return true;
-  try {
-    const url = new URL(base);
-    const host = b.host.trim().toLowerCase();
-    return (
-      url.protocol === 'https:' &&
-      url.username === '' &&
-      url.password === '' &&
-      !/[?#]/.test(base) &&
-      (url.host === host || url.host === forgeApiHost(b.provider, host))
-    );
-  } catch {
-    return false;
-  }
-};
-
 // What an edit leaves behind: the stored provider and URL stand in for whatever the request omits.
 const apiBaseTargetSchema = z
   .object({ host: z.string(), provider: z.string().nullish(), apiBaseUrl: z.string().nullish() })
-  .refine(apiBaseOnHost, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
+  .refine(apiBaseFits, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
 
 const createCredentialSchema = z
   .object({
@@ -113,7 +80,7 @@ const createCredentialSchema = z
     gitEmail: gitEmailField,
   })
   .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] })
-  .refine(apiBaseOnHost, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
+  .refine(apiBaseFits, { message: API_BASE_ON_HOST, path: ['apiBaseUrl'] });
 
 // Edit: label/host always; username/secret optional — blank means "keep the
 // current value" (the encrypted values are never sent to the client, so the
