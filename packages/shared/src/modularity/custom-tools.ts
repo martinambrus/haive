@@ -24,14 +24,14 @@ export const RAG_QUERY_TOP_K_MAX = 20;
 export const INVALID_TOOLS_SHOWN = 8;
 
 const INVALID_TOOL_NAME_SHOWN_LENGTH = 64;
-const CUSTOM_TOOL_TIMEOUT_DEFAULT_MS = 10_000;
-const CUSTOM_TOOL_RESPONSE_DEFAULT_BYTES = 32_768;
+export const CUSTOM_TOOL_TIMEOUT_DEFAULT_MS = 10_000;
+export const CUSTOM_TOOL_RESPONSE_DEFAULT_BYTES = 32_768;
 const CUSTOM_TOOL_STRING_MAX_LENGTH = 512;
-const CUSTOM_TOOL_STRING_DEFAULT_LENGTH = 128;
+export const CUSTOM_TOOL_STRING_DEFAULT_LENGTH = 128;
 const CUSTOM_TOOL_ENUM_MAX_VALUES = 20;
 const CUSTOM_TOOL_ENUM_VALUE_MAX_LENGTH = 64;
 const RAG_QUERY_MAX_LENGTH = 500;
-const RAG_QUERY_TOP_K_DEFAULT = 8;
+export const RAG_QUERY_TOP_K_DEFAULT = 8;
 const RAG_QUERY_SCOPES = ['project', 'global', 'all'] as const;
 
 // C0 (TAB, LF and CR included), DEL and C1.
@@ -179,6 +179,8 @@ export interface CustomToolProblem {
   kind: CustomToolProblemKind;
   /** The name of the tool it is about, as written; empty for a problem of the whole list. */
   tool: string;
+  /** The parameter it is about, as written; set only on the parameter kinds. */
+  param?: string;
   message: string;
 }
 
@@ -186,7 +188,7 @@ export interface CustomToolValidationContext {
   requiresRepository: boolean;
 }
 
-type Add = (kind: CustomToolProblemKind, message: string) => void;
+type Add = (kind: CustomToolProblemKind, message: string, param?: string) => void;
 
 const PLACEHOLDER = /\{([^{}]*)\}/g;
 const URL_PARTS = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/s;
@@ -349,10 +351,12 @@ function checkParams(
       add(
         'tool-param-invalid',
         `The parameter ${JSON.stringify(param.name)} is not valid: ${problem}.`,
+        param.name,
       );
     }
   }
-  for (const name of repeated) add('tool-param-duplicate', `Two parameters are named ${name}.`);
+  for (const name of repeated)
+    add('tool-param-duplicate', `Two parameters are named ${name}.`, name);
 }
 
 function checkUsage(declared: readonly string[], used: readonly string[], add: Add): void {
@@ -362,6 +366,7 @@ function checkUsage(declared: readonly string[], used: readonly string[], add: A
       add(
         'tool-param-undeclared',
         `The URL or query list uses ${JSON.stringify(name)}, which is not a declared parameter.`,
+        name,
       );
     }
   }
@@ -371,11 +376,13 @@ function checkUsage(declared: readonly string[], used: readonly string[], add: A
       add(
         'tool-param-unused',
         `The parameter ${name} is not used in the URL path or the query list.`,
+        name,
       );
     } else if (times > 1) {
       add(
         'tool-param-reused',
         `The parameter ${name} is used ${times} times; use each parameter once, in the URL path or the query list.`,
+        name,
       );
     }
   }
@@ -386,7 +393,8 @@ export function validateCustomTool(
   ctx: CustomToolValidationContext,
 ): CustomToolProblem[] {
   const problems: CustomToolProblem[] = [];
-  const add: Add = (kind, message) => problems.push({ kind, tool: tool.name, message });
+  const add: Add = (kind, message, param) =>
+    problems.push({ kind, tool: tool.name, message, ...(param === undefined ? {} : { param }) });
 
   if (!TOOL_NAME_PATTERN.test(tool.name)) {
     add(

@@ -66,6 +66,7 @@ export interface PromptStepIssue {
   message: string;
   raw?: string;
   start?: number;
+  param?: string;
 }
 
 /** Every custom id in the step list has an entry of this type, every entry is used, and each validates where it stands. */
@@ -102,8 +103,16 @@ export function checkPromptSteps(
       stepIdsBefore: def.stepIds.slice(0, index),
       quotableStepIds,
     });
-    for (const { kind, message, raw, start } of problems) {
-      issues.push({ kind, stepId, index, message, raw, start });
+    for (const { kind, message, raw, start, param } of problems) {
+      issues.push({
+        kind,
+        stepId,
+        index,
+        message,
+        raw,
+        start,
+        ...(param === undefined ? {} : { param }),
+      });
     }
   });
   for (const stepId of byId.keys()) {

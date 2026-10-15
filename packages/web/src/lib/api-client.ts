@@ -10,6 +10,7 @@ import type {
   ModuleDiff,
   ModuleIntentRow,
   PromptStepEntry,
+  PromptStepIssue,
   PublicTaskType,
   TaskTypeAvailability,
   TaskTypeUpdate,
@@ -2467,6 +2468,11 @@ export const maintenanceApi = {
     ),
 };
 
+/** A prompt step as the api returns it: a row stored before tools existed has none. */
+export type StoredPromptStep = Omit<PromptStepEntry, 'tools'> & {
+  tools?: PromptStepEntry['tools'];
+};
+
 export interface AdminTaskType {
   slug: string;
   displayName: string;
@@ -2475,7 +2481,7 @@ export interface AdminTaskType {
   stepIds: string[] | null;
   preAnswerDefaults: Record<string, Record<string, unknown>>;
   stepLoopLimitDefaults: Record<string, number>;
-  promptSteps: Record<string, PromptStepEntry>;
+  promptSteps: Record<string, StoredPromptStep>;
   fixLoop: unknown;
   enabled: boolean;
   selectable: boolean;
@@ -2510,6 +2516,7 @@ export const getAdminTaskType = (slug: string) =>
     taskType: AdminTaskType;
     availability: TaskTypeAvailability;
     compositionIssues: CompositionIssue[];
+    promptStepIssues?: PromptStepIssue[];
   }>(`/admin/task-types/${encodeURIComponent(slug)}`);
 
 export const getTaskTypeCatalog = () => api.get<TaskTypeCatalog>('/admin/task-types/catalog');
@@ -2531,6 +2538,12 @@ export function changedTaskType(err: ApiError): AdminTaskType | null {
 
 export const deleteTaskType = (slug: string) =>
   api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);
+
+export const getCustomToolsSwitch = () =>
+  api.get<{ enabled: boolean }>('/admin/config/custom-tools');
+
+export const setCustomToolsSwitch = (enabled: boolean) =>
+  api.put<{ enabled: boolean }>('/admin/config/custom-tools', { enabled });
 
 /** The step every type_draft task cycles on; its revise loop re-targets itself, so submitting by step id is unambiguous. */
 export const TYPE_DRAFT_STEP_ID = '01-type-draft';

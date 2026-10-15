@@ -21,6 +21,7 @@ import {
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
 } from '@haive/shared';
+import { reconcileStrandedSyncingBundles } from '../data-migrations.js';
 import {
   enqueueAdvance,
   enqueueCancel,
@@ -659,6 +660,7 @@ export class StalledTaskSweeper {
     let redriven = await redriveStalledTasks(this.db, defaultDeps, { staleMs: this.staleMs });
     redriven += await redriveCancelledTasks(this.db, defaultCancelDeps, { staleMs: this.staleMs });
     redriven += await redriveRepoCleanups(this.db);
+    await reconcileStrandedSyncingBundles(this.db);
     return { redriven };
   }
 }

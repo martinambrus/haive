@@ -5,6 +5,7 @@ const runInSandbox = vi.fn();
 const release = vi.fn(async () => undefined);
 const acquireAgentLease = vi.fn();
 const resolveAppReach = vi.fn();
+const haiveDataBoundary = vi.fn();
 
 vi.mock('./npm-cache.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./npm-cache.js')>()),
@@ -50,6 +51,9 @@ vi.mock('../queues/cli-exec/gitfile-mask.js', async (importOriginal) => ({
     masks: [{ containerPath: '/haive/workdir/.git/config', content: '' }],
   }),
 }));
+vi.mock('../queues/cli-exec/haive-data-boundary.js', () => ({
+  haiveDataBoundary: (...args: unknown[]) => haiveDataBoundary(...args),
+}));
 
 const { runStepCommandInSandbox, BINARY_MISSING_EXIT } = await import('./step-command.js');
 const { AgentLeaseAbortedError, AgentLeaseTimeoutError } =
@@ -82,6 +86,20 @@ function ran(exitCode: number | null, stdout = '', stderr = '') {
 }
 
 beforeEach(() => {
+  haiveDataBoundary.mockReset();
+  haiveDataBoundary.mockResolvedValue([
+    {
+      source: 'haive_repos',
+      target: '/haive/workdir/.haive-data',
+      subpath: 'u/r/wt/.haive-data',
+      readOnly: true,
+    },
+    {
+      source: 'haive_repos',
+      target: '/haive/workdir/.haive-data/knowledge_base',
+      subpath: 'u/r/wt/.haive-data/knowledge_base',
+    },
+  ]);
   runInSandbox.mockReset();
   release.mockClear();
   acquireAgentLease.mockReset();
@@ -243,9 +261,15 @@ describe('runStepCommandInSandbox', () => {
     expect(options.extraMounts.some((m: { kind?: string }) => m.kind === 'auth')).toBe(false);
     expect(options.extraMounts.map((m: { target: string }) => m.target)).toEqual([
       '/haive/workdir/.git',
+      '/haive/workdir/.haive-data',
+      '/haive/workdir/.haive-data/knowledge_base',
       '/haive/workdir',
       '/haive-npm-cache',
     ]);
+    expect(haiveDataBoundary).toHaveBeenCalledWith(
+      { source: 'haive_repos', target: '/haive/workdir', subpath: 'u/r/wt' },
+      { hasRepo: true },
+    );
     expect(options.addHosts).toBeUndefined();
     expect(options.noProxyHosts).toBeUndefined();
     expect(spec.extraFiles).toHaveLength(2);
@@ -310,6 +334,8 @@ describe('runStepCommandInSandbox', () => {
     expect(resolveAppReach.mock.calls[0]![1]).toBe('task-1');
     expect(options.extraMounts.map((m: { target: string }) => m.target)).toEqual([
       '/haive/workdir/.git',
+      '/haive/workdir/.haive-data',
+      '/haive/workdir/.haive-data/knowledge_base',
       '/haive/workdir',
       '/etc/ssl/certs/ca.pem',
       '/haive-npm-cache',

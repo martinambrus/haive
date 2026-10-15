@@ -578,8 +578,8 @@ every put-back 00a triggers runs under its checkout's merge-dir lock (`inMergeDi
 is refused while another task's claim holds it. Each restore runs under the domain's lock, after the
 caller's fence (`CheckoutFence`: refresh passes the checkout-holding task count) has read zero there,
 and a task that started meanwhile answers `held` with the files untouched; 00a runs that restore and its move in its claim's merge-dir section (`withMergeDirSection`, fenced on the pass's epoch), so a Stop or a cancel refuses both; and the sync base is pointed at
-the record now in the checkout (`rebaseProjectStateOnCheckout`; a checkout with no record gets an
-EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
+the record HEAD now commits (`rebaseProjectStateOnHeadLocked`, read from the commit inside the
+restore's transaction; a HEAD with no record gets an EMPTY base rather than none, so an incoming record is three-way merged against the pending state and
 a clash is asked about, never imported over it, and one whose record cannot be read keeps the old
 base and answers in `last_error`), because the writer's base already holds the pending change and
 a sync against it would read the incoming head as the other side's revert. The plan needs no such

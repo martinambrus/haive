@@ -284,6 +284,17 @@ with it.
   fails (`custom-tools-unwired`) when their server could not be added to the CLI; a best-effort server
   failure elsewhere lets the run carry on.
 
+- **Authoring and the switch.** An administrator adds tools in the prompt-step editor's Custom tools
+  section (action, name, description, then the URL and query parameters or the scope and result count,
+  and typed parameters); a new tool starts with the schema defaults, and switching its action keeps the
+  name and description. The editor shows no timeout or response cap: new tools take the defaults, and a
+  stored tool outside today's range is fixed by removing and adding it again.
+  `GET /admin/task-types/:slug` carries `promptStepIssues`, the save checks run over an admin type's
+  stored prompt steps (empty for other rows and while the step catalog is unsynced), so a stored tool
+  that no longer passes the schema is named on load as `tool-no-longer-valid`.
+  `GET|PUT /admin/config/custom-tools` reads and writes `CUSTOM_MCP_TOOLS_ENABLED` (default on; the
+  "Custom tools" card on the admin page), and every PUT records `config.custom_tools` with
+  `{from, to}`.
 - **Schema** (`custom-tools.ts`): at most 10 typed params per tool, names matching `TOOL_NAME_PATTERN`,
   reserved names `rag_search`, `ddev_status`, `ddev_logs`, `ddev_restart`. `http-get`: an https URL of
   at most 2048 characters with `{name}` placeholders in the path only, a public DNS host (no IP literal
