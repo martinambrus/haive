@@ -271,23 +271,24 @@ describe('editorStateForAgent', () => {
     });
   });
 
-  it('removes the tools of every prompt step, and does not touch the editor', () => {
+  it('sends only the draftable keys of every prompt step, and does not touch the editor', () => {
     const held = editor({ promptSteps: { a: entry(), b: entry({ slug: 'b' }) } });
     const state = editorStateForAgent(held);
     const steps = state.promptSteps as Record<string, Record<string, unknown>>;
     expect(Object.keys(steps)).toEqual(['a', 'b']);
-    for (const step of Object.values(steps)) expect('tools' in step).toBe(false);
+    for (const step of Object.values(steps)) {
+      expect(Object.keys(step).sort()).toEqual([...PROMPT_STEP_DRAFTABLE_KEYS].sort());
+    }
     expect(steps.a).toMatchObject({ slug: 'a', title: 'Old title', template: 'Old template.' });
     expect(JSON.stringify(state)).not.toContain('repo_status');
     expect(JSON.stringify(state)).not.toContain('secret');
+    expect(JSON.stringify(state)).not.toContain('Hand-written note');
     expect(held.promptSteps.a?.tools).toEqual([tool]);
   });
 
-  it('is read by the server as a state with nothing for it to cut at the top level', () => {
+  it('is read by the server as a state with nothing for it to cut', () => {
     const state = editorStateForAgent(editor());
-    expect(
-      pickTaskTypeDraft(state).dropped.filter((key) => !key.startsWith('promptSteps.')),
-    ).toEqual([]);
+    expect(pickTaskTypeDraft(state).dropped).toEqual([]);
   });
 
   it('reads a missing text as empty and a repository flag that is not true as false', () => {

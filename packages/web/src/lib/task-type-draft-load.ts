@@ -88,7 +88,10 @@ export function editorStateForAgent(editor: DraftEditorState): Record<string, un
     stepIds: editor.stepIds,
     stepLoopLimitDefaults: editor.loopLimits,
     promptSteps: Object.fromEntries(
-      Object.entries(editor.promptSteps).map(([slug, { tools: _tools, ...rest }]) => [slug, rest]),
+      Object.entries(editor.promptSteps).map(([slug, entry]) => [
+        slug,
+        Object.fromEntries(PROMPT_STEP_DRAFTABLE_KEYS.map((key) => [key, entry[key]])),
+      ]),
     ),
   };
 }

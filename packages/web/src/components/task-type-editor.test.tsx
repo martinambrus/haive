@@ -440,7 +440,7 @@ describe('TaskTypeEditor creator panel', () => {
     });
   });
 
-  it('keeps the tools of a prompt step out of what the agent reads', async () => {
+  it('keeps all but the draftable parts of a prompt step out of what the agent reads', async () => {
     api.getAdminTaskType.mockResolvedValue({
       taskType: WITH_TOOLS,
       availability: AVAILABLE,
@@ -448,7 +448,8 @@ describe('TaskTypeEditor creator panel', () => {
     });
     const view = await mount();
     const state = JSON.stringify(view.panel()?.props.editorState);
-    expect(state).toContain('Kept note');
+    expect(state).toContain('List TODOs.');
+    expect(state).not.toContain('Kept note');
     expect(state).not.toContain('repo_status');
   });
 
