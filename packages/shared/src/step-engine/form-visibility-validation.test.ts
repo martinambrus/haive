@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { FormSchema } from '../schemas/form.js';
-import { isFieldVisible } from '../schemas/form.js';
+import { formSchemaSchema, isFieldVisible } from '../schemas/form.js';
 import { validateFormValues } from './schemas.js';
 
 /** The exact shape that failed a live task: a required text field gated behind an
@@ -127,5 +127,42 @@ describe('isFieldVisible', () => {
     // Absent, and non-string values, must not match — `in` is string-only.
     expect(isFieldVisible(f(vw), {})).toBe(false);
     expect(isFieldVisible(f({ field: 'p', in: ['true'] }), { p: true })).toBe(false);
+  });
+});
+
+describe('a hidden textarea', () => {
+  const schema: FormSchema = {
+    title: 't',
+    fields: [
+      { type: 'textarea', id: 'message', label: 'Message' },
+      { type: 'textarea', id: 'draft', label: 'Editor state', hidden: true },
+    ],
+  };
+
+  it('is never visible, whatever its predicate says', () => {
+    const [, hidden] = schema.fields;
+    expect(isFieldVisible(hidden!, {})).toBe(false);
+    const gated = { ...hidden!, visibleWhen: { field: 'p', equals: true } };
+    expect(isFieldVisible(gated, { p: true })).toBe(false);
+  });
+
+  it('is kept by the schema that parses a stored form', () => {
+    const parsed = formSchemaSchema.parse(schema);
+    expect(parsed.fields.map((f) => (f.type === 'textarea' ? f.hidden : undefined))).toEqual([
+      undefined,
+      true,
+    ]);
+  });
+
+  it('is not required of the person, but a value it is sent still reaches the step', () => {
+    const required: FormSchema = {
+      title: 't',
+      fields: [
+        { type: 'textarea', id: 'draft', label: 'Editor state', required: true, hidden: true },
+      ],
+    };
+    expect(validateFormValues(required, {}).success).toBe(true);
+    const res = validateFormValues(required, { draft: '{"slug":"x"}' });
+    expect(res.success && res.data.draft).toBe('{"slug":"x"}');
   });
 });
