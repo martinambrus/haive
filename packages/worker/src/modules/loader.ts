@@ -273,6 +273,7 @@ export async function startModuleJobs(
   }
 
   const pending = new Set(deactivated);
+  const held = new Set<string>();
   const reconcile = async (nowDeactivated: ReadonlySet<string>): Promise<void> => {
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
@@ -282,10 +283,22 @@ export async function startModuleJobs(
       if ((!jobs && !ensureSchema) || stops.has(moduleId)) continue;
       if (nowDeactivated.has(moduleId)) {
         pending.add(moduleId);
+        held.delete(moduleId);
         continue;
       }
       // A module starts once per reactivation, and not while its teardown runs.
-      if ((!pending.has(moduleId) && !tornDown.has(moduleId)) || tearingDown(moduleId)) continue;
+      if (!pending.has(moduleId) && !tornDown.has(moduleId)) continue;
+      if (tearingDown(moduleId)) {
+        if (!held.has(moduleId)) {
+          held.add(moduleId);
+          logger.warn(
+            { module: moduleId },
+            'module start held back: its teardown hook is still running',
+          );
+        }
+        continue;
+      }
+      held.delete(moduleId);
       pending.delete(moduleId);
       tornDown.delete(moduleId);
       // Claimed before the first await, so a teardown that checks now is refused.

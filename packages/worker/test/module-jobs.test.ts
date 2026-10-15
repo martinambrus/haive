@@ -373,6 +373,39 @@ describe('the jobs reconcile', () => {
     await stopAll();
   });
 
+  it('warns once per hold when passes keep a reactivated module back for its running teardown hook, and logs nothing more when the hold ends', async () => {
+    const m = moduleWithSchemaOnly('held');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile, stopAll } = await startModuleJobs([m.loaded], [m.entry], new Set(['held']));
+
+    const endFirst = beginModuleTeardown('held');
+    await reconcile(new Set());
+    await reconcile(new Set());
+    await reconcile(new Set());
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ module: 'held' }),
+      expect.stringMatching(/teardown hook is still running/),
+    );
+
+    endFirst();
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledOnce();
+
+    const endSecond = beginModuleTeardown('held');
+    await reconcile(new Set());
+    await reconcile(new Set());
+    expect(warn).toHaveBeenCalledTimes(2);
+
+    await reconcile(new Set(['held']));
+    await reconcile(new Set());
+    expect(warn).toHaveBeenCalledTimes(3);
+
+    endSecond();
+    await stopAll();
+  });
+
   it('never starts or stops a module without jobs', async () => {
     const bare = { loaded: { manifest: { id: 'plain' } } as unknown as Loaded, entry: {} as Entry };
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
