@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
 
 const moduleDb = vi.hoisted(() => ({ opened: vi.fn(), closed: vi.fn(async () => {}) }));
@@ -19,9 +20,35 @@ vi.mock('@haive/shared/module-db', async (importOriginal) => ({
 
 const { beginModuleTeardown, moduleJobsStarted, startModuleJobs } =
   await import('../src/modules/loader.js');
+const { ModuleTeardownRefusedError, runModuleTeardown } =
+  await import('../src/queues/module-control-queue.js');
 
 type Loaded = Parameters<typeof startModuleJobs>[0][number];
 type Entry = Parameters<typeof startModuleJobs>[1][number];
+type Hook = NonNullable<Entry['teardown']>;
+
+const deactivatedRowDb = {
+  select: () => ({
+    from: () => ({
+      where: () => ({ limit: async () => [{ deactivatedAt: new Date(), missingAt: null }] }),
+    }),
+  }),
+  update: () => ({
+    set: () => ({ where: () => ({ returning: async () => [{ tornDownAt: new Date() }] }) }),
+  }),
+} as unknown as Database;
+
+const teardownDeps = (
+  m: { loaded: Loaded; entry: Entry },
+  teardown: Hook,
+  hookTimeoutMs?: number,
+) => ({
+  db: deactivatedRowDb,
+  loaded: [m.loaded],
+  entries: [{ ...m.entry, teardown }],
+  jobsStarted: moduleJobsStarted,
+  hookTimeoutMs,
+});
 
 function moduleWithJobs(id: string) {
   const stop = vi.fn(async () => {});
@@ -390,5 +417,51 @@ describe('the jobs reconcile', () => {
     expect(moduleJobsStarted('schema-only')).toBe(false);
 
     await stopAll();
+  });
+
+  it('refuses a teardown begun while a reactivated module is starting, and allows one once the start has failed', async () => {
+    const m = moduleWithSchema('claimed');
+    let endEnsure!: () => void;
+    let endJobs!: () => void;
+    m.ensure.mockImplementationOnce(() => new Promise<void>((resolve) => (endEnsure = resolve)));
+    m.jobs.mockImplementationOnce(
+      () => new Promise<typeof m.stop>((resolve) => (endJobs = () => resolve(m.stop))),
+    );
+    const hook = vi.fn<Hook>(async () => {});
+    const refusal = async () =>
+      (await runModuleTeardown(teardownDeps(m, hook), 'claimed').catch(
+        (err: unknown) => err,
+      )) as Error;
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['claimed']),
+    );
+
+    const pass = reconcile(new Set());
+    await vi.waitFor(() => expect(m.ensure).toHaveBeenCalledOnce());
+    expect(moduleJobsStarted('claimed')).toBe(true);
+    const whileEnsuring = await refusal();
+    expect(whileEnsuring).toBeInstanceOf(ModuleTeardownRefusedError);
+    expect(whileEnsuring.message).toMatch(/claimed.*jobs.*still running/);
+
+    endEnsure();
+    await vi.waitFor(() => expect(m.jobs).toHaveBeenCalledOnce());
+    expect(await refusal()).toBeInstanceOf(ModuleTeardownRefusedError);
+
+    endJobs();
+    await pass;
+    expect(moduleJobsStarted('claimed')).toBe(true);
+    expect(hook).not.toHaveBeenCalled();
+    await stopAll();
+
+    const bad = moduleWithSchema('abandoned');
+    bad.ensure.mockRejectedValueOnce(new Error('ddl refused'));
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const failing = await startModuleJobs([bad.loaded], [bad.entry], new Set(['abandoned']));
+    await failing.reconcile(new Set());
+    expect(moduleJobsStarted('abandoned')).toBe(false);
+    await runModuleTeardown(teardownDeps(bad, hook), 'abandoned');
+    expect(hook).toHaveBeenCalledOnce();
   });
 });

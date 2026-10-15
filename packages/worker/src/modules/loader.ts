@@ -278,6 +278,8 @@ export async function startModuleJobs(
       // A module starts once per reactivation, and not while its teardown runs.
       if (!pending.has(moduleId) || teardownsRunning.has(moduleId)) continue;
       pending.delete(moduleId);
+      // Claimed before the first await, so a teardown that checks now is refused.
+      jobsStarted.add(moduleId);
       try {
         if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
         if (jobs) {
@@ -289,6 +291,8 @@ export async function startModuleJobs(
           { err, module: moduleId },
           'module schema or jobs failed to start; deactivate and reactivate the module to try again',
         );
+      } finally {
+        if (!stops.has(moduleId)) jobsStarted.delete(moduleId);
       }
     }
   };
