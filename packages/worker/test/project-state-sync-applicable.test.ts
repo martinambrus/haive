@@ -280,6 +280,7 @@ async function setup(seed: Seed = {}) {
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     projectStateConflicts: schema.projectStateConflicts,
+    taskEvents: schema.taskEvents,
   });
   fake.insert(repositories, {
     id: REPO,

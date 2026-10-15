@@ -42,6 +42,7 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
     projectStateSync: schema.projectStateSync,
     projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
+    taskEvents: schema.taskEvents,
   });
   fake.insert(schema.repositories, {
     id: REPO,
