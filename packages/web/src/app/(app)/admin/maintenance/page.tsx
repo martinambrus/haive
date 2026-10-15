@@ -25,7 +25,7 @@ const STATES: { value: MaintenanceState; label: string; help: string }[] = [
   {
     value: 'draining',
     label: 'Draining',
-    help: 'No new tasks are accepted; work already running is left to finish. This is where you wait.',
+    help: 'No new work is started (no new tasks, retries or resumes); work already running is left to finish. This is where you wait.',
   },
   {
     value: 'maintenance',
