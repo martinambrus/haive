@@ -683,6 +683,26 @@ describe('Dialog focus', () => {
     }
   });
 
+  it('C10 Escape closes only the top dialog of a stack', () => {
+    const below = vi.fn();
+    const above = vi.fn();
+    const stack = (top: boolean) => (
+      <>
+        <Dialog open onOpenChange={below}>
+          <button id="a1">a1</button>
+        </Dialog>
+        <Dialog open={top} onOpenChange={above}>
+          <button id="b1">b1</button>
+        </Dialog>
+      </>
+    );
+    show(stack(false));
+    show(stack(true));
+    press('Escape');
+    expect(above).toHaveBeenCalledExactlyOnceWith(false);
+    expect(below).not.toHaveBeenCalled();
+  });
+
   it('C8 re-rendering an open dialog does not move focus', () => {
     openDialog(buttons);
     byId('cancel').focus();
