@@ -9,6 +9,7 @@ export const MODULE_STATES = [
 export type ModuleState = (typeof MODULE_STATES)[number];
 
 export const MODULE_DEPENDENTS_CAP = 200;
+export type ModuleSource = 'local' | 'registry';
 
 export interface ModuleIntentRow {
   moduleId: string;
