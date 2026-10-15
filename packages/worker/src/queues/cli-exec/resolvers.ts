@@ -64,6 +64,7 @@ import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { customToolInputSchema, parsePinnedCustomSteps } from '@haive/shared/modularity';
+import { pinnedToolsFailure } from '../../step-engine/steps/custom/pinned-tools.js';
 import { signTaskToken } from '@haive/shared/task-token';
 import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
 import {
@@ -276,9 +277,10 @@ async function resolveCustomFiles(
     where: eq(schema.tasks.id, taskId),
     columns: { customSteps: true },
   });
-  const tools = (parsePinnedCustomSteps(task?.customSteps)[step.stepId]?.tools ?? []).filter(
-    (tool) => names.includes(tool.name),
-  );
+  const pinnedTools = parsePinnedCustomSteps(task?.customSteps)[step.stepId]?.tools ?? [];
+  const invalid = pinnedToolsFailure(pinnedTools);
+  if (invalid !== null) throw new Error(invalid);
+  const tools = pinnedTools.filter((tool) => names.includes(tool.name));
   if (tools.length === 0) throw unwired('the step has none of them pinned', names);
   const missing = names.filter((name) => !tools.some((tool) => tool.name === name));
   if (missing.length > 0) throw unwired(`the step does not pin ${missing.join(', ')}`, names);

@@ -11,7 +11,11 @@ vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
   }),
 }));
 import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
-import { parsePinnedCustomSteps } from '@haive/shared/modularity';
+import {
+  customToolSchema,
+  parsePinnedCustomSteps,
+  validateCustomTools,
+} from '@haive/shared/modularity';
 import {
   CUSTOM_TOOLS_NO_SIGNING_KEY_REASON,
   CUSTOM_TOOLS_SWITCHED_OFF_REASON,
@@ -1784,6 +1788,17 @@ describe('advanceStep and the custom tools of a prompt step', () => {
       expect(enqueued).toEqual([]);
     },
   );
+
+  it('words the failure of a pinned tool that fails its checks as the run of the step does', async () => {
+    const reserved = { ...ragTool, name: 'rag_search' };
+    const { result } = await run(promptStep([httpTool, reserved]));
+    const [problem] = validateCustomTools([customToolSchema.parse(reserved)], {
+      requiresRepository: true,
+    });
+    expect(failure(result)).toBe(
+      `${CUSTOM_TOOL_INVALID_REASON}: this step's tools no longer pass their checks: \`rag_search\`: ${problem!.message} The task pinned them when it was created; fix them in the task type and start a new task.`,
+    );
+  });
 
   it('names at most 8 of the problems of the pinned tools, then how many more', async () => {
     const insecure = Array.from({ length: 8 }, (_, i) => ({

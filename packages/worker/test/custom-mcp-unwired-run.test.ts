@@ -43,6 +43,7 @@ vi.mock('../src/lsp/configured-lsp.js', () => ({ hasReadyLspBridge: async () => 
 
 import { handleCliExecJob } from '../src/queues/cli-exec/handlers.js';
 import { CUSTOM_TOOLS_UNWIRED_REASON } from '../src/queues/cli-exec/resolvers.js';
+import { CUSTOM_TOOL_INVALID_REASON } from '../src/step-engine/step-runner.js';
 
 const SECRET = 'custom-mcp-unwired-run-test-secret';
 const STEP_ID = 'custom.demo.audit';
@@ -181,4 +182,27 @@ describe('a run that names custom tools it cannot wire, through the job handler'
       expect(stubs.resumeStepIfLinked).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+describe('a run queued before its pinned tools tightened, through the job handler', () => {
+  it('ends as a failed invocation with its reason when a pinned tool is one a save refuses now, and is not run again', async () => {
+    const queued = { ...payload, customTools: ['rag_search'] };
+    const { db, writes } = fakeDb(pinned(['rag_search']));
+
+    await expect(handleCliExecJob(db, queued)).rejects.toThrow(CUSTOM_TOOL_INVALID_REASON);
+
+    const ended = writes.filter((w) => w.table === 'cli_invocations' && 'endedAt' in w.set);
+    expect(ended).toHaveLength(1);
+    expect(ended[0]!.set).toMatchObject({ exitCode: -1, endedAt: expect.any(Date) });
+    const message = ended[0]!.set.errorMessage as string;
+    expect(message.startsWith(`${CUSTOM_TOOL_INVALID_REASON}: `)).toBe(true);
+    expect(message).toContain('`rag_search`');
+    expect(message).toContain('kept for Haive');
+    expect(stubs.resumeStepIfLinked).toHaveBeenCalledExactlyOnceWith(queued, false, message);
+
+    const written = writes.length;
+    await expect(handleCliExecJob(db, queued)).resolves.toBeUndefined();
+    expect(writes).toHaveLength(written);
+    expect(stubs.resumeStepIfLinked).toHaveBeenCalledTimes(1);
+  });
 });

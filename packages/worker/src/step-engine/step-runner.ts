@@ -46,15 +46,13 @@ import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import {
-  INVALID_TOOLS_SHOWN,
   TEMPLATE_PERSONA_MARKER_PATTERN,
   describeInvalidTools,
   parsePinnedCustomSteps,
   parseStepId,
-  validateCustomTools,
-  type CustomToolProblem,
 } from '@haive/shared/modularity';
 import { moduleDeactivationMessage } from '../modules/activation.js';
+import { invalidToolsFailure, pinnedToolsFailure } from './steps/custom/pinned-tools.js';
 import { promptStepNamedText, promptStepTools } from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
@@ -556,22 +554,9 @@ async function insertInvocationOrNull<T>(insert: () => Promise<T>): Promise<T | 
   }
 }
 
-export const CUSTOM_TOOL_INVALID_REASON = 'custom-tool-invalid';
+export { CUSTOM_TOOL_INVALID_REASON } from './steps/custom/pinned-tools.js';
 export const CUSTOM_TOOLS_SWITCHED_OFF_REASON = 'custom-tools-switched-off';
 export const CUSTOM_TOOLS_NO_SIGNING_KEY_REASON = 'custom-tools-no-signing-key';
-
-const invalidToolsFailure = (found: string): { failure: string } => ({
-  failure: `${CUSTOM_TOOL_INVALID_REASON}: this step's tools no longer pass their checks: ${found} The task pinned them when it was created; fix them in the task type and start a new task.`,
-});
-
-/** The problems of a step's tools, each led by its tool as inline code: at most 8, then how many more. */
-function describeToolProblems(problems: readonly CustomToolProblem[]): string {
-  const shown = problems
-    .slice(0, INVALID_TOOLS_SHOWN)
-    .map((problem) => `${describeInvalidTools([problem.tool])}: ${problem.message}`);
-  const more = problems.length - shown.length;
-  return `${shown.join(' ')}${more > 0 ? ` And ${more} more.` : ''}`;
-}
 
 /** The tool names a prompt step's dispatch carries, or the failure that stops it; null for a step with none. */
 async function resolveCustomTools(
@@ -582,19 +567,17 @@ async function resolveCustomTools(
   const tools = promptStepTools(stepDef);
   if (!tools) return null;
   if (tools.invalid.length > 0) {
-    return invalidToolsFailure(`${describeInvalidTools(tools.invalid)}.`);
+    return { failure: invalidToolsFailure(`${describeInvalidTools(tools.invalid)}.`) };
   }
   if (tools.names.length === 0) return null;
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { customSteps: true },
   });
-  // The type's requiresRepository is not known here; it only decides a rag-query tool's scope.
-  const problems = validateCustomTools(
+  const invalid = pinnedToolsFailure(
     parsePinnedCustomSteps(task?.customSteps)[stepDef.metadata.id]?.tools ?? [],
-    { requiresRepository: true },
   );
-  if (problems.length > 0) return invalidToolsFailure(describeToolProblems(problems));
+  if (invalid !== null) return { failure: invalid };
   if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
     return {
       failure: `${CUSTOM_TOOLS_SWITCHED_OFF_REASON}: custom tools are switched off on this install, so this step cannot run. Switch them on, then retry the step.`,

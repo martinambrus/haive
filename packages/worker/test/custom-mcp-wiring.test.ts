@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
+import { customToolSchema, validateCustomTools } from '@haive/shared/modularity';
 import { verifyTaskToken } from '@haive/shared/task-token';
 import {
   CUSTOM_TOOLS_UNWIRED_REASON,
   resolveMcpExtraFiles,
 } from '../src/queues/cli-exec/resolvers.js';
 import { isTransientCliFailure } from '../src/queues/cli-exec/failure-class.js';
+import { CUSTOM_TOOL_INVALID_REASON } from '../src/step-engine/step-runner.js';
 import {
   CUSTOM_MCP_SERVER_JS,
   CUSTOM_MCP_SERVER_PATH,
@@ -175,6 +177,20 @@ async function unwired(provider: Provider, db: Database, forRun: Run): Promise<s
   expect(merged).toEqual({ cli: [], gemini: [] });
   const message = (failure as Error).message;
   expect(message.startsWith(`${CUSTOM_TOOLS_UNWIRED_REASON}: `)).toBe(true);
+  expect(isTransientCliFailure({ exitCode: -1, errorMessage: message })).toBe(false);
+  return message;
+}
+
+/** The message a run fails with when a pinned tool no longer passes its checks; nothing of it reaches the task volume. */
+async function invalid(provider: Provider, db: Database, forRun: Run): Promise<string> {
+  merged.cli.length = 0;
+  merged.gemini.length = 0;
+  const failure = await extra(provider, db, forRun).catch((err: unknown) => err);
+  expect(failure).toBeInstanceOf(Error);
+  expect(merged).toEqual({ cli: [], gemini: [] });
+  expect(writers.file).toEqual([]);
+  const message = (failure as Error).message;
+  expect(message.startsWith(`${CUSTOM_TOOL_INVALID_REASON}: `)).toBe(true);
   expect(isTransientCliFailure({ exitCode: -1, errorMessage: message })).toBe(false);
   return message;
 }
@@ -366,6 +382,85 @@ describe.each<Provider>(['claude-code', 'codex', 'gemini'])(
       expect(message).not.toContain('CONFIG_ENCRYPTION_KEY');
     });
 
+    // These parse; they fail the checks a save runs today.
+    it.each([
+      [
+        'a name kept for Haive',
+        [repoStatus, { ...houseRules, name: 'rag_search' }],
+        '`rag_search`',
+        'kept for Haive',
+      ],
+      [
+        'a URL the guard refuses',
+        [repoStatus, { ...repoStatus, name: 'local_status', url: 'https://127.0.0.1/v1/status' }],
+        '`local_status`',
+        'is an IP address',
+      ],
+      [
+        'one name twice',
+        [repoStatus, { ...houseRules, name: 'repo_status' }],
+        '`repo_status`',
+        'Two tools in this step are named repo_status',
+      ],
+    ])(
+      'fails a run whose pinned tools hold %s, naming the tool and the issue, before anything is written',
+      async (_label, tools, named, issue) => {
+        const customTools = [...new Set(tools.map((tool) => tool.name))];
+        const message = await invalid(provider, dbFor(pinned(tools)), run({ customTools }));
+        expect(message).toContain(named);
+        expect(message).toContain(issue);
+      },
+    );
+
+    it('judges every tool the step pinned, as the dispatch check does, not only the ones the run names', async () => {
+      const tools = [repoStatus, { ...houseRules, name: 'rag_search' }];
+      const message = await invalid(
+        provider,
+        dbFor(pinned(tools)),
+        run({ customTools: ['repo_status'] }),
+      );
+      expect(message).toContain('`rag_search`');
+    });
+
+    it('words the failure as the dispatch check does', async () => {
+      const reserved = { ...houseRules, name: 'rag_search' };
+      const message = await invalid(
+        provider,
+        dbFor(pinned([reserved])),
+        run({ customTools: ['rag_search'] }),
+      );
+      const [problem] = validateCustomTools([customToolSchema.parse(reserved)], {
+        requiresRepository: true,
+      });
+      expect(message).toBe(
+        `${CUSTOM_TOOL_INVALID_REASON}: this step's tools no longer pass their checks: \`rag_search\`: ${problem!.message} The task pinned them when it was created; fix them in the task type and start a new task.`,
+      );
+    });
+
+    it('names at most 8 of the problems of the pinned tools, then how many more', async () => {
+      const insecure = Array.from({ length: 8 }, (_, i) => ({
+        ...repoStatus,
+        name: `tool_${i}`,
+        url: 'http://127.0.0.1/v1/status',
+        params: [],
+      }));
+      const customTools = insecure.map((tool) => tool.name);
+      const message = await invalid(provider, dbFor(pinned(insecure)), run({ customTools }));
+      expect(message).toContain('`tool_3`');
+      expect(message).not.toContain('`tool_4`');
+      expect(message).toContain('And 8 more.');
+    });
+
+    it('wires a pinned project-scope search, since the type that allowed it is not known here', async () => {
+      const tool = { ...houseRules, name: 'project_rules', scope: 'project' };
+      const { files } = await extra(
+        provider,
+        dbFor(pinned([tool])),
+        run({ customTools: ['project_rules'] }),
+      );
+      expect(toolsIn(files).map((t) => t.name)).toEqual(['project_rules']);
+    });
+
     it('wires a run while the switch is on, reading it as the step runner does', async () => {
       const { entry } = await entryOf(provider, db(), run());
       expect(entry).toEqual(ENTRY);
@@ -424,6 +519,14 @@ describe('a CLI whose configuration file is written whole into its task volume',
       "the CLI's MCP configuration could not be written to its task volume",
     );
     expect(message).toContain('repo_status, house_rules');
+  });
+
+  it('fails a run whose pinned tool no longer passes its checks before it writes the file', async () => {
+    forced.delivery = 'volume-write';
+    const tools = [repoStatus, { ...houseRules, name: 'rag_search' }];
+    const customTools = ['repo_status', 'rag_search'];
+    await invalid('antigravity', dbFor(pinned(tools)), run({ customTools }));
+    expect(writers.file).toEqual([]);
   });
 
   it('wires a run whose file landed', async () => {
