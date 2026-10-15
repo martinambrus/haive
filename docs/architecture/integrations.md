@@ -323,8 +323,10 @@ forge therefore cannot be given an http API base, and its default base is https,
 calls cannot reach it. The rule runs on create and edit; a row stored before it may still hold another
 base, so `resolveForgeContext` (worker, PR open and poll) re-checks every use: before the token is
 decrypted it refuses, with a ForgeError naming the fix, a credential that does not fit the repository's
-remote (`credentialUsableForPr`) and a stored base that fails `apiBaseFits`. With no stored base, the
-default follows an http(s) remote's host.
+remote (`credentialUsableForPr`) and a stored base that fails `apiBaseFits`. It reads the row once and
+decrypts that same row (`decryptCredentialRow`), so an edit landing between the check and the decrypt
+cannot pair the new token with the host and base that were checked. With no stored base, the default
+follows an http(s) remote's host.
 
 ## The call log, the stamp and the token
 
