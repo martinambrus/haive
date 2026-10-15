@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -220,6 +220,45 @@ describe('haiveDataBoundary: what it refuses', () => {
     );
     expect(await readdir(path.join(repoDir, 'elsewhere'))).toEqual([]);
     expect(ensureDir).not.toHaveBeenCalled();
+  });
+});
+
+describe('haiveDataBoundary: protected files with another name', () => {
+  it('refuses a protected file with a hard link elsewhere in the checkout', async () => {
+    await dirs(path.join(repoDir, '.haive-data/state'));
+    await writeFile(path.join(repoDir, '.haive-data/state/format.json'), '{}');
+    await link(
+      path.join(repoDir, '.haive-data/state/format.json'),
+      path.join(repoDir, 'alias.json'),
+    );
+
+    await expect(haiveDataBoundary(rootMount, { hasRepo: true })).rejects.toThrow(
+      /\.haive-data\/state\/format\.json in .* has another hard link/,
+    );
+  });
+
+  it('refuses one linked from a writable knowledge dir, in a worktree too', async () => {
+    const data = path.join(treeDir, '.haive-data');
+    await dirs(path.join(data, 'knowledge_base'));
+    await writeFile(path.join(data, 'plan.json'), '{}');
+    await link(path.join(data, 'plan.json'), path.join(data, 'knowledge_base/plan.md'));
+
+    await expect(haiveDataBoundary(worktreeMount, { hasRepo: true })).rejects.toThrow(
+      /\.haive-data\/plan\.json in .* has another hard link/,
+    );
+  });
+
+  it('mounts as usual when every name sits in the read-only part or inside one knowledge dir', async () => {
+    const data = path.join(repoDir, '.haive-data');
+    await dirs(path.join(data, 'state'), path.join(data, 'knowledge_base'));
+    await writeFile(path.join(data, 'state/a.json'), '{}');
+    await link(path.join(data, 'state/a.json'), path.join(data, 'state/.a.json.haive-park-1-x'));
+    await writeFile(path.join(data, 'knowledge_base/a.md'), 'a');
+    await link(path.join(data, 'knowledge_base/a.md'), path.join(data, 'knowledge_base/b.md'));
+
+    expect(await haiveDataBoundary(rootMount, { hasRepo: true })).toEqual(
+      rootMounts(['knowledge_base', 'learnings']),
+    );
   });
 });
 
