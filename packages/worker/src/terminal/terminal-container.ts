@@ -29,8 +29,7 @@ const log = logger.child({ module: 'terminal-container' });
 
 /** In-container path + source of the git credential helper used by repo-scope
  *  terminals. Dependency-free Node ESM. On `get`, it POSTs the repo-scoped
- *  token (the file at GIT_CRED_TOKEN_PATH, else env HAIVE_GIT_CRED_TOKEN) to the
- *  API and emits the username/password git asks for. Holds no secret itself; on
+ *  token (the file at GIT_CRED_TOKEN_PATH) to the API and emits the username/password git asks for. Holds no secret itself; on
  *  any failure it emits nothing and git falls through to manual auth. */
 // Under the sandbox user's home (node-writable). NOT under /haive — Docker
 // creates /haive as root for the workdir mount, so a `node`-user write there is
@@ -46,7 +45,6 @@ if (op !== 'get') process.exit(0);
 const endpoint = process.env.HAIVE_GIT_CRED_URL || '';
 let token = '';
 try { token = fs.readFileSync(${JSON.stringify(GIT_CRED_TOKEN_PATH)}, 'utf8').trim(); } catch (e) {}
-if (!token) token = process.env.HAIVE_GIT_CRED_TOKEN || '';
 if (!endpoint || !token) process.exit(0);
 
 // Drain git's stdin request (protocol/host/path) so the pipe doesn't block.

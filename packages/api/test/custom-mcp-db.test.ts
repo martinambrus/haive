@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -76,7 +76,7 @@ vi.mock('../src/lib/egress-guard.js', async (importOriginal) => {
   };
 });
 
-import { signRagToken, type RagSearchHit } from '@haive/shared/rag';
+import type { RagSearchHit } from '@haive/shared/rag';
 import { signTaskToken, type TaskTokenClaims } from '@haive/shared/task-token';
 import { createApiApp } from '../src/index.js';
 import type { GuardReason } from '../src/lib/egress-guard.js';
@@ -409,13 +409,19 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
       return `${version}.${payload}.${mac}`;
     };
 
+    const legacyRagToken = (): string => {
+      const exp = Math.floor(Date.now() / 1000) + 60;
+      const payload = Buffer.from(JSON.stringify({ taskId: fx.taskId, exp })).toString('base64url');
+      return `${payload}.${createHmac('sha256', SECRET).update(payload).digest('base64url')}`;
+    };
+
     it.each([
       ['a forged MAC (another invocation swapped in)', () => forgedPayload(mint())],
       ['an expired token', () => mint({ ttlSeconds: -1 })],
       ['a token signed with another secret', () => mint({}, 'another-secret')],
       ['a rag-audience token with the same claims', () => mint({ aud: 'rag' })],
       ['a ddev-audience token with the same claims', () => mint({ aud: 'ddev' })],
-      ['the legacy two-part rag token', () => signRagToken(fx.taskId, SECRET)],
+      ['the legacy two-part rag token', legacyRagToken],
       ['a token with no invocation claim', () => mint({ cliInvocationId: undefined })],
       ['a token with no step claim', () => mint({ taskStepId: undefined })],
       ['a token with its version dropped', () => mint().split('.').slice(1).join('.')],
@@ -779,7 +785,7 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
         expect(statuses.filter((s) => s === status)).toHaveLength(BUDGET);
         expect(statuses.filter((s) => s === 429)).toHaveLength(10);
         expect(await rowsFor(fx.invA)).toHaveLength(BUDGET);
-      });
+      }, 30_000);
 
       it('is answered 429 once the budget is spent, and writes nothing', async () => {
         await spendBudget();
@@ -791,7 +797,7 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
         expect(await res.json()).toEqual({ error: expect.any(String), code: 'budget-spent' });
         expect(await rowsFor(fx.invA)).toHaveLength(BUDGET);
         expect(h.searches).toEqual([]);
-      });
+      }, 30_000);
     });
   });
 

@@ -11,7 +11,6 @@ import {
   ragHybridSearch,
   resolveRagConnection,
   resolveToolingOllamaUrl,
-  verifyRagToken,
   type RagConnection,
   type RagMode,
   type RagSearchHit,
@@ -301,10 +300,7 @@ ragRoutes.post('/search', sandboxBodyLimit, async (c) => {
 
   const authHeader = c.req.header('Authorization') ?? '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-  // The audience-less 2-part token is RAG-only: /ddev never takes it.
-  const verified = token
-    ? (verifyTaskToken(token, 'rag', secret) ?? verifyRagToken(token, secret))
-    : null;
+  const verified = token ? verifyTaskToken(token, 'rag', secret) : null;
   if (!verified) throw new HttpError(401, 'invalid or missing rag token');
   const { taskId } = verified;
 

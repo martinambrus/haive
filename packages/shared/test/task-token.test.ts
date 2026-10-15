@@ -1,6 +1,5 @@
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { signRagToken, verifyRagToken } from '../src/rag/token.js';
 import {
   DEFAULT_TASK_TOKEN_TTL_SECONDS,
   TASK_TOKEN_AUDIENCES,
@@ -24,6 +23,12 @@ function handSigned(macAud: string, payload: string, secret = SECRET): string {
   const key = createHmac('sha256', secret).update(`haive-task-token:${macAud}`).digest();
   const mac = createHmac('sha256', key).update(`v1.${payload}`).digest('base64url');
   return `v1.${payload}.${mac}`;
+}
+
+/** The two-part form from before v1, `<payload>.<hmac(raw secret, payload)>`, which nothing signs now. */
+function legacyToken(claims: object): string {
+  const payload = b64({ ...claims, exp: Math.floor(Date.now() / 1000) + 60 });
+  return `${payload}.${createHmac('sha256', SECRET).update(payload).digest('base64url')}`;
 }
 
 const NOW_SECONDS = 1_800_000_000;
@@ -214,7 +219,7 @@ describe.each(AUDIENCES)('task token for %s', (aud) => {
       empty: '',
       'one part': 'not-a-token',
       'two parts, the version dropped': `${payload}.${mac}`,
-      'two parts, the legacy format': signRagToken('task-abc', SECRET),
+      'two parts, the legacy format': legacyToken({ taskId: 'task-abc' }),
       'four parts': `${token}.extra`,
       'a trailing dot': `${token}.`,
       'a leading dot': `.${token}`,
@@ -258,25 +263,12 @@ describe.each(AUDIENCES)('task token for %s', (aud) => {
   });
 });
 
-describe('the two token formats', () => {
-  it('never verify each other', () => {
-    const legacy = signRagToken('task-abc', SECRET);
-    const scoped = signTaskToken({ aud: 'rag', taskId: 'task-abc' }, SECRET);
+describe('the legacy two-part token', () => {
+  it('is refused under every audience, even when its payload names one', () => {
+    for (const aud of AUDIENCES) {
+      const token = legacyToken({ aud, taskId: 'task-abc' });
 
-    expect(verifyRagToken(scoped, SECRET)).toBeNull();
-    expect(verifyRagToken(legacy, SECRET)).toEqual({ taskId: 'task-abc' });
-    for (const aud of AUDIENCES) expect(verifyTaskToken(legacy, aud, SECRET)).toBeNull();
-  });
-
-  it('keep a legacy token out even when its payload claims an audience', () => {
-    const payload = b64({
-      aud: 'ddev',
-      taskId: 'task-abc',
-      exp: Math.floor(Date.now() / 1000) + 60,
-    });
-    const mac = createHmac('sha256', SECRET).update(payload).digest('base64url');
-
-    expect(verifyRagToken(`${payload}.${mac}`, SECRET)).toEqual({ taskId: 'task-abc' });
-    expect(verifyTaskToken(`${payload}.${mac}`, 'ddev', SECRET)).toBeNull();
+      expect(verifyTaskToken(token, aud, SECRET), aud).toBeNull();
+    }
   });
 });

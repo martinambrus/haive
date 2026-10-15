@@ -109,7 +109,7 @@ describe('git credential helper token source', () => {
     expect(result).toEqual({ code: 0, stdout: EMITTED });
   });
 
-  it('prefers the file over the env token, which an older container keeps for good', async () => {
+  it('ignores an env token beside the file', async () => {
     await writeFile(tokenFile, 'fresh-file-token');
     await runHelper({ envToken: 'expired-env-token' });
     expect(hits.map((h) => h.authorization)).toEqual(['Bearer fresh-file-token']);
@@ -121,55 +121,60 @@ describe('git credential helper token source', () => {
     expect(hits.map((h) => h.authorization)).toEqual(['Bearer token-from-file']);
   });
 
-  it('still works from the env token alone, for a container created before the file', async () => {
+  it('sends nothing on an env token alone: only the file is read', async () => {
     const result = await runHelper({ envToken: 'token-from-env' });
-    expect(hits.map((h) => h.authorization)).toEqual(['Bearer token-from-env']);
-    expect(result).toEqual({ code: 0, stdout: EMITTED });
+    expect(hits).toEqual([]);
+    expect(result).toEqual({ code: 0, stdout: '' });
   });
 
-  it('falls back to the env token when the file is empty', async () => {
+  it('sends nothing when the file is empty, whatever the env holds', async () => {
     await writeFile(tokenFile, '');
     await runHelper({ envToken: 'token-from-env' });
-    expect(hits.map((h) => h.authorization)).toEqual(['Bearer token-from-env']);
+    expect(hits).toEqual([]);
   });
 });
 
 describe('git credential helper failure', () => {
-  it('emits nothing and exits 0 with neither a file nor an env token', async () => {
+  it('emits nothing and exits 0 without a token file', async () => {
     const result = await runHelper({});
     expect(hits).toEqual([]);
     expect(result).toEqual({ code: 0, stdout: '' });
   });
 
   it('emits nothing and exits 0 without the endpoint', async () => {
-    const result = await runHelper({ envToken: 'token-from-env', noUrl: true });
+    await writeFile(tokenFile, 'token-from-file');
+    const result = await runHelper({ noUrl: true });
     expect(hits).toEqual([]);
     expect(result).toEqual({ code: 0, stdout: '' });
   });
 
   it.each([401, 404, 500])('emits nothing and exits 0 on a %i', async (status) => {
     reply = { status, body: JSON.stringify(CREDENTIAL) };
-    const result = await runHelper({ envToken: 'token-from-env' });
+    await writeFile(tokenFile, 'token-from-file');
+    const result = await runHelper({});
     expect(hits).toHaveLength(1);
     expect(result).toEqual({ code: 0, stdout: '' });
   });
 
   it('emits nothing on a 204, the answer for a repository with no stored credential', async () => {
     reply = { status: 204, body: '' };
-    const result = await runHelper({ envToken: 'token-from-env' });
+    await writeFile(tokenFile, 'token-from-file');
+    const result = await runHelper({});
     expect(hits).toHaveLength(1);
     expect(result).toEqual({ code: 0, stdout: '' });
   });
 
   it('emits nothing for a body that is not JSON', async () => {
     reply = { status: 200, body: 'not json' };
-    const result = await runHelper({ envToken: 'token-from-env' });
+    await writeFile(tokenFile, 'token-from-file');
+    const result = await runHelper({});
     expect(hits).toHaveLength(1);
     expect(result).toEqual({ code: 0, stdout: '' });
   });
 
   it.each(['store', 'erase'])('does nothing for git’s %s', async (op) => {
-    const result = await runHelper({ envToken: 'token-from-env', op });
+    await writeFile(tokenFile, 'token-from-file');
+    const result = await runHelper({ op });
     expect(hits).toEqual([]);
     expect(result).toEqual({ code: 0, stdout: '' });
   });
