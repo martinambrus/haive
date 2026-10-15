@@ -114,6 +114,22 @@ describe('a vendor error that echoes the credential', () => {
     expect(leaked(err.message, token)).toEqual([]);
   });
 
+  it.each([
+    ['JSON-escaped', (header: string) => JSON.stringify({ received: header })],
+    ['URL-encoded', (header: string) => `received=${encodeURIComponent(header)}`],
+  ])('keeps no part of a token with a quote and a backslash echoed %s', async (_form, encode) => {
+    const token = `${secretOf(30)}"q\\w${secretOf(30)}`;
+    fetchMock.mockImplementation((_url, init) =>
+      echo(401, encode(new Headers(init?.headers).get('authorization') ?? ''))(),
+    );
+
+    const err = await failure(new GithubForgeProvider().getPullRequestState(ctxWith(token), '1'));
+
+    for (const form of [token, JSON.stringify(token).slice(1, -1), encodeURIComponent(token)]) {
+      expect(leaked(err.message, form)).toEqual([]);
+    }
+  });
+
   it('leaves the rest of the vendor text alone', async () => {
     const token = secretOf(40);
     fetchMock.mockImplementation(() =>

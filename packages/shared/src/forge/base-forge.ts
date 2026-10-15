@@ -126,10 +126,16 @@ async function readBounded(
   }
 }
 
-/** The credential text a request sends: the token and each auth header's value after its scheme, longest first. */
+/** The credential text a request sends (the token and each auth header's value after its scheme), each also
+ *  JSON-escaped and URL-encoded as a vendor may echo it, longest first. */
 function wireSecrets(token: string, auth: Record<string, string>): string[] {
   const values = Object.values(auth).map((value) => value.slice(value.indexOf(' ') + 1));
-  return [...new Set([token, ...values])]
+  const forms = [token, ...values].flatMap((secret) => [
+    secret,
+    JSON.stringify(secret).slice(1, -1),
+    encodeURIComponent(secret),
+  ]);
+  return [...new Set(forms)]
     .filter((secret) => secret.length > 0)
     .sort((a, b) => b.length - a.length);
 }

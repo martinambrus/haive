@@ -381,7 +381,7 @@ read.
 - **The token stays in the api.** A vendor may echo its Authorization header, so `BaseForgeProvider`
   removes the credential from an error body while it is still whole, before the 500-character cut: the
   token and each auth header value after its scheme (Bitbucket Cloud's `Basic base64(username:token)`
-  included), and when the 4 KiB read stopped early also a trailing start of one. The broker then cuts
+  included), each also JSON-escaped and URL-encoded, and when the 4 KiB read stopped early also a trailing start of one. The broker then cuts
   its error text to 400 characters and removes the token again. The gated harness
   (`api/test/integration-mcp-db.test.ts`) scans every response, row and log line for the token, its
   Basic form and any 12-character piece of a long token cut by the limit.
