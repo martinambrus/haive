@@ -21,6 +21,11 @@ describe('SecretsService cache', () => {
     stored = encrypt('old', h.key);
     reads = 0;
     const db = {
+      delete: () => ({
+        where: async () => {
+          stored = null;
+        },
+      }),
       query: {
         systemSecrets: {
           findFirst: async () => {
@@ -58,6 +63,13 @@ describe('SecretsService cache', () => {
     expect(await service.get('k')).toBe('old');
     stored = encrypt('new', h.key);
     expect(await service.getFresh('k')).toBe('new');
+    expect(reads).toBe(2);
+  });
+
+  it('forgets a deleted value at once instead of serving it from the cache', async () => {
+    expect(await service.get('k')).toBe('old');
+    await service.delete('k');
+    expect(await service.get('k')).toBeNull();
     expect(reads).toBe(2);
   });
 
