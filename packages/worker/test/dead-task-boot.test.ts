@@ -1,10 +1,13 @@
+import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 import { and, asc, eq, inArray } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import type { WorkflowType } from '@haive/shared';
+import { TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import {
   handleResult,
   markTaskDead,
+  processTaskJob,
   reconcileOrphanedSteps,
   resolveFixLoopGate,
 } from '../src/queues/task-queue.js';
@@ -14,8 +17,33 @@ import {
   type DeadTaskBootDeps,
   type DeadTaskView,
 } from '../src/queues/dead-task-boot.js';
+import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
+import type { AdvanceStepResult } from '../src/step-engine/index.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
+import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { FIX_LOOP_TARGET_STEP_ID } from '../src/step-engine/steps/workflow/_fix-loop.js';
+
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  /** What the task queue was asked to enqueue. */
+  adds: [] as { name: string; data: unknown }[],
+}));
+
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/redis.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/redis.js')>()),
+  getBullRedis: () => ({}),
+  getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
+}));
+vi.mock('bullmq', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('bullmq')>()),
+  Queue: class {
+    async add(name: string, data: unknown) {
+      h.adds.push({ name, data });
+    }
+  },
+}));
 
 const url = process.env.DEAD_TASK_BOOT_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/dead_task_boot_test'))
@@ -23,18 +51,28 @@ if (url && !new URL(url).pathname.startsWith('/dead_task_boot_test'))
 
 const TYPE = 'j4a_dead_boot';
 const DYNAMIC = 'fnf136_dead_boot_dynamic';
+const LOOP_TYPE = 'fnf137_loop_back';
 const A = 'j4a-a';
 const B = 'j4a-b';
+const REVIEW = 'fnf137-review';
+const REVISER = 'fnf137-reviser';
 const GONE = 'module.j4a.gone';
 const LATER = 'module.j4a.later';
 const DEAD_AT = new Date('2026-10-14T08:00:00.000Z');
 const DEAD_REASON = `the run list names a step this install does not register: ${GONE}`;
 
-function stub(id: string, index: number): void {
+type StepRow = typeof schema.taskSteps.$inferSelect;
+
+function stub(
+  id: string,
+  index: number,
+  workflowType: string = TYPE,
+  over: Partial<StepDefinition> = {},
+): void {
   stepRegistry.register({
     metadata: {
       id,
-      workflowType: TYPE as WorkflowType,
+      workflowType: workflowType as WorkflowType,
       index,
       title: id,
       description: 'dead-task-boot test stub',
@@ -49,6 +87,7 @@ function stub(id: string, index: number): void {
     async apply() {
       return {};
     },
+    ...over,
   });
 }
 
@@ -183,9 +222,19 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     fixLoop: null,
     ...over,
   });
+  let repositoryId: string;
+  const job = (name: string, data: Record<string, unknown>) =>
+    ({
+      id: randomUUID(),
+      name,
+      data,
+      timestamp: Date.now(),
+      moveToDelayed: async () => undefined,
+    }) as unknown as Parameters<typeof processTaskJob>[0];
 
   beforeAll(async () => {
     db = createDatabase(url as string);
+    h.db = db;
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     const [user] = await db
       .insert(schema.users)
@@ -199,6 +248,18 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       })
       .returning();
     userId = user!.id;
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'dead-task-boot',
+        source: 'local_path',
+        localPath: os.tmpdir(),
+        storagePath: os.tmpdir(),
+        status: 'ready',
+      })
+      .returning();
+    repositoryId = repo!.id;
     await db
       .insert(schema.taskTypeDefinitions)
       .values({ slug: TYPE, displayName: TYPE, runListStrategy: 'static', source: 'test' })
@@ -214,9 +275,17 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       .onConflictDoNothing();
     stub(A, 1);
     stub(B, 2);
+    stub(FIX_LOOP_TARGET_STEP_ID, 0, LOOP_TYPE);
+    stub(REVIEW, 1, LOOP_TYPE, {
+      fixLoop: { evaluate: () => ({ blocking: true, diagnosis: 'the review found a defect' }) },
+    });
+    stub(REVISER, 2, LOOP_TYPE, {
+      reviseLoop: { evaluate: () => ({ targetStepId: FIX_LOOP_TARGET_STEP_ID }) },
+    });
   });
 
   beforeEach(async () => {
+    h.adds.length = 0;
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
 
@@ -877,6 +946,206 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
 
       expect((await runOf(free.id)).supersededAt).toBeInstanceOf(Date);
       expect((await runOf(held.id)).supersededAt).toBeNull();
+    });
+  });
+
+  describe.each([
+    {
+      event: 'step.done',
+      source: A,
+      snapshot: [A, B],
+      next: { stepId: B, round: 0 },
+      result: (finished: StepRow): AdvanceStepResult => ({
+        status: 'done',
+        row: finished,
+        output: {},
+      }),
+    },
+    {
+      event: 'step.loop_back',
+      source: REVIEW,
+      snapshot: [FIX_LOOP_TARGET_STEP_ID, REVIEW],
+      next: { stepId: FIX_LOOP_TARGET_STEP_ID, round: 1 },
+      result: (finished: StepRow): AdvanceStepResult => ({
+        status: 'loop_back',
+        row: finished,
+        diagnosis: 'the review found a defect',
+        sourceStepId: REVIEW,
+      }),
+    },
+    {
+      event: 'step.revise',
+      source: REVISER,
+      snapshot: [FIX_LOOP_TARGET_STEP_ID, REVISER],
+      next: { stepId: FIX_LOOP_TARGET_STEP_ID, round: 1 },
+      result: (finished: StepRow): AdvanceStepResult => ({
+        status: 'revise',
+        row: finished,
+        targetStepId: FIX_LOOP_TARGET_STEP_ID,
+        sourceStepId: REVISER,
+      }),
+    },
+  ])('a duplicate delivery of the advance of a finished step, $event', (kind) => {
+    const deliver = (taskId: string, epoch = 3) =>
+      processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId: kind.source, round: 0, epoch }),
+      );
+    const finished = async () => {
+      const id = await make({
+        repositoryId,
+        currentStepId: kind.source,
+        runListSnapshot: kind.snapshot,
+      });
+      const done = await row(id, kind.source, 'done', {
+        output: {},
+        endedAt: DEAD_AT,
+        updatedAt: DEAD_AT,
+      });
+      return { id, done };
+    };
+    const firstPass = (id: string, done: StepRow) =>
+      handleResult(
+        db,
+        ctxFor(id, kind.snapshot, { currentStepId: kind.source }),
+        kind.source,
+        kind.result(done),
+      );
+    const loseHandOff = async (id: string) => {
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: kind.source, currentRound: 0 })
+        .where(eq(schema.tasks.id, id));
+      h.adds.length = 0;
+    };
+    const recorded = async (id: string, done: StepRow) =>
+      (await events(id, kind.event)).filter((e) => e.taskStepId === done.id);
+    const expectHandedOn = async (id: string, epoch = 3) => {
+      expect((await task(id)).currentStepId).toBe(kind.next.stepId);
+      expect(h.adds).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId: id, userId, stepId: kind.next.stepId, round: kind.next.round, epoch },
+        },
+      ]);
+    };
+
+    it('records no second event when the first pass recorded one, and still hands the task on', async () => {
+      const { id, done } = await finished();
+      await firstPass(id, done);
+      await loseHandOff(id);
+
+      await deliver(id);
+
+      expect(await recorded(id, done)).toHaveLength(1);
+      await expectHandedOn(id);
+    });
+
+    it('stamps the event with the ended_at of the row it ends', async () => {
+      const { id, done } = await finished();
+
+      await firstPass(id, done);
+
+      expect((await recorded(id, done)).map((e) => e.payload)).toMatchObject([
+        { endedAt: DEAD_AT.toISOString() },
+      ]);
+    });
+
+    it('appends the event of a first pass whatever is recorded', async () => {
+      const { id, done } = await finished();
+      await firstPass(id, done);
+      await loseHandOff(id);
+
+      await firstPass(id, done);
+
+      expect(await recorded(id, done)).toHaveLength(2);
+    });
+
+    it('records the event a first pass died before recording, once however often it is re-driven', async () => {
+      const { id, done } = await finished();
+      const earlier = await row(id, 'j4a-earlier', 'done');
+      const otherRound = await row(id, kind.source, 'done', { round: 1 });
+      const stamped = { stepId: kind.source, endedAt: DEAD_AT.toISOString() };
+      await db.insert(schema.taskEvents).values([
+        { taskId: id, taskStepId: earlier.id, eventType: kind.event, payload: stamped },
+        { taskId: id, taskStepId: otherRound.id, eventType: kind.event, payload: stamped },
+        { taskId: id, taskStepId: done.id, eventType: 'step.waiting_cli', payload: stamped },
+      ]);
+
+      await deliver(id);
+      await loseHandOff(id);
+      await deliver(id);
+
+      expect(await recorded(id, done)).toHaveLength(1);
+      expect(await events(id, kind.event)).toHaveLength(3);
+      await expectHandedOn(id);
+    });
+
+    it('records the event of a rerun after a Retry whose pass died before recording', async () => {
+      const { id, done } = await finished();
+      await firstPass(id, done);
+      const rerunEndedAt = new Date(DEAD_AT.getTime() + 3_600_000);
+      await resetStepAndDownstream(db, id, kind.source, 0);
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'done', output: {}, endedAt: rerunEndedAt, updatedAt: rerunEndedAt })
+        .where(eq(schema.taskSteps.id, done.id));
+      await loseHandOff(id);
+
+      await deliver(id, 4);
+
+      const both = await recorded(id, done);
+      expect(both).toHaveLength(2);
+      expect(both.map((e) => e.payload)).toMatchObject([
+        { endedAt: DEAD_AT.toISOString() },
+        { endedAt: rerunEndedAt.toISOString() },
+      ]);
+      await expectHandedOn(id, 4);
+    });
+
+    it('records no second event when the epoch moved on after the first pass, as a revive or a stalled re-drive moves it', async () => {
+      const { id, done } = await finished();
+      await firstPass(id, done);
+      await loseHandOff(id);
+      await db.update(schema.tasks).set({ orchestrationEpoch: 4 }).where(eq(schema.tasks.id, id));
+
+      await deliver(id, 4);
+
+      expect(await recorded(id, done)).toHaveLength(1);
+      await expectHandedOn(id, 4);
+    });
+
+    it('records the event again when the earlier one carries no stamp', async () => {
+      const { id, done } = await finished();
+      await db.insert(schema.taskEvents).values({
+        taskId: id,
+        taskStepId: done.id,
+        eventType: kind.event,
+        payload: { stepId: kind.source },
+      });
+
+      await deliver(id);
+
+      expect(await recorded(id, done)).toHaveLength(2);
+      await expectHandedOn(id);
+    });
+
+    it('records the event again when the row carries no ended_at', async () => {
+      const { id, done } = await finished();
+      await db
+        .update(schema.taskSteps)
+        .set({ endedAt: null })
+        .where(eq(schema.taskSteps.id, done.id));
+      await db.insert(schema.taskEvents).values({
+        taskId: id,
+        taskStepId: done.id,
+        eventType: kind.event,
+        payload: { stepId: kind.source, endedAt: null },
+      });
+
+      await deliver(id);
+
+      expect(await recorded(id, done)).toHaveLength(2);
+      await expectHandedOn(id);
     });
   });
 

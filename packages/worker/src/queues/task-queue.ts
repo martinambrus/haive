@@ -286,6 +286,36 @@ async function appendEvent(
   });
 }
 
+/** The pass's name: a Retry clears the row's ended_at and the rerun sets a new one. */
+function endedAtOf(row: { endedAt: Date | null }): string | null {
+  return row.endedAt?.toISOString() ?? null;
+}
+
+/** Appends the event once per pass (row, type, `endedAt`); a missing `endedAt` never matches. */
+async function appendEventOnce(
+  db: Database,
+  taskId: string,
+  taskStepId: string,
+  eventType: string,
+  payload: Record<string, unknown> & { endedAt: string | null },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [seen] = await tx
+      .select({ id: schema.taskEvents.id })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, taskId),
+          eq(schema.taskEvents.taskStepId, taskStepId),
+          eq(schema.taskEvents.eventType, eventType),
+          sql`${schema.taskEvents.payload}->>'endedAt' = ${payload.endedAt}`,
+        ),
+      )
+      .limit(1);
+    if (!seen) await appendEvent(tx, taskId, taskStepId, eventType, payload);
+  });
+}
+
 /** A task nobody has started yet: created, or queued by the start action or a task Retry. */
 const STARTABLE_TASK_STATUSES = ['created', 'queued'] as const satisfies readonly TaskStatus[];
 
@@ -1658,8 +1688,11 @@ export async function handleResult(
   ctx: ResolvedTaskContext,
   stepId: string,
   result: AdvanceStepResult,
+  opts: { redrive?: boolean } = {},
 ): Promise<void> {
   const stepDef = requireTaskStep(ctx, stepId);
+  // A first pass appends; only a re-driven hand-off can repeat the events its pass already wrote.
+  const record = opts.redrive ? appendEventOnce : appendEvent;
   // The pass ran under the epoch its job was picked up at. A Retry, a reset or a cancel that moved
   // the task on while it ran owns the task now, so this result hands nothing off.
   if (result.status !== 'superseded' && (await taskEpochMoved(db, ctx))) {
@@ -1684,8 +1717,9 @@ export async function handleResult(
     }
     case 'done':
     case 'skipped': {
-      await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
+      await record(db, ctx.taskId, result.row.id, `step.${result.status}`, {
         stepId,
+        endedAt: endedAtOf(result.row),
       });
       // A fan-out step DEGRADES on a dead agent rather than failing (a reviewer that died
       // is not evidence the code is wrong), so its budget kills would otherwise leave no
@@ -1822,10 +1856,11 @@ export async function handleResult(
         columns: { maxFixRounds: true },
       });
       const cap = taskRow?.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
-      await appendEvent(db, ctx.taskId, result.row.id, 'step.loop_back', {
+      await record(db, ctx.taskId, result.row.id, 'step.loop_back', {
         stepId,
         sourceStepId: result.sourceStepId,
         round: nextRound,
+        endedAt: endedAtOf(result.row),
       });
       // Oscillation guard: before the round cap, catch a non-converging loop (two checks
       // with contradictory criteria ping-ponging) and escalate to the SAME Continue/Accept/
@@ -2026,11 +2061,12 @@ export async function handleResult(
       // preserved, per-card timer, terminal re-opens on the fresh row) — mirrors loop_back.
       const selfLoop = result.targetStepId === result.sourceStepId;
       const targetRound = selfLoop ? result.row.round : result.row.round + 1;
-      await appendEvent(db, ctx.taskId, result.row.id, 'step.revise', {
+      await record(db, ctx.taskId, result.row.id, 'step.revise', {
         stepId,
         sourceStepId: result.sourceStepId,
         targetStepId: result.targetStepId,
         round: targetRound,
+        endedAt: endedAtOf(result.row),
       });
       const reset = await resetStepAndDownstream(
         db,
@@ -2610,7 +2646,7 @@ async function handleAdvanceStep(
     if (gate) {
       await resolveFixLoopGate(db, ctx, existing, gate.action, round, gate.instruction);
     } else if (redriven) {
-      await handleResult(db, ctx, payload.stepId, redriven);
+      await handleResult(db, ctx, payload.stepId, redriven, { redrive: true });
     }
     return;
   }
