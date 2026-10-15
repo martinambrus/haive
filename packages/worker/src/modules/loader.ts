@@ -180,13 +180,19 @@ export async function ensureModuleSchemas(
   db: Database,
   loaded: readonly LoadedWorkerModule[],
   entries: readonly WorkerModuleEntry[],
-): Promise<Record<string, 'ok' | 'none'>> {
-  const result: Record<string, 'ok' | 'none'> = {};
+  deactivated: ReadonlySet<string>,
+): Promise<Record<string, 'ok' | 'none' | 'deactivated'>> {
+  const result: Record<string, 'ok' | 'none' | 'deactivated'> = {};
   for (const [index, module] of loaded.entries()) {
     const moduleId = module.manifest.id;
     const ensureSchema = entries[index]?.ensureSchema;
     if (!ensureSchema) {
       result[moduleId] = 'none';
+      continue;
+    }
+    // A restart after Tear down must not re-create the schema the teardown dropped.
+    if (deactivated.has(moduleId)) {
+      result[moduleId] = 'deactivated';
       continue;
     }
     await bootstrapModuleSchema(db, moduleId, ensureSchema);
@@ -375,7 +381,7 @@ export async function startModuleJobs(
 export async function publishWorkerBootReport(
   redis: Redis,
   loaded: readonly LoadedWorkerModule[],
-  schemas: Record<string, 'ok' | 'none'>,
+  schemas: Record<string, 'ok' | 'none' | 'deactivated'>,
   taskTypes: Record<string, ModuleTaskTypeOutcome>,
 ): Promise<void> {
   await redis.set(

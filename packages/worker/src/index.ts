@@ -69,7 +69,11 @@ import { deactivatedModuleIds } from './modules/activation.js';
 async function main(): Promise<void> {
   const buildStamp = initBuildStamp();
   const { repoStoragePath, bundleStoragePath } = await bootstrap();
-  const { loaded: loadedModules, entries: moduleEntries } = await bootStepEngine(getDb());
+  const {
+    loaded: loadedModules,
+    entries: moduleEntries,
+    deactivated: deactivatedAtBoot,
+  } = await bootStepEngine(getDb());
   // Reap any cli sandbox containers left behind by a prior worker that died
   // mid-job (tsx watch restart, SIGKILL, OOM). BullMQ will redeliver the
   // job to this worker once its lock expires; we want a clean slate to
@@ -261,11 +265,7 @@ async function main(): Promise<void> {
   const cliStreamLogReaper = new CliStreamLogReaper({ db: getDb() });
   cliStreamLogReaper.start();
 
-  const moduleJobs = await startModuleJobs(
-    loadedModules,
-    moduleEntries,
-    await deactivatedModuleIds(getDb()),
-  );
+  const moduleJobs = await startModuleJobs(loadedModules, moduleEntries, deactivatedAtBoot);
   // After the module jobs: a teardown refuses a module whose jobs this worker started.
   const moduleControlWorker = startModuleControlWorker({
     loaded: loadedModules,
