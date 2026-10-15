@@ -2,7 +2,8 @@
 
 A module is a package named `@haive/module-<id>` (a workspace folder under `modules/<id>/`) or
 `@haive-module/<id>` (published to the registry; `modulePackageId` in `@haive/shared/modularity` is
-the one rule, and both loaders and `gen-modules` refuse a manifest id that does not match), whose
+the one rule: `gen-modules` refuses a package that exports `./manifest` under any other name, and both
+loaders refuse at boot a manifest whose id does not match its name), whose
 `package.json` exports `./manifest` and any of `./routes` (api), `./steps`, `./ensure-schema` and
 `./jobs` (worker), `./web` and `./dashboard` (web). `scripts/gen-modules.mjs` turns the installed
 ones into four gitignored registries (`packages/api/src/modules.generated.ts`,
@@ -117,7 +118,9 @@ published, so the root `package.json` pins `@haive/shared`, `@haive/database` an
 `workspace:*` in `pnpm.overrides`: without them pnpm looks the core packages up on registry.npmjs.org
 (and could install somebody else's). A registry module ships `files: ["dist"]`, takes `@haive/*`,
 `hono`, `drizzle-orm` and `zod` (and `react`/`next` for web parts) as peer dependencies, and is named
-`@haive-module/<id>` with `<id>` equal to its manifest id.
+`@haive-module/<id>` with `<id>` equal to its manifest id. `gen-modules` checks the name only; the id
+is checked when the api and worker load the module, so a mismatch builds and they then refuse to
+start, naming the package.
 
 ## Published-image installs
 
