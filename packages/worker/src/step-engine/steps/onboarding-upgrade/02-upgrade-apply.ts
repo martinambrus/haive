@@ -65,7 +65,6 @@ import {
   type RulesImportStubOutcome,
 } from '../onboarding/_rules-files.js';
 import { buildRtkAwarenessBlock, withoutRtkHookEntry } from '../onboarding/_rtk-templates.js';
-import { inHead } from '../onboarding/_stage-paths.js';
 import {
   backfillRecord,
   readRenderContextColumnRaw,
@@ -75,6 +74,9 @@ import {
 } from './01-upgrade-plan.js';
 
 const RESTORE_RTK_BLOCK_FIELD = 'restoreRtkBlock';
+
+/** One per Haive file 02 removes, so a retry that finds it gone knows this task removed it. */
+export const HAIVE_FILE_RETIRED_EVENT = 'upgrade.haive_file_retired';
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
@@ -1812,21 +1814,43 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       });
       writtenPaths.push(...state.written);
       deletedPaths.push(...state.removed);
-      const manifest = await retireInstallManifest(ctx, warnings);
-      if (
-        manifest === 'removed' ||
-        (manifest === 'absent' && (await inHead(ctx.repoPath, INSTALL_MANIFEST_PATH)))
-      ) {
-        deletedPaths.push(INSTALL_MANIFEST_PATH);
-      }
+      const retiredEarlier = new Set(
+        (
+          await ctx.db
+            .select({ payload: schema.taskEvents.payload })
+            .from(schema.taskEvents)
+            .where(
+              and(
+                eq(schema.taskEvents.taskId, ctx.taskId),
+                eq(schema.taskEvents.eventType, HAIVE_FILE_RETIRED_EVENT),
+              ),
+            )
+        ).map((event) => event.payload?.path),
+      );
+      const listRetired = async (retired: Awaited<ReturnType<typeof retireLegacyMirrors>>) => {
+        for (const { path, outcome } of retired) {
+          if (outcome === 'removed' || (outcome === 'absent' && retiredEarlier.has(path))) {
+            deletedPaths.push(path);
+          }
+        }
+        const removed = retired.filter(({ outcome }) => outcome === 'removed');
+        if (removed.length === 0) return;
+        await ctx.db.insert(schema.taskEvents).values(
+          removed.map(({ path }) => ({
+            taskId: ctx.taskId,
+            taskStepId: ctx.taskStepId,
+            eventType: HAIVE_FILE_RETIRED_EVENT,
+            payload: { path },
+          })),
+        );
+      };
+      await listRetired([
+        { path: INSTALL_MANIFEST_PATH, outcome: await retireInstallManifest(ctx, warnings) },
+      ]);
       const keepTooling = (await toolingOutsideRecord(ctx.db, plan.repositoryId))
         ? [HAIVE_DATA_FILES.tooling]
         : [];
-      for (const { path, outcome } of await retireLegacyMirrors(ctx, warnings, keepTooling)) {
-        if (outcome === 'removed' || (outcome === 'absent' && (await inHead(ctx.repoPath, path)))) {
-          deletedPaths.push(path);
-        }
-      }
+      await listRetired(await retireLegacyMirrors(ctx, warnings, keepTooling));
     } catch (err) {
       failIfColumnStale(err);
       if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);

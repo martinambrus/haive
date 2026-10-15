@@ -9,13 +9,18 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import type { UpgradePlanOutput } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
-import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
+import {
+  HAIVE_FILE_RETIRED_EVENT,
+  upgradeApplyStep,
+} from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { appliedWrittenPaths } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const TASK = '00000000-0000-4000-8000-0000000000c1';
+const OTHER_TASK = '00000000-0000-4000-8000-0000000000c2';
+const STEP = '00000000-0000-4000-8000-0000000000d1';
 
 const RECORD_PATHS = ['.haive-data/state/format.json', '.haive-data/state/project/render.json'];
 
@@ -53,6 +58,7 @@ async function setup(installJson?: string) {
     projectStateSync: schema.projectStateSync,
     projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
+    taskEvents: schema.taskEvents,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
   const plan = {
@@ -75,13 +81,24 @@ async function setup(installJson?: string) {
     backfilledRows: 0,
   } as UpgradePlanOutput;
   const noop = () => undefined;
+  let crash = false;
   const ctx = {
     db: fake.db,
     repoPath: root,
     taskId: TASK,
+    taskStepId: STEP,
     userId: USER,
     throwIfCancelled: () => {},
-    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    logger: {
+      info: () => {
+        if (!crash) return;
+        crash = false;
+        throw new Error('crashed after retiring');
+      },
+      warn: noop,
+      error: noop,
+      debug: noop,
+    },
   } as unknown as StepContext;
   const apply = () =>
     upgradeApplyStep.apply(ctx, {
@@ -94,6 +111,14 @@ async function setup(installJson?: string) {
     root,
     fake,
     apply,
+    crashAfterRetire: () => {
+      crash = true;
+    },
+    retired: () =>
+      fake
+        .rows(schema.taskEvents)
+        .filter((e) => e.eventType === HAIVE_FILE_RETIRED_EVENT)
+        .map(({ taskId, taskStepId, payload }) => ({ taskId, taskStepId, payload })),
     column: () => fake.rows(schema.repositories)[0]!.renderContext ?? null,
     syncRows: () => fake.rows(schema.projectStateSync),
   };
@@ -165,16 +190,59 @@ describe('02 and .haive/install.json', () => {
     expect(out.warnings).toEqual([]);
   });
 
-  it('lists it on a retry, when a first attempt removed it and HEAD still carries it', async () => {
+  it('records the removal as an event of this task and step', async () => {
+    const s = await setup(HAIVE_SHAPED);
+
+    await s.apply();
+
+    expect(s.retired()).toEqual([{ taskId: TASK, taskStepId: STEP, payload: { path: INSTALL } }]);
+  });
+
+  it('does not list one the person deleted, though HEAD still carries it', async () => {
     const s = await setup(HAIVE_SHAPED);
     await commitAll(s.root);
     await rm(join(s.root, INSTALL));
 
     const out = await s.apply();
 
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(out.warnings).toEqual([]);
+  });
+
+  it.each([
+    ['a committed repository', true],
+    ['no git at all', false],
+  ])('lists it again on a retry of the task that removed it, in %s', async (_what, withGit) => {
+    const s = await setup(HAIVE_SHAPED);
+    if (withGit) await commitAll(s.root);
+    s.crashAfterRetire();
+
+    await expect(s.apply()).rejects.toThrow('crashed after retiring');
     expect(existsSync(join(s.root, INSTALL))).toBe(false);
+
+    const out = await s.apply();
+
     expect(out.deletedPaths).toContain(INSTALL);
     expect(out.warnings).toEqual([]);
+  });
+
+  it.each([
+    ['another task', OTHER_TASK, INSTALL],
+    ['another path', TASK, '.haive/other.json'],
+  ])('does not take the event of %s for its own', async (_what, taskId, path) => {
+    const s = await setup(HAIVE_SHAPED);
+    await commitAll(s.root);
+    await rm(join(s.root, INSTALL));
+    s.fake.insert(schema.taskEvents, {
+      taskId,
+      taskStepId: null,
+      eventType: HAIVE_FILE_RETIRED_EVENT,
+      payload: { path },
+    });
+
+    const out = await s.apply();
+
+    expect(out.deletedPaths ?? []).not.toContain(INSTALL);
   });
 
   it.each([
@@ -196,6 +264,7 @@ describe('02 and .haive/install.json', () => {
 
     expect(existsSync(join(s.root, INSTALL))).toBe(true);
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
+    expect(s.retired()).toEqual([]);
     expect(out.warnings).toEqual([
       '.haive/install.json was left in place: it is not a Haive install manifest',
     ]);
@@ -264,7 +333,21 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
     );
   });
 
-  it('lists them on a retry, when a first attempt removed them and HEAD still carries them', async () => {
+  it('records each removal as an event of this task and step', async () => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
+
+    await s.apply();
+
+    expect(s.retired()).toHaveLength(2);
+    expect(s.retired()).toEqual(
+      expect.arrayContaining([
+        { taskId: TASK, taskStepId: STEP, payload: { path: ENV_LEGACY } },
+        { taskId: TASK, taskStepId: STEP, payload: { path: GLOBS_LEGACY } },
+      ]),
+    );
+  });
+
+  it('does not list ones the person deleted, though HEAD still carries them', async () => {
     const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
     await commitAll(s.root);
     for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) await rm(join(s.root, rel));
@@ -272,7 +355,27 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
     const out = await s.apply();
 
     for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
+      expect(out.deletedPaths ?? [], rel).not.toContain(rel);
+    }
+    expect(out.warnings).toEqual([]);
+  });
+
+  it.each([
+    ['a committed repository', true],
+    ['no git at all', false],
+  ])('lists them again on a retry of the task that removed them, in %s', async (_what, withGit) => {
+    const s = await withLegacy({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS }, true);
+    if (withGit) await commitAll(s.root);
+    s.crashAfterRetire();
+
+    await expect(s.apply()).rejects.toThrow('crashed after retiring');
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
       expect(existsSync(join(s.root, rel)), rel).toBe(false);
+    }
+
+    const out = await s.apply();
+
+    for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
       expect(out.deletedPaths, rel).toContain(rel);
     }
     expect(out.warnings).toEqual([]);
@@ -306,6 +409,7 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
         } mirror`,
       );
     }
+    expect(s.retired()).toEqual([]);
   });
 
   it('keeps a mirror whose value the record does not carry', async () => {

@@ -51,7 +51,7 @@ function strings(raw: unknown): string[] {
   return list(raw).filter((s): s is string => typeof s === 'string');
 }
 
-export async function inHead(repoPath: string, rel: string): Promise<boolean> {
+async function inHead(repoPath: string, rel: string): Promise<boolean> {
   return (await gitRun(repoPath, ['cat-file', '-e', `HEAD:${rel}`])).code === 0;
 }
 
