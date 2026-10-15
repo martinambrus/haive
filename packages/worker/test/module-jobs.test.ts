@@ -23,8 +23,13 @@ vi.mock('@haive/shared/module-db', async (importOriginal) => ({
   },
 }));
 
-const { beginModuleTeardown, moduleJobsStarted, moduleTeardownRunning, startModuleJobs } =
-  await import('../src/modules/loader.js');
+const {
+  MODULE_JOBS_RECONCILE_MS,
+  beginModuleTeardown,
+  moduleJobsStarted,
+  moduleTeardownRunning,
+  startModuleJobs,
+} = await import('../src/modules/loader.js');
 const { ModuleTeardownRefusedError, runModuleTeardown } =
   await import('../src/queues/module-control-queue.js');
 
@@ -538,6 +543,34 @@ describe('the jobs reconcile', () => {
     expect(moduleJobsStarted('abandoned')).toBe(false);
     await runModuleTeardown(teardownDeps(bad, hook), 'abandoned');
     expect(hook).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a teardown begun while a schema-only module is being ensured, in words that fit a schema setup', async () => {
+    const m = moduleWithSchemaOnly('ensuring');
+    let endEnsure!: () => void;
+    m.ensure.mockImplementationOnce(() => new Promise<void>((resolve) => (endEnsure = resolve)));
+    const hook = vi.fn<Hook>(async () => {});
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['ensuring']),
+    );
+
+    const pass = reconcile(new Set());
+    await vi.waitFor(() => expect(m.ensure).toHaveBeenCalledOnce());
+    const refusal = (await runModuleTeardown(teardownDeps(m, hook), 'ensuring').catch(
+      (err: unknown) => err,
+    )) as Error;
+
+    expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
+    expect(refusal.message).toMatch(
+      new RegExp(`ensuring.*schema setup.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds`),
+    );
+    expect(hook).not.toHaveBeenCalled();
+
+    endEnsure();
+    await pass;
+    await stopAll();
   });
 
   it.each(['resolves', 'rejects'] as const)(

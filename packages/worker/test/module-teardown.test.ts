@@ -265,12 +265,12 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
       /alpha.*missing/,
     ],
     [
-      'had its jobs started by this worker',
+      'had its jobs or schema setup started by this worker',
       () => setModule('alpha', { deactivatedAt: OFF }),
       ['alpha'],
       ['alpha'],
       new RegExp(
-        `alpha.*jobs.*still running on this worker.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds.*try again shortly`,
+        `alpha.*jobs or schema setup.*still running on this worker.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds.*try again shortly`,
       ),
     ],
   ])(
