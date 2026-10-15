@@ -119,7 +119,9 @@ with 400 alongside a new string, and audited as `{connectionStringSet: false}`. 
 string writes it (and its audit row) after the embedding-width check and before the mode, so no
 process finds the external store without its string, and a refused save writes nothing. Every
 process reads the mode and the string fresh, past the 30 s caches (`resolveGlobalKbSettings`), so a
-switch or a removal reaches the worker at once. The house-rules switch lives in
+switch or a removal reaches the worker at once; a reader that finds the external store without a
+string reads the mode once more, since a switch to the built-in store writes the mode before it
+deletes the string. The house-rules switch lives in
 the admin console, and an admin who points the KB at an external store trusts every writer of that
 database: a row it marks enforced is honoured. The
 enrich task refuses to re-enrich an enforced entry, since a retry would demote it.
