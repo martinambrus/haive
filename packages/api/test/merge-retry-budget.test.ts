@@ -22,6 +22,7 @@ import { is, SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -30,12 +31,9 @@ const TASK = '00000000-0000-4000-8000-000000000001';
 const STEP = '12-worktree-cleanup';
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/', taskRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 const json = (path: string, method: string, body: unknown) =>
   app.request(path, {

@@ -126,10 +126,6 @@ const catalogRow = (
 let selects = 0;
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 
 const send = (method: string, path: string, body?: unknown) =>
   app.request(path, {

@@ -23,6 +23,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
   configService: {
     get: async () => 'USD',
+    getFresh: async () => 'normal',
     getBoolean: async () => true,
   },
 }));
@@ -45,10 +46,6 @@ const TYPE = 'tcs-type';
 const CUSTOM_ID = `custom.${TYPE}.review`;
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/admin/task-types', adminTaskTypeRoutes);
 app.route('/tasks', taskRoutes);
 app.onError(errorHandler);

@@ -35,7 +35,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  configService: { getBoolean: async () => true },
+  configService: { getBoolean: async () => true, getFresh: async () => 'normal' },
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
@@ -55,10 +55,6 @@ import type { AppEnv } from '../src/context.js';
 const PROVIDER = '00000000-0000-4000-8000-0000000000c1';
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/', globalKbRoutes);
 app.onError(errorHandler);
 

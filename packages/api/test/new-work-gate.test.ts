@@ -92,16 +92,27 @@ const REFUSAL =
   'Haive is preparing for maintenance, so new work is not being started. Work already running will finish.';
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', h.state as 'normal');
-  await next();
-});
 app.route('/tasks', taskRoutes);
 app.route('/repositories', upgradeRoutes);
 app.route('/repositories', planRoutes);
 app.route('/global-kb', globalKbRoutes);
 app.route('/admin/task-type-drafts', taskTypeDraftRoutes);
 app.onError(errorHandler);
+
+const gated = new Hono<AppEnv>();
+gated.use('*', maintenanceGate);
+gated.route('/tasks', taskRoutes);
+gated.route('/repositories', upgradeRoutes);
+gated.route('/repositories', planRoutes);
+gated.route('/global-kb', globalKbRoutes);
+gated.route('/admin/task-type-drafts', taskTypeDraftRoutes);
+gated.onError(errorHandler);
+
+/** What the cached read answers, and what the stored state is when it is read past the cache. */
+const states = (cached: string, stored: string) => {
+  vi.spyOn(configService, 'get').mockResolvedValue(cached);
+  return vi.spyOn(configService, 'getFresh').mockClear().mockResolvedValue(stored);
+};
 
 const ROUTES: { name: string; path: string; body: unknown }[] = [
   {
@@ -207,6 +218,7 @@ beforeEach(() => {
   h.state = 'normal';
   vi.spyOn(configService, 'get').mockResolvedValue('true');
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+  vi.spyOn(configService, 'getFresh').mockImplementation(async () => h.state);
 });
 
 describe.each(ROUTES)('$name', (route) => {
@@ -232,22 +244,53 @@ describe.each(ROUTES)('$name', (route) => {
       expect(h.dbCalls).toBe(0);
     },
   );
+
+  describe('behind the real maintenance gate', () => {
+    it('creates a task when the cached copy and the stored state both say normal', async () => {
+      const { fake, seeded } = setup();
+      states('normal', 'normal');
+
+      expect((await gated.request(route.path, request(route))).status).toBe(201);
+      expect(fake.rows(schema.tasks).length).toBe(seeded + 1);
+    });
+
+    it.each(['draining', 'maintenance'])(
+      'answers 503 and creates no task when only the stored state is %s, the cached copy still saying normal',
+      async (stored) => {
+        const { fake, seeded } = setup();
+        states('normal', stored);
+
+        const res = await gated.request(route.path, request(route));
+
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+        expect(fake.rows(schema.tasks).length).toBe(seeded);
+        expect(fake.rows(globalKbEntries)).toEqual([]);
+        expect(h.dbCalls).toBe(0);
+      },
+    );
+
+    it('creates a task when a drain was lifted after the cached copy was read', async () => {
+      const { fake, seeded } = setup();
+      states('draining', 'normal');
+
+      expect((await gated.request(route.path, request(route))).status).toBe(201);
+      expect(fake.rows(schema.tasks).length).toBe(seeded + 1);
+    });
+  });
 });
 
-describe('with the real maintenance gate in front', () => {
-  it('takes the stored state from it, so a drain refuses and normal accepts', async () => {
-    const gated = new Hono<AppEnv>();
-    gated.use('*', maintenanceGate);
-    gated.route('/tasks', taskRoutes);
-    gated.onError(errorHandler);
+describe('the real maintenance gate', () => {
+  it('locks a non-admin out on its cached read, without reading the stored state', async () => {
     const { fake, seeded } = setup();
+    const stored = states('maintenance', 'normal');
 
-    vi.spyOn(configService, 'get').mockResolvedValue('draining');
-    expect((await gated.request('/tasks', request(ROUTES[0]!))).status).toBe(503);
+    const res = await gated.request('/tasks', request(ROUTES[0]!));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ maintenance: 'maintenance' });
     expect(fake.rows(schema.tasks).length).toBe(seeded);
-
-    vi.spyOn(configService, 'get').mockResolvedValue('normal');
-    expect((await gated.request('/tasks', request(ROUTES[0]!))).status).toBe(201);
+    expect(stored).not.toHaveBeenCalled();
   });
 });
 
@@ -665,4 +708,34 @@ describe.each([
       expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
     },
   );
+
+  describe('behind the real maintenance gate', () => {
+    const answerThroughGate = () =>
+      gated.request(`/tasks/${TASK}/steps/${STEP}/${route}`, request({ body }));
+
+    it('queues the answer to a failed task when the cached copy and the stored state both say normal', async () => {
+      const fake = withParkedForm('failed');
+      states('normal', 'normal');
+
+      expect((await answerThroughGate()).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: statusAfter });
+      expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+    });
+
+    it.each(['draining', 'maintenance'])(
+      'answers 503 and queues and writes nothing for a failed task when only the stored state is %s, the cached copy still saying normal',
+      async (stored) => {
+        const fake = withParkedForm('failed');
+        const before = written(fake);
+        states('normal', stored);
+
+        const res = await answerThroughGate();
+
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+        expect(h.queued).toEqual([]);
+        expect(written(fake)).toEqual(before);
+      },
+    );
+  });
 });

@@ -63,7 +63,6 @@ export const maintenanceGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const state: MaintenanceState = parseMaintenanceState(
     await configService.get(CONFIG_KEYS.MAINTENANCE_STATE),
   );
-  c.set('maintenanceState', state);
 
   if (!locksOutNonAdmins(state)) return next();
   if (ALWAYS_OPEN.some((p) => p.test(c.req.path))) return next();
@@ -80,7 +79,9 @@ export const maintenanceGate: MiddlewareHandler<AppEnv> = async (c, next) => {
 };
 
 /** Throws the 503 a route that starts work answers once the system drains or is in maintenance. */
-export function assertNewWorkAllowed(state: MaintenanceState): void {
+export async function assertNewWorkAllowed(): Promise<void> {
+  // Past the cache: the updater sets the drain from another process and counts live tasks at once.
+  const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
   if (refusesNewWork(state)) {
     throw new HttpError(
       503,
@@ -91,7 +92,7 @@ export function assertNewWorkAllowed(state: MaintenanceState): void {
 }
 
 /** A route that creates a task answers 503 once the system drains or is in maintenance. */
-export const requireNewWorkAllowed: MiddlewareHandler<AppEnv> = async (c, next) => {
-  assertNewWorkAllowed(c.get('maintenanceState'));
+export const requireNewWorkAllowed: MiddlewareHandler<AppEnv> = async (_c, next) => {
+  await assertNewWorkAllowed();
   await next();
 };

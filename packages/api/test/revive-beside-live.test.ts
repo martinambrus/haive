@@ -21,6 +21,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { liveTaskIdOfType, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { withRepositoryTaskLock } from '../src/routes/upgrades.js';
@@ -33,12 +34,9 @@ const OTHER = '00000000-0000-4000-8000-000000000002';
 const STEP = '11d-skill-sync';
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/', taskRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 beforeEach(() => {
   h.add.mockClear();

@@ -30,6 +30,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { taskTypeDraftRoutes } from '../src/routes/task-type-drafts.js';
 import { upgradeRoutes } from '../src/routes/upgrades.js';
@@ -43,14 +44,11 @@ const SNAPSHOT = ['00-x', '01-y'];
 const PINNED = { 'custom.t.s': { slug: 's', title: 'S' } };
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/tasks', taskRoutes);
 app.route('/repositories', upgradeRoutes);
 app.route('/admin/task-type-drafts', taskTypeDraftRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 function world() {
   const fake = createFakeDb({

@@ -41,7 +41,11 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  configService: { getBoolean: async () => true, get: async () => 'true' },
+  configService: {
+    getBoolean: async () => true,
+    get: async () => 'true',
+    getFresh: async () => 'normal',
+  },
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
@@ -141,10 +145,6 @@ const typeRow = (
 });
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/tasks', taskRoutes);
 app.route('/admin/task-types', adminTaskTypeRoutes);
 app.route('/repositories', planRoutes);

@@ -70,7 +70,7 @@ taskTypeDraftRoutes.use('*', requireAdmin);
 
 taskTypeDraftRoutes.post('/', async (c) => {
   const userId = c.get('userId');
-  assertNewWorkAllowed(c.get('maintenanceState'));
+  await assertNewWorkAllowed();
   const body = startSchema.parse(await c.req.json());
   const db = getDb();
   if (body.cliProviderId) await loadUsableProvider(db, userId, body.cliProviderId);

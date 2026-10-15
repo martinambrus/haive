@@ -1170,7 +1170,7 @@ taskRoutes.post('/:id/action', async (c) => {
 
   switch (body.action) {
     case 'start': {
-      assertNewWorkAllowed(c.get('maintenanceState'));
+      await assertNewWorkAllowed();
       refuseDeadTask(task);
       // The second half of a two-phase create (POST /plan/build with
       // `deferStart`): the row was made unstarted so the caller could upload
@@ -1204,7 +1204,7 @@ taskRoutes.post('/:id/action', async (c) => {
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
     case 'retry': {
-      assertNewWorkAllowed(c.get('maintenanceState'));
+      await assertNewWorkAllowed();
       refuseDeadTask(task);
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);

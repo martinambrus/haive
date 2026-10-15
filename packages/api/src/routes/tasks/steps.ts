@@ -676,7 +676,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   });
   if (!task) throw new HttpError(404, 'Task not found');
   // The answer reopens a failed task, which is new work.
-  if (task.status === 'failed') assertNewWorkAllowed(c.get('maintenanceState'));
+  if (task.status === 'failed') await assertNewWorkAllowed();
   refuseDeadTask(task);
   // Answering a failed upgrade's form revives it in the worker, which the index refuses there.
   if (task.status === 'failed' && task.type === 'onboarding_upgrade' && task.repositoryId) {
@@ -757,7 +757,7 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
   });
   if (!task) throw new HttpError(404, 'Task not found');
   // The answer reopens a failed task, which is new work.
-  if (task.status === 'failed') assertNewWorkAllowed(c.get('maintenanceState'));
+  if (task.status === 'failed') await assertNewWorkAllowed();
   refuseDeadTask(task);
 
   const stepRows = await db
@@ -832,7 +832,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   });
   if (!task) throw new HttpError(404, 'Task not found');
   if (body.action !== 'abort') {
-    assertNewWorkAllowed(c.get('maintenanceState'));
+    await assertNewWorkAllowed();
     refuseDeadTask(task);
   }
 
@@ -1739,7 +1739,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
 
   const movesTask =
     step.iterationCount === 0 && (step.status === 'waiting_form' || step.status === 'failed');
-  if (movesTask) assertNewWorkAllowed(c.get('maintenanceState'));
+  if (movesTask) await assertNewWorkAllowed();
 
   await writeStepCliChoice(db, choice);
 

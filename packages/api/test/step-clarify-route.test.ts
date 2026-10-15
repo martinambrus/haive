@@ -11,6 +11,7 @@ vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: h.add }) }));
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { stepRoutes } from '../src/routes/tasks/steps.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -22,11 +23,11 @@ const STEP = '06c-dag-execute';
 const app = new Hono<AppEnv>();
 app.use('*', async (c, next) => {
   c.set('userId', USER);
-  c.set('maintenanceState', 'normal');
   await next();
 });
 app.route('/', stepRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 /** A task at `status` whose merge step is parked on a clarification. */
 function setup(status: string) {
