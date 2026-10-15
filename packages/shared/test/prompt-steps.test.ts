@@ -719,9 +719,9 @@ describe('tools on a prompt step', () => {
     expect(kinds(entry())).toEqual([]);
   });
 
-  it('no longer raises tools-not-supported-yet, though the kind stays listed', () => {
+  it('no longer knows tools-not-supported-yet: tools save clean and the kind is gone', () => {
     expect(validatePromptStep(entry({ tools: [httpTool] }), ctx)).toEqual([]);
-    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tools-not-supported-yet');
+    expect(PROMPT_STEP_PROBLEM_KINDS).not.toContain('tools-not-supported-yet');
   });
 
   it('adds the problems of each tool, with the tool name as the raw text', () => {
@@ -787,7 +787,6 @@ describe('tools on a prompt step', () => {
       'step-token-not-quotable',
       'step-token-not-own-line',
     ]);
-    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tools-not-supported-yet');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tool-no-longer-valid');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tool-url-not-https');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('too-many-tools');

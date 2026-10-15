@@ -103,9 +103,7 @@ type Reach =
   | { reaches: () => unknown }
   | { schemaPath: string; refuses: () => unknown }
   // Raised for a stored step read back with a tool that no longer parses: no draft carries that.
-  | { stored: () => Record<string, unknown> }
-  // Still listed, because the web words it, and no longer raised.
-  | { retired: () => unknown };
+  | { stored: () => Record<string, unknown> };
 
 // Every kind the save path can answer is a key here: a kind added later without a row fails to compile.
 const KINDS: Record<KindOf, Reach> = {
@@ -135,7 +133,6 @@ const KINDS: Record<KindOf, Reach> = {
   'step-token-not-earlier': { reaches: () => withStep({ template: 'Use\n{{step:ta-nope}}\n' }) },
   'step-token-not-quotable': { reaches: () => withStep({ template: 'Use\n{{step:ta-b}}\n' }) },
   'step-token-not-own-line': { reaches: () => withStep({ template: 'Use {{step:ta-a}} now' }) },
-  'tools-not-supported-yet': { retired: () => withTools([httpTool]) },
   'tool-no-longer-valid': {
     stored: () => ({
       review: parsePromptSteps({
@@ -374,6 +371,13 @@ describe('validateTaskTypeDraft', () => {
     expect(validateTaskTypeDraft(plain, catalog)).toEqual({ issues: [], warnings: [] });
   });
 
+  it('accepts a draft whose step carries a valid tool', () => {
+    expect(validateTaskTypeDraft(withTools([httpTool]), catalog)).toEqual({
+      issues: [],
+      warnings: [],
+    });
+  });
+
   it('has a row for every kind the save path answers', () => {
     const universe = [
       ...PROMPT_STEP_PROBLEM_KINDS,
@@ -407,10 +411,6 @@ describe('validateTaskTypeDraft', () => {
         expect(issues.map((i) => [i.kind, i.stepId, i.index])).toEqual([[kind, CUSTOM_ID, 2]]);
         const forged = withStep({ invalidTools: ['forged'] });
         expect(kindsOf(validateTaskTypeDraft(forged, catalog).issues)).not.toContain(kind);
-      });
-    } else if ('retired' in how) {
-      it('is not raised any more: the draft saves clean', () => {
-        expect(validateTaskTypeDraft(how.retired(), catalog)).toEqual({ issues: [], warnings: [] });
       });
     } else {
       it('is refused by the schema first, as on the save path', () => {

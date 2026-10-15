@@ -282,7 +282,6 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'step-token-not-own-line',
   ...CUSTOM_TOOL_PROBLEM_KINDS,
   'tool-no-longer-valid',
-  'tools-not-supported-yet',
 ] as const;
 export type PromptStepProblemKind = (typeof PROMPT_STEP_PROBLEM_KINDS)[number];
 
