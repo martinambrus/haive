@@ -34,7 +34,10 @@ import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import type { AdvanceStepResult } from '../src/step-engine/index.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
-import { FIX_LOOP_TARGET_STEP_ID } from '../src/step-engine/steps/workflow/_fix-loop.js';
+import {
+  FIX_LOOP_TARGET_STEP_ID,
+  isFixLoopSuppressed,
+} from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -1601,6 +1604,131 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
 
       const [dead] = await events(id, 'task.dead');
       expect(dead?.payload).toMatchObject({ unresolved: [GONE], stepId: A });
+    });
+  });
+
+  describe('an answered fix-loop gate that reopens the task', () => {
+    const FAILED = { status: 'failed' as const, completedAt: DEAD_AT };
+    const LOOP = [FIX_LOOP_TARGET_STEP_ID, REVIEW];
+    const parked = async (
+      gateStep: string,
+      snapshot: string[],
+      over: Partial<typeof schema.tasks.$inferInsert> = {},
+    ) => {
+      const id = await make({
+        repositoryId,
+        currentStepId: gateStep,
+        runListSnapshot: snapshot,
+        ...over,
+      });
+      return { id, gate: await row(id, gateStep, 'waiting_form') };
+    };
+    const expectParked = async (id: string, gate: StepRow) => {
+      expect(await stepRow(gate.id)).toMatchObject({ status: 'waiting_form', endedAt: null });
+      expect(await events(id, 'fix_loop.accepted')).toHaveLength(0);
+      expect(await events(id, 'fix_loop.continued')).toHaveLength(0);
+      expect(await events(id, 'fix_loop.requested')).toHaveLength(0);
+      expect(h.adds).toEqual([]);
+    };
+
+    it('leaves the gate parked and records no accept when a hold lands after the early check', async () => {
+      const { id, gate } = await parked(A, [A, B], FAILED);
+      vi.spyOn(configService, 'getFresh').mockResolvedValue('draining');
+
+      await expect(
+        resolveFixLoopGate(db, ctxFor(id, [A, B], { status: 'failed' }), gate, 'accept', 0, ''),
+      ).rejects.toMatchObject({ name: 'NewWorkHeld' });
+
+      await expectParked(id, gate);
+      expect(await task(id)).toMatchObject({ status: 'failed', currentStepId: A });
+    });
+
+    it('leaves the gate parked and records no accept when a Retry moved the task on', async () => {
+      const { id, gate } = await parked(A, [A, B], { orchestrationEpoch: 4 });
+
+      await resolveFixLoopGate(db, ctxFor(id, [A, B]), gate, 'accept', 0, '');
+
+      await expectParked(id, gate);
+      expect(await task(id)).toMatchObject({
+        status: 'running',
+        currentStepId: A,
+        orchestrationEpoch: 4,
+      });
+    });
+
+    it('closes the gate, records the accept and reopens a failed task together, and hands it on', async () => {
+      const { id, gate } = await parked(A, [A, B], FAILED);
+
+      await resolveFixLoopGate(db, ctxFor(id, [A, B], { status: 'failed' }), gate, 'accept', 0, '');
+
+      expect(await stepRow(gate.id)).toMatchObject({ status: 'done' });
+      expect(await events(id, 'fix_loop.accepted')).toHaveLength(2);
+      expect(await isFixLoopSuppressed(db, id)).toBe(true);
+      expect(await task(id)).toMatchObject({
+        status: 'running',
+        currentStepId: B,
+        completedAt: null,
+      });
+      expect(h.adds).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId: id, userId, stepId: B, round: 0, epoch: 3 },
+        },
+      ]);
+    });
+
+    it.each(['draining', 'maintenance'])(
+      'leaves the gate parked and records nothing when the system turns %s after the early check, answering continue',
+      async (state) => {
+        const { id, gate } = await parked(REVIEW, LOOP, FAILED);
+        vi.spyOn(configService, 'getFresh').mockResolvedValue(state);
+
+        await expect(
+          resolveFixLoopGate(
+            db,
+            ctxFor(id, LOOP, { status: 'failed', currentStepId: REVIEW }),
+            gate,
+            'continue',
+            1,
+            'use the other flag',
+          ),
+        ).rejects.toMatchObject({ name: 'NewWorkHeld' });
+
+        await expectParked(id, gate);
+        expect(await task(id)).toMatchObject({ status: 'failed', currentStepId: REVIEW });
+      },
+    );
+
+    it('closes the gate, records the directive and reopens a failed task together, answering continue', async () => {
+      const { id, gate } = await parked(REVIEW, LOOP, FAILED);
+
+      await resolveFixLoopGate(
+        db,
+        ctxFor(id, LOOP, { status: 'failed', currentStepId: REVIEW }),
+        gate,
+        'continue',
+        1,
+        'use the other flag',
+      );
+
+      expect(await stepRow(gate.id)).toMatchObject({ status: 'done' });
+      expect(await events(id, 'fix_loop.requested')).toMatchObject([
+        { payload: { sourceStepId: 'fix-loop-gate', round: 2 } },
+      ]);
+      expect(await events(id, 'fix_loop.continued')).toMatchObject([
+        { payload: { round: 2, directed: true } },
+      ]);
+      expect(await task(id)).toMatchObject({
+        status: 'running',
+        currentStepId: FIX_LOOP_TARGET_STEP_ID,
+        currentRound: 2,
+      });
+      expect(h.adds).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId: id, userId, stepId: FIX_LOOP_TARGET_STEP_ID, round: 2, epoch: 3 },
+        },
+      ]);
     });
   });
 
