@@ -14,10 +14,11 @@ with the task owner's own account, without the agent ever holding that account's
 What is live and what is not: providers, connections, sign-in, the write switch, the forge code,
 resolution, the choice routes, the broker (`/integration-mcp`, see The broker) and the exec side of the
 worker are merged: a run whose invocation row carries a stamp gets the `haive-integrations` MCP server
-and its own `integrations` token (see The call log, the stamp and the token). Nothing yet declares a
-step requirement, writes a stamp or calls `recordTaskGrants` — the worker's dispatch side is the next
-step — so no agent reaches the broker yet, today no task grant exists in production and the
-resolver's grant tier is always empty. The task page has no Integrations section yet either.
+and its own `integrations` token (see The call log, the stamp and the token), and the dispatch side is
+merged: a step whose catalog entry declares requirements is resolved, granted and stamped at dispatch
+(see Dispatch). No shipped step declares one yet (a module step can; prompt templates will with J6), so
+in production no agent reaches the broker and the resolver's grant tier stays empty. The task page has
+no Integrations section yet.
 
 ## Providers and categories
 
@@ -244,6 +245,25 @@ no-op when unchanged) and skips unresolved and provider-pinned results. The agre
 the grant is written FIRST and the stamped invocation inserted after it, in one transaction, so no run
 holds a connection without a grant.
 
+**Dispatch** (`worker/src/step-engine/step-integrations.ts`, the llm and fan-out sites of
+`step-runner.ts`). A step's requirements are its composable catalog entry's `integrations` (a
+`custom.*` step has none yet); boot refuses, naming the step, a declaration none of the step's
+dispatches can carry (no `llm` or `agentMining` phase without a `toolProfile`). Only a dispatch whose
+spec leaves `toolProfile` unset resolves; recaps, the AI-fix agent, merges and the DAG never do. One
+resolution per dispatch, shared by every agent of a fan-out: a required requirement that does not
+resolve fails the step `integration-unresolved` naming it, its category and the reason (an optional one
+is dropped), a requirement that pins a provider is refused `integration-provider-pinned` until J6, and
+a missing signing key or tool names the broker could not list fail `integrations-no-signing-key` and
+`integration-tools-unlistable`. The run is written by `insertStampedRun`: one transaction that takes
+`lockTaskIntegrations` (the lock the choice PUT and DELETE take first), resolves again, records the
+grants from that resolution and inserts the run stamped with its bindings; a required binding lost
+since the first resolution writes nothing and fails the step. Bindings make the dispatch need an
+MCP-capable CLI, and the prompt names each provider (its id when the display name is not one safe line
+or names an agent path) with the tools the agent will see, write tools only while the owner's switch
+is on, never the account. The prompt and the CLI choice come from the first resolution and the stamp
+from the second; tools/list follows the stamp, so a choice change landing between the two can only
+leave the prompt naming tools the agent is not offered.
+
 **Repository allow-list.** `repositories.integrations_restricted` plus repository grants (category
 NULL) listing the allowed accounts. It fails closed on the flag, never on whether entries exist: entries
 cascade with their connection — deleting a Git credential is enough — so keying on entries would lift
@@ -451,3 +471,6 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
 15. `integration_calls` never stores arguments or results.
 16. The broker lists and runs only what the invocation's stamp declares and re-reads the write switches
     on every call; it never reads grants, and no token or its Basic form reaches a response, row or log.
+17. Only a dispatch stamps, under the task's integrations lock, with its grants in the same
+    transaction; the choice routes take that lock first; a provider-pinned requirement is refused at
+    dispatch until J6.
