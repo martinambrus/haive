@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { formSchemaSchema } from '../schemas/form.js';
 import { collapseToLine } from '../utils/collapse-line.js';
 import {
+  INTEGRATION_ID_MAX_LENGTH,
+  INTEGRATION_ID_PATTERN,
   integrationRequirementSchema,
   isCustomStepId,
   isPersonaId,
@@ -30,8 +32,6 @@ export const PROMPT_STEP_TIMEOUT_MAX_MS = 30 * 60_000;
 export const PROMPT_STEP_CAPABILITIES = ['tool_use', 'file_write', 'vision'] as const;
 export type PromptStepCapability = (typeof PROMPT_STEP_CAPABILITIES)[number];
 export const INTEGRATIONS_MAX_PER_STEP = 8;
-export const INTEGRATION_ID_MAX_LENGTH = 16;
-const INTEGRATION_ID_PATTERN = new RegExp(`^[a-z][a-z0-9-]{0,${INTEGRATION_ID_MAX_LENGTH - 1}}$`);
 
 const RESERVED_MARKER_OPEN = '[[HAIVE_';
 const PREAMBLE_OPEN = '<haive_';
