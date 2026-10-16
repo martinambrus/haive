@@ -18,6 +18,15 @@ interface BbServerPr {
   toRef?: { displayId?: string };
 }
 
+interface BbServerPage {
+  values?: BbServerPr[];
+  isLastPage?: boolean;
+  nextPageStart?: number;
+}
+
+const OPEN_PR_PAGE_SIZE = 50;
+const OPEN_PR_MAX_PAGES = 20;
+
 /** Bitbucket Server / Data Center. Distinct API from Bitbucket Cloud:
  *  /rest/api/1.0 base, projects/{key}/repos/{slug} path, fromRef/toRef body with
  *  full refs/heads/ ids, HTTP access token via Bearer. */
@@ -74,15 +83,27 @@ export class BitbucketServerForgeProvider extends BaseForgeProvider {
     head: string,
     base: string,
   ): Promise<OpenPrResult | null> {
-    const list = await this.request<{ values?: BbServerPr[] }>(
-      ctx,
-      'GET',
-      `/projects/${ctx.owner}/repos/${ctx.repo}/pull-requests?state=OPEN&direction=OUTGOING`,
-    );
-    const pr = (list.values ?? []).find(
-      (p) => p.fromRef?.displayId === head && p.toRef?.displayId === base,
-    );
-    return pr ? toResult(pr) : null;
+    let start = 0;
+    for (let page = 0; page < OPEN_PR_MAX_PAGES; page += 1) {
+      const query = new URLSearchParams({
+        state: 'OPEN',
+        direction: 'OUTGOING',
+        start: String(start),
+        limit: String(OPEN_PR_PAGE_SIZE),
+      });
+      const list = await this.request<BbServerPage>(
+        ctx,
+        'GET',
+        `/projects/${ctx.owner}/repos/${ctx.repo}/pull-requests?${query.toString()}`,
+      );
+      const pr = (list.values ?? []).find(
+        (p) => p.fromRef?.displayId === head && p.toRef?.displayId === base,
+      );
+      if (pr) return toResult(pr);
+      if (list.isLastPage !== false || list.nextPageStart === undefined) break;
+      start = list.nextPageStart;
+    }
+    return null;
   }
 }
 
