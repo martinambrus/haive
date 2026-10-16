@@ -2206,8 +2206,7 @@ export async function resolveFixLoopGate(
     const next = idx < 0 ? undefined : steps[idx + 1];
     if (next) {
       const landed = await reopen(next, round, async (tx) => {
-        // recordFixLoopAccepted takes a Database, not a transaction.
-        await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.accepted', {});
+        await recordFixLoopAccepted(tx, ctx.taskId, gateRow.id);
         await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
       });
       if (!landed) return;
