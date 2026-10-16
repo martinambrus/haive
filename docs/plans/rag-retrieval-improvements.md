@@ -18,7 +18,8 @@ How retrieval works today (resolve by symbol; line numbers drift):
 - **Writers.** `10-rag-populate` (onboarding), `runRagIndexSync` in `_rag-index.ts` (workflow
   `02-pre-rag-sync` and `11c-rag-reindex`) and `global-kb-sync-queue.ts` all chunk through
   `_rag-chunkers.ts`: construct regexes per language (`phpRanges`, `jsRanges`, …), then
-  `assembleSections` (the spans between constructs become `chunk-<n>` gap sections), then
+  `assembleSections` (a span between constructs of 120 trimmed characters or more becomes a
+  `chunk-<n>` gap section, and a shorter one that is not blank joins a neighbouring section), then
   `chunkSection` (2,000 chars, 200 overlap; split at a paragraph break, else at `'. '`, else a hard
   cut), then `capChunks` (`MAX_CHUNKS_PER_FILE`, 80). Every chunk carries a
   `[path > class > function]` header inside `content`, so the header is embedded and indexed, and
@@ -435,6 +436,13 @@ no longer in the store: finer sections fill the 80-chunk cap of a large file soo
 bundled file keeps less of itself. Counted as misses, paraphrase hits@20 go 78 → 74 of 100 and the
 overall hits@20 stay 253 of 296. The store grows 20,921 → 23,105 rows (+10.4%), HNSW 163.4 → 180.5
 MiB, database 470.8 → 516.7 MiB; neither store holds a null or hash-fallback vector.
+
+The after store predates the review fix that stopped dropping a span shorter than 120 characters
+between sections (a class's fields, a decorator, the rest of a method a `}` in a string cut short):
+such a span now joins the section it continues, or the one it leads into. That fix takes the text
+outside every section from 0.35% to 0.0035% of the non-blank characters (main: 0.16%; what remains is
+13 small files with no construct at all), keeps M1, M2 and M4 and finds one more JS construct (M3
+176 → 175), and changes 3,838 of the 22,035 code chunk hashes. The eval set was not re-run on it.
 
 ### P2. Query-side experiments (no reindex)
 
