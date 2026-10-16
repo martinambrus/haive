@@ -164,6 +164,15 @@ export function promptStepIntegrations(
   return { requirements: entry.integrations ?? [], invalid: entry.invalidIntegrations ?? [] };
 }
 
+/** The ids of the requirements whose account a prompt step's template names with `{{integration:<id>.account}}`; none for any other step. */
+export function promptStepAccountIds(stepDef: object): string[] {
+  const entry = entries.get(stepDef);
+  if (!entry) return [];
+  return (entry.integrations ?? [])
+    .map(({ id }) => id)
+    .filter((id) => entry.template.includes(`{{integration:${id}.account}}`));
+}
+
 /** The text a file-writing prompt step's house rules read paths from: its template with the task's
  *  and the form's values, without any quoted step output. Undefined for any other step. */
 export function promptStepNamedText(

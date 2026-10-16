@@ -55,7 +55,11 @@ import {
 } from '@haive/shared/modularity';
 import { moduleDeactivationMessage } from '../modules/activation.js';
 import { invalidToolsFailure, pinnedToolsFailure } from './steps/custom/pinned-tools.js';
-import { promptStepNamedText, promptStepTools } from './steps/custom/prompt-step.js';
+import {
+  promptStepAccountIds,
+  promptStepNamedText,
+  promptStepTools,
+} from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
 import { closeAppRunnerExtraTabs, restoreAppRunnerBrowserWindow } from '../sandbox/app-runner.js';
@@ -604,6 +608,8 @@ type DispatchStamp = {
   requirements: readonly IntegrationRequirement[];
   bindings: IntegrationBinding[];
   failure: string | null;
+  /** Each requirement whose account the prompt names, with the connection it had in the first resolution (null: none). */
+  named?: ReadonlyMap<string, string | null>;
   fixed?: { integrations: IntegrationBinding[] | null };
 };
 
@@ -620,7 +626,17 @@ async function resolveDispatchStamp(
   if (requirements.length === 0) return { requirements, bindings: [], failure: null };
   const resolved = await resolveDispatchIntegrations(db, taskId, requirements);
   return resolved.ok
-    ? { requirements, bindings: resolved.bindings, failure: null }
+    ? {
+        requirements,
+        bindings: resolved.bindings,
+        failure: null,
+        named: new Map<string, string | null>(
+          promptStepAccountIds(stepDef).map((id) => [
+            id,
+            resolved.bindings.find((binding) => binding.requirementId === id)?.connectionId ?? null,
+          ]),
+        ),
+      }
     : { requirements, bindings: [], failure: resolved.failure };
 }
 
@@ -636,7 +652,14 @@ async function insertDispatchRun(
   if (stamp.fixed) {
     return insertOwnedRun(db, stepRowId, { ...values, integrations: stamp.fixed.integrations });
   }
-  const run = await insertStampedRun(db, taskId, stepRowId, values, stamp.requirements);
+  const run = await insertStampedRun(
+    db,
+    taskId,
+    stepRowId,
+    values,
+    stamp.requirements,
+    stamp.named,
+  );
   if (!('failure' in run)) stamp.fixed = { integrations: run.integrations };
   return run;
 }

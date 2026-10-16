@@ -1029,6 +1029,8 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
     "a lookup of a prompt step's tool names; builds no prompt text",
   'step-engine/steps/custom/prompt-step.ts#promptStepIntegrations':
     "a lookup of a prompt step's declared integrations; builds no prompt text",
+  'step-engine/steps/custom/prompt-step.ts#promptStepAccountIds':
+    "a lookup of the requirement ids a prompt step's template names an account for; builds no prompt text",
   'step-engine/steps/workflow/_rag-usage.ts#buildRagUsagePrompt':
     '13-pr-wait llm builder, already scanned through the registry',
   'step-engine/steps/type-draft/_type-draft.ts#buildDraftPrompt':

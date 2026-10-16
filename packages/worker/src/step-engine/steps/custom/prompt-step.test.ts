@@ -10,6 +10,7 @@ import type { StepContext } from '../../step-definition.js';
 import {
   PROMPT_STEP_OUTPUT_CAP_BYTES,
   buildPromptStep,
+  promptStepAccountIds,
   promptStepNamedText,
 } from './prompt-step.js';
 
@@ -366,5 +367,30 @@ describe('prompt step account token', () => {
   it('gives the house-rule path text none, so a text never names a path there', () => {
     const def = buildPromptStep(ID, entry, 0);
     expect(promptStepNamedText(def, detected(), {})).toBe('Acting as .\n');
+  });
+
+  describe('the requirements whose account the template names', () => {
+    const integrations = [
+      { id: 'forge', category: 'forge', access: 'read' },
+      { id: 'tracker', category: 'issues', access: 'read', optional: true },
+    ];
+    const idsOf = (template: string) =>
+      promptStepAccountIds(buildPromptStep(ID, make({ template, integrations }), 0));
+
+    it('are those it writes an account token for, and no other', () => {
+      expect(idsOf('Acting as {{integration:tracker.account}}.')).toEqual(['tracker']);
+      expect(idsOf('{{integration:tracker.account}} {{integration:forge.account}}')).toEqual([
+        'forge',
+        'tracker',
+      ]);
+    });
+
+    it('are none for a template without an account token', () => {
+      expect(idsOf('Audit {{task.title}} on forge')).toEqual([]);
+    });
+
+    it('are none for a step that is not a prompt step', () => {
+      expect(promptStepAccountIds({})).toEqual([]);
+    });
   });
 });

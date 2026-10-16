@@ -2,21 +2,26 @@ import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
+import { lockTaskIntegrations } from '@haive/shared/integrations';
 import { parsePinnedCustomSteps } from '@haive/shared/modularity';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { INTEGRATION_ACCOUNT_CHANGED_REASON } from '../src/step-engine/step-integrations.js';
 import { buildPromptStep } from '../src/step-engine/steps/custom/prompt-step.js';
 import {
   SIGNING_KEY,
+  advisoryWaiters,
   deleteUsers,
+  grantsOf,
   runsOf,
   seedBareWorld,
   seedConnection,
   seedProvider,
+  sleep,
 } from './support/step-integrations-db.js';
 import { FORGE_READ, STEP_ID, storedPromptStep } from './support/prompt-step-integrations.js';
 
-// Controls of J6b (task #186), worker side, on Postgres. Tags: [C4] is the brief's control, [C0] passes before and after.
+// Controls of J6b and J6b fix-2 (task #186), worker side, on Postgres. Tags: [C4] and [A1] fail before their fix, [C0] and [A0] pass before and after.
 
 const url = process.env.PROMPT_STEP_ACCOUNT_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/prompt_step_account_test'))
@@ -48,6 +53,7 @@ vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
 import { advanceStep } from '../src/step-engine/step-runner.js';
 
 const LABEL = 'octo-user';
+const SECOND_LABEL = 'second-account';
 const TEMPLATE = 'Acting as {{integration:forge.account}} on the remote.\nTitle: {{task.title}}';
 
 describe.skipIf(!url)('a pinned prompt step names the account its integration resolved to', () => {
@@ -80,8 +86,28 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
   async function world(label: string | null = LABEL) {
     const w = await seedBareWorld(db);
     users.push(w.userId);
-    if (label !== null) await seedConnection(db, w.userId, { label });
-    return { ...w, claude: await seedProvider(db, w.userId, 'claude-code') };
+    const connectionId = label === null ? null : await seedConnection(db, w.userId, { label });
+    return { ...w, connectionId, claude: await seedProvider(db, w.userId, 'claude-code') };
+  }
+
+  /** The task's choice names the first account and the owner's preference the second, so dropping the choice moves the task to the second. */
+  async function choiceWorld() {
+    const w = await world();
+    const first = w.connectionId as string;
+    const second = await seedConnection(db, w.userId, { label: SECOND_LABEL });
+    await db.insert(schema.taskIntegrationChoices).values({
+      taskId: w.taskId,
+      categoryId: 'forge',
+      providerId: 'github',
+      connectionId: first,
+    });
+    await db.insert(schema.integrationCategoryPreferences).values({
+      userId: w.userId,
+      categoryId: 'forge',
+      providerId: 'github',
+      connectionId: second,
+    });
+    return { ...w, first, second };
   }
 
   /** The task pins the prompt step at create (tasks.custom_steps); the worker reads it back and builds the step from it. */
@@ -111,6 +137,35 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
       epoch: 0,
       moduleDeactivation: null,
     });
+  }
+
+  /** Runs `dispatch` until it waits for the task lock, drops the task's choice while the lock is held, then lets it go on. */
+  async function dropChoiceBeforeStamp<T>(taskId: string, dispatch: () => Promise<T>): Promise<T> {
+    const held = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const holder = db.transaction(async (tx) => {
+      await lockTaskIntegrations(tx, taskId);
+      held.resolve();
+      await release.promise;
+      await tx
+        .delete(schema.taskIntegrationChoices)
+        .where(eq(schema.taskIntegrationChoices.taskId, taskId));
+    });
+    await held.promise;
+
+    try {
+      const pending = dispatch();
+      for (let waited = 0; (await advisoryWaiters(db)) < 1; waited += 1) {
+        if (waited > 300) throw new Error('the dispatch never reached the task lock');
+        await sleep(100);
+      }
+      release.resolve();
+      await holder;
+      return await pending;
+    } finally {
+      release.resolve();
+      await holder.catch(() => undefined);
+    }
   }
 
   async function promptOf(taskId: string): Promise<string> {
@@ -167,4 +222,62 @@ describe.skipIf(!url)('a pinned prompt step names the account its integration re
 
     expect(await promptOf(w.taskId)).not.toContain(LABEL);
   }, 60_000);
+
+  describe('[A] the account the prompt names is the account the run is stamped with', () => {
+    it('[A1] fails the step, naming the requirement, and writes nothing when the choice moves to another account before the run is stamped', async () => {
+      const w = await choiceWorld();
+
+      const result = await dropChoiceBeforeStamp(w.taskId, () =>
+        advance(w, TEMPLATE, [FORGE_READ]),
+      );
+
+      expect(result.status).toBe('failed');
+      const [row] = await db
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.taskId, w.taskId));
+      expect(row!.status).toBe('failed');
+      expect(row!.errorMessage?.startsWith(`${INTEGRATION_ACCOUNT_CHANGED_REASON}: `)).toBe(true);
+      expect(row!.errorMessage).toContain(FORGE_READ.id);
+      expect(await runsOf(db, w.taskId), 'cli_invocations rows').toEqual([]);
+      expect(await grantsOf(db, w.taskId), 'task grants').toEqual([]);
+      expect(enqueued, 'enqueues').toEqual([]);
+    }, 60_000);
+
+    it('[A0] dispatches on the account the choice moves to when the template names no account', async () => {
+      const w = await choiceWorld();
+
+      const result = await dropChoiceBeforeStamp(w.taskId, () =>
+        advance(w, 'Audit {{task.title}}', [FORGE_READ]),
+      );
+
+      expect(result.status).toBe('waiting_cli');
+      const prompt = await promptOf(w.taskId);
+      expect(prompt).not.toContain(LABEL);
+      expect(prompt).not.toContain(SECOND_LABEL);
+      const [run] = await runsOf(db, w.taskId);
+      expect(run!.integrations).toMatchObject([
+        { requirementId: FORGE_READ.id, connectionId: w.second },
+      ]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: 'forge', connectionId: w.second },
+      ]);
+    }, 60_000);
+
+    it('[A0] names the account of the choice, and stamps it, when the choice does not move', async () => {
+      const w = await choiceWorld();
+
+      const result = await advance(w, TEMPLATE, [FORGE_READ]);
+
+      expect(result.status).toBe('waiting_cli');
+      expect(await promptOf(w.taskId)).toContain(`Acting as ${LABEL} on the remote.`);
+      const [run] = await runsOf(db, w.taskId);
+      expect(run!.integrations).toMatchObject([
+        { requirementId: FORGE_READ.id, connectionId: w.first },
+      ]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: 'forge', connectionId: w.first },
+      ]);
+    }, 60_000);
+  });
 });
